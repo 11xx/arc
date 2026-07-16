@@ -1,4 +1,5 @@
 mod commands;
+mod config;
 mod gates;
 mod gitio;
 mod ids;
@@ -234,6 +235,8 @@ enum Cmd {
         #[arg(long)]
         superseded: Option<String>,
     },
+    /// Show the resolved configuration and store location as JSON
+    Config,
 }
 
 fn main() {
@@ -394,6 +397,24 @@ fn run(cli: Cli) -> Result<i32> {
             superseded,
         } => {
             commands::close(&ctx, &change, integrated, abandoned, superseded)?;
+            Ok(0)
+        }
+        Cmd::Config => {
+            let cfg = config::load()?;
+            let store_root = store::Store::resolve_root(&ctx.cwd)
+                .map(|p| p.display().to_string())
+                .ok();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ai_home": cfg.ai_home.display().to_string(),
+                    "config_file": cfg.config_path.display().to_string(),
+                    "config_file_exists": cfg.config_path.is_file(),
+                    "worktrees_dir": cfg.worktrees_dir.display().to_string(),
+                    "data_root": cfg.data_root.map(|p| p.display().to_string()),
+                    "store_root_for_cwd": store_root,
+                }))?
+            );
             Ok(0)
         }
     }

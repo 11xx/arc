@@ -87,22 +87,39 @@ pub fn begin(
     ids::validate_slug(slug)?;
     let store = ctx.store()?;
 
+    let mut open_change_branches: Vec<String> = Vec::new();
     for existing in store.list_change_ids()? {
         let events = store.load_events(&existing)?;
         let st = state::reduce(&events)?;
-        if st.slug == slug && !st.is_closed() {
+        if st.is_closed() {
+            continue;
+        }
+        if st.slug == slug {
             bail!(
                 "open change {existing} already uses slug {slug:?}; continue it or close it first"
             );
         }
+        open_change_branches.push(st.branch);
     }
 
+    // Changes derive from the branch they intend to merge into. The
+    // default is the primary worktree's branch (the main checkout,
+    // normally master/main) — never whatever branch happens to be
+    // checked out here, which may itself be work in progress. Stacking
+    // on another open change requires an explicit --target.
+    let explicit_target = target.is_some();
     let target_branch = match target {
         Some(t) => t,
-        None => {
-            gitio::current_branch(&ctx.cwd)?.context("detached HEAD: pass --target explicitly")?
-        }
+        None => gitio::primary_worktree_branch(&ctx.cwd)?
+            .or(gitio::current_branch(&ctx.cwd)?)
+            .context("cannot determine a target branch (detached?); pass --target")?,
     };
+    if !explicit_target && open_change_branches.contains(&target_branch) {
+        bail!(
+            "default target {target_branch:?} is another open change's branch; \
+             pass --target explicitly to stack changes deliberately"
+        );
+    }
     let target_head = gitio::branch_head(&ctx.cwd, &target_branch)?;
 
     let change_id = ids::new_change_id(slug);
@@ -138,6 +155,10 @@ pub fn begin(
             };
             if path.exists() {
                 bail!("worktree path {} already exists", path.display());
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("cannot create {}", parent.display()))?;
             }
             gitio::add_worktree(&ctx.cwd, &path, &branch_name)?;
             Some(path.display().to_string())
@@ -175,10 +196,8 @@ fn default_worktree_path(cwd: &Path, slug: &str) -> Result<PathBuf> {
         .context("cannot determine repository name")?
         .to_string_lossy()
         .into_owned();
-    let home = std::env::var("HOME").context("HOME is unset")?;
-    Ok(PathBuf::from(home)
-        .join(".worktrees")
-        .join(format!("{repo_name}-{slug}")))
+    let config = crate::config::load()?;
+    Ok(config.worktrees_dir.join(format!("{repo_name}-{slug}")))
 }
 
 pub fn list(ctx: &Ctx, open_only: bool, json: bool) -> Result<()> {
@@ -284,8 +303,13 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
         },
     );
     store.append_event(&ev)?;
-    // Keep the reviewed head reachable even if the branch is later deleted.
-    gitio::update_ref(&ctx.cwd, &gitio::retention_ref(&change_id), &head)?;
+    // Pin this head with its own ref: reviewed heads must stay reachable
+    // individually, even if the branch is rewound or deleted later.
+    gitio::update_ref(
+        &ctx.cwd,
+        &gitio::retention_ref(&change_id, &patchset_id),
+        &head,
+    )?;
     println!("patchset: {patchset_id}");
     println!("head: {head}");
     println!("event: {}", ev.event_id);
@@ -695,7 +719,7 @@ pub fn integrate(
         },
     );
     store.append_event(&ev)?;
-    let _ = gitio::delete_ref(&ctx.cwd, &gitio::retention_ref(&change_id));
+    release_retention_refs(ctx, &change_id, Some(&merged))?;
 
     println!("integrated: {merged}");
     println!("event: {}", ev.event_id);
@@ -729,31 +753,64 @@ pub fn close(
     if st.is_closed() {
         bail!("change {change_id} is already closed");
     }
-    let payload = match (integrated, abandoned, superseded_by) {
-        (Some(rev), false, None) => Payload::ChangeClosed {
-            outcome: Closure::Integrated,
-            integrated_commit: Some(gitio::rev_parse(&ctx.cwd, &rev)?),
-            superseded_by: None,
-        },
-        (None, true, None) => Payload::ChangeClosed {
-            outcome: Closure::Abandoned,
-            integrated_commit: None,
-            superseded_by: None,
-        },
+    let (payload, integrated_rev) = match (integrated, abandoned, superseded_by) {
+        (Some(rev), false, None) => {
+            let rev = gitio::rev_parse(&ctx.cwd, &rev)?;
+            (
+                Payload::ChangeClosed {
+                    outcome: Closure::Integrated,
+                    integrated_commit: Some(rev.clone()),
+                    superseded_by: None,
+                },
+                Some(rev),
+            )
+        }
+        (None, true, None) => (
+            Payload::ChangeClosed {
+                outcome: Closure::Abandoned,
+                integrated_commit: None,
+                superseded_by: None,
+            },
+            None,
+        ),
         (None, false, Some(other)) => {
             let other_id = store.resolve_change(&other)?;
-            Payload::ChangeClosed {
-                outcome: Closure::Superseded,
-                integrated_commit: None,
-                superseded_by: Some(other_id),
-            }
+            (
+                Payload::ChangeClosed {
+                    outcome: Closure::Superseded,
+                    integrated_commit: None,
+                    superseded_by: Some(other_id),
+                },
+                None,
+            )
         }
         _ => bail!("provide exactly one of --integrated <rev>, --abandoned, --superseded <change>"),
     };
     let ev = ctx.event(&store, &change_id, payload);
     store.append_event(&ev)?;
-    let _ = gitio::delete_ref(&ctx.cwd, &gitio::retention_ref(&change_id));
+    release_retention_refs(ctx, &change_id, integrated_rev.as_deref())?;
     println!("closed: {change_id}");
     println!("event: {}", ev.event_id);
+    Ok(())
+}
+
+/// Drop a change's retention refs only for heads proven reachable from
+/// the integration commit. Everything else stays pinned: abandoned or
+/// externally rewritten (squash/rebase) work must never become
+/// GC-collectable through arc. Unpinning by hand remains possible with
+/// `git update-ref -d refs/arc/keep/<change>/<patchset>`.
+fn release_retention_refs(ctx: &Ctx, change_id: &str, integrated: Option<&str>) -> Result<()> {
+    let refs = gitio::list_refs(&ctx.cwd, &gitio::retention_prefix(change_id))?;
+    for (name, oid) in refs {
+        let reachable = match integrated {
+            Some(rev) => gitio::is_ancestor(&ctx.cwd, &oid, rev)?,
+            None => false,
+        };
+        if reachable {
+            let _ = gitio::delete_ref(&ctx.cwd, &name);
+        } else {
+            println!("kept {name}: head {oid} is not reachable from the integrated commit");
+        }
+    }
     Ok(())
 }

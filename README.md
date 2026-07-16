@@ -103,18 +103,54 @@ Every event records an actor, and optionally a harness and native
 session ID: `--actor/--harness/--session` or `ARC_ACTOR`, `ARC_HARNESS`,
 `ARC_SESSION`. Actor defaults to `git config user.name`.
 
-## Storage and safety notes
+## Configuration
 
-- Ledger location: `<git-common-dir>/arc/` (shared by all worktrees);
-  `ARC_DATA_DIR` overrides it for bare repos or read-only common dirs.
-- Reviewed heads are pinned by `refs/arc/keep/<change-id>` so Git GC
-  cannot collect them after branch deletion; the ref is dropped on
-  closure.
+arc treats `~/.local/ai/` as the AI data home (relocate it with
+`AI_HOME`) and reads `~/.local/ai/arc/config.toml`:
+
+```toml
+worktrees_dir = "~/.worktrees"   # where change worktrees are created
+data_root = "~/.local/ai/arc-data"  # optional: ledgers at <data_root>/<repo-path-slug>/
+```
+
+Environment variables override the file: `ARC_WORKTREES_DIR`,
+`ARC_DATA_ROOT`, and `ARC_DATA_DIR` (an exact ledger directory for
+exactly one repository — highest precedence). `data_root` keys each
+repository by its slugged main path (the /thread convention:
+`/home/x/code/y` → `-home-x-code-y`), so one root safely serves many
+repositories — useful for sandboxing: point the paths somewhere
+isolated and arc never writes outside them (worktrees, ledger) beyond
+ordinary Git operations in the repository itself. `arc config` prints
+the resolved paths as JSON.
+
+Change derivation: `begin` targets the branch checked out in the
+**primary worktree** (the main checkout — normally master/main), not
+whatever branch the invoking worktree happens to be on. Deriving from an
+open change's branch (stacking) requires an explicit `--target`.
+
+## Storage and data-safety guarantees
+
+- Ledger location: `<git-common-dir>/arc/` by default (shared by all
+  worktrees); see Configuration for relocation.
+- The ledger is append-only: arc never deletes or rewrites event files.
+- Every reviewed head is pinned by its own `refs/arc/keep/<change>/<patchset>`
+  ref, so Git GC cannot collect it — including earlier patchsets after a
+  branch rewind. Pins are released only for heads proven reachable from
+  the integration commit; abandoned or externally rewritten work stays
+  pinned (release by hand with `git update-ref -d`).
+- arc never passes `--force` to git: worktree removal refuses when
+  dirty/untracked content is present, branch deletion refuses unmerged
+  branches, and a failed merge is aborted back to the pre-checked clean
+  state.
+- A detected integration race (target moved) is reported, never
+  "repaired" by rewriting refs.
 - Git object IDs are stored as variable-length strings (SHA-256 safe).
 - Anchors record path, side, blob OID, and line range; blob identity is
   what survives when line numbers drift.
 - `arc` never rewrites source branches and never merges on its own —
   `integrate` is always an explicit invocation.
+- Gates execute repo-committed commands (`.arc/gates.toml`): the trust
+  level is the same as running `make` in that repository.
 
 ## Non-goals
 
