@@ -245,6 +245,31 @@ fn approval_goes_stale_when_head_moves() {
         .code(3);
 }
 
+/// integrate --cleanup invoked from INSIDE the change worktree must not
+/// die when that worktree is removed under it (regression: branch
+/// deletion used the vanished cwd).
+#[test]
+fn integrate_cleanup_from_inside_change_worktree() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "fix-c"]));
+    let wt = repo.home.join(".worktrees").join("repo-fix-c");
+    repo.commit(&wt, "c.txt", "c\n", "fix: c");
+    stdout(repo.arc(&wt).args(["snapshot", "fix-c"]));
+    repo.arc(&wt)
+        .args(["review", "fix-c", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    repo.arc(&wt)
+        .args(["integrate", "fix-c", "--cleanup"])
+        .assert()
+        .success();
+
+    assert!(!wt.exists(), "change worktree should be removed");
+    let branches = git_out(&repo.root, &["branch", "--list", "arc/fix-c"]);
+    assert!(branches.is_empty(), "change branch should be deleted");
+}
+
 /// Hold blocks integration (exit 4) until released.
 #[test]
 fn hold_blocks_integration() {

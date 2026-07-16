@@ -701,15 +701,17 @@ pub fn integrate(
     println!("event: {}", ev.event_id);
 
     if cleanup {
+        // Run cleanup git commands from the target worktree: ctx.cwd may be
+        // inside the change worktree that is about to be removed.
         if let Some(wt_path) = &st.worktree {
             let p = PathBuf::from(wt_path);
             if p.exists() && p != wt {
-                gitio::git(&ctx.cwd, &["worktree", "remove", wt_path])?;
+                gitio::git(&wt, &["worktree", "remove", wt_path])?;
                 println!("removed worktree {wt_path}");
             }
         }
         // -d refuses unless merged: exactly the safety we want.
-        gitio::git(&ctx.cwd, &["branch", "-d", &st.branch])?;
+        gitio::git(&wt, &["branch", "-d", &st.branch])?;
         println!("deleted branch {}", st.branch);
     }
     Ok(0)
