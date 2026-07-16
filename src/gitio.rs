@@ -129,8 +129,56 @@ pub fn delete_ref(cwd: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn retention_ref(change_id: &str) -> String {
-    format!("refs/arc/keep/{change_id}")
+/// One retention ref per patchset: reviewed heads must stay reachable
+/// individually, including across branch rewinds.
+pub fn retention_ref(change_id: &str, patchset_id: &str) -> String {
+    format!("refs/arc/keep/{change_id}/{patchset_id}")
+}
+
+pub fn retention_prefix(change_id: &str) -> String {
+    format!("refs/arc/keep/{change_id}/")
+}
+
+/// All refs under a prefix as (refname, object id) pairs.
+pub fn list_refs(cwd: &Path, prefix: &str) -> Result<Vec<(String, String)>> {
+    let out = git(
+        cwd,
+        &["for-each-ref", "--format=%(refname) %(objectname)", prefix],
+    )?;
+    Ok(out
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            Some((it.next()?.to_string(), it.next()?.to_string()))
+        })
+        .collect())
+}
+
+pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let out = Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(cwd)
+        .output()
+        .context("failed to spawn git merge-base")?;
+    Ok(out.status.success())
+}
+
+/// The branch checked out in the primary worktree (the main checkout,
+/// always first in `git worktree list`). None when it is detached.
+pub fn primary_worktree_branch(cwd: &Path) -> Result<Option<String>> {
+    let out = git(cwd, &["worktree", "list", "--porcelain"])?;
+    let mut in_first = false;
+    for line in out.lines() {
+        if line.starts_with("worktree ") {
+            if in_first {
+                break; // reached the second worktree
+            }
+            in_first = true;
+        } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
+            return Ok(Some(b.to_string()));
+        }
+    }
+    Ok(None)
 }
 
 pub fn commit_parents(cwd: &Path, rev: &str) -> Result<Vec<String>> {

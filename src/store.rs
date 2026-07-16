@@ -23,15 +23,11 @@ pub struct Store {
 
 impl Store {
     /// Locate (creating on first use) the store for the repository
-    /// containing `cwd`. `ARC_DATA_DIR` overrides the location for bare
-    /// repositories or read-only common dirs.
+    /// containing `cwd`. Precedence: `ARC_DATA_DIR` (exact directory for
+    /// exactly one repository) > configured `data_root` (per-repo slug
+    /// subdirectory, sandbox-friendly) > the repository's Git common dir.
     pub fn discover(cwd: &Path) -> Result<Store> {
-        let root = match std::env::var_os("ARC_DATA_DIR") {
-            Some(dir) => PathBuf::from(dir),
-            None => gitio::common_dir(cwd)
-                .context("not inside a Git repository (and ARC_DATA_DIR is unset)")?
-                .join("arc"),
-        };
+        let root = Self::resolve_root(cwd)?;
         create_private_dir(&root)?;
         let config_path = root.join("config.json");
         let repository_id = match fs::read(&config_path) {
@@ -60,6 +56,26 @@ impl Store {
             root,
             repository_id,
         })
+    }
+
+    pub fn resolve_root(cwd: &Path) -> Result<PathBuf> {
+        if let Some(dir) = std::env::var_os("ARC_DATA_DIR") {
+            return Ok(PathBuf::from(dir));
+        }
+        let config = crate::config::load()?;
+        let common = gitio::common_dir(cwd)
+            .context("not inside a Git repository (and no path override is set)")?;
+        if let Some(data_root) = config.data_root {
+            // Key by the main repository path (the common dir's parent),
+            // never a worktree path: all worktrees share one ledger.
+            let repo_path = if common.file_name().is_some_and(|n| n == ".git") {
+                common.parent().unwrap_or(&common).to_path_buf()
+            } else {
+                common.clone()
+            };
+            return Ok(data_root.join(crate::config::path_slug(&repo_path)));
+        }
+        Ok(common.join("arc"))
     }
 
     fn changes_dir(&self) -> PathBuf {
