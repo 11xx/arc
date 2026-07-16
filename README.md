@@ -129,5 +129,8 @@ See PLAN-02 in the arc-discussion thread archive. Shipped: local core +
 policy engine (M1–M2). Next: `/arc` skill wiring (M3), export/import
 (M4), forge projection — Forgejo/Codeberg first, then GitHub (M5), and
 possibly absorbing the mechanical parts of the /thread archive
-conventions as `arc thread` subcommands. License: to be chosen before
-publishing.
+conventions as `arc thread` subcommands.
+
+## License
+
+[Unlicense](UNLICENSE) — public domain.
