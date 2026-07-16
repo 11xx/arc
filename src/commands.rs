@@ -331,6 +331,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         dry_run,
     );
     if !conflicts.is_empty() {
+        println!("aborted: no events or refs written");
         return Ok(1);
     }
     if dry_run {

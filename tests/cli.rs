@@ -801,7 +801,10 @@ fn import_conflict_writes_nothing() {
         .args(["import", bundle.to_str().unwrap()])
         .assert()
         .code(1)
-        .stdout(predicates::str::contains(format!("conflict: {event_id}")));
+        .stdout(predicates::str::contains(format!("conflict: {event_id}")))
+        .stdout(predicates::str::contains(
+            "aborted: no events or refs written",
+        ));
     assert_eq!(fs::read(event_path).unwrap(), tampered_bytes);
 }
 
