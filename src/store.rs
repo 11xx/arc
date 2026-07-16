@@ -168,6 +168,33 @@ impl Store {
         }
         Ok(events)
     }
+
+    /// Raw JSON events of one change. Export deliberately bypasses the
+    /// typed Event enum so future event types and fields survive intact.
+    pub fn raw_events(&self, change_id: &str) -> Result<Vec<(String, serde_json::Value)>> {
+        ids::validate_id_component(change_id)?;
+        let dir = self.events_dir(change_id);
+        let entries =
+            fs::read_dir(&dir).with_context(|| format!("unknown change {change_id:?}"))?;
+        let mut events = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(event_id) = name.strip_suffix(".json") else {
+                continue;
+            };
+            ids::validate_id_component(event_id)?;
+            let path = entry.path();
+            let value = serde_json::from_slice(&fs::read(&path)?)
+                .with_context(|| format!("malformed event file {}", path.display()))?;
+            events.push((event_id.to_string(), value));
+        }
+        events.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(events)
+    }
 }
 
 fn create_private_dir(path: &Path) -> Result<()> {

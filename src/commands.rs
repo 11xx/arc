@@ -1,3 +1,4 @@
+use crate::bundle::Bundle;
 use crate::gates;
 use crate::gitio;
 use crate::ids;
@@ -7,7 +8,7 @@ use crate::state::{self, ChangeState};
 use crate::status::{self, StatusReport};
 use crate::store::Store;
 use anyhow::{bail, Context, Result};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 pub struct Ctx {
@@ -253,6 +254,26 @@ pub fn status_cmd(ctx: &Ctx, reference: &str) -> Result<()> {
     let (_, st) = ctx.load_state(&store, reference)?;
     let report = ctx.report(&st)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+pub fn export_bundle(ctx: &Ctx, reference: &str, output: &str) -> Result<()> {
+    let store = ctx.store()?;
+    let change_id = store.resolve_change(reference)?;
+    let bundle = Bundle::export(&store, &change_id)?;
+    let bytes = bundle.to_bytes()?;
+    if output == "-" {
+        std::io::stdout().write_all(&bytes)?;
+        eprintln!("events: {}", bundle.event_count);
+        eprintln!("sha256: {}", bundle.events_sha256);
+        eprintln!("output: -");
+    } else {
+        std::fs::write(output, bytes)
+            .with_context(|| format!("cannot write export bundle {output}"))?;
+        println!("events: {}", bundle.event_count);
+        println!("sha256: {}", bundle.events_sha256);
+        println!("output: {output}");
+    }
     Ok(())
 }
 
