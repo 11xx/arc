@@ -27,7 +27,7 @@ impl Bundle {
         }
 
         let mut events = Vec::with_capacity(raw.len());
-        let mut source_repository_id: Option<String> = None;
+        let mut origin_repository_id: Option<String> = None;
         for (file_event_id, value) in raw {
             let envelope = event_envelope(&value)?;
             if envelope.event_id != file_event_id {
@@ -43,15 +43,10 @@ impl Bundle {
                     envelope.change_id
                 );
             }
-            match &source_repository_id {
-                Some(expected) if expected != envelope.repository_id => bail!(
-                    "event {} has repository_id {:?}, expected {:?}",
-                    envelope.event_id,
-                    envelope.repository_id,
-                    expected
-                ),
-                None => source_repository_id = Some(envelope.repository_id.to_string()),
-                _ => {}
+            // The opening event identifies the originating store. Later
+            // events may legitimately come from other stores after transfer.
+            if origin_repository_id.is_none() {
+                origin_repository_id = Some(envelope.repository_id.to_string());
             }
             events.push(value);
         }
@@ -64,7 +59,7 @@ impl Bundle {
         let events_sha256 = checksum(&events)?;
         Ok(Bundle {
             schema: BUNDLE_SCHEMA.to_string(),
-            repository_id: source_repository_id.expect("non-empty event list"),
+            repository_id: origin_repository_id.expect("non-empty event list"),
             change_id: change_id.to_string(),
             event_count: events.len(),
             events_sha256,
@@ -111,9 +106,9 @@ impl Bundle {
         let mut patchset_ids = HashSet::new();
         for value in &bundle.events {
             let envelope = event_envelope(value)?;
-            if envelope.repository_id != bundle.repository_id {
+            if prior_event_id.is_none() && envelope.repository_id != bundle.repository_id {
                 bail!(
-                    "event {} has repository_id {:?}, expected {:?}",
+                    "first event {} has repository_id {:?}, expected bundle origin {:?}",
                     envelope.event_id,
                     envelope.repository_id,
                     bundle.repository_id

@@ -711,6 +711,26 @@ fn export_import_roundtrip_is_byte_identical() {
         .success();
 
     assert_eq!(fs::read(bundle).unwrap(), fs::read(roundtrip).unwrap());
+
+    // Continuing the change on the destination creates events with that
+    // store's repository ID. Mixed provenance remains exportable/importable.
+    destination
+        .arc(&destination.root)
+        .args(["hold", "move-r", "--reason", "continue elsewhere"])
+        .assert()
+        .success();
+    let continued = destination.home.join("continued.json");
+    destination
+        .arc(&destination.root)
+        .args(["export", "move-r", "--output", continued.to_str().unwrap()])
+        .assert()
+        .success();
+    let third = Repo::new();
+    third
+        .arc(&third.root)
+        .args(["import", continued.to_str().unwrap()])
+        .assert()
+        .success();
 }
 
 #[test]
