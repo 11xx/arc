@@ -73,6 +73,25 @@ arc integrate radio-refill-fix --cleanup
 the contract orchestrating agents program against. `arc show <change>`
 renders the change as Markdown.
 
+## Export / import
+
+Move one change's complete ledger as a deterministic `arc-bundle/1`
+JSON file:
+
+```sh
+arc export radio-refill-fix --output change.json
+arc import change.json --dry-run
+arc import change.json
+```
+
+Use `-` instead of a path for stdout or stdin. Re-exporting unchanged
+events is byte-identical, and importing the same bundle again skips
+identical events. A conflicting event makes the whole import write
+nothing and exit 1. Missing Git commits are warnings rather than data
+loss: available patchset heads are restored under
+`refs/arc/keep/<change>/<patchset>`, while unavailable objects are
+reported for separate transfer.
+
 ## Exit codes (`check`, and `integrate` refusals)
 
 | Code | Meaning |
@@ -155,17 +174,18 @@ open change's branch (stacking) requires an explicit `--target`.
 ## Non-goals
 
 Not a forge or forge clone, no hosted-PR parity claim, no daemon or web
-UI, no multi-machine sync (a deterministic export/import bundle and a
-forge-PR projection are planned; shared Git-ref sync is deferred until a
-real concurrent multi-machine need exists).
+UI, and no automatic multi-machine synchronization. Export/import moves
+the ledger as one file; Git objects still travel separately. A forge-PR
+projection is planned, while shared Git-ref sync remains deferred until
+a real concurrent multi-machine need exists.
 
 ## Roadmap
 
 See PLAN-02 in the arc-discussion thread archive. Shipped: local core +
-policy engine (M1–M2). Next: `/arc` skill wiring (M3), export/import
-(M4), forge projection — Forgejo/Codeberg first, then GitHub (M5), and
-possibly absorbing the mechanical parts of the /thread archive
-conventions as `arc thread` subcommands.
+policy engine (M1–M2), `/arc` skill wiring (M3), and deterministic
+export/import bundles (M4). Next: forge projection — Forgejo/Codeberg
+first, then GitHub (M5), and possibly absorbing the mechanical parts of
+the /thread archive conventions as `arc thread` subcommands.
 
 ## License
 

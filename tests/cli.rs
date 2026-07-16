@@ -82,6 +82,26 @@ fn stdout(cmd: &mut AssertCommand) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+fn change_with_patchset(repo: &Repo, slug: &str) -> (String, PathBuf, String) {
+    let out = stdout(repo.arc(&repo.root).args(["begin", slug]));
+    let change_id = out
+        .lines()
+        .find_map(|line| line.strip_prefix("change: "))
+        .unwrap()
+        .to_string();
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(&worktree, "change.txt", "change\n", "test: add change");
+    stdout(repo.arc(&worktree).args(["snapshot", slug]));
+    let head = repo.head(&worktree);
+    (change_id, worktree, head)
+}
+
+fn json_file_bytes(value: &serde_json::Value) -> Vec<u8> {
+    let mut bytes = serde_json::to_vec_pretty(value).unwrap();
+    bytes.push(b'\n');
+    bytes
+}
+
 /// begin → worktree + branch + ledger; list/status see the change.
 #[test]
 fn begin_creates_change_branch_and_worktree() {
@@ -645,4 +665,255 @@ fn close_abandoned_and_refuse_further_work() {
         ])
         .assert()
         .success();
+}
+
+#[test]
+fn export_is_deterministic() {
+    let repo = Repo::new();
+    change_with_patchset(&repo, "move-d");
+    let first = repo.home.join("first.json");
+    let second = repo.home.join("second.json");
+
+    repo.arc(&repo.root)
+        .args(["export", "move-d", "--output", first.to_str().unwrap()])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["export", "move-d", "--output", second.to_str().unwrap()])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(first).unwrap(), fs::read(second).unwrap());
+}
+
+#[test]
+fn export_import_roundtrip_is_byte_identical() {
+    let source = Repo::new();
+    change_with_patchset(&source, "move-r");
+    let bundle = source.home.join("bundle.json");
+    source
+        .arc(&source.root)
+        .args(["export", "move-r", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let roundtrip = destination.home.join("roundtrip.json");
+    destination
+        .arc(&destination.root)
+        .args(["export", "move-r", "--output", roundtrip.to_str().unwrap()])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(bundle).unwrap(), fs::read(roundtrip).unwrap());
+
+    // Continuing the change on the destination creates events with that
+    // store's repository ID. Mixed provenance remains exportable/importable.
+    destination
+        .arc(&destination.root)
+        .args(["hold", "move-r", "--reason", "continue elsewhere"])
+        .assert()
+        .success();
+    let continued = destination.home.join("continued.json");
+    destination
+        .arc(&destination.root)
+        .args(["export", "move-r", "--output", continued.to_str().unwrap()])
+        .assert()
+        .success();
+    let third = Repo::new();
+    third
+        .arc(&third.root)
+        .args(["import", continued.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+#[test]
+fn import_is_idempotent() {
+    let source = Repo::new();
+    change_with_patchset(&source, "move-i");
+    let bundle = source.home.join("bundle.json");
+    source
+        .arc(&source.root)
+        .args(["export", "move-i", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let event_count = serde_json::from_slice::<serde_json::Value>(&fs::read(&bundle).unwrap())
+        .unwrap()["event_count"]
+        .as_u64()
+        .unwrap();
+
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "summary: new=0 skipped={event_count} conflicts=0"
+        )));
+}
+
+#[test]
+fn import_conflict_writes_nothing() {
+    let source = Repo::new();
+    let (change_id, _, _) = change_with_patchset(&source, "move-c");
+    let bundle = source.home.join("bundle.json");
+    source
+        .arc(&source.root)
+        .args(["export", "move-c", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let bundle_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    let event_id = bundle_json["events"][0]["event_id"].as_str().unwrap();
+    let event_path = destination
+        .root
+        .join(".git/arc/changes")
+        .join(&change_id)
+        .join("events")
+        .join(format!("{event_id}.json"));
+    let mut tampered: serde_json::Value =
+        serde_json::from_slice(&fs::read(&event_path).unwrap()).unwrap();
+    tampered["actor"] = serde_json::Value::String("tampered".into());
+    let tampered_bytes = json_file_bytes(&tampered);
+    fs::write(&event_path, &tampered_bytes).unwrap();
+
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains(format!("conflict: {event_id}")))
+        .stdout(predicates::str::contains(
+            "aborted: no events or refs written",
+        ));
+    assert_eq!(fs::read(event_path).unwrap(), tampered_bytes);
+}
+
+#[test]
+fn import_dry_run_into_fresh_repo_writes_nothing() {
+    let source = Repo::new();
+    change_with_patchset(&source, "move-p");
+    let bundle = source.home.join("bundle.json");
+    source
+        .arc(&source.root)
+        .args(["export", "move-p", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let event_count = serde_json::from_slice::<serde_json::Value>(&fs::read(&bundle).unwrap())
+        .unwrap()["event_count"]
+        .as_u64()
+        .unwrap();
+
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap(), "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "summary: new={event_count} skipped=0 conflicts=0"
+        )))
+        .stdout(predicates::str::contains(
+            "dry-run: no events or refs written",
+        ));
+    assert!(!destination.root.join(".git/arc").exists());
+}
+
+#[test]
+fn import_restores_patchset_retention_refs() {
+    let repo = Repo::new();
+    let (change_id, _, head) = change_with_patchset(&repo, "move-k");
+    let bundle = repo.home.join("bundle.json");
+    repo.arc(&repo.root)
+        .args(["export", "move-k", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let change_dir = repo.root.join(".git/arc/changes").join(&change_id);
+    fs::remove_dir_all(change_dir).unwrap();
+    let retention_ref = format!("refs/arc/keep/{change_id}/ps-01");
+    git(&repo.root, &["update-ref", "-d", &retention_ref]);
+
+    repo.arc(&repo.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(git_out(&repo.root, &["rev-parse", &retention_ref]), head);
+}
+
+#[test]
+fn import_preserves_unknown_event_bytes() {
+    let source = Repo::new();
+    let out = stdout(
+        source
+            .arc(&source.root)
+            .args(["begin", "move-u", "--no-worktree"]),
+    );
+    let change_id = out
+        .lines()
+        .find_map(|line| line.strip_prefix("change: "))
+        .unwrap();
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(source.root.join(".git/arc/config.json")).unwrap())
+            .unwrap();
+    let event_id = "ZZZZZZZZZZZZZZZZZZZZZZZZZZ";
+    let unknown = serde_json::json!({
+        "schema_version": 1,
+        "event_id": event_id,
+        "repository_id": config["repository_id"],
+        "change_id": change_id,
+        "actor": "future-agent",
+        "created_at": "2026-07-16T00:00:00Z",
+        "event_type": "future-thing",
+        "future_payload": {"kept": [1, 2, 3], "nested": true}
+    });
+    let source_event = source
+        .root
+        .join(".git/arc/changes")
+        .join(change_id)
+        .join("events")
+        .join(format!("{event_id}.json"));
+    let unknown_bytes = json_file_bytes(&unknown);
+    fs::write(&source_event, &unknown_bytes).unwrap();
+    let bundle = source.home.join("bundle.json");
+    source
+        .arc(&source.root)
+        .args(["export", "move-u", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "unknown event type: {event_id} future-thing"
+        )));
+    let destination_event = destination
+        .root
+        .join(".git/arc/changes")
+        .join(change_id)
+        .join("events")
+        .join(format!("{event_id}.json"));
+    assert_eq!(fs::read(destination_event).unwrap(), unknown_bytes);
 }

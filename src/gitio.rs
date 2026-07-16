@@ -187,3 +187,13 @@ pub fn commit_parents(cwd: &Path, rev: &str) -> Result<Vec<String>> {
     ids.next();
     Ok(ids.collect())
 }
+
+pub fn commit_exists(cwd: &Path, oid: &str) -> Result<bool> {
+    let object = format!("{oid}^{{commit}}");
+    let out = Command::new("git")
+        .args(["cat-file", "-e", "--", &object])
+        .current_dir(cwd)
+        .output()
+        .context("failed to spawn git cat-file")?;
+    Ok(out.status.success())
+}

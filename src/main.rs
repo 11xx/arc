@@ -1,3 +1,4 @@
+mod bundle;
 mod commands;
 mod config;
 mod gates;
@@ -121,6 +122,21 @@ enum Cmd {
     },
     /// Machine-readable status report (the versioned arc-status/1 schema)
     Status { change: String },
+    /// Export one change as a deterministic, versioned JSON bundle
+    Export {
+        change: String,
+        /// Output file ('-' for stdout)
+        #[arg(long)]
+        output: String,
+    },
+    /// Import a versioned JSON bundle into this repository's local store
+    Import {
+        /// Input file ('-' for stdin)
+        input: String,
+        /// Validate and report without writing events or retention refs
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Integration preflight; exit code identifies the first blocker
     Check { change: String },
     /// Record the current branch head as a new patchset
@@ -303,6 +319,11 @@ fn run(cli: Cli) -> Result<i32> {
             commands::status_cmd(&ctx, &change)?;
             Ok(0)
         }
+        Cmd::Export { change, output } => {
+            commands::export_bundle(&ctx, &change, &output)?;
+            Ok(0)
+        }
+        Cmd::Import { input, dry_run } => commands::import_bundle(&ctx, &input, dry_run),
         Cmd::Check { change } => commands::check(&ctx, &change),
         Cmd::Snapshot { change, base } => {
             commands::snapshot(&ctx, &change, base)?;
