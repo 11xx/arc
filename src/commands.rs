@@ -1,4 +1,4 @@
-use crate::bundle::Bundle;
+use crate::bundle::{Bundle, ValidatedBundle};
 use crate::gates;
 use crate::gitio;
 use crate::ids;
@@ -275,6 +275,137 @@ pub fn export_bundle(ctx: &Ctx, reference: &str, output: &str) -> Result<()> {
         println!("output: {output}");
     }
     Ok(())
+}
+
+pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
+    let bytes = if input == "-" {
+        let mut bytes = Vec::new();
+        std::io::stdin().read_to_end(&mut bytes)?;
+        bytes
+    } else {
+        std::fs::read(input).with_context(|| format!("cannot read import bundle {input}"))?
+    };
+    // Parsing validates every path-bearing ID, checksum, envelope, and
+    // patchset field before the local store is inspected or created.
+    let validated = Bundle::parse(&bytes)?;
+    let root = Store::resolve_root(&ctx.cwd)?;
+    let local_repository_id = Store::repository_id_at(&root)?;
+
+    let mut new_events = Vec::new();
+    let mut skipped_events = Vec::new();
+    let mut conflicts = Vec::new();
+    for event in &validated.events {
+        match Store::raw_event_at(&root, &validated.bundle.change_id, &event.event_id)? {
+            None => new_events.push(event.event_id.clone()),
+            Some(existing) => match serde_json::from_slice::<serde_json::Value>(&existing) {
+                Ok(value) if value == event.value => skipped_events.push(event.event_id.clone()),
+                _ => conflicts.push(event.event_id.clone()),
+            },
+        }
+    }
+
+    let mut missing_objects = Vec::new();
+    let mut pins = Vec::new();
+    for patchset in &validated.patchsets {
+        if !gitio::commit_exists(&ctx.cwd, &patchset.base)? {
+            missing_objects.push((patchset.event_id.clone(), "base", patchset.base.clone()));
+        }
+        if gitio::commit_exists(&ctx.cwd, &patchset.head)? {
+            pins.push((
+                gitio::retention_ref(&validated.bundle.change_id, &patchset.patchset_id),
+                patchset.head.clone(),
+            ));
+        } else {
+            missing_objects.push((patchset.event_id.clone(), "head", patchset.head.clone()));
+        }
+    }
+
+    print_import_report(
+        &validated,
+        local_repository_id.as_deref(),
+        &new_events,
+        &skipped_events,
+        &conflicts,
+        &missing_objects,
+        &pins,
+        dry_run,
+    );
+    if !conflicts.is_empty() {
+        return Ok(1);
+    }
+    if dry_run {
+        return Ok(0);
+    }
+
+    let store = Store::discover(&ctx.cwd)?;
+    if local_repository_id.is_none() && store.repository_id != validated.bundle.repository_id {
+        println!(
+            "repository: bundle {} differs from local {} (expected for cross-machine import)",
+            validated.bundle.repository_id, store.repository_id
+        );
+    }
+    for event in &validated.events {
+        if new_events.contains(&event.event_id) {
+            store.append_raw_event(&validated.bundle.change_id, &event.event_id, &event.bytes)?;
+        }
+    }
+    for (name, head) in pins {
+        gitio::update_ref(&ctx.cwd, &name, &head)?;
+    }
+    Ok(0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_import_report(
+    validated: &ValidatedBundle,
+    local_repository_id: Option<&str>,
+    new_events: &[String],
+    skipped_events: &[String],
+    conflicts: &[String],
+    missing_objects: &[(String, &str, String)],
+    pins: &[(String, String)],
+    dry_run: bool,
+) {
+    if let Some(local) = local_repository_id {
+        if local != validated.bundle.repository_id {
+            println!(
+                "repository: bundle {} differs from local {local} (expected for cross-machine import)",
+                validated.bundle.repository_id
+            );
+        }
+    }
+    for event_id in new_events {
+        println!("new: {event_id}");
+    }
+    for event_id in skipped_events {
+        println!("skipped: {event_id}");
+    }
+    for event_id in conflicts {
+        println!("conflict: {event_id}");
+    }
+    for (event_id, kind, oid) in missing_objects {
+        println!("warning: event {event_id} is missing {kind} commit {oid}");
+    }
+    for (event_id, event_type) in &validated.unknown_event_types {
+        println!("unknown event type: {event_id} {event_type} (preserved verbatim)");
+    }
+    for (name, head) in pins {
+        if dry_run {
+            println!("would pin: {name} -> {head}");
+        } else {
+            println!("pin: {name} -> {head}");
+        }
+    }
+    println!(
+        "summary: new={} skipped={} conflicts={} missing_objects={}",
+        new_events.len(),
+        skipped_events.len(),
+        conflicts.len(),
+        missing_objects.len()
+    );
+    if dry_run {
+        println!("dry-run: no events or refs written");
+    }
 }
 
 pub fn check(ctx: &Ctx, reference: &str) -> Result<i32> {
