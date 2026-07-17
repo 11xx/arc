@@ -289,6 +289,38 @@ fn watch_ready_times_out_when_check_is_not_green() {
 }
 
 #[test]
+fn watch_ready_observes_a_git_only_head_transition() {
+    let repo = Repo::new();
+    let (_, worktree, head) = change_with_patchset(&repo, "watch-ready-live");
+    repo.arc(&worktree)
+        .args(["review", "watch-ready-live", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let branch = "refs/heads/arc/watch-ready-live";
+    let base = git_out(&repo.root, &["rev-parse", "master"]);
+    git(&repo.root, &["update-ref", branch, &base]);
+    let mut child = spawn_arc(
+        &repo,
+        &repo.root,
+        &[
+            "watch",
+            "watch-ready-live",
+            "--until",
+            "ready",
+            "--timeout",
+            "2",
+        ],
+    );
+    thread::sleep(Duration::from_millis(50));
+    // Ref restoration changes readiness without appending a ledger event.
+    git(&repo.root, &["update-ref", branch, &head]);
+
+    assert!(wait_for_exit(&mut child).success());
+    assert_eq!(child_stdout(&mut child).trim(), "reached: ready");
+}
+
+#[test]
 fn watch_integrated_returns_after_real_integration() {
     let repo = Repo::new();
     let (_, worktree, _) = change_with_patchset(&repo, "watch-integrated");
@@ -1488,4 +1520,14 @@ fn import_preserves_unknown_event_bytes() {
         .join("events")
         .join(format!("{event_id}.json"));
     assert_eq!(fs::read(destination_event).unwrap(), unknown_bytes);
+
+    let streamed = stdout(destination.arc(&destination.root).args([
+        "events",
+        "--change",
+        "move-u",
+        "--type",
+        "future-thing",
+    ]));
+    let streamed: serde_json::Value = serde_json::from_str(streamed.trim()).unwrap();
+    assert_eq!(streamed, unknown);
 }

@@ -268,12 +268,29 @@ fn create_private_dir_all(path: &Path) -> Result<()> {
 }
 
 fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|| format!("cannot create {}", path.display()))?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    Ok(())
+    let file_name = path
+        .file_name()
+        .context("exclusive-write path has no file name")?
+        .to_string_lossy();
+    let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", crate::ids::new_event_id()));
+
+    let publish = (|| -> Result<()> {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("cannot create {}", temporary.display()))?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+
+        // A same-directory hard link atomically publishes the fully written
+        // inode while preserving create-new collision behavior. Temporary
+        // names do not end in .json, so readers ignore a file left by a crash.
+        fs::hard_link(&temporary, path)
+            .with_context(|| format!("cannot create {}", path.display()))?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&temporary);
+    publish
 }
