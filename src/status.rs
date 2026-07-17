@@ -243,15 +243,15 @@ pub fn build(
     let gate_summary = gate_statuses
         .iter()
         .map(|gate| {
-            (
-                gate.name.clone(),
-                if gate.green_at_head {
-                    "pass"
-                } else {
-                    "pending"
-                }
-                .into(),
-            )
+            let result = current_head
+                .as_deref()
+                .and_then(|head| state.gate_result_at(&gate.name, head));
+            let label = match result {
+                Some(crate::model::VerifyResult::Pass) => "pass",
+                Some(crate::model::VerifyResult::Fail) => "fail",
+                None => "pending",
+            };
+            (gate.name.clone(), label.into())
         })
         .collect();
     let open_findings = findings

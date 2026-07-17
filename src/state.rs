@@ -161,13 +161,16 @@ impl ChangeState {
         self.closure.is_some()
     }
 
-    /// Latest passing verification per gate name at an exact revision.
-    pub fn gate_passed_at(&self, gate: &str, revision: &str) -> bool {
+    /// Latest verification result per gate name at an exact revision.
+    pub fn gate_result_at(&self, gate: &str, revision: &str) -> Option<VerifyResult> {
         self.verifications
             .iter()
             .rfind(|v| v.gate.as_deref() == Some(gate) && v.revision == revision)
-            .map(|v| v.result == VerifyResult::Pass)
-            .unwrap_or(false)
+            .map(|v| v.result)
+    }
+
+    pub fn gate_passed_at(&self, gate: &str, revision: &str) -> bool {
+        self.gate_result_at(gate, revision) == Some(VerifyResult::Pass)
     }
 
     pub fn resolve_finding_id(&self, needle: &str) -> Result<String> {
