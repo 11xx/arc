@@ -2450,7 +2450,7 @@ fn old_patchset_events_without_identity_fields_remain_readable() {
 }
 
 #[test]
-fn old_claim_events_without_generation_fields_remain_readable() {
+fn claim_events_without_generation_fields_are_rejected() {
     let repo = Repo::new();
     let opened =
         stdout(
@@ -2470,17 +2470,18 @@ fn old_claim_events_without_generation_fields_remain_readable() {
         .args(["release-claim", "old-claim-generation"])
         .assert()
         .success();
-    for event_type in ["claim-set", "stage-set", "claim-released"] {
-        rewrite_event(&repo, &change_id, event_type, |event| {
-            event.as_object_mut().unwrap().remove("claim_id");
-        });
-    }
+    // The claim protocol shipped with generations from the start: the binary
+    // always writes claim_id, so a claim event without one is corruption or a
+    // forgery and must fail loud rather than replay through inference.
+    rewrite_event(&repo, &change_id, "claim-set", |event| {
+        event.as_object_mut().unwrap().remove("claim_id");
+    });
 
     repo.arc(&repo.root)
         .args(["status", "old-claim-generation"])
         .assert()
-        .success()
-        .stdout(predicates::str::contains("\"claim\": null"));
+        .failure()
+        .stderr(predicates::str::contains("malformed event file"));
 }
 
 #[test]

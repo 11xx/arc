@@ -69,18 +69,15 @@ pub enum Payload {
         claim_actor: Option<String>,
     },
     ClaimSet {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        claim_id: Option<String>,
+        claim_id: String,
         ttl_seconds: u64,
         stage_budgets: BTreeMap<StageBudget, u64>,
     },
     ClaimReleased {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        claim_id: Option<String>,
+        claim_id: String,
     },
     StageSet {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        claim_id: Option<String>,
+        claim_id: String,
         stage: ClaimStage,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,

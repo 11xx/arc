@@ -429,18 +429,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     harness,
                     session,
                 };
-                if let Some(claim_id) = claim_id {
-                    crate::ids::validate_id_component(claim_id)?;
-                }
-                let claim_id = match (claim_id, state.claim.as_ref()) {
-                    (Some(claim_id), _) => claim_id.clone(),
-                    (None, Some(claim))
-                        if claim.owner == owner && claim_timing_at(claim, ev.created_at).active =>
-                    {
-                        claim.claim_id.clone()
-                    }
-                    (None, _) => ev.event_id.clone(),
-                };
+                crate::ids::validate_id_component(claim_id)?;
+                let claim_id = claim_id.clone();
                 if state.retired_claim_ids.contains(&claim_id) {
                     continue;
                 }
@@ -484,30 +474,24 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 });
             }
             Payload::ClaimReleased { claim_id } => {
-                if let Some(claim_id) = claim_id {
-                    crate::ids::validate_id_component(claim_id)?;
-                    if state
-                        .claim
-                        .as_ref()
-                        .is_some_and(|claim| claim.claim_id == *claim_id)
-                    {
-                        state.claim = None;
-                    }
-                    state.retired_claim_ids.insert(claim_id.clone());
-                } else if let Some(claim) = state.claim.take() {
-                    state.retired_claim_ids.insert(claim.claim_id);
+                crate::ids::validate_id_component(claim_id)?;
+                if state
+                    .claim
+                    .as_ref()
+                    .is_some_and(|claim| claim.claim_id == *claim_id)
+                {
+                    state.claim = None;
                 }
+                state.retired_claim_ids.insert(claim_id.clone());
             }
             Payload::StageSet {
                 claim_id,
                 stage,
                 note,
             } => {
-                if let Some(claim_id) = claim_id {
-                    crate::ids::validate_id_component(claim_id)?;
-                    if state.retired_claim_ids.contains(claim_id) {
-                        continue;
-                    }
+                crate::ids::validate_id_component(claim_id)?;
+                if state.retired_claim_ids.contains(claim_id) {
+                    continue;
                 }
                 let Some(claim) = state.claim.as_mut() else {
                     // A concurrently appended release can sort before an
@@ -515,10 +499,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     // but do not let it make all subsequent typed replay fail.
                     continue;
                 };
-                if claim_id
-                    .as_ref()
-                    .is_some_and(|claim_id| claim_id != &claim.claim_id)
-                {
+                if claim_id != &claim.claim_id {
                     continue;
                 }
                 if claim.owner.actor != ev.actor

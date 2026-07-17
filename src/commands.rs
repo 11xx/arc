@@ -475,7 +475,7 @@ pub fn claim(
         now,
         &owner,
         Payload::ClaimSet {
-            claim_id: Some(claim_id),
+            claim_id,
             ttl_seconds,
             stage_budgets: budgets,
         },
@@ -509,7 +509,7 @@ pub fn release_claim(ctx: &Ctx, reference: &str) -> Result<i32> {
         now,
         &caller,
         Payload::ClaimReleased {
-            claim_id: Some(existing.claim_id.clone()),
+            claim_id: existing.claim_id.clone(),
         },
     );
     store.append_event(&event)?;
@@ -561,7 +561,7 @@ pub fn stage(ctx: &Ctx, reference: &str, stage: StageArg, note: Option<String>) 
         now,
         &owner,
         Payload::StageSet {
-            claim_id: Some(existing.claim_id.clone()),
+            claim_id: existing.claim_id.clone(),
             stage,
             note,
         },

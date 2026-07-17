@@ -290,7 +290,7 @@ pub fn parse_known_event(value: &Value) -> Result<Option<Event>> {
             stage_budgets,
         } => {
             validate_claim_identity(&event)?;
-            validate_claim_id(claim_id.as_deref())?;
+            ids::validate_id_component(claim_id)?;
             if *ttl_seconds == 0 {
                 bail!("claim event {} has a zero TTL", event.event_id);
             }
@@ -312,7 +312,7 @@ pub fn parse_known_event(value: &Value) -> Result<Option<Event>> {
         }
         Payload::ClaimReleased { claim_id } => {
             validate_claim_identity(&event)?;
-            validate_claim_id(claim_id.as_deref())?;
+            ids::validate_id_component(claim_id)?;
         }
         Payload::StageSet {
             claim_id,
@@ -320,7 +320,7 @@ pub fn parse_known_event(value: &Value) -> Result<Option<Event>> {
             note,
         } => {
             validate_claim_identity(&event)?;
-            validate_claim_id(claim_id.as_deref())?;
+            ids::validate_id_component(claim_id)?;
             if *stage == ClaimStage::Snapshotted {
                 bail!(
                     "stage event {} cannot set snapshotted explicitly",
@@ -339,13 +339,6 @@ pub fn parse_known_event(value: &Value) -> Result<Option<Event>> {
         _ => {}
     }
     Ok(Some(event))
-}
-
-fn validate_claim_id(claim_id: Option<&str>) -> Result<()> {
-    if let Some(claim_id) = claim_id {
-        ids::validate_id_component(claim_id)?;
-    }
-    Ok(())
 }
 
 fn validate_claim_identity(event: &Event) -> Result<()> {

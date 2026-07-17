@@ -12,6 +12,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
+// The target lock is legitimately held across a real merge, so waiters get a
+// budget sized to an integration rather than to a state append.
+const TARGET_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const LOCK_RETRY: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -107,12 +110,16 @@ impl Store {
     /// Serialize state-derived transitions for one change across processes.
     pub fn lock_transition(&self, change_id: &str) -> Result<TransitionLock> {
         ids::validate_id_component(change_id)?;
-        self.lock_file(&format!("{change_id}.lock"), "change transition")
+        self.lock_file(
+            &format!("{change_id}.lock"),
+            "change transition",
+            LOCK_TIMEOUT,
+        )
     }
 
     /// Serialize dependency graph reads and writes across every change.
     pub fn lock_graph(&self) -> Result<TransitionLock> {
-        self.lock_file("graph.lock", "repository graph")
+        self.lock_file("graph.lock", "repository graph", LOCK_TIMEOUT)
     }
 
     /// Serialize integrations that mutate the same target branch/worktree.
@@ -124,10 +131,16 @@ impl Store {
         self.lock_file(
             &format!("target-{}.lock", hex::encode(digest)),
             "integration target",
+            TARGET_LOCK_TIMEOUT,
         )
     }
 
-    fn lock_file(&self, name: &str, description: &str) -> Result<TransitionLock> {
+    fn lock_file(
+        &self,
+        name: &str,
+        description: &str,
+        timeout: Duration,
+    ) -> Result<TransitionLock> {
         let dir = self.root.join("locks");
         create_private_dir_all(&dir)?;
         let path = dir.join(name);
@@ -138,7 +151,7 @@ impl Store {
             .truncate(false)
             .open(&path)
             .with_context(|| format!("cannot open {description} lock {}", path.display()))?;
-        let deadline = Instant::now() + LOCK_TIMEOUT;
+        let deadline = Instant::now() + timeout;
         loop {
             match file.try_lock() {
                 Ok(()) => return Ok(TransitionLock(file)),

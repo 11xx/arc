@@ -138,9 +138,11 @@ stage is a heartbeat: it refreshes claim activity and age-in-stage. `blocked-on`
 requires a note and is distress rather than stale;
 claim TTL still applies. `snapshotted` comes only from a real `arc snapshot`
 event and cannot be supplied to `arc stage`. An identified caller may release
-any live claim so a lead can recover stale foreign work. Claim release, stage,
-and snapshot events carry the observed generation so imported stale events
-cannot clear, advance, or claim provenance for a replacement lease.
+any live claim so a lead can recover stale foreign work. Every claim, release,
+and stage event carries its generation (snapshots carry the one observed at
+snapshot time), so imported stale events cannot clear, advance, or claim
+provenance for a replacement lease; a claim event without a generation is
+rejected as malformed rather than replayed through inference.
 Integration warns on an active foreign claim, including a stale one, but
 proceeds when the normal integration gates pass.
 
@@ -172,8 +174,9 @@ State-derived writes use persistent OS-backed advisory locks with bounded
 acquisition. Dependency metadata takes a repository graph lock before its
 per-change lock; integration takes a target-branch lock before its per-change
 lock. This prevents concurrent cycles and target-worktree races without
-waiting forever on re-entry. Verification runs its external gate before taking
-the short state-append lock.
+waiting forever on re-entry. State-append locks wait briefly; the target lock
+waits integration-scale because its holder is legitimately running a merge.
+Verification runs its external gate before taking the short state-append lock.
 
 Query and batch views avoid ad-hoc JSON filtering:
 
