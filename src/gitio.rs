@@ -236,3 +236,22 @@ pub fn commit_exists(cwd: &Path, oid: &str) -> Result<bool> {
         .context("failed to spawn git cat-file")?;
     Ok(out.status.success())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deadline_kills_and_reaps_a_slow_probe() {
+        let started = Instant::now();
+        with_deadline(Some(started + Duration::from_millis(50)), || {
+            let mut command = Command::new("sleep");
+            command.arg("5");
+            let error = command_output(&mut command).unwrap_err();
+            assert!(error.to_string().contains("timed out"));
+            Ok(())
+        })
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+}
