@@ -97,7 +97,12 @@ fn change_with_patchset(repo: &Repo, slug: &str) -> (String, PathBuf, String) {
         .unwrap()
         .to_string();
     let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
-    repo.commit(&worktree, "change.txt", "change\n", "test: add change");
+    repo.commit(
+        &worktree,
+        &format!("{slug}.txt"),
+        &format!("{slug}\n"),
+        &format!("test: add {slug}"),
+    );
     stdout(repo.arc(&worktree).args(["snapshot", slug]));
     let head = repo.head(&worktree);
     (change_id, worktree, head)
@@ -209,6 +214,19 @@ fn age_event(repo: &Repo, change_id: &str, event_type: &str, seconds: i64) {
 }
 
 fn hold_transition_lock(repo: &Repo, change_id: &str) -> fs::File {
+    hold_named_lock(repo, &format!("{change_id}.lock"))
+}
+
+fn hold_graph_lock(repo: &Repo) -> fs::File {
+    hold_named_lock(repo, "graph.lock")
+}
+
+fn hold_target_lock(repo: &Repo, target: &str) -> fs::File {
+    let digest = Sha256::digest(target.as_bytes());
+    hold_named_lock(repo, &format!("target-{}.lock", hex::encode(digest)))
+}
+
+fn hold_named_lock(repo: &Repo, name: &str) -> fs::File {
     let dir = repo.root.join(".git/arc/locks");
     fs::create_dir_all(&dir).unwrap();
     let file = fs::OpenOptions::new()
@@ -216,7 +234,7 @@ fn hold_transition_lock(repo: &Repo, change_id: &str) -> fs::File {
         .write(true)
         .create(true)
         .truncate(false)
-        .open(dir.join(format!("{change_id}.lock")))
+        .open(dir.join(name))
         .unwrap();
     file.lock().unwrap();
     file
@@ -289,6 +307,7 @@ fn claim_lifecycle_reports_defaults_renewal_conflict_release_and_expiry() {
     assert_eq!(status["claim"]["stage_budgets"]["verifying"], 900);
     assert_eq!(status["claim"]["active"], true);
 
+    let original_claim_id = status["claim"]["claim_id"].clone();
     let original_claimed_at = status["claim"]["claimed_at"].clone();
     thread::sleep(Duration::from_millis(5));
     repo.arc(&repo.root)
@@ -298,6 +317,7 @@ fn claim_lifecycle_reports_defaults_renewal_conflict_release_and_expiry() {
     let renewed: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "claim-life"]))).unwrap();
     assert_eq!(renewed["claim"]["claimed_at"], original_claimed_at);
+    assert_eq!(renewed["claim"]["claim_id"], original_claim_id);
     assert_ne!(
         renewed["claim"]["last_activity_at"],
         status["claim"]["last_activity_at"]
@@ -358,6 +378,7 @@ fn claim_lifecycle_reports_defaults_renewal_conflict_release_and_expiry() {
     let reclaimed: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "claim-life"]))).unwrap();
     assert_eq!(reclaimed["claim"]["owner"]["session"], "session-b");
+    assert_ne!(reclaimed["claim"]["claim_id"], original_claim_id);
 }
 
 #[test]
@@ -466,6 +487,22 @@ fn concurrent_claims_have_one_winner_and_stage_release_replay_stays_readable() {
             .success()
             .stdout(predicates::str::contains("\"claim\": null"));
     }
+}
+
+#[test]
+fn transition_lock_acquisition_is_bounded() {
+    let repo = Repo::new();
+    let opened = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "bounded-lock", "--no-worktree"]),
+    );
+    let change_id = opened_change_id(&opened);
+    let transition_lock = hold_transition_lock(&repo, &change_id);
+    let started = Instant::now();
+    let mut claim = spawn_arc(&repo, &repo.root, &["claim", "bounded-lock"]);
+    assert_eq!(wait_for_exit(&mut claim).code(), Some(1));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    transition_lock.unlock().unwrap();
 }
 
 #[test]
@@ -824,6 +861,78 @@ fn transition_lock_serializes_hold_against_integrate() {
         .args(["status", "hold-integrate-race"])
         .assert()
         .success();
+}
+
+#[test]
+fn concurrent_integrations_serialize_on_the_target_branch_lock() {
+    let repo = Repo::new();
+    let (_, first_worktree, _) = change_with_patchset(&repo, "target-race-a");
+    let (_, second_worktree, _) = change_with_patchset(&repo, "target-race-b");
+    repo.arc(&first_worktree)
+        .args(["review", "target-race-a", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&second_worktree)
+        .args(["review", "target-race-b", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let target_lock = hold_target_lock(&repo, "master");
+    let mut first = spawn_arc_with_session(
+        &repo,
+        &repo.root,
+        &["integrate", "target-race-a"],
+        "integrator-a",
+    );
+    let mut second = spawn_arc_with_session(
+        &repo,
+        &repo.root,
+        &["integrate", "target-race-b"],
+        "integrator-b",
+    );
+    assert_waiting_on_transition_lock(&mut [&mut first, &mut second]);
+    target_lock.unlock().unwrap();
+
+    assert!(wait_for_exit(&mut first).success());
+    assert!(wait_for_exit(&mut second).success());
+    assert!(repo.root.join("target-race-a.txt").is_file());
+    assert!(repo.root.join("target-race-b.txt").is_file());
+    repo.arc(&repo.root)
+        .args(["status", "target-race-a"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("\"outcome\": \"integrated\""));
+    repo.arc(&repo.root)
+        .args(["status", "target-race-b"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("\"outcome\": \"integrated\""));
+}
+
+#[test]
+fn verification_gate_can_mutate_arc_state_without_lock_reentry_deadlock() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "verify-reentry", "--no-worktree"]),
+    );
+    let binary = std::env::var("CARGO_BIN_EXE_arc").unwrap();
+    let gate = format!("\"{binary}\" hold verify-reentry --reason gate-self-mutation");
+    let mut verify = spawn_arc(
+        &repo,
+        &repo.root,
+        &["verify", "verify-reentry", "--command", &gate],
+    );
+    assert!(wait_for_exit(&mut verify).success());
+
+    let state: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "show",
+        "verify-reentry",
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(state["hold"], "gate-self-mutation");
+    assert_eq!(state["verifications"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -1610,6 +1719,49 @@ fn query_tags_batch_views_and_actionable_errors() {
         .stdout(predicates::str::contains("tagged-b-"));
 }
 
+#[test]
+fn concurrent_metadata_updates_cannot_create_a_dependency_cycle() {
+    let repo = Repo::new();
+    let first = begin_change(&repo, "cycle-race-a", None);
+    let second = begin_change(&repo, "cycle-race-b", None);
+
+    let graph_lock = hold_graph_lock(&repo);
+    let mut first_to_second = spawn_arc(
+        &repo,
+        &repo.root,
+        &["metadata", &first, "--blocked-by", &second],
+    );
+    let mut second_to_first = spawn_arc(
+        &repo,
+        &repo.root,
+        &["metadata", &second, "--blocked-by", &first],
+    );
+    assert_waiting_on_transition_lock(&mut [&mut first_to_second, &mut second_to_first]);
+    graph_lock.unlock().unwrap();
+
+    let first_status = wait_for_exit(&mut first_to_second);
+    let second_status = wait_for_exit(&mut second_to_first);
+    assert_ne!(first_status.success(), second_status.success());
+    assert_eq!(
+        [first_status, second_status]
+            .iter()
+            .filter(|status| status.success())
+            .count(),
+        1
+    );
+    let first_state: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["show", &first, "--json"]),
+    ))
+    .unwrap();
+    let second_state: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["show", &second, "--json"]),
+    ))
+    .unwrap();
+    let edge_count = first_state["blocked_by"].as_array().unwrap().len()
+        + second_state["blocked_by"].as_array().unwrap().len();
+    assert_eq!(edge_count, 1);
+}
+
 /// The full green path: implement → snapshot → verify gate → approve →
 /// check ok → integrate produces a --no-ff merge with correct parents.
 #[test]
@@ -2229,6 +2381,18 @@ fn bundle_roundtrip_preserves_claim_stage_and_snapshot_provenance_events() {
         .collect::<Vec<_>>();
     assert!(event_types.contains(&"claim-set"));
     assert!(event_types.contains(&"stage-set"));
+    let claim = exported["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_type"] == "claim-set")
+        .unwrap();
+    let stage = exported["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_type"] == "stage-set")
+        .unwrap();
     let patchset = exported["events"]
         .as_array()
         .unwrap()
@@ -2237,6 +2401,9 @@ fn bundle_roundtrip_preserves_claim_stage_and_snapshot_provenance_events() {
         .unwrap();
     assert_eq!(patchset["author_name"], "Tester");
     assert_eq!(patchset["committer_email"], "tester@example.invalid");
+    assert_eq!(stage["claim_id"], claim["claim_id"]);
+    assert_eq!(patchset["claim_id"], claim["claim_id"]);
+    assert_eq!(patchset["claim_actor"], "Executor");
 
     let destination = Repo::new();
     destination
@@ -2280,6 +2447,40 @@ fn old_patchset_events_without_identity_fields_remain_readable() {
         .args(["show", "old-patchset"])
         .assert()
         .success();
+}
+
+#[test]
+fn old_claim_events_without_generation_fields_remain_readable() {
+    let repo = Repo::new();
+    let opened =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", "old-claim-generation", "--no-worktree"]),
+        );
+    let change_id = opened_change_id(&opened);
+    repo.arc(&repo.root)
+        .args(["claim", "old-claim-generation"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["stage", "old-claim-generation", "started"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["release-claim", "old-claim-generation"])
+        .assert()
+        .success();
+    for event_type in ["claim-set", "stage-set", "claim-released"] {
+        rewrite_event(&repo, &change_id, event_type, |event| {
+            event.as_object_mut().unwrap().remove("claim_id");
+        });
+    }
+
+    repo.arc(&repo.root)
+        .args(["status", "old-claim-generation"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("\"claim\": null"));
 }
 
 #[test]
@@ -2534,16 +2735,15 @@ fn import_replays_combined_history_before_writing() {
 }
 
 #[test]
-fn stale_imported_stage_after_local_release_does_not_poison_replay() {
+fn stale_imported_release_stage_and_snapshot_cannot_mutate_a_replacement_claim() {
     let source = Repo::new();
-    stdout(
-        source
-            .arc(&source.root)
-            .args(["begin", "move-stale-stage", "--no-worktree"]),
-    );
+    let opened = stdout(source.arc(&source.root).args(["begin", "move-stale-claim"]));
+    let change_id = opened_change_id(&opened);
+    let worktree = source.home.join(".worktrees/repo-move-stale-claim");
     source
-        .arc(&source.root)
-        .args(["claim", "move-stale-stage"])
+        .arc(&worktree)
+        .env("ARC_ACTOR", "Source Executor")
+        .args(["claim", "move-stale-claim"])
         .assert()
         .success();
     let initial = source.home.join("initial.json");
@@ -2551,7 +2751,7 @@ fn stale_imported_stage_after_local_release_does_not_poison_replay() {
         .arc(&source.root)
         .args([
             "export",
-            "move-stale-stage",
+            "move-stale-claim",
             "--output",
             initial.to_str().unwrap(),
         ])
@@ -2567,13 +2767,46 @@ fn stale_imported_stage_after_local_release_does_not_poison_replay() {
     destination
         .arc(&destination.root)
         .env("ARC_SESSION", "lead")
-        .args(["release-claim", "move-stale-stage"])
+        .args(["release-claim", "move-stale-claim"])
         .assert()
         .success();
+    destination
+        .arc(&destination.root)
+        .env("ARC_ACTOR", "Replacement Executor")
+        .env("ARC_SESSION", "replacement-session")
+        .args(["claim", "move-stale-claim"])
+        .assert()
+        .success();
+    let replacement: serde_json::Value = serde_json::from_str(&stdout(
+        destination
+            .arc(&destination.root)
+            .args(["status", "move-stale-claim"]),
+    ))
+    .unwrap();
+    let replacement_claim_id = replacement["claim"]["claim_id"].clone();
+
     thread::sleep(Duration::from_millis(5));
     source
+        .arc(&worktree)
+        .env("ARC_ACTOR", "Source Executor")
+        .args(["stage", "move-stale-claim", "started"])
+        .assert()
+        .success();
+    source.commit(
+        &worktree,
+        "stale.txt",
+        "source snapshot\n",
+        "test: snapshot source claim",
+    );
+    source
+        .arc(&worktree)
+        .args(["snapshot", "move-stale-claim"])
+        .assert()
+        .success();
+    source
         .arc(&source.root)
-        .args(["stage", "move-stale-stage", "started"])
+        .env("ARC_SESSION", "source-lead")
+        .args(["release-claim", "move-stale-claim"])
         .assert()
         .success();
     let updated = source.home.join("updated.json");
@@ -2581,7 +2814,7 @@ fn stale_imported_stage_after_local_release_does_not_poison_replay() {
         .arc(&source.root)
         .args([
             "export",
-            "move-stale-stage",
+            "move-stale-claim",
             "--output",
             updated.to_str().unwrap(),
         ])
@@ -2596,10 +2829,23 @@ fn stale_imported_stage_after_local_release_does_not_poison_replay() {
     let status: serde_json::Value = serde_json::from_str(&stdout(
         destination
             .arc(&destination.root)
-            .args(["status", "move-stale-stage"]),
+            .args(["status", "move-stale-claim"]),
     ))
     .unwrap();
-    assert!(status["claim"].is_null());
+    assert_eq!(status["claim"]["claim_id"], replacement_claim_id);
+    assert_eq!(status["claim"]["owner"]["actor"], "Replacement Executor");
+    assert_eq!(status["claim"]["stage"], "launch");
+    assert!(status["claim"]["snapshot_author"].is_null());
+
+    let state: serde_json::Value = serde_json::from_str(&stdout(
+        destination
+            .arc(&destination.root)
+            .args(["show", &change_id, "--json"]),
+    ))
+    .unwrap();
+    let patchset = state["patchsets"].as_array().unwrap().last().unwrap();
+    assert_eq!(patchset["claim_actor"], "Source Executor");
+    assert_ne!(patchset["claim_id"], replacement_claim_id);
 }
 
 #[test]

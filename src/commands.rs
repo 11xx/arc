@@ -461,6 +461,12 @@ pub fn claim(
             return Ok(8);
         }
     }
+    let claim_id = state
+        .claim
+        .as_ref()
+        .filter(|claim| claim.owner == owner && state::claim_timing_at(claim, now).active)
+        .map(|claim| claim.claim_id.clone())
+        .unwrap_or_else(ids::new_event_id);
 
     let event = identity_event_at(
         ctx,
@@ -469,6 +475,7 @@ pub fn claim(
         now,
         &owner,
         Payload::ClaimSet {
+            claim_id: Some(claim_id),
             ttl_seconds,
             stage_budgets: budgets,
         },
@@ -501,7 +508,9 @@ pub fn release_claim(ctx: &Ctx, reference: &str) -> Result<i32> {
         &change_id,
         now,
         &caller,
-        Payload::ClaimReleased,
+        Payload::ClaimReleased {
+            claim_id: Some(existing.claim_id.clone()),
+        },
     );
     store.append_event(&event)?;
     println!("claim released: {change_id}");
@@ -551,7 +560,11 @@ pub fn stage(ctx: &Ctx, reference: &str, stage: StageArg, note: Option<String>) 
         &change_id,
         now,
         &owner,
-        Payload::StageSet { stage, note },
+        Payload::StageSet {
+            claim_id: Some(existing.claim_id.clone()),
+            stage,
+            note,
+        },
     );
     store.append_event(&event)?;
     println!("stage: {}", stage.as_str());
@@ -1070,6 +1083,7 @@ pub fn metadata(
     remove_tags: Vec<String>,
 ) -> Result<()> {
     let store = ctx.store()?;
+    let _graph = store.lock_graph()?;
     let (change_id, _transition, state) = locked_state(&store, reference)?;
     if state.is_closed() {
         bail!("change {change_id} is closed");
@@ -1284,7 +1298,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     }
 
     let store = Store::discover(&ctx.cwd)?;
-    let _transition = store.lock_transition(&validated.bundle.change_id)?;
+    let transition = store.lock_transition(&validated.bundle.change_id)?;
     // Classification and candidate replay must happen after taking the same
     // per-change lock used by claim, release, stage, and snapshot. Otherwise a
     // local transition could land between validation and the raw appends.
@@ -1319,6 +1333,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
             store.append_raw_event(&validated.bundle.change_id, &event.event_id, &event.bytes)?;
         }
     }
+    drop(transition);
     for (name, head) in pins {
         gitio::update_ref(&ctx.cwd, &name, &head)?;
     }
@@ -1513,10 +1528,16 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
         .as_deref()
         .and_then(|t| gitio::merge_base(&ctx.cwd, t, &head).ok());
     let identity = gitio::commit_identity(&ctx.cwd, &head)?;
+    let now = chrono::Utc::now();
+    let snapshot_claim = st
+        .claim
+        .as_ref()
+        .filter(|claim| state::claim_timing_at(claim, now).active);
     let patchset_id = format!("ps-{:02}", st.patchsets.len() + 1);
-    let ev = ctx.event(
+    let ev = ctx.event_at(
         &store,
         &change_id,
+        now,
         Payload::PatchsetAdded {
             patchset_id: patchset_id.clone(),
             base: base_rev,
@@ -1526,6 +1547,8 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
             author_email: Some(identity.author_email),
             committer_name: Some(identity.committer_name),
             committer_email: Some(identity.committer_email),
+            claim_id: snapshot_claim.map(|claim| claim.claim_id.clone()),
+            claim_actor: snapshot_claim.map(|claim| claim.owner.actor.clone()),
         },
     );
     store.append_event(&ev)?;
@@ -1808,7 +1831,7 @@ pub fn verify(
     command: Option<String>,
 ) -> Result<i32> {
     let store = ctx.store()?;
-    let (change_id, _transition, st) = locked_state(&store, reference)?;
+    let (change_id, st) = ctx.load_state(&store, reference)?;
     if st.is_closed() {
         bail!("change {change_id} is closed");
     }
@@ -1848,6 +1871,12 @@ pub fn verify(
         VerifyResult::Fail
     };
 
+    // Gates are arbitrary external commands and may legitimately invoke arc.
+    // Acquire the append lock only after they return, then re-check closure.
+    let (_, _transition, st) = locked_state(&store, &change_id)?;
+    if st.is_closed() {
+        bail!("change {change_id} closed while verification was running");
+    }
     let ev = ctx.event(
         &store,
         &change_id,
@@ -1862,7 +1891,6 @@ pub fn verify(
         },
     );
     store.append_event(&ev)?;
-    let _ = st;
     println!("verification: {result:?} at {revision}");
     println!("event: {}", ev.event_id);
     Ok(if out.success() { 0 } else { 1 })
@@ -1901,7 +1929,12 @@ pub fn integrate(
 ) -> Result<i32> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
-    let _transition = store.lock_transition(&change_id)?;
+    let initial = state::reduce(&store.load_events(&change_id)?)?;
+    let target = into.unwrap_or_else(|| initial.target_branch.clone());
+    // Cross-change order is always target, then change. This serializes the
+    // target worktree without allowing an integration/metadata lock cycle.
+    let target_lock = store.lock_target(&target)?;
+    let transition = store.lock_transition(&change_id)?;
     let st = state::reduce(&store.load_events(&change_id)?)?;
     let report = ctx.report(&store, &st)?;
     if let Some(claim) = &st.claim {
@@ -1927,7 +1960,6 @@ pub fn integrate(
         return Ok(status::check_exit_code(&report));
     }
 
-    let target = into.unwrap_or_else(|| st.target_branch.clone());
     // The approved head, merged by exact SHA so a branch moved after
     // approval can never smuggle unreviewed commits into the merge.
     let approved_head = st
@@ -1972,6 +2004,11 @@ pub fn integrate(
         },
     );
     store.append_event(&ev)?;
+    // The merge and closure event are the atomic integration transition.
+    // Retention and worktree cleanup are post-closure maintenance and may
+    // invoke Git hooks or other arc commands, so no state lock spans them.
+    drop(transition);
+    drop(target_lock);
     release_retention_refs(ctx, &change_id, Some(&merged))?;
 
     println!("integrated: {merged}");
@@ -2096,6 +2133,7 @@ mod tests {
             verdicts: Vec::new(),
             verifications: Vec::new(),
             claim: None,
+            retired_claim_ids: BTreeSet::new(),
             hold: None,
             closure: closure.map(|outcome| crate::state::ClosureState {
                 outcome,

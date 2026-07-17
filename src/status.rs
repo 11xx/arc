@@ -102,6 +102,7 @@ pub struct BlockerSummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ClaimStatus {
+    pub claim_id: String,
     pub owner: ClaimIdentity,
     pub active: bool,
     pub expired: bool,
@@ -395,10 +396,12 @@ pub fn build_at(
 pub fn claim_status_at(state: &ChangeState, now: DateTime<Utc>) -> Option<ClaimStatus> {
     let claim = state.claim.as_ref()?;
     let timing = state::claim_timing_at(claim, now);
-    let snapshot = state
-        .latest_patchset()
-        .filter(|_| timing.stage == "snapshotted");
+    let snapshot = state.latest_patchset().filter(|patchset| {
+        timing.stage == "snapshotted"
+            && patchset.claim_id.as_deref() == Some(claim.claim_id.as_str())
+    });
     Some(ClaimStatus {
+        claim_id: claim.claim_id.clone(),
         owner: claim.owner.clone(),
         active: timing.active,
         expired: timing.expired,

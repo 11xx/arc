@@ -3,10 +3,16 @@ use crate::ids;
 use crate::model::Event;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
+const LOCK_RETRY: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StoreConfig {
@@ -101,19 +107,56 @@ impl Store {
     /// Serialize state-derived transitions for one change across processes.
     pub fn lock_transition(&self, change_id: &str) -> Result<TransitionLock> {
         ids::validate_id_component(change_id)?;
+        self.lock_file(&format!("{change_id}.lock"), "change transition")
+    }
+
+    /// Serialize dependency graph reads and writes across every change.
+    pub fn lock_graph(&self) -> Result<TransitionLock> {
+        self.lock_file("graph.lock", "repository graph")
+    }
+
+    /// Serialize integrations that mutate the same target branch/worktree.
+    pub fn lock_target(&self, target: &str) -> Result<TransitionLock> {
+        if target.is_empty() {
+            bail!("target branch cannot be empty");
+        }
+        let digest = Sha256::digest(target.as_bytes());
+        self.lock_file(
+            &format!("target-{}.lock", hex::encode(digest)),
+            "integration target",
+        )
+    }
+
+    fn lock_file(&self, name: &str, description: &str) -> Result<TransitionLock> {
         let dir = self.root.join("locks");
         create_private_dir_all(&dir)?;
-        let path = dir.join(format!("{change_id}.lock"));
+        let path = dir.join(name);
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(&path)
-            .with_context(|| format!("cannot open transition lock {}", path.display()))?;
-        file.lock()
-            .with_context(|| format!("cannot lock transition {}", path.display()))?;
-        Ok(TransitionLock(file))
+            .with_context(|| format!("cannot open {description} lock {}", path.display()))?;
+        let deadline = Instant::now() + LOCK_TIMEOUT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(TransitionLock(file)),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        bail!(
+                            "{description} lock {} is busy; retry the command",
+                            path.display()
+                        );
+                    }
+                    thread::sleep(LOCK_RETRY);
+                }
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(error)
+                        .with_context(|| format!("cannot lock {description} {}", path.display()));
+                }
+            }
+        }
     }
 
     pub fn list_change_ids(&self) -> Result<Vec<String>> {

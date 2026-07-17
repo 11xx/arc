@@ -27,10 +27,10 @@ happened and what is allowed*.
   parallel when ready, while dependent members wait mechanically until their
   prerequisites integrate.
 - **Executor claims and typed stages** are advisory liveness signals. A claim
-  identifies its actor, harness, and session, carries a TTL and resolved stage
-  budgets, and is refreshed by stage activity. Stale and expired are distinct:
-  stale means a live executor exceeded its current stage budget; expired means
-  its lease activity exceeded the TTL.
+  has a stable generation ID plus actor, harness, and session, carries a TTL
+  and resolved stage budgets, and is refreshed by stage activity. Stale and
+  expired are distinct: stale means a live executor exceeded its current stage
+  budget; expired means its lease activity exceeded the TTL.
 - **Findings, verdicts, comments, replies, dispositions, claims, stages,
   verifications, holds, and closures** are append-only JSON events under
   `<git-common-dir>/arc/`, one file per event, created exclusively so
@@ -44,8 +44,9 @@ happened and what is allowed*.
   hostname — local evidence with provenance, the local analogue of
   required CI checks.
 - **Snapshots record Git author and committer identity.** When a claim is live,
-  the snapshot also records the claim actor and reports an author mismatch as
-  provenance evidence, never as an integration blocker.
+  the snapshot also records its generation and actor at snapshot time and
+  reports an author mismatch as provenance evidence, never as an integration
+  blocker.
 - **`arc integrate`** performs the merge only when, atomically checked:
   the head equals the approved patchset head, no blocking finding is
   open, every required gate is green at that exact head, and no hold is
@@ -137,9 +138,11 @@ stage is a heartbeat: it refreshes claim activity and age-in-stage. `blocked-on`
 requires a note and is distress rather than stale;
 claim TTL still applies. `snapshotted` comes only from a real `arc snapshot`
 event and cannot be supplied to `arc stage`. An identified caller may release
-any live claim so a lead can recover stale foreign work. Integration warns on
-an active foreign claim, including a stale one, but proceeds when the normal
-integration gates pass.
+any live claim so a lead can recover stale foreign work. Claim release, stage,
+and snapshot events carry the observed generation so imported stale events
+cannot clear, advance, or claim provenance for a replacement lease.
+Integration warns on an active foreign claim, including a stale one, but
+proceeds when the normal integration gates pass.
 
 Dependencies are live ledger relationships: a blocker is satisfied when it
 closes as integrated, or when a superseding successor eventually closes as
@@ -164,6 +167,13 @@ stores. Arc reports each member as blocked but does not mutate imported
 history automatically. Break the cycle explicitly by removing one edge with
 `arc metadata <change> --remove-blocked-by <blocker>`; exact blocker IDs also
 work when the blocker's own bundle is absent.
+
+State-derived writes use persistent OS-backed advisory locks with bounded
+acquisition. Dependency metadata takes a repository graph lock before its
+per-change lock; integration takes a target-branch lock before its per-change
+lock. This prevents concurrent cycles and target-worktree races without
+waiting forever on re-entry. Verification runs its external gate before taking
+the short state-append lock.
 
 Query and batch views avoid ad-hoc JSON filtering:
 

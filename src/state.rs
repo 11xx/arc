@@ -2,7 +2,7 @@ use crate::model::*;
 use anyhow::{bail, Result};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Patchset {
@@ -12,6 +12,7 @@ pub struct Patchset {
     pub merge_base: Option<String>,
     pub author: Option<GitIdentity>,
     pub committer: Option<GitIdentity>,
+    pub claim_id: Option<String>,
     pub claim_actor: Option<String>,
     pub provenance_mismatch: Option<bool>,
     pub created_at: DateTime<Utc>,
@@ -39,6 +40,7 @@ pub struct StageProgress {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ClaimState {
+    pub claim_id: String,
     pub owner: ClaimIdentity,
     pub ttl_seconds: u64,
     pub stage_budgets: BTreeMap<StageBudget, u64>,
@@ -231,6 +233,8 @@ pub struct ChangeState {
     pub verdicts: Vec<VerdictEntry>,
     pub verifications: Vec<VerificationEntry>,
     pub claim: Option<ClaimState>,
+    #[serde(skip)]
+    pub(crate) retired_claim_ids: BTreeSet<String>,
     pub hold: Option<String>,
     pub closure: Option<ClosureState>,
 }
@@ -318,6 +322,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     verdicts: Vec::new(),
                     verifications: Vec::new(),
                     claim: None,
+                    retired_claim_ids: BTreeSet::new(),
                     hold: None,
                     closure: None,
                 },
@@ -369,14 +374,17 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 author_email,
                 committer_name,
                 committer_email,
+                claim_id,
+                claim_actor,
             } => {
-                let claim_actor = state.claim.as_ref().and_then(|claim| {
-                    claim_timing_at(claim, ev.created_at)
-                        .active
-                        .then(|| claim.owner.actor.clone())
-                });
-                if claim_actor.is_some() {
-                    let claim = state.claim.as_mut().expect("claim was present");
+                if let Some(claim_id) = claim_id {
+                    crate::ids::validate_id_component(claim_id)?;
+                }
+                if let Some(claim) = state
+                    .claim
+                    .as_mut()
+                    .filter(|claim| claim_id.as_deref() == Some(claim.claim_id.as_str()))
+                {
                     claim.last_activity_at = ev.created_at;
                     claim.progress = Some(StageProgress {
                         stage: ClaimStage::Snapshotted,
@@ -397,12 +405,14 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     merge_base: merge_base.clone(),
                     author,
                     committer,
-                    claim_actor,
+                    claim_id: claim_id.clone(),
+                    claim_actor: claim_actor.clone(),
                     provenance_mismatch,
                     created_at: ev.created_at,
                 });
             }
             Payload::ClaimSet {
+                claim_id,
                 ttl_seconds,
                 stage_budgets,
             } => {
@@ -419,22 +429,52 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     harness,
                     session,
                 };
+                if let Some(claim_id) = claim_id {
+                    crate::ids::validate_id_component(claim_id)?;
+                }
+                let claim_id = match (claim_id, state.claim.as_ref()) {
+                    (Some(claim_id), _) => claim_id.clone(),
+                    (None, Some(claim))
+                        if claim.owner == owner && claim_timing_at(claim, ev.created_at).active =>
+                    {
+                        claim.claim_id.clone()
+                    }
+                    (None, _) => ev.event_id.clone(),
+                };
+                if state.retired_claim_ids.contains(&claim_id) {
+                    continue;
+                }
                 // Histories produced before transition locking (or merged by
                 // import) may contain two acquisitions that both observed no
                 // live owner. The first replayed owner wins until release or
                 // expiry; the stale contender remains observable in the raw
                 // ledger without taking over the typed view.
-                if state.claim.as_ref().is_some_and(|claim| {
-                    claim.owner != owner && claim_timing_at(claim, ev.created_at).active
-                }) {
-                    continue;
+                if let Some(current) = state.claim.as_ref() {
+                    let active = claim_timing_at(current, ev.created_at).active;
+                    if current.claim_id == claim_id {
+                        if current.owner != owner || !active {
+                            if !active {
+                                state.retired_claim_ids.insert(claim_id);
+                                state.claim = None;
+                            }
+                            continue;
+                        }
+                    } else if active {
+                        state.retired_claim_ids.insert(claim_id);
+                        continue;
+                    } else {
+                        state.retired_claim_ids.insert(current.claim_id.clone());
+                    }
                 }
                 let renewal = state.claim.as_ref().filter(|claim| {
-                    claim.owner == owner && claim_timing_at(claim, ev.created_at).active
+                    claim.claim_id == claim_id
+                        && claim.owner == owner
+                        && claim_timing_at(claim, ev.created_at).active
                 });
                 let claimed_at = renewal.map_or(ev.created_at, |claim| claim.claimed_at);
                 let progress = renewal.and_then(|claim| claim.progress.clone());
                 state.claim = Some(ClaimState {
+                    claim_id,
                     owner,
                     ttl_seconds: *ttl_seconds,
                     stage_budgets: stage_budgets.clone(),
@@ -443,14 +483,44 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     progress,
                 });
             }
-            Payload::ClaimReleased => state.claim = None,
-            Payload::StageSet { stage, note } => {
+            Payload::ClaimReleased { claim_id } => {
+                if let Some(claim_id) = claim_id {
+                    crate::ids::validate_id_component(claim_id)?;
+                    if state
+                        .claim
+                        .as_ref()
+                        .is_some_and(|claim| claim.claim_id == *claim_id)
+                    {
+                        state.claim = None;
+                    }
+                    state.retired_claim_ids.insert(claim_id.clone());
+                } else if let Some(claim) = state.claim.take() {
+                    state.retired_claim_ids.insert(claim.claim_id);
+                }
+            }
+            Payload::StageSet {
+                claim_id,
+                stage,
+                note,
+            } => {
+                if let Some(claim_id) = claim_id {
+                    crate::ids::validate_id_component(claim_id)?;
+                    if state.retired_claim_ids.contains(claim_id) {
+                        continue;
+                    }
+                }
                 let Some(claim) = state.claim.as_mut() else {
                     // A concurrently appended release can sort before an
                     // already-authorized stage event. Keep the raw transition,
                     // but do not let it make all subsequent typed replay fail.
                     continue;
                 };
+                if claim_id
+                    .as_ref()
+                    .is_some_and(|claim_id| claim_id != &claim.claim_id)
+                {
+                    continue;
+                }
                 if claim.owner.actor != ev.actor
                     || ev.harness.as_deref() != Some(claim.owner.harness.as_str())
                     || ev.session.as_deref() != Some(claim.owner.session.as_str())
@@ -761,6 +831,7 @@ mod tests {
         .into_iter()
         .collect();
         let mut claim = ClaimState {
+            claim_id: "claim-1".into(),
             owner: ClaimIdentity {
                 actor: "executor".into(),
                 harness: "codex".into(),
