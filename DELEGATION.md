@@ -27,6 +27,18 @@ changes.
 | Codex | Orchestrate sub-Codex work (rare and explicit) | Run `codex exec` with a self-contained plan and wait for its result | Do this only when the prompt explicitly assigns Codex the orchestrator role. Preserve Claude's review and merge boundary. |
 | `/arc` skill | Coordinate the workflow | Use the `arc` CLI ledger, worktrees, blockers, snapshots, gates, reviews, and integration checks | Assign one writer per branch/worktree. Give Codex local-only executor prompts. The lead owns dependency order and integration. |
 
+## Roles and boundaries
+
+| Role | CLI binding | Boundary |
+| --- | --- | --- |
+| Implementer | `ARC_ROLE=implementer` | May record progress, snapshots, verification, discussion, claims, stages, and metadata; may not review, resolve findings, set or release holds, close, or integrate. |
+| Reviewer | `ARC_ROLE=reviewer` | May review and resolve findings; may not close or integrate. |
+| Lead | `ARC_ROLE=lead` | Full access, including closure and integration. Unset or empty remains equivalent for backward compatibility. |
+
+Delegation prompts set `ARC_ROLE` explicitly: `implementer` for executor
+sessions and `reviewer` for review-only sessions. Do not rely on the unset
+backward-compatible behavior for delegated work.
+
 ## Golden rule
 
 Never tell an executor to delegate to itself.
@@ -65,12 +77,13 @@ A Codex executor prompt should use this shape:
 ```markdown
 You're in a Codex harness. This is LOCAL execution only.
 
-1. Import the arc bundle and read the thread spec.
-2. Claim the change and record typed progress stages in the assigned worktree.
-3. Implement in the assigned worktree.
-4. Run the specified build and test gates.
-5. Commit the scoped changes and run `arc snapshot <change>`.
-6. Signal: "Arc improvements ready for review."
+1. Set `ARC_ROLE=implementer`.
+2. Import the arc bundle and read the thread spec.
+3. Claim the change and record typed progress stages in the assigned worktree.
+4. Implement in the assigned worktree.
+5. Run the specified build and test gates.
+6. Commit the scoped changes and run `arc snapshot <change>`.
+7. Signal: "Arc improvements ready for review."
 
 DO NOT run `codex exec`, delegate to another harness, merge, or integrate.
 ```

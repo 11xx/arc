@@ -10,7 +10,7 @@ mod state;
 mod status;
 mod store;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use commands::{AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{DispositionStatus, Severity, Side, Verdict};
@@ -31,8 +31,39 @@ struct Cli {
     /// Native session ID of the acting harness thread
     #[arg(long, global = true, env = "ARC_SESSION")]
     session: Option<String>,
+    /// Execution boundary: implementer | reviewer | lead
+    #[arg(long, global = true, env = "ARC_ROLE")]
+    role: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecutionRole {
+    Implementer,
+    Reviewer,
+    Lead,
+}
+
+impl ExecutionRole {
+    fn parse(value: Option<&str>) -> Result<Self> {
+        match value.map(str::trim) {
+            None | Some("") | Some("lead") => Ok(Self::Lead),
+            Some("implementer") => Ok(Self::Implementer),
+            Some("reviewer") => Ok(Self::Reviewer),
+            Some(value) => {
+                bail!("invalid execution role {value:?}; expected implementer, reviewer, or lead")
+            }
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Implementer => "implementer",
+            Self::Reviewer => "reviewer",
+            Self::Lead => "lead",
+        }
+    }
 }
 
 #[derive(clap::Args)]
@@ -350,6 +381,26 @@ enum Cmd {
     Config,
 }
 
+fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<&'static str> {
+    match role {
+        ExecutionRole::Lead => None,
+        ExecutionRole::Reviewer => match command {
+            Cmd::Integrate { .. } => Some("integrate"),
+            Cmd::Close { .. } => Some("close"),
+            _ => None,
+        },
+        ExecutionRole::Implementer => match command {
+            Cmd::Review { .. } => Some("review"),
+            Cmd::Resolve { .. } => Some("resolve"),
+            Cmd::Hold { .. } => Some("hold"),
+            Cmd::ReleaseHold { .. } => Some("release-hold"),
+            Cmd::Close { .. } => Some("close"),
+            Cmd::Integrate { .. } => Some("integrate"),
+            _ => None,
+        },
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     match run(cli) {
@@ -362,6 +413,12 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<i32> {
+    let role = ExecutionRole::parse(cli.role.as_deref())?;
+    if let Some(command) = role_refusal(role, &cli.cmd) {
+        eprintln!("role refusal: {} may not {command}", role.as_str());
+        return Ok(9);
+    }
+
     let cwd = std::env::current_dir()?;
     let actor = match cli.actor {
         Some(a) => a,
