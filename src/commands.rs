@@ -116,36 +116,98 @@ fn dependency_status(
     let blockers_ready = state
         .blocked_by
         .iter()
-        .map(|change_id| match states.get(change_id) {
-            Some(blocker) => {
-                let integrated = blocker
-                    .closure
-                    .as_ref()
-                    .is_some_and(|closure| closure.outcome == Closure::Integrated);
-                let status = match blocker.closure.as_ref().map(|closure| closure.outcome) {
-                    Some(Closure::Integrated) => "integrated",
-                    Some(Closure::Abandoned) => "abandoned",
-                    Some(Closure::Superseded) => "superseded",
-                    None => "open",
-                };
-                status::DependencyChangeStatus {
-                    change_id: change_id.clone(),
-                    slug: blocker.slug.clone(),
-                    status: status.into(),
-                    integrated,
-                }
-            }
-            None => status::DependencyChangeStatus {
-                change_id: change_id.clone(),
-                slug: change_id.clone(),
-                status: "missing".into(),
-                integrated: false,
-            },
-        })
+        .map(|change_id| dependency_change_status(change_id, states))
         .collect::<Vec<_>>();
     status::BlockerStatus {
         blocked: blockers_ready.iter().any(|blocker| !blocker.integrated),
         blockers_ready,
+    }
+}
+
+const WEDGED_DEPENDENCY_RECOVERY: &str =
+    "prerequisite closed without integration: clear or retarget with arc metadata";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupersessionResolution {
+    Integrated,
+    Wedged,
+}
+
+fn dependency_change_status(
+    change_id: &str,
+    states: &BTreeMap<String, ChangeState>,
+) -> status::DependencyChangeStatus {
+    let Some(blocker) = states.get(change_id) else {
+        return status::DependencyChangeStatus {
+            change_id: change_id.into(),
+            slug: change_id.into(),
+            status: "missing".into(),
+            integrated: false,
+            recovery: None,
+        };
+    };
+
+    match blocker.closure.as_ref().map(|closure| closure.outcome) {
+        Some(Closure::Integrated) => status::DependencyChangeStatus {
+            change_id: change_id.into(),
+            slug: blocker.slug.clone(),
+            status: "integrated".into(),
+            integrated: true,
+            recovery: None,
+        },
+        Some(Closure::Superseded)
+            if resolve_supersession(change_id, states) == SupersessionResolution::Integrated =>
+        {
+            status::DependencyChangeStatus {
+                change_id: change_id.into(),
+                slug: blocker.slug.clone(),
+                status: "superseded-integrated".into(),
+                integrated: true,
+                recovery: None,
+            }
+        }
+        Some(Closure::Abandoned) | Some(Closure::Superseded) => status::DependencyChangeStatus {
+            change_id: change_id.into(),
+            slug: blocker.slug.clone(),
+            status: "wedged".into(),
+            integrated: false,
+            recovery: Some(WEDGED_DEPENDENCY_RECOVERY.into()),
+        },
+        None => status::DependencyChangeStatus {
+            change_id: change_id.into(),
+            slug: blocker.slug.clone(),
+            status: "open".into(),
+            integrated: false,
+            recovery: None,
+        },
+    }
+}
+
+fn resolve_supersession(
+    change_id: &str,
+    states: &BTreeMap<String, ChangeState>,
+) -> SupersessionResolution {
+    let mut current = change_id;
+    let mut visited = BTreeSet::new();
+
+    loop {
+        if !visited.insert(current) {
+            return SupersessionResolution::Wedged;
+        }
+        let Some(state) = states.get(current) else {
+            return SupersessionResolution::Wedged;
+        };
+        let Some(closure) = &state.closure else {
+            return SupersessionResolution::Wedged;
+        };
+        match closure.outcome {
+            Closure::Integrated => return SupersessionResolution::Integrated,
+            Closure::Abandoned => return SupersessionResolution::Wedged,
+            Closure::Superseded => match closure.superseded_by.as_deref() {
+                Some(successor) => current = successor,
+                None => return SupersessionResolution::Wedged,
+            },
+        }
     }
 }
 

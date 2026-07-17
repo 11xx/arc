@@ -102,9 +102,13 @@ is blocked. Changes under an explicit hold are never suggested as alternative
 work. `--json` is accepted for compatibility although status is always JSON.
 `arc show <change>` renders the same actionable state as Markdown.
 
-Dependencies are live ledger relationships: a blocker is satisfied only when
-it closes as integrated. Abandoned, superseded, missing, or still-open changes
-continue to block. `arc check` and `arc integrate` enforce this boundary.
+Dependencies are live ledger relationships: a blocker is satisfied when it
+closes as integrated, or when a superseding successor eventually closes as
+integrated (including through a transitive supersession chain). Abandoned
+prerequisites and superseded chains that cannot resolve to an integrated change
+are reported as `wedged`; clear or retarget them with `arc metadata`.
+Missing or still-open changes continue to block. `arc check` and `arc
+integrate` enforce this boundary.
 `arc is-blocked` has its own polling contract: exit 0 means ready, 1 means
 blocked, and 2 means the lookup or ledger read failed, so automation must stop
 rather than keep waiting. Add or remove dependencies and tags append-only after

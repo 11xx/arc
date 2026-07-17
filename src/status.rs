@@ -53,6 +53,8 @@ pub struct DependencyChangeStatus {
     pub slug: String,
     pub status: String,
     pub integrated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

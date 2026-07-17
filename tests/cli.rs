@@ -414,6 +414,40 @@ fn watch_closed_accepts_abandoned_and_superseded_but_integrated_does_not() {
         .stdout("timeout: integrated\n");
 }
 
+fn begin_change(repo: &Repo, slug: &str, blocked_by: Option<&str>) -> String {
+    let mut command = repo.arc(&repo.root);
+    command.args(["begin", slug, "--no-worktree"]);
+    if let Some(blocker) = blocked_by {
+        command.args(["--blocked-by", blocker]);
+    }
+    let out = stdout(&mut command);
+    out.lines()
+        .find_map(|line| line.strip_prefix("change: "))
+        .unwrap()
+        .to_string()
+}
+
+fn replace_closure_successor(repo: &Repo, change_id: &str, successor: &str) {
+    let events = repo
+        .root
+        .join(".git/arc/changes")
+        .join(change_id)
+        .join("events");
+    for entry in fs::read_dir(events).unwrap() {
+        let path = entry.unwrap().path();
+        let mut event: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        if event["event_type"] == "change-closed" {
+            event["outcome"] = serde_json::json!("superseded");
+            event["superseded_by"] = serde_json::json!(successor);
+            event.as_object_mut().unwrap().remove("integrated_commit");
+            fs::write(path, json_file_bytes(&event)).unwrap();
+            return;
+        }
+    }
+    panic!("expected a change-closed event for {change_id}");
+}
+
 /// begin → worktree + branch + ledger; list/status see the change.
 #[test]
 fn begin_creates_change_branch_and_worktree() {
@@ -519,6 +553,142 @@ fn blocker_chain_transitions_and_suggests_ready_alternatives() {
     let c_status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "chain-c"]))).unwrap();
     assert_eq!(c_status["blocker_status"]["blocked"], false);
+}
+
+#[test]
+fn superseded_prerequisites_resolve_after_successor_integration() {
+    let repo = Repo::new();
+    let prerequisite = begin_change(&repo, "superseded-a", None);
+    let successor = begin_change(&repo, "superseded-a2", None);
+    let dependent = begin_change(&repo, "superseded-dependent", Some(&prerequisite));
+
+    repo.arc(&repo.root)
+        .args(["close", &prerequisite, "--superseded", &successor])
+        .assert()
+        .success();
+    let wedged: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["blocker-status", &dependent]),
+    ))
+    .unwrap();
+    assert_eq!(wedged["blocked"], true);
+    assert_eq!(wedged["blockers_ready"][0]["status"], "wedged");
+
+    repo.arc(&repo.root)
+        .args(["close", &successor, "--integrated", "HEAD"])
+        .assert()
+        .success();
+    let ready: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", &dependent]))).unwrap();
+    assert_eq!(ready["blocker_status"]["blocked"], false);
+    assert_eq!(
+        ready["blocker_status"]["blockers_ready"][0]["status"],
+        "superseded-integrated"
+    );
+    assert_eq!(
+        ready["blocker_status"]["blockers_ready"][0]["integrated"],
+        true
+    );
+    repo.arc(&repo.root)
+        .args(["is-blocked", &dependent])
+        .assert()
+        .success();
+
+    let first = begin_change(&repo, "transitive-a", None);
+    let second = begin_change(&repo, "transitive-a2", None);
+    let third = begin_change(&repo, "transitive-a3", None);
+    let transitive_dependent = begin_change(&repo, "transitive-dependent", Some(&first));
+    repo.arc(&repo.root)
+        .args(["close", &first, "--superseded", &second])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["close", &second, "--superseded", &third])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["close", &third, "--integrated", "HEAD"])
+        .assert()
+        .success();
+    let transitive: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["blocker-status", &transitive_dependent]),
+    ))
+    .unwrap();
+    assert_eq!(transitive["blocked"], false);
+    assert_eq!(
+        transitive["blockers_ready"][0]["status"],
+        "superseded-integrated"
+    );
+    assert_eq!(transitive["blockers_ready"][0]["integrated"], true);
+}
+
+#[test]
+fn wedged_prerequisites_report_recovery_and_stay_blocked() {
+    let repo = Repo::new();
+    let abandoned = begin_change(&repo, "abandoned-a", None);
+    let dependent = begin_change(&repo, "abandoned-dependent", Some(&abandoned));
+    repo.arc(&repo.root)
+        .args(["close", &abandoned, "--abandoned"])
+        .assert()
+        .success();
+
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", &dependent]))).unwrap();
+    let dependency = &status["blocker_status"]["blockers_ready"][0];
+    assert_eq!(status["blocker_status"]["blocked"], true);
+    assert_eq!(dependency["status"], "wedged");
+    assert_eq!(
+        dependency["recovery"],
+        "prerequisite closed without integration: clear or retarget with arc metadata"
+    );
+    repo.arc(&repo.root)
+        .args(["is-blocked", &dependent])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains(format!(
+            "blocked by {abandoned} (wedged)"
+        )));
+    repo.arc(&repo.root)
+        .args(["check", &dependent])
+        .assert()
+        .code(7)
+        .stdout(predicates::str::contains(
+            "prerequisite closed without integration: clear or retarget with arc metadata",
+        ));
+
+    let raw_missing = begin_change(&repo, "raw-missing-a", None);
+    let raw_dependent = begin_change(&repo, "raw-missing-dependent", Some(&raw_missing));
+    repo.arc(&repo.root)
+        .args(["close", &raw_missing, "--abandoned"])
+        .assert()
+        .success();
+    replace_closure_successor(&repo, &raw_missing, "missing-successor");
+    let missing: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["blocker-status", &raw_dependent]),
+    ))
+    .unwrap();
+    assert_eq!(missing["blocked"], true);
+    assert_eq!(missing["blockers_ready"][0]["status"], "wedged");
+
+    let first = begin_change(&repo, "cycle-a", None);
+    let second = begin_change(&repo, "cycle-a2", None);
+    let cycle_dependent = begin_change(&repo, "cycle-dependent", Some(&first));
+    repo.arc(&repo.root)
+        .args(["close", &first, "--superseded", &second])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["close", &second, "--superseded", &first])
+        .assert()
+        .success();
+    let cycle: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["blocker-status", &cycle_dependent]),
+    ))
+    .unwrap();
+    assert_eq!(cycle["blocked"], true);
+    assert_eq!(cycle["blockers_ready"][0]["status"], "wedged");
 }
 
 #[test]
