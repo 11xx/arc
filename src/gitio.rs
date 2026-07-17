@@ -1,13 +1,30 @@
 use anyhow::{bail, Context, Result};
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+thread_local! {
+    static COMMAND_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Scope Git subprocesses on this thread to one absolute deadline. Watch uses
+/// this so its typed timeout can kill and reap a probe instead of orphaning it.
+pub fn with_deadline<T>(deadline: Option<Instant>, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    COMMAND_DEADLINE.with(|slot| {
+        let previous = slot.replace(deadline);
+        let result = f();
+        slot.set(previous);
+        result
+    })
+}
 
 pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("failed to spawn git in {}", cwd.display()))?;
+    let mut command = Command::new("git");
+    command.args(args).current_dir(cwd);
+    let out = command_output(&mut command)
+        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
     if !out.status.success() {
         bail!(
             "git {} failed: {}",
@@ -16,6 +33,28 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+fn command_output(command: &mut Command) -> Result<Output> {
+    let deadline = COMMAND_DEADLINE.get();
+    let Some(deadline) = deadline else {
+        return Ok(command.output()?);
+    };
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(child.wait_with_output()?);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("git probe timed out");
+        }
+        thread::sleep((deadline - now).min(Duration::from_millis(10)));
+    }
 }
 
 /// The common Git directory shared by every worktree of one repository.
@@ -196,4 +235,23 @@ pub fn commit_exists(cwd: &Path, oid: &str) -> Result<bool> {
         .output()
         .context("failed to spawn git cat-file")?;
     Ok(out.status.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deadline_kills_and_reaps_a_slow_probe() {
+        let started = Instant::now();
+        with_deadline(Some(started + Duration::from_millis(50)), || {
+            let mut command = Command::new("sleep");
+            command.arg("5");
+            let error = command_output(&mut command).unwrap_err();
+            assert!(error.to_string().contains("timed out"));
+            Ok(())
+        })
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }

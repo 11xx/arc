@@ -3,6 +3,7 @@ use crate::ids;
 use crate::model::Event;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -172,6 +173,17 @@ impl Store {
     /// Raw JSON events of one change. Export deliberately bypasses the
     /// typed Event enum so future event types and fields survive intact.
     pub fn raw_events(&self, change_id: &str) -> Result<Vec<(String, serde_json::Value)>> {
+        self.raw_events_unseen(change_id, &BTreeSet::new())
+    }
+
+    /// Read only raw events whose IDs the caller has not already observed.
+    /// Follow mode uses this to rescan directory entries without reparsing the
+    /// complete ledger on every poll.
+    pub fn raw_events_unseen(
+        &self,
+        change_id: &str,
+        seen: &BTreeSet<String>,
+    ) -> Result<Vec<(String, serde_json::Value)>> {
         ids::validate_id_component(change_id)?;
         let dir = self.events_dir(change_id);
         let entries =
@@ -187,10 +199,28 @@ impl Store {
                 continue;
             };
             ids::validate_id_component(event_id)?;
+            if seen.contains(event_id) {
+                continue;
+            }
             let path = entry.path();
             let value = serde_json::from_slice(&fs::read(&path)?)
                 .with_context(|| format!("malformed event file {}", path.display()))?;
             events.push((event_id.to_string(), value));
+        }
+        events.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(events)
+    }
+
+    /// Unseen raw JSON events from every change, globally ordered by event ID.
+    /// This avoids decoding the typed Event enum so readers can forward unknown
+    /// imported fields and event types.
+    pub fn raw_events_all_unseen(
+        &self,
+        seen: &BTreeSet<String>,
+    ) -> Result<Vec<(String, serde_json::Value)>> {
+        let mut events = Vec::new();
+        for change_id in self.list_change_ids()? {
+            events.extend(self.raw_events_unseen(&change_id, seen)?);
         }
         events.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(events)
@@ -256,12 +286,29 @@ fn create_private_dir_all(path: &Path) -> Result<()> {
 }
 
 fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .with_context(|| format!("cannot create {}", path.display()))?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    Ok(())
+    let file_name = path
+        .file_name()
+        .context("exclusive-write path has no file name")?
+        .to_string_lossy();
+    let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", crate::ids::new_event_id()));
+
+    let publish = (|| -> Result<()> {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("cannot create {}", temporary.display()))?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+
+        // A same-directory hard link atomically publishes the fully written
+        // inode while preserving create-new collision behavior. Temporary
+        // names do not end in .json, so readers ignore a file left by a crash.
+        fs::hard_link(&temporary, path)
+            .with_context(|| format!("cannot create {}", path.display()))?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&temporary);
+    publish
 }
