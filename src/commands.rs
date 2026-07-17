@@ -119,6 +119,7 @@ fn dependency_status(
         .map(|change_id| dependency_change_status(change_id, states))
         .collect::<Vec<_>>();
     status::BlockerStatus {
+        schema: status::BLOCKER_STATUS_SCHEMA,
         blocked: blockers_ready.iter().any(|blocker| !blocker.integrated),
         blockers_ready,
     }

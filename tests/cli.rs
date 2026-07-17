@@ -513,6 +513,7 @@ fn blocker_chain_transitions_and_suggests_ready_alternatives() {
         repo.arc(&repo.root).args(["blocker-status", "chain-b"]),
     ))
     .unwrap();
+    assert_eq!(blocker_status["schema"], "arc-blocker-status/1");
     assert_eq!(blocker_status["blocked"], true);
     assert_eq!(blocker_status["blockers_ready"][0]["slug"], "chain-a");
     repo.arc(&repo.root)

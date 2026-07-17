@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 pub const STATUS_SCHEMA: &str = "arc-status/2";
+pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 
 /// Typed integration blockers, ordered by exit-code precedence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -57,8 +58,9 @@ pub struct DependencyChangeStatus {
     pub recovery: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BlockerStatus {
+    pub schema: &'static str,
     pub blocked: bool,
     /// Status of every declared prerequisite. The historical field name is
     /// retained because orchestrators already consume it from the design spec.

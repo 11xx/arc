@@ -107,12 +107,13 @@ closes as integrated, or when a superseding successor eventually closes as
 integrated (including through a transitive supersession chain). Abandoned
 prerequisites and superseded chains that cannot resolve to an integrated change
 are reported as `wedged`; clear or retarget them with `arc metadata`.
-Missing or still-open changes continue to block. `arc check` and `arc
-integrate` enforce this boundary.
-`arc is-blocked` has its own polling contract: exit 0 means ready, 1 means
-blocked, and 2 means the lookup or ledger read failed, so automation must stop
-rather than keep waiting. Add or remove dependencies and tags append-only after
-creation:
+Missing or still-open changes remain blocked; `arc check` and `arc integrate`
+enforce this boundary.
+`arc blocker-status` exposes the versioned `arc-blocker-status/1` dependency
+payload. `arc is-blocked` has its own polling contract: exit 0 means ready, 1
+means blocked, and 2 means the lookup or ledger read failed, so automation must
+stop rather than keep waiting. Add or remove dependencies and tags append-only
+after creation:
 
 ```sh
 arc metadata radio-refill-fix --blocked-by radio-storage --tag '#radio'
