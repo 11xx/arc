@@ -6,7 +6,7 @@ use crate::model::*;
 use crate::render;
 use crate::state::{self, ChangeState};
 use crate::status::{self, StatusReport};
-use crate::store::Store;
+use crate::store::{Store, TransitionLock};
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use serde::Serialize;
@@ -66,6 +66,13 @@ impl From<StageArg> for ClaimStage {
             StageArg::BlockedOn => ClaimStage::BlockedOn,
         }
     }
+}
+
+fn locked_state(store: &Store, reference: &str) -> Result<(String, TransitionLock, ChangeState)> {
+    let change_id = store.resolve_change(reference)?;
+    let transition = store.lock_transition(&change_id)?;
+    let state = state::reduce(&store.load_events(&change_id)?)?;
+    Ok((change_id, transition, state))
 }
 
 impl Ctx {
@@ -1063,7 +1070,7 @@ pub fn metadata(
     remove_tags: Vec<String>,
 ) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, state) = ctx.load_state(&store, reference)?;
+    let (change_id, _transition, state) = locked_state(&store, reference)?;
     if state.is_closed() {
         bail!("change {change_id} is closed");
     }
@@ -1625,7 +1632,10 @@ pub fn finding(
     anchor_args: &AnchorArgs,
 ) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let (change_id, _transition, st) = locked_state(&store, reference)?;
+    if st.is_closed() {
+        bail!("change {change_id} is closed");
+    }
     let patchset_id = resolve_patchset_id(&st, patchset)?;
     let anchor = build_anchor(ctx, &st, patchset_id.as_deref(), anchor_args)?;
     let finding_id = ids::new_finding_id();
@@ -1681,7 +1691,10 @@ pub fn resolve(
     evidence: Option<String>,
 ) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let (change_id, _transition, st) = locked_state(&store, reference)?;
+    if st.is_closed() {
+        bail!("change {change_id} is closed");
+    }
     let finding_id = st.resolve_finding_id(&finding)?;
     let commit = match commit {
         Some(c) => Some(gitio::rev_parse(&ctx.cwd, &c)?),
@@ -1717,7 +1730,7 @@ pub fn review(
     findings_json: Option<String>,
 ) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let (change_id, _transition, st) = locked_state(&store, reference)?;
     if st.is_closed() {
         bail!("change {change_id} is closed");
     }
@@ -1795,7 +1808,10 @@ pub fn verify(
     command: Option<String>,
 ) -> Result<i32> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let (change_id, _transition, st) = locked_state(&store, reference)?;
+    if st.is_closed() {
+        bail!("change {change_id} is closed");
+    }
     let toplevel = gitio::toplevel(&ctx.cwd)?;
     let cmd = match (&gate, command) {
         (Some(name), None) => {
@@ -1854,7 +1870,7 @@ pub fn verify(
 
 pub fn hold(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let (change_id, _transition, st) = locked_state(&store, reference)?;
     if st.is_closed() {
         bail!("change {change_id} is closed");
     }
@@ -1866,7 +1882,7 @@ pub fn hold(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {
 
 pub fn release_hold(ctx: &Ctx, reference: &str, reason: Option<String>) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let (change_id, _transition, st) = locked_state(&store, reference)?;
     if st.hold.is_none() {
         bail!("no active hold on {change_id}");
     }

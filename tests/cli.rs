@@ -208,6 +208,30 @@ fn age_event(repo: &Repo, change_id: &str, event_type: &str, seconds: i64) {
     });
 }
 
+fn hold_transition_lock(repo: &Repo, change_id: &str) -> fs::File {
+    let dir = repo.root.join(".git/arc/locks");
+    fs::create_dir_all(&dir).unwrap();
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(format!("{change_id}.lock")))
+        .unwrap();
+    file.lock().unwrap();
+    file
+}
+
+fn assert_waiting_on_transition_lock(children: &mut [&mut Child]) {
+    thread::sleep(Duration::from_millis(250));
+    for child in children {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "transition command bypassed the externally held product lock"
+        );
+    }
+}
+
 fn wait_for_exit(child: &mut Child) -> ExitStatus {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -372,6 +396,7 @@ fn concurrent_claims_have_one_winner_and_stage_release_replay_stays_readable() {
     let opened = stdout(repo.arc(&repo.root).args(["begin", "claim-race"]));
     let change_id = opened_change_id(&opened);
 
+    let transition_lock = hold_transition_lock(&repo, &change_id);
     let mut contenders = (0..16)
         .map(|index| {
             spawn_arc_with_session(
@@ -382,6 +407,9 @@ fn concurrent_claims_have_one_winner_and_stage_release_replay_stays_readable() {
             )
         })
         .collect::<Vec<_>>();
+    let mut contender_refs = contenders.iter_mut().collect::<Vec<_>>();
+    assert_waiting_on_transition_lock(&mut contender_refs);
+    transition_lock.unlock().unwrap();
     let statuses = contenders.iter_mut().map(wait_for_exit).collect::<Vec<_>>();
     assert_eq!(
         statuses.iter().filter(|status| status.success()).count(),
@@ -747,6 +775,55 @@ fn integration_warns_for_foreign_claim_but_still_succeeds_when_green() {
         .stderr(predicates::str::contains(
             "warning: active foreign claim by executor",
         ));
+}
+
+#[test]
+fn transition_lock_serializes_hold_against_integrate() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "hold-integrate-race");
+    repo.arc(&worktree)
+        .args(["review", "hold-integrate-race", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let transition_lock = hold_transition_lock(&repo, &change_id);
+    let mut integrate = spawn_arc_with_session(
+        &repo,
+        &repo.root,
+        &["integrate", "hold-integrate-race"],
+        "lead-integrate",
+    );
+    let mut hold = spawn_arc_with_session(
+        &repo,
+        &repo.root,
+        &[
+            "hold",
+            "hold-integrate-race",
+            "--reason",
+            "concurrent user hold",
+        ],
+        "lead-hold",
+    );
+    assert_waiting_on_transition_lock(&mut [&mut integrate, &mut hold]);
+    transition_lock.unlock().unwrap();
+
+    let integrate_status = wait_for_exit(&mut integrate);
+    let hold_status = wait_for_exit(&mut hold);
+    assert_ne!(
+        integrate_status.success(),
+        hold_status.success(),
+        "serialized hold/integrate permits exactly one transition"
+    );
+    if integrate_status.success() {
+        assert_eq!(hold_status.code(), Some(1));
+    } else {
+        assert_eq!(integrate_status.code(), Some(4));
+        assert!(hold_status.success());
+    }
+    repo.arc(&repo.root)
+        .args(["status", "hold-integrate-race"])
+        .assert()
+        .success();
 }
 
 #[test]
