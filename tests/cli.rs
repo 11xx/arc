@@ -279,6 +279,36 @@ fn imported_change_can_remove_missing_blocker() {
 }
 
 #[test]
+fn batch_check_treats_all_closed_outcomes_as_terminal() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "batch-live", "--tag", "#terminal-suite"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "batch-abandoned", "--tag", "#terminal-suite"]),
+    );
+    repo.arc(&repo.root)
+        .args(["close", "batch-abandoned", "--abandoned"])
+        .assert()
+        .success();
+    complete_change(&repo, "batch-live");
+
+    repo.arc(&repo.root)
+        .args(["check", "--tag", "#terminal-suite"])
+        .assert()
+        .success()
+        .stdout(
+            predicates::str::contains("batch-live-").and(predicates::str::contains(": integrated")),
+        )
+        .stdout(
+            predicates::str::contains("batch-abandoned-")
+                .and(predicates::str::contains(": abandoned")),
+        );
+}
+
+#[test]
 fn query_tags_batch_views_and_actionable_errors() {
     let repo = Repo::new();
     stdout(

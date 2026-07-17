@@ -903,12 +903,8 @@ fn check_tagged(ctx: &Ctx, tags: Vec<String>) -> Result<i32> {
     }
     let mut aggregate = 0;
     for state in selected {
-        if state
-            .closure
-            .as_ref()
-            .is_some_and(|closure| closure.outcome == Closure::Integrated)
-        {
-            println!("{}: integrated", state.change_id);
+        if state.is_closed() {
+            println!("{}: {}", state.change_id, change_status(state));
             continue;
         }
         let report = ctx.report(&store, state)?;
