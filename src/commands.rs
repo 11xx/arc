@@ -1516,6 +1516,7 @@ mod tests {
             ("c-id".into(), change("c-id", &["b-id"], None)),
             ("d-id".into(), held),
             ("e-id".into(), change("e-id", &[], Some(Closure::Abandoned))),
+            ("f-id".into(), change("f-id", &[], None)),
         ]);
 
         let alternatives = find_unblocked_changes("c-id", &states);
@@ -1524,11 +1525,12 @@ mod tests {
                 .iter()
                 .map(|alternative| alternative.change_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["b-id"]
+            vec!["b-id", "f-id"]
         );
         assert_eq!(
             alternatives[0].reason,
             "all blockers integrated, ready to work"
         );
+        assert_eq!(alternatives[1].reason, "no blockers, independent work");
     }
 }

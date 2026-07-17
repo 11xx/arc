@@ -169,10 +169,6 @@ impl ChangeState {
             .map(|v| v.result)
     }
 
-    pub fn gate_passed_at(&self, gate: &str, revision: &str) -> bool {
-        self.gate_result_at(gate, revision) == Some(VerifyResult::Pass)
-    }
-
     pub fn resolve_finding_id(&self, needle: &str) -> Result<String> {
         if self.findings.contains_key(needle) {
             return Ok(needle.to_string());

@@ -675,6 +675,7 @@ fn gates_must_be_green_at_head() {
         pending["blocker_summary"]["gate_status"]["fails"],
         "pending"
     );
+    assert_eq!(pending["gates"][0]["result"], "pending");
 
     // Gate ran and failed: still blocked, verify itself exits 1.
     repo.arc(&wt)
@@ -685,6 +686,7 @@ fn gates_must_be_green_at_head() {
     let failed: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "fix-g"]))).unwrap();
     assert_eq!(failed["blocker_summary"]["gate_status"]["fails"], "fail");
+    assert_eq!(failed["gates"][0]["result"], "fail");
 
     // Fix the gate in the worktree's .arc? Gate command comes from the
     // toplevel of the invoking worktree, so run a passing command via a
@@ -709,6 +711,7 @@ fn gates_must_be_green_at_head() {
     let passed: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "fix-g"]))).unwrap();
     assert_eq!(passed["blocker_summary"]["gate_status"]["fails"], "pass");
+    assert_eq!(passed["gates"][0]["result"], "pass");
 }
 
 /// Comments, replies, and prefix resolution round-trip through the ledger.
