@@ -125,6 +125,10 @@ pub struct ChangeState {
     pub branch: String,
     pub base: String,
     pub worktree: Option<String>,
+    pub opened_by: String,
+    pub opened_harness: Option<String>,
+    pub blocked_by: Vec<String>,
+    pub tags: Vec<String>,
     pub opened_at: chrono::DateTime<chrono::Utc>,
     pub patchsets: Vec<Patchset>,
     pub comments: Vec<CommentEntry>,
@@ -196,6 +200,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 branch,
                 base,
                 worktree,
+                blocked_by,
+                tags,
             } => (
                 ChangeState {
                     change_id: ev.change_id.clone(),
@@ -206,6 +212,10 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     branch: branch.clone(),
                     base: base.clone(),
                     worktree: worktree.clone(),
+                    opened_by: ev.actor.clone(),
+                    opened_harness: ev.harness.clone(),
+                    blocked_by: blocked_by.clone(),
+                    tags: tags.clone(),
                     opened_at: ev.created_at,
                     patchsets: Vec::new(),
                     comments: Vec::new(),
@@ -230,6 +240,29 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
         match &ev.payload {
             Payload::ChangeOpened { .. } => {
                 bail!("duplicate change-opened event {}", ev.event_id)
+            }
+            Payload::MetadataUpdated {
+                add_blocked_by,
+                remove_blocked_by,
+                add_tags,
+                remove_tags,
+            } => {
+                state
+                    .blocked_by
+                    .retain(|id| !remove_blocked_by.contains(id));
+                for id in add_blocked_by {
+                    if !state.blocked_by.contains(id) {
+                        state.blocked_by.push(id.clone());
+                    }
+                }
+                state.tags.retain(|tag| !remove_tags.contains(tag));
+                for tag in add_tags {
+                    if !state.tags.contains(tag) {
+                        state.tags.push(tag.clone());
+                    }
+                }
+                state.blocked_by.sort();
+                state.tags.sort();
             }
             Payload::PatchsetAdded {
                 patchset_id,
@@ -412,8 +445,33 @@ mod tests {
                 branch: "arc/fix".into(),
                 base: "b0".into(),
                 worktree: None,
+                blocked_by: Vec::new(),
+                tags: Vec::new(),
             },
         )
+    }
+
+    #[test]
+    fn old_opening_events_default_new_metadata() {
+        let event: Event = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "event_id": "event-old",
+            "repository_id": "repo",
+            "change_id": "fix-old",
+            "actor": "tester",
+            "created_at": "2026-07-16T00:00:00Z",
+            "event_type": "change-opened",
+            "slug": "fix",
+            "title": "Fix",
+            "profile": "local",
+            "target_branch": "master",
+            "branch": "arc/fix",
+            "base": "base"
+        }))
+        .unwrap();
+        let state = reduce(&[event]).unwrap();
+        assert!(state.blocked_by.is_empty());
+        assert!(state.tags.is_empty());
     }
 
     #[test]

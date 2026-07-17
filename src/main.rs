@@ -12,7 +12,7 @@ mod store;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use commands::{AnchorArgs, Ctx};
+use commands::{AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{DispositionStatus, Severity, Side, Verdict};
 
 /// Change, review, and integration state over plain Git for agentic
@@ -106,6 +106,12 @@ enum Cmd {
         /// Track an existing branch instead of creating one
         #[arg(long)]
         adopt: Option<String>,
+        /// Change that must integrate before this one is ready (repeatable)
+        #[arg(long = "blocked-by")]
+        blocked_by: Vec<String>,
+        /// Batch/query tag (repeatable)
+        #[arg(long)]
+        tag: Vec<String>,
     },
     /// List changes
     List {
@@ -113,15 +119,58 @@ enum Cmd {
         open: bool,
         #[arg(long)]
         json: bool,
+        #[arg(long, value_enum, default_value = "default")]
+        format: ListFormat,
     },
-    /// Render one change (Markdown, or full state with --json)
-    Show {
-        change: String,
+    /// Filter changes and print matching IDs (or JSON)
+    Query {
+        /// open | closed | integrated | abandoned | superseded
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        tag: Vec<String>,
+        #[arg(long, value_enum)]
+        verdict: Option<Verdict>,
+        #[arg(long)]
+        actor: Option<String>,
+        #[arg(long)]
+        harness: Option<String>,
         #[arg(long)]
         json: bool,
     },
+    /// Render one change (Markdown, or full state with --json)
+    Show {
+        change: Option<String>,
+        #[arg(long)]
+        tag: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Append dependency or tag metadata to an open change
+    Metadata {
+        change: String,
+        #[arg(long = "blocked-by")]
+        blocked_by: Vec<String>,
+        #[arg(long = "remove-blocked-by")]
+        remove_blocked_by: Vec<String>,
+        #[arg(long)]
+        tag: Vec<String>,
+        #[arg(long = "remove-tag")]
+        remove_tag: Vec<String>,
+    },
     /// Machine-readable status report (the versioned arc-status/1 schema)
-    Status { change: String },
+    Status {
+        change: String,
+        /// Accepted for compatibility; status output is always JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report whether declared prerequisite changes have integrated
+    BlockerStatus { change: String },
+    /// Dependency probe: exit 0 ready, 1 blocked, 2 on lookup/ledger errors
+    IsBlocked { change: String },
     /// Export one change as a deterministic, versioned JSON bundle
     Export {
         change: String,
@@ -138,7 +187,12 @@ enum Cmd {
         dry_run: bool,
     },
     /// Integration preflight; exit code identifies the first blocker
-    Check { change: String },
+    Check {
+        change: Option<String>,
+        /// Check every change carrying all supplied tags
+        #[arg(long)]
+        tag: Vec<String>,
+    },
     /// Record the current branch head as a new patchset
     Snapshot {
         change: String,
@@ -292,6 +346,8 @@ fn run(cli: Cli) -> Result<i32> {
             worktree,
             no_worktree,
             adopt,
+            blocked_by,
+            tag,
         } => {
             commands::begin(
                 &ctx,
@@ -304,27 +360,80 @@ fn run(cli: Cli) -> Result<i32> {
                 worktree,
                 no_worktree,
                 adopt,
+                blocked_by,
+                tag,
             )?;
             Ok(0)
         }
-        Cmd::List { open, json } => {
-            commands::list(&ctx, open, json)?;
+        Cmd::List { open, json, format } => {
+            commands::list(&ctx, open, json, format)?;
             Ok(0)
         }
-        Cmd::Show { change, json } => {
-            commands::show(&ctx, &change, json)?;
+        Cmd::Query {
+            status,
+            target,
+            tag,
+            verdict,
+            actor,
+            harness,
+            json,
+        } => {
+            commands::query(
+                &ctx,
+                QueryArgs {
+                    status,
+                    target,
+                    tags: tag,
+                    verdict,
+                    actor,
+                    harness,
+                    json,
+                },
+            )?;
             Ok(0)
         }
-        Cmd::Status { change } => {
+        Cmd::Show { change, tag, json } => {
+            commands::show_selection(&ctx, change.as_deref(), tag, json)?;
+            Ok(0)
+        }
+        Cmd::Metadata {
+            change,
+            blocked_by,
+            remove_blocked_by,
+            tag,
+            remove_tag,
+        } => {
+            commands::metadata(
+                &ctx,
+                &change,
+                blocked_by,
+                remove_blocked_by,
+                tag,
+                remove_tag,
+            )?;
+            Ok(0)
+        }
+        Cmd::Status { change, json: _ } => {
             commands::status_cmd(&ctx, &change)?;
             Ok(0)
         }
+        Cmd::BlockerStatus { change } => {
+            commands::blocker_status_cmd(&ctx, &change)?;
+            Ok(0)
+        }
+        Cmd::IsBlocked { change } => match commands::is_blocked(&ctx, &change) {
+            Ok(code) => Ok(code),
+            Err(error) => {
+                eprintln!("error: {error:#}");
+                Ok(2)
+            }
+        },
         Cmd::Export { change, output } => {
             commands::export_bundle(&ctx, &change, &output)?;
             Ok(0)
         }
         Cmd::Import { input, dry_run } => commands::import_bundle(&ctx, &input, dry_run),
-        Cmd::Check { change } => commands::check(&ctx, &change),
+        Cmd::Check { change, tag } => commands::check_selection(&ctx, change.as_deref(), tag),
         Cmd::Snapshot { change, base } => {
             commands::snapshot(&ctx, &change, base)?;
             Ok(0)

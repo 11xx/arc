@@ -33,6 +33,20 @@ pub enum Payload {
         base: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         worktree: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blocked_by: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
+    },
+    MetadataUpdated {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        add_blocked_by: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remove_blocked_by: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        add_tags: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remove_tags: Vec<String>,
     },
     PatchsetAdded {
         patchset_id: String,

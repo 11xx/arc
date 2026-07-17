@@ -245,6 +245,7 @@ fn known_event_type(event_type: &str) -> bool {
     matches!(
         event_type,
         "change-opened"
+            | "metadata-updated"
             | "patchset-added"
             | "comment-added"
             | "finding-added"

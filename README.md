@@ -45,8 +45,12 @@ happened and what is allowed*.
 ## Quick tour
 
 ```sh
-arc begin radio-refill-fix --title "Keep radio refill from restarting playback"
+arc begin radio-refill-fix --title "Keep radio refill from restarting playback" \
+  --tag '#radio' --blocked-by radio-foundation
 # → branch arc/radio-refill-fix + worktree ~/.worktrees/<repo>-radio-refill-fix
+
+arc is-blocked radio-refill-fix        # 0 ready, 1 blocked, 2 lookup/ledger error
+arc blocker-status radio-refill-fix   # structured dependency detail
 
 cd ~/.worktrees/<repo>-radio-refill-fix
 # ... implement, commit ...
@@ -70,8 +74,37 @@ arc integrate radio-refill-fix --cleanup
 ```
 
 `arc status <change>` prints the versioned `arc-status/1` JSON report —
-the contract orchestrating agents program against. `arc show <change>`
-renders the change as Markdown.
+the contract orchestrating agents program against. It includes dependency
+state, inverse `blocks` links, tags, a blocker summary, a machine-readable
+`next_action`, and ready alternative open changes while the requested change
+is blocked. `--json` is accepted for compatibility although status is always
+JSON. `arc show <change>` renders the same actionable state as Markdown.
+
+Dependencies are live ledger relationships: a blocker is satisfied only when
+it closes as integrated. Abandoned, superseded, missing, or still-open changes
+continue to block. `arc check` and `arc integrate` enforce this boundary.
+`arc is-blocked` has its own polling contract: exit 0 means ready, 1 means
+blocked, and 2 means the lookup or ledger read failed, so automation must stop
+rather than keep waiting. Add or remove dependencies and tags append-only after
+creation:
+
+```sh
+arc metadata radio-refill-fix --blocked-by radio-storage --tag '#radio'
+arc metadata radio-refill-fix --remove-blocked-by radio-storage --remove-tag '#radio'
+```
+
+Query and batch views avoid ad-hoc JSON filtering:
+
+```sh
+arc query --status open --target master --tag '#radio'
+arc list --format wide
+arc show --tag '#radio' --json
+arc check --tag '#radio'
+```
+
+See [DELEGATION.md](DELEGATION.md) before generating cross-harness executor
+prompts. In particular, a Codex executor works locally and must never be told
+to invoke `codex exec` on itself.
 
 ## Export / import
 
@@ -102,9 +135,21 @@ reported for separate transfer.
 | 3 | no valid approval for the current head (stale or missing) |
 | 4 | hold active |
 | 5 | required gates not green at head |
-| 6 | closed change or malformed state |
+| 6 | closed change, missing branch, or malformed state |
+| 7 | unresolved prerequisite changes |
 
-## Gate declaration
+## Build and gate declaration
+
+The repository provides the same convenient local commands used by its
+implementation arcs:
+
+```sh
+make build
+make test
+make lint
+```
+
+Declared integration gates remain in `.arc/gates.toml`:
 
 ```toml
 # .arc/gates.toml
@@ -147,6 +192,10 @@ Change derivation: `begin` targets the branch checked out in the
 whatever branch the invoking worktree happens to be on. Deriving from an
 open change's branch (stacking) requires an explicit `--target`.
 
+`arc query` filters by lifecycle status, target, tags, latest verdict, opening
+actor, and opening harness. `arc list --format compact|wide|json` supplies
+pipe-friendly IDs, a scannable orchestration table, or structured rows.
+
 ## Storage and data-safety guarantees
 
 - Ledger location: `<git-common-dir>/arc/` by default (shared by all
@@ -182,10 +231,12 @@ a real concurrent multi-machine need exists.
 ## Roadmap
 
 See PLAN-02 in the arc-discussion thread archive. Shipped: local core +
-policy engine (M1–M2), `/arc` skill wiring (M3), and deterministic
-export/import bundles (M4). Next: forge projection — Forgejo/Codeberg
-first, then GitHub (M5), and possibly absorbing the mechanical parts of
-the /thread archive conventions as `arc thread` subcommands.
+policy engine (M1–M2), `/arc` skill wiring (M3), deterministic export/import
+bundles (M4), and local orchestration foundations (dependencies, tags,
+actionable status, query, and batch views). Forge projection remains deferred
+until this installation actually uses a forge. Absorbing the mechanical parts
+of the /thread archive conventions as `arc thread` subcommands is likewise an
+unscheduled, evidence-driven possibility.
 
 ## License
 

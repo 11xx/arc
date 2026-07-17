@@ -1,10 +1,15 @@
+use crate::commands::ArcAlternative;
 use crate::state::ChangeState;
-use crate::status::StatusReport;
+use crate::status::{Blocker, StatusReport};
 use std::fmt::Write;
 
 /// Human-readable Markdown view of one change. Suitable for terminals
 /// and for dropping into a /thread artifact; the ledger stays private.
-pub fn markdown(state: &ChangeState, report: &StatusReport) -> String {
+pub fn markdown(
+    state: &ChangeState,
+    report: &StatusReport,
+    alternatives: &[ArcAlternative],
+) -> String {
     let mut out = String::new();
     let w = &mut out;
 
@@ -34,6 +39,34 @@ pub fn markdown(state: &ChangeState, report: &StatusReport) -> String {
                 .map(|s| format!(" at `{s}`"))
                 .unwrap_or_default()
         );
+    }
+    if !state.tags.is_empty() {
+        let _ = writeln!(w, "- Tags: {}", state.tags.join(", "));
+    }
+
+    if !report.blocker_status.blockers_ready.is_empty() {
+        let _ = writeln!(w, "\n## Blocked by\n");
+        for blocker in &report.blocker_status.blockers_ready {
+            let _ = writeln!(
+                w,
+                "- {} (`{}`): {}{}",
+                blocker.slug,
+                blocker.change_id,
+                blocker.status,
+                if blocker.integrated { " ✓" } else { "" }
+            );
+        }
+    }
+
+    if !alternatives.is_empty() {
+        let _ = writeln!(w, "\n## Suggested alternatives (ready now)\n");
+        for alternative in alternatives {
+            let _ = writeln!(
+                w,
+                "- {} (`{}`): {}",
+                alternative.slug, alternative.change_id, alternative.reason
+            );
+        }
     }
 
     if !state.patchsets.is_empty() {
@@ -159,4 +192,81 @@ pub fn markdown(state: &ChangeState, report: &StatusReport) -> String {
     }
 
     out
+}
+
+/// Detailed refusal text for `check` and `integrate`. Exit codes remain the
+/// machine contract; this text tells a human or executor how to recover.
+pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Cannot integrate {}", state.change_id);
+    let _ = writeln!(out);
+
+    for (index, blocker) in report.blockers.iter().enumerate() {
+        let _ = writeln!(out, "Blocker {}: {}", index + 1, blocker_title(*blocker));
+        match blocker {
+            Blocker::Closed => {
+                let _ = writeln!(out, "  - Change is already closed");
+            }
+            Blocker::BranchMissing => {
+                let _ = writeln!(out, "  - Branch `{}` is missing", state.branch);
+            }
+            Blocker::BlockedByChanges => {
+                for dependency in report
+                    .blocker_status
+                    .blockers_ready
+                    .iter()
+                    .filter(|dependency| !dependency.integrated)
+                {
+                    let _ = writeln!(
+                        out,
+                        "  - {} (`{}`): {}",
+                        dependency.slug, dependency.change_id, dependency.status
+                    );
+                }
+            }
+            Blocker::BlockingFindings => {
+                for finding in report
+                    .findings
+                    .iter()
+                    .filter(|finding| report.open_blocking_findings.contains(&finding.id))
+                {
+                    let _ = writeln!(
+                        out,
+                        "  - `{}` [{:?}] {}",
+                        finding.id, finding.severity, finding.summary
+                    );
+                }
+            }
+            Blocker::NoValidApproval => {
+                let _ = writeln!(out, "  - Current head has no valid approval");
+            }
+            Blocker::GatesNotGreen => {
+                for gate in report.gates.iter().filter(|gate| !gate.green_at_head) {
+                    let _ = writeln!(out, "  - Gate `{}` is not green at head", gate.name);
+                }
+            }
+            Blocker::HoldActive => {
+                let _ = writeln!(
+                    out,
+                    "  - {}",
+                    report.hold.as_deref().unwrap_or("hold active")
+                );
+            }
+        }
+        let _ = writeln!(out);
+    }
+    let _ = writeln!(out, "Next step: {}", report.next_action);
+    out
+}
+
+fn blocker_title(blocker: Blocker) -> &'static str {
+    match blocker {
+        Blocker::Closed => "change closed",
+        Blocker::BranchMissing => "branch missing",
+        Blocker::BlockedByChanges => "prerequisite changes unresolved",
+        Blocker::BlockingFindings => "open blocking findings",
+        Blocker::NoValidApproval => "missing or stale approval",
+        Blocker::GatesNotGreen => "required gates not green",
+        Blocker::HoldActive => "hold active",
+    }
 }
