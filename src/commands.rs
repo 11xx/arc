@@ -13,11 +13,9 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-#[derive(Clone)]
 pub struct Ctx {
     pub cwd: PathBuf,
     pub actor: String,
@@ -25,7 +23,8 @@ pub struct Ctx {
     pub session: Option<String>,
 }
 
-const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const POLL_MIN: Duration = Duration::from_millis(100);
+const POLL_MAX: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum WatchUntil {
@@ -217,31 +216,36 @@ pub fn events(
     let change_id = change
         .map(|reference| store.resolve_change(reference))
         .transpose()?;
-    let mut emitted = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut poll_interval = POLL_MIN;
 
     loop {
         let raw_events = match &change_id {
-            Some(id) => store.raw_events(id)?,
-            None => store.raw_events_all()?,
+            Some(id) => store.raw_events_unseen(id, &seen)?,
+            None => store.raw_events_all_unseen(&seen)?,
         };
+        let observed_events = !raw_events.is_empty();
         let mut out = std::io::stdout().lock();
         for (event_id, value) in raw_events {
-            if emitted.contains(&event_id)
-                || !event_type.is_none_or(|wanted| {
-                    value.get("event_type").and_then(serde_json::Value::as_str) == Some(wanted)
-                })
-            {
+            seen.insert(event_id);
+            if !event_type.is_none_or(|wanted| {
+                value.get("event_type").and_then(serde_json::Value::as_str) == Some(wanted)
+            }) {
                 continue;
             }
             serde_json::to_writer(&mut out, &value)?;
             out.write_all(b"\n")?;
             out.flush()?;
-            emitted.insert(event_id);
         }
         if !follow {
             return Ok(());
         }
-        thread::sleep(WATCH_POLL_INTERVAL);
+        poll_interval = if observed_events {
+            POLL_MIN
+        } else {
+            (poll_interval * 2).min(POLL_MAX)
+        };
+        thread::sleep(poll_interval);
     }
 }
 
@@ -251,42 +255,51 @@ pub fn watch(
     until: WatchUntil,
     timeout_secs: Option<u64>,
 ) -> Result<i32> {
-    let worker_ctx = ctx.clone();
-    let reference = reference.to_string();
-    let (sender, receiver) = mpsc::sync_channel(1);
-    thread::spawn(move || {
-        let _ = sender.send(watch_until_reached(&worker_ctx, &reference, until));
+    let deadline = timeout_secs.map(|timeout| Instant::now() + Duration::from_secs(timeout));
+    let result = gitio::with_deadline(deadline, || {
+        watch_until_reached(ctx, reference, until, deadline)
     });
-
-    let result = match timeout_secs {
-        Some(timeout) => match receiver.recv_timeout(Duration::from_secs(timeout)) {
-            Ok(result) => result,
-            Err(RecvTimeoutError::Timeout) => {
-                println!("timeout: {}", until.label());
-                return Ok(2);
-            }
-            Err(RecvTimeoutError::Disconnected) => bail!("watch worker stopped unexpectedly"),
-        },
-        None => receiver
-            .recv()
-            .context("watch worker stopped unexpectedly")?,
-    };
-    result?;
-    println!("reached: {}", until.label());
-    Ok(0)
+    match result {
+        Ok(true) => {
+            println!("reached: {}", until.label());
+            Ok(0)
+        }
+        Ok(false) => {
+            println!("timeout: {}", until.label());
+            Ok(2)
+        }
+        Err(_) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
+            println!("timeout: {}", until.label());
+            Ok(2)
+        }
+        Err(error) => Err(error),
+    }
 }
 
-fn watch_until_reached(ctx: &Ctx, reference: &str, until: WatchUntil) -> Result<()> {
+fn watch_until_reached(
+    ctx: &Ctx,
+    reference: &str,
+    until: WatchUntil,
+    deadline: Option<Instant>,
+) -> Result<bool> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
+    let mut poll_interval = POLL_MIN;
     loop {
         if watch_reached(ctx, &store, &change_id, until)? {
-            return Ok(());
+            return Ok(true);
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(false);
         }
         // Poll the derived condition itself rather than gating checks on event
-        // discovery. `ready` also depends on live Git state, and checking only
-        // after new events creates a lost-wakeup window during initialization.
-        thread::sleep(WATCH_POLL_INTERVAL);
+        // discovery. `ready` also depends on live Git state. Backoff keeps idle
+        // watchers cheap while retaining sub-second response for fresh work.
+        let sleep_for = deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .map_or(poll_interval, |remaining| poll_interval.min(remaining));
+        thread::sleep(sleep_for);
+        poll_interval = (poll_interval * 2).min(POLL_MAX);
     }
 }
 

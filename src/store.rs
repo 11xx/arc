@@ -3,6 +3,7 @@ use crate::ids;
 use crate::model::Event;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -172,6 +173,17 @@ impl Store {
     /// Raw JSON events of one change. Export deliberately bypasses the
     /// typed Event enum so future event types and fields survive intact.
     pub fn raw_events(&self, change_id: &str) -> Result<Vec<(String, serde_json::Value)>> {
+        self.raw_events_unseen(change_id, &BTreeSet::new())
+    }
+
+    /// Read only raw events whose IDs the caller has not already observed.
+    /// Follow mode uses this to rescan directory entries without reparsing the
+    /// complete ledger on every poll.
+    pub fn raw_events_unseen(
+        &self,
+        change_id: &str,
+        seen: &BTreeSet<String>,
+    ) -> Result<Vec<(String, serde_json::Value)>> {
         ids::validate_id_component(change_id)?;
         let dir = self.events_dir(change_id);
         let entries =
@@ -187,6 +199,9 @@ impl Store {
                 continue;
             };
             ids::validate_id_component(event_id)?;
+            if seen.contains(event_id) {
+                continue;
+            }
             let path = entry.path();
             let value = serde_json::from_slice(&fs::read(&path)?)
                 .with_context(|| format!("malformed event file {}", path.display()))?;
@@ -196,13 +211,16 @@ impl Store {
         Ok(events)
     }
 
-    /// Raw JSON events from every change, globally ordered by event ID.
-    /// Like `raw_events`, this deliberately avoids decoding the typed Event
-    /// enum so readers can forward unknown imported fields and event types.
-    pub fn raw_events_all(&self) -> Result<Vec<(String, serde_json::Value)>> {
+    /// Unseen raw JSON events from every change, globally ordered by event ID.
+    /// This avoids decoding the typed Event enum so readers can forward unknown
+    /// imported fields and event types.
+    pub fn raw_events_all_unseen(
+        &self,
+        seen: &BTreeSet<String>,
+    ) -> Result<Vec<(String, serde_json::Value)>> {
         let mut events = Vec::new();
         for change_id in self.list_change_ids()? {
-            events.extend(self.raw_events(&change_id)?);
+            events.extend(self.raw_events_unseen(&change_id, seen)?);
         }
         events.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(events)

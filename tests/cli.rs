@@ -1,7 +1,7 @@
 use assert_cmd::Command as AssertCommand;
 use predicates::prelude::PredicateBooleanExt;
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -230,15 +230,39 @@ fn events_follow_emits_a_later_snapshot_once() {
             "patchset-added",
         ],
     );
-    thread::sleep(Duration::from_millis(50));
+    let child_output = child.stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let reader_thread = thread::spawn(move || {
+        let mut reader = BufReader::new(child_output);
+        let mut first_line = String::new();
+        let result = reader.read_line(&mut first_line);
+        let _ = sender.send((reader, first_line, result));
+    });
+    let (mut reader, first_line, first_read) = match receiver.recv_timeout(Duration::from_secs(2)) {
+        Ok(result) => result,
+        Err(_) => {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            reader_thread.join().unwrap();
+            panic!("events --follow did not flush its initial replay");
+        }
+    };
+    reader_thread.join().unwrap();
+    assert!(first_read.unwrap() > 0);
+    let first: serde_json::Value = serde_json::from_str(first_line.trim()).unwrap();
+    assert_eq!(first["patchset_id"], "ps-01");
+
+    // The second snapshot is created only after follow mode has flushed its
+    // replay, so a delayed startup cannot make this test pass accidentally.
     stdout(repo.arc(&worktree).args(["snapshot", "events-follow"]));
-    thread::sleep(Duration::from_millis(150));
+    thread::sleep(Duration::from_millis(250));
     child.kill().unwrap();
     child.wait().unwrap();
+    let mut later = String::new();
+    reader.read_to_string(&mut later).unwrap();
 
-    let output = child_stdout(&mut child);
-    let events = output
-        .lines()
+    let events = std::iter::once(first_line.as_str())
+        .chain(later.lines())
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(events.len(), 2, "replay plus the later snapshot");
