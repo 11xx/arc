@@ -49,11 +49,16 @@ pub fn markdown(
         for blocker in &report.blocker_status.blockers_ready {
             let _ = writeln!(
                 w,
-                "- {} (`{}`): {}{}",
+                "- {} (`{}`): {}{}{}",
                 blocker.slug,
                 blocker.change_id,
                 blocker.status,
-                if blocker.integrated { " ✓" } else { "" }
+                if blocker.integrated { " ✓" } else { "" },
+                blocker
+                    .recovery
+                    .as_deref()
+                    .map(|recovery| format!(" — {recovery}"))
+                    .unwrap_or_default()
             );
         }
     }
@@ -219,8 +224,15 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                 {
                     let _ = writeln!(
                         out,
-                        "  - {} (`{}`): {}",
-                        dependency.slug, dependency.change_id, dependency.status
+                        "  - {} (`{}`): {}{}",
+                        dependency.slug,
+                        dependency.change_id,
+                        dependency.status,
+                        dependency
+                            .recovery
+                            .as_deref()
+                            .map(|recovery| format!(" — {recovery}"))
+                            .unwrap_or_default()
                     );
                 }
             }

@@ -94,7 +94,7 @@ timeout. `snapshot` waits for a patchset, `ready` matches `arc check` success,
 `integrated` requires that closure outcome, and `closed` accepts integrated,
 abandoned, or superseded changes.
 
-`arc status <change>` prints the versioned `arc-status/1` JSON report —
+`arc status <change>` prints the versioned `arc-status/2` JSON report —
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, a blocker summary, a machine-readable
 `next_action`, and ready alternative open changes while the requested change
@@ -102,13 +102,18 @@ is blocked. Changes under an explicit hold are never suggested as alternative
 work. `--json` is accepted for compatibility although status is always JSON.
 `arc show <change>` renders the same actionable state as Markdown.
 
-Dependencies are live ledger relationships: a blocker is satisfied only when
-it closes as integrated. Abandoned, superseded, missing, or still-open changes
-continue to block. `arc check` and `arc integrate` enforce this boundary.
-`arc is-blocked` has its own polling contract: exit 0 means ready, 1 means
-blocked, and 2 means the lookup or ledger read failed, so automation must stop
-rather than keep waiting. Add or remove dependencies and tags append-only after
-creation:
+Dependencies are live ledger relationships: a blocker is satisfied when it
+closes as integrated, or when a superseding successor eventually closes as
+integrated (including through a transitive supersession chain). Abandoned
+prerequisites and superseded chains that cannot resolve to an integrated change
+are reported as `wedged`; clear or retarget them with `arc metadata`.
+Missing or still-open changes remain blocked; `arc check` and `arc integrate`
+enforce this boundary.
+`arc blocker-status` exposes the versioned `arc-blocker-status/1` dependency
+payload. `arc is-blocked` has its own polling contract: exit 0 means ready, 1
+means blocked, and 2 means the lookup or ledger read failed, so automation must
+stop rather than keep waiting. Add or remove dependencies and tags append-only
+after creation:
 
 ```sh
 arc metadata radio-refill-fix --blocked-by radio-storage --tag '#radio'
