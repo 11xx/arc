@@ -7,7 +7,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/1";
+pub const STATUS_SCHEMA: &str = "arc-status/2";
 
 /// Typed integration blockers, ordered by exit-code precedence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -129,7 +129,7 @@ pub struct StatusReport {
     pub next_action: String,
     pub ready_reason: String,
     pub ready_to_integrate: bool,
-    /// Backward-compatible spelling retained for arc-status/1 consumers.
+    /// Backward-compatible spelling retained from arc-status/1.
     pub integrate_ready: bool,
     pub blockers: Vec<Blocker>,
     pub closure: Option<crate::state::ClosureState>,
@@ -278,6 +278,12 @@ pub fn build(
         "none:closed".into()
     } else if current_head.is_none() {
         "restore_branch".into()
+    } else if dependency_status
+        .blockers_ready
+        .iter()
+        .any(|dependency| dependency.status == "wedged")
+    {
+        "repair_blockers:metadata".into()
     } else if dependency_status.blocked {
         "wait_for:blockers".into()
     } else if !head_matches {

@@ -635,7 +635,9 @@ fn wedged_prerequisites_report_recovery_and_stay_blocked() {
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", &dependent]))).unwrap();
     let dependency = &status["blocker_status"]["blockers_ready"][0];
+    assert_eq!(status["schema"], "arc-status/2");
     assert_eq!(status["blocker_status"]["blocked"], true);
+    assert_eq!(status["next_action"], "repair_blockers:metadata");
     assert_eq!(dependency["status"], "wedged");
     assert_eq!(
         dependency["recovery"],

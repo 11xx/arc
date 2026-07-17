@@ -160,7 +160,7 @@ enum Cmd {
         #[arg(long = "remove-tag")]
         remove_tag: Vec<String>,
     },
-    /// Machine-readable status report (the versioned arc-status/1 schema)
+    /// Machine-readable status report (the versioned arc-status/2 schema)
     Status {
         change: String,
         /// Accepted for compatibility; status output is always JSON
