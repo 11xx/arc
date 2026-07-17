@@ -5,6 +5,12 @@ ladder selects an executor; this matrix determines how work reaches that
 executor. Always identify the actor that will read the prompt before choosing a
 mechanism.
 
+This file is the canonical mechanism-routing reference: harness instruction
+sets (global CLAUDE.md, the /arc skill, executor prompt templates) should
+reference it rather than restate it. Model and effort selection stays with the
+model/effort ladder; this document owns how the selected executor is invoked
+and what context it receives.
+
 ## Routing matrix
 
 | Actor | Task | Mechanism | Rules |
@@ -101,6 +107,38 @@ Do not:
   owner.
 - Merge while a hold, blocker, stale approval, failed gate, or open blocking
   finding remains.
+
+## Native subagents and context routing
+
+Harness-native subagent features are not a substitute for this matrix. As of
+2026-07, Codex (GPT-5.6) subagents by default inherit the whole conversation
+plus the parent's model family and reasoning level. Both defaults conflict
+with the routing policy:
+
+- Effort inheritance is the wrong direction. A high-effort orchestrator
+  spawning same-effort context gatherers is the most expensive possible
+  configuration; the ladder routes gathering and extraction down (low/Luna)
+  and implementation to the cheapest tier the spec quality allows (Terra
+  high for planned slices).
+- Whole-conversation inheritance is unscoped context transfer. It pays for
+  the entire session history in every child and buries the task signal.
+  Delegated work gets a curated, self-contained brief: the spec, the done
+  condition, the gates, and nothing else. That is what arc bundles and
+  thread specs are for.
+
+So: do not route work through native subagent defaults. Invoke executors
+explicitly (`codex exec` with a chosen model and effort, an arc bundle plus
+spec, or an orchestration script) where model, effort, and context are all
+stated. Revisit if a harness ships per-subagent model/effort/context
+controls and they prove reliable.
+
+The strongest known pattern is programmatic orchestration: generate a
+dedicated one-off script that spawns each agent with an explicit prompt,
+model, effort, and input set, and encodes the control flow (fan-out,
+gates, joins) as code rather than conversation. Claude Code's workflow
+scripts work this way. An arc chain is the ledger-backed equivalent:
+deterministic dependency order, curated per-executor specs, machine-checked
+gates. Prefer either over implicit inheritance.
 
 ## Correct and incorrect delegation
 
