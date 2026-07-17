@@ -23,6 +23,9 @@ happened and what is allowed*.
 - A **patchset** is an immutable base/head snapshot of that branch,
   recorded with `arc snapshot`. Reviews and approvals bind to patchsets,
   never to moving branch names.
+- A **chain** is a tagged blocked-by series: independent siblings can run in
+  parallel when ready, while dependent members wait mechanically until their
+  prerequisites integrate.
 - **Findings, verdicts, comments, replies, dispositions,
   verifications, holds, and closures** are append-only JSON events under
   `<git-common-dir>/arc/`, one file per event, created exclusively so
@@ -72,6 +75,22 @@ arc review radio-refill-fix --verdict approved
 arc check radio-refill-fix             # exit 0 = ready
 arc integrate radio-refill-fix --cleanup
 ```
+
+Observe a change without scraping status views, or wait for one condition for
+shell orchestration:
+
+```sh
+arc events --change radio-refill-fix --type patchset-added
+arc events --follow                     # replay, then stream raw NDJSON events
+arc watch radio-refill-fix --until snapshot --timeout 30
+arc watch radio-refill-fix --until ready
+```
+
+`arc events` emits one compact raw ledger event per line. `arc watch` emits a
+single diagnostic and exits 0 when its condition is reached, or exits 2 on a
+timeout. `snapshot` waits for a patchset, `ready` matches `arc check` success,
+`integrated` requires that closure outcome, and `closed` accepts integrated,
+abandoned, or superseded changes.
 
 `arc status <change>` prints the versioned `arc-status/1` JSON report —
 the contract orchestrating agents program against. It includes dependency

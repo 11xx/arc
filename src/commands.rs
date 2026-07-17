@@ -8,16 +8,40 @@ use crate::state::{self, ChangeState};
 use crate::status::{self, StatusReport};
 use crate::store::Store;
 use anyhow::{bail, Context, Result};
+use clap::ValueEnum;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub struct Ctx {
     pub cwd: PathBuf,
     pub actor: String,
     pub harness: Option<String>,
     pub session: Option<String>,
+}
+
+const WATCH_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum WatchUntil {
+    Snapshot,
+    Ready,
+    Integrated,
+    Closed,
+}
+
+impl WatchUntil {
+    fn label(self) -> &'static str {
+        match self {
+            WatchUntil::Snapshot => "snapshot",
+            WatchUntil::Ready => "ready",
+            WatchUntil::Integrated => "integrated",
+            WatchUntil::Closed => "closed",
+        }
+    }
 }
 
 impl Ctx {
@@ -176,6 +200,87 @@ pub fn read_body(body: Option<String>, body_file: Option<String>) -> Result<Stri
         bail!("body is empty");
     }
     Ok(trimmed.to_string())
+}
+
+/// Replay raw ledger events as compact NDJSON, optionally continuing as new
+/// event files arrive. Event IDs are ULIDs, so they provide the chronological
+/// ordering both across changes and within each polling batch.
+pub fn events(
+    ctx: &Ctx,
+    follow: bool,
+    change: Option<&str>,
+    event_type: Option<&str>,
+) -> Result<()> {
+    let store = ctx.store()?;
+    let change_id = change
+        .map(|reference| store.resolve_change(reference))
+        .transpose()?;
+    let mut emitted = BTreeSet::new();
+
+    loop {
+        let raw_events = match &change_id {
+            Some(id) => store.raw_events(id)?,
+            None => store.raw_events_all()?,
+        };
+        let mut out = std::io::stdout().lock();
+        for (event_id, value) in raw_events {
+            if emitted.contains(&event_id)
+                || !event_type.is_none_or(|wanted| {
+                    value.get("event_type").and_then(serde_json::Value::as_str) == Some(wanted)
+                })
+            {
+                continue;
+            }
+            serde_json::to_writer(&mut out, &value)?;
+            out.write_all(b"\n")?;
+            out.flush()?;
+            emitted.insert(event_id);
+        }
+        if !follow {
+            return Ok(());
+        }
+        thread::sleep(WATCH_POLL_INTERVAL);
+    }
+}
+
+pub fn watch(
+    ctx: &Ctx,
+    reference: &str,
+    until: WatchUntil,
+    timeout_secs: Option<u64>,
+) -> Result<i32> {
+    let store = ctx.store()?;
+    let change_id = store.resolve_change(reference)?;
+    let started = Instant::now();
+
+    loop {
+        if watch_reached(ctx, &store, &change_id, until)? {
+            println!("reached: {}", until.label());
+            return Ok(0);
+        }
+        if timeout_secs.is_some_and(|timeout| started.elapsed() >= Duration::from_secs(timeout)) {
+            println!("timeout: {}", until.label());
+            return Ok(2);
+        }
+        // Poll the derived condition itself rather than gating checks on event
+        // discovery. `ready` also depends on live Git state, and checking only
+        // after new events creates a lost-wakeup window during initialization.
+        thread::sleep(WATCH_POLL_INTERVAL);
+    }
+}
+
+fn watch_reached(ctx: &Ctx, store: &Store, change_id: &str, until: WatchUntil) -> Result<bool> {
+    let events = store.load_events(change_id)?;
+    let state = state::reduce(&events)?;
+    Ok(match until {
+        WatchUntil::Snapshot => state.latest_patchset().is_some(),
+        WatchUntil::Ready => ctx.report(store, &state)?.integrate_ready,
+        WatchUntil::Integrated => state
+            .closure
+            .as_ref()
+            .is_some_and(|closure| closure.outcome == Closure::Integrated),
+        WatchUntil::Closed => state.is_closed(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

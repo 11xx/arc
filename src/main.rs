@@ -171,6 +171,27 @@ enum Cmd {
     BlockerStatus { change: String },
     /// Dependency probe: exit 0 ready, 1 blocked, 2 on lookup/ledger errors
     IsBlocked { change: String },
+    /// Replay raw ledger events as NDJSON, optionally following new events
+    Events {
+        /// Continue emitting matching events appended after the replay
+        #[arg(long)]
+        follow: bool,
+        /// Limit events to one exact change ID or unique prefix
+        #[arg(long)]
+        change: Option<String>,
+        /// Limit events to one raw kebab-case event_type value
+        #[arg(long = "type")]
+        event_type: Option<String>,
+    },
+    /// Wait for a change to reach a selected ledger-derived condition
+    Watch {
+        change: String,
+        #[arg(long, value_enum)]
+        until: commands::WatchUntil,
+        /// Fail with exit 2 after this many seconds
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
     /// Export one change as a deterministic, versioned JSON bundle
     Export {
         change: String,
@@ -428,6 +449,19 @@ fn run(cli: Cli) -> Result<i32> {
                 Ok(2)
             }
         },
+        Cmd::Events {
+            follow,
+            change,
+            event_type,
+        } => {
+            commands::events(&ctx, follow, change.as_deref(), event_type.as_deref())?;
+            Ok(0)
+        }
+        Cmd::Watch {
+            change,
+            until,
+            timeout,
+        } => commands::watch(&ctx, &change, until, timeout),
         Cmd::Export { change, output } => {
             commands::export_bundle(&ctx, &change, &output)?;
             Ok(0)

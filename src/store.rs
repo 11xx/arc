@@ -196,6 +196,18 @@ impl Store {
         Ok(events)
     }
 
+    /// Raw JSON events from every change, globally ordered by event ID.
+    /// Like `raw_events`, this deliberately avoids decoding the typed Event
+    /// enum so readers can forward unknown imported fields and event types.
+    pub fn raw_events_all(&self) -> Result<Vec<(String, serde_json::Value)>> {
+        let mut events = Vec::new();
+        for change_id in self.list_change_ids()? {
+            events.extend(self.raw_events(&change_id)?);
+        }
+        events.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(events)
+    }
+
     /// Read an event without creating the store. Import uses this during
     /// its validate-and-plan phase so conflicts and dry-runs write nothing.
     pub fn raw_event_at(root: &Path, change_id: &str, event_id: &str) -> Result<Option<Vec<u8>>> {
