@@ -1,13 +1,14 @@
 use crate::gates::GatesFile;
 use crate::gitio;
 use crate::model::Verdict;
-use crate::state::ChangeState;
+use crate::state::{self, ChangeState, ClaimIdentity, GitIdentity};
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/2";
+pub const STATUS_SCHEMA: &str = "arc-status/3";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 
 /// Typed integration blockers, ordered by exit-code precedence.
@@ -99,6 +100,29 @@ pub struct BlockerSummary {
     pub hold: HoldSummary,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaimStatus {
+    pub claim_id: String,
+    pub owner: ClaimIdentity,
+    pub active: bool,
+    pub expired: bool,
+    pub stale: bool,
+    pub ttl_seconds: u64,
+    pub claimed_at: DateTime<Utc>,
+    pub last_activity_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub stage: String,
+    pub note: Option<String>,
+    pub stage_started_at: DateTime<Utc>,
+    pub age_seconds: u64,
+    pub budget_seconds: Option<u64>,
+    pub stage_budgets: BTreeMap<crate::model::StageBudget, u64>,
+    pub snapshot_author: Option<GitIdentity>,
+    pub snapshot_committer: Option<GitIdentity>,
+    pub snapshot_claim_actor: Option<String>,
+    pub provenance_mismatch: Option<bool>,
+}
+
 /// The versioned machine-readable contract the /arc skill programs
 /// against. Everything here is derivable from the ledger plus Git.
 #[derive(Debug, Serialize)]
@@ -119,6 +143,7 @@ pub struct StatusReport {
     pub blocked_by: Vec<String>,
     pub blocks: Vec<String>,
     pub blocker_status: BlockerStatus,
+    pub claim: Option<ClaimStatus>,
     pub current_head: Option<String>,
     pub latest_patchset: Option<crate::state::Patchset>,
     pub head_matches_latest_patchset: bool,
@@ -153,6 +178,17 @@ pub fn build(
     gates: &GatesFile,
     dependency_status: BlockerStatus,
     blocks: Vec<String>,
+) -> Result<StatusReport> {
+    build_at(state, cwd, gates, dependency_status, blocks, Utc::now())
+}
+
+pub fn build_at(
+    state: &ChangeState,
+    cwd: &Path,
+    gates: &GatesFile,
+    dependency_status: BlockerStatus,
+    blocks: Vec<String>,
+    now: DateTime<Utc>,
 ) -> Result<StatusReport> {
     let current_head = gitio::branch_head(cwd, &state.branch).ok();
 
@@ -338,6 +374,7 @@ pub fn build(
         blocked_by: state.blocked_by.clone(),
         blocks,
         blocker_status: dependency_status,
+        claim: claim_status_at(state, now),
         current_head,
         latest_patchset,
         head_matches_latest_patchset: head_matches,
@@ -353,6 +390,39 @@ pub fn build(
         integrate_ready: ready,
         blockers,
         closure: state.closure.clone(),
+    })
+}
+
+pub fn claim_status_at(state: &ChangeState, now: DateTime<Utc>) -> Option<ClaimStatus> {
+    let claim = state.claim.as_ref()?;
+    let timing = state::claim_timing_at(claim, now);
+    let snapshot = state.latest_patchset().filter(|patchset| {
+        timing.stage == "snapshotted"
+            && patchset.claim_id.as_deref() == Some(claim.claim_id.as_str())
+    });
+    Some(ClaimStatus {
+        claim_id: claim.claim_id.clone(),
+        owner: claim.owner.clone(),
+        active: timing.active,
+        expired: timing.expired,
+        stale: timing.stale,
+        ttl_seconds: claim.ttl_seconds,
+        claimed_at: claim.claimed_at,
+        last_activity_at: claim.last_activity_at,
+        expires_at: timing.expires_at,
+        stage: timing.stage,
+        note: claim
+            .progress
+            .as_ref()
+            .and_then(|progress| progress.note.clone()),
+        stage_started_at: timing.stage_started_at,
+        age_seconds: timing.age_seconds,
+        budget_seconds: timing.budget_seconds,
+        stage_budgets: claim.stage_budgets.clone(),
+        snapshot_author: snapshot.and_then(|patchset| patchset.author.clone()),
+        snapshot_committer: snapshot.and_then(|patchset| patchset.committer.clone()),
+        snapshot_claim_actor: snapshot.and_then(|patchset| patchset.claim_actor.clone()),
+        provenance_mismatch: snapshot.and_then(|patchset| patchset.provenance_mismatch),
     })
 }
 

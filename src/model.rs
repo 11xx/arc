@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -54,6 +55,32 @@ pub enum Payload {
         head: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         merge_base: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        author_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        author_email: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committer_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        committer_email: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claim_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claim_actor: Option<String>,
+    },
+    ClaimSet {
+        claim_id: String,
+        ttl_seconds: u64,
+        stage_budgets: BTreeMap<StageBudget, u64>,
+    },
+    ClaimReleased {
+        claim_id: String,
+    },
+    StageSet {
+        claim_id: String,
+        stage: ClaimStage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     CommentAdded {
         body: String,
@@ -122,6 +149,62 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         superseded_by: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StageBudget {
+    Launch,
+    Started,
+    SpecRead,
+    Implementing,
+    Verifying,
+}
+
+impl StageBudget {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StageBudget::Launch => "launch",
+            StageBudget::Started => "started",
+            StageBudget::SpecRead => "spec-read",
+            StageBudget::Implementing => "implementing",
+            StageBudget::Verifying => "verifying",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClaimStage {
+    Started,
+    SpecRead,
+    Implementing,
+    Verifying,
+    BlockedOn,
+    Snapshotted,
+}
+
+impl ClaimStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ClaimStage::Started => "started",
+            ClaimStage::SpecRead => "spec-read",
+            ClaimStage::Implementing => "implementing",
+            ClaimStage::Verifying => "verifying",
+            ClaimStage::BlockedOn => "blocked-on",
+            ClaimStage::Snapshotted => "snapshotted",
+        }
+    }
+
+    pub fn budget_key(self) -> Option<StageBudget> {
+        match self {
+            ClaimStage::Started => Some(StageBudget::Started),
+            ClaimStage::SpecRead => Some(StageBudget::SpecRead),
+            ClaimStage::Implementing => Some(StageBudget::Implementing),
+            ClaimStage::Verifying => Some(StageBudget::Verifying),
+            ClaimStage::BlockedOn | ClaimStage::Snapshotted => None,
+        }
+    }
 }
 
 /// Where a comment or finding attaches. Blob OIDs anchor to immutable

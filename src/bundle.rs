@@ -1,4 +1,6 @@
 use crate::ids;
+use crate::model::{ClaimStage, Event, Payload, StageBudget};
+use crate::state;
 use crate::store::Store;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -130,6 +132,8 @@ impl Bundle {
             }
             prior_event_id = Some(envelope.event_id.to_string());
 
+            let typed = parse_known_event(value)?;
+
             if envelope.event_type == "patchset-added" {
                 let object = value.as_object().expect("validated event object");
                 let patchset_id = string_field(object, "patchset_id", envelope.event_id)?;
@@ -162,8 +166,15 @@ impl Bundle {
                 event_id: envelope.event_id.to_string(),
                 value: value.clone(),
                 bytes: event_file_bytes(value)?,
+                typed,
             });
         }
+
+        let typed_events = events
+            .iter()
+            .filter_map(|event| event.typed.clone())
+            .collect::<Vec<_>>();
+        state::reduce(&typed_events).context("bundled known events are not replayable")?;
 
         Ok(ValidatedBundle {
             bundle,
@@ -185,6 +196,7 @@ pub struct ValidatedEvent {
     pub event_id: String,
     pub value: Value,
     pub bytes: Vec<u8>,
+    pub typed: Option<Event>,
 }
 
 pub struct PatchsetObject {
@@ -247,6 +259,9 @@ fn known_event_type(event_type: &str) -> bool {
         "change-opened"
             | "metadata-updated"
             | "patchset-added"
+            | "claim-set"
+            | "claim-released"
+            | "stage-set"
             | "comment-added"
             | "finding-added"
             | "reply-added"
@@ -257,6 +272,106 @@ fn known_event_type(event_type: &str) -> bool {
             | "hold-released"
             | "change-closed"
     )
+}
+
+/// Decode a known event completely while leaving future event types opaque.
+/// Import uses the same helper for bundled and already-local raw history.
+pub fn parse_known_event(value: &Value) -> Result<Option<Event>> {
+    let envelope = event_envelope(value)?;
+    if !known_event_type(envelope.event_type) {
+        return Ok(None);
+    }
+    let event: Event = serde_json::from_value(value.clone())
+        .with_context(|| format!("known event {} is malformed", envelope.event_id))?;
+    match &event.payload {
+        Payload::ClaimSet {
+            claim_id,
+            ttl_seconds,
+            stage_budgets,
+        } => {
+            validate_claim_identity(&event)?;
+            ids::validate_id_component(claim_id)?;
+            if *ttl_seconds == 0 {
+                bail!("claim event {} has a zero TTL", event.event_id);
+            }
+            for key in [
+                StageBudget::Launch,
+                StageBudget::Started,
+                StageBudget::SpecRead,
+                StageBudget::Implementing,
+                StageBudget::Verifying,
+            ] {
+                if !stage_budgets.get(&key).is_some_and(|seconds| *seconds > 0) {
+                    bail!(
+                        "claim event {} lacks a positive {} budget",
+                        event.event_id,
+                        key.as_str()
+                    );
+                }
+            }
+        }
+        Payload::ClaimReleased { claim_id } => {
+            validate_claim_identity(&event)?;
+            ids::validate_id_component(claim_id)?;
+        }
+        Payload::StageSet {
+            claim_id,
+            stage,
+            note,
+        } => {
+            validate_claim_identity(&event)?;
+            ids::validate_id_component(claim_id)?;
+            if *stage == ClaimStage::Snapshotted {
+                bail!(
+                    "stage event {} cannot set snapshotted explicitly",
+                    event.event_id
+                );
+            }
+            if *stage == ClaimStage::BlockedOn
+                && !note
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|note| !note.is_empty())
+            {
+                bail!("blocked-on event {} requires a note", event.event_id);
+            }
+        }
+        _ => {}
+    }
+    Ok(Some(event))
+}
+
+fn validate_claim_identity(event: &Event) -> Result<()> {
+    for (field, value) in [
+        ("actor", Some(event.actor.as_str())),
+        ("harness", event.harness.as_deref()),
+        ("session", event.session.as_deref()),
+    ] {
+        let value = value.with_context(|| {
+            format!(
+                "{} event {} has no {field}",
+                event_type(&event.payload),
+                event.event_id
+            )
+        })?;
+        if value.trim().is_empty() || value != value.trim() {
+            bail!(
+                "{} event {} has a non-canonical {field}",
+                event_type(&event.payload),
+                event.event_id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn event_type(payload: &Payload) -> &'static str {
+    match payload {
+        Payload::ClaimSet { .. } => "claim",
+        Payload::ClaimReleased { .. } => "claim-release",
+        Payload::StageSet { .. } => "stage",
+        _ => "event",
+    }
 }
 
 fn event_id(value: &Value) -> Option<&str> {

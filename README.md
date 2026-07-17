@@ -26,7 +26,12 @@ happened and what is allowed*.
 - A **chain** is a tagged blocked-by series: independent siblings can run in
   parallel when ready, while dependent members wait mechanically until their
   prerequisites integrate.
-- **Findings, verdicts, comments, replies, dispositions,
+- **Executor claims and typed stages** are advisory liveness signals. A claim
+  has a stable generation ID plus actor, harness, and session, carries a TTL
+  and resolved stage budgets, and is refreshed by stage activity. Stale and
+  expired are distinct: stale means a live executor exceeded its current stage
+  budget; expired means its lease activity exceeded the TTL.
+- **Findings, verdicts, comments, replies, dispositions, claims, stages,
   verifications, holds, and closures** are append-only JSON events under
   `<git-common-dir>/arc/`, one file per event, created exclusively so
   concurrent writers never clobber each other. The ledger is
@@ -38,6 +43,10 @@ happened and what is allowed*.
   runs a gate and records command, exact revision, result, duration, and
   hostname — local evidence with provenance, the local analogue of
   required CI checks.
+- **Snapshots record Git author and committer identity.** When a claim is live,
+  the snapshot also records its generation and actor at snapshot time and
+  reports an author mismatch as provenance evidence, never as an integration
+  blocker.
 - **`arc integrate`** performs the merge only when, atomically checked:
   the head equals the approved patchset head, no blocking finding is
   open, every required gate is green at that exact head, and no hold is
@@ -56,8 +65,15 @@ arc is-blocked radio-refill-fix        # 0 ready, 1 blocked, 2 lookup/ledger err
 arc blocker-status radio-refill-fix   # structured dependency detail
 
 cd ~/.worktrees/<repo>-radio-refill-fix
+export ARC_HARNESS=codex ARC_SESSION="$CODEX_THREAD_ID"
+arc claim radio-refill-fix --ttl 2h
+arc stage radio-refill-fix started
+# ... read the executor spec ...
+arc stage radio-refill-fix spec-read
+arc stage radio-refill-fix implementing
 # ... implement, commit ...
 
+arc stage radio-refill-fix verifying
 arc snapshot radio-refill-fix          # record patchset ps-01
 arc verify radio-refill-fix --gate test
 
@@ -83,6 +99,7 @@ shell orchestration:
 arc events --change radio-refill-fix --type patchset-added
 arc events --follow                     # replay, then stream raw NDJSON events
 arc watch radio-refill-fix --until snapshot --timeout 30
+arc watch radio-refill-fix --until stalled
 arc watch radio-refill-fix --until ready
 ```
 
@@ -91,16 +108,43 @@ each observed follow batch are sorted by `event_id`; strict total ordering
 across concurrent cross-change appends is not promised. `arc watch` emits a
 single diagnostic and exits 0 when its condition is reached, or exits 2 on a
 timeout. `snapshot` waits for a patchset, `ready` matches `arc check` success,
-`integrated` requires that closure outcome, and `closed` accepts integrated,
-abandoned, or superseded changes.
+`stalled` reaches only when a live claim is stale, `integrated` requires that
+closure outcome, and `closed` accepts integrated, abandoned, or superseded
+changes.
 
-`arc status <change>` prints the versioned `arc-status/2` JSON report —
+`arc status <change>` prints the versioned `arc-status/3` JSON report —
 the contract orchestrating agents program against. It includes dependency
-state, inverse `blocks` links, tags, a blocker summary, a machine-readable
-`next_action`, and ready alternative open changes while the requested change
-is blocked. Changes under an explicit hold are never suggested as alternative
-work. `--json` is accepted for compatibility although status is always JSON.
-`arc show <change>` renders the same actionable state as Markdown.
+state, inverse `blocks` links, tags, claim owner/activity/stage timing, snapshot
+provenance, a blocker summary, a machine-readable `next_action`, and ready
+alternative open changes while the requested change is blocked. Actively
+claimed non-stale changes and held changes are never suggested; stale and
+expired claims reappear. `--json` is accepted for compatibility although
+status is always JSON. `arc show <change>` renders the same actionable state as
+Markdown, visibly marking stale, expired, and `blocked-on` progress.
+
+Claims are advisory rather than merge locks:
+
+```sh
+arc claim radio-refill-fix \
+  --stage-budget launch=60s --stage-budget implementing=30m
+arc stage radio-refill-fix blocked-on --note "waiting for test fixture"
+arc release-claim radio-refill-fix
+```
+
+Durations are positive integers ending in `s`, `m`, or `h`; the default claim
+TTL is `2h`. The resolved defaults are `launch=60s`, `started=5m`,
+`spec-read=2m`, `implementing=30m`, and `verifying=15m`. Repeating the current
+stage is a heartbeat: it refreshes claim activity and age-in-stage. `blocked-on`
+requires a note and is distress rather than stale;
+claim TTL still applies. `snapshotted` comes only from a real `arc snapshot`
+event and cannot be supplied to `arc stage`. An identified caller may release
+any live claim so a lead can recover stale foreign work. Every claim, release,
+and stage event carries its generation (snapshots carry the one observed at
+snapshot time), so imported stale events cannot clear, advance, or claim
+provenance for a replacement lease; a claim event without a generation is
+rejected as malformed rather than replayed through inference.
+Integration warns on an active foreign claim, including a stale one, but
+proceeds when the normal integration gates pass.
 
 Dependencies are live ledger relationships: a blocker is satisfied when it
 closes as integrated, or when a superseding successor eventually closes as
@@ -125,6 +169,14 @@ stores. Arc reports each member as blocked but does not mutate imported
 history automatically. Break the cycle explicitly by removing one edge with
 `arc metadata <change> --remove-blocked-by <blocker>`; exact blocker IDs also
 work when the blocker's own bundle is absent.
+
+State-derived writes use persistent OS-backed advisory locks with bounded
+acquisition. Dependency metadata takes a repository graph lock before its
+per-change lock; integration takes a target-branch lock before its per-change
+lock. This prevents concurrent cycles and target-worktree races without
+waiting forever on re-entry. State-append locks wait briefly; the target lock
+waits integration-scale because its holder is legitimately running a merge.
+Verification runs its external gate before taking the short state-append lock.
 
 Query and batch views avoid ad-hoc JSON filtering:
 
@@ -170,6 +222,7 @@ reported for separate transfer.
 | 5 | required gates not green at head |
 | 6 | closed change, missing branch, or malformed state |
 | 7 | unresolved prerequisite changes |
+| 8 | claim or stage ownership/liveness conflict |
 
 ## Build and gate declaration
 
@@ -198,7 +251,9 @@ profiles = ["local", "forge", "release"]   # omit = required for every profile
 
 Every event records an actor, and optionally a harness and native
 session ID: `--actor/--harness/--session` or `ARC_ACTOR`, `ARC_HARNESS`,
-`ARC_SESSION`. Actor defaults to `git config user.name`.
+`ARC_SESSION`. Actor defaults to `git config user.name`. `claim`,
+`release-claim`, and `stage` require nonempty harness and session values;
+identity is the actor + harness + session tuple.
 
 ## Configuration
 

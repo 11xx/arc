@@ -6,7 +6,7 @@ use crate::model::*;
 use crate::render;
 use crate::state::{self, ChangeState};
 use crate::status::{self, StatusReport};
-use crate::store::Store;
+use crate::store::{Store, TransitionLock};
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use serde::Serialize;
@@ -29,6 +29,7 @@ const POLL_MAX: Duration = Duration::from_secs(1);
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum WatchUntil {
     Snapshot,
+    Stalled,
     Ready,
     Integrated,
     Closed,
@@ -38,11 +39,40 @@ impl WatchUntil {
     fn label(self) -> &'static str {
         match self {
             WatchUntil::Snapshot => "snapshot",
+            WatchUntil::Stalled => "stalled",
             WatchUntil::Ready => "ready",
             WatchUntil::Integrated => "integrated",
             WatchUntil::Closed => "closed",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum StageArg {
+    Started,
+    SpecRead,
+    Implementing,
+    Verifying,
+    BlockedOn,
+}
+
+impl From<StageArg> for ClaimStage {
+    fn from(stage: StageArg) -> Self {
+        match stage {
+            StageArg::Started => ClaimStage::Started,
+            StageArg::SpecRead => ClaimStage::SpecRead,
+            StageArg::Implementing => ClaimStage::Implementing,
+            StageArg::Verifying => ClaimStage::Verifying,
+            StageArg::BlockedOn => ClaimStage::BlockedOn,
+        }
+    }
+}
+
+fn locked_state(store: &Store, reference: &str) -> Result<(String, TransitionLock, ChangeState)> {
+    let change_id = store.resolve_change(reference)?;
+    let transition = store.lock_transition(&change_id)?;
+    let state = state::reduce(&store.load_events(&change_id)?)?;
+    Ok((change_id, transition, state))
 }
 
 impl Ctx {
@@ -51,6 +81,16 @@ impl Ctx {
     }
 
     fn event(&self, store: &Store, change_id: &str, payload: Payload) -> Event {
+        self.event_at(store, change_id, chrono::Utc::now(), payload)
+    }
+
+    fn event_at(
+        &self,
+        store: &Store,
+        change_id: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+        payload: Payload,
+    ) -> Event {
         Event {
             schema_version: SCHEMA_VERSION,
             event_id: ids::new_event_id(),
@@ -59,7 +99,7 @@ impl Ctx {
             actor: self.actor.clone(),
             harness: self.harness.clone(),
             session: self.session.clone(),
-            created_at: chrono::Utc::now(),
+            created_at,
             payload,
         }
     }
@@ -231,6 +271,10 @@ fn find_unblocked_changes(
                 && !candidate.is_closed()
                 && candidate.hold.is_none()
                 && !dependency_status(candidate, states).blocked
+                && candidate.claim.as_ref().is_none_or(|claim| {
+                    let timing = state::claim_timing_at(claim, chrono::Utc::now());
+                    !timing.active || timing.stale
+                })
         })
         .map(|candidate| ArcAlternative {
             change_id: candidate.change_id.clone(),
@@ -371,6 +415,10 @@ fn watch_reached(ctx: &Ctx, store: &Store, change_id: &str, until: WatchUntil) -
     let state = state::reduce(&events)?;
     Ok(match until {
         WatchUntil::Snapshot => state.latest_patchset().is_some(),
+        WatchUntil::Stalled => state
+            .claim
+            .as_ref()
+            .is_some_and(|claim| state::claim_timing_at(claim, chrono::Utc::now()).stale),
         WatchUntil::Ready => ctx.report(store, &state)?.integrate_ready,
         WatchUntil::Integrated => state
             .closure
@@ -378,6 +426,255 @@ fn watch_reached(ctx: &Ctx, store: &Store, change_id: &str, until: WatchUntil) -
             .is_some_and(|closure| closure.outcome == Closure::Integrated),
         WatchUntil::Closed => state.is_closed(),
     })
+}
+
+pub fn claim(
+    ctx: &Ctx,
+    reference: &str,
+    ttl: Option<String>,
+    stage_budgets: Vec<String>,
+) -> Result<i32> {
+    let owner = command_identity(ctx)?;
+    let ttl_seconds = ttl
+        .as_deref()
+        .map(parse_duration)
+        .transpose()?
+        .unwrap_or(2 * 60 * 60);
+    let mut budgets = default_stage_budgets();
+    for raw in stage_budgets {
+        let (key, seconds) = parse_stage_budget(&raw)?;
+        budgets.insert(key, seconds);
+    }
+
+    let store = ctx.store()?;
+    let change_id = store.resolve_change(reference)?;
+    let _transition = store.lock_transition(&change_id)?;
+    let state = state::reduce(&store.load_events(&change_id)?)?;
+    let now = chrono::Utc::now();
+    if state.is_closed() {
+        bail!("change {change_id} is closed");
+    }
+    if let Some(existing) = &state.claim {
+        let timing = state::claim_timing_at(existing, now);
+        if timing.active && existing.owner != owner {
+            print_claim_conflict("claim is already held", existing, &timing);
+            return Ok(8);
+        }
+    }
+    let claim_id = state
+        .claim
+        .as_ref()
+        .filter(|claim| claim.owner == owner && state::claim_timing_at(claim, now).active)
+        .map(|claim| claim.claim_id.clone())
+        .unwrap_or_else(ids::new_event_id);
+
+    let event = identity_event_at(
+        ctx,
+        &store,
+        &change_id,
+        now,
+        &owner,
+        Payload::ClaimSet {
+            claim_id,
+            ttl_seconds,
+            stage_budgets: budgets,
+        },
+    );
+    store.append_event(&event)?;
+    println!("claimed: {change_id} for {ttl_seconds}s");
+    println!("event: {}", event.event_id);
+    Ok(0)
+}
+
+pub fn release_claim(ctx: &Ctx, reference: &str) -> Result<i32> {
+    let caller = command_identity(ctx)?;
+    let store = ctx.store()?;
+    let change_id = store.resolve_change(reference)?;
+    let _transition = store.lock_transition(&change_id)?;
+    let state = state::reduce(&store.load_events(&change_id)?)?;
+    let now = chrono::Utc::now();
+    let Some(existing) = &state.claim else {
+        eprintln!("claim conflict: {change_id} has no live claim");
+        return Ok(8);
+    };
+    let timing = state::claim_timing_at(existing, now);
+    if !timing.active {
+        print_claim_conflict("claim is expired", existing, &timing);
+        return Ok(8);
+    }
+    let event = identity_event_at(
+        ctx,
+        &store,
+        &change_id,
+        now,
+        &caller,
+        Payload::ClaimReleased {
+            claim_id: existing.claim_id.clone(),
+        },
+    );
+    store.append_event(&event)?;
+    println!("claim released: {change_id}");
+    println!("event: {}", event.event_id);
+    Ok(0)
+}
+
+pub fn stage(ctx: &Ctx, reference: &str, stage: StageArg, note: Option<String>) -> Result<i32> {
+    let owner = command_identity(ctx)?;
+    let stage = ClaimStage::from(stage);
+    let note = note.and_then(|note| {
+        let trimmed = note.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+    if stage == ClaimStage::BlockedOn && note.is_none() {
+        bail!("blocked-on requires a nonempty --note");
+    }
+
+    let store = ctx.store()?;
+    let change_id = store.resolve_change(reference)?;
+    let _transition = store.lock_transition(&change_id)?;
+    let state = state::reduce(&store.load_events(&change_id)?)?;
+    if state.is_closed() {
+        bail!("change {change_id} is closed");
+    }
+    let now = chrono::Utc::now();
+    let Some(existing) = &state.claim else {
+        eprintln!(
+            "claim conflict: {change_id} has no claim for stage {}",
+            stage.as_str()
+        );
+        return Ok(8);
+    };
+    let timing = state::claim_timing_at(existing, now);
+    if !timing.active {
+        print_claim_conflict("claim is expired", existing, &timing);
+        return Ok(8);
+    }
+    if existing.owner != owner {
+        print_claim_conflict("stage caller does not own claim", existing, &timing);
+        return Ok(8);
+    }
+
+    let event = identity_event_at(
+        ctx,
+        &store,
+        &change_id,
+        now,
+        &owner,
+        Payload::StageSet {
+            claim_id: existing.claim_id.clone(),
+            stage,
+            note,
+        },
+    );
+    store.append_event(&event)?;
+    println!("stage: {}", stage.as_str());
+    println!("event: {}", event.event_id);
+    Ok(0)
+}
+
+fn command_identity(ctx: &Ctx) -> Result<state::ClaimIdentity> {
+    let actor = ctx.actor.trim();
+    if actor.is_empty() {
+        bail!("claim/stage commands require a nonempty actor");
+    }
+    let harness = ctx
+        .harness
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("claim/stage commands require nonempty ARC_HARNESS or --harness")?;
+    let session = ctx
+        .session
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("claim/stage commands require nonempty ARC_SESSION or --session")?;
+    Ok(state::ClaimIdentity {
+        actor: actor.to_string(),
+        harness: harness.to_string(),
+        session: session.to_string(),
+    })
+}
+
+fn identity_event_at(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    created_at: chrono::DateTime<chrono::Utc>,
+    identity: &state::ClaimIdentity,
+    payload: Payload,
+) -> Event {
+    let mut event = ctx.event_at(store, change_id, created_at, payload);
+    event.actor = identity.actor.clone();
+    event.harness = Some(identity.harness.clone());
+    event.session = Some(identity.session.clone());
+    event
+}
+
+fn print_claim_conflict(message: &str, claim: &state::ClaimState, timing: &state::ClaimTiming) {
+    eprintln!(
+        "claim conflict: {message}; owner={} harness={} session={} stage={} expires={}",
+        claim.owner.actor,
+        claim.owner.harness,
+        claim.owner.session,
+        timing.stage,
+        timing.expires_at
+    );
+}
+
+pub fn parse_duration(raw: &str) -> Result<u64> {
+    let Some((suffix_index, suffix)) = raw.char_indices().last() else {
+        bail!("duration is empty; expected a positive integer followed by s, m, or h");
+    };
+    let number = &raw[..suffix_index];
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("invalid duration {raw:?}; expected a positive integer followed by s, m, or h");
+    }
+    let value: u64 = number
+        .parse()
+        .with_context(|| format!("invalid duration {raw:?}"))?;
+    if value == 0 {
+        bail!("duration must be positive");
+    }
+    let multiplier = match suffix {
+        's' => 1,
+        'm' => 60,
+        'h' => 60 * 60,
+        _ => bail!("invalid duration {raw:?}; expected an s, m, or h suffix"),
+    };
+    value
+        .checked_mul(multiplier)
+        .filter(|seconds| *seconds <= i64::MAX as u64)
+        .context("duration is too large")
+}
+
+fn parse_stage_budget(raw: &str) -> Result<(StageBudget, u64)> {
+    let (name, duration) = raw
+        .split_once('=')
+        .with_context(|| format!("invalid stage budget {raw:?}; expected <name>=<duration>"))?;
+    let key = match name {
+        "launch" => StageBudget::Launch,
+        "started" => StageBudget::Started,
+        "spec-read" => StageBudget::SpecRead,
+        "implementing" => StageBudget::Implementing,
+        "verifying" => StageBudget::Verifying,
+        _ => bail!(
+            "unknown stage budget {name:?}; expected launch, started, spec-read, implementing, or verifying"
+        ),
+    };
+    Ok((key, parse_duration(duration)?))
+}
+
+fn default_stage_budgets() -> BTreeMap<StageBudget, u64> {
+    [
+        (StageBudget::Launch, 60),
+        (StageBudget::Started, 5 * 60),
+        (StageBudget::SpecRead, 2 * 60),
+        (StageBudget::Implementing, 30 * 60),
+        (StageBudget::Verifying, 15 * 60),
+    ]
+    .into_iter()
+    .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -786,7 +1083,8 @@ pub fn metadata(
     remove_tags: Vec<String>,
 ) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, state) = ctx.load_state(&store, reference)?;
+    let _graph = store.lock_graph()?;
+    let (change_id, _transition, state) = locked_state(&store, reference)?;
     if state.is_closed() {
         bail!("change {change_id} is closed");
     }
@@ -955,19 +1253,6 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     let root = Store::resolve_root(&ctx.cwd)?;
     let local_repository_id = Store::repository_id_at(&root)?;
 
-    let mut new_events = Vec::new();
-    let mut skipped_events = Vec::new();
-    let mut conflicts = Vec::new();
-    for event in &validated.events {
-        match Store::raw_event_at(&root, &validated.bundle.change_id, &event.event_id)? {
-            None => new_events.push(event.event_id.clone()),
-            Some(existing) => match serde_json::from_slice::<serde_json::Value>(&existing) {
-                Ok(value) if value == event.value => skipped_events.push(event.event_id.clone()),
-                _ => conflicts.push(event.event_id.clone()),
-            },
-        }
-    }
-
     let mut missing_objects = Vec::new();
     let mut pins = Vec::new();
     for patchset in &validated.patchsets {
@@ -984,25 +1269,59 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         }
     }
 
-    print_import_report(
-        &validated,
-        local_repository_id.as_deref(),
-        &new_events,
-        &skipped_events,
-        &conflicts,
-        &missing_objects,
-        &pins,
-        dry_run,
-    );
-    if !conflicts.is_empty() {
-        println!("aborted: no events or refs written");
-        return Ok(1);
-    }
     if dry_run {
+        let plan = classify_import_events(&root, &validated)?;
+        if plan.conflicts.is_empty() {
+            if let Some(repository_id) = &local_repository_id {
+                let store = Store {
+                    root: root.clone(),
+                    repository_id: repository_id.clone(),
+                };
+                validate_import_candidate(&store, &validated, &plan.new_events)?;
+            }
+        }
+        print_import_report(
+            &validated,
+            local_repository_id.as_deref(),
+            &plan.new_events,
+            &plan.skipped_events,
+            &plan.conflicts,
+            &missing_objects,
+            &pins,
+            true,
+        );
+        if !plan.conflicts.is_empty() {
+            println!("aborted: no events or refs written");
+            return Ok(1);
+        }
         return Ok(0);
     }
 
     let store = Store::discover(&ctx.cwd)?;
+    let transition = store.lock_transition(&validated.bundle.change_id)?;
+    // Classification and candidate replay must happen after taking the same
+    // per-change lock used by claim, release, stage, and snapshot. Otherwise a
+    // local transition could land between validation and the raw appends.
+    let plan = classify_import_events(&root, &validated)?;
+    if plan.conflicts.is_empty() {
+        validate_import_candidate(&store, &validated, &plan.new_events)?;
+    }
+
+    print_import_report(
+        &validated,
+        local_repository_id.as_deref(),
+        &plan.new_events,
+        &plan.skipped_events,
+        &plan.conflicts,
+        &missing_objects,
+        &pins,
+        false,
+    );
+    if !plan.conflicts.is_empty() {
+        println!("aborted: no events or refs written");
+        return Ok(1);
+    }
+
     if local_repository_id.is_none() && store.repository_id != validated.bundle.repository_id {
         println!(
             "repository: bundle {} differs from local {} (expected for cross-machine import)",
@@ -1010,14 +1329,72 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         );
     }
     for event in &validated.events {
-        if new_events.contains(&event.event_id) {
+        if plan.new_events.contains(&event.event_id) {
             store.append_raw_event(&validated.bundle.change_id, &event.event_id, &event.bytes)?;
         }
     }
+    drop(transition);
     for (name, head) in pins {
         gitio::update_ref(&ctx.cwd, &name, &head)?;
     }
     Ok(0)
+}
+
+struct ImportEventPlan {
+    new_events: Vec<String>,
+    skipped_events: Vec<String>,
+    conflicts: Vec<String>,
+}
+
+fn classify_import_events(root: &Path, validated: &ValidatedBundle) -> Result<ImportEventPlan> {
+    let mut plan = ImportEventPlan {
+        new_events: Vec::new(),
+        skipped_events: Vec::new(),
+        conflicts: Vec::new(),
+    };
+    for event in &validated.events {
+        match Store::raw_event_at(root, &validated.bundle.change_id, &event.event_id)? {
+            None => plan.new_events.push(event.event_id.clone()),
+            Some(existing) => match serde_json::from_slice::<serde_json::Value>(&existing) {
+                Ok(value) if value == event.value => {
+                    plan.skipped_events.push(event.event_id.clone())
+                }
+                _ => plan.conflicts.push(event.event_id.clone()),
+            },
+        }
+    }
+    Ok(plan)
+}
+
+fn validate_import_candidate(
+    store: &Store,
+    validated: &ValidatedBundle,
+    new_events: &[String],
+) -> Result<()> {
+    let mut candidate = Vec::new();
+    if store
+        .list_change_ids()?
+        .iter()
+        .any(|change_id| change_id == &validated.bundle.change_id)
+    {
+        for (_, value) in store.raw_events(&validated.bundle.change_id)? {
+            if let Some(event) = crate::bundle::parse_known_event(&value)? {
+                candidate.push(event);
+            }
+        }
+    }
+    let new_events = new_events.iter().collect::<BTreeSet<_>>();
+    candidate.extend(
+        validated
+            .events
+            .iter()
+            .filter(|event| new_events.contains(&event.event_id))
+            .filter_map(|event| event.typed.clone()),
+    );
+    candidate.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+    state::reduce(&candidate)
+        .context("combined local and bundled known events are not replayable")?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1129,7 +1506,9 @@ fn check_tagged(ctx: &Ctx, tags: Vec<String>) -> Result<i32> {
 
 pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let change_id = store.resolve_change(reference)?;
+    let _transition = store.lock_transition(&change_id)?;
+    let st = state::reduce(&store.load_events(&change_id)?)?;
     if st.is_closed() {
         bail!("change {change_id} is closed");
     }
@@ -1148,15 +1527,28 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
     let merge_base = target_head
         .as_deref()
         .and_then(|t| gitio::merge_base(&ctx.cwd, t, &head).ok());
+    let identity = gitio::commit_identity(&ctx.cwd, &head)?;
+    let now = chrono::Utc::now();
+    let snapshot_claim = st
+        .claim
+        .as_ref()
+        .filter(|claim| state::claim_timing_at(claim, now).active);
     let patchset_id = format!("ps-{:02}", st.patchsets.len() + 1);
-    let ev = ctx.event(
+    let ev = ctx.event_at(
         &store,
         &change_id,
+        now,
         Payload::PatchsetAdded {
             patchset_id: patchset_id.clone(),
             base: base_rev,
             head: head.clone(),
             merge_base,
+            author_name: Some(identity.author_name),
+            author_email: Some(identity.author_email),
+            committer_name: Some(identity.committer_name),
+            committer_email: Some(identity.committer_email),
+            claim_id: snapshot_claim.map(|claim| claim.claim_id.clone()),
+            claim_actor: snapshot_claim.map(|claim| claim.owner.actor.clone()),
         },
     );
     store.append_event(&ev)?;
@@ -1263,7 +1655,10 @@ pub fn finding(
     anchor_args: &AnchorArgs,
 ) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let (change_id, _transition, st) = locked_state(&store, reference)?;
+    if st.is_closed() {
+        bail!("change {change_id} is closed");
+    }
     let patchset_id = resolve_patchset_id(&st, patchset)?;
     let anchor = build_anchor(ctx, &st, patchset_id.as_deref(), anchor_args)?;
     let finding_id = ids::new_finding_id();
@@ -1319,7 +1714,10 @@ pub fn resolve(
     evidence: Option<String>,
 ) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let (change_id, _transition, st) = locked_state(&store, reference)?;
+    if st.is_closed() {
+        bail!("change {change_id} is closed");
+    }
     let finding_id = st.resolve_finding_id(&finding)?;
     let commit = match commit {
         Some(c) => Some(gitio::rev_parse(&ctx.cwd, &c)?),
@@ -1355,7 +1753,7 @@ pub fn review(
     findings_json: Option<String>,
 ) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let (change_id, _transition, st) = locked_state(&store, reference)?;
     if st.is_closed() {
         bail!("change {change_id} is closed");
     }
@@ -1434,6 +1832,9 @@ pub fn verify(
 ) -> Result<i32> {
     let store = ctx.store()?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
+    if st.is_closed() {
+        bail!("change {change_id} is closed");
+    }
     let toplevel = gitio::toplevel(&ctx.cwd)?;
     let cmd = match (&gate, command) {
         (Some(name), None) => {
@@ -1470,6 +1871,12 @@ pub fn verify(
         VerifyResult::Fail
     };
 
+    // Gates are arbitrary external commands and may legitimately invoke arc.
+    // Acquire the append lock only after they return, then re-check closure.
+    let (_, _transition, st) = locked_state(&store, &change_id)?;
+    if st.is_closed() {
+        bail!("change {change_id} closed while verification was running");
+    }
     let ev = ctx.event(
         &store,
         &change_id,
@@ -1484,7 +1891,6 @@ pub fn verify(
         },
     );
     store.append_event(&ev)?;
-    let _ = st;
     println!("verification: {result:?} at {revision}");
     println!("event: {}", ev.event_id);
     Ok(if out.success() { 0 } else { 1 })
@@ -1492,7 +1898,7 @@ pub fn verify(
 
 pub fn hold(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let (change_id, _transition, st) = locked_state(&store, reference)?;
     if st.is_closed() {
         bail!("change {change_id} is closed");
     }
@@ -1504,7 +1910,7 @@ pub fn hold(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {
 
 pub fn release_hold(ctx: &Ctx, reference: &str, reason: Option<String>) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let (change_id, _transition, st) = locked_state(&store, reference)?;
     if st.hold.is_none() {
         bail!("no active hold on {change_id}");
     }
@@ -1522,14 +1928,38 @@ pub fn integrate(
     cleanup: bool,
 ) -> Result<i32> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let change_id = store.resolve_change(reference)?;
+    let initial = state::reduce(&store.load_events(&change_id)?)?;
+    let target = into.unwrap_or_else(|| initial.target_branch.clone());
+    // Cross-change order is always target, then change. This serializes the
+    // target worktree without allowing an integration/metadata lock cycle.
+    let target_lock = store.lock_target(&target)?;
+    let transition = store.lock_transition(&change_id)?;
+    let st = state::reduce(&store.load_events(&change_id)?)?;
     let report = ctx.report(&store, &st)?;
+    if let Some(claim) = &st.claim {
+        let timing = state::claim_timing_at(claim, chrono::Utc::now());
+        let caller = state::ClaimIdentity {
+            actor: ctx.actor.clone(),
+            harness: ctx.harness.clone().unwrap_or_default(),
+            session: ctx.session.clone().unwrap_or_default(),
+        };
+        if timing.active && claim.owner != caller {
+            eprintln!(
+                "warning: active foreign claim by {} via {}/{} at stage {}{}; integration remains lead-owned",
+                claim.owner.actor,
+                claim.owner.harness,
+                claim.owner.session,
+                timing.stage,
+                if timing.stale { " (stale)" } else { "" }
+            );
+        }
+    }
     if !report.integrate_ready {
         eprint!("{}", render::blocker_explanation(&st, &report));
         return Ok(status::check_exit_code(&report));
     }
 
-    let target = into.unwrap_or_else(|| st.target_branch.clone());
     // The approved head, merged by exact SHA so a branch moved after
     // approval can never smuggle unreviewed commits into the merge.
     let approved_head = st
@@ -1574,6 +2004,11 @@ pub fn integrate(
         },
     );
     store.append_event(&ev)?;
+    // The merge and closure event are the atomic integration transition.
+    // Retention and worktree cleanup are post-closure maintenance and may
+    // invoke Git hooks or other arc commands, so no state lock spans them.
+    drop(transition);
+    drop(target_lock);
     release_retention_refs(ctx, &change_id, Some(&merged))?;
 
     println!("integrated: {merged}");
@@ -1604,7 +2039,9 @@ pub fn close(
     superseded_by: Option<String>,
 ) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let change_id = store.resolve_change(reference)?;
+    let _transition = store.lock_transition(&change_id)?;
+    let st = state::reduce(&store.load_events(&change_id)?)?;
     if st.is_closed() {
         bail!("change {change_id} is already closed");
     }
@@ -1695,6 +2132,8 @@ mod tests {
             findings: BTreeMap::new(),
             verdicts: Vec::new(),
             verifications: Vec::new(),
+            claim: None,
+            retired_claim_ids: BTreeSet::new(),
             hold: None,
             closure: closure.map(|outcome| crate::state::ClosureState {
                 outcome,

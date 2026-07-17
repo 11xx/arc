@@ -227,6 +227,44 @@ pub fn commit_parents(cwd: &Path, rev: &str) -> Result<Vec<String>> {
     Ok(ids.collect())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitIdentity {
+    pub author_name: String,
+    pub author_email: String,
+    pub committer_name: String,
+    pub committer_email: String,
+}
+
+pub fn commit_identity(cwd: &Path, rev: &str) -> Result<CommitIdentity> {
+    let out = git(
+        cwd,
+        &["show", "-s", "--format=%an%x00%ae%x00%cn%x00%ce", rev],
+    )?;
+    let mut fields = out.split('\0');
+    let identity = CommitIdentity {
+        author_name: fields
+            .next()
+            .context("git omitted author name")?
+            .to_string(),
+        author_email: fields
+            .next()
+            .context("git omitted author email")?
+            .to_string(),
+        committer_name: fields
+            .next()
+            .context("git omitted committer name")?
+            .to_string(),
+        committer_email: fields
+            .next()
+            .context("git omitted committer email")?
+            .to_string(),
+    };
+    if fields.next().is_some() {
+        bail!("git returned unexpected commit identity fields");
+    }
+    Ok(identity)
+}
+
 pub fn commit_exists(cwd: &Path, oid: &str) -> Result<bool> {
     let object = format!("{oid}^{{commit}}");
     let out = Command::new("git")
