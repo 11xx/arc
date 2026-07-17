@@ -174,8 +174,10 @@ Arm two watchdog tiers at launch, always:
 
 Executors leave a start breadcrumb: `arc comment <change>` ("executor
 started, session <id>") immediately after reading the spec, so the ledger
-shows life between `begin` and the first `snapshot`. This is convention
-until the claim/heartbeat mechanism ships in the ledger.
+shows life between `begin` and the first `snapshot`. Leads can consume it with
+`arc events --follow --change <change>` or block on a milestone with
+`arc watch <change> --until snapshot|ready|integrated|closed --timeout <secs>`.
+This is convention until the claim/stage mechanism ships in the ledger.
 
 ## Correct and incorrect delegation
 
@@ -210,11 +212,13 @@ After tests pass, run `arc integrate --cleanup` and merge to master.
 The executor does not own that decision. It must stop after the snapshot so
 Claude can review the exact patchset.
 
-### Correct: `/arc` coordinates a dependency chain
+### Correct: `/arc` coordinates a chain
 
-The lead opens each change with its declared blocker, assigns local-only
-executor prompts, and starts downstream implementation only when the ledger
-reports it ready. Claude reviews and integrates each approved patchset.
+A **chain** is a tagged blocked-by series: ready siblings may run in parallel,
+while dependent members wait mechanically for their prerequisites. The lead
+opens each change with its declared blocker, assigns local-only executor
+prompts, and starts downstream implementation only when the ledger reports it
+ready. Claude reviews and integrates each approved patchset.
 
 ### Incorrect: `/arc` shares a checkout
 
