@@ -146,6 +146,16 @@ rejected as malformed rather than replayed through inference.
 Integration warns on an active foreign claim, including a stale one, but
 proceeds when the normal integration gates pass.
 
+## Execution roles
+
+Delegated sessions can bind an execution boundary with
+`ARC_ROLE=implementer|reviewer|lead` or the equivalent global `--role` flag.
+Implementers may not run `review`, `resolve`, `hold`, `release-hold`, `close`,
+or `integrate`; reviewers may not run `close` or `integrate`; leads retain full
+access. Role refusals happen before the command takes a lock or writes an
+event. An unset or empty role also retains full access for backward
+compatibility, exactly like `lead`.
+
 Dependencies are live ledger relationships: a blocker is satisfied when it
 closes as integrated, or when a superseding successor eventually closes as
 integrated (including through a transitive supersession chain). Abandoned
@@ -223,6 +233,7 @@ reported for separate transfer.
 | 6 | closed change, missing branch, or malformed state |
 | 7 | unresolved prerequisite changes |
 | 8 | claim or stage ownership/liveness conflict |
+| 9 | execution role refused the command |
 
 ## Build and gate declaration
 
