@@ -250,10 +250,19 @@ fn claim_lifecycle_reports_defaults_renewal_conflict_release_and_expiry() {
     assert_eq!(status["claim"]["stage_budgets"]["verifying"], 900);
     assert_eq!(status["claim"]["active"], true);
 
+    let original_claimed_at = status["claim"]["claimed_at"].clone();
+    thread::sleep(Duration::from_millis(5));
     repo.arc(&repo.root)
         .args(["claim", "claim-life"])
         .assert()
         .success();
+    let renewed: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "claim-life"]))).unwrap();
+    assert_eq!(renewed["claim"]["claimed_at"], original_claimed_at);
+    assert_ne!(
+        renewed["claim"]["last_activity_at"],
+        status["claim"]["last_activity_at"]
+    );
     let claim_events = stdout(repo.arc(&repo.root).args([
         "events",
         "--change",
@@ -353,7 +362,7 @@ fn stage_requires_owned_live_claim_and_tracks_heartbeats_advisory_order_and_snap
         .assert()
         .code(8);
     repo.arc(&repo.root)
-        .args(["claim", "stage-life"])
+        .args(["claim", "stage-life", "--ttl", "1s"])
         .assert()
         .success();
     repo.arc(&repo.root)
@@ -419,7 +428,17 @@ fn stage_requires_owned_live_claim_and_tracks_heartbeats_advisory_order_and_snap
         .args(["stage", "stage-life", "snapshotted"])
         .assert()
         .failure();
-    assert!(!opened_change_id(&opened).is_empty());
+
+    let change_id = opened_change_id(&opened);
+    age_event(&repo, &change_id, "patchset-added", 5);
+    repo.arc(&repo.root)
+        .args(["claim", "stage-life"])
+        .assert()
+        .success();
+    let restarted: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "stage-life"]))).unwrap();
+    assert_eq!(restarted["claim"]["stage"], "launch");
+    assert_eq!(restarted["claim"]["expired"], false);
 }
 
 #[test]

@@ -416,16 +416,16 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     harness,
                     session,
                 };
-                let progress = state
-                    .claim
-                    .as_ref()
-                    .filter(|claim| claim.owner == owner)
-                    .and_then(|claim| claim.progress.clone());
+                let renewal = state.claim.as_ref().filter(|claim| {
+                    claim.owner == owner && claim_timing_at(claim, ev.created_at).active
+                });
+                let claimed_at = renewal.map_or(ev.created_at, |claim| claim.claimed_at);
+                let progress = renewal.and_then(|claim| claim.progress.clone());
                 state.claim = Some(ClaimState {
                     owner,
                     ttl_seconds: *ttl_seconds,
                     stage_budgets: stage_budgets.clone(),
-                    claimed_at: ev.created_at,
+                    claimed_at,
                     last_activity_at: ev.created_at,
                     progress,
                 });

@@ -549,8 +549,12 @@ fn command_identity(ctx: &Ctx) -> Result<state::ClaimIdentity> {
 
 fn print_claim_conflict(message: &str, claim: &state::ClaimState, timing: &state::ClaimTiming) {
     eprintln!(
-        "claim conflict: {message}; owner={} harness={} session={} stage={}",
-        claim.owner.actor, claim.owner.harness, claim.owner.session, timing.stage
+        "claim conflict: {message}; owner={} harness={} session={} stage={} expires={}",
+        claim.owner.actor,
+        claim.owner.harness,
+        claim.owner.session,
+        timing.stage,
+        timing.expires_at
     );
 }
 
