@@ -49,7 +49,7 @@ arc begin radio-refill-fix --title "Keep radio refill from restarting playback" 
   --tag '#radio' --blocked-by radio-foundation
 # → branch arc/radio-refill-fix + worktree ~/.worktrees/<repo>-radio-refill-fix
 
-arc is-blocked radio-refill-fix        # 1 while a prerequisite is unresolved
+arc is-blocked radio-refill-fix        # 0 ready, 1 blocked, 2 lookup/ledger error
 arc blocker-status radio-refill-fix   # structured dependency detail
 
 cd ~/.worktrees/<repo>-radio-refill-fix
@@ -82,8 +82,11 @@ JSON. `arc show <change>` renders the same actionable state as Markdown.
 
 Dependencies are live ledger relationships: a blocker is satisfied only when
 it closes as integrated. Abandoned, superseded, missing, or still-open changes
-continue to block. `arc check` and `arc integrate` enforce this boundary. Add
-or remove dependencies and tags append-only after creation:
+continue to block. `arc check` and `arc integrate` enforce this boundary.
+`arc is-blocked` has its own polling contract: exit 0 means ready, 1 means
+blocked, and 2 means the lookup or ledger read failed, so automation must stop
+rather than keep waiting. Add or remove dependencies and tags append-only after
+creation:
 
 ```sh
 arc metadata radio-refill-fix --blocked-by radio-storage --tag '#radio'

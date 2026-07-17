@@ -169,7 +169,7 @@ enum Cmd {
     },
     /// Report whether declared prerequisite changes have integrated
     BlockerStatus { change: String },
-    /// Exit 1 while prerequisite changes are unresolved, otherwise exit 0
+    /// Dependency probe: exit 0 ready, 1 blocked, 2 on lookup/ledger errors
     IsBlocked { change: String },
     /// Export one change as a deterministic, versioned JSON bundle
     Export {
@@ -421,7 +421,13 @@ fn run(cli: Cli) -> Result<i32> {
             commands::blocker_status_cmd(&ctx, &change)?;
             Ok(0)
         }
-        Cmd::IsBlocked { change } => commands::is_blocked(&ctx, &change),
+        Cmd::IsBlocked { change } => match commands::is_blocked(&ctx, &change) {
+            Ok(code) => Ok(code),
+            Err(error) => {
+                eprintln!("error: {error:#}");
+                Ok(2)
+            }
+        },
         Cmd::Export { change, output } => {
             commands::export_bundle(&ctx, &change, &output)?;
             Ok(0)

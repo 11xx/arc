@@ -183,6 +183,11 @@ fn blocker_chain_transitions_and_suggests_ready_alternatives() {
         .assert()
         .code(1);
     repo.arc(&repo.root)
+        .args(["is-blocked", "does-not-exist"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("no change matches"));
+    repo.arc(&repo.root)
         .args(["check", "chain-b"])
         .assert()
         .code(7);
