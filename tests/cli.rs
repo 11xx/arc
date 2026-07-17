@@ -1,5 +1,6 @@
 use assert_cmd::Command as AssertCommand;
 use predicates::prelude::PredicateBooleanExt;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -128,6 +129,10 @@ fn json_file_bytes(value: &serde_json::Value) -> Vec<u8> {
 }
 
 fn spawn_arc(repo: &Repo, cwd: &Path, args: &[&str]) -> Child {
+    spawn_arc_with_session(repo, cwd, args, "session-a")
+}
+
+fn spawn_arc_with_session(repo: &Repo, cwd: &Path, args: &[&str], session: &str) -> Child {
     let binary = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo should provide arc binary");
     Command::new(binary)
         .args(args)
@@ -135,14 +140,24 @@ fn spawn_arc(repo: &Repo, cwd: &Path, args: &[&str]) -> Child {
         .env("HOME", &repo.home)
         .env("ARC_ACTOR", "tester")
         .env("ARC_HARNESS", "test")
-        .env("ARC_SESSION", "session-a")
+        .env("ARC_SESSION", session)
         .env_remove("ARC_DATA_DIR")
         .env_remove("ARC_DATA_ROOT")
         .env_remove("ARC_WORKTREES_DIR")
         .env_remove("AI_HOME")
         .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .unwrap()
+}
+
+fn refresh_bundle_checksum(bundle: &mut serde_json::Value) {
+    let mut digest = Sha256::new();
+    for event in bundle["events"].as_array().unwrap() {
+        digest.update(serde_json::to_vec(event).unwrap());
+        digest.update(b"\n");
+    }
+    bundle["events_sha256"] = serde_json::Value::String(hex::encode(digest.finalize()));
 }
 
 fn opened_change_id(output: &str) -> String {
@@ -194,14 +209,14 @@ fn age_event(repo: &Repo, change_id: &str, event_type: &str, seconds: i64) {
 }
 
 fn wait_for_exit(child: &mut Child) -> ExitStatus {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             return status;
         }
         if Instant::now() >= deadline {
             child.kill().unwrap();
-            panic!("arc subprocess did not exit within two seconds");
+            panic!("arc subprocess did not exit within five seconds");
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -352,6 +367,130 @@ fn claim_duration_budget_and_identity_validation_is_strict() {
 }
 
 #[test]
+fn concurrent_claims_have_one_winner_and_stage_release_replay_stays_readable() {
+    let repo = Repo::new();
+    let opened = stdout(repo.arc(&repo.root).args(["begin", "claim-race"]));
+    let change_id = opened_change_id(&opened);
+
+    let mut contenders = (0..16)
+        .map(|index| {
+            spawn_arc_with_session(
+                &repo,
+                &repo.root,
+                &["claim", "claim-race"],
+                &format!("contender-{index}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let statuses = contenders.iter_mut().map(wait_for_exit).collect::<Vec<_>>();
+    assert_eq!(
+        statuses.iter().filter(|status| status.success()).count(),
+        1,
+        "exactly one serialized acquisition succeeds"
+    );
+    assert!(statuses
+        .iter()
+        .filter(|status| !status.success())
+        .all(|status| status.code() == Some(8)));
+    let claim_events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "claim-race",
+        "--type",
+        "claim-set",
+    ]));
+    assert_eq!(claim_events.lines().count(), 1);
+    assert!(repo
+        .root
+        .join(".git/arc/locks")
+        .join(format!("{change_id}.lock"))
+        .is_file());
+
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "lead")
+        .args(["release-claim", "claim-race"])
+        .assert()
+        .success();
+    for iteration in 0..12 {
+        repo.arc(&repo.root)
+            .args(["claim", "claim-race"])
+            .assert()
+            .success();
+        let mut stage = spawn_arc_with_session(
+            &repo,
+            &repo.root,
+            &["stage", "claim-race", "started"],
+            "session-a",
+        );
+        let mut release = spawn_arc_with_session(
+            &repo,
+            &repo.root,
+            &["release-claim", "claim-race"],
+            &format!("lead-{iteration}"),
+        );
+        let stage_status = wait_for_exit(&mut stage);
+        let release_status = wait_for_exit(&mut release);
+        assert!(release_status.success());
+        assert!(stage_status.success() || stage_status.code() == Some(8));
+        repo.arc(&repo.root)
+            .args(["status", "claim-race"])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("\"claim\": null"));
+    }
+}
+
+#[test]
+fn claim_persists_normalized_identity_and_handles_maximum_ttl() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "claim-normalized"]));
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "  Executor  ")
+        .env("ARC_HARNESS", "  codex  ")
+        .env("ARC_SESSION", "  thread-1  ")
+        .args(["claim", "claim-normalized", "--ttl", "9223372036854775807s"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "  Executor  ")
+        .env("ARC_HARNESS", "  codex  ")
+        .env("ARC_SESSION", "  thread-1  ")
+        .args(["stage", "claim-normalized", "started"])
+        .assert()
+        .success();
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "claim-normalized"]),
+    ))
+    .unwrap();
+    assert_eq!(status["claim"]["owner"]["actor"], "Executor");
+    assert_eq!(status["claim"]["owner"]["harness"], "codex");
+    assert_eq!(status["claim"]["owner"]["session"], "thread-1");
+    assert_eq!(status["claim"]["active"], true);
+    assert_eq!(
+        status["claim"]["ttl_seconds"],
+        serde_json::Value::from(i64::MAX)
+    );
+
+    let transitions = stdout(
+        repo.arc(&repo.root)
+            .args(["events", "--change", "claim-normalized"]),
+    );
+    for event in transitions.lines().filter_map(|line| {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        matches!(
+            event["event_type"].as_str(),
+            Some("claim-set" | "stage-set")
+        )
+        .then_some(event)
+    }) {
+        assert_eq!(event["actor"], "Executor");
+        assert_eq!(event["harness"], "codex");
+        assert_eq!(event["session"], "thread-1");
+    }
+}
+
+#[test]
 fn stage_requires_owned_live_claim_and_tracks_heartbeats_advisory_order_and_snapshot() {
     let repo = Repo::new();
     let opened = stdout(repo.arc(&repo.root).args(["begin", "stage-life"]));
@@ -444,6 +583,32 @@ fn stage_requires_owned_live_claim_and_tracks_heartbeats_advisory_order_and_snap
 #[test]
 fn stale_claims_are_time_derived_and_watch_until_stalled_reaches() {
     let repo = Repo::new();
+
+    stdout(repo.arc(&repo.root).args(["begin", "wall-clock-stall"]));
+    repo.arc(&repo.root)
+        .args(["claim", "wall-clock-stall", "--stage-budget", "launch=1s"])
+        .assert()
+        .success();
+    let started = Instant::now();
+    let mut watcher = spawn_arc(
+        &repo,
+        &repo.root,
+        &[
+            "watch",
+            "wall-clock-stall",
+            "--until",
+            "stalled",
+            "--timeout",
+            "4",
+        ],
+    );
+    assert!(wait_for_exit(&mut watcher).success());
+    assert_eq!(child_stdout(&mut watcher), "reached: stalled\n");
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "a fresh claim must become stalled through wall-clock passage"
+    );
+
     let launch = stdout(repo.arc(&repo.root).args(["begin", "stale-launch"]));
     let launch_id = opened_change_id(&launch);
     repo.arc(&repo.root)
@@ -2160,6 +2325,204 @@ fn import_conflict_writes_nothing() {
             "aborted: no events or refs written",
         ));
     assert_eq!(fs::read(event_path).unwrap(), tampered_bytes);
+}
+
+#[test]
+fn import_rejects_malformed_known_events_before_writing() {
+    let source = Repo::new();
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["begin", "move-malformed", "--no-worktree"]),
+    );
+    source
+        .arc(&source.root)
+        .args(["claim", "move-malformed"])
+        .assert()
+        .success();
+    source
+        .arc(&source.root)
+        .args(["stage", "move-malformed", "started"])
+        .assert()
+        .success();
+    let bundle_path = source.home.join("malformed.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            "move-malformed",
+            "--output",
+            bundle_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let mut bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
+    let original_bundle = bundle.clone();
+    let claim = bundle["events"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|event| event["event_type"] == "claim-set")
+        .unwrap();
+    claim["ttl_seconds"] = serde_json::Value::String("not-seconds".into());
+    refresh_bundle_checksum(&mut bundle);
+    fs::write(&bundle_path, json_file_bytes(&bundle)).unwrap();
+
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle_path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("known event"))
+        .stderr(predicates::str::contains("malformed"));
+    assert!(!destination.root.join(".git/arc").exists());
+
+    let mut ownerless = original_bundle;
+    let stage = ownerless["events"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|event| event["event_type"] == "stage-set")
+        .unwrap();
+    stage.as_object_mut().unwrap().remove("session");
+    refresh_bundle_checksum(&mut ownerless);
+    let ownerless_path = source.home.join("ownerless-stage.json");
+    fs::write(&ownerless_path, json_file_bytes(&ownerless)).unwrap();
+    let ownerless_destination = Repo::new();
+    ownerless_destination
+        .arc(&ownerless_destination.root)
+        .args(["import", ownerless_path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("has no session"));
+    assert!(!ownerless_destination.root.join(".git/arc").exists());
+}
+
+#[test]
+fn import_replays_combined_history_before_writing() {
+    let source = Repo::new();
+    let opened = stdout(
+        source
+            .arc(&source.root)
+            .args(["begin", "move-combined", "--no-worktree"]),
+    );
+    let change_id = opened_change_id(&opened);
+    let bundle_path = source.home.join("combined.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            "move-combined",
+            "--output",
+            bundle_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
+    let bundled_open = bundle["events"][0].clone();
+    let bundled_event_id = bundled_open["event_id"].as_str().unwrap().to_string();
+
+    let destination = Repo::new();
+    stdout(
+        destination
+            .arc(&destination.root)
+            .args(["begin", "seed-store", "--no-worktree"]),
+    );
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(destination.root.join(".git/arc/config.json")).unwrap())
+            .unwrap();
+    let mut local_open = bundled_open;
+    local_open["event_id"] = serde_json::Value::String("00000000000000000000000000".into());
+    local_open["repository_id"] = config["repository_id"].clone();
+    let local_dir = event_dir(&destination, &change_id);
+    fs::create_dir_all(&local_dir).unwrap();
+    fs::write(
+        local_dir.join("00000000000000000000000000.json"),
+        json_file_bytes(&local_open),
+    )
+    .unwrap();
+
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle_path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "combined local and bundled known events are not replayable",
+        ));
+    assert!(!local_dir.join(format!("{bundled_event_id}.json")).exists());
+}
+
+#[test]
+fn stale_imported_stage_after_local_release_does_not_poison_replay() {
+    let source = Repo::new();
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["begin", "move-stale-stage", "--no-worktree"]),
+    );
+    source
+        .arc(&source.root)
+        .args(["claim", "move-stale-stage"])
+        .assert()
+        .success();
+    let initial = source.home.join("initial.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            "move-stale-stage",
+            "--output",
+            initial.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", initial.to_str().unwrap()])
+        .assert()
+        .success();
+    destination
+        .arc(&destination.root)
+        .env("ARC_SESSION", "lead")
+        .args(["release-claim", "move-stale-stage"])
+        .assert()
+        .success();
+    thread::sleep(Duration::from_millis(5));
+    source
+        .arc(&source.root)
+        .args(["stage", "move-stale-stage", "started"])
+        .assert()
+        .success();
+    let updated = source.home.join("updated.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            "move-stale-stage",
+            "--output",
+            updated.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    destination
+        .arc(&destination.root)
+        .args(["import", updated.to_str().unwrap()])
+        .assert()
+        .success();
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        destination
+            .arc(&destination.root)
+            .args(["status", "move-stale-stage"]),
+    ))
+    .unwrap();
+    assert!(status["claim"].is_null());
 }
 
 #[test]

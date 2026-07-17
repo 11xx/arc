@@ -64,7 +64,10 @@ pub struct ClaimTiming {
 /// helper so recorded events remain deterministic while wall-clock views do
 /// not drift into subtly different definitions.
 pub fn claim_timing_at(claim: &ClaimState, now: DateTime<Utc>) -> ClaimTiming {
-    let expires_at = claim.last_activity_at + seconds_delta(claim.ttl_seconds);
+    let expires_at = claim
+        .last_activity_at
+        .checked_add_signed(seconds_delta(claim.ttl_seconds))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC);
     let expired = now >= expires_at;
     let (stage, stage_started_at, budget_seconds) = match &claim.progress {
         Some(progress) => (
@@ -416,6 +419,16 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     harness,
                     session,
                 };
+                // Histories produced before transition locking (or merged by
+                // import) may contain two acquisitions that both observed no
+                // live owner. The first replayed owner wins until release or
+                // expiry; the stale contender remains observable in the raw
+                // ledger without taking over the typed view.
+                if state.claim.as_ref().is_some_and(|claim| {
+                    claim.owner != owner && claim_timing_at(claim, ev.created_at).active
+                }) {
+                    continue;
+                }
                 let renewal = state.claim.as_ref().filter(|claim| {
                     claim.owner == owner && claim_timing_at(claim, ev.created_at).active
                 });
@@ -432,18 +445,20 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             }
             Payload::ClaimReleased => state.claim = None,
             Payload::StageSet { stage, note } => {
-                let claim = state
-                    .claim
-                    .as_mut()
-                    .ok_or_else(|| anyhow::anyhow!("stage event {} has no claim", ev.event_id))?;
+                let Some(claim) = state.claim.as_mut() else {
+                    // A concurrently appended release can sort before an
+                    // already-authorized stage event. Keep the raw transition,
+                    // but do not let it make all subsequent typed replay fail.
+                    continue;
+                };
                 if claim.owner.actor != ev.actor
                     || ev.harness.as_deref() != Some(claim.owner.harness.as_str())
                     || ev.session.as_deref() != Some(claim.owner.session.as_str())
                 {
-                    bail!("stage event {} is not owned by the live claim", ev.event_id);
+                    continue;
                 }
                 if !claim_timing_at(claim, ev.created_at).active {
-                    bail!("stage event {} follows an expired claim", ev.event_id);
+                    continue;
                 }
                 claim.last_activity_at = ev.created_at;
                 claim.progress = Some(StageProgress {

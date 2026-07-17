@@ -4,7 +4,7 @@ use crate::model::Event;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::fs;
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +20,17 @@ struct StoreConfig {
 pub struct Store {
     pub root: PathBuf,
     pub repository_id: String,
+}
+
+/// A process-scoped transition guard. The lock file is intentionally
+/// persistent: the OS releases the advisory lock when this handle is dropped
+/// or the process exits, so a crash cannot leave a stale ownership marker.
+pub struct TransitionLock(File);
+
+impl Drop for TransitionLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 impl Store {
@@ -85,6 +96,24 @@ impl Store {
 
     fn events_dir(&self, change_id: &str) -> PathBuf {
         self.changes_dir().join(change_id).join("events")
+    }
+
+    /// Serialize state-derived transitions for one change across processes.
+    pub fn lock_transition(&self, change_id: &str) -> Result<TransitionLock> {
+        ids::validate_id_component(change_id)?;
+        let dir = self.root.join("locks");
+        create_private_dir_all(&dir)?;
+        let path = dir.join(format!("{change_id}.lock"));
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("cannot open transition lock {}", path.display()))?;
+        file.lock()
+            .with_context(|| format!("cannot lock transition {}", path.display()))?;
+        Ok(TransitionLock(file))
     }
 
     pub fn list_change_ids(&self) -> Result<Vec<String>> {
