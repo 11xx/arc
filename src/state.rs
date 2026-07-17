@@ -1,5 +1,6 @@
 use crate::model::*;
 use anyhow::{bail, Result};
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -9,7 +10,98 @@ pub struct Patchset {
     pub base: String,
     pub head: String,
     pub merge_base: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub author: Option<GitIdentity>,
+    pub committer: Option<GitIdentity>,
+    pub claim_actor: Option<String>,
+    pub provenance_mismatch: Option<bool>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GitIdentity {
+    pub name: String,
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClaimIdentity {
+    pub actor: String,
+    pub harness: String,
+    pub session: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StageProgress {
+    pub stage: ClaimStage,
+    pub note: Option<String>,
+    pub changed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaimState {
+    pub owner: ClaimIdentity,
+    pub ttl_seconds: u64,
+    pub stage_budgets: BTreeMap<StageBudget, u64>,
+    pub claimed_at: DateTime<Utc>,
+    pub last_activity_at: DateTime<Utc>,
+    pub progress: Option<StageProgress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimTiming {
+    pub active: bool,
+    pub expired: bool,
+    pub stale: bool,
+    pub expires_at: DateTime<Utc>,
+    pub stage: String,
+    pub stage_started_at: DateTime<Utc>,
+    pub age_seconds: u64,
+    pub budget_seconds: Option<u64>,
+}
+
+/// Derive every clock-sensitive claim property from one injected instant.
+/// Command checks, status, alternatives, watch, and replay all share this
+/// helper so recorded events remain deterministic while wall-clock views do
+/// not drift into subtly different definitions.
+pub fn claim_timing_at(claim: &ClaimState, now: DateTime<Utc>) -> ClaimTiming {
+    let expires_at = claim.last_activity_at + seconds_delta(claim.ttl_seconds);
+    let expired = now >= expires_at;
+    let (stage, stage_started_at, budget_seconds) = match &claim.progress {
+        Some(progress) => (
+            progress.stage.as_str().to_string(),
+            progress.changed_at,
+            progress
+                .stage
+                .budget_key()
+                .and_then(|key| claim.stage_budgets.get(&key).copied()),
+        ),
+        None => (
+            StageBudget::Launch.as_str().to_string(),
+            claim.claimed_at,
+            claim.stage_budgets.get(&StageBudget::Launch).copied(),
+        ),
+    };
+    let age_seconds = elapsed_seconds(stage_started_at, now);
+    let stale = !expired && budget_seconds.is_some_and(|budget| age_seconds > budget);
+    ClaimTiming {
+        active: !expired,
+        expired,
+        stale,
+        expires_at,
+        stage,
+        stage_started_at,
+        age_seconds,
+        budget_seconds,
+    }
+}
+
+fn elapsed_seconds(since: DateTime<Utc>, now: DateTime<Utc>) -> u64 {
+    now.signed_duration_since(since).num_seconds().max(0) as u64
+}
+
+fn seconds_delta(seconds: u64) -> TimeDelta {
+    let seconds = i64::try_from(seconds).unwrap_or(i64::MAX);
+    TimeDelta::try_seconds(seconds).unwrap_or(TimeDelta::MAX)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -135,6 +227,7 @@ pub struct ChangeState {
     pub findings: BTreeMap<String, FindingState>,
     pub verdicts: Vec<VerdictEntry>,
     pub verifications: Vec<VerificationEntry>,
+    pub claim: Option<ClaimState>,
     pub hold: Option<String>,
     pub closure: Option<ClosureState>,
 }
@@ -221,6 +314,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     findings: BTreeMap::new(),
                     verdicts: Vec::new(),
                     verifications: Vec::new(),
+                    claim: None,
                     hold: None,
                     closure: None,
                 },
@@ -268,13 +362,96 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 base,
                 head,
                 merge_base,
-            } => state.patchsets.push(Patchset {
-                id: patchset_id.clone(),
-                base: base.clone(),
-                head: head.clone(),
-                merge_base: merge_base.clone(),
-                created_at: ev.created_at,
-            }),
+                author_name,
+                author_email,
+                committer_name,
+                committer_email,
+            } => {
+                let claim_actor = state.claim.as_ref().and_then(|claim| {
+                    claim_timing_at(claim, ev.created_at)
+                        .active
+                        .then(|| claim.owner.actor.clone())
+                });
+                if claim_actor.is_some() {
+                    let claim = state.claim.as_mut().expect("claim was present");
+                    claim.last_activity_at = ev.created_at;
+                    claim.progress = Some(StageProgress {
+                        stage: ClaimStage::Snapshotted,
+                        note: None,
+                        changed_at: ev.created_at,
+                    });
+                }
+                let author = git_identity(author_name, author_email);
+                let committer = git_identity(committer_name, committer_email);
+                let provenance_mismatch = claim_actor
+                    .as_ref()
+                    .zip(author.as_ref())
+                    .map(|(actor, author)| actor != &author.name);
+                state.patchsets.push(Patchset {
+                    id: patchset_id.clone(),
+                    base: base.clone(),
+                    head: head.clone(),
+                    merge_base: merge_base.clone(),
+                    author,
+                    committer,
+                    claim_actor,
+                    provenance_mismatch,
+                    created_at: ev.created_at,
+                });
+            }
+            Payload::ClaimSet {
+                ttl_seconds,
+                stage_budgets,
+            } => {
+                let harness = ev
+                    .harness
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("claim event {} has no harness", ev.event_id))?;
+                let session = ev
+                    .session
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("claim event {} has no session", ev.event_id))?;
+                let owner = ClaimIdentity {
+                    actor: ev.actor.clone(),
+                    harness,
+                    session,
+                };
+                let progress = state
+                    .claim
+                    .as_ref()
+                    .filter(|claim| claim.owner == owner)
+                    .and_then(|claim| claim.progress.clone());
+                state.claim = Some(ClaimState {
+                    owner,
+                    ttl_seconds: *ttl_seconds,
+                    stage_budgets: stage_budgets.clone(),
+                    claimed_at: ev.created_at,
+                    last_activity_at: ev.created_at,
+                    progress,
+                });
+            }
+            Payload::ClaimReleased => state.claim = None,
+            Payload::StageSet { stage, note } => {
+                let claim = state
+                    .claim
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("stage event {} has no claim", ev.event_id))?;
+                if claim.owner.actor != ev.actor
+                    || ev.harness.as_deref() != Some(claim.owner.harness.as_str())
+                    || ev.session.as_deref() != Some(claim.owner.session.as_str())
+                {
+                    bail!("stage event {} is not owned by the live claim", ev.event_id);
+                }
+                if !claim_timing_at(claim, ev.created_at).active {
+                    bail!("stage event {} follows an expired claim", ev.event_id);
+                }
+                claim.last_activity_at = ev.created_at;
+                claim.progress = Some(StageProgress {
+                    stage: *stage,
+                    note: note.clone(),
+                    changed_at: ev.created_at,
+                });
+            }
             Payload::CommentAdded {
                 body,
                 patchset_id,
@@ -414,10 +591,17 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
     Ok(state)
 }
 
+fn git_identity(name: &Option<String>, email: &Option<String>) -> Option<GitIdentity> {
+    name.as_ref().map(|name| GitIdentity {
+        name: name.clone(),
+        email: email.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
 
     fn ev(change: &str, payload: Payload) -> Event {
         Event {
@@ -547,5 +731,64 @@ mod tests {
         assert!(reduce(&events).unwrap().hold.is_some());
         events.push(ev(change, Payload::HoldReleased { reason: None }));
         assert!(reduce(&events).unwrap().hold.is_none());
+    }
+
+    #[test]
+    fn claim_timing_distinguishes_stale_expired_and_unbudgeted_stages() {
+        let claimed_at = Utc.with_ymd_and_hms(2026, 7, 17, 12, 0, 0).unwrap();
+        let budgets = [
+            (StageBudget::Launch, 60),
+            (StageBudget::Started, 300),
+            (StageBudget::SpecRead, 120),
+            (StageBudget::Implementing, 1_800),
+            (StageBudget::Verifying, 900),
+        ]
+        .into_iter()
+        .collect();
+        let mut claim = ClaimState {
+            owner: ClaimIdentity {
+                actor: "executor".into(),
+                harness: "codex".into(),
+                session: "session".into(),
+            },
+            ttl_seconds: 7_200,
+            stage_budgets: budgets,
+            claimed_at,
+            last_activity_at: claimed_at,
+            progress: None,
+        };
+
+        let launch = claim_timing_at(&claim, claimed_at + TimeDelta::seconds(61));
+        assert!(launch.active);
+        assert!(launch.stale);
+        assert_eq!(launch.stage, "launch");
+        assert_eq!(launch.age_seconds, 61);
+        assert_eq!(launch.budget_seconds, Some(60));
+
+        claim.progress = Some(StageProgress {
+            stage: ClaimStage::Implementing,
+            note: None,
+            changed_at: claimed_at + TimeDelta::seconds(10),
+        });
+        claim.last_activity_at = claimed_at + TimeDelta::seconds(1_000);
+        let implementing = claim_timing_at(&claim, claimed_at + TimeDelta::seconds(1_811));
+        assert!(implementing.active);
+        assert!(implementing.stale);
+        assert_eq!(implementing.age_seconds, 1_801);
+
+        claim.progress = Some(StageProgress {
+            stage: ClaimStage::BlockedOn,
+            note: Some("waiting".into()),
+            changed_at: claimed_at,
+        });
+        let blocked = claim_timing_at(&claim, claimed_at + TimeDelta::seconds(5_000));
+        assert!(blocked.active);
+        assert!(!blocked.stale);
+        assert_eq!(blocked.budget_seconds, None);
+
+        let expired = claim_timing_at(&claim, claimed_at + TimeDelta::seconds(8_201));
+        assert!(expired.expired);
+        assert!(!expired.active);
+        assert!(!expired.stale);
     }
 }

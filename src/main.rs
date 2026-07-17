@@ -160,7 +160,7 @@ enum Cmd {
         #[arg(long = "remove-tag")]
         remove_tag: Vec<String>,
     },
-    /// Machine-readable status report (the versioned arc-status/2 schema)
+    /// Machine-readable status report (the versioned arc-status/3 schema)
     Status {
         change: String,
         /// Accepted for compatibility; status output is always JSON
@@ -213,6 +213,26 @@ enum Cmd {
         /// Check every change carrying all supplied tags
         #[arg(long)]
         tag: Vec<String>,
+    },
+    /// Acquire or renew an advisory executor claim
+    Claim {
+        change: String,
+        /// Lease duration (positive integer with s, m, or h suffix; default 2h)
+        #[arg(long)]
+        ttl: Option<String>,
+        /// Override one stage budget as <name>=<duration> (repeatable)
+        #[arg(long = "stage-budget")]
+        stage_budget: Vec<String>,
+    },
+    /// Release the current advisory executor claim
+    ReleaseClaim { change: String },
+    /// Record typed executor progress (requires an owned live claim)
+    Stage {
+        change: String,
+        #[arg(value_enum)]
+        stage: commands::StageArg,
+        #[arg(long)]
+        note: Option<String>,
     },
     /// Record the current branch head as a new patchset
     Snapshot {
@@ -468,6 +488,17 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Import { input, dry_run } => commands::import_bundle(&ctx, &input, dry_run),
         Cmd::Check { change, tag } => commands::check_selection(&ctx, change.as_deref(), tag),
+        Cmd::Claim {
+            change,
+            ttl,
+            stage_budget,
+        } => commands::claim(&ctx, &change, ttl, stage_budget),
+        Cmd::ReleaseClaim { change } => commands::release_claim(&ctx, &change),
+        Cmd::Stage {
+            change,
+            stage,
+            note,
+        } => commands::stage(&ctx, &change, stage, note),
         Cmd::Snapshot { change, base } => {
             commands::snapshot(&ctx, &change, base)?;
             Ok(0)

@@ -41,6 +41,7 @@ impl Repo {
             .env("HOME", &self.home)
             .env("ARC_ACTOR", "tester")
             .env("ARC_HARNESS", "test")
+            .env("ARC_SESSION", "session-a")
             .env_remove("ARC_DATA_DIR")
             .env_remove("ARC_DATA_ROOT")
             .env_remove("ARC_WORKTREES_DIR")
@@ -134,6 +135,7 @@ fn spawn_arc(repo: &Repo, cwd: &Path, args: &[&str]) -> Child {
         .env("HOME", &repo.home)
         .env("ARC_ACTOR", "tester")
         .env("ARC_HARNESS", "test")
+        .env("ARC_SESSION", "session-a")
         .env_remove("ARC_DATA_DIR")
         .env_remove("ARC_DATA_ROOT")
         .env_remove("ARC_WORKTREES_DIR")
@@ -141,6 +143,54 @@ fn spawn_arc(repo: &Repo, cwd: &Path, args: &[&str]) -> Child {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap()
+}
+
+fn opened_change_id(output: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("change: "))
+        .expect("begin output should contain a change id")
+        .to_string()
+}
+
+fn event_dir(repo: &Repo, change_id: &str) -> PathBuf {
+    repo.root
+        .join(".git/arc/changes")
+        .join(change_id)
+        .join("events")
+}
+
+fn rewrite_event(
+    repo: &Repo,
+    change_id: &str,
+    event_type: &str,
+    mut update: impl FnMut(&mut serde_json::Value),
+) {
+    let mut paths = fs::read_dir(event_dir(repo, change_id))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    paths.sort();
+    let path = paths
+        .into_iter()
+        .rev()
+        .find(|path| {
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            value["event_type"] == event_type
+        })
+        .expect("event type should exist");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    update(&mut value);
+    fs::write(path, json_file_bytes(&value)).unwrap();
+}
+
+fn age_event(repo: &Repo, change_id: &str, event_type: &str, seconds: i64) {
+    rewrite_event(repo, change_id, event_type, |event| {
+        event["created_at"] = serde_json::Value::String(
+            (chrono::Utc::now() - chrono::Duration::seconds(seconds)).to_rfc3339(),
+        );
+    });
 }
 
 fn wait_for_exit(child: &mut Child) -> ExitStatus {
@@ -166,6 +216,390 @@ fn child_stdout(child: &mut Child) -> String {
         .read_to_string(&mut output)
         .unwrap();
     output
+}
+
+#[test]
+fn claim_lifecycle_reports_defaults_renewal_conflict_release_and_expiry() {
+    let repo = Repo::new();
+    let opened = stdout(repo.arc(&repo.root).args(["begin", "claim-life"]));
+    let change_id = opened_change_id(&opened);
+
+    repo.arc(&repo.root)
+        .args([
+            "claim",
+            "claim-life",
+            "--ttl",
+            "5m",
+            "--stage-budget",
+            "implementing=1m",
+        ])
+        .assert()
+        .success();
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "claim-life"]))).unwrap();
+    assert_eq!(status["schema"], "arc-status/3");
+    assert_eq!(status["claim"]["owner"]["actor"], "tester");
+    assert_eq!(status["claim"]["owner"]["harness"], "test");
+    assert_eq!(status["claim"]["owner"]["session"], "session-a");
+    assert_eq!(status["claim"]["ttl_seconds"], 300);
+    assert_eq!(status["claim"]["stage"], "launch");
+    assert_eq!(status["claim"]["stage_budgets"]["launch"], 60);
+    assert_eq!(status["claim"]["stage_budgets"]["started"], 300);
+    assert_eq!(status["claim"]["stage_budgets"]["spec-read"], 120);
+    assert_eq!(status["claim"]["stage_budgets"]["implementing"], 60);
+    assert_eq!(status["claim"]["stage_budgets"]["verifying"], 900);
+    assert_eq!(status["claim"]["active"], true);
+
+    repo.arc(&repo.root)
+        .args(["claim", "claim-life"])
+        .assert()
+        .success();
+    let claim_events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "claim-life",
+        "--type",
+        "claim-set",
+    ]));
+    assert_eq!(claim_events.lines().count(), 2, "same owner renews");
+
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "session-b")
+        .args(["claim", "claim-life"])
+        .assert()
+        .code(8)
+        .stderr(predicates::str::contains("owner=tester"))
+        .stderr(predicates::str::contains("session=session-a"))
+        .stderr(predicates::str::contains("stage=launch"));
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "lead-session")
+        .args(["release-claim", "claim-life"])
+        .assert()
+        .success();
+    let released: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "claim-life"]))).unwrap();
+    assert!(released["claim"].is_null());
+    repo.arc(&repo.root)
+        .args(["release-claim", "claim-life"])
+        .assert()
+        .code(8);
+
+    repo.arc(&repo.root)
+        .args(["claim", "claim-life", "--ttl", "1s"])
+        .assert()
+        .success();
+    age_event(&repo, &change_id, "claim-set", 5);
+    let expired: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "claim-life"]))).unwrap();
+    assert_eq!(expired["claim"]["active"], false);
+    assert_eq!(expired["claim"]["expired"], true);
+    assert_eq!(expired["claim"]["stale"], false);
+    repo.arc(&repo.root)
+        .args(["stage", "claim-life", "started"])
+        .assert()
+        .code(8);
+    repo.arc(&repo.root)
+        .args(["release-claim", "claim-life"])
+        .assert()
+        .code(8);
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "session-b")
+        .args(["claim", "claim-life"])
+        .assert()
+        .success();
+    let reclaimed: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "claim-life"]))).unwrap();
+    assert_eq!(reclaimed["claim"]["owner"]["session"], "session-b");
+}
+
+#[test]
+fn claim_duration_budget_and_identity_validation_is_strict() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "claim-input"]));
+    for invalid in ["0s", "5d", "s", "-1m", "18446744073709551615h"] {
+        repo.arc(&repo.root)
+            .args(["claim", "claim-input", "--ttl", invalid])
+            .assert()
+            .failure();
+    }
+    for invalid in ["unknown=1m", "implementing", "implementing=0s"] {
+        repo.arc(&repo.root)
+            .args(["claim", "claim-input", "--stage-budget", invalid])
+            .assert()
+            .failure();
+    }
+    repo.arc(&repo.root)
+        .env_remove("ARC_SESSION")
+        .args(["claim", "claim-input"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("nonempty ARC_SESSION"));
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "")
+        .args(["claim", "claim-input"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("nonempty ARC_HARNESS"));
+}
+
+#[test]
+fn stage_requires_owned_live_claim_and_tracks_heartbeats_advisory_order_and_snapshot() {
+    let repo = Repo::new();
+    let opened = stdout(repo.arc(&repo.root).args(["begin", "stage-life"]));
+    let worktree = repo.home.join(".worktrees/repo-stage-life");
+
+    repo.arc(&repo.root)
+        .args(["stage", "stage-life", "started"])
+        .assert()
+        .code(8);
+    repo.arc(&repo.root)
+        .args(["claim", "stage-life"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "stage",
+            "stage-life",
+            "implementing",
+            "--note",
+            "skipped ahead",
+        ])
+        .assert()
+        .success();
+    let first: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "stage-life"]))).unwrap();
+    thread::sleep(Duration::from_millis(5));
+    repo.arc(&repo.root)
+        .args(["stage", "stage-life", "implementing", "--note", "heartbeat"])
+        .assert()
+        .success();
+    let heartbeat: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "stage-life"]))).unwrap();
+    assert_ne!(
+        first["claim"]["stage_started_at"], heartbeat["claim"]["stage_started_at"],
+        "a heartbeat refreshes age-in-stage and its budget clock"
+    );
+    assert_ne!(
+        first["claim"]["last_activity_at"],
+        heartbeat["claim"]["last_activity_at"]
+    );
+    assert_eq!(heartbeat["claim"]["note"], "heartbeat");
+
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "foreign")
+        .args(["stage", "stage-life", "verifying"])
+        .assert()
+        .code(8);
+    repo.arc(&repo.root)
+        .args(["stage", "stage-life", "blocked-on"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("requires a nonempty --note"));
+    repo.arc(&repo.root)
+        .args([
+            "stage",
+            "stage-life",
+            "blocked-on",
+            "--note",
+            "waiting for input",
+        ])
+        .assert()
+        .success();
+
+    repo.commit(&worktree, "stage.txt", "done\n", "feat: finish stage work");
+    repo.arc(&worktree)
+        .args(["snapshot", "stage-life"])
+        .assert()
+        .success();
+    let snapshotted: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "stage-life"]))).unwrap();
+    assert_eq!(snapshotted["claim"]["stage"], "snapshotted");
+    assert_eq!(snapshotted["claim"]["stale"], false);
+    repo.arc(&repo.root)
+        .args(["stage", "stage-life", "snapshotted"])
+        .assert()
+        .failure();
+    assert!(!opened_change_id(&opened).is_empty());
+}
+
+#[test]
+fn stale_claims_are_time_derived_and_watch_until_stalled_reaches() {
+    let repo = Repo::new();
+    let launch = stdout(repo.arc(&repo.root).args(["begin", "stale-launch"]));
+    let launch_id = opened_change_id(&launch);
+    repo.arc(&repo.root)
+        .args(["claim", "stale-launch", "--stage-budget", "launch=1s"])
+        .assert()
+        .success();
+    age_event(&repo, &launch_id, "claim-set", 5);
+    let launch_status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "stale-launch"]),
+    ))
+    .unwrap();
+    assert_eq!(launch_status["claim"]["active"], true);
+    assert_eq!(launch_status["claim"]["stale"], true);
+    assert_eq!(launch_status["claim"]["stage"], "launch");
+    repo.arc(&repo.root)
+        .args([
+            "watch",
+            "stale-launch",
+            "--until",
+            "stalled",
+            "--timeout",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout("reached: stalled\n");
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "lead-recovery")
+        .args(["release-claim", "stale-launch"])
+        .assert()
+        .success();
+
+    let implementing = stdout(repo.arc(&repo.root).args(["begin", "stale-impl"]));
+    let implementing_id = opened_change_id(&implementing);
+    repo.arc(&repo.root)
+        .args(["claim", "stale-impl", "--stage-budget", "implementing=1s"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["stage", "stale-impl", "implementing"])
+        .assert()
+        .success();
+    age_event(&repo, &implementing_id, "stage-set", 5);
+    let implementing_status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "stale-impl"]))).unwrap();
+    assert_eq!(implementing_status["claim"]["stale"], true);
+    assert!(
+        implementing_status["claim"]["age_seconds"]
+            .as_u64()
+            .unwrap()
+            >= 5
+    );
+
+    repo.arc(&repo.root)
+        .args(["stage", "stale-impl", "blocked-on", "--note", "distress"])
+        .assert()
+        .success();
+    age_event(&repo, &implementing_id, "stage-set", 60);
+    let blocked: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "stale-impl"]))).unwrap();
+    assert_eq!(blocked["claim"]["stage"], "blocked-on");
+    assert_eq!(blocked["claim"]["stale"], false);
+    assert!(blocked["claim"]["budget_seconds"].is_null());
+}
+
+#[test]
+fn alternatives_exclude_active_claims_but_include_stale_and_expired_claims() {
+    let repo = Repo::new();
+    let prerequisite = stdout(repo.arc(&repo.root).args(["begin", "alt-prereq"]));
+    let prerequisite_id = opened_change_id(&prerequisite);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "alt-blocked", "--blocked-by", &prerequisite_id]),
+    );
+    stdout(repo.arc(&repo.root).args(["begin", "alt-active"]));
+    let stale = stdout(repo.arc(&repo.root).args(["begin", "alt-stale"]));
+    let stale_id = opened_change_id(&stale);
+    let expired = stdout(repo.arc(&repo.root).args(["begin", "alt-expired"]));
+    let expired_id = opened_change_id(&expired);
+
+    repo.arc(&repo.root)
+        .args(["claim", "alt-active"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["claim", "alt-stale", "--stage-budget", "launch=1s"])
+        .assert()
+        .success();
+    age_event(&repo, &stale_id, "claim-set", 5);
+    repo.arc(&repo.root)
+        .args(["claim", "alt-expired", "--ttl", "1s"])
+        .assert()
+        .success();
+    age_event(&repo, &expired_id, "claim-set", 5);
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "alt-blocked"]),
+    ))
+    .unwrap();
+    let slugs = status["suggested_alternatives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|alternative| alternative["slug"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(slugs.contains(&"alt-prereq"));
+    assert!(slugs.contains(&"alt-stale"));
+    assert!(slugs.contains(&"alt-expired"));
+    assert!(!slugs.contains(&"alt-active"));
+}
+
+#[test]
+fn integration_warns_for_foreign_claim_but_still_succeeds_when_green() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "claimed-green"]));
+    let worktree = repo.home.join(".worktrees/repo-claimed-green");
+    repo.commit(&worktree, "green.txt", "green\n", "feat: add green change");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "executor")
+        .env("ARC_SESSION", "executor-session")
+        .args(["claim", "claimed-green"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["snapshot", "claimed-green"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["review", "claimed-green", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "claimed-green"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "warning: active foreign claim by executor",
+        ));
+}
+
+#[test]
+fn snapshot_captures_git_identities_and_renders_claim_actor_mismatch() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "snapshot-who"]));
+    let worktree = repo.home.join(".worktrees/repo-snapshot-who");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Executor Person")
+        .args(["claim", "snapshot-who"])
+        .assert()
+        .success();
+    repo.commit(&worktree, "who.txt", "who\n", "feat: record identity");
+    repo.arc(&worktree)
+        .args(["snapshot", "snapshot-who"])
+        .assert()
+        .success();
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "snapshot-who"]),
+    ))
+    .unwrap();
+    assert_eq!(status["latest_patchset"]["author"]["name"], "Tester");
+    assert_eq!(
+        status["latest_patchset"]["author"]["email"],
+        "tester@example.invalid"
+    );
+    assert_eq!(status["latest_patchset"]["committer"]["name"], "Tester");
+    assert_eq!(status["latest_patchset"]["claim_actor"], "Executor Person");
+    assert_eq!(status["latest_patchset"]["provenance_mismatch"], true);
+    assert_eq!(status["claim"]["snapshot_author"]["name"], "Tester");
+    assert_eq!(status["claim"]["provenance_mismatch"], true);
+    repo.arc(&repo.root)
+        .args(["show", "snapshot-who"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("PROVENANCE MISMATCH"));
 }
 
 #[test]
@@ -636,7 +1070,7 @@ fn wedged_prerequisites_report_recovery_and_stay_blocked() {
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", &dependent]))).unwrap();
     let dependency = &status["blocker_status"]["blockers_ready"][0];
-    assert_eq!(status["schema"], "arc-status/2");
+    assert_eq!(status["schema"], "arc-status/3");
     assert_eq!(status["blocker_status"]["blocked"], true);
     assert_eq!(status["next_action"], "repair_blockers:metadata");
     assert_eq!(dependency["status"], "wedged");
@@ -1485,6 +1919,106 @@ fn export_is_deterministic() {
         .success();
 
     assert_eq!(fs::read(first).unwrap(), fs::read(second).unwrap());
+}
+
+#[test]
+fn bundle_roundtrip_preserves_claim_stage_and_snapshot_provenance_events() {
+    let source = Repo::new();
+    let opened = stdout(source.arc(&source.root).args(["begin", "move-claim"]));
+    let change_id = opened_change_id(&opened);
+    let worktree = source.home.join(".worktrees/repo-move-claim");
+    source
+        .arc(&worktree)
+        .env("ARC_ACTOR", "Executor")
+        .args([
+            "claim",
+            "move-claim",
+            "--ttl",
+            "5m",
+            "--stage-budget",
+            "implementing=2m",
+        ])
+        .assert()
+        .success();
+    source
+        .arc(&worktree)
+        .env("ARC_ACTOR", "Executor")
+        .args(["stage", "move-claim", "implementing"])
+        .assert()
+        .success();
+    source.commit(&worktree, "move.txt", "move\n", "feat: move claimed work");
+    source
+        .arc(&worktree)
+        .args(["snapshot", "move-claim"])
+        .assert()
+        .success();
+
+    let bundle = source.home.join("claim-bundle.json");
+    source
+        .arc(&source.root)
+        .args(["export", "move-claim", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let exported: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    let event_types = exported["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["event_type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(event_types.contains(&"claim-set"));
+    assert!(event_types.contains(&"stage-set"));
+    let patchset = exported["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_type"] == "patchset-added")
+        .unwrap();
+    assert_eq!(patchset["author_name"], "Tester");
+    assert_eq!(patchset["committer_email"], "tester@example.invalid");
+
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("unknown event type").not());
+    let roundtrip = destination.home.join("claim-roundtrip.json");
+    destination
+        .arc(&destination.root)
+        .args([
+            "export",
+            &change_id,
+            "--output",
+            roundtrip.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(bundle).unwrap(), fs::read(roundtrip).unwrap());
+}
+
+#[test]
+fn old_patchset_events_without_identity_fields_remain_readable() {
+    let repo = Repo::new();
+    let (change_id, _, _) = change_with_patchset(&repo, "old-patchset");
+    rewrite_event(&repo, &change_id, "patchset-added", |event| {
+        event.as_object_mut().unwrap().remove("author_name");
+        event.as_object_mut().unwrap().remove("author_email");
+        event.as_object_mut().unwrap().remove("committer_name");
+        event.as_object_mut().unwrap().remove("committer_email");
+    });
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "old-patchset"]),
+    ))
+    .unwrap();
+    assert!(status["latest_patchset"]["author"].is_null());
+    assert!(status["latest_patchset"]["committer"].is_null());
+    repo.arc(&repo.root)
+        .args(["show", "old-patchset"])
+        .assert()
+        .success();
 }
 
 #[test]

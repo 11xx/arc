@@ -66,10 +66,11 @@ A Codex executor prompt should use this shape:
 You're in a Codex harness. This is LOCAL execution only.
 
 1. Import the arc bundle and read the thread spec.
-2. Implement in the assigned worktree.
-3. Run the specified build and test gates.
-4. Commit the scoped changes and run `arc snapshot <change>`.
-5. Signal: "Arc improvements ready for review."
+2. Claim the change and record typed progress stages in the assigned worktree.
+3. Implement in the assigned worktree.
+4. Run the specified build and test gates.
+5. Commit the scoped changes and run `arc snapshot <change>`.
+6. Signal: "Arc improvements ready for review."
 
 DO NOT run `codex exec`, delegate to another harness, merge, or integrate.
 ```
@@ -80,8 +81,9 @@ Do:
 
 - Treat an imported implementation plan as local work unless it explicitly
   names Codex as an orchestrator.
-- Import the bundle, inspect the repository and spec, implement in the assigned
-  worktree, verify, commit, and snapshot.
+- Import the bundle, inspect the repository and spec, claim the change, record
+  typed stages, implement in the assigned worktree, verify, commit, and
+  snapshot.
 - Stop before review and integration and report the commits and gate results.
 - Flag a prompt as misrouted if it tells a local Codex executor to run
   `codex exec`.
@@ -172,12 +174,24 @@ Arm two watchdog tiers at launch, always:
   before assuming work is happening; a hung process and a working one are
   otherwise indistinguishable.
 
-Executors leave a start breadcrumb: `arc comment <change>` ("executor
-started, session <id>") immediately after reading the spec, so the ledger
-shows life between `begin` and the first `snapshot`. Leads can consume it with
-`arc events --follow --change <change>` or block on a milestone with
-`arc watch <change> --until snapshot|ready|integrated|closed --timeout <secs>`.
-This is convention until the claim/stage mechanism ships in the ledger.
+Executors claim immediately and record typed progress with their native
+identity:
+
+```sh
+ARC_HARNESS=codex ARC_SESSION="${CODEX_THREAD_ID:?}" arc claim <change>
+ARC_HARNESS=codex ARC_SESSION="${CODEX_THREAD_ID:?}" arc stage <change> started
+# after reading the executor spec
+ARC_HARNESS=codex ARC_SESSION="${CODEX_THREAD_ID:?}" arc stage <change> spec-read
+```
+
+Continue with `implementing`, `verifying`, or `blocked-on --note <reason>` as
+work changes state. Repeating a stage is a heartbeat; changing it is progress.
+Leads consume raw events with `arc events --follow --change <change>`, inspect
+the time-derived claim object in `arc status`, or wait with
+`arc watch <change> --until stalled|snapshot|ready|integrated|closed`. A stale
+claim is still live and owned; an expired one is not. Claims remain advisory:
+an identified lead may release a live foreign claim, and `arc integrate` warns
+about but does not block on one.
 
 ## Correct and incorrect delegation
 
@@ -199,9 +213,10 @@ instructions.
 
 ### Correct: Codex completes an arc implementation
 
-Codex imports the bundle, reads the thread spec, edits and tests in its
-worktree, makes scoped commits, runs `arc snapshot`, and signals that the arc is
-ready for review. Claude later reviews and integrates.
+Codex imports the bundle, reads the thread spec, claims the change, records
+typed stages, edits and tests in its worktree, makes scoped commits, runs
+`arc snapshot`, and signals that the arc is ready for review. Claude later
+reviews and integrates.
 
 ### Incorrect: the implementation prompt merges
 

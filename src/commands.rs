@@ -29,6 +29,7 @@ const POLL_MAX: Duration = Duration::from_secs(1);
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum WatchUntil {
     Snapshot,
+    Stalled,
     Ready,
     Integrated,
     Closed,
@@ -38,9 +39,31 @@ impl WatchUntil {
     fn label(self) -> &'static str {
         match self {
             WatchUntil::Snapshot => "snapshot",
+            WatchUntil::Stalled => "stalled",
             WatchUntil::Ready => "ready",
             WatchUntil::Integrated => "integrated",
             WatchUntil::Closed => "closed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum StageArg {
+    Started,
+    SpecRead,
+    Implementing,
+    Verifying,
+    BlockedOn,
+}
+
+impl From<StageArg> for ClaimStage {
+    fn from(stage: StageArg) -> Self {
+        match stage {
+            StageArg::Started => ClaimStage::Started,
+            StageArg::SpecRead => ClaimStage::SpecRead,
+            StageArg::Implementing => ClaimStage::Implementing,
+            StageArg::Verifying => ClaimStage::Verifying,
+            StageArg::BlockedOn => ClaimStage::BlockedOn,
         }
     }
 }
@@ -51,6 +74,16 @@ impl Ctx {
     }
 
     fn event(&self, store: &Store, change_id: &str, payload: Payload) -> Event {
+        self.event_at(store, change_id, chrono::Utc::now(), payload)
+    }
+
+    fn event_at(
+        &self,
+        store: &Store,
+        change_id: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+        payload: Payload,
+    ) -> Event {
         Event {
             schema_version: SCHEMA_VERSION,
             event_id: ids::new_event_id(),
@@ -59,7 +92,7 @@ impl Ctx {
             actor: self.actor.clone(),
             harness: self.harness.clone(),
             session: self.session.clone(),
-            created_at: chrono::Utc::now(),
+            created_at,
             payload,
         }
     }
@@ -231,6 +264,10 @@ fn find_unblocked_changes(
                 && !candidate.is_closed()
                 && candidate.hold.is_none()
                 && !dependency_status(candidate, states).blocked
+                && candidate.claim.as_ref().is_none_or(|claim| {
+                    let timing = state::claim_timing_at(claim, chrono::Utc::now());
+                    !timing.active || timing.stale
+                })
         })
         .map(|candidate| ArcAlternative {
             change_id: candidate.change_id.clone(),
@@ -371,6 +408,10 @@ fn watch_reached(ctx: &Ctx, store: &Store, change_id: &str, until: WatchUntil) -
     let state = state::reduce(&events)?;
     Ok(match until {
         WatchUntil::Snapshot => state.latest_patchset().is_some(),
+        WatchUntil::Stalled => state
+            .claim
+            .as_ref()
+            .is_some_and(|claim| state::claim_timing_at(claim, chrono::Utc::now()).stale),
         WatchUntil::Ready => ctx.report(store, &state)?.integrate_ready,
         WatchUntil::Integrated => state
             .closure
@@ -378,6 +419,194 @@ fn watch_reached(ctx: &Ctx, store: &Store, change_id: &str, until: WatchUntil) -
             .is_some_and(|closure| closure.outcome == Closure::Integrated),
         WatchUntil::Closed => state.is_closed(),
     })
+}
+
+pub fn claim(
+    ctx: &Ctx,
+    reference: &str,
+    ttl: Option<String>,
+    stage_budgets: Vec<String>,
+) -> Result<i32> {
+    let owner = command_identity(ctx)?;
+    let ttl_seconds = ttl
+        .as_deref()
+        .map(parse_duration)
+        .transpose()?
+        .unwrap_or(2 * 60 * 60);
+    let mut budgets = default_stage_budgets();
+    for raw in stage_budgets {
+        let (key, seconds) = parse_stage_budget(&raw)?;
+        budgets.insert(key, seconds);
+    }
+
+    let store = ctx.store()?;
+    let (change_id, state) = ctx.load_state(&store, reference)?;
+    let now = chrono::Utc::now();
+    if state.is_closed() {
+        bail!("change {change_id} is closed");
+    }
+    if let Some(existing) = &state.claim {
+        let timing = state::claim_timing_at(existing, now);
+        if timing.active && existing.owner != owner {
+            print_claim_conflict("claim is already held", existing, &timing);
+            return Ok(8);
+        }
+    }
+
+    let event = ctx.event_at(
+        &store,
+        &change_id,
+        now,
+        Payload::ClaimSet {
+            ttl_seconds,
+            stage_budgets: budgets,
+        },
+    );
+    store.append_event(&event)?;
+    println!("claimed: {change_id} for {ttl_seconds}s");
+    println!("event: {}", event.event_id);
+    Ok(0)
+}
+
+pub fn release_claim(ctx: &Ctx, reference: &str) -> Result<i32> {
+    let _caller = command_identity(ctx)?;
+    let store = ctx.store()?;
+    let (change_id, state) = ctx.load_state(&store, reference)?;
+    let now = chrono::Utc::now();
+    let Some(existing) = &state.claim else {
+        eprintln!("claim conflict: {change_id} has no live claim");
+        return Ok(8);
+    };
+    let timing = state::claim_timing_at(existing, now);
+    if !timing.active {
+        print_claim_conflict("claim is expired", existing, &timing);
+        return Ok(8);
+    }
+    let event = ctx.event_at(&store, &change_id, now, Payload::ClaimReleased);
+    store.append_event(&event)?;
+    println!("claim released: {change_id}");
+    println!("event: {}", event.event_id);
+    Ok(0)
+}
+
+pub fn stage(ctx: &Ctx, reference: &str, stage: StageArg, note: Option<String>) -> Result<i32> {
+    let owner = command_identity(ctx)?;
+    let stage = ClaimStage::from(stage);
+    let note = note.and_then(|note| {
+        let trimmed = note.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+    if stage == ClaimStage::BlockedOn && note.is_none() {
+        bail!("blocked-on requires a nonempty --note");
+    }
+
+    let store = ctx.store()?;
+    let (change_id, state) = ctx.load_state(&store, reference)?;
+    let now = chrono::Utc::now();
+    let Some(existing) = &state.claim else {
+        eprintln!(
+            "claim conflict: {change_id} has no claim for stage {}",
+            stage.as_str()
+        );
+        return Ok(8);
+    };
+    let timing = state::claim_timing_at(existing, now);
+    if !timing.active {
+        print_claim_conflict("claim is expired", existing, &timing);
+        return Ok(8);
+    }
+    if existing.owner != owner {
+        print_claim_conflict("stage caller does not own claim", existing, &timing);
+        return Ok(8);
+    }
+
+    let event = ctx.event_at(&store, &change_id, now, Payload::StageSet { stage, note });
+    store.append_event(&event)?;
+    println!("stage: {}", stage.as_str());
+    println!("event: {}", event.event_id);
+    Ok(0)
+}
+
+fn command_identity(ctx: &Ctx) -> Result<state::ClaimIdentity> {
+    let harness = ctx
+        .harness
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("claim/stage commands require nonempty ARC_HARNESS or --harness")?;
+    let session = ctx
+        .session
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("claim/stage commands require nonempty ARC_SESSION or --session")?;
+    Ok(state::ClaimIdentity {
+        actor: ctx.actor.clone(),
+        harness: harness.to_string(),
+        session: session.to_string(),
+    })
+}
+
+fn print_claim_conflict(message: &str, claim: &state::ClaimState, timing: &state::ClaimTiming) {
+    eprintln!(
+        "claim conflict: {message}; owner={} harness={} session={} stage={}",
+        claim.owner.actor, claim.owner.harness, claim.owner.session, timing.stage
+    );
+}
+
+pub fn parse_duration(raw: &str) -> Result<u64> {
+    let Some((suffix_index, suffix)) = raw.char_indices().last() else {
+        bail!("duration is empty; expected a positive integer followed by s, m, or h");
+    };
+    let number = &raw[..suffix_index];
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("invalid duration {raw:?}; expected a positive integer followed by s, m, or h");
+    }
+    let value: u64 = number
+        .parse()
+        .with_context(|| format!("invalid duration {raw:?}"))?;
+    if value == 0 {
+        bail!("duration must be positive");
+    }
+    let multiplier = match suffix {
+        's' => 1,
+        'm' => 60,
+        'h' => 60 * 60,
+        _ => bail!("invalid duration {raw:?}; expected an s, m, or h suffix"),
+    };
+    value
+        .checked_mul(multiplier)
+        .filter(|seconds| *seconds <= i64::MAX as u64)
+        .context("duration is too large")
+}
+
+fn parse_stage_budget(raw: &str) -> Result<(StageBudget, u64)> {
+    let (name, duration) = raw
+        .split_once('=')
+        .with_context(|| format!("invalid stage budget {raw:?}; expected <name>=<duration>"))?;
+    let key = match name {
+        "launch" => StageBudget::Launch,
+        "started" => StageBudget::Started,
+        "spec-read" => StageBudget::SpecRead,
+        "implementing" => StageBudget::Implementing,
+        "verifying" => StageBudget::Verifying,
+        _ => bail!(
+            "unknown stage budget {name:?}; expected launch, started, spec-read, implementing, or verifying"
+        ),
+    };
+    Ok((key, parse_duration(duration)?))
+}
+
+fn default_stage_budgets() -> BTreeMap<StageBudget, u64> {
+    [
+        (StageBudget::Launch, 60),
+        (StageBudget::Started, 5 * 60),
+        (StageBudget::SpecRead, 2 * 60),
+        (StageBudget::Implementing, 30 * 60),
+        (StageBudget::Verifying, 15 * 60),
+    ]
+    .into_iter()
+    .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1148,6 +1377,7 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
     let merge_base = target_head
         .as_deref()
         .and_then(|t| gitio::merge_base(&ctx.cwd, t, &head).ok());
+    let identity = gitio::commit_identity(&ctx.cwd, &head)?;
     let patchset_id = format!("ps-{:02}", st.patchsets.len() + 1);
     let ev = ctx.event(
         &store,
@@ -1157,6 +1387,10 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
             base: base_rev,
             head: head.clone(),
             merge_base,
+            author_name: Some(identity.author_name),
+            author_email: Some(identity.author_email),
+            committer_name: Some(identity.committer_name),
+            committer_email: Some(identity.committer_email),
         },
     );
     store.append_event(&ev)?;
@@ -1524,6 +1758,24 @@ pub fn integrate(
     let store = ctx.store()?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
     let report = ctx.report(&store, &st)?;
+    if let Some(claim) = &st.claim {
+        let timing = state::claim_timing_at(claim, chrono::Utc::now());
+        let caller = state::ClaimIdentity {
+            actor: ctx.actor.clone(),
+            harness: ctx.harness.clone().unwrap_or_default(),
+            session: ctx.session.clone().unwrap_or_default(),
+        };
+        if timing.active && claim.owner != caller {
+            eprintln!(
+                "warning: active foreign claim by {} via {}/{} at stage {}{}; integration remains lead-owned",
+                claim.owner.actor,
+                claim.owner.harness,
+                claim.owner.session,
+                timing.stage,
+                if timing.stale { " (stale)" } else { "" }
+            );
+        }
+    }
     if !report.integrate_ready {
         eprint!("{}", render::blocker_explanation(&st, &report));
         return Ok(status::check_exit_code(&report));
@@ -1695,6 +1947,7 @@ mod tests {
             findings: BTreeMap::new(),
             verdicts: Vec::new(),
             verifications: Vec::new(),
+            claim: None,
             hold: None,
             closure: closure.map(|outcome| crate::state::ClosureState {
                 outcome,

@@ -74,10 +74,84 @@ pub fn markdown(
         }
     }
 
+    if let Some(claim) = &report.claim {
+        let _ = writeln!(w, "\n## Claim / Progress\n");
+        let condition = if claim.expired {
+            "EXPIRED"
+        } else if claim.stale {
+            "STALE"
+        } else if claim.stage == "blocked-on" {
+            "BLOCKED"
+        } else {
+            "active"
+        };
+        let _ = writeln!(
+            w,
+            "- Owner: {} via {}/{} — **{}**",
+            claim.owner.actor, claim.owner.harness, claim.owner.session, condition
+        );
+        let _ = writeln!(
+            w,
+            "- Stage: `{}`{} — age {}s{}",
+            claim.stage,
+            claim
+                .note
+                .as_deref()
+                .map(|note| format!(" — {note}"))
+                .unwrap_or_default(),
+            claim.age_seconds,
+            claim
+                .budget_seconds
+                .map(|budget| format!(" / budget {budget}s"))
+                .unwrap_or_default()
+        );
+        let _ = writeln!(
+            w,
+            "- Activity: claimed {}, last {}, expires {} (TTL {}s)",
+            claim.claimed_at, claim.last_activity_at, claim.expires_at, claim.ttl_seconds
+        );
+    }
+
     if !state.patchsets.is_empty() {
         let _ = writeln!(w, "\n## Patchsets\n");
         for p in &state.patchsets {
             let _ = writeln!(w, "- `{}`: `{}` → `{}`", p.id, p.base, p.head);
+            if let Some(author) = &p.author {
+                let _ = writeln!(
+                    w,
+                    "  - author: {}{}",
+                    author.name,
+                    author
+                        .email
+                        .as_deref()
+                        .map(|email| format!(" <{email}>"))
+                        .unwrap_or_default()
+                );
+            }
+            if let Some(committer) = &p.committer {
+                let _ = writeln!(
+                    w,
+                    "  - committer: {}{}",
+                    committer.name,
+                    committer
+                        .email
+                        .as_deref()
+                        .map(|email| format!(" <{email}>"))
+                        .unwrap_or_default()
+                );
+            }
+            if let Some(actor) = &p.claim_actor {
+                let _ = writeln!(
+                    w,
+                    "  - claim actor at snapshot: {}{}",
+                    actor,
+                    if p.provenance_mismatch == Some(true) {
+                        " — **PROVENANCE MISMATCH**"
+                    } else {
+                        ""
+                    }
+                );
+            }
         }
     }
 
