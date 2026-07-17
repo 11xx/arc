@@ -214,6 +214,71 @@ fn blocker_chain_transitions_and_suggests_ready_alternatives() {
 }
 
 #[test]
+fn imported_change_can_remove_missing_blocker() {
+    let source = Repo::new();
+    let blocker_out = stdout(source.arc(&source.root).args(["begin", "remote-blocker"]));
+    let blocker_id = blocker_out
+        .lines()
+        .find_map(|line| line.strip_prefix("change: "))
+        .unwrap()
+        .to_string();
+    stdout(source.arc(&source.root).args([
+        "begin",
+        "dependent-change",
+        "--blocked-by",
+        &blocker_id,
+    ]));
+    let bundle = source.home.join("dependent.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            "dependent-change",
+            "--output",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let blocked: serde_json::Value = serde_json::from_str(&stdout(
+        destination
+            .arc(&destination.root)
+            .args(["status", "dependent-change"]),
+    ))
+    .unwrap();
+    assert_eq!(blocked["blocker_status"]["blocked"], true);
+    assert_eq!(
+        blocked["blocker_status"]["blockers_ready"][0]["status"],
+        "missing"
+    );
+
+    destination
+        .arc(&destination.root)
+        .args([
+            "metadata",
+            "dependent-change",
+            "--remove-blocked-by",
+            &blocker_id,
+        ])
+        .assert()
+        .success();
+    let cleared: serde_json::Value = serde_json::from_str(&stdout(
+        destination
+            .arc(&destination.root)
+            .args(["status", "dependent-change"]),
+    ))
+    .unwrap();
+    assert_eq!(cleared["blocked_by"], serde_json::json!([]));
+    assert_eq!(cleared["blocker_status"]["blocked"], false);
+}
+
+#[test]
 fn query_tags_batch_views_and_actionable_errors() {
     let repo = Repo::new();
     stdout(

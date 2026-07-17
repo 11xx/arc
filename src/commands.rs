@@ -596,7 +596,7 @@ pub fn metadata(
         .collect::<Vec<_>>();
     let remove_blocked_by = remove_blocked_by
         .iter()
-        .map(|dependency| store.resolve_change(dependency))
+        .map(|dependency| resolve_blocker_removal(&store, &state, dependency))
         .collect::<Result<BTreeSet<_>>>()?
         .into_iter()
         .collect::<Vec<_>>();
@@ -627,6 +627,29 @@ pub fn metadata(
     store.append_event(&event)?;
     println!("event: {}", event.event_id);
     Ok(())
+}
+
+fn resolve_blocker_removal(store: &Store, state: &ChangeState, reference: &str) -> Result<String> {
+    if state.blocked_by.iter().any(|blocker| blocker == reference) {
+        return Ok(reference.to_string());
+    }
+    let matches = state
+        .blocked_by
+        .iter()
+        .filter(|blocker| blocker.starts_with(reference))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [blocker] => Ok((*blocker).clone()),
+        [] => store.resolve_change(reference),
+        _ => bail!(
+            "ambiguous blocker {reference:?}: matches {}",
+            matches
+                .iter()
+                .map(|blocker| blocker.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 fn dependency_reaches(start: &str, target: &str, states: &BTreeMap<String, ChangeState>) -> bool {
