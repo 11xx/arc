@@ -86,7 +86,9 @@ arc watch radio-refill-fix --until snapshot --timeout 30
 arc watch radio-refill-fix --until ready
 ```
 
-`arc events` emits one compact raw ledger event per line. `arc watch` emits a
+`arc events` emits one compact raw ledger event per line. Replay output and
+each observed follow batch are sorted by `event_id`; strict total ordering
+across concurrent cross-change appends is not promised. `arc watch` emits a
 single diagnostic and exits 0 when its condition is reached, or exits 2 on a
 timeout. `snapshot` waits for a patchset, `ready` matches `arc check` success,
 `integrated` requires that closure outcome, and `closed` accepts integrated,

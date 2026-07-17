@@ -189,7 +189,7 @@ enum Cmd {
         #[arg(long, value_enum)]
         until: commands::WatchUntil,
         /// Fail with exit 2 after this many seconds
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: Option<u64>,
     },
     /// Export one change as a deterministic, versioned JSON bundle

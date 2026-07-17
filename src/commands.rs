@@ -13,9 +13,11 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+#[derive(Clone)]
 pub struct Ctx {
     pub cwd: PathBuf,
     pub actor: String,
@@ -203,8 +205,8 @@ pub fn read_body(body: Option<String>, body_file: Option<String>) -> Result<Stri
 }
 
 /// Replay raw ledger events as compact NDJSON, optionally continuing as new
-/// event files arrive. Event IDs are ULIDs, so they provide the chronological
-/// ordering both across changes and within each polling batch.
+/// event files arrive. Event IDs are ULIDs, so replay and each observed polling
+/// batch can be sorted across changes; concurrent appends may cross batches.
 pub fn events(
     ctx: &Ctx,
     follow: bool,
@@ -249,18 +251,37 @@ pub fn watch(
     until: WatchUntil,
     timeout_secs: Option<u64>,
 ) -> Result<i32> {
+    let worker_ctx = ctx.clone();
+    let reference = reference.to_string();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let _ = sender.send(watch_until_reached(&worker_ctx, &reference, until));
+    });
+
+    let result = match timeout_secs {
+        Some(timeout) => match receiver.recv_timeout(Duration::from_secs(timeout)) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => {
+                println!("timeout: {}", until.label());
+                return Ok(2);
+            }
+            Err(RecvTimeoutError::Disconnected) => bail!("watch worker stopped unexpectedly"),
+        },
+        None => receiver
+            .recv()
+            .context("watch worker stopped unexpectedly")?,
+    };
+    result?;
+    println!("reached: {}", until.label());
+    Ok(0)
+}
+
+fn watch_until_reached(ctx: &Ctx, reference: &str, until: WatchUntil) -> Result<()> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
-    let started = Instant::now();
-
     loop {
         if watch_reached(ctx, &store, &change_id, until)? {
-            println!("reached: {}", until.label());
-            return Ok(0);
-        }
-        if timeout_secs.is_some_and(|timeout| started.elapsed() >= Duration::from_secs(timeout)) {
-            println!("timeout: {}", until.label());
-            return Ok(2);
+            return Ok(());
         }
         // Poll the derived condition itself rather than gating checks on event
         // discovery. `ready` also depends on live Git state, and checking only

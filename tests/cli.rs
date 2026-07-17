@@ -282,7 +282,7 @@ fn watch_ready_times_out_when_check_is_not_green() {
     let repo = Repo::new();
     stdout(repo.arc(&repo.root).args(["begin", "watch-ready"]));
     repo.arc(&repo.root)
-        .args(["watch", "watch-ready", "--until", "ready", "--timeout", "0"])
+        .args(["watch", "watch-ready", "--until", "ready", "--timeout", "1"])
         .assert()
         .code(2)
         .stdout("timeout: ready\n");
@@ -371,7 +371,7 @@ fn watch_closed_accepts_abandoned_and_superseded_but_integrated_does_not() {
 
     for change in ["watch-abandoned", "watch-superseded"] {
         repo.arc(&repo.root)
-            .args(["watch", change, "--until", "closed", "--timeout", "0"])
+            .args(["watch", change, "--until", "closed", "--timeout", "1"])
             .assert()
             .success()
             .stdout("reached: closed\n");
@@ -383,7 +383,7 @@ fn watch_closed_accepts_abandoned_and_superseded_but_integrated_does_not() {
             "--until",
             "integrated",
             "--timeout",
-            "0",
+            "1",
         ])
         .assert()
         .code(2)
