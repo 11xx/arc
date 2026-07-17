@@ -141,6 +141,7 @@ fn find_unblocked_changes(
         .filter(|candidate| {
             candidate.change_id != current_change_id
                 && !candidate.is_closed()
+                && candidate.hold.is_none()
                 && !dependency_status(candidate, states).blocked
         })
         .map(|candidate| ArcAlternative {
@@ -1504,6 +1505,8 @@ mod tests {
 
     #[test]
     fn find_unblocked_changes_returns_only_open_ready_work() {
+        let mut held = change("d-id", &[], None);
+        held.hold = Some("waiting for user".into());
         let states = BTreeMap::from([
             (
                 "a-id".into(),
@@ -1511,8 +1514,9 @@ mod tests {
             ),
             ("b-id".into(), change("b-id", &["a-id"], None)),
             ("c-id".into(), change("c-id", &["b-id"], None)),
-            ("d-id".into(), change("d-id", &[], None)),
+            ("d-id".into(), held),
             ("e-id".into(), change("e-id", &[], Some(Closure::Abandoned))),
+            ("f-id".into(), change("f-id", &[], None)),
         ]);
 
         let alternatives = find_unblocked_changes("c-id", &states);
@@ -1521,7 +1525,7 @@ mod tests {
                 .iter()
                 .map(|alternative| alternative.change_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["b-id", "d-id"]
+            vec!["b-id", "f-id"]
         );
         assert_eq!(
             alternatives[0].reason,

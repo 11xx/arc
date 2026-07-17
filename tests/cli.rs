@@ -167,6 +167,11 @@ fn blocker_chain_transitions_and_suggests_ready_alternatives() {
         repo.arc(&repo.root)
             .args(["begin", "chain-d", "--blocked-by", "chain-c"]),
     );
+    stdout(repo.arc(&repo.root).args(["begin", "chain-held"]));
+    repo.arc(&repo.root)
+        .args(["hold", "chain-held", "--reason", "do not start"])
+        .assert()
+        .success();
 
     let b_status: serde_json::Value = serde_json::from_str(&stdout(
         repo.arc(&repo.root).args(["status", "chain-b", "--json"]),
@@ -178,6 +183,12 @@ fn blocker_chain_transitions_and_suggests_ready_alternatives() {
         1
     );
     assert_eq!(b_status["suggested_alternatives"][0]["slug"], "chain-a");
+    let blocker_status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["blocker-status", "chain-b"]),
+    ))
+    .unwrap();
+    assert_eq!(blocker_status["blocked"], true);
+    assert_eq!(blocker_status["blockers_ready"][0]["slug"], "chain-a");
     repo.arc(&repo.root)
         .args(["is-blocked", "chain-b"])
         .assert()
@@ -298,6 +309,11 @@ fn batch_check_treats_all_closed_outcomes_as_terminal() {
         .args(["close", "batch-abandoned", "--abandoned"])
         .assert()
         .success();
+    repo.arc(&repo.root)
+        .args(["metadata", "batch-abandoned", "--tag", "#too-late"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is closed"));
     complete_change(&repo, "batch-live");
 
     repo.arc(&repo.root)
@@ -651,8 +667,15 @@ fn gates_must_be_green_at_head() {
         .assert()
         .success();
 
-    // Gate never ran: blocked.
+    // Gate never ran: blocked and accurately summarized as pending.
     repo.arc(&wt).args(["check", "fix-g"]).assert().code(5);
+    let pending: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "fix-g"]))).unwrap();
+    assert_eq!(
+        pending["blocker_summary"]["gate_status"]["fails"],
+        "pending"
+    );
+    assert_eq!(pending["gates"][0]["result"], "pending");
 
     // Gate ran and failed: still blocked, verify itself exits 1.
     repo.arc(&wt)
@@ -660,6 +683,10 @@ fn gates_must_be_green_at_head() {
         .assert()
         .code(1);
     repo.arc(&wt).args(["check", "fix-g"]).assert().code(5);
+    let failed: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "fix-g"]))).unwrap();
+    assert_eq!(failed["blocker_summary"]["gate_status"]["fails"], "fail");
+    assert_eq!(failed["gates"][0]["result"], "fail");
 
     // Fix the gate in the worktree's .arc? Gate command comes from the
     // toplevel of the invoking worktree, so run a passing command via a
@@ -681,6 +708,10 @@ fn gates_must_be_green_at_head() {
         .assert()
         .success();
     repo.arc(&wt).args(["check", "fix-g"]).assert().success();
+    let passed: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "fix-g"]))).unwrap();
+    assert_eq!(passed["blocker_summary"]["gate_status"]["fails"], "pass");
+    assert_eq!(passed["gates"][0]["result"], "pass");
 }
 
 /// Comments, replies, and prefix resolution round-trip through the ledger.

@@ -77,8 +77,9 @@ arc integrate radio-refill-fix --cleanup
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, a blocker summary, a machine-readable
 `next_action`, and ready alternative open changes while the requested change
-is blocked. `--json` is accepted for compatibility although status is always
-JSON. `arc show <change>` renders the same actionable state as Markdown.
+is blocked. Changes under an explicit hold are never suggested as alternative
+work. `--json` is accepted for compatibility although status is always JSON.
+`arc show <change>` renders the same actionable state as Markdown.
 
 Dependencies are live ledger relationships: a blocker is satisfied only when
 it closes as integrated. Abandoned, superseded, missing, or still-open changes
@@ -92,6 +93,12 @@ creation:
 arc metadata radio-refill-fix --blocked-by radio-storage --tag '#radio'
 arc metadata radio-refill-fix --remove-blocked-by radio-storage --remove-tag '#radio'
 ```
+
+Sequential bundle import can expose a dependency cycle assembled across
+stores. Arc reports each member as blocked but does not mutate imported
+history automatically. Break the cycle explicitly by removing one edge with
+`arc metadata <change> --remove-blocked-by <blocker>`; exact blocker IDs also
+work when the blocker's own bundle is absent.
 
 Query and batch views avoid ad-hoc JSON filtering:
 

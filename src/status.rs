@@ -67,6 +67,7 @@ pub struct BlockerStatus {
 pub struct GateStatus {
     pub name: String,
     pub command: String,
+    pub result: String,
     pub green_at_head: bool,
 }
 
@@ -203,13 +204,21 @@ pub fn build(
     let gate_statuses: Vec<GateStatus> = gates
         .required_for(&state.profile)
         .into_iter()
-        .map(|(name, gate)| GateStatus {
-            name: name.clone(),
-            command: gate.command.clone(),
-            green_at_head: current_head
+        .map(|(name, gate)| {
+            let result = current_head
                 .as_deref()
-                .map(|h| state.gate_passed_at(name, h))
-                .unwrap_or(false),
+                .and_then(|head| state.gate_result_at(name, head));
+            GateStatus {
+                name: name.clone(),
+                command: gate.command.clone(),
+                result: match result {
+                    Some(crate::model::VerifyResult::Pass) => "pass",
+                    Some(crate::model::VerifyResult::Fail) => "fail",
+                    None => "pending",
+                }
+                .into(),
+                green_at_head: result == Some(crate::model::VerifyResult::Pass),
+            }
         })
         .collect();
 
@@ -242,17 +251,7 @@ pub fn build(
 
     let gate_summary = gate_statuses
         .iter()
-        .map(|gate| {
-            (
-                gate.name.clone(),
-                if gate.green_at_head {
-                    "pass"
-                } else {
-                    "pending"
-                }
-                .into(),
-            )
-        })
+        .map(|gate| (gate.name.clone(), gate.result.clone()))
         .collect();
     let open_findings = findings
         .iter()
