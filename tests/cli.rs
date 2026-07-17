@@ -1,4 +1,5 @@
 use assert_cmd::Command as AssertCommand;
+use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -96,6 +97,25 @@ fn change_with_patchset(repo: &Repo, slug: &str) -> (String, PathBuf, String) {
     (change_id, worktree, head)
 }
 
+fn complete_change(repo: &Repo, slug: &str) {
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(
+        &worktree,
+        &format!("{slug}.txt"),
+        &format!("{slug}\n"),
+        &format!("feat: complete {slug}"),
+    );
+    stdout(repo.arc(&worktree).args(["snapshot", slug]));
+    repo.arc(&worktree)
+        .args(["review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", slug])
+        .assert()
+        .success();
+}
+
 fn json_file_bytes(value: &serde_json::Value) -> Vec<u8> {
     let mut bytes = serde_json::to_vec_pretty(value).unwrap();
     bytes.push(b'\n');
@@ -127,6 +147,191 @@ fn begin_creates_change_branch_and_worktree() {
         .args(["begin", "fix-thing"])
         .assert()
         .failure();
+}
+
+/// A dependency chain blocks until each prerequisite integrates. Status
+/// suggests only other open changes whose own prerequisites are satisfied.
+#[test]
+fn blocker_chain_transitions_and_suggests_ready_alternatives() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "chain-a"]));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "chain-b", "--blocked-by", "chain-a"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "chain-c", "--blocked-by", "chain-b"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "chain-d", "--blocked-by", "chain-c"]),
+    );
+
+    let b_status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "chain-b", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(b_status["blocker_status"]["blocked"], true);
+    assert_eq!(
+        b_status["suggested_alternatives"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(b_status["suggested_alternatives"][0]["slug"], "chain-a");
+    repo.arc(&repo.root)
+        .args(["is-blocked", "chain-b"])
+        .assert()
+        .code(1);
+    repo.arc(&repo.root)
+        .args(["check", "chain-b"])
+        .assert()
+        .code(7);
+
+    complete_change(&repo, "chain-a");
+
+    let b_status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "chain-b"]))).unwrap();
+    assert_eq!(b_status["blocker_status"]["blocked"], false);
+    assert_eq!(b_status["suggested_alternatives"], serde_json::json!([]));
+    repo.arc(&repo.root)
+        .args(["is-blocked", "chain-b"])
+        .assert()
+        .success();
+
+    let c_status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "chain-c"]))).unwrap();
+    assert_eq!(c_status["blocker_status"]["blocked"], true);
+    assert_eq!(
+        c_status["suggested_alternatives"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(c_status["suggested_alternatives"][0]["slug"], "chain-b");
+
+    complete_change(&repo, "chain-b");
+    let c_status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "chain-c"]))).unwrap();
+    assert_eq!(c_status["blocker_status"]["blocked"], false);
+}
+
+#[test]
+fn query_tags_batch_views_and_actionable_errors() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "tagged-a", "--tag", "#suite", "--tag", "#fast"]),
+    );
+    stdout(repo.arc(&repo.root).args([
+        "begin",
+        "tagged-b",
+        "--blocked-by",
+        "tagged-a",
+        "--tag",
+        "#suite",
+    ]));
+
+    let query = stdout(repo.arc(&repo.root).args([
+        "query",
+        "--status",
+        "open",
+        "--target",
+        "master",
+        "--tag",
+        "#suite",
+        "--actor",
+        "tester",
+        "--harness",
+        "test",
+    ]));
+    assert_eq!(query.lines().count(), 2);
+    assert!(query.contains("tagged-a-"));
+    assert!(query.contains("tagged-b-"));
+
+    let wide = stdout(repo.arc(&repo.root).args(["list", "--format", "wide"]));
+    assert!(wide.contains("Verdict"));
+    assert!(wide.contains("blocked-by:tagged-a"));
+
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "tagged-b"]))).unwrap();
+    assert_eq!(status["next_action"], "wait_for:blockers");
+    assert_eq!(status["ready_to_integrate"], false);
+    assert_eq!(status["blocker_summary"]["hold"]["active"], false);
+
+    repo.arc(&repo.root)
+        .args(["check", "tagged-b"])
+        .assert()
+        .code(7)
+        .stdout(predicates::str::contains("Cannot integrate"))
+        .stdout(predicates::str::contains("Next step: wait_for:blockers"));
+    repo.arc(&repo.root)
+        .args(["integrate", "tagged-b"])
+        .assert()
+        .code(7)
+        .stderr(predicates::str::contains("prerequisite changes unresolved"));
+
+    repo.arc(&repo.root)
+        .args(["metadata", "tagged-a", "--tag", "#extra"])
+        .assert()
+        .success();
+    let extra = stdout(
+        repo.arc(&repo.root)
+            .args(["query", "--tag", "#extra", "--json"]),
+    );
+    let rows: serde_json::Value = serde_json::from_str(&extra).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["slug"], "tagged-a");
+
+    // Metadata events remain first-class through deterministic transfer.
+    let bundle = repo.home.join("tagged-a.json");
+    repo.arc(&repo.root)
+        .args(["export", "tagged-a", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("unknown event type").not());
+    let transferred = stdout(
+        destination
+            .arc(&destination.root)
+            .args(["query", "--tag", "#extra", "--json"]),
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&transferred)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // B already depends on A, so making A depend on B would form a cycle.
+    repo.arc(&repo.root)
+        .args(["metadata", "tagged-a", "--blocked-by", "tagged-b"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("dependency cycle"));
+
+    let batch = stdout(
+        repo.arc(&repo.root)
+            .args(["show", "--tag", "#suite", "--json"]),
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&batch)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    repo.arc(&repo.root)
+        .args(["check", "--tag", "#suite"])
+        .assert()
+        .code(3)
+        .stdout(predicates::str::contains("tagged-a-"))
+        .stdout(predicates::str::contains("tagged-b-"));
 }
 
 /// The full green path: implement → snapshot → verify gate → approve →

@@ -4,6 +4,7 @@ use crate::model::Verdict;
 use crate::state::ChangeState;
 use anyhow::Result;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 pub const STATUS_SCHEMA: &str = "arc-status/1";
@@ -13,24 +14,53 @@ pub const STATUS_SCHEMA: &str = "arc-status/1";
 #[serde(rename_all = "kebab-case")]
 pub enum Blocker {
     Closed,
+    BranchMissing,
+    BlockedByChanges,
     BlockingFindings,
     NoValidApproval,
     GatesNotGreen,
     HoldActive,
-    BranchMissing,
 }
 
 impl Blocker {
     pub fn exit_code(self) -> i32 {
         match self {
-            Blocker::Closed => 6,
+            Blocker::Closed | Blocker::BranchMissing => 6,
+            Blocker::BlockedByChanges => 7,
             Blocker::BlockingFindings => 2,
             Blocker::NoValidApproval => 3,
             Blocker::GatesNotGreen => 5,
             Blocker::HoldActive => 4,
-            Blocker::BranchMissing => 6,
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Blocker::Closed => "closed",
+            Blocker::BranchMissing => "branch-missing",
+            Blocker::BlockedByChanges => "blocked-by-changes",
+            Blocker::BlockingFindings => "blocking-findings",
+            Blocker::NoValidApproval => "no-valid-approval",
+            Blocker::GatesNotGreen => "gates-not-green",
+            Blocker::HoldActive => "hold-active",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DependencyChangeStatus {
+    pub change_id: String,
+    pub slug: String,
+    pub status: String,
+    pub integrated: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BlockerStatus {
+    pub blocked: bool,
+    /// Status of every declared prerequisite. The historical field name is
+    /// retained because orchestrators already consume it from the design spec.
+    pub blockers_ready: Vec<DependencyChangeStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,6 +80,20 @@ pub struct FindingSummary {
     pub contested: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct HoldSummary {
+    pub active: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BlockerSummary {
+    pub open_findings: usize,
+    pub blocking_findings: usize,
+    pub gate_status: BTreeMap<String, String>,
+    pub hold: HoldSummary,
+}
+
 /// The versioned machine-readable contract the /arc skill programs
 /// against. Everything here is derivable from the ledger plus Git.
 #[derive(Debug, Serialize)]
@@ -64,6 +108,12 @@ pub struct StatusReport {
     pub branch: String,
     pub base: String,
     pub worktree: Option<String>,
+    pub opened_by: String,
+    pub opened_harness: Option<String>,
+    pub tags: Vec<String>,
+    pub blocked_by: Vec<String>,
+    pub blocks: Vec<String>,
+    pub blocker_status: BlockerStatus,
     pub current_head: Option<String>,
     pub latest_patchset: Option<crate::state::Patchset>,
     pub head_matches_latest_patchset: bool,
@@ -72,6 +122,11 @@ pub struct StatusReport {
     pub open_blocking_findings: Vec<String>,
     pub hold: Option<String>,
     pub gates: Vec<GateStatus>,
+    pub blocker_summary: BlockerSummary,
+    pub next_action: String,
+    pub ready_reason: String,
+    pub ready_to_integrate: bool,
+    /// Backward-compatible spelling retained for arc-status/1 consumers.
     pub integrate_ready: bool,
     pub blockers: Vec<Blocker>,
     pub closure: Option<crate::state::ClosureState>,
@@ -86,8 +141,14 @@ pub struct VerdictStatus {
 }
 
 /// Build the status report: replayed ledger state joined with live Git
-/// facts (branch head) and the declared gate policy.
-pub fn build(state: &ChangeState, cwd: &Path, gates: &GatesFile) -> Result<StatusReport> {
+/// facts, dependency state, and the declared gate policy.
+pub fn build(
+    state: &ChangeState,
+    cwd: &Path,
+    gates: &GatesFile,
+    dependency_status: BlockerStatus,
+    blocks: Vec<String>,
+) -> Result<StatusReport> {
     let current_head = gitio::branch_head(cwd, &state.branch).ok();
 
     let latest_patchset = state.latest_patchset().cloned();
@@ -159,6 +220,9 @@ pub fn build(state: &ChangeState, cwd: &Path, gates: &GatesFile) -> Result<Statu
     if current_head.is_none() {
         blockers.push(Blocker::BranchMissing);
     }
+    if dependency_status.blocked {
+        blockers.push(Blocker::BlockedByChanges);
+    }
     if !open_blocking.is_empty() {
         blockers.push(Blocker::BlockingFindings);
     }
@@ -176,6 +240,74 @@ pub fn build(state: &ChangeState, cwd: &Path, gates: &GatesFile) -> Result<Statu
         blockers.push(Blocker::HoldActive);
     }
 
+    let gate_summary = gate_statuses
+        .iter()
+        .map(|gate| {
+            (
+                gate.name.clone(),
+                if gate.green_at_head {
+                    "pass"
+                } else {
+                    "pending"
+                }
+                .into(),
+            )
+        })
+        .collect();
+    let open_findings = findings
+        .iter()
+        .filter(|finding| {
+            !matches!(
+                finding.status.as_str(),
+                "resolved" | "acceptedrisk" | "obsolete"
+            )
+        })
+        .count();
+    let blocker_summary = BlockerSummary {
+        open_findings,
+        blocking_findings: open_blocking.len(),
+        gate_status: gate_summary,
+        hold: HoldSummary {
+            active: state.hold.is_some(),
+            reason: state.hold.clone(),
+        },
+    };
+
+    let next_action = if state.is_closed() {
+        "none:closed".into()
+    } else if current_head.is_none() {
+        "restore_branch".into()
+    } else if dependency_status.blocked {
+        "wait_for:blockers".into()
+    } else if !head_matches {
+        "snapshot".into()
+    } else if !open_blocking.is_empty() {
+        "resolve_findings".into()
+    } else if state.hold.is_some() {
+        "release_hold".into()
+    } else if let Some(gate) = gate_statuses.iter().find(|gate| !gate.green_at_head) {
+        format!("run_gate:{}", gate.name)
+    } else if !verdict
+        .as_ref()
+        .map(|v| v.valid_for_current_head)
+        .unwrap_or(false)
+    {
+        "request_review".into()
+    } else {
+        "integrate".into()
+    };
+
+    let ready = blockers.is_empty();
+    let ready_reason = if ready {
+        "all integration gates pass".into()
+    } else {
+        blockers
+            .iter()
+            .map(|blocker| blocker.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
     Ok(StatusReport {
         schema: STATUS_SCHEMA,
         change_id: state.change_id.clone(),
@@ -191,6 +323,12 @@ pub fn build(state: &ChangeState, cwd: &Path, gates: &GatesFile) -> Result<Statu
         branch: state.branch.clone(),
         base: state.base.clone(),
         worktree: state.worktree.clone(),
+        opened_by: state.opened_by.clone(),
+        opened_harness: state.opened_harness.clone(),
+        tags: state.tags.clone(),
+        blocked_by: state.blocked_by.clone(),
+        blocks,
+        blocker_status: dependency_status,
         current_head,
         latest_patchset,
         head_matches_latest_patchset: head_matches,
@@ -199,7 +337,11 @@ pub fn build(state: &ChangeState, cwd: &Path, gates: &GatesFile) -> Result<Statu
         open_blocking_findings: open_blocking,
         hold: state.hold.clone(),
         gates: gate_statuses,
-        integrate_ready: blockers.is_empty(),
+        blocker_summary,
+        next_action,
+        ready_reason,
+        ready_to_integrate: ready,
+        integrate_ready: ready,
         blockers,
         closure: state.closure.clone(),
     })
@@ -211,16 +353,17 @@ pub fn check_exit_code(report: &StatusReport) -> i32 {
     if report.integrate_ready {
         return 0;
     }
-    for b in [
+    for blocker in [
         Blocker::Closed,
         Blocker::BranchMissing,
+        Blocker::BlockedByChanges,
         Blocker::BlockingFindings,
         Blocker::NoValidApproval,
         Blocker::GatesNotGreen,
         Blocker::HoldActive,
     ] {
-        if report.blockers.contains(&b) {
-            return b.exit_code();
+        if report.blockers.contains(&blocker) {
+            return blocker.exit_code();
         }
     }
     6
