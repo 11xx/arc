@@ -145,6 +145,38 @@ scripts work this way. An arc chain is the ledger-backed equivalent:
 deterministic dependency order, curated per-executor specs, machine-checked
 gates. Prefer either over implicit inheritance.
 
+## Launcher hygiene and liveness
+
+Rules from the 2026-07-17 wave-2 stall postmortem (a `codex exec` blocked
+forever reading a stdin pipe another heredoc had opened; no channel showed
+the difference between hung and working for seven minutes).
+
+Launching a non-interactive executor:
+
+- Give `codex exec` exactly one prompt source. Prompt as an argument means
+  stdin MUST be closed: append `< /dev/null`. Prompt via stdin means a
+  single heredoc feeding codex and nothing else. Never let an executor
+  launch share a compound command with any other stdin consumer or
+  producer (heredocs, pipes) — journal appends and launches are separate
+  commands.
+- Redirect output to a log file per executor; the log is the liveness
+  probe.
+
+Arm two watchdog tiers at launch, always:
+
+- **First-output (seconds):** the executor banner appears within seconds
+  of a healthy start. Log still near-empty after 60 s = launch failure;
+  kill and relaunch, do not wait.
+- **Progress (minutes):** a log that stops growing for longer than the
+  task plausibly needs is a wedge, not deep thought. Check interim output
+  before assuming work is happening; a hung process and a working one are
+  otherwise indistinguishable.
+
+Executors leave a start breadcrumb: `arc comment <change>` ("executor
+started, session <id>") immediately after reading the spec, so the ledger
+shows life between `begin` and the first `snapshot`. This is convention
+until the claim/heartbeat mechanism ships in the ledger.
+
 ## Correct and incorrect delegation
 
 ### Correct: Claude invokes Codex
