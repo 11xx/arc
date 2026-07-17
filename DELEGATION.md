@@ -78,7 +78,7 @@ Do:
 Do not:
 
 - Spawn another Codex from a normal executor prompt.
-- write to another agent's branch or worktree.
+- Write to another agent's branch or worktree.
 - Merge into the target branch or run `arc integrate` when Claude owns review.
 - Work around an unclear actor assignment; ask the orchestrator to correct it.
 
