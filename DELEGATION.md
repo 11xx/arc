@@ -145,6 +145,69 @@ scripts work this way. An arc chain is the ledger-backed equivalent:
 deterministic dependency order, curated per-executor specs, machine-checked
 gates. Prefer either over implicit inheritance.
 
+## Executor backends (harness adapters)
+
+The matrix above routes *roles*; this section routes *invocations*. A
+backend is a CLI a lead can drive programmatically to run a selected model.
+Each backend has an adapter contract — the facts a lead must know before
+composing a command. A backend is routable only after every contract row
+has been probed and recorded here; until then it is "unprobed" and must not
+be selected.
+
+Adapter contract (probe checklist for onboarding any new harness):
+
+1. **Non-interactive entrypoint** — the `claude -p` / `codex exec`
+   equivalent, and how the prompt is passed (argument, stdin, file).
+2. **Model and effort selection** — explicit flags; never rely on the
+   harness default or fuzzy matching in delegation commands.
+3. **Working directory** — a `-C`-style flag, or `cd` before invoking.
+4. **Final-message capture** — where the answer lands (stdout, `-o` file)
+   and how noisy the channel is.
+5. **Isolation** — OS sandbox, tool allowlist, or nothing; what write mode
+   actually fences.
+6. **Clean-room switches** — how to suppress ambient config, sessions,
+   extensions, and context files so the curated brief is the whole input.
+7. **Resume** — continuing a prior run for follow-ups.
+8. **Quota identity** — which subscription pool the backend draws from and
+   the exact usage-limit error signature. Two backends on one pool are not
+   fallbacks for each other's limits.
+
+### Verified backends (2026-07-17)
+
+| Contract | codex CLI (`codex exec`) | pi (`pi -p`), v0.80.10 |
+| --- | --- | --- |
+| Entrypoint | `codex exec "<prompt>"` | `pi -p "<prompt>"`; `@file` args inline files (specs) |
+| Model | `-m gpt-5.6-{sol,terra,luna}` | `--provider openai-codex --model gpt-5.6-{sol,terra,luna}` |
+| Effort | `-c model_reasoning_effort="low\|medium\|high\|xhigh"` | `--thinking off\|minimal\|low\|medium\|high\|xhigh\|max` (or `:level` model suffix) |
+| Working dir | `-C <dir>` | none — `cd` first |
+| Capture | `-o <file>`; stdout is the full transcript (noisy) | stdout is exactly the final message |
+| Isolation | OS sandbox: `-s read-only` / `-s workspace-write` (+ `writable_roots`) | **none**; read-only ≈ `--tools read,grep,find,ls` (no bash, so no git/shell inspection); write mode is unsandboxed user access |
+| Clean-room | curated prompt; reads repo AGENTS.md | `--no-session --no-extensions --no-skills --no-context-files` |
+| Resume | `codex exec resume --last` | `--session <id>` / `-c` / `--fork` |
+| Quota | ChatGPT/Codex subscription; "You've hit your usage limit … try again at HH:MM" | **same** ChatGPT/Codex pool via the `openai-codex` login — not a quota fallback for codex CLI limits |
+
+Backend selection between the two GPT routes:
+
+- **codex CLI is the default for GPT work**, and mandatory-by-default for
+  write mode: its OS sandbox is a real fence; pi's write mode has none.
+  Route write-mode work through pi only when the codex CLI itself is the
+  blocker (broken install, incompatible flag, harness without codex
+  access), and then only inside a dedicated worktree with explicit
+  scope fencing in the prompt.
+- **pi's niche is provider plurality and lead portability**: one adapter
+  reaches every provider the user has logged in (today only
+  `openai-codex`; Anthropic/Copilot/xAI logins would appear in the same
+  `--provider` flag), and any harness that can run a shell can drive it.
+  A non-Claude, non-codex lead delegating to GPT goes through pi.
+- pi "read-only" (`--tools read,grep,find,ls`) is tool-level, not
+  OS-level, and excludes bash entirely: file reading and search work,
+  `git log`/build commands do not. Investigations needing shell stay on
+  `codex exec -s read-only`.
+- Liveness, watchdog, and one-prompt-source stdin rules below apply to
+  every backend. pi's stdin behavior under `-p` is unprobed: apply the
+  same `< /dev/null` discipline defensively.
+- opencode: **unprobed** — run the contract checklist before first use.
+
 ## Launcher hygiene and liveness
 
 Rules from the 2026-07-17 wave-2 stall postmortem (a `codex exec` blocked
