@@ -405,6 +405,20 @@ item with a machine-readable journal line (`consumed <filename>
 [<outcome>]`). The journal is append-only; consumption never edits or deletes
 the artifact.
 
+Advisory **lanes** announce which topics a session is actively working so
+parallel sessions sharing one archive see occupancy instead of guessing:
+`thread lane open <topic> [--scope t1,t2] [--ttl 2h] [--status <text>]`,
+`renew`, `close [--outcome done|handoff|abandoned|expired]`, and `list`.
+Lanes are journal markers (`lane opened/renewed/closed` — hand-writable,
+malformed markers are inert), never locks. Liveness needs no heartbeats:
+any journal line by the owning session restarts the ttl window; idle lanes
+decay to stale, and anyone may close a stale lane `[expired]` — the
+explicit takeover path. Opening a lane implicitly closes the session's
+previous one (a session has at most one). `thread open` annotates items
+covered by a live lane, distinguishing this-session from external
+occupancy, and `catchup` leads with the lanes block so a newly opened
+session sees who else is here first.
+
 ## Roadmap
 
 See PLAN-02 in the arc-discussion thread archive. Shipped: local core +
