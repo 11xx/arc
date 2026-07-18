@@ -421,7 +421,7 @@ session sees who else is here first.
 
 ## Roadmap
 
-See PLAN-02 in the arc-discussion thread archive. Shipped: local core +
+Shipped: local core +
 policy engine (M1–M2), `/arc` skill wiring (M3), deterministic export/import
 bundles (M4), local orchestration foundations (dependencies, tags,
 actionable status, query, and batch views), claims/stages and execution

@@ -39,5 +39,10 @@ daemon, no database, no network, no multi-machine ref sync.
   that split.
 - After integrating a CLI change, refresh the installed binary:
   `cargo install --path . --locked`.
-- Add a line under `[Unreleased]` in CHANGELOG.md as part of each
-  integrated change.
+- Documentation ships with the change, not as a follow-up: update the
+  affected README section, module doc comment, and the `[Unreleased]`
+  CHANGELOG.md line in the same change that alters behavior.
+- Docs and comments must be timeless and self-contained: never reference
+  the authoring session, conversation, specs, plans, thread artifacts, or
+  moment-of-writing context ("per the spec", "the drift fix", "new in
+  this change") — state the invariant, not the story behind it.

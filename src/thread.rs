@@ -287,8 +287,8 @@ pub fn resolve_dir(cwd: &Path) -> Result<PathBuf> {
 }
 
 /// The main repository root, shared by every worktree. Keying the archive
-/// off this (never a worktree path) is exactly the drift fix: two worktrees
-/// of one repo resolve to the same directory.
+/// off this (never a worktree path) means two worktrees of one repo always
+/// resolve to the same directory.
 fn repo_root(cwd: &Path) -> Result<PathBuf> {
     let common = gitio::common_dir(cwd)
         .context("not inside a Git repository (set ARC_THREAD_DIR to override)")?;
