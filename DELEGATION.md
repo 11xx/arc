@@ -39,6 +39,30 @@ Delegation prompts set `ARC_ROLE` explicitly: `implementer` for executor
 sessions and `reviewer` for review-only sessions. Do not rely on the unset
 backward-compatible behavior for delegated work.
 
+## Reviewer line
+
+The verdict never comes from the model that authored the diff, and review
+effort is priced by stakes, not applied uniformly. The reviewer tiers are
+exactly **Sol high**, **Sol medium**, and **Opus high** — Sol low never
+reviews (too shallow for a verdict), Sol xhigh authors rather than reviews,
+and Opus high doubles as the reviewer fallback when Codex quota is
+exhausted. Machine form: `agent-routing models` (`[policy].review`).
+
+| Author | Routine / docs-only | Behavior-affecting | High-stakes* |
+| --- | --- | --- | --- |
+| Fable (trusted lead) | none — its own agency suffices | Sol medium read-only skim | Sol high, mandatory |
+| Sol executor (any effort) | lead reads the diff | lead review | lead + Opus high or a second Sol high pass |
+| Opus | none | Sol medium | Sol high |
+
+*High-stakes: data migrations, schema or breaking changes, destructive
+operations, security-sensitive surfaces.
+
+Futures, listed so activation is a data update rather than a policy
+rewrite: Grok 4.5 (roughly the Opus-high band) and Kimi K3 (Fable
+medium/high band on good days, variable) are reachable through the
+OpenCode subscription but stay inactive until that backend is probed and
+real benchmark rows land in the model matrix.
+
 ## Golden rule
 
 Never tell an executor to delegate to itself.
