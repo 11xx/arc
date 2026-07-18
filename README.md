@@ -51,8 +51,10 @@ happened and what is allowed*.
   the head equals the approved patchset head, no blocking finding is
   open, every required gate is green at that exact head, and no hold is
   active. It merges the approved SHA (not the branch name) with
-  `--no-ff`, then verifies the merge commit's parents. Refusals carry
-  typed exit codes.
+  `--no-ff`, then verifies the merge commit's parents. `arc integrate
+  --tag '#series'` applies that same guarded path to every matching change
+  in dependency order, stopping at the first refusal. Refusals carry typed
+  exit codes.
 
 ## Quick tour
 
@@ -90,6 +92,10 @@ arc review radio-refill-fix --verdict approved
 
 arc check radio-refill-fix             # exit 0 = ready
 arc integrate radio-refill-fix --cleanup
+
+# Integrate every matching series member in dependency order. --cleanup is
+# allowed here; --into and --message are intentionally per-change only.
+arc integrate --tag '#radio-series' --cleanup
 ```
 
 Observe a change without scraping status views, or wait for one condition for

@@ -462,6 +462,140 @@ fn query_tags_batch_views_and_actionable_errors() {
         .stdout(predicates::str::contains("tagged-b-"));
 }
 
+fn ready_tagged_change(repo: &Repo, slug: &str, blocked_by: Option<&str>) -> String {
+    let mut begin = repo.arc(&repo.root);
+    begin.args(["begin", slug, "--tag", "#series"]);
+    if let Some(blocker) = blocked_by {
+        begin.args(["--blocked-by", blocker]);
+    }
+    let change_id = opened_change_id(&stdout(&mut begin));
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(
+        &worktree,
+        &format!("{slug}.txt"),
+        &format!("{slug}\n"),
+        &format!("feat: add {slug}"),
+    );
+    stdout(repo.arc(&worktree).args(["snapshot", slug]));
+    repo.arc(&worktree)
+        .args(["review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
+    change_id
+}
+
+#[test]
+fn tagged_integration_unblocks_and_merges_a_chain_in_dependency_order() {
+    let repo = Repo::new();
+    let first = ready_tagged_change(&repo, "series-first", None);
+    let second = ready_tagged_change(&repo, "series-second", Some(&first));
+
+    repo.arc(&repo.root)
+        .args(["integrate", "--tag", "#series"])
+        .assert()
+        .success();
+
+    let subjects = git_out(&repo.root, &["log", "--format=%s", "-2"]);
+    assert_eq!(
+        subjects.lines().collect::<Vec<_>>(),
+        [
+            "merge(series-second): series second",
+            "merge(series-first): series first"
+        ]
+    );
+    for change in [first, second] {
+        let status: serde_json::Value =
+            serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", &change]))).unwrap();
+        assert_eq!(status["closure"]["outcome"], "integrated");
+    }
+}
+
+#[test]
+fn tagged_integration_skips_closed_members_in_deterministic_order() {
+    let repo = Repo::new();
+    let closed = ready_tagged_change(&repo, "series-closed", None);
+    repo.arc(&repo.root)
+        .args(["integrate", "series-closed"])
+        .assert()
+        .success();
+    let live = ready_tagged_change(&repo, "series-live", None);
+
+    let output = stdout(repo.arc(&repo.root).args(["integrate", "--tag", "#series"]));
+    assert!(output.contains(&format!("{closed}: integrated")));
+    assert!(
+        output.find(&format!("{closed}: integrated")).unwrap()
+            < output.find("integrated:").unwrap()
+    );
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", &live]))).unwrap();
+    assert_eq!(status["closure"]["outcome"], "integrated");
+}
+
+#[test]
+fn tagged_integration_stops_at_first_nonready_member_after_prior_merge() {
+    let repo = Repo::new();
+    let first = ready_tagged_change(&repo, "series-ready", None);
+    let mut begin = repo.arc(&repo.root);
+    begin.args([
+        "begin",
+        "series-not-ready",
+        "--tag",
+        "#series",
+        "--blocked-by",
+        &first,
+    ]);
+    let second = opened_change_id(&stdout(&mut begin));
+
+    repo.arc(&repo.root)
+        .args(["integrate", "--tag", "#series"])
+        .assert()
+        .code(3);
+
+    let first_status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", &first]))).unwrap();
+    let second_status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", &second]))).unwrap();
+    assert_eq!(first_status["closure"]["outcome"], "integrated");
+    assert_eq!(second_status["state"], "open");
+    assert!(repo.root.join("series-ready.txt").exists());
+}
+
+#[test]
+fn tagged_integration_reports_selector_and_option_errors() {
+    let repo = Repo::new();
+    ready_tagged_change(&repo, "series-options", None);
+
+    repo.arc(&repo.root)
+        .args(["integrate"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "provide a change or at least one --tag",
+        ));
+    repo.arc(&repo.root)
+        .args(["integrate", "series-options", "--tag", "#series"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "provide a change or --tag, not both",
+        ));
+    repo.arc(&repo.root)
+        .args(["integrate", "--tag", "#missing"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no changes match tags #missing"));
+    repo.arc(&repo.root)
+        .args(["integrate", "--tag", "#series", "--into", "master"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--into is only valid"));
+    repo.arc(&repo.root)
+        .args(["integrate", "--tag", "#series", "--message", "custom"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--message is only valid"));
+}
+
 #[test]
 fn concurrent_metadata_updates_cannot_create_a_dependency_cycle() {
     let repo = Repo::new();

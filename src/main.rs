@@ -414,9 +414,13 @@ enum Cmd {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Guarded --no-ff merge of the approved head into the target branch
+    /// Guarded merge of one change or a dependency-ordered tagged series
     Integrate {
-        change: String,
+        /// Change to integrate; omit only when selecting with --tag
+        change: Option<String>,
+        /// Integrate every change carrying all supplied tags, in dependency order
+        #[arg(long)]
+        tag: Vec<String>,
         /// Merge into this branch instead of the recorded target
         #[arg(long)]
         into: Option<String>,
@@ -810,10 +814,11 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Integrate {
             change,
+            tag,
             into,
             message,
             cleanup,
-        } => commands::integrate(&ctx, &change, into, message, cleanup),
+        } => commands::integrate(&ctx, change.as_deref(), tag, into, message, cleanup),
         Cmd::Close {
             change,
             integrated,

@@ -193,6 +193,33 @@ pub fn release_hold(ctx: &Ctx, reference: &str, reason: Option<String>) -> Resul
 
 pub fn integrate(
     ctx: &Ctx,
+    reference: Option<&str>,
+    tags: Vec<String>,
+    into: Option<String>,
+    message: Option<String>,
+    cleanup: bool,
+) -> Result<i32> {
+    match (reference, tags.is_empty()) {
+        (Some(reference), true) => integrate_one(ctx, reference, into, message, cleanup),
+        (None, false) => {
+            if into.is_some() {
+                bail!("--into is only valid when integrating one change");
+            }
+            if message.is_some() {
+                bail!("--message is only valid when integrating one change");
+            }
+            integrate_tagged(ctx, normalize_tags(tags)?, cleanup)
+        }
+        (Some(_), false) => bail!("provide a change or --tag, not both"),
+        (None, true) => bail!("provide a change or at least one --tag"),
+    }
+}
+
+/// Integrate one already-selected change. Tagged integration reuses this
+/// guarded path for every open member so each merge gets the normal target,
+/// approval, gate, and dependency checks.
+fn integrate_one(
+    ctx: &Ctx,
     reference: &str,
     into: Option<String>,
     message: Option<String>,
@@ -300,6 +327,67 @@ pub fn integrate(
         println!("deleted branch {}", st.branch);
     }
     Ok(0)
+}
+
+fn integrate_tagged(ctx: &Ctx, tags: Vec<String>, cleanup: bool) -> Result<i32> {
+    let store = ctx.store()?;
+    let selected = ctx
+        .load_all_states(&store)?
+        .into_iter()
+        .filter(|(_, state)| tags.iter().all(|tag| state.tags.contains(tag)))
+        .collect::<BTreeMap<_, _>>();
+    if selected.is_empty() {
+        bail!("no changes match tags {}", tags.join(", "));
+    }
+
+    for change_id in dependency_order(&selected)? {
+        // The earlier member may have changed dependency state or closed this
+        // member, so never act on the selection snapshot.
+        let (_, state) = ctx.load_state(&store, &change_id)?;
+        if state.is_closed() {
+            println!("{}: {}", state.change_id, change_status(&state));
+            continue;
+        }
+        let code = integrate_one(ctx, &change_id, None, None, cleanup)?;
+        if code != 0 {
+            return Ok(code);
+        }
+    }
+    Ok(0)
+}
+
+/// Return selected changes in dependency order. Unrelated members are stable
+/// by their ledger opening time, then immutable change ID.
+fn dependency_order(selected: &BTreeMap<String, ChangeState>) -> Result<Vec<String>> {
+    let mut pending = selected.keys().cloned().collect::<BTreeSet<_>>();
+    let mut ordered = Vec::with_capacity(pending.len());
+
+    while !pending.is_empty() {
+        let mut ready = pending
+            .iter()
+            .filter(|change_id| {
+                selected[*change_id]
+                    .blocked_by
+                    .iter()
+                    .filter(|blocker| selected.contains_key(*blocker))
+                    .all(|blocker| !pending.contains(blocker))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        ready.sort_by(|left, right| {
+            selected[left]
+                .opened_at
+                .cmp(&selected[right].opened_at)
+                .then_with(|| left.cmp(right))
+        });
+        let Some(next) = ready.into_iter().next() else {
+            bail!("selected changes contain a dependency cycle");
+        };
+        pending.remove(&next);
+        ordered.push(next);
+    }
+
+    Ok(ordered)
 }
 
 pub fn close(
