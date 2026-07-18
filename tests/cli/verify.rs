@@ -40,6 +40,8 @@ fn verify_all_records_every_passing_gate_and_summary() {
     assert_eq!(values[1]["gate"], "beta");
     assert_eq!(values[0]["note"], "full suite");
     assert_eq!(values[1]["note"], "full suite");
+    assert!(values[0]["exit_code"].is_i64());
+    assert!(values[0]["duration_ms"].is_u64());
 }
 
 #[test]
@@ -171,6 +173,42 @@ fn verify_attest_records_gate_evidence_without_running() {
     assert_eq!(gate["green_at_head"], true);
     assert_eq!(gate["attested"], true);
 
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "feat-att",
+        "--type",
+        "verification-recorded",
+    ]));
+    let recorded: serde_json::Value = serde_json::from_str(events.lines().next().unwrap()).unwrap();
+    let payload = recorded.as_object().unwrap();
+    assert!(!payload.contains_key("exit_code"));
+    assert!(!payload.contains_key("duration_ms"));
+
+    let bundle = repo.home.join("attested-bundle.json");
+    repo.arc(&repo.root)
+        .args(["export", "feat-att", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let imported_events = stdout(destination.arc(&destination.root).args([
+        "events",
+        "--change",
+        "feat-att",
+        "--type",
+        "verification-recorded",
+    ]));
+    let imported: serde_json::Value =
+        serde_json::from_str(imported_events.lines().next().unwrap()).unwrap();
+    let imported_payload = imported.as_object().unwrap();
+    assert!(!imported_payload.contains_key("exit_code"));
+    assert!(!imported_payload.contains_key("duration_ms"));
+
     repo.arc(&repo.root)
         .args(["show", "feat-att"])
         .assert()
@@ -210,7 +248,7 @@ fn verify_attest_result_flag_pairing_is_enforced() {
             "--result is only valid with --attest",
         ));
 
-    // A failing attestation is recorded and mirrors the result in the exit code.
+    // A failing attestation is recorded and reports failure to the caller.
     repo.arc(&repo.root)
         .args([
             "verify",

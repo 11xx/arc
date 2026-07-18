@@ -1,3 +1,7 @@
+//! Gate verification keeps observed process evidence distinct from attestation:
+//! executed gates carry exit code and duration, while attested gates carry only
+//! the externally supplied result.
+
 use super::*;
 
 pub fn check_selection(ctx: &Ctx, reference: Option<&str>, tags: Vec<String>) -> Result<i32> {
@@ -102,13 +106,9 @@ fn record_verification(
 
     let attest = attested_result.is_some();
     let (result, exit_code, duration_ms) = match attested_result {
-        // Attested: record the caller's result without running anything. The
-        // gate did not execute here, so there is no observed exit code, timing,
-        // or head movement to re-check.
-        Some(result) => {
-            let exit_code = if result == VerifyResult::Pass { 0 } else { 1 };
-            (result, exit_code, 0)
-        }
+        // Attested evidence has only the caller's result because arc did not
+        // execute a process or observe an exit code or duration.
+        Some(result) => (result, None, None),
         None => {
             eprintln!("running: {cmd}");
             let started = std::time::Instant::now();
@@ -135,7 +135,7 @@ fn record_verification(
                      evidence recorded at {revision}"
                 );
             }
-            (result, exit_code, duration_ms)
+            (result, Some(exit_code), Some(duration_ms))
         }
     };
 

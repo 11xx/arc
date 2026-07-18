@@ -13,6 +13,8 @@ no version has been tagged yet.
 
 ### Fixed
 
+- Attested verification events omit unobserved exit codes and durations
+  (`attested-evidence-honesty`).
 - Free-text `thread journal` messages are never promoted into typed
   events, and doctor counts only artifact-shaped file fields as
   references (`journal-log-fix`).

@@ -43,9 +43,10 @@ happened and what is allowed*.
   the branch head equals the approved patchset head. Any new commit
   makes it stale.
 - **Gates** are declared in `.arc/gates.toml` (committed). `arc verify`
-  runs a gate and records command, exact revision, result, duration, and
-  hostname — local evidence with provenance, the local analogue of
-  required CI checks.
+  runs a gate and records command, exact revision, result, exit code, duration,
+  and hostname — local evidence with provenance, the local analogue of required
+  CI checks. Attested verification records no exit code or duration because arc
+  did not run the command.
 - **Snapshots record Git author and committer identity.** When a claim is live,
   the snapshot also records its generation and actor at snapshot time and
   reports an author mismatch as provenance evidence, never as an integration
@@ -321,8 +322,9 @@ arc verify <change> --gate test --attest --result pass --note "ran in CI sandbox
 
 Attested evidence is recorded without executing the command and still counts
 toward gate green-ness, but `arc show` and `arc status` mark it `(attested)`
-so a lead can apply stricter judgment. `--attest` requires `--result`, and
-`--result` without `--attest` is a usage error (arc observes its own result).
+so a lead can apply stricter judgment. It has no exit code or duration because
+arc did not run a process. `--attest` requires `--result`, and `--result`
+without `--attest` is a usage error (arc observes its own result).
 
 ## Identity
 

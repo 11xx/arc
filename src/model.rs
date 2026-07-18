@@ -151,8 +151,14 @@ pub enum Payload {
         command: String,
         revision: String,
         result: VerifyResult,
-        exit_code: i32,
-        duration_ms: u64,
+        /// Absent when arc did not execute the command. Existing ledger events
+        /// carry this field and round-trip byte-identically as `Some`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        /// Absent when arc did not execute the command. Existing ledger events
+        /// carry this field and round-trip byte-identically as `Some`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
         hostname: String,
         /// Evidence that arc did not execute itself (e.g. a sandboxed
         /// executor ran the gate, or the result comes from another host).
