@@ -4,6 +4,7 @@ mod config;
 mod gates;
 mod gitio;
 mod ids;
+mod inbox;
 mod model;
 mod render;
 mod state;
@@ -14,7 +15,7 @@ mod thread;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use commands::{AnchorArgs, Ctx, ListFormat, QueryArgs};
-use model::{DispositionStatus, Severity, Side, Verdict};
+use model::{DispositionStatus, MessageSeverity, MessageType, Severity, Side, Verdict};
 
 /// Change, review, and integration state over plain Git for agentic
 /// coding arcs. Git owns content and history; arc owns the collaboration
@@ -180,7 +181,48 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Append dependency or tag metadata to an open change
+    /// Append a structured cross-change announcement (never policy input)
+    Message {
+        change: String,
+        /// Announcement class
+        #[arg(long = "type", value_enum)]
+        message_type: MessageType,
+        /// Required single-line summary
+        #[arg(long)]
+        summary: String,
+        /// Optional longer detail
+        #[arg(long)]
+        detail: Option<String>,
+        /// Optional JSON object stored verbatim as metadata
+        #[arg(long)]
+        json: Option<String>,
+        /// Advisory severity
+        #[arg(long, value_enum, default_value = "info")]
+        severity: MessageSeverity,
+    },
+    /// Scan messages across open and closed changes (newest first)
+    Messages {
+        #[arg(long)]
+        change: Option<String>,
+        #[arg(long = "type", value_enum)]
+        message_type: Option<MessageType>,
+        #[arg(long, value_enum)]
+        severity: Option<MessageSeverity>,
+        /// Only messages created at or after this ISO 8601 instant
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Lead-facing queue rollup across open changes (arc-inbox/1 schema)
+    Inbox {
+        /// Restrict to changes assigned to this harness
+        #[arg(long = "assigned-to")]
+        assigned_to: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Append dependency, tag, or assignment metadata to an open change
     Metadata {
         change: String,
         #[arg(long = "blocked-by")]
@@ -191,6 +233,9 @@ enum Cmd {
         tag: Vec<String>,
         #[arg(long = "remove-tag")]
         remove_tag: Vec<String>,
+        /// Assign to a harness (advisory; latest wins; "" clears)
+        #[arg(long)]
+        assign: Option<String>,
     },
     /// Machine-readable status report (the versioned arc-status/3 schema)
     Status {
@@ -500,12 +545,38 @@ fn run(cli: Cli) -> Result<i32> {
             commands::show_selection(&ctx, change.as_deref(), tag, json)?;
             Ok(0)
         }
+        Cmd::Message {
+            change,
+            message_type,
+            summary,
+            detail,
+            json,
+            severity,
+        } => {
+            commands::message(&ctx, &change, message_type, summary, detail, json, severity)?;
+            Ok(0)
+        }
+        Cmd::Messages {
+            change,
+            message_type,
+            severity,
+            since,
+            json,
+        } => {
+            commands::messages(&ctx, change.as_deref(), message_type, severity, since, json)?;
+            Ok(0)
+        }
+        Cmd::Inbox { assigned_to, json } => {
+            commands::inbox(&ctx, assigned_to, json)?;
+            Ok(0)
+        }
         Cmd::Metadata {
             change,
             blocked_by,
             remove_blocked_by,
             tag,
             remove_tag,
+            assign,
         } => {
             commands::metadata(
                 &ctx,
@@ -514,6 +585,7 @@ fn run(cli: Cli) -> Result<i32> {
                 remove_blocked_by,
                 tag,
                 remove_tag,
+                assign,
             )?;
             Ok(0)
         }

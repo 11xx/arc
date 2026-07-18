@@ -203,6 +203,20 @@ pub struct CommentEntry {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct MessageEntry {
+    pub event_id: String,
+    pub message_type: MessageType,
+    pub severity: MessageSeverity,
+    pub summary: String,
+    pub detail: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub actor: String,
+    pub harness: Option<String>,
+    pub session: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ClosureState {
     pub outcome: Closure,
     pub integrated_commit: Option<String>,
@@ -226,8 +240,10 @@ pub struct ChangeState {
     pub opened_harness: Option<String>,
     pub blocked_by: Vec<String>,
     pub tags: Vec<String>,
+    pub assigned_to: Option<String>,
     pub opened_at: chrono::DateTime<chrono::Utc>,
     pub patchsets: Vec<Patchset>,
+    pub messages: Vec<MessageEntry>,
     pub comments: Vec<CommentEntry>,
     pub findings: BTreeMap<String, FindingState>,
     pub verdicts: Vec<VerdictEntry>,
@@ -315,8 +331,10 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     opened_harness: ev.harness.clone(),
                     blocked_by: blocked_by.clone(),
                     tags: tags.clone(),
+                    assigned_to: None,
                     opened_at: ev.created_at,
                     patchsets: Vec::new(),
+                    messages: Vec::new(),
                     comments: Vec::new(),
                     findings: BTreeMap::new(),
                     verdicts: Vec::new(),
@@ -347,6 +365,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 remove_blocked_by,
                 add_tags,
                 remove_tags,
+                assign,
             } => {
                 state
                     .blocked_by
@@ -364,7 +383,34 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 }
                 state.blocked_by.sort();
                 state.tags.sort();
+                // Latest assignment wins; an empty value clears it.
+                if let Some(assign) = assign {
+                    let trimmed = assign.trim();
+                    state.assigned_to = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
+                }
             }
+            Payload::Message {
+                message_type,
+                severity,
+                summary,
+                detail,
+                metadata,
+            } => state.messages.push(MessageEntry {
+                event_id: ev.event_id.clone(),
+                message_type: *message_type,
+                severity: *severity,
+                summary: summary.clone(),
+                detail: detail.clone(),
+                metadata: metadata.clone(),
+                actor: ev.actor.clone(),
+                harness: ev.harness.clone(),
+                session: ev.session.clone(),
+                created_at: ev.created_at,
+            }),
             Payload::PatchsetAdded {
                 patchset_id,
                 base,

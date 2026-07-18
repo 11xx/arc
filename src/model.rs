@@ -48,6 +48,21 @@ pub enum Payload {
         add_tags: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remove_tags: Vec<String>,
+        /// Assignment update (latest wins). `Some("")` clears; `None` leaves
+        /// the current assignment untouched. Advisory only — never enforced.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assign: Option<String>,
+    },
+    /// A structured cross-change announcement. Messages are announcements,
+    /// never policy input: `check`/`integrate` ignore them entirely.
+    Message {
+        message_type: MessageType,
+        severity: MessageSeverity,
+        summary: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
     },
     PatchsetAdded {
         patchset_id: String,
@@ -149,6 +164,47 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         superseded_by: Option<String>,
     },
+}
+
+/// The announcement class of a `message` event. Deliberately excludes
+/// `verdict` and `gate-result`: those already have native, policy-bearing
+/// events, and duplicating them as messages would create two sources of truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum MessageType {
+    Status,
+    Discovery,
+    Note,
+}
+
+impl MessageType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MessageType::Status => "status",
+            MessageType::Discovery => "discovery",
+            MessageType::Note => "note",
+        }
+    }
+}
+
+/// Advisory severity of a `message` event. Distinct from finding `Severity`:
+/// a message announces, it never blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum MessageSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+impl MessageSeverity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MessageSeverity::Info => "info",
+            MessageSeverity::Warning => "warning",
+            MessageSeverity::Error => "error",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

@@ -258,6 +258,7 @@ fn known_event_type(event_type: &str) -> bool {
         event_type,
         "change-opened"
             | "metadata-updated"
+            | "message"
             | "patchset-added"
             | "claim-set"
             | "claim-released"
