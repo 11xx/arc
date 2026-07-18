@@ -1136,3 +1136,134 @@ fn thread_catchup_shows_lanes_block() {
     .unwrap();
     assert_eq!(value["lanes"][0]["topic"], "work-a");
 }
+
+#[test]
+fn thread_doctor_clean_archive_exits_zero() {
+    let repo = Repo::new();
+    let body = repo.home.join("body.md");
+    fs::write(&body, "content\n").unwrap();
+    for (topic, kind) in [("clean-note", "note"), ("shared-fact", "memory")] {
+        repo.arc(&repo.root)
+            .args([
+                "thread",
+                "note",
+                topic,
+                "--kind",
+                kind,
+                "--body-file",
+                body.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+    }
+    repo.arc(&repo.root)
+        .args(["thread", "lane", "open", "active-work"])
+        .assert()
+        .success();
+
+    let text = stdout(repo.arc(&repo.root).args(["thread", "doctor"]));
+    assert_eq!(text, "problems:\n  (none)\nadvice:\n  (none)\n");
+    repo.arc(&repo.root)
+        .args(["thread", "doctor"])
+        .assert()
+        .success();
+
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["thread", "doctor", "--json"]),
+    ))
+    .unwrap();
+    assert!(value["problems"].as_array().unwrap().is_empty());
+    assert!(value["advice"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn thread_doctor_reports_problems_and_exits_one() {
+    let repo = Repo::new();
+    let body = repo.home.join("body.md");
+    fs::write(&body, "work\n").unwrap();
+    let artifact = stdout(repo.arc(&repo.root).args([
+        "thread",
+        "note",
+        "missing-work",
+        "--kind",
+        "todo",
+        "--body-file",
+        body.to_str().unwrap(),
+    ]));
+    let artifact = PathBuf::from(artifact.trim());
+    let filename = artifact.file_name().unwrap().to_str().unwrap().to_string();
+    repo.arc(&repo.root)
+        .args(["thread", "consume", &filename])
+        .assert()
+        .success();
+    fs::remove_file(artifact).unwrap();
+
+    let dir = thread_dir(&repo);
+    let journal = dir.join("journal.jsonl");
+    let mut contents = fs::read_to_string(&journal).unwrap();
+    contents.push_str("not json\n");
+    contents.push_str(
+        r#"{"schema":"thread-journal/1","ts":"2026-07-18T00:00:00Z","harness":"test","session":"session-a","topic":"unknown","event":"bogus"}"#,
+    );
+    contents.push('\n');
+    fs::write(journal, contents).unwrap();
+    fs::write(dir.join("bad.md"), "bad\n").unwrap();
+    fs::write(dir.join("foo-topic-bogus.md"), "bad kind\n").unwrap();
+
+    let assert = repo
+        .arc(&repo.root)
+        .args(["thread", "doctor"])
+        .assert()
+        .code(1);
+    let text = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    for code in [
+        "malformed-jsonl",
+        "unknown-jsonl-event",
+        "malformed-artifact-name",
+        "unknown-artifact-kind",
+        "dangling-artifact-reference",
+    ] {
+        assert!(text.contains(code), "missing {code}: {text}");
+    }
+}
+
+#[test]
+fn thread_doctor_advice_only_exits_zero() {
+    let repo = Repo::new();
+    let body = repo.home.join("body.md");
+    fs::write(&body, "work\n").unwrap();
+    let artifact = stdout(repo.arc(&repo.root).args([
+        "thread",
+        "note",
+        "finished-work",
+        "--kind",
+        "todo",
+        "--body-file",
+        body.to_str().unwrap(),
+    ]));
+    let filename = PathBuf::from(artifact.trim())
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    repo.arc(&repo.root)
+        .args(["thread", "consume", &filename])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["thread", "lane", "open", "idle-work", "--ttl", "1s"])
+        .assert()
+        .success();
+    thread::sleep(Duration::from_secs(2));
+
+    let assert = repo
+        .arc(&repo.root)
+        .args(["thread", "doctor"])
+        .assert()
+        .success();
+    let text = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(text.contains("archivable-artifacts"), "{text}");
+    assert!(text.contains("stale-lane"), "{text}");
+    assert!(text.contains("problems:\n  (none)"), "{text}");
+}

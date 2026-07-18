@@ -430,6 +430,11 @@ covered by a live lane, distinguishing this-session from external
 occupancy, and `catchup` leads with the lanes block so a newly opened
 session sees who else is here first.
 
+`thread doctor [--json]` performs a read-only archive health check. It reports
+malformed journal lines, artifact names and kinds, and dangling references as
+problems with a failing exit status, while stale lanes and archive housekeeping
+remain non-failing advice; it never creates the archive directory.
+
 ## Roadmap
 
 Shipped: local core +

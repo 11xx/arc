@@ -18,6 +18,8 @@ no version has been tagged yet.
 
 ### Added
 
+- Read-only `thread doctor [--json]` archive health and housekeeping checks
+  (`thread-doctor`).
 - Change-scoped implementation briefs stored in the ledger and carried by
   export/import bundles (`change-briefs`).
 - Shared project memory artifacts listed by `thread memories` and always
