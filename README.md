@@ -386,11 +386,13 @@ then the `[threads.dirs]` map in the config file keyed by repository root,
 then `<ai_home>/threads/<repo-slug>`); `note` writes a timestamped
 `<ts>-<topic>-<kind>.md` artifact and its journal line; `journal` appends a
 journal-only line; `catchup` lists newest-first. Work waiting for a future
-session uses the actionable kinds — `todo`, `handoff`, `inbox`, `plan` —
-which `thread open` lists until an explicit `thread consume <filename>
-[--outcome done|superseded|discarded] [--note <text>]` retires them with a
-machine-readable journal line (`consumed <filename> [<outcome>]`). The
-journal is append-only; consumption never edits or deletes the artifact.
+session uses the primary actionable kinds — `todo`, `handoff`, `inbox`,
+`plan` — plus lower-priority `later`. `thread open` lists the primary queue
+first and then a separate later section until an explicit `thread consume
+<filename> [--outcome done|superseded|discarded] [--note <text>]` retires an
+item with a machine-readable journal line (`consumed <filename>
+[<outcome>]`). The journal is append-only; consumption never edits or deletes
+the artifact.
 
 ## Roadmap
 

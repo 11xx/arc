@@ -29,6 +29,7 @@ pub enum ThreadKind {
     Inbox,
     Spec,
     Todo,
+    Later,
 }
 
 impl ThreadKind {
@@ -43,14 +44,19 @@ impl ThreadKind {
             ThreadKind::Inbox => "inbox",
             ThreadKind::Spec => "spec",
             ThreadKind::Todo => "todo",
+            ThreadKind::Later => "later",
         }
     }
 }
 
-/// Kinds that represent work waiting for a future session: they stay listed
-/// by `thread open` until an explicit `thread consume`. The other kinds are
-/// records, not queues.
-const ACTIONABLE_KINDS: [&str; 4] = ["todo", "handoff", "inbox", "plan"];
+/// Primary kinds that represent work waiting for a future session: they stay
+/// in the main `thread open` queue until an explicit `thread consume`.
+const PRIMARY_ACTIONABLE_KINDS: [&str; 4] = ["todo", "handoff", "inbox", "plan"];
+const LATER_KIND: &str = "later";
+
+fn is_actionable_kind(kind: &str) -> bool {
+    PRIMARY_ACTIONABLE_KINDS.contains(&kind) || kind == LATER_KIND
+}
 
 /// How a consumed artifact was discharged. Advisory vocabulary recorded in
 /// the journal line; `done` covers the normal picked-up-and-finished path.
@@ -112,9 +118,9 @@ pub enum ThreadCmd {
         #[arg(long)]
         archived: bool,
     },
-    /// List actionable artifacts (todo/handoff/inbox/plan) not yet consumed
+    /// List actionable artifacts (todo/handoff/inbox/plan, then later) not yet consumed
     Open {
-        /// Restrict to one actionable kind
+        /// Restrict to one actionable kind; later is shown separately
         #[arg(long, value_enum)]
         kind: Option<ThreadKind>,
         /// Emit structured JSON instead of text
@@ -137,7 +143,7 @@ pub enum ThreadCmd {
         /// Artifact filename inside the hot dir (a name, not a path)
         #[arg(required_unless_present = "consumed", conflicts_with = "consumed")]
         filename: Option<String>,
-        /// Archive every consumed actionable artifact
+        /// Archive every consumed actionable artifact, including later items
         #[arg(long)]
         consumed: bool,
         /// With --consumed, include only artifacts older than this many days
@@ -532,23 +538,31 @@ fn read_journal(dir: &Path) -> Result<String> {
 struct OpenItems {
     dir: String,
     open: Vec<ArtifactEntry>,
+    later: Vec<ArtifactEntry>,
 }
 
 fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
     if let Some(kind) = kind {
-        if !ACTIONABLE_KINDS.contains(&kind.as_str()) {
+        if !is_actionable_kind(kind.as_str()) {
             bail!(
                 "--kind {} is not actionable; the open queue tracks {}",
                 kind.as_str(),
-                ACTIONABLE_KINDS.join("|")
+                PRIMARY_ACTIONABLE_KINDS
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(LATER_KIND))
+                    .collect::<Vec<_>>()
+                    .join("|")
             );
         }
     }
     let dir = resolve_dir(&ctx.cwd)?;
     let mut open: Vec<ArtifactEntry> = Vec::new();
+    let mut later: Vec<ArtifactEntry> = Vec::new();
     if dir.is_dir() {
         let journal = read_journal(&dir)?;
-        let mut names: Vec<String> = Vec::new();
+        let mut open_names: Vec<String> = Vec::new();
+        let mut later_names: Vec<String> = Vec::new();
         for entry in
             std::fs::read_dir(&dir).with_context(|| format!("cannot read {}", dir.display()))?
         {
@@ -558,18 +572,36 @@ fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
             };
             let wanted = match kind {
                 Some(kind) => file_kind == kind.as_str(),
-                None => ACTIONABLE_KINDS.contains(&file_kind.as_str()),
+                None => is_actionable_kind(&file_kind),
             };
             if wanted && !is_consumed(&journal, &name) {
-                names.push(name);
+                if file_kind == LATER_KIND {
+                    later_names.push(name);
+                } else {
+                    open_names.push(name);
+                }
             }
         }
-        names.sort();
-        names.reverse();
-        for name in names {
+        open_names.sort();
+        open_names.reverse();
+        later_names.sort();
+        later_names.reverse();
+        for name in open_names {
             if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
                 let heading = first_heading(&dir.join(&name));
                 open.push(ArtifactEntry {
+                    file: name,
+                    timestamp: ts,
+                    topic,
+                    kind: file_kind,
+                    heading,
+                });
+            }
+        }
+        for name in later_names {
+            if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
+                let heading = first_heading(&dir.join(&name));
+                later.push(ArtifactEntry {
                     file: name,
                     timestamp: ts,
                     topic,
@@ -584,6 +616,7 @@ fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
         let out = OpenItems {
             dir: dir.display().to_string(),
             open,
+            later,
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
@@ -593,6 +626,14 @@ fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
             println!("  (none)");
         }
         for f in &open {
+            let heading = f.heading.as_deref().unwrap_or("");
+            println!("  {}  {}  {}  {}", f.timestamp, f.topic, f.kind, heading);
+        }
+        println!("later items (newest first):");
+        if later.is_empty() {
+            println!("  (none)");
+        }
+        for f in &later {
             let heading = f.heading.as_deref().unwrap_or("");
             println!("  {}  {}  {}  {}", f.timestamp, f.topic, f.kind, heading);
         }
@@ -642,7 +683,7 @@ fn archive(
                 let Some((timestamp, _, kind)) = parse_artifact_name(&name) else {
                     continue;
                 };
-                if ACTIONABLE_KINDS.contains(&kind.as_str())
+                if is_actionable_kind(&kind)
                     && is_consumed(&journal, &name)
                     && older_than_days.is_none_or(|days| timestamp_older_than(&timestamp, days))
                 {
@@ -688,7 +729,7 @@ fn archive_one(ctx: &Ctx, hot: &Path, filename: &str, note: Option<&str>) -> Res
     if !source.is_file() {
         bail!("no such artifact {} in {}", filename, hot.display());
     }
-    if ACTIONABLE_KINDS.contains(&kind.as_str()) && !is_consumed(&read_journal(hot)?, filename) {
+    if is_actionable_kind(&kind) && !is_consumed(&read_journal(hot)?, filename) {
         bail!("{filename} is actionable and must be consumed before it can be archived");
     }
 

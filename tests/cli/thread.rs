@@ -281,9 +281,9 @@ fn thread_journal_is_append_only() {
     assert!(text.contains("topic-b: second message"));
 }
 
-/// `thread open` lists only unconsumed actionable kinds (todo/handoff/
-/// inbox/plan); `thread consume` retires an item through a machine-readable
-/// journal line and refuses double consumption.
+/// `thread open` lists unconsumed primary actionable kinds (todo/handoff/
+/// inbox/plan) before lower-priority later items; `thread consume` retires
+/// either through a machine-readable journal line and refuses double consumption.
 #[test]
 fn thread_open_and_consume_track_actionable_items() {
     let repo = Repo::new();
@@ -295,6 +295,7 @@ fn thread_open_and_consume_track_actionable_items() {
     for (topic, kind) in [
         ("next-work", "todo"),
         ("pickup", "handoff"),
+        ("deferred", "later"),
         ("memo", "note"),
     ] {
         let out = stdout(repo.arc(&repo.root).args([
@@ -320,11 +321,18 @@ fn thread_open_and_consume_track_actionable_items() {
         names["todo"]
     );
 
-    // open: actionable kinds appear; records (note) do not.
+    // Open renders the primary queue before its separate later tier; records
+    // (note) do not appear in either section.
     let open = stdout(repo.arc(&repo.root).args(["thread", "open"]));
     assert!(open.contains("next-work"), "{open}");
     assert!(open.contains("pickup"), "{open}");
+    assert!(open.contains("deferred"), "{open}");
     assert!(!open.contains("memo"), "{open}");
+    assert!(
+        open.find("open items (newest first):").unwrap()
+            < open.find("later items (newest first):").unwrap(),
+        "{open}"
+    );
 
     // Consume the handoff with an outcome and note; it leaves the queue.
     repo.arc(&repo.root)
@@ -343,6 +351,7 @@ fn thread_open_and_consume_track_actionable_items() {
         repo.arc(&repo.root).args(["thread", "open", "--json"]),
     ))
     .unwrap();
+    assert!(open["dir"].as_str().is_some());
     let open_files: Vec<&str> = open["open"]
         .as_array()
         .unwrap()
@@ -350,17 +359,49 @@ fn thread_open_and_consume_track_actionable_items() {
         .map(|e| e["file"].as_str().unwrap())
         .collect();
     assert_eq!(open_files, vec![names["todo"].as_str()]);
+    let later_files: Vec<&str> = open["later"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(later_files, vec![names["later"].as_str()]);
 
-    // --kind filters within the actionable set; record kinds are refused.
-    let filtered = stdout(
+    // --kind filters a primary kind into open and later into its own array.
+    let filtered: serde_json::Value = serde_json::from_str(&stdout(
         repo.arc(&repo.root)
-            .args(["thread", "open", "--kind", "todo"]),
+            .args(["thread", "open", "--kind", "todo", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(filtered["open"][0]["file"], names["todo"]);
+    assert!(filtered["later"].as_array().unwrap().is_empty());
+    let filtered: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["thread", "open", "--kind", "later", "--json"]),
+    ))
+    .unwrap();
+    assert!(filtered["open"].as_array().unwrap().is_empty());
+    assert_eq!(filtered["later"][0]["file"], names["later"]);
+    let filtered_text = stdout(
+        repo.arc(&repo.root)
+            .args(["thread", "open", "--kind", "later"]),
     );
-    assert!(filtered.contains("next-work"), "{filtered}");
+    assert!(
+        filtered_text.contains("open items (newest first):\n  (none)\nlater items (newest first):"),
+        "{filtered_text}"
+    );
     repo.arc(&repo.root)
         .args(["thread", "open", "--kind", "note"])
         .assert()
         .failure();
+
+    // A later item consumes just like an item in the primary queue.
+    repo.arc(&repo.root)
+        .args(["thread", "consume", &names["later"]])
+        .assert()
+        .success();
+    let after_later = stdout(repo.arc(&repo.root).args(["thread", "open"]));
+    assert!(after_later.contains("later items (newest first):\n  (none)"));
 
     // Prose mentioning a filename near "consumed" is not the machine shape
     // and must not retire the item.
@@ -479,12 +520,12 @@ fn thread_archive_moves_records_and_catchup_reads_cold_with_hot_journal() {
 }
 
 #[test]
-fn thread_archive_refuses_unconsumed_actionable_then_accepts_consumed() {
+fn thread_archive_refuses_unconsumed_later_then_accepts_consumed() {
     let repo = Repo::new();
     let hot = thread_dir(&repo);
     fs::create_dir_all(&hot).unwrap();
-    let name = "20260101T000000Z-next-todo.md";
-    fs::write(hot.join(name), "todo\n").unwrap();
+    let name = "20260101T000000Z-next-later.md";
+    fs::write(hot.join(name), "later\n").unwrap();
 
     repo.arc(&repo.root)
         .args(["thread", "archive", name])
@@ -513,13 +554,14 @@ fn thread_archive_consumed_bulk_filters_age_and_rejects_flag_misuse() {
     let hot = thread_dir(&repo);
     fs::create_dir_all(&hot).unwrap();
     let old = "20200101T000000Z-old-todo.md";
+    let old_later = "20200101T000000Z-old-later.md";
     let new = "29990101T000000Z-new-plan.md";
     let open = "20200101T000000Z-open-inbox.md";
     let record = "20200101T000000Z-record-note.md";
-    for name in [old, new, open, record] {
+    for name in [old, old_later, new, open, record] {
         fs::write(hot.join(name), name).unwrap();
     }
-    for name in [old, new] {
+    for name in [old, old_later, new] {
         repo.arc(&repo.root)
             .args(["thread", "consume", name])
             .assert()
@@ -533,9 +575,10 @@ fn thread_archive_consumed_bulk_filters_age_and_rejects_flag_misuse() {
         "--older-than-days",
         "30",
     ]));
-    assert_eq!(output.trim(), old);
+    assert_eq!(output.lines().collect::<Vec<_>>(), vec![old_later, old]);
     let cold = PathBuf::from(format!("{}-archive", hot.display()));
     assert!(cold.join(old).is_file());
+    assert!(cold.join(old_later).is_file());
     assert!(hot.join(new).is_file());
     assert!(hot.join(open).is_file());
     assert!(hot.join(record).is_file());
