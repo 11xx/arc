@@ -15,13 +15,16 @@ daemon, no database, no network, no multi-machine ref sync.
   `arc-inbox/1`); a breaking shape change bumps the version.
 - Approval staleness is structural: a verdict binds to the exact approved
   patchset head, and any new commit invalidates it. Never weaken this.
-- Claims, stages, and thread lanes are advisory liveness signals, never
-  locks. Thread artifacts stay hand-writable Markdown; the journal is typed
-  JSONL (`thread-journal/1`), fails open on malformed lines, and is versioned
-  like every other output schema.
-- The thread archive lives outside the repo (`arc thread dir`) so
+- The ledger is authoritative and gating; the journal is advisory and
+  contextual. Claims, stages, and journal lanes are advisory liveness
+  signals, never locks. Journal artifacts stay hand-writable Markdown; the
+  event log is typed JSONL (`thread-journal/1`), fails open on malformed
+  lines, and is versioned like every other output schema.
+- The project journal lives outside the repo (`arc journal dir`) so
   worktrees stay clean; cross-session context goes there, not into
-  tracked files.
+  tracked files. `arc thread` and the storage-tier thread spellings
+  (`ARC_THREAD_DIR`, `[threads]`, the `threads/` path, `thread-journal/1`)
+  are compatibility contracts for the journal surface.
 - DELEGATION.md is the canon for mechanism-routing prose and is referenced
   by global agent config — edit deliberately, keep it in sync with the
   `agent-routing` manifests.
@@ -42,6 +45,6 @@ daemon, no database, no network, no multi-machine ref sync.
   affected README section, module doc comment, and the `[Unreleased]`
   CHANGELOG.md line in the same change that alters behavior.
 - Docs and comments must be timeless and self-contained: never reference
-  the authoring session, conversation, specs, plans, thread artifacts, or
+  the authoring session, conversation, specs, plans, journal artifacts, or
   moment-of-writing context ("per the spec", "the drift fix", "new in
   this change") — state the invariant, not the story behind it.

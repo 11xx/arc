@@ -16,14 +16,15 @@ pub struct ConfigFile {
     /// of inside each repository's Git common dir.
     #[serde(default)]
     pub data_root: Option<String>,
-    /// Per-project overrides for the `/thread` archive directory. Keyed by
+    /// Per-project overrides for the project-journal directory. Keyed by
     /// the absolute repository-root path (the main checkout, shared by all
-    /// its worktrees); values may use a leading `~`.
+    /// its worktrees); values may use a leading `~`. The table keeps its
+    /// legacy `[threads]` spelling as a compatibility contract.
     #[serde(default)]
     pub threads: ThreadsConfig,
 }
 
-/// The `[threads]` table: a `dirs` map from repository-root path to archive
+/// The `[threads]` table: a `dirs` map from repository-root path to journal
 /// directory. A dedicated table (rather than a general `[project."…"]`
 /// namespace) keeps the override self-documenting and matches config.rs's
 /// flat, single-purpose key idiom.
@@ -102,7 +103,7 @@ pub fn load() -> Result<Config> {
     })
 }
 
-/// Slug an absolute repository path the same way the /thread archive
+/// Slug an absolute repository path the same way the project journal
 /// keys projects: `/` and `.` become `-`.
 pub fn path_slug(path: &Path) -> String {
     path.to_string_lossy()
@@ -116,7 +117,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn path_slug_matches_thread_convention() {
+    fn path_slug_matches_journal_convention() {
         assert_eq!(
             path_slug(Path::new("/home/lobo/code/muzaiten")),
             "-home-lobo-code-muzaiten"
