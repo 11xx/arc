@@ -6,6 +6,9 @@
 //! archive-directory resolution, timestamped filenames, and append-only
 //! journal lines. It is a convenience and correctness layer, never a
 //! gatekeeper, and it is intentionally decoupled from the change ledger.
+//!
+//! Lanes are advisory occupancy announced through journal markers. Their
+//! liveness follows the owner's latest journal activity; they are never locks.
 
 use crate::commands::Ctx;
 use crate::config;
@@ -14,6 +17,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Closed set of artifact kinds. Malformed kinds are rejected by clap at
@@ -65,6 +69,60 @@ pub enum ConsumeOutcome {
     Done,
     Superseded,
     Discarded,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum LaneOutcome {
+    Done,
+    Handoff,
+    Abandoned,
+    Expired,
+}
+
+impl LaneOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Handoff => "handoff",
+            Self::Abandoned => "abandoned",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum LaneCmd {
+    /// Open or replace an advisory work lane
+    Open {
+        topic: String,
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long, default_value = "2h")]
+        ttl: String,
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Renew a lane owned by this session
+    Renew {
+        topic: String,
+        #[arg(long)]
+        ttl: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Close a lane
+    Close {
+        topic: String,
+        #[arg(long, value_enum, default_value = "done")]
+        outcome: LaneOutcome,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// List current live and stale lanes
+    List {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 impl ConsumeOutcome {
@@ -127,6 +185,11 @@ pub enum ThreadCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Manage advisory session work lanes
+    Lane {
+        #[command(subcommand)]
+        command: LaneCmd,
+    },
     /// Mark an artifact consumed so it leaves the `open` queue
     Consume {
         /// Artifact filename inside the archive dir (a name, not a path)
@@ -178,6 +241,7 @@ pub fn run(ctx: &Ctx, cmd: ThreadCmd) -> Result<i32> {
             archived,
         } => catchup(ctx, limit.unwrap_or(20), json, archived),
         ThreadCmd::Open { kind, json } => open(ctx, kind, json),
+        ThreadCmd::Lane { command } => lane(ctx, command),
         ThreadCmd::Consume {
             filename,
             outcome,
@@ -388,6 +452,432 @@ fn append_journal(
     Ok(())
 }
 
+const DEFAULT_LANE_TTL: u64 = 2 * 60 * 60;
+
+#[derive(Debug, PartialEq, Eq)]
+enum LaneMarker {
+    Opened {
+        ttl: u64,
+        scope: Vec<String>,
+        status: Option<String>,
+    },
+    Renewed {
+        ttl: Option<u64>,
+        status: Option<String>,
+    },
+    Closed {
+        outcome: String,
+        note: Option<String>,
+    },
+}
+
+fn parse_ttl(value: &str) -> Option<u64> {
+    let (number, unit) = value.split_at(value.len().checked_sub(1)?);
+    let number: u64 = number.parse().ok()?;
+    if number == 0 {
+        return None;
+    }
+    number.checked_mul(match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        _ => return None,
+    })
+}
+
+fn parse_optional_text(rest: &str) -> Option<Option<String>> {
+    if rest.is_empty() {
+        Some(None)
+    } else {
+        rest.strip_prefix(": ").map(|text| Some(text.to_string()))
+    }
+}
+
+fn take_bracketed_ttl(rest: &str) -> Option<(u64, &str)> {
+    let rest = rest.strip_prefix('[')?;
+    let end = rest.find(']')?;
+    let ttl = parse_ttl(&rest[..end])?;
+    Some((ttl, &rest[end + 1..]))
+}
+
+fn parse_lane_marker(message: &str) -> Option<LaneMarker> {
+    if let Some(mut rest) = message.strip_prefix("lane opened") {
+        let mut ttl = DEFAULT_LANE_TTL;
+        if let Some(after_space) = rest.strip_prefix(' ') {
+            if after_space.starts_with('[') {
+                (ttl, rest) = take_bracketed_ttl(after_space)?;
+            }
+        }
+        let mut scope = Vec::new();
+        if let Some(after_scope) = rest.strip_prefix(" scope=") {
+            let (topics, tail) = match after_scope.split_once(": ") {
+                Some((topics, status)) => (topics, Some(status)),
+                None => (after_scope, None),
+            };
+            scope = topics.split(',').map(str::to_string).collect();
+            if scope.is_empty() || scope.iter().any(|topic| !valid_topic(topic)) {
+                return None;
+            }
+            return Some(LaneMarker::Opened {
+                ttl,
+                scope,
+                status: tail.map(str::to_string),
+            });
+        }
+        return Some(LaneMarker::Opened {
+            ttl,
+            scope,
+            status: parse_optional_text(rest)?,
+        });
+    }
+    if let Some(mut rest) = message.strip_prefix("lane renewed") {
+        let mut ttl = None;
+        if let Some(after_space) = rest.strip_prefix(' ') {
+            if after_space.starts_with('[') {
+                let (parsed, tail) = take_bracketed_ttl(after_space)?;
+                ttl = Some(parsed);
+                rest = tail;
+            }
+        }
+        return Some(LaneMarker::Renewed {
+            ttl,
+            status: parse_optional_text(rest)?,
+        });
+    }
+    if let Some(rest) = message.strip_prefix("lane closed ") {
+        let rest = rest.strip_prefix('[')?;
+        let end = rest.find(']')?;
+        let outcome = &rest[..end];
+        if !["done", "handoff", "abandoned", "expired"].contains(&outcome) {
+            return None;
+        }
+        return Some(LaneMarker::Closed {
+            outcome: outcome.to_string(),
+            note: parse_optional_text(&rest[end + 1..])?,
+        });
+    }
+    None
+}
+
+struct JournalLine<'a> {
+    timestamp: DateTime<Utc>,
+    harness: &'a str,
+    session: &'a str,
+    topic: &'a str,
+    message: &'a str,
+}
+
+fn parse_journal_line(line: &str) -> Option<JournalLine<'_>> {
+    let (prefix, message) = line.split_once(": ")?;
+    let mut fields = prefix.split_whitespace();
+    if fields.next()? != "-" {
+        return None;
+    }
+    let timestamp = DateTime::parse_from_rfc3339(fields.next()?)
+        .ok()?
+        .with_timezone(&Utc);
+    let harness = fields.next()?;
+    let session = fields.next()?;
+    let topic = fields.next()?;
+    if fields.next().is_some() || !valid_topic(topic) {
+        return None;
+    }
+    Some(JournalLine {
+        timestamp,
+        harness,
+        session,
+        topic,
+        message,
+    })
+}
+
+#[derive(Clone, Serialize)]
+struct LaneEntry {
+    topic: String,
+    owner_harness: String,
+    owner_session: String,
+    state: String,
+    opened_at: String,
+    last_activity: String,
+    ttl_seconds: u64,
+    scope: Vec<String>,
+    status: Option<String>,
+    #[serde(skip)]
+    opened_time: DateTime<Utc>,
+    #[serde(skip)]
+    last_activity_time: DateTime<Utc>,
+}
+
+fn lanes_from_journal(journal: &str, now: DateTime<Utc>) -> Vec<LaneEntry> {
+    struct ActiveLane {
+        topic: String,
+        owner_harness: String,
+        owner_session: String,
+        opened_time: DateTime<Utc>,
+        ttl_seconds: u64,
+        scope: Vec<String>,
+        status: Option<String>,
+    }
+
+    let lines: Vec<_> = journal.lines().filter_map(parse_journal_line).collect();
+    let mut last_activity = HashMap::new();
+    for line in &lines {
+        last_activity.insert(line.session.to_string(), line.timestamp);
+    }
+    let mut active: HashMap<String, ActiveLane> = HashMap::new();
+    for line in lines {
+        let Some(marker) = parse_lane_marker(line.message) else {
+            continue;
+        };
+        match marker {
+            LaneMarker::Opened { ttl, scope, status } => {
+                active.retain(|_, lane| lane.owner_session != line.session);
+                active.insert(
+                    line.topic.to_string(),
+                    ActiveLane {
+                        topic: line.topic.to_string(),
+                        owner_harness: line.harness.to_string(),
+                        owner_session: line.session.to_string(),
+                        opened_time: line.timestamp,
+                        ttl_seconds: ttl,
+                        scope,
+                        status,
+                    },
+                );
+            }
+            LaneMarker::Renewed { ttl, status } => {
+                if let Some(lane) = active.get_mut(line.topic) {
+                    if let Some(ttl) = ttl {
+                        lane.ttl_seconds = ttl;
+                    }
+                    if status.is_some() {
+                        lane.status = status;
+                    }
+                }
+            }
+            LaneMarker::Closed { .. } => {
+                active.remove(line.topic);
+            }
+        }
+    }
+
+    let mut lanes: Vec<_> = active
+        .into_values()
+        .map(|lane| {
+            let activity = last_activity
+                .get(&lane.owner_session)
+                .copied()
+                .unwrap_or(lane.opened_time);
+            let elapsed = now.signed_duration_since(activity).num_seconds().max(0) as u64;
+            LaneEntry {
+                topic: lane.topic,
+                owner_harness: lane.owner_harness,
+                owner_session: lane.owner_session,
+                state: if elapsed < lane.ttl_seconds {
+                    "live".to_string()
+                } else {
+                    "stale".to_string()
+                },
+                opened_at: lane.opened_time.to_rfc3339_opts(SecondsFormat::Secs, true),
+                last_activity: activity.to_rfc3339_opts(SecondsFormat::Secs, true),
+                ttl_seconds: lane.ttl_seconds,
+                scope: lane.scope,
+                status: lane.status,
+                opened_time: lane.opened_time,
+                last_activity_time: activity,
+            }
+        })
+        .collect();
+    lanes.sort_by(|a, b| {
+        (a.state == "stale")
+            .cmp(&(b.state == "stale"))
+            .then_with(|| b.opened_time.cmp(&a.opened_time))
+    });
+    lanes
+}
+
+fn format_age(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 86400 {
+        format!("{}h", seconds / 3600)
+    } else {
+        format!("{}d", seconds / 86400)
+    }
+}
+
+fn render_lanes(lanes: &[LaneEntry], now: DateTime<Utc>) {
+    println!("lanes:");
+    if lanes.is_empty() {
+        println!("  (none)");
+    }
+    for lane in lanes {
+        let age = now
+            .signed_duration_since(lane.last_activity_time)
+            .num_seconds()
+            .max(0) as u64;
+        let activity = if lane.state == "live" {
+            format!(
+                "live (updated {} ago, ttl {})",
+                format_age(age),
+                format_age(lane.ttl_seconds)
+            )
+        } else {
+            format!(
+                "stale (idle {}, ttl {})",
+                format_age(age),
+                format_age(lane.ttl_seconds)
+            )
+        };
+        let scope = if lane.scope.is_empty() {
+            String::new()
+        } else {
+            format!("  +scope: {}", lane.scope.join(", "))
+        };
+        println!(
+            "  {}  {} {}  {}{}",
+            lane.topic, lane.owner_harness, lane.owner_session, activity, scope
+        );
+        if let Some(status) = &lane.status {
+            println!("    {status}");
+        }
+    }
+}
+
+fn require_lane_session(ctx: &Ctx) -> Result<String> {
+    let (_, session) = identity(ctx);
+    if session == "unknown" {
+        bail!("thread lane requires a session identity (--session or ARC_SESSION)");
+    }
+    Ok(session)
+}
+
+fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    let now = Utc::now();
+    let journal_text = read_journal(&dir)?;
+    let lanes = lanes_from_journal(&journal_text, now);
+    match command {
+        LaneCmd::Open {
+            topic,
+            scope,
+            ttl,
+            status,
+        } => {
+            let session = require_lane_session(ctx)?;
+            if !valid_topic(&topic) {
+                bail!("topic {topic:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
+            }
+            parse_ttl(&ttl).context("ttl must be a positive integer followed by s, m, or h")?;
+            let scope: Vec<String> = scope
+                .as_deref()
+                .map(|value| value.split(',').map(str::to_string).collect())
+                .unwrap_or_default();
+            if scope.iter().any(|topic| !valid_topic(topic)) {
+                bail!("scope topics must be comma-separated kebab-case-safe topics");
+            }
+            if let Some(overlap) = lanes.iter().find(|lane| {
+                lane.state == "live"
+                    && lane.owner_session != session
+                    && (lane.topic == topic || lane.scope.contains(&topic))
+            }) {
+                eprintln!(
+                    "warning: topic {topic} is covered by live lane {} owned by {} {}",
+                    overlap.topic, overlap.owner_harness, overlap.owner_session
+                );
+            }
+            let mut message = format!("lane opened [{ttl}]");
+            if !scope.is_empty() {
+                message.push_str(&format!(" scope={}", scope.join(",")));
+            }
+            if let Some(status) = status {
+                message.push_str(&format!(": {status}"));
+            }
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("cannot create archive dir {}", dir.display()))?;
+            append_journal(&dir, ctx, now, &topic, &message, None)?;
+        }
+        LaneCmd::Renew { topic, ttl, status } => {
+            let session = require_lane_session(ctx)?;
+            let current = lanes
+                .iter()
+                .find(|lane| lane.topic == topic)
+                .with_context(|| format!("lane {topic} does not exist or is already closed"))?;
+            if current.owner_session != session {
+                bail!(
+                    "lane {topic} is owned by {} {}",
+                    current.owner_harness,
+                    current.owner_session
+                );
+            }
+            if let Some(ttl) = &ttl {
+                parse_ttl(ttl).context("ttl must be a positive integer followed by s, m, or h")?;
+            }
+            let mut message = "lane renewed".to_string();
+            if let Some(ttl) = ttl {
+                message.push_str(&format!(" [{ttl}]"));
+            }
+            if let Some(status) = status {
+                message.push_str(&format!(": {status}"));
+            }
+            append_journal(&dir, ctx, now, &topic, &message, None)?;
+        }
+        LaneCmd::Close {
+            topic,
+            outcome,
+            note,
+        } => {
+            let session = require_lane_session(ctx)?;
+            let current = lanes
+                .iter()
+                .find(|lane| lane.topic == topic)
+                .with_context(|| format!("lane {topic} does not exist or is already closed"))?;
+            if current.owner_session != session {
+                let idle = now
+                    .signed_duration_since(current.last_activity_time)
+                    .num_seconds()
+                    .max(0) as u64;
+                if !matches!(outcome, LaneOutcome::Expired) || current.state != "stale" {
+                    bail!(
+                        "lane {topic} conflict: owner {} {}, session {}, idle {}, ttl {}",
+                        current.owner_harness,
+                        current.owner_session,
+                        session,
+                        format_age(idle),
+                        format_age(current.ttl_seconds)
+                    );
+                }
+            }
+            let mut message = format!("lane closed [{}]", outcome.as_str());
+            if let Some(note) = note {
+                message.push_str(&format!(": {note}"));
+            }
+            append_journal(&dir, ctx, now, &topic, &message, None)?;
+        }
+        LaneCmd::List { json } => {
+            if json {
+                #[derive(Serialize)]
+                struct LaneList<'a> {
+                    dir: String,
+                    lanes: &'a [LaneEntry],
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&LaneList {
+                        dir: dir.display().to_string(),
+                        lanes: &lanes
+                    })?
+                );
+            } else {
+                render_lanes(&lanes, now);
+            }
+        }
+    }
+    Ok(0)
+}
+
 #[derive(Serialize)]
 struct ArtifactEntry {
     file: String,
@@ -395,11 +885,22 @@ struct ArtifactEntry {
     topic: String,
     kind: String,
     heading: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lane: Option<ArtifactLane>,
+}
+
+#[derive(Clone, Serialize)]
+struct ArtifactLane {
+    topic: String,
+    owner_harness: String,
+    owner_session: String,
+    this_session: bool,
 }
 
 #[derive(Serialize)]
 struct Catchup {
     dir: String,
+    lanes: Vec<LaneEntry>,
     files: Vec<ArtifactEntry>,
     journal_tail: Vec<String>,
 }
@@ -465,21 +966,26 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
                     topic,
                     kind,
                     heading,
+                    lane: None,
                 });
             }
         }
     }
 
     let journal_tail = journal_tail(&hot_dir, limit)?;
+    let now = Utc::now();
+    let lanes = lanes_from_journal(&read_journal(&hot_dir)?, now);
 
     if json {
         let out = Catchup {
             dir: dir.display().to_string(),
+            lanes,
             files,
             journal_tail,
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
+        render_lanes(&lanes, now);
         println!("dir: {}", dir.display());
         println!("artifacts (newest first):");
         if files.is_empty() {
@@ -559,8 +1065,11 @@ fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
     let mut open: Vec<ArtifactEntry> = Vec::new();
     let mut later: Vec<ArtifactEntry> = Vec::new();
+    let now = Utc::now();
+    let journal = read_journal(&dir)?;
+    let lanes = lanes_from_journal(&journal, now);
+    let (_, caller_session) = identity(ctx);
     if dir.is_dir() {
-        let journal = read_journal(&dir)?;
         let mut open_names: Vec<String> = Vec::new();
         let mut later_names: Vec<String> = Vec::new();
         for entry in
@@ -592,6 +1101,7 @@ fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
                 open.push(ArtifactEntry {
                     file: name,
                     timestamp: ts,
+                    lane: lane_for_topic(&lanes, &topic, &caller_session),
                     topic,
                     kind: file_kind,
                     heading,
@@ -604,6 +1114,7 @@ fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
                 later.push(ArtifactEntry {
                     file: name,
                     timestamp: ts,
+                    lane: lane_for_topic(&lanes, &topic, &caller_session),
                     topic,
                     kind: file_kind,
                     heading,
@@ -627,7 +1138,14 @@ fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
         }
         for f in &open {
             let heading = f.heading.as_deref().unwrap_or("");
-            println!("  {}  {}  {}  {}", f.timestamp, f.topic, f.kind, heading);
+            println!(
+                "  {}  {}  {}  {}{}",
+                f.timestamp,
+                f.topic,
+                f.kind,
+                heading,
+                render_artifact_lane(f.lane.as_ref())
+            );
         }
         println!("later items (newest first):");
         if later.is_empty() {
@@ -635,10 +1153,47 @@ fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
         }
         for f in &later {
             let heading = f.heading.as_deref().unwrap_or("");
-            println!("  {}  {}  {}  {}", f.timestamp, f.topic, f.kind, heading);
+            println!(
+                "  {}  {}  {}  {}{}",
+                f.timestamp,
+                f.topic,
+                f.kind,
+                heading,
+                render_artifact_lane(f.lane.as_ref())
+            );
         }
     }
     Ok(0)
+}
+
+fn lane_for_topic(lanes: &[LaneEntry], topic: &str, caller_session: &str) -> Option<ArtifactLane> {
+    lanes
+        .iter()
+        .find(|lane| {
+            lane.state == "live"
+                && (lane.topic == topic || lane.scope.iter().any(|item| item == topic))
+        })
+        .map(|lane| ArtifactLane {
+            topic: lane.topic.clone(),
+            owner_harness: lane.owner_harness.clone(),
+            owner_session: lane.owner_session.clone(),
+            this_session: lane.owner_session == caller_session,
+        })
+}
+
+fn render_artifact_lane(lane: Option<&ArtifactLane>) -> String {
+    let Some(lane) = lane else {
+        return String::new();
+    };
+    if lane.this_session {
+        format!(" [lane: {} — this session]", lane.topic)
+    } else {
+        let short_session: String = lane.owner_session.chars().take(8).collect();
+        format!(
+            " [lane: {} — {} {}, external]",
+            lane.topic, lane.owner_harness, short_session
+        )
+    }
 }
 
 fn consume(ctx: &Ctx, filename: &str, outcome: ConsumeOutcome, note: Option<&str>) -> Result<i32> {
@@ -813,5 +1368,57 @@ mod tests {
         );
         assert_eq!(parse_artifact_name("journal.md"), None);
         assert_eq!(parse_artifact_name("no-suffix"), None);
+    }
+
+    #[test]
+    fn lane_marker_parsing_accepts_contract_shapes_and_rejects_malformed_markers() {
+        assert_eq!(
+            parse_lane_marker("lane opened [30m] scope=alpha,beta: working"),
+            Some(LaneMarker::Opened {
+                ttl: 1800,
+                scope: vec!["alpha".to_string(), "beta".to_string()],
+                status: Some("working".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_lane_marker("lane opened"),
+            Some(LaneMarker::Opened {
+                ttl: DEFAULT_LANE_TTL,
+                scope: vec![],
+                status: None,
+            })
+        );
+        assert_eq!(
+            parse_lane_marker("lane renewed [1h]: still working"),
+            Some(LaneMarker::Renewed {
+                ttl: Some(3600),
+                status: Some("still working".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_lane_marker("lane renewed"),
+            Some(LaneMarker::Renewed {
+                ttl: None,
+                status: None,
+            })
+        );
+        assert_eq!(
+            parse_lane_marker("lane closed [handoff]: passed on"),
+            Some(LaneMarker::Closed {
+                outcome: "handoff".to_string(),
+                note: Some("passed on".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_lane_marker("lane closed [done]"),
+            Some(LaneMarker::Closed {
+                outcome: "done".to_string(),
+                note: None,
+            })
+        );
+        assert_eq!(parse_lane_marker("quoted lane opened [2h]"), None);
+        assert_eq!(parse_lane_marker("lane opened [0s]"), None);
+        assert_eq!(parse_lane_marker("lane opened [2d]"), None);
+        assert_eq!(parse_lane_marker("lane opened scope=Bad_Topic"), None);
     }
 }
