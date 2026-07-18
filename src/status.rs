@@ -1,6 +1,6 @@
 use crate::gates::GatesFile;
 use crate::gitio;
-use crate::model::Verdict;
+use crate::model::{MessageSeverity, MessageType, Verdict};
 use crate::state::{self, ChangeState, ClaimIdentity, GitIdentity};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -129,6 +129,37 @@ pub struct ClaimStatus {
     pub provenance_mismatch: Option<bool>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct MessageStatus {
+    pub event_id: String,
+    pub message_type: MessageType,
+    pub severity: MessageSeverity,
+    pub summary: String,
+    pub detail: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub actor: String,
+    pub harness: Option<String>,
+    pub session: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<&crate::state::MessageEntry> for MessageStatus {
+    fn from(message: &crate::state::MessageEntry) -> Self {
+        Self {
+            event_id: message.event_id.clone(),
+            message_type: message.message_type,
+            severity: message.severity,
+            summary: message.summary.clone(),
+            detail: message.detail.clone(),
+            metadata: message.metadata.clone(),
+            actor: message.actor.clone(),
+            harness: message.harness.clone(),
+            session: message.session.clone(),
+            created_at: message.created_at,
+        }
+    }
+}
+
 /// The versioned machine-readable contract the /arc skill programs
 /// against. Everything here is derivable from the ledger plus Git.
 #[derive(Debug, Serialize)]
@@ -147,6 +178,8 @@ pub struct StatusReport {
     pub opened_harness: Option<String>,
     pub tags: Vec<String>,
     pub blocked_by: Vec<String>,
+    pub assigned_to: Option<String>,
+    pub messages: Vec<MessageStatus>,
     pub blocks: Vec<String>,
     pub blocker_status: BlockerStatus,
     pub claim: Option<ClaimStatus>,
@@ -404,6 +437,8 @@ pub fn build_at(
         opened_harness: state.opened_harness.clone(),
         tags: state.tags.clone(),
         blocked_by: state.blocked_by.clone(),
+        assigned_to: state.assigned_to.clone(),
+        messages: state.messages.iter().map(MessageStatus::from).collect(),
         blocks,
         blocker_status: dependency_status,
         claim: claim_status_at(state, now),
