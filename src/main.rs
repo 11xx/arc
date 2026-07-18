@@ -1,6 +1,7 @@
 mod bundle;
 mod commands;
 mod config;
+mod forge;
 mod gates;
 mod gitio;
 mod ids;
@@ -237,7 +238,7 @@ enum Cmd {
         #[arg(long)]
         assign: Option<String>,
     },
-    /// Machine-readable status report (the versioned arc-status/3 schema)
+    /// Machine-readable status report (the versioned arc-status/4 schema)
     Status {
         change: String,
         /// Accepted for compatibility; status output is always JSON
@@ -423,12 +424,75 @@ enum Cmd {
         #[arg(long)]
         superseded: Option<String>,
     },
+    /// Record and validate observed forge (hosted-PR) facts
+    Forge {
+        #[command(subcommand)]
+        cmd: ForgeCmd,
+    },
     /// Show the resolved configuration and store location as JSON
     Config,
     /// Cross-harness `/thread` archive mechanics (plain Markdown stays the contract)
     Thread {
         #[command(subcommand)]
         cmd: thread::ThreadCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ForgeCmd {
+    /// Declare the explicit projection tuple and policy for a change
+    Declare {
+        change: String,
+        #[arg(long)]
+        host: String,
+        #[arg(long = "base-repo")]
+        base_repo: String,
+        #[arg(long = "base-ref")]
+        base_ref: String,
+        #[arg(long = "head-repo")]
+        head_repo: String,
+        #[arg(long = "head-ref")]
+        head_ref: String,
+        /// same-repository-only (default) | allowed-base-repo=<owner/name>
+        #[arg(long, default_value = "same-repository-only")]
+        policy: String,
+    },
+    /// Record the observed post-creation PR tuple (validated, fail-closed)
+    Link {
+        change: String,
+        #[arg(long)]
+        pr: u64,
+        #[arg(long)]
+        url: String,
+        #[arg(long = "base-repo")]
+        base_repo: String,
+        #[arg(long = "base-ref")]
+        base_ref: String,
+        #[arg(long = "head-repo")]
+        head_repo: String,
+        #[arg(long = "head-ref")]
+        head_ref: String,
+        #[arg(long = "head-sha")]
+        head_sha: String,
+    },
+    /// Record the observed hosted-check rollup at an exact PR head
+    Checks {
+        change: String,
+        #[arg(long = "pr-head")]
+        pr_head: String,
+        #[arg(long, value_enum)]
+        state: forge::ForgeCheckState,
+        #[arg(long)]
+        detail: Option<String>,
+    },
+    /// Record the observed PR lifecycle state
+    PrState {
+        change: String,
+        #[arg(long, value_enum)]
+        state: forge::ForgePrState,
+        /// Required when state is merged
+        #[arg(long = "merge-sha")]
+        merge_sha: Option<String>,
     },
 }
 
@@ -729,6 +793,61 @@ fn run(cli: Cli) -> Result<i32> {
             commands::close(&ctx, &change, integrated, abandoned, superseded)?;
             Ok(0)
         }
+        Cmd::Forge { cmd } => match cmd {
+            ForgeCmd::Declare {
+                change,
+                host,
+                base_repo,
+                base_ref,
+                head_repo,
+                head_ref,
+                policy,
+            } => {
+                commands::forge_declare(
+                    &ctx, &change, host, base_repo, base_ref, head_repo, head_ref, policy,
+                )?;
+                Ok(0)
+            }
+            ForgeCmd::Link {
+                change,
+                pr,
+                url,
+                base_repo,
+                base_ref,
+                head_repo,
+                head_ref,
+                head_sha,
+            } => commands::forge_link(
+                &ctx,
+                &change,
+                commands::ForgeLinkArgs {
+                    pr_number: pr,
+                    url,
+                    base_repo,
+                    base_ref,
+                    head_repo,
+                    head_ref,
+                    head_sha,
+                },
+            ),
+            ForgeCmd::Checks {
+                change,
+                pr_head,
+                state,
+                detail,
+            } => {
+                commands::forge_checks(&ctx, &change, pr_head, state, detail)?;
+                Ok(0)
+            }
+            ForgeCmd::PrState {
+                change,
+                state,
+                merge_sha,
+            } => {
+                commands::forge_pr_state(&ctx, &change, state, merge_sha)?;
+                Ok(0)
+            }
+        },
         Cmd::Config => {
             let cfg = config::load()?;
             let store_root = store::Store::resolve_root(&ctx.cwd)

@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/3";
+pub const STATUS_SCHEMA: &str = "arc-status/4";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 
 /// Typed integration blockers, ordered by exit-code precedence.
@@ -160,6 +160,10 @@ pub struct StatusReport {
     pub integrate_ready: bool,
     pub blockers: Vec<Blocker>,
     pub closure: Option<crate::state::ClosureState>,
+    /// Observed forge (hosted-PR) facts. Absent for changes with no forge
+    /// events that are not on the `forge` profile. Additive in arc-status/4.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forge: Option<crate::forge::ForgeStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -342,6 +346,15 @@ pub fn build_at(
         "integrate".into()
     };
 
+    let forge = crate::forge::build_status(
+        &state.forge,
+        &state.profile,
+        latest_patchset
+            .as_ref()
+            .map(|patchset| patchset.head.as_str()),
+        state.hold.is_some(),
+    );
+
     let ready = blockers.is_empty();
     let ready_reason = if ready {
         "all integration gates pass".into()
@@ -390,6 +403,7 @@ pub fn build_at(
         integrate_ready: ready,
         blockers,
         closure: state.closure.clone(),
+        forge,
     })
 }
 

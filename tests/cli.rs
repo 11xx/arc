@@ -467,7 +467,7 @@ fn claim_lifecycle_reports_defaults_renewal_conflict_release_and_expiry() {
         .success();
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "claim-life"]))).unwrap();
-    assert_eq!(status["schema"], "arc-status/3");
+    assert_eq!(status["schema"], "arc-status/4");
     assert_eq!(status["claim"]["owner"]["actor"], "tester");
     assert_eq!(status["claim"]["owner"]["harness"], "test");
     assert_eq!(status["claim"]["owner"]["session"], "session-a");
@@ -1613,7 +1613,7 @@ fn wedged_prerequisites_report_recovery_and_stay_blocked() {
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", &dependent]))).unwrap();
     let dependency = &status["blocker_status"]["blockers_ready"][0];
-    assert_eq!(status["schema"], "arc-status/3");
+    assert_eq!(status["schema"], "arc-status/4");
     assert_eq!(status["blocker_status"]["blocked"], true);
     assert_eq!(status["next_action"], "repair_blockers:metadata");
     assert_eq!(dependency["status"], "wedged");
@@ -3829,4 +3829,601 @@ fn implementer_role_may_announce_and_assign() {
         .args(["inbox", "--json"])
         .assert()
         .success();
+}
+
+// ---- Forge projection ------------------------------------------------------
+
+/// Begin a forge-profile change, commit, and snapshot; returns
+/// (change_id, worktree, head_sha).
+fn forge_change(repo: &Repo, slug: &str) -> (String, PathBuf, String) {
+    let out = stdout(repo.arc(&repo.root).args([
+        "begin",
+        slug,
+        "--profile",
+        "forge",
+        "--target",
+        "master",
+    ]));
+    let change_id = opened_change_id(&out);
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(
+        &worktree,
+        &format!("{slug}.txt"),
+        &format!("{slug}\n"),
+        &format!("feat: {slug}"),
+    );
+    stdout(repo.arc(&worktree).args(["snapshot", slug]));
+    let head = repo.head(&worktree);
+    (change_id, worktree, head)
+}
+
+fn status_json(repo: &Repo, reference: &str) -> serde_json::Value {
+    serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", reference]))).unwrap()
+}
+
+#[test]
+fn forge_profile_without_declaration_is_undeclared_then_declared() {
+    let repo = Repo::new();
+    let (change_id, _wt, _head) = forge_change(&repo, "proj-declare");
+
+    let status = status_json(&repo, "proj-declare");
+    assert_eq!(status["schema"], "arc-status/4");
+    assert_eq!(status["forge"]["projection"], "undeclared");
+
+    let before = event_count(&repo, &change_id);
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "declare",
+            "proj-declare",
+            "--host",
+            "github.com",
+            "--base-repo",
+            "11xx/streamrip",
+            "--base-ref",
+            "dev",
+            "--head-repo",
+            "11xx/streamrip",
+            "--head-ref",
+            "arc/proj-declare",
+        ])
+        .assert()
+        .success();
+    assert_eq!(event_count(&repo, &change_id), before + 1);
+
+    let status = status_json(&repo, "proj-declare");
+    assert_eq!(status["forge"]["projection"], "declared");
+    assert_eq!(status["forge"]["declared"]["host"], "github.com");
+    assert_eq!(status["forge"]["declared"]["base_repo"], "11xx/streamrip");
+    assert_eq!(status["forge"]["declared"]["base_ref"], "dev");
+    assert_eq!(status["forge"]["declared"]["head_repo"], "11xx/streamrip");
+    assert_eq!(status["forge"]["declared"]["head_ref"], "arc/proj-declare");
+    assert_eq!(
+        status["forge"]["declared"]["policy"],
+        "same-repository-only"
+    );
+}
+
+#[test]
+fn non_forge_change_without_forge_events_omits_the_block() {
+    let repo = Repo::new();
+    let (_id, _wt, _head) = change_with_patchset(&repo, "plain");
+    let status = status_json(&repo, "plain");
+    assert_eq!(status["schema"], "arc-status/4");
+    assert!(status.get("forge").is_none() || status["forge"].is_null());
+}
+
+fn declare_same_repo(repo: &Repo, reference: &str, head_ref: &str) {
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "declare",
+            reference,
+            "--host",
+            "github.com",
+            "--base-repo",
+            "11xx/streamrip",
+            "--base-ref",
+            "dev",
+            "--head-repo",
+            "11xx/streamrip",
+            "--head-ref",
+            head_ref,
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn forge_link_matches_declaration_and_refuses_each_mismatch_axis() {
+    let repo = Repo::new();
+    let (change_id, _wt, head) = forge_change(&repo, "linker");
+    declare_same_repo(&repo, "linker", "arc/linker");
+
+    // Each mismatch axis refuses with exit 10 and appends no event. Exactly
+    // one axis is wrong per run; the rest match the declaration.
+    let before = event_count(&repo, &change_id);
+    for axis in ["base-repo", "base-ref", "head-repo", "head-ref"] {
+        let mut base_repo = "11xx/streamrip";
+        let mut base_ref = "dev";
+        let mut head_repo = "11xx/streamrip";
+        let mut head_ref = "arc/linker";
+        match axis {
+            "base-repo" => base_repo = "other/repo",
+            "base-ref" => base_ref = "main",
+            "head-repo" => head_repo = "other/repo",
+            "head-ref" => head_ref = "arc/wrong",
+            _ => unreachable!(),
+        }
+        let assert = repo
+            .arc(&repo.root)
+            .args([
+                "forge",
+                "link",
+                "linker",
+                "--pr",
+                "1",
+                "--url",
+                "https://example.invalid/pr/1",
+                "--base-repo",
+                base_repo,
+                "--base-ref",
+                base_ref,
+                "--head-repo",
+                head_repo,
+                "--head-ref",
+                head_ref,
+                "--head-sha",
+                &head,
+            ])
+            .assert()
+            .failure();
+        assert_eq!(assert.get_output().status.code(), Some(10));
+        assert_eq!(
+            event_count(&repo, &change_id),
+            before,
+            "refused {axis} must not append an event"
+        );
+    }
+
+    // The matching link succeeds and records the tuple.
+    link_at(&repo, "linker", "1", &head, "arc/linker");
+    assert_eq!(event_count(&repo, &change_id), before + 1);
+    let status = status_json(&repo, "linker");
+    assert_eq!(status["forge"]["projection"], "linked");
+    assert_eq!(status["forge"]["link"]["pr_number"], 1);
+    assert_eq!(status["forge"]["link"]["head_sha"], head);
+    assert_eq!(status["forge"]["head_match"], true);
+}
+
+#[test]
+fn forge_link_same_repository_only_refuses_cross_repo_tuple() {
+    let repo = Repo::new();
+    let (change_id, _wt, head) = forge_change(&repo, "cross");
+    // Declare a cross-repo tuple but keep the default same-repository-only
+    // policy: the declaration tuple matches but the policy refuses it.
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "declare",
+            "cross",
+            "--host",
+            "github.com",
+            "--base-repo",
+            "nathom/streamrip",
+            "--base-ref",
+            "dev",
+            "--head-repo",
+            "11xx/streamrip",
+            "--head-ref",
+            "arc/cross",
+        ])
+        .assert()
+        .success();
+    let before = event_count(&repo, &change_id);
+    let assert = repo
+        .arc(&repo.root)
+        .args([
+            "forge",
+            "link",
+            "cross",
+            "--pr",
+            "2",
+            "--url",
+            "https://github.com/nathom/streamrip/pull/2",
+            "--base-repo",
+            "nathom/streamrip",
+            "--base-ref",
+            "dev",
+            "--head-repo",
+            "11xx/streamrip",
+            "--head-ref",
+            "arc/cross",
+            "--head-sha",
+            &head,
+        ])
+        .assert()
+        .failure();
+    assert_eq!(assert.get_output().status.code(), Some(10));
+    assert_eq!(event_count(&repo, &change_id), before);
+}
+
+#[test]
+fn forge_link_allowed_base_repo_accepts_target_and_refuses_others() {
+    let repo = Repo::new();
+    let (change_id, _wt, head) = forge_change(&repo, "allow");
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "declare",
+            "allow",
+            "--host",
+            "github.com",
+            "--base-repo",
+            "nathom/streamrip",
+            "--base-ref",
+            "dev",
+            "--head-repo",
+            "11xx/streamrip",
+            "--head-ref",
+            "arc/allow",
+            "--policy",
+            "allowed-base-repo=nathom/streamrip",
+        ])
+        .assert()
+        .success();
+
+    // The declared base repo equals the allowed base repo: accepted.
+    let before = event_count(&repo, &change_id);
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "link",
+            "allow",
+            "--pr",
+            "3",
+            "--url",
+            "https://github.com/nathom/streamrip/pull/3",
+            "--base-repo",
+            "nathom/streamrip",
+            "--base-ref",
+            "dev",
+            "--head-repo",
+            "11xx/streamrip",
+            "--head-ref",
+            "arc/allow",
+            "--head-sha",
+            &head,
+        ])
+        .assert()
+        .success();
+    assert_eq!(event_count(&repo, &change_id), before + 1);
+
+    // Re-declare with a different allowed base repo; the same observed
+    // base repo is now refused.
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "declare",
+            "allow",
+            "--host",
+            "github.com",
+            "--base-repo",
+            "nathom/streamrip",
+            "--base-ref",
+            "dev",
+            "--head-repo",
+            "11xx/streamrip",
+            "--head-ref",
+            "arc/allow",
+            "--policy",
+            "allowed-base-repo=someone/else",
+        ])
+        .assert()
+        .success();
+    let before = event_count(&repo, &change_id);
+    let assert = repo
+        .arc(&repo.root)
+        .args([
+            "forge",
+            "link",
+            "allow",
+            "--pr",
+            "4",
+            "--url",
+            "https://github.com/nathom/streamrip/pull/4",
+            "--base-repo",
+            "nathom/streamrip",
+            "--base-ref",
+            "dev",
+            "--head-repo",
+            "11xx/streamrip",
+            "--head-ref",
+            "arc/allow",
+            "--head-sha",
+            &head,
+        ])
+        .assert()
+        .failure();
+    assert_eq!(assert.get_output().status.code(), Some(10));
+    assert_eq!(event_count(&repo, &change_id), before);
+}
+
+fn link_at(repo: &Repo, reference: &str, pr: &str, head: &str, head_ref: &str) {
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "link",
+            reference,
+            "--pr",
+            pr,
+            "--url",
+            "https://github.com/11xx/streamrip/pull/1",
+            "--base-repo",
+            "11xx/streamrip",
+            "--base-ref",
+            "dev",
+            "--head-repo",
+            "11xx/streamrip",
+            "--head-ref",
+            head_ref,
+            "--head-sha",
+            head,
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn forge_checks_vocabulary_never_greens_zero_checks_and_marks_stale() {
+    let repo = Repo::new();
+    let (_id, _wt, head) = forge_change(&repo, "checks");
+    declare_same_repo(&repo, "checks", "arc/checks");
+    link_at(&repo, "checks", "1", &head, "arc/checks");
+
+    // Zero-checks states are first-class and never render as passed.
+    for state in [
+        "not-configured",
+        "not-triggered",
+        "pending",
+        "failed",
+        "passed",
+    ] {
+        repo.arc(&repo.root)
+            .args([
+                "forge",
+                "checks",
+                "checks",
+                "--pr-head",
+                &head,
+                "--state",
+                state,
+            ])
+            .assert()
+            .success();
+        let status = status_json(&repo, "checks");
+        assert_eq!(status["forge"]["checks"], state);
+        if state != "passed" {
+            assert_ne!(status["forge"]["checks"], "passed");
+        }
+    }
+
+    // A rollup recorded for a different head than the linked one is stale.
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "checks",
+            "checks",
+            "--pr-head",
+            "0000000000000000000000000000000000000000",
+            "--state",
+            "passed",
+        ])
+        .assert()
+        .success();
+    let status = status_json(&repo, "checks");
+    assert_eq!(status["forge"]["checks"], "stale");
+
+    // With no checks event at the linked head the rollup is unknown.
+    let (_id2, _wt2, head2) = forge_change(&repo, "checks2");
+    declare_same_repo(&repo, "checks2", "arc/checks2");
+    link_at(&repo, "checks2", "2", &head2, "arc/checks2");
+    let status = status_json(&repo, "checks2");
+    assert_eq!(status["forge"]["checks"], "unknown");
+}
+
+#[test]
+fn forge_ready_truth_table() {
+    let repo = Repo::new();
+    let (_id, worktree, head) = forge_change(&repo, "ready");
+    declare_same_repo(&repo, "ready", "arc/ready");
+    link_at(&repo, "ready", "1", &head, "arc/ready");
+    repo.arc(&repo.root)
+        .args(["forge", "pr-state", "ready", "--state", "open"])
+        .assert()
+        .success();
+
+    // passed + head_match + open => ready.
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "checks",
+            "ready",
+            "--pr-head",
+            &head,
+            "--state",
+            "passed",
+        ])
+        .assert()
+        .success();
+    let status = status_json(&repo, "ready");
+    assert_eq!(status["forge"]["head_match"], true);
+    assert_eq!(status["forge"]["forge_ready"], true);
+
+    // not-configured => ready, but with an explicit caveat.
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "checks",
+            "ready",
+            "--pr-head",
+            &head,
+            "--state",
+            "not-configured",
+        ])
+        .assert()
+        .success();
+    let status = status_json(&repo, "ready");
+    assert_eq!(status["forge"]["forge_ready"], true);
+    let caveats = status["forge"]["caveats"].as_array().unwrap();
+    assert!(caveats
+        .iter()
+        .any(|caveat| caveat.as_str().unwrap().contains("not-configured")));
+
+    // failed and pending block.
+    for state in ["failed", "pending"] {
+        repo.arc(&repo.root)
+            .args([
+                "forge",
+                "checks",
+                "ready",
+                "--pr-head",
+                &head,
+                "--state",
+                state,
+            ])
+            .assert()
+            .success();
+        assert_eq!(status_json(&repo, "ready")["forge"]["forge_ready"], false);
+    }
+
+    // Non-open pr_state blocks even with passed checks.
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "checks",
+            "ready",
+            "--pr-head",
+            &head,
+            "--state",
+            "passed",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["forge", "pr-state", "ready", "--state", "draft"])
+        .assert()
+        .success();
+    assert_eq!(status_json(&repo, "ready")["forge"]["forge_ready"], false);
+    repo.arc(&repo.root)
+        .args(["forge", "pr-state", "ready", "--state", "open"])
+        .assert()
+        .success();
+
+    // A head mismatch (new snapshot moves the approved head) blocks.
+    repo.commit(&worktree, "ready2.txt", "more\n", "feat: more ready");
+    stdout(repo.arc(&worktree).args(["snapshot", "ready"]));
+    let status = status_json(&repo, "ready");
+    assert_eq!(status["forge"]["head_match"], false);
+    assert_eq!(status["forge"]["forge_ready"], false);
+}
+
+#[test]
+fn forge_pr_state_merged_requires_merge_sha() {
+    let repo = Repo::new();
+    let (_id, _wt, _head) = forge_change(&repo, "merged");
+    repo.arc(&repo.root)
+        .args(["forge", "pr-state", "merged", "--state", "merged"])
+        .assert()
+        .failure()
+        .code(1);
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "pr-state",
+            "merged",
+            "--state",
+            "merged",
+            "--merge-sha",
+            "abc123",
+        ])
+        .assert()
+        .success();
+    let status = status_json(&repo, "merged");
+    assert_eq!(status["forge"]["pr_state"]["state"], "merged");
+    assert_eq!(status["forge"]["pr_state"]["merge_sha"], "abc123");
+}
+
+#[test]
+fn forge_held_and_linked_renders_awaiting_user() {
+    let repo = Repo::new();
+    let (_id, _wt, head) = forge_change(&repo, "awaiting");
+    declare_same_repo(&repo, "awaiting", "arc/awaiting");
+    link_at(&repo, "awaiting", "1", &head, "arc/awaiting");
+    repo.arc(&repo.root)
+        .args(["hold", "awaiting", "--reason", "keep personal PR open"])
+        .assert()
+        .success();
+    let status = status_json(&repo, "awaiting");
+    assert_eq!(
+        status["forge"]["awaiting_user"]["pr_url"],
+        "https://github.com/11xx/streamrip/pull/1"
+    );
+    assert_eq!(status["forge"]["awaiting_user"]["head_sha"], head);
+    // The awaiting-user fact also shows in the Markdown Forge section.
+    let shown = stdout(repo.arc(&repo.root).args(["show", "awaiting"]));
+    assert!(shown.contains("Awaiting user"));
+    assert!(shown.contains("https://github.com/11xx/streamrip/pull/1"));
+}
+
+#[test]
+fn forge_events_round_trip_through_export_import() {
+    let source = Repo::new();
+    let (change_id, _wt, head) = forge_change(&source, "roundtrip");
+    declare_same_repo(&source, "roundtrip", "arc/roundtrip");
+    link_at(&source, "roundtrip", "1", &head, "arc/roundtrip");
+    source
+        .arc(&source.root)
+        .args([
+            "forge",
+            "checks",
+            "roundtrip",
+            "--pr-head",
+            &head,
+            "--state",
+            "passed",
+        ])
+        .assert()
+        .success();
+    source
+        .arc(&source.root)
+        .args(["forge", "pr-state", "roundtrip", "--state", "open"])
+        .assert()
+        .success();
+    let source_status = status_json(&source, "roundtrip");
+
+    let bundle = source.home.join("forge-bundle.json");
+    source
+        .arc(&source.root)
+        .args(["export", "roundtrip", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let imported_status: serde_json::Value = serde_json::from_str(&stdout(
+        destination
+            .arc(&destination.root)
+            .args(["status", &change_id]),
+    ))
+    .unwrap();
+    assert_eq!(imported_status["forge"], source_status["forge"]);
+    assert_eq!(imported_status["forge"]["projection"], "linked");
+    assert_eq!(imported_status["forge"]["checks"], "passed");
+    assert_eq!(imported_status["forge"]["pr_state"]["state"], "open");
 }

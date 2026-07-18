@@ -164,6 +164,42 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         superseded_by: Option<String>,
     },
+    /// Declared forge projection: the explicit repository tuple plus policy
+    /// a later observed link is validated against. Latest declaration wins.
+    ForgeProjection {
+        host: String,
+        base_repo: String,
+        base_ref: String,
+        head_repo: String,
+        head_ref: String,
+        policy: crate::forge::ForgePolicy,
+    },
+    /// Observed post-creation PR tuple, read back from the forge by the
+    /// agent. Only appended after fail-closed validation against the
+    /// declaration; recording one asserts the tuple matched.
+    ForgeLink {
+        pr_number: u64,
+        url: String,
+        base_repo: String,
+        base_ref: String,
+        head_repo: String,
+        head_ref: String,
+        head_sha: String,
+    },
+    /// Observed hosted-check rollup at an exact PR head. Zero checks is
+    /// `not-configured`/`not-triggered`, never `passed`.
+    ForgeChecks {
+        pr_head: String,
+        state: crate::forge::ForgeCheckState,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    /// Observed PR lifecycle. `merged` carries the actual merge commit.
+    ForgePrState {
+        state: crate::forge::ForgePrState,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        merge_sha: Option<String>,
+    },
 }
 
 /// The announcement class of a `message` event. Deliberately excludes

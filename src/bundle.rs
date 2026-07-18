@@ -272,6 +272,10 @@ fn known_event_type(event_type: &str) -> bool {
             | "hold-set"
             | "hold-released"
             | "change-closed"
+            | "forge-projection"
+            | "forge-link"
+            | "forge-checks"
+            | "forge-pr-state"
     )
 }
 
