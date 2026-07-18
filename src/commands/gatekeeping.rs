@@ -9,15 +9,27 @@ pub fn check_selection(ctx: &Ctx, reference: Option<&str>, tags: Vec<String>) ->
     }
 }
 
-pub fn verify(
-    ctx: &Ctx,
-    reference: &str,
-    gate: Option<String>,
-    command: Option<String>,
-    attest: bool,
-    result: Option<VerifyResult>,
-    note: Option<String>,
-) -> Result<i32> {
+pub struct VerifyArgs {
+    pub all: bool,
+    pub gate: Option<String>,
+    pub command: Option<String>,
+    pub attest: bool,
+    pub result: Option<VerifyResult>,
+    pub note: Option<String>,
+}
+
+pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
+    let VerifyArgs {
+        all,
+        gate,
+        command,
+        attest,
+        result,
+        note,
+    } = args;
+    if all && (gate.is_some() || command.is_some() || attest || result.is_some()) {
+        bail!("--all cannot be combined with --gate, --command, --attest, or --result");
+    }
     // --attest records evidence arc did not observe (so it needs the caller's
     // --result); without it arc runs the command and observing --result is a bug.
     let attested_result = match (attest, result) {
@@ -32,6 +44,31 @@ pub fn verify(
         bail!("change {change_id} is closed");
     }
     let toplevel = gitio::toplevel(&ctx.cwd)?;
+    if all {
+        let gates = gates::load(&toplevel)?;
+        let required = gates.required_for(&st.profile);
+        if required.is_empty() {
+            bail!("no gates declared for profile {}", st.profile);
+        }
+        let total = required.len();
+        let mut passed = 0;
+        for (name, gate) in required {
+            let result = record_verification(
+                ctx,
+                &store,
+                &change_id,
+                Some(name.clone()),
+                gate.command.clone(),
+                None,
+                note.clone(),
+            )?;
+            if result == 0 {
+                passed += 1;
+            }
+        }
+        println!("gates: {passed}/{total} pass");
+        return Ok(if passed == total { 0 } else { 1 });
+    }
     let cmd = match (&gate, command) {
         (Some(name), None) => {
             let gates = gates::load(&toplevel)?;
@@ -46,11 +83,24 @@ pub fn verify(
         (Some(_), Some(_)) => bail!("--gate and --command are mutually exclusive"),
         (None, None) => bail!("provide --gate <name> or --command <cmd>"),
     };
+    record_verification(ctx, &store, &change_id, gate, cmd, attested_result, note)
+}
+
+fn record_verification(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    gate: Option<String>,
+    cmd: String,
+    attested_result: Option<VerifyResult>,
+    note: Option<String>,
+) -> Result<i32> {
     let revision = gitio::head(&ctx.cwd)?;
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "unknown".into());
 
+    let attest = attested_result.is_some();
     let (result, exit_code, duration_ms) = match attested_result {
         // Attested: record the caller's result without running anything. The
         // gate did not execute here, so there is no observed exit code, timing,
@@ -91,13 +141,13 @@ pub fn verify(
 
     // Gates are arbitrary external commands and may legitimately invoke arc.
     // Acquire the append lock only after they return, then re-check closure.
-    let (_, _transition, st) = locked_state(&store, &change_id)?;
+    let (_, _transition, st) = locked_state(store, change_id)?;
     if st.is_closed() {
         bail!("change {change_id} closed while verification was running");
     }
     let ev = ctx.event(
-        &store,
-        &change_id,
+        store,
+        change_id,
         Payload::VerificationRecorded {
             gate,
             command: cmd,

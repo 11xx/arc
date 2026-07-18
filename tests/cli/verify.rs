@@ -1,5 +1,124 @@
 use super::common::*;
 
+fn write_two_gates(repo: &Repo, first: &str, second: &str) {
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        format!("[gates.alpha]\ncommand = {first:?}\n[gates.beta]\ncommand = {second:?}\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn verify_all_records_every_passing_gate_and_summary() {
+    let repo = Repo::new();
+    write_two_gates(&repo, "true", "true");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "all-pass", "--no-worktree"]),
+    );
+
+    repo.arc(&repo.root)
+        .args(["verify", "all-pass", "--all", "--note", "full suite"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("gates: 2/2 pass"));
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "all-pass",
+        "--type",
+        "verification-recorded",
+    ]));
+    let values = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0]["gate"], "alpha");
+    assert_eq!(values[1]["gate"], "beta");
+    assert_eq!(values[0]["note"], "full suite");
+    assert_eq!(values[1]["note"], "full suite");
+}
+
+#[test]
+fn verify_all_continues_after_a_failure() {
+    let repo = Repo::new();
+    write_two_gates(&repo, "false", "true");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "all-fail", "--no-worktree"]),
+    );
+
+    repo.arc(&repo.root)
+        .args(["verify", "all-fail", "--all"])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("gates: 1/2 pass"));
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "all-fail",
+        "--type",
+        "verification-recorded",
+    ]));
+    assert_eq!(events.lines().count(), 2);
+}
+
+#[test]
+fn verify_all_rejects_conflicting_flags_without_appending() {
+    let repo = Repo::new();
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "all-flags",
+        "--no-worktree",
+    ])));
+    let before = event_count(&repo, &change_id);
+
+    for args in [
+        vec!["verify", "all-flags", "--all", "--gate", "x"],
+        vec![
+            "verify",
+            "all-flags",
+            "--all",
+            "--attest",
+            "--result",
+            "pass",
+        ],
+        vec!["verify", "all-flags", "--all", "--command", "true"],
+    ] {
+        repo.arc(&repo.root).args(args).assert().failure();
+    }
+    assert_eq!(event_count(&repo, &change_id), before);
+}
+
+#[test]
+fn verify_all_rejects_missing_or_empty_gates_without_appending() {
+    for empty_file in [false, true] {
+        let repo = Repo::new();
+        if empty_file {
+            fs::create_dir_all(repo.root.join(".arc")).unwrap();
+            fs::write(repo.root.join(".arc/gates.toml"), "").unwrap();
+        }
+        let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args([
+            "begin",
+            "all-empty",
+            "--no-worktree",
+        ])));
+        let before = event_count(&repo, &change_id);
+        repo.arc(&repo.root)
+            .args(["verify", "all-empty", "--all"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "no gates declared for profile local",
+            ));
+        assert_eq!(event_count(&repo, &change_id), before);
+    }
+}
+
 /// `verify --attest --result` records externally observed evidence without
 /// running anything, counts it toward gate green-ness, and flags it attested
 /// in both the machine status and the human render.
