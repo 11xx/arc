@@ -388,7 +388,12 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     for event in &events {
         if ["consumed", "archived"].contains(&event.event.as_str()) {
             if let Some(file) = &event.file {
-                if !dir.join(file).is_file() && !cold.join(file).is_file() {
+                // Only artifact-shaped names are references; legacy or
+                // hand-written prose in the file field is not a dangle.
+                if parse_artifact_name(file).is_some()
+                    && !dir.join(file).is_file()
+                    && !cold.join(file).is_file()
+                {
                     problems.push(DoctorFinding {
                         code: "dangling-artifact-reference",
                         detail: format!("{} references {file}", event.event),
@@ -635,7 +640,12 @@ fn journal(ctx: &Ctx, topic: &str, message: &str) -> Result<i32> {
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("cannot create archive dir {}", dir.display()))?;
     let now = Utc::now();
-    append_journal(&dir, ctx, now, topic, message, None)?;
+    // Free text is always a log event: marker promotion is reserved for the
+    // internal consume/archive/lane callers, so a message that happens to
+    // begin with "archived " or "consumed " cannot forge a typed event.
+    let mut event = JournalEvent::base(ctx, now, topic, "log");
+    event.message = Some(message.to_string());
+    append_event(&dir, &event)?;
     Ok(0)
 }
 

@@ -11,6 +11,12 @@ no version has been tagged yet.
 
 ## [Unreleased]
 
+### Fixed
+
+- Free-text `thread journal` messages are never promoted into typed
+  events, and doctor counts only artifact-shaped file fields as
+  references (`journal-log-fix`).
+
 ### Changed
 
 - The thread journal is now a typed `thread-journal/1` JSONL event log while
