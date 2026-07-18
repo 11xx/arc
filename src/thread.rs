@@ -453,9 +453,16 @@ fn consumed_markers(filename: &str) -> [String; 3] {
 
 fn is_consumed(journal: &str, filename: &str) -> bool {
     let markers = consumed_markers(filename);
-    journal
-        .lines()
-        .any(|line| markers.iter().any(|marker| line.contains(marker.as_str())))
+    journal.lines().any(|line| {
+        // Journal lines are `- <ts> <harness> <session> <topic>: <message>`;
+        // the marker must open the message field itself, so prose that quotes
+        // the shape mid-sentence does not retire the item. (Timestamps carry
+        // `:` but never `: `, so the first `: ` ends the topic.)
+        let message = line.split_once(": ").map_or(line, |(_, message)| message);
+        markers
+            .iter()
+            .any(|marker| message.starts_with(marker.as_str()))
+    })
 }
 
 fn read_journal(dir: &Path) -> Result<String> {

@@ -4796,6 +4796,20 @@ fn thread_open_and_consume_track_actionable_items() {
     let still_open = stdout(repo.arc(&repo.root).args(["thread", "open"]));
     assert!(still_open.contains("next-work"), "{still_open}");
 
+    // Even the full machine shape quoted mid-sentence must not consume:
+    // the marker has to open the journal message field.
+    repo.arc(&repo.root)
+        .args([
+            "thread",
+            "journal",
+            "next-work",
+            &format!("reviewed consumed {} [done] but rejected it", names["todo"]),
+        ])
+        .assert()
+        .success();
+    let still_open = stdout(repo.arc(&repo.root).args(["thread", "open"]));
+    assert!(still_open.contains("next-work"), "{still_open}");
+
     // Exclusive creation: recreating the same timestamped path fails loudly
     // instead of overwriting a queued artifact.
     let clash = stdout(repo.arc(&repo.root).args([
