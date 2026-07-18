@@ -240,7 +240,7 @@ enum Cmd {
         #[arg(long)]
         assign: Option<String>,
     },
-    /// Machine-readable status report (the versioned arc-status/4 schema)
+    /// Machine-readable status report (the versioned arc-status/5 schema)
     Status {
         change: String,
         /// Accepted for compatibility; status output is always JSON

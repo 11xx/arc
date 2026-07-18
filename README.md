@@ -112,7 +112,7 @@ timeout. `snapshot` waits for a patchset, `ready` matches `arc check` success,
 closure outcome, and `closed` accepts integrated, abandoned, or superseded
 changes.
 
-`arc status <change>` prints the versioned `arc-status/4` JSON report —
+`arc status <change>` prints the versioned `arc-status/5` JSON report —
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, claim owner/activity/stage timing, snapshot
 provenance, a blocker summary, a machine-readable `next_action`, an additive

@@ -102,6 +102,29 @@ pub fn merge_base(cwd: &Path, a: &str, b: &str) -> Result<String> {
     git(cwd, &["merge-base", a, b])
 }
 
+pub fn merge_conflicts(cwd: &Path, target_rev: &str, head_rev: &str) -> Result<bool> {
+    let out = Command::new("git")
+        .args([
+            "merge-tree",
+            "--write-tree",
+            "--no-messages",
+            target_rev,
+            head_rev,
+        ])
+        .current_dir(cwd)
+        .output()
+        .context("failed to spawn git merge-tree")?;
+    match out.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        code => bail!(
+            "git merge-tree failed with exit code {}: {}",
+            code.map_or_else(|| "signal".to_string(), |code| code.to_string()),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    }
+}
+
 pub fn blob_oid(cwd: &Path, rev: &str, path: &str) -> Option<String> {
     git(cwd, &["rev-parse", "--verify", &format!("{rev}:{path}")]).ok()
 }
