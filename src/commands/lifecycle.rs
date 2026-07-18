@@ -1,0 +1,518 @@
+use super::*;
+
+#[allow(clippy::too_many_arguments)]
+pub fn begin(
+    ctx: &Ctx,
+    slug: &str,
+    title: Option<String>,
+    profile: &str,
+    target: Option<String>,
+    base: Option<String>,
+    branch: Option<String>,
+    worktree: Option<String>,
+    no_worktree: bool,
+    adopt: Option<String>,
+    blocked_by: Vec<String>,
+    tags: Vec<String>,
+) -> Result<()> {
+    ids::validate_slug(slug)?;
+    let store = ctx.store()?;
+    let blocked_by = blocked_by
+        .iter()
+        .map(|reference| store.resolve_change(reference))
+        .collect::<Result<BTreeSet<_>>>()?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let tags = normalize_tags(tags)?;
+
+    let mut open_change_branches: Vec<String> = Vec::new();
+    for existing in store.list_change_ids()? {
+        let events = store.load_events(&existing)?;
+        let st = state::reduce(&events)?;
+        if st.is_closed() {
+            continue;
+        }
+        if st.slug == slug {
+            bail!(
+                "open change {existing} already uses slug {slug:?}; continue it or close it first"
+            );
+        }
+        open_change_branches.push(st.branch);
+    }
+
+    // Changes derive from the branch they intend to merge into. The
+    // default is the primary worktree's branch (the main checkout,
+    // normally master/main) — never whatever branch happens to be
+    // checked out here, which may itself be work in progress. Stacking
+    // on another open change requires an explicit --target.
+    let explicit_target = target.is_some();
+    let target_branch = match target {
+        Some(t) => t,
+        None => gitio::primary_worktree_branch(&ctx.cwd)?
+            .or(gitio::current_branch(&ctx.cwd)?)
+            .context("cannot determine a target branch (detached?); pass --target")?,
+    };
+    if !explicit_target && open_change_branches.contains(&target_branch) {
+        bail!(
+            "default target {target_branch:?} is another open change's branch; \
+             pass --target explicitly to stack changes deliberately"
+        );
+    }
+    let target_head = gitio::branch_head(&ctx.cwd, &target_branch)?;
+
+    let change_id = ids::new_change_id(slug);
+    let title = title.unwrap_or_else(|| slug.replace('-', " "));
+
+    let (branch_name, base_rev, worktree_path) = if let Some(adopted) = adopt {
+        if !gitio::branch_exists(&ctx.cwd, &adopted) {
+            bail!("--adopt branch {adopted:?} does not exist");
+        }
+        let branch_head = gitio::branch_head(&ctx.cwd, &adopted)?;
+        let base_rev = match base {
+            Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
+            None => gitio::merge_base(&ctx.cwd, &target_head, &branch_head)?,
+        };
+        let wt = gitio::worktree_for_branch(&ctx.cwd, &adopted)?.map(|p| p.display().to_string());
+        (adopted, base_rev, wt)
+    } else {
+        let branch_name = branch.unwrap_or_else(|| format!("arc/{slug}"));
+        if gitio::branch_exists(&ctx.cwd, &branch_name) {
+            bail!("branch {branch_name:?} already exists; use --adopt {branch_name} to track it");
+        }
+        let base_rev = match base {
+            Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
+            None => target_head.clone(),
+        };
+        gitio::create_branch(&ctx.cwd, &branch_name, &base_rev)?;
+        let wt = if no_worktree {
+            None
+        } else {
+            let path = match worktree {
+                Some(p) => PathBuf::from(p),
+                None => default_worktree_path(&ctx.cwd, slug)?,
+            };
+            if path.exists() {
+                bail!("worktree path {} already exists", path.display());
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("cannot create {}", parent.display()))?;
+            }
+            gitio::add_worktree(&ctx.cwd, &path, &branch_name)?;
+            Some(path.display().to_string())
+        };
+        (branch_name, base_rev, wt)
+    };
+
+    let ev = ctx.event(
+        &store,
+        &change_id,
+        Payload::ChangeOpened {
+            slug: slug.to_string(),
+            title,
+            profile: profile.to_string(),
+            target_branch,
+            branch: branch_name.clone(),
+            base: base_rev,
+            worktree: worktree_path.clone(),
+            blocked_by,
+            tags,
+        },
+    );
+    store.append_event(&ev)?;
+
+    println!("change: {change_id}");
+    println!("branch: {branch_name}");
+    if let Some(wt) = worktree_path {
+        println!("worktree: {wt}");
+    }
+    Ok(())
+}
+
+pub fn list(ctx: &Ctx, open_only: bool, json: bool, format: ListFormat) -> Result<()> {
+    let store = ctx.store()?;
+    let states = ctx.load_all_states(&store)?;
+    let selected = states
+        .values()
+        .filter(|state| !open_only || !state.is_closed())
+        .collect::<Vec<_>>();
+
+    if json || matches!(format, ListFormat::Json) {
+        let rows = selected
+            .iter()
+            .map(|state| list_row(state, &states))
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+    } else if selected.is_empty() {
+        println!("no changes");
+    } else {
+        match format {
+            ListFormat::Compact => {
+                for state in selected {
+                    println!("{}", state.change_id);
+                }
+            }
+            ListFormat::Wide => {
+                println!(
+                    "{:<36} {:<12} {:<18} {:<24} Target",
+                    "Change", "Status", "Verdict", "Blocker"
+                );
+                for state in selected {
+                    println!(
+                        "{:<36} {:<12} {:<18} {:<24} {}",
+                        state.change_id,
+                        change_status(state),
+                        verdict_label(state),
+                        blocker_label(state, &states),
+                        state.target_branch
+                    );
+                }
+            }
+            ListFormat::Default | ListFormat::Json => {
+                for state in selected {
+                    println!(
+                        "{}  [{}] {} ({})",
+                        state.change_id,
+                        change_status(state),
+                        state.title,
+                        state.branch,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn query(ctx: &Ctx, args: QueryArgs) -> Result<()> {
+    if let Some(status) = &args.status {
+        if !matches!(
+            status.as_str(),
+            "open" | "closed" | "integrated" | "abandoned" | "superseded"
+        ) {
+            bail!(
+                "unknown status {status:?}; expected open, closed, integrated, abandoned, or superseded"
+            );
+        }
+    }
+    let store = ctx.store()?;
+    let states = ctx.load_all_states(&store)?;
+    let tags = normalize_tags(args.tags)?;
+    let selected = states
+        .values()
+        .filter(|state| {
+            args.status
+                .as_deref()
+                .is_none_or(|wanted| status_matches(state, wanted))
+                && args
+                    .target
+                    .as_deref()
+                    .is_none_or(|target| state.target_branch == target)
+                && tags.iter().all(|tag| state.tags.contains(tag))
+                && args.verdict.is_none_or(|verdict| {
+                    state.latest_verdict().is_some_and(|v| v.verdict == verdict)
+                })
+                && args
+                    .actor
+                    .as_deref()
+                    .is_none_or(|actor| state.opened_by == actor)
+                && args
+                    .harness
+                    .as_deref()
+                    .is_none_or(|harness| state.opened_harness.as_deref() == Some(harness))
+        })
+        .collect::<Vec<_>>();
+
+    if args.json {
+        let rows = selected
+            .iter()
+            .map(|state| list_row(state, &states))
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+    } else {
+        for state in selected {
+            println!("{}", state.change_id);
+        }
+    }
+    Ok(())
+}
+
+pub fn show_selection(
+    ctx: &Ctx,
+    reference: Option<&str>,
+    tags: Vec<String>,
+    json: bool,
+) -> Result<()> {
+    match (reference, tags.is_empty()) {
+        (Some(reference), true) => show(ctx, reference, json),
+        (None, false) => show_tagged(ctx, normalize_tags(tags)?, json),
+        (Some(_), false) => bail!("provide a change or --tag, not both"),
+        (None, true) => bail!("provide a change or at least one --tag"),
+    }
+}
+
+pub fn metadata(
+    ctx: &Ctx,
+    reference: &str,
+    blocked_by: Vec<String>,
+    remove_blocked_by: Vec<String>,
+    tags: Vec<String>,
+    remove_tags: Vec<String>,
+    assign: Option<String>,
+) -> Result<()> {
+    let store = ctx.store()?;
+    let _graph = store.lock_graph()?;
+    let (change_id, _transition, state) = locked_state(&store, reference)?;
+    if state.is_closed() {
+        bail!("change {change_id} is closed");
+    }
+    let states = ctx.load_all_states(&store)?;
+    let add_blocked_by = blocked_by
+        .iter()
+        .map(|dependency| store.resolve_change(dependency))
+        .collect::<Result<BTreeSet<_>>>()?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let remove_blocked_by = remove_blocked_by
+        .iter()
+        .map(|dependency| resolve_blocker_removal(&store, &state, dependency))
+        .collect::<Result<BTreeSet<_>>>()?
+        .into_iter()
+        .collect::<Vec<_>>();
+    for dependency in &add_blocked_by {
+        if dependency == &change_id || dependency_reaches(dependency, &change_id, &states) {
+            bail!("adding blocker {dependency} would create a dependency cycle");
+        }
+    }
+    let add_tags = normalize_tags(tags)?;
+    let remove_tags = normalize_tags(remove_tags)?;
+    // An assignment value may contain no whitespace-delimited surprises: a
+    // harness label, or empty to clear. Store the trimmed form verbatim.
+    let assign = match &assign {
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.chars().any(char::is_whitespace) {
+                bail!("assignment harness must not contain whitespace: {value:?}");
+            }
+            Some(trimmed.to_string())
+        }
+        None => None,
+    };
+    if add_blocked_by.is_empty()
+        && remove_blocked_by.is_empty()
+        && add_tags.is_empty()
+        && remove_tags.is_empty()
+        && assign.is_none()
+    {
+        bail!("provide at least one metadata change");
+    }
+    let event = ctx.event(
+        &store,
+        &change_id,
+        Payload::MetadataUpdated {
+            add_blocked_by,
+            remove_blocked_by,
+            add_tags,
+            remove_tags,
+            assign,
+        },
+    );
+    store.append_event(&event)?;
+    println!("event: {}", event.event_id);
+    Ok(())
+}
+
+pub fn status_cmd(ctx: &Ctx, reference: &str) -> Result<()> {
+    let store = ctx.store()?;
+    let (_, st) = ctx.load_state(&store, reference)?;
+    let states = ctx.load_all_states(&store)?;
+    let report = ctx.report(&store, &st)?;
+    let suggested_alternatives = if report.blocker_status.blocked {
+        find_unblocked_changes(&st.change_id, &states)
+    } else {
+        Vec::new()
+    };
+    let output = StatusOutput {
+        report,
+        suggested_alternatives,
+    };
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+pub fn blocker_status_cmd(ctx: &Ctx, reference: &str) -> Result<()> {
+    let store = ctx.store()?;
+    let (_, state) = ctx.load_state(&store, reference)?;
+    let states = ctx.load_all_states(&store)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&dependency_status(&state, &states))?
+    );
+    Ok(())
+}
+
+pub fn is_blocked(ctx: &Ctx, reference: &str) -> Result<i32> {
+    let store = ctx.store()?;
+    let (_, state) = ctx.load_state(&store, reference)?;
+    let states = ctx.load_all_states(&store)?;
+    let blocker_status = dependency_status(&state, &states);
+    if blocker_status.blocked {
+        for blocker in blocker_status
+            .blockers_ready
+            .iter()
+            .filter(|blocker| !blocker.integrated)
+        {
+            println!("blocked by {} ({})", blocker.change_id, blocker.status);
+        }
+        Ok(1)
+    } else {
+        println!("ready: all prerequisite changes are integrated");
+        Ok(0)
+    }
+}
+
+fn default_worktree_path(cwd: &Path, slug: &str) -> Result<PathBuf> {
+    let toplevel = gitio::toplevel(cwd)?;
+    let repo_name = toplevel
+        .file_name()
+        .context("cannot determine repository name")?
+        .to_string_lossy()
+        .into_owned();
+    let config = crate::config::load()?;
+    Ok(config.worktrees_dir.join(format!("{repo_name}-{slug}")))
+}
+
+fn list_row(state: &ChangeState, states: &BTreeMap<String, ChangeState>) -> serde_json::Value {
+    serde_json::json!({
+        "change_id": state.change_id,
+        "slug": state.slug,
+        "title": state.title,
+        "profile": state.profile,
+        "branch": state.branch,
+        "target_branch": state.target_branch,
+        "state": if state.is_closed() { "closed" } else { "open" },
+        "status": change_status(state),
+        "verdict": verdict_label(state),
+        "blocked_by": state.blocked_by,
+        "blocker": blocker_label(state, states),
+        "tags": state.tags,
+    })
+}
+
+fn status_matches(state: &ChangeState, wanted: &str) -> bool {
+    match wanted {
+        "closed" => state.is_closed(),
+        other => change_status(state) == other,
+    }
+}
+
+fn verdict_label(state: &ChangeState) -> &'static str {
+    match state.latest_verdict().map(|verdict| verdict.verdict) {
+        Some(Verdict::Approved) => "approved",
+        Some(Verdict::ChangesRequested) => "changes-requested",
+        Some(Verdict::CommentOnly) => "comment-only",
+        None => "none",
+    }
+}
+
+fn blocker_label(state: &ChangeState, states: &BTreeMap<String, ChangeState>) -> String {
+    let dependencies = dependency_status(state, states);
+    if let Some(blocker) = dependencies
+        .blockers_ready
+        .iter()
+        .find(|blocker| !blocker.integrated)
+    {
+        return format!("blocked-by:{}", blocker.slug);
+    }
+    if !state.open_blocking_findings().is_empty() {
+        return format!("{} findings", state.open_blocking_findings().len());
+    }
+    if state.hold.is_some() {
+        return "hold".into();
+    }
+    "—".into()
+}
+
+fn show(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
+    let store = ctx.store()?;
+    let (_, st) = ctx.load_state(&store, reference)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&st)?);
+    } else {
+        let states = ctx.load_all_states(&store)?;
+        let report = ctx.report(&store, &st)?;
+        let alternatives = if report.blocker_status.blocked {
+            find_unblocked_changes(&st.change_id, &states)
+        } else {
+            Vec::new()
+        };
+        print!("{}", render::markdown(&st, &report, &alternatives));
+    }
+    Ok(())
+}
+
+fn show_tagged(ctx: &Ctx, tags: Vec<String>, json: bool) -> Result<()> {
+    let store = ctx.store()?;
+    let states = ctx.load_all_states(&store)?;
+    let selected = states
+        .values()
+        .filter(|state| tags.iter().all(|tag| state.tags.contains(tag)))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        bail!("no changes match tags {}", tags.join(", "));
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&selected)?);
+    } else {
+        for state in selected {
+            let report = ctx.report(&store, state)?;
+            let alternatives = if report.blocker_status.blocked {
+                find_unblocked_changes(&state.change_id, &states)
+            } else {
+                Vec::new()
+            };
+            print!("{}", render::markdown(state, &report, &alternatives));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_blocker_removal(store: &Store, state: &ChangeState, reference: &str) -> Result<String> {
+    if state.blocked_by.iter().any(|blocker| blocker == reference) {
+        return Ok(reference.to_string());
+    }
+    let matches = state
+        .blocked_by
+        .iter()
+        .filter(|blocker| blocker.starts_with(reference))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [blocker] => Ok((*blocker).clone()),
+        [] => store.resolve_change(reference),
+        _ => bail!(
+            "ambiguous blocker {reference:?}: matches {}",
+            matches
+                .iter()
+                .map(|blocker| blocker.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn dependency_reaches(start: &str, target: &str, states: &BTreeMap<String, ChangeState>) -> bool {
+    let mut pending = vec![start];
+    let mut visited = BTreeSet::new();
+    while let Some(change_id) = pending.pop() {
+        if change_id == target {
+            return true;
+        }
+        if !visited.insert(change_id) {
+            continue;
+        }
+        if let Some(state) = states.get(change_id) {
+            pending.extend(state.blocked_by.iter().map(String::as_str));
+        }
+    }
+    false
+}
