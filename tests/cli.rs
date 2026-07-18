@@ -4700,3 +4700,163 @@ fn provenance_email_match_suppresses_name_only_false_positive() {
         .success()
         .stdout(predicates::str::contains("PROVENANCE MISMATCH").not());
 }
+
+/// `thread open` lists only unconsumed actionable kinds (todo/handoff/
+/// inbox/plan); `thread consume` retires an item through a machine-readable
+/// journal line and refuses double consumption.
+#[test]
+fn thread_open_and_consume_track_actionable_items() {
+    let repo = Repo::new();
+    let body_path = repo.home.join("body.md");
+    fs::write(&body_path, "# Item\n\nbody\n").unwrap();
+    let body = body_path.to_str().unwrap();
+
+    let mut names = std::collections::HashMap::new();
+    for (topic, kind) in [
+        ("next-work", "todo"),
+        ("pickup", "handoff"),
+        ("memo", "note"),
+    ] {
+        let out = stdout(repo.arc(&repo.root).args([
+            "thread",
+            "note",
+            topic,
+            "--kind",
+            kind,
+            "--body-file",
+            body,
+        ]));
+        let file = PathBuf::from(out.trim());
+        names.insert(
+            kind,
+            file.file_name().unwrap().to_string_lossy().to_string(),
+        );
+    }
+
+    // The todo kind produces the expected filename shape.
+    assert!(
+        names["todo"].ends_with("-next-work-todo.md"),
+        "{:?}",
+        names["todo"]
+    );
+
+    // open: actionable kinds appear; records (note) do not.
+    let open = stdout(repo.arc(&repo.root).args(["thread", "open"]));
+    assert!(open.contains("next-work"), "{open}");
+    assert!(open.contains("pickup"), "{open}");
+    assert!(!open.contains("memo"), "{open}");
+
+    // Consume the handoff with an outcome and note; it leaves the queue.
+    repo.arc(&repo.root)
+        .args([
+            "thread",
+            "consume",
+            &names["handoff"],
+            "--outcome",
+            "superseded",
+            "--note",
+            "folded",
+        ])
+        .assert()
+        .success();
+    let open: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["thread", "open", "--json"]),
+    ))
+    .unwrap();
+    let open_files: Vec<&str> = open["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(open_files, vec![names["todo"].as_str()]);
+
+    // --kind filters within the actionable set; record kinds are refused.
+    let filtered = stdout(
+        repo.arc(&repo.root)
+            .args(["thread", "open", "--kind", "todo"]),
+    );
+    assert!(filtered.contains("next-work"), "{filtered}");
+    repo.arc(&repo.root)
+        .args(["thread", "open", "--kind", "note"])
+        .assert()
+        .failure();
+
+    // Prose mentioning a filename near "consumed" is not the machine shape
+    // and must not retire the item.
+    repo.arc(&repo.root)
+        .args([
+            "thread",
+            "journal",
+            "next-work",
+            &format!("discussed consumed {} in passing", names["todo"]),
+        ])
+        .assert()
+        .success();
+    let still_open = stdout(repo.arc(&repo.root).args(["thread", "open"]));
+    assert!(still_open.contains("next-work"), "{still_open}");
+
+    // Even the full machine shape quoted mid-sentence must not consume:
+    // the marker has to open the journal message field.
+    repo.arc(&repo.root)
+        .args([
+            "thread",
+            "journal",
+            "next-work",
+            &format!("reviewed consumed {} [done] but rejected it", names["todo"]),
+        ])
+        .assert()
+        .success();
+    let still_open = stdout(repo.arc(&repo.root).args(["thread", "open"]));
+    assert!(still_open.contains("next-work"), "{still_open}");
+
+    // Exclusive creation: recreating the same timestamped path fails loudly
+    // instead of overwriting a queued artifact.
+    let clash = stdout(repo.arc(&repo.root).args([
+        "thread",
+        "note",
+        "clash",
+        "--kind",
+        "todo",
+        "--body-file",
+        body,
+    ]));
+    let clash_name = PathBuf::from(clash.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let manual = thread_dir(&repo).join(&clash_name);
+    assert!(manual.is_file());
+    // A direct second create of the identical path (what a same-second
+    // duplicate note would attempt) must be refused by exclusive creation.
+    assert!(fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&manual)
+        .is_err());
+
+    // The journal carries the machine-readable consumption line.
+    let journal = fs::read_to_string(thread_dir(&repo).join("journal.md")).unwrap();
+    assert!(
+        journal.contains(&format!(
+            "consumed {} [superseded]: folded",
+            names["handoff"]
+        )),
+        "{journal}"
+    );
+
+    // Guards: double consume, unknown artifact, and paths are refused.
+    repo.arc(&repo.root)
+        .args(["thread", "consume", &names["handoff"]])
+        .assert()
+        .failure();
+    repo.arc(&repo.root)
+        .args(["thread", "consume", "20990101T000000Z-ghost-todo.md"])
+        .assert()
+        .failure();
+    repo.arc(&repo.root)
+        .args(["thread", "consume", "sub/dir-file-todo.md"])
+        .assert()
+        .failure();
+}

@@ -377,15 +377,31 @@ the ledger as one file; Git objects still travel separately. A forge-PR
 projection is planned, while shared Git-ref sync remains deferred until
 a real concurrent multi-machine need exists.
 
+## Thread archive mechanics
+
+`arc thread` encodes the drift-prone mechanics of the cross-harness /thread
+archive while the content stays plain Markdown any tool-less agent can read
+and write: `dir` prints the resolved archive directory (`ARC_THREAD_DIR`,
+then the `[threads.dirs]` map in the config file keyed by repository root,
+then `<ai_home>/threads/<repo-slug>`); `note` writes a timestamped
+`<ts>-<topic>-<kind>.md` artifact and its journal line; `journal` appends a
+journal-only line; `catchup` lists newest-first. Work waiting for a future
+session uses the actionable kinds — `todo`, `handoff`, `inbox`, `plan` —
+which `thread open` lists until an explicit `thread consume <filename>
+[--outcome done|superseded|discarded] [--note <text>]` retires them with a
+machine-readable journal line (`consumed <filename> [<outcome>]`). The
+journal is append-only; consumption never edits or deletes the artifact.
+
 ## Roadmap
 
 See PLAN-02 in the arc-discussion thread archive. Shipped: local core +
 policy engine (M1–M2), `/arc` skill wiring (M3), deterministic export/import
-bundles (M4), and local orchestration foundations (dependencies, tags,
-actionable status, query, and batch views). Forge projection remains deferred
-until this installation actually uses a forge. Absorbing the mechanical parts
-of the /thread archive conventions as `arc thread` subcommands is likewise an
-unscheduled, evidence-driven possibility.
+bundles (M4), local orchestration foundations (dependencies, tags,
+actionable status, query, and batch views), claims/stages and execution
+roles, messaging and the inbox rollup, thread archive mechanics, and the
+ledger side of forge projection (declare/link/checks/pr-state with
+fail-closed validation). Remaining evidence-driven possibilities live in the
+thread archive's open items (`arc thread open`).
 
 ## License
 
