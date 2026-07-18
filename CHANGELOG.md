@@ -18,6 +18,8 @@ no version has been tagged yet.
 
 ### Added
 
+- Shared project memory artifacts listed by `thread memories` and always
+  surfaced by hot `catchup` (`thread-memory`).
 - Advisory session work lanes in the thread archive: `thread lane
   open|renew|close|list`, heartbeat-free liveness from owner journal
   activity, stale takeover, and lane occupancy surfaced in `thread open`
