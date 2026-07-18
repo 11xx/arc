@@ -181,6 +181,16 @@ pub fn worktree_for_branch(cwd: &Path, branch: &str) -> Result<Option<PathBuf>> 
     Ok(None)
 }
 
+/// The primary worktree path (the first entry from `git worktree list`),
+/// including when its HEAD is detached.
+pub fn primary_worktree(cwd: &Path) -> Result<PathBuf> {
+    let out = git(cwd, &["worktree", "list", "--porcelain"])?;
+    out.lines()
+        .find_map(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .context("git worktree list did not contain a primary worktree")
+}
+
 pub fn update_ref(cwd: &Path, name: &str, value: &str) -> Result<()> {
     git(cwd, &["update-ref", name, value])?;
     Ok(())

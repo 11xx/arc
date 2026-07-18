@@ -200,7 +200,14 @@ pub fn integrate(
     cleanup: bool,
 ) -> Result<i32> {
     match (reference, tags.is_empty()) {
-        (Some(reference), true) => integrate_one(ctx, reference, into, message, cleanup),
+        (Some(reference), true) => integrate_one(
+            ctx,
+            reference,
+            into,
+            message,
+            cleanup,
+            ClosedBehavior::Refuse,
+        ),
         (None, false) => {
             if into.is_some() {
                 bail!("--into is only valid when integrating one change");
@@ -215,6 +222,12 @@ pub fn integrate(
     }
 }
 
+#[derive(Clone, Copy)]
+enum ClosedBehavior {
+    Refuse,
+    SkipTagged,
+}
+
 /// Integrate one already-selected change. Tagged integration reuses this
 /// guarded path for every open member so each merge gets the normal target,
 /// approval, gate, and dependency checks.
@@ -224,6 +237,7 @@ fn integrate_one(
     into: Option<String>,
     message: Option<String>,
     cleanup: bool,
+    closed_behavior: ClosedBehavior,
 ) -> Result<i32> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
@@ -234,6 +248,10 @@ fn integrate_one(
     let target_lock = store.lock_target(&target)?;
     let transition = store.lock_transition(&change_id)?;
     let st = state::reduce(&store.load_events(&change_id)?)?;
+    if st.is_closed() && matches!(closed_behavior, ClosedBehavior::SkipTagged) {
+        println!("{}: {}", st.change_id, change_status(&st));
+        return Ok(0);
+    }
     let report = ctx.report(&store, &st)?;
     if let Some(claim) = &st.claim {
         let timing = state::claim_timing_at(claim, chrono::Utc::now());
@@ -330,8 +348,14 @@ fn integrate_one(
 }
 
 fn integrate_tagged(ctx: &Ctx, tags: Vec<String>, cleanup: bool) -> Result<i32> {
-    let store = ctx.store()?;
-    let selected = ctx
+    let batch_ctx = Ctx {
+        cwd: gitio::primary_worktree(&ctx.cwd)?,
+        actor: ctx.actor.clone(),
+        harness: ctx.harness.clone(),
+        session: ctx.session.clone(),
+    };
+    let store = batch_ctx.store()?;
+    let selected = batch_ctx
         .load_all_states(&store)?
         .into_iter()
         .filter(|(_, state)| tags.iter().all(|tag| state.tags.contains(tag)))
@@ -341,14 +365,14 @@ fn integrate_tagged(ctx: &Ctx, tags: Vec<String>, cleanup: bool) -> Result<i32> 
     }
 
     for change_id in dependency_order(&selected)? {
-        // The earlier member may have changed dependency state or closed this
-        // member, so never act on the selection snapshot.
-        let (_, state) = ctx.load_state(&store, &change_id)?;
-        if state.is_closed() {
-            println!("{}: {}", state.change_id, change_status(&state));
-            continue;
-        }
-        let code = integrate_one(ctx, &change_id, None, None, cleanup)?;
+        let code = integrate_one(
+            &batch_ctx,
+            &change_id,
+            None,
+            None,
+            cleanup,
+            ClosedBehavior::SkipTagged,
+        )?;
         if code != 0 {
             return Ok(code);
         }

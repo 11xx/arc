@@ -511,6 +511,31 @@ fn tagged_integration_unblocks_and_merges_a_chain_in_dependency_order() {
 }
 
 #[test]
+fn tagged_integration_cleanup_from_first_selected_worktree_keeps_batch_context_valid() {
+    let repo = Repo::new();
+    let first = ready_tagged_change(&repo, "series-cleanup-first", None);
+    let second = ready_tagged_change(&repo, "series-cleanup-second", Some(&first));
+    let first_worktree = repo.home.join(".worktrees/repo-series-cleanup-first");
+    let second_worktree = repo.home.join(".worktrees/repo-series-cleanup-second");
+
+    repo.arc(&first_worktree)
+        .args(["integrate", "--tag", "#series", "--cleanup"])
+        .assert()
+        .success();
+
+    assert!(!first_worktree.exists());
+    assert!(!second_worktree.exists());
+    for branch in ["arc/series-cleanup-first", "arc/series-cleanup-second"] {
+        assert!(git_out(&repo.root, &["branch", "--list", branch]).is_empty());
+    }
+    for change in [first, second] {
+        let status: serde_json::Value =
+            serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", &change]))).unwrap();
+        assert_eq!(status["closure"]["outcome"], "integrated");
+    }
+}
+
+#[test]
 fn tagged_integration_skips_closed_members_in_deterministic_order() {
     let repo = Repo::new();
     let closed = ready_tagged_change(&repo, "series-closed", None);
@@ -529,6 +554,24 @@ fn tagged_integration_skips_closed_members_in_deterministic_order() {
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", &live]))).unwrap();
     assert_eq!(status["closure"]["outcome"], "integrated");
+}
+
+#[test]
+fn tagged_integration_skips_member_closed_while_waiting_for_target_lock() {
+    let repo = Repo::new();
+    let change = ready_tagged_change(&repo, "series-closed-under-lock", None);
+    let target_lock = hold_target_lock(&repo, "master");
+    let mut integrate = spawn_arc(&repo, &repo.root, &["integrate", "--tag", "#series"]);
+    assert_waiting_on_transition_lock(&mut [&mut integrate]);
+
+    repo.arc(&repo.root)
+        .args(["close", &change, "--abandoned"])
+        .assert()
+        .success();
+    target_lock.unlock().unwrap();
+
+    assert!(wait_for_exit(&mut integrate).success());
+    assert!(child_stdout(&mut integrate).contains(&format!("{change}: abandoned")));
 }
 
 #[test]
