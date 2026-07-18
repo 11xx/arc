@@ -20,10 +20,10 @@ changes.
 
 | Actor | Task | Mechanism | Rules |
 | --- | --- | --- | --- |
-| Claude | Plan an arc chain | Write the arc JSON export and a detailed thread spec | Make dependencies and ownership explicit. Generated executor prompts stop before review, merge, or integration. |
+| Claude | Plan an arc chain | Write the arc JSON export and a detailed journal spec | Make dependencies and ownership explicit. Generated executor prompts stop before review, merge, or integration. |
 | Claude | Delegate implementation to Codex | Use `/plan-for-codex`; Claude may invoke `codex exec` | Put `codex exec` only in instructions Claude itself will run. Do not ask the Codex executor to delegate again. |
 | Claude | Review and merge | Review `base..head`, record the verdict, then use `arc integrate` when every gate passes | Do not skip review or merge automatically from an implementation prompt. |
-| Codex | Execute a local arc | Import the bundle, read the thread spec, and work locally in the assigned worktree | Implement, verify, commit, run `arc snapshot`, and stop for review. Do not run `codex exec`, delegate, merge, or integrate. |
+| Codex | Execute a local arc | Import the bundle, read the journal spec, and work locally in the assigned worktree | Implement, verify, commit, run `arc snapshot`, and stop for review. Do not run `codex exec`, delegate, merge, or integrate. |
 | Codex | Orchestrate sub-Codex work (rare and explicit) | Run `codex exec` with a self-contained plan and wait for its result | Do this only when the prompt explicitly assigns Codex the orchestrator role. Preserve Claude's review and merge boundary. |
 | `/arc` skill | Coordinate the workflow | Use the `arc` CLI ledger, worktrees, blockers, snapshots, gates, reviews, and integration checks | Assign one writer per branch/worktree. Give Codex local-only executor prompts. The lead owns dependency order and integration. |
 
@@ -61,7 +61,7 @@ Do:
 - State whether a prompt is for Claude or for Codex before including commands.
 - For a Codex executor, say that execution is local to the current harness and
   assigned worktree.
-- Provide the bundle location, thread spec, done condition, verification gates,
+- Provide the bundle location, journal spec, done condition, verification gates,
   and the exact ready-for-review signal.
 - Review the final `base..head` diff and retain control of `arc integrate`.
 
@@ -78,7 +78,7 @@ A Codex executor prompt should use this shape:
 You're in a Codex harness. This is LOCAL execution only.
 
 1. Set `ARC_ROLE=implementer`.
-2. Import the arc bundle and read the thread spec.
+2. Import the arc bundle and read the journal spec.
 3. Claim the change and record typed progress stages in the assigned worktree.
 4. Implement in the assigned worktree.
 5. Run the specified build and test gates.
@@ -144,7 +144,7 @@ with the routing policy:
   the entire session history in every child and buries the task signal.
   Delegated work gets a curated, self-contained brief: the spec, the done
   condition, the gates, and nothing else. That is what arc bundles and
-  thread specs are for.
+  journal specs are for.
 
 So: do not route work through native subagent defaults. Invoke executors
 explicitly (`codex exec` with a chosen model and effort, an arc bundle plus
@@ -297,7 +297,7 @@ instructions.
 
 ### Correct: Codex completes an arc implementation
 
-Codex imports the bundle, reads the thread spec, claims the change, records
+Codex imports the bundle, reads the journal spec, claims the change, records
 typed stages, edits and tests in its worktree, makes scoped commits, runs
 `arc snapshot`, and signals that the arc is ready for review. Claude later
 reviews and integrates.

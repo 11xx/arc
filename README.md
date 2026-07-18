@@ -24,7 +24,7 @@ happened and what is allowed*.
   recorded with `arc snapshot`. Reviews and approvals bind to patchsets,
   never to moving branch names.
 - A **brief** is a change-scoped implementation contract stored in the ledger;
-  goal-scoped analysis briefs stay in the thread archive, and briefs never
+  goal-scoped analysis briefs stay in the project journal, and briefs never
   gate checking or integration.
 - A **chain** is a tagged blocked-by series: independent siblings can run in
   parallel when ready, while dependent members wait mechanically until their
@@ -347,7 +347,7 @@ data_root = "~/.local/ai/arc-data"  # optional: ledgers at <data_root>/<repo-pat
 Environment variables override the file: `ARC_WORKTREES_DIR`,
 `ARC_DATA_ROOT`, and `ARC_DATA_DIR` (an exact ledger directory for
 exactly one repository — highest precedence). `data_root` keys each
-repository by its slugged main path (the /thread convention:
+repository by its slugged main path (the project-journal convention:
 `/home/x/code/y` → `-home-x-code-y`), so one root safely serves many
 repositories — useful for sandboxing: point the paths somewhere
 isolated and arc never writes outside them (worktrees, ledger) beyond
@@ -395,47 +395,52 @@ the ledger as one file; Git objects still travel separately. A forge-PR
 projection is planned, while shared Git-ref sync remains deferred until
 a real concurrent multi-machine need exists.
 
-## Thread archive mechanics
+## Project journal mechanics
 
-`arc thread` encodes the drift-prone mechanics of the cross-harness /thread
-archive while artifacts stay plain Markdown any tool-less agent can read and
-write. The canonical agent-written journal is the append-only `journal.jsonl`,
-whose versioned `thread-journal/1` events can be streamed as NDJSON with
-`thread events [--limit N]`; legacy `journal.md` archives remain readable
-forever. `dir` prints the resolved archive directory (`ARC_THREAD_DIR`,
-then the `[threads.dirs]` map in the config file keyed by repository root,
-then `<ai_home>/threads/<repo-slug>`); `note` writes a timestamped
-`<ts>-<topic>-<kind>.md` artifact and its journal event; `journal` appends a
-journal-only event; `catchup` lists newest-first. Work waiting for a future
-session uses the primary actionable kinds — `todo`, `handoff`, `inbox`,
-`plan` — plus lower-priority `later`. `thread open` lists the primary queue
-first and then a separate later section until an explicit `thread consume
-<filename> [--outcome done|superseded|discarded] [--note <text>]` retires an
-item with a typed consumed event. The journal is append-only; consumption never edits or deletes
-the artifact.
+> **The ledger is authoritative and gating; the journal is advisory and
+> contextual.**
+
+`arc journal` (alias: `arc thread`) encodes the drift-prone mechanics of the
+cross-harness project journal while artifacts stay plain Markdown any
+tool-less agent can read and write. The canonical agent-written event log is
+the append-only `journal.jsonl`, whose versioned `thread-journal/1` events can
+be streamed as NDJSON with `journal events [--limit N]`; legacy `journal.md`
+archives remain readable forever. `dir` prints the resolved journal directory
+(`ARC_THREAD_DIR`, then the `[threads.dirs]` map in the config file keyed by
+repository root, then `<ai_home>/threads/<repo-slug>` — storage-tier names
+keep the legacy thread spelling as compatibility contracts); `note` writes a
+timestamped `<ts>-<topic>-<kind>.md` artifact and its journal event; `log`
+(alias: `journal`) appends a log-only event; `catchup` lists newest-first.
+Work waiting for a future session uses the primary actionable kinds — `todo`,
+`handoff`, `inbox`, `plan` — plus lower-priority `later`. `journal open` lists
+the primary queue first and then a separate later section until an explicit
+`journal consume <filename> [--outcome done|superseded|discarded]
+[--note <text>]` retires an item with a typed consumed event. The journal is
+append-only; consumption never edits or deletes the artifact.
 
 Memory artifacts are shared, always-surfaced project facts, one per file with
-a heading that describes the fact. Retire them with `thread consume`; list
-live memories with `thread memories`, and `catchup` leads with them after lanes.
+a heading that describes the fact. Retire them with `journal consume`; list
+live memories with `journal memories`, and `catchup` leads with them after
+lanes.
 
 Advisory **lanes** announce which topics a session is actively working so
 parallel sessions sharing one archive see occupancy instead of guessing:
-`thread lane open <topic> [--scope t1,t2] [--ttl 2h] [--status <text>]`,
+`journal lane open <topic> [--scope t1,t2] [--ttl 2h] [--status <text>]`,
 `renew`, `close [--outcome done|handoff|abandoned|expired]`, and `list`.
 Lanes are typed journal events, never locks. Malformed JSONL lines are skipped
 so readers fail open. Liveness needs no heartbeats: any journal event by the
 owning session restarts the ttl window; idle lanes
 decay to stale, and anyone may close a stale lane `[expired]` — the
 explicit takeover path. Opening a lane implicitly closes the session's
-previous one (a session has at most one). `thread open` annotates items
+previous one (a session has at most one). `journal open` annotates items
 covered by a live lane, distinguishing this-session from external
 occupancy, and `catchup` leads with the lanes block so a newly opened
 session sees who else is here first.
 
-`thread doctor [--json]` performs a read-only archive health check. It reports
+`journal doctor [--json]` performs a read-only health check. It reports
 malformed journal lines, artifact names and kinds, and dangling references as
 problems with a failing exit status, while stale lanes and archive housekeeping
-remain non-failing advice; it never creates the archive directory.
+remain non-failing advice; it never creates the journal directory.
 
 ## Roadmap
 
@@ -443,10 +448,10 @@ Shipped: local core +
 policy engine (M1–M2), `/arc` skill wiring (M3), deterministic export/import
 bundles (M4), local orchestration foundations (dependencies, tags,
 actionable status, query, and batch views), claims/stages and execution
-roles, messaging and the inbox rollup, thread archive mechanics, and the
+roles, messaging and the inbox rollup, project-journal mechanics, and the
 ledger side of forge projection (declare/link/checks/pr-state with
 fail-closed validation). Remaining evidence-driven possibilities live in the
-thread archive's open items (`arc thread open`).
+journal's open items (`arc journal open`).
 
 ## License
 

@@ -6,12 +6,12 @@ mod gates;
 mod gitio;
 mod ids;
 mod inbox;
+mod journal;
 mod model;
 mod render;
 mod state;
 mod status;
 mod store;
-mod thread;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
@@ -463,10 +463,11 @@ enum Cmd {
     },
     /// Show the resolved configuration and store location as JSON
     Config,
-    /// Cross-harness `/thread` archive mechanics (plain Markdown stays the contract)
-    Thread {
+    /// Cross-harness project journal mechanics (plain Markdown stays the contract)
+    #[command(alias = "thread")]
+    Journal {
         #[command(subcommand)]
-        cmd: thread::ThreadCmd,
+        cmd: journal::JournalCmd,
     },
 }
 
@@ -922,6 +923,6 @@ fn run(cli: Cli) -> Result<i32> {
             );
             Ok(0)
         }
-        Cmd::Thread { cmd } => thread::run(&ctx, cmd),
+        Cmd::Journal { cmd } => journal::run(&ctx, cmd),
     }
 }

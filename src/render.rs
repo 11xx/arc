@@ -4,7 +4,7 @@ use crate::status::{Blocker, StatusReport};
 use std::fmt::Write;
 
 /// Human-readable Markdown view of one change. Suitable for terminals
-/// and for dropping into a /thread artifact; the ledger stays private.
+/// and for dropping into a journal artifact; the ledger stays private.
 pub fn markdown(
     state: &ChangeState,
     report: &StatusReport,

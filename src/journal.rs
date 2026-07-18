@@ -1,12 +1,18 @@
-//! Mechanics for the cross-harness `/thread` archive.
+//! Mechanics for the cross-harness project journal.
 //!
-//! Artifacts stay freeform Markdown and remain readable and writable by a
-//! tool-less agent. The append-only journal uses versioned JSONL events while
-//! legacy Markdown journals remain readable. `arc thread` only encodes the
-//! invariants that drift in practice — archive-directory resolution,
-//! timestamped filenames, and journal event semantics. It is a convenience
-//! and correctness layer, never a gatekeeper, and it is intentionally
-//! decoupled from the change ledger.
+//! The ledger is authoritative and gating; the journal is advisory and
+//! contextual. Artifacts stay freeform Markdown and remain readable and
+//! writable by a tool-less agent. The append-only event log uses versioned
+//! JSONL while legacy Markdown journals remain readable. `arc journal`
+//! (alias: `arc thread`) only encodes the invariants that drift in
+//! practice — directory resolution, timestamped filenames, and journal
+//! event semantics. It is a convenience and correctness layer, never a
+//! gatekeeper, and it is intentionally decoupled from the change ledger.
+//!
+//! Storage-tier names keep the legacy thread spelling as compatibility
+//! contracts: the `ARC_THREAD_DIR` env override, the `[threads]` config
+//! table, the `<ai_home>/threads/` default path, and the
+//! `thread-journal/1` event schema.
 //!
 //! Lanes are advisory occupancy announced through journal events. Their
 //! liveness follows the owner's latest journal activity; they are never locks.
@@ -24,7 +30,7 @@ use std::path::{Path, PathBuf};
 /// Closed set of artifact kinds. Malformed kinds are rejected by clap at
 /// parse time, before anything is written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum ThreadKind {
+pub enum JournalKind {
     Note,
     Memory,
     Plan,
@@ -38,26 +44,26 @@ pub enum ThreadKind {
     Later,
 }
 
-impl ThreadKind {
+impl JournalKind {
     fn as_str(self) -> &'static str {
         match self {
-            ThreadKind::Note => "note",
-            ThreadKind::Memory => "memory",
-            ThreadKind::Plan => "plan",
-            ThreadKind::Handoff => "handoff",
-            ThreadKind::Done => "done",
-            ThreadKind::Review => "review",
-            ThreadKind::Conclusion => "conclusion",
-            ThreadKind::Inbox => "inbox",
-            ThreadKind::Spec => "spec",
-            ThreadKind::Todo => "todo",
-            ThreadKind::Later => "later",
+            JournalKind::Note => "note",
+            JournalKind::Memory => "memory",
+            JournalKind::Plan => "plan",
+            JournalKind::Handoff => "handoff",
+            JournalKind::Done => "done",
+            JournalKind::Review => "review",
+            JournalKind::Conclusion => "conclusion",
+            JournalKind::Inbox => "inbox",
+            JournalKind::Spec => "spec",
+            JournalKind::Todo => "todo",
+            JournalKind::Later => "later",
         }
     }
 }
 
 /// Primary kinds that represent work waiting for a future session: they stay
-/// in the main `thread open` queue until an explicit `thread consume`.
+/// in the main `journal open` queue until an explicit `journal consume`.
 const PRIMARY_ACTIONABLE_KINDS: [&str; 4] = ["todo", "handoff", "inbox", "plan"];
 const LATER_KIND: &str = "later";
 
@@ -139,14 +145,14 @@ impl ConsumeOutcome {
 }
 
 #[derive(Subcommand)]
-pub enum ThreadCmd {
-    /// Print the resolved archive directory (creates nothing)
+pub enum JournalCmd {
+    /// Print the resolved journal directory (creates nothing)
     Dir {
         /// Print the cold sibling archive directory
         #[arg(long)]
         archive: bool,
     },
-    /// Check the thread archive for malformed or stale state (read-only)
+    /// Check the journal for malformed or stale state (read-only)
     Doctor {
         /// Emit structured JSON instead of text
         #[arg(long)]
@@ -158,7 +164,7 @@ pub enum ThreadCmd {
         topic: String,
         /// Artifact kind (closed set)
         #[arg(long, value_enum)]
-        kind: ThreadKind,
+        kind: JournalKind,
         /// Body source: a file path, or '-' for stdin (written verbatim)
         #[arg(long)]
         body_file: String,
@@ -166,14 +172,15 @@ pub enum ThreadCmd {
         #[arg(long)]
         title: Option<String>,
     },
-    /// Append a journal-only line (no artifact file is created)
-    Journal {
+    /// Append a log-only journal line (no artifact file is created)
+    #[command(alias = "journal")]
+    Log {
         /// Kebab-case topic slug
         topic: String,
         /// Free-text journal message
         message: String,
     },
-    /// Dump the merged thread journal as newline-delimited JSON
+    /// Dump the merged journal event log as newline-delimited JSON
     Events {
         /// Cap the number of events (oldest first)
         #[arg(long)]
@@ -201,7 +208,7 @@ pub enum ThreadCmd {
     Open {
         /// Restrict to one actionable kind; later is shown separately
         #[arg(long, value_enum)]
-        kind: Option<ThreadKind>,
+        kind: Option<JournalKind>,
         /// Emit structured JSON instead of text
         #[arg(long)]
         json: bool,
@@ -239,9 +246,9 @@ pub enum ThreadCmd {
     },
 }
 
-pub fn run(ctx: &Ctx, cmd: ThreadCmd) -> Result<i32> {
+pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
     match cmd {
-        ThreadCmd::Dir { archive } => {
+        JournalCmd::Dir { archive } => {
             let hot = resolve_dir(&ctx.cwd)?;
             println!(
                 "{}",
@@ -249,29 +256,29 @@ pub fn run(ctx: &Ctx, cmd: ThreadCmd) -> Result<i32> {
             );
             Ok(0)
         }
-        ThreadCmd::Doctor { json } => doctor(ctx, json),
-        ThreadCmd::Note {
+        JournalCmd::Doctor { json } => doctor(ctx, json),
+        JournalCmd::Note {
             topic,
             kind,
             body_file,
             title,
         } => note(ctx, &topic, kind, &body_file, title.as_deref()),
-        ThreadCmd::Journal { topic, message } => journal(ctx, &topic, &message),
-        ThreadCmd::Events { limit } => events(ctx, limit),
-        ThreadCmd::Catchup {
+        JournalCmd::Log { topic, message } => log_line(ctx, &topic, &message),
+        JournalCmd::Events { limit } => events(ctx, limit),
+        JournalCmd::Catchup {
             limit,
             json,
             archived,
         } => catchup(ctx, limit.unwrap_or(20), json, archived),
-        ThreadCmd::Memories { json } => memories(ctx, json),
-        ThreadCmd::Open { kind, json } => open(ctx, kind, json),
-        ThreadCmd::Lane { command } => lane(ctx, command),
-        ThreadCmd::Consume {
+        JournalCmd::Memories { json } => memories(ctx, json),
+        JournalCmd::Open { kind, json } => open(ctx, kind, json),
+        JournalCmd::Lane { command } => lane(ctx, command),
+        JournalCmd::Consume {
             filename,
             outcome,
             note,
         } => consume(ctx, &filename, outcome, note.as_deref()),
-        ThreadCmd::Archive {
+        JournalCmd::Archive {
             filename,
             consumed,
             older_than_days,
@@ -309,17 +316,17 @@ struct DoctorReport {
 
 fn known_kind(kind: &str) -> bool {
     [
-        ThreadKind::Note,
-        ThreadKind::Memory,
-        ThreadKind::Plan,
-        ThreadKind::Handoff,
-        ThreadKind::Done,
-        ThreadKind::Review,
-        ThreadKind::Conclusion,
-        ThreadKind::Inbox,
-        ThreadKind::Spec,
-        ThreadKind::Todo,
-        ThreadKind::Later,
+        JournalKind::Note,
+        JournalKind::Memory,
+        JournalKind::Plan,
+        JournalKind::Handoff,
+        JournalKind::Done,
+        JournalKind::Review,
+        JournalKind::Conclusion,
+        JournalKind::Inbox,
+        JournalKind::Spec,
+        JournalKind::Todo,
+        JournalKind::Later,
     ]
     .iter()
     .any(|value| value.as_str() == kind)
@@ -414,7 +421,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     if archivable > 0 {
         advice.push(DoctorFinding {
             code: "archivable-artifacts",
-            detail: format!("{archivable} consumed actionable artifacts or retired memories remain in the hot dir; run thread archive --consumed"),
+            detail: format!("{archivable} consumed actionable artifacts or retired memories remain in the hot dir; run journal archive --consumed"),
         });
     }
 
@@ -582,7 +589,7 @@ fn read_body_verbatim(body_file: &str) -> Result<String> {
 fn note(
     ctx: &Ctx,
     topic: &str,
-    kind: ThreadKind,
+    kind: JournalKind,
     body_file: &str,
     title: Option<&str>,
 ) -> Result<i32> {
@@ -632,7 +639,7 @@ fn note(
     Ok(0)
 }
 
-fn journal(ctx: &Ctx, topic: &str, message: &str) -> Result<i32> {
+fn log_line(ctx: &Ctx, topic: &str, message: &str) -> Result<i32> {
     if !valid_topic(topic) {
         bail!("topic {topic:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
     }
@@ -1341,7 +1348,7 @@ fn render_lanes(lanes: &[LaneEntry], now: DateTime<Utc>) {
 fn require_lane_session(ctx: &Ctx) -> Result<String> {
     let (_, session) = identity(ctx);
     if session == "unknown" {
-        bail!("thread lane requires a session identity (--session or ARC_SESSION)");
+        bail!("journal lane requires a session identity (--session or ARC_SESSION)");
     }
     Ok(session)
 }
@@ -1704,7 +1711,7 @@ struct OpenItems {
     later: Vec<ArtifactEntry>,
 }
 
-fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
+fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
     if let Some(kind) = kind {
         if !is_actionable_kind(kind.as_str()) {
             bail!(
@@ -1858,7 +1865,7 @@ fn consume(ctx: &Ctx, filename: &str, outcome: ConsumeOutcome, note: Option<&str
         bail!("consume takes an artifact filename inside the archive dir, not a path");
     }
     let Some((_, topic, _)) = parse_artifact_name(filename) else {
-        bail!("{filename:?} is not a thread artifact name (<timestamp>-<topic>-<kind>.md)");
+        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     };
     let dir = resolve_dir(&ctx.cwd)?;
     if !dir.join(filename).is_file() {
@@ -1935,7 +1942,7 @@ fn archive_one(ctx: &Ctx, hot: &Path, filename: &str, note: Option<&str>) -> Res
         bail!("archive takes an artifact filename inside the hot dir, not a path");
     }
     let Some((_, topic, kind)) = parse_artifact_name(filename) else {
-        bail!("{filename:?} is not a thread artifact name (<timestamp>-<topic>-<kind>.md)");
+        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     };
     let source = hot.join(filename);
     if !source.is_file() {

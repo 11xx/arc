@@ -21,6 +21,11 @@ no version has been tagged yet.
 
 ### Changed
 
+- The thread surface is renamed to the project journal: `arc journal` with
+  nested `log` replaces `arc thread` with nested `journal`, both old
+  spellings remain as aliases, and storage-tier names (`ARC_THREAD_DIR`,
+  `[threads]`, the `threads/` path, `thread-journal/1`) keep the legacy
+  spelling as compatibility contracts (`journal-rename`).
 - The thread journal is now a typed `thread-journal/1` JSONL event log while
   legacy Markdown journals remain readable (`journal-jsonl`).
 
