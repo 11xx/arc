@@ -12,6 +12,130 @@ fn thread_dir(repo: &Repo) -> PathBuf {
     PathBuf::from(out.trim())
 }
 
+fn journal_events(dir: &Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(dir.join("journal.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn thread_journal_writes_typed_jsonl_events() {
+    let repo = Repo::new();
+    let body = repo.home.join("body.md");
+    fs::write(&body, "work\n").unwrap();
+    let output = stdout(repo.arc(&repo.root).args([
+        "thread",
+        "note",
+        "typed",
+        "--kind",
+        "todo",
+        "--body-file",
+        body.to_str().unwrap(),
+    ]));
+    let file = PathBuf::from(output.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    repo.arc(&repo.root)
+        .args(["thread", "journal", "typed", "progress"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "thread",
+            "consume",
+            &file,
+            "--outcome",
+            "done",
+            "--note",
+            "finished",
+        ])
+        .assert()
+        .success();
+    let dir = thread_dir(&repo);
+    let events = journal_events(&dir);
+    assert_eq!(events.len(), 3);
+    for event in &events {
+        assert_eq!(event["schema"], "thread-journal/1");
+        assert_eq!(event["harness"], "test");
+        assert_eq!(event["session"], "session-a");
+        assert_eq!(event["topic"], "typed");
+        assert!(event["ts"].as_str().unwrap().ends_with('Z'));
+    }
+    assert_eq!(events[0]["event"], "note");
+    assert_eq!(events[0]["file"], file);
+    assert_eq!(events[1]["event"], "log");
+    assert_eq!(events[1]["message"], "progress");
+    assert_eq!(events[2]["event"], "consumed");
+    assert_eq!(events[2]["outcome"], "done");
+    assert_eq!(events[2]["note"], "finished");
+    assert!(!dir.join("journal.md").exists());
+}
+
+#[test]
+fn thread_legacy_journal_md_still_read() {
+    let repo = Repo::new();
+    let dir = thread_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    let file = "20260101T000000Z-legacy-todo.md";
+    fs::write(dir.join(file), "# Legacy\n").unwrap();
+    let legacy = format!("- 2026-01-01T00:00:00Z old legacy legacy: Legacy ({file})\n- 2026-01-01T00:01:00Z old legacy legacy: consumed {file} [done]\n- 2026-01-01T00:02:00Z old legacy lane-a: lane opened [2h] scope=legacy: working\n");
+    fs::write(dir.join("journal.md"), &legacy).unwrap();
+    let open = stdout(repo.arc(&repo.root).args(["thread", "open"]));
+    assert!(!open.contains(file), "{open}");
+    let lanes = stdout(repo.arc(&repo.root).args(["thread", "lane", "list"]));
+    assert!(lanes.contains("lane-a"), "{lanes}");
+    let second = "20260101T000100Z-second-todo.md";
+    fs::write(dir.join(second), "# Second\n").unwrap();
+    repo.arc(&repo.root)
+        .args(["thread", "consume", second])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(dir.join("journal.md")).unwrap(), legacy);
+    assert_eq!(journal_events(&dir).last().unwrap()["event"], "consumed");
+}
+
+#[test]
+fn thread_events_emits_merged_ndjson() {
+    let repo = Repo::new();
+    let dir = thread_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("journal.md"),
+        "- 2026-01-01T00:00:00Z old legacy topic-a: old message\n",
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args(["thread", "journal", "topic-a", "new message"])
+        .assert()
+        .success();
+    let output = stdout(repo.arc(&repo.root).args(["thread", "events"]));
+    let events: Vec<serde_json::Value> = output
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["message"], "old message");
+    assert_eq!(events[1]["message"], "new message");
+}
+
+#[test]
+fn thread_catchup_renders_events_as_human_lines() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["thread", "journal", "topic-a", "human message"])
+        .assert()
+        .success();
+    let output = stdout(repo.arc(&repo.root).args(["thread", "catchup"]));
+    assert!(
+        output.contains("- 20") && output.contains(" test session-a topic-a: human message"),
+        "{output}"
+    );
+}
+
 #[test]
 fn thread_dir_precedence_env_over_config_over_default() {
     let repo = Repo::new();
@@ -110,15 +234,12 @@ fn thread_note_writes_file_and_journal_line() {
     // Body is written verbatim.
     assert_eq!(fs::read_to_string(&file).unwrap(), body);
 
-    // Journal line carries the harness/session identity and references the file.
-    let journal = fs::read_to_string(file.parent().unwrap().join("journal.md")).unwrap();
-    let line = journal.lines().next().unwrap();
-    assert!(line.starts_with("- "), "{line}");
-    assert!(
-        line.contains(" test session-a delegation-blocker-ux: "),
-        "{line}"
-    );
-    assert!(line.ends_with(&format!("({name})")), "{line}");
+    let event = &journal_events(file.parent().unwrap())[0];
+    assert_eq!(event["event"], "note");
+    assert_eq!(event["harness"], "test");
+    assert_eq!(event["session"], "session-a");
+    assert_eq!(event["topic"], "delegation-blocker-ux");
+    assert_eq!(event["file"], name);
 }
 
 #[test]
@@ -144,8 +265,10 @@ fn thread_note_title_prepends_heading() {
         fs::read_to_string(&file).unwrap(),
         "# The Plan\n\nplan contents\n"
     );
-    let journal = fs::read_to_string(file.parent().unwrap().join("journal.md")).unwrap();
-    assert!(journal.contains(" topic-a: The Plan ("), "{journal}");
+    assert_eq!(
+        journal_events(file.parent().unwrap())[0]["title"],
+        "The Plan"
+    );
 }
 
 #[test]
@@ -199,16 +322,10 @@ fn thread_journal_appends_without_creating_artifact_file() {
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
         .collect();
-    assert_eq!(entries, vec!["journal.md".to_string()]);
-    let journal = fs::read_to_string(dir.join("journal.md")).unwrap();
-    assert!(
-        journal.contains(" test session-a topic-a: consumed inbox X"),
-        "{journal}"
-    );
-    assert!(
-        !journal.contains('('),
-        "journal-only line has no filename: {journal}"
-    );
+    assert_eq!(entries, vec!["journal.jsonl".to_string()]);
+    let event = &journal_events(&dir)[0];
+    assert_eq!(event["event"], "log");
+    assert_eq!(event["message"], "consumed inbox X");
 }
 
 #[test]
@@ -227,7 +344,11 @@ fn thread_catchup_lists_newest_first_and_json_parses() {
         "# Beta heading\nnew\n",
     )
     .unwrap();
-    fs::write(dir.join("journal.md"), "- prior journal line\n").unwrap();
+    fs::write(
+        dir.join("journal.md"),
+        "- 2026-01-01T00:00:00Z test old topic-a: prior journal line\n",
+    )
+    .unwrap();
 
     // Text form is newest-first.
     let text = stdout(repo.arc(&repo.root).args(["thread", "catchup"]));
@@ -265,20 +386,24 @@ fn thread_journal_is_append_only() {
         .assert()
         .success();
     let dir = thread_dir(&repo);
-    let after_first = fs::read(dir.join("journal.md")).unwrap();
+    let after_first = fs::read(dir.join("journal.jsonl")).unwrap();
 
     repo.arc(&repo.root)
         .args(["thread", "journal", "topic-b", "second message"])
         .assert()
         .success();
-    let after_second = fs::read(dir.join("journal.md")).unwrap();
+    let after_second = fs::read(dir.join("journal.jsonl")).unwrap();
 
     // The earlier bytes are preserved verbatim; only new bytes are appended.
     assert!(after_second.starts_with(&after_first[..]));
     assert!(after_second.len() > after_first.len());
     let text = String::from_utf8(after_second).unwrap();
-    assert!(text.contains("topic-a: first message"));
-    assert!(text.contains("topic-b: second message"));
+    assert!(
+        text.contains("\"topic\":\"topic-a\"") && text.contains("\"message\":\"first message\"")
+    );
+    assert!(
+        text.contains("\"topic\":\"topic-b\"") && text.contains("\"message\":\"second message\"")
+    );
 }
 
 /// `thread open` lists unconsumed primary actionable kinds (todo/handoff/
@@ -457,15 +582,14 @@ fn thread_open_and_consume_track_actionable_items() {
         .open(&manual)
         .is_err());
 
-    // The journal carries the machine-readable consumption line.
-    let journal = fs::read_to_string(thread_dir(&repo).join("journal.md")).unwrap();
-    assert!(
-        journal.contains(&format!(
-            "consumed {} [superseded]: folded",
-            names["handoff"]
-        )),
-        "{journal}"
-    );
+    let events = journal_events(&thread_dir(&repo));
+    let consumed = events
+        .iter()
+        .find(|event| event["event"] == "consumed")
+        .unwrap();
+    assert_eq!(consumed["file"], names["handoff"]);
+    assert_eq!(consumed["outcome"], "superseded");
+    assert_eq!(consumed["note"], "folded");
 
     // Guards: double consume, unknown artifact, and paths are refused.
     repo.arc(&repo.root)
@@ -489,7 +613,11 @@ fn thread_archive_moves_records_and_catchup_reads_cold_with_hot_journal() {
     fs::create_dir_all(&hot).unwrap();
     let name = "20260101T000000Z-history-note.md";
     fs::write(hot.join(name), "# History\n").unwrap();
-    fs::write(hot.join("journal.md"), "- prior hot journal line\n").unwrap();
+    fs::write(
+        hot.join("journal.md"),
+        "- 2026-01-01T00:00:00Z test old history: prior hot journal line\n",
+    )
+    .unwrap();
 
     repo.arc(&repo.root)
         .args(["thread", "archive", name, "--note", "cold storage"])
@@ -512,11 +640,10 @@ fn thread_archive_moves_records_and_catchup_reads_cold_with_hot_journal() {
         cold_catchup.contains("prior hot journal line"),
         "{cold_catchup}"
     );
-    let journal = fs::read_to_string(hot.join("journal.md")).unwrap();
-    assert!(
-        journal.contains(&format!("history: archived {name}: cold storage")),
-        "{journal}"
-    );
+    let archived = journal_events(&hot).pop().unwrap();
+    assert_eq!(archived["event"], "archived");
+    assert_eq!(archived["file"], name);
+    assert_eq!(archived["note"], "cold storage");
 }
 
 #[test]
@@ -630,11 +757,11 @@ fn thread_lane_open_writes_marker_and_list_shows_live() {
         ])
         .assert()
         .success();
-    let journal = fs::read_to_string(thread_dir(&repo).join("journal.md")).unwrap();
-    assert!(
-        journal.contains(" work-a: lane opened [30m] scope=topic-a,topic-b: implementing"),
-        "{journal}"
-    );
+    let event = journal_events(&thread_dir(&repo)).pop().unwrap();
+    assert_eq!(event["event"], "lane-opened");
+    assert_eq!(event["ttl_seconds"], 1800);
+    assert_eq!(event["scope"], serde_json::json!(["topic-a", "topic-b"]));
+    assert_eq!(event["status"], "implementing");
 
     let text = stdout(repo.arc(&repo.root).args(["thread", "lane", "list"]));
     assert!(text.contains("work-a  test session-a  live"), "{text}");

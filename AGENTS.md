@@ -16,10 +16,9 @@ daemon, no database, no network, no multi-machine ref sync.
 - Approval staleness is structural: a verdict binds to the exact approved
   patchset head, and any new commit invalidates it. Never weaken this.
 - Claims, stages, and thread lanes are advisory liveness signals, never
-  locks. `arc thread` is a convenience layer over plain Markdown; every
-  marker it writes (`consumed …`, `lane opened/renewed/closed …`) must
-  remain hand-writable by a tool-less agent, and malformed markers are
-  inert prose, never errors.
+  locks. Thread artifacts stay hand-writable Markdown; the journal is typed
+  JSONL (`thread-journal/1`), fails open on malformed lines, and is versioned
+  like every other output schema.
 - The thread archive lives outside the repo (`arc thread dir`) so
   worktrees stay clean; cross-session context goes there, not into
   tracked files.
