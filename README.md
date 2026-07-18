@@ -112,10 +112,11 @@ timeout. `snapshot` waits for a patchset, `ready` matches `arc check` success,
 closure outcome, and `closed` accepts integrated, abandoned, or superseded
 changes.
 
-`arc status <change>` prints the versioned `arc-status/3` JSON report —
+`arc status <change>` prints the versioned `arc-status/4` JSON report —
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, claim owner/activity/stage timing, snapshot
-provenance, a blocker summary, a machine-readable `next_action`, and ready
+provenance, a blocker summary, a machine-readable `next_action`, an additive
+`forge` projection block (see below), and ready
 alternative open changes while the requested change is blocked. Actively
 claimed non-stale changes and held changes are never suggested; stale and
 expired claims reappear. `--json` is accepted for compatibility although
@@ -145,6 +146,41 @@ provenance for a replacement lease; a claim event without a generation is
 rejected as malformed rather than replayed through inference.
 Integration warns on an active foreign claim, including a stale one, but
 proceeds when the normal integration gates pass.
+
+## Forge projection
+
+For `forge`-profile changes that project onto a hosted pull request, arc
+records and validates the forge facts an agent observed — it makes no
+network call, invokes no `gh`, and autodetects nothing. Declare the
+explicit tuple and policy up front, then record the observed link, checks,
+and lifecycle:
+
+```sh
+arc forge declare tidal-fix --host github.com \
+  --base-repo 11xx/streamrip --base-ref dev \
+  --head-repo 11xx/streamrip --head-ref arc/tidal-fix \
+  --policy same-repository-only        # or allowed-base-repo=<owner/name>
+arc forge link tidal-fix --pr 1 --url https://github.com/11xx/streamrip/pull/1 \
+  --base-repo 11xx/streamrip --base-ref dev \
+  --head-repo 11xx/streamrip --head-ref arc/tidal-fix --head-sha <sha>
+arc forge checks tidal-fix --pr-head <sha> --state not-configured
+arc forge pr-state tidal-fix --state open   # merged requires --merge-sha
+```
+
+`arc forge link` fails closed with exit 10, appending no event, when the
+observed tuple differs from the declaration on any axis or violates the
+declared policy (`same-repository-only` requires base repo == head repo;
+`allowed-base-repo=X` requires base repo == X). The `forge` status block
+reports `projection` (undeclared/declared/linked), the observed link,
+`head_match` against the current approved patchset head (the exact-head
+rule), the recorded checks state (`stale` for an older head, `unknown`
+when none exists at the linked head), `pr_state`, and `forge_ready` —
+true only when linked, head-matched, checks in {passed, not-configured},
+and the PR is open, with `not-configured` surfaced as an explicit caveat.
+A held, linked change renders an `awaiting_user` fact carrying the PR URL.
+These facts are advisory rendering plus the fail-closed link validation;
+they never change local `integrate` semantics. Close an externally merged
+PR through `arc close --integrated <merge-sha>`.
 
 ## Execution roles
 
@@ -234,6 +270,7 @@ reported for separate transfer.
 | 7 | unresolved prerequisite changes |
 | 8 | claim or stage ownership/liveness conflict |
 | 9 | execution role refused the command |
+| 10 | forge link refused: observed tuple or policy mismatch |
 
 ## Build and gate declaration
 

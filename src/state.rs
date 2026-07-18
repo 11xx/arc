@@ -253,6 +253,7 @@ pub struct ChangeState {
     pub(crate) retired_claim_ids: BTreeSet<String>,
     pub hold: Option<String>,
     pub closure: Option<ClosureState>,
+    pub forge: crate::forge::ForgeState,
 }
 
 impl ChangeState {
@@ -343,6 +344,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     retired_claim_ids: BTreeSet::new(),
                     hold: None,
                     closure: None,
+                    forge: crate::forge::ForgeState::default(),
                 },
                 ev,
             ),
@@ -696,6 +698,62 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     integrated_commit: integrated_commit.clone(),
                     superseded_by: superseded_by.clone(),
                     event_id: ev.event_id.clone(),
+                });
+            }
+            Payload::ForgeProjection {
+                host,
+                base_repo,
+                base_ref,
+                head_repo,
+                head_ref,
+                policy,
+            } => {
+                state.forge.projection = Some(crate::forge::ForgeProjectionRecord {
+                    host: host.clone(),
+                    base_repo: base_repo.clone(),
+                    base_ref: base_ref.clone(),
+                    head_repo: head_repo.clone(),
+                    head_ref: head_ref.clone(),
+                    policy: policy.clone(),
+                });
+            }
+            Payload::ForgeLink {
+                pr_number,
+                url,
+                base_repo,
+                base_ref,
+                head_repo,
+                head_ref,
+                head_sha,
+            } => {
+                state.forge.link = Some(crate::forge::ForgeLinkRecord {
+                    pr_number: *pr_number,
+                    url: url.clone(),
+                    base_repo: base_repo.clone(),
+                    base_ref: base_ref.clone(),
+                    head_repo: head_repo.clone(),
+                    head_ref: head_ref.clone(),
+                    head_sha: head_sha.clone(),
+                });
+            }
+            Payload::ForgeChecks {
+                pr_head,
+                state: check_state,
+                detail,
+            } => {
+                state.forge.checks = Some(crate::forge::ForgeChecksRecord {
+                    pr_head: pr_head.clone(),
+                    state: *check_state,
+                    detail: detail.clone(),
+                });
+            }
+            Payload::ForgePrState {
+                state: pr_state,
+                merge_sha,
+            } => {
+                state.forge.pr_state = Some(crate::forge::ForgePrStateRecord {
+                    state: *pr_state,
+                    merge_sha: merge_sha.clone(),
                 });
             }
         }

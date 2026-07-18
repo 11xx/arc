@@ -281,6 +281,76 @@ pub fn markdown(
         }
     }
 
+    if let Some(forge) = &report.forge {
+        let _ = writeln!(w, "\n## Forge\n");
+        let _ = writeln!(w, "- Projection: {}", forge.projection);
+        if let Some(declared) = &forge.declared {
+            let _ = writeln!(
+                w,
+                "- Declared: {} — base `{}`@`{}` ← head `{}`@`{}` (policy {})",
+                declared.host,
+                declared.base_repo,
+                declared.base_ref,
+                declared.head_repo,
+                declared.head_ref,
+                declared.policy
+            );
+        }
+        if let Some(link) = &forge.link {
+            let _ = writeln!(
+                w,
+                "- PR #{}: {} (head `{}`)",
+                link.pr_number, link.url, link.head_sha
+            );
+            let _ = writeln!(
+                w,
+                "- Head match: {}",
+                if forge.head_match {
+                    "yes"
+                } else {
+                    "NO — linked head differs from approved patchset"
+                }
+            );
+        }
+        let _ = writeln!(
+            w,
+            "- Checks: {}{}",
+            forge.checks,
+            forge
+                .checks_detail
+                .as_deref()
+                .map(|detail| format!(" — {detail}"))
+                .unwrap_or_default()
+        );
+        if let Some(pr_state) = &forge.pr_state {
+            let _ = writeln!(
+                w,
+                "- PR state: {}{}",
+                pr_state.state,
+                pr_state
+                    .merge_sha
+                    .as_deref()
+                    .map(|sha| format!(" (merge `{sha}`)"))
+                    .unwrap_or_default()
+            );
+        }
+        let _ = writeln!(
+            w,
+            "- Forge ready: {}",
+            if forge.forge_ready { "yes" } else { "no" }
+        );
+        for caveat in &forge.caveats {
+            let _ = writeln!(w, "  - caveat: {caveat}");
+        }
+        if let Some(awaiting) = &forge.awaiting_user {
+            let _ = writeln!(
+                w,
+                "- **Awaiting user:** open PR {} at head `{}`",
+                awaiting.pr_url, awaiting.head_sha
+            );
+        }
+    }
+
     let _ = writeln!(w, "\n## Integration\n");
     if report.integrate_ready {
         let _ = writeln!(w, "- ready to integrate");
