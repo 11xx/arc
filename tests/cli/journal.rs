@@ -13,7 +13,7 @@ fn journal_dir(repo: &Repo) -> PathBuf {
 }
 
 fn journal_events(dir: &Path) -> Vec<serde_json::Value> {
-    fs::read_to_string(dir.join("journal.jsonl"))
+    fs::read_to_string(dir.join("events.jsonl"))
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -59,7 +59,7 @@ fn journal_log_writes_typed_jsonl_events() {
     let events = journal_events(&dir);
     assert_eq!(events.len(), 3);
     for event in &events {
-        assert_eq!(event["schema"], "thread-journal/1");
+        assert_eq!(event["schema"], "journal-events/1");
         assert_eq!(event["harness"], "test");
         assert_eq!(event["session"], "session-a");
         assert_eq!(event["topic"], "typed");
@@ -72,42 +72,15 @@ fn journal_log_writes_typed_jsonl_events() {
     assert_eq!(events[2]["event"], "consumed");
     assert_eq!(events[2]["outcome"], "done");
     assert_eq!(events[2]["note"], "finished");
-    assert!(!dir.join("journal.md").exists());
 }
 
 #[test]
-fn journal_legacy_journal_md_still_read() {
+fn journal_events_emits_ndjson() {
     let repo = Repo::new();
-    let dir = journal_dir(&repo);
-    fs::create_dir_all(&dir).unwrap();
-    let file = "20260101T000000Z-legacy-todo.md";
-    fs::write(dir.join(file), "# Legacy\n").unwrap();
-    let legacy = format!("- 2026-01-01T00:00:00Z old legacy legacy: Legacy ({file})\n- 2026-01-01T00:01:00Z old legacy legacy: consumed {file} [done]\n- 2026-01-01T00:02:00Z old legacy lane-a: lane opened [2h] scope=legacy: working\n");
-    fs::write(dir.join("journal.md"), &legacy).unwrap();
-    let open = stdout(repo.arc(&repo.root).args(["journal", "open"]));
-    assert!(!open.contains(file), "{open}");
-    let lanes = stdout(repo.arc(&repo.root).args(["journal", "lane", "list"]));
-    assert!(lanes.contains("lane-a"), "{lanes}");
-    let second = "20260101T000100Z-second-todo.md";
-    fs::write(dir.join(second), "# Second\n").unwrap();
     repo.arc(&repo.root)
-        .args(["journal", "consume", second])
+        .args(["journal", "log", "topic-a", "old message"])
         .assert()
         .success();
-    assert_eq!(fs::read_to_string(dir.join("journal.md")).unwrap(), legacy);
-    assert_eq!(journal_events(&dir).last().unwrap()["event"], "consumed");
-}
-
-#[test]
-fn journal_events_emits_merged_ndjson() {
-    let repo = Repo::new();
-    let dir = journal_dir(&repo);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("journal.md"),
-        "- 2026-01-01T00:00:00Z old legacy topic-a: old message\n",
-    )
-    .unwrap();
     repo.arc(&repo.root)
         .args(["journal", "log", "topic-a", "new message"])
         .assert()
@@ -141,10 +114,10 @@ fn journal_dir_precedence_env_over_config_over_default() {
     let repo = Repo::new();
     let canon = fs::canonicalize(&repo.root).unwrap();
 
-    // Default: <ai_home>/threads/<repo-root-slug>.
+    // Default: <ai_home>/journals/<repo-root-slug>.
     let expected_default = repo
         .home
-        .join(".local/ai/threads")
+        .join(".local/ai/journals")
         .join(journal_slug(&canon));
     let got_default = journal_dir(&repo);
     assert_eq!(got_default, expected_default);
@@ -156,7 +129,7 @@ fn journal_dir_precedence_env_over_config_over_default() {
     fs::write(
         cfg_dir.join("config.toml"),
         format!(
-            "[threads]\ndirs = {{ \"{}\" = \"{}\" }}\n",
+            "[journals]\ndirs = {{ \"{}\" = \"{}\" }}\n",
             canon.display(),
             override_dir.display()
         ),
@@ -169,7 +142,7 @@ fn journal_dir_precedence_env_over_config_over_default() {
     let env_dir = repo.home.join("env-journal-dir");
     let out = stdout(
         repo.arc(&repo.root)
-            .env("ARC_THREAD_DIR", &env_dir)
+            .env("ARC_JOURNAL_DIR", &env_dir)
             .args(["journal", "dir"]),
     );
     assert_eq!(PathBuf::from(out.trim()), env_dir);
@@ -190,7 +163,7 @@ fn journal_dir_archive_prints_cold_sibling_and_respects_env() {
     );
 
     let env_hot = repo.home.join("custom-hot");
-    let env_cold = stdout(repo.arc(&repo.root).env("ARC_THREAD_DIR", &env_hot).args([
+    let env_cold = stdout(repo.arc(&repo.root).env("ARC_JOURNAL_DIR", &env_hot).args([
         "journal",
         "dir",
         "--archive",
@@ -322,7 +295,7 @@ fn journal_log_appends_without_creating_artifact_file() {
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
         .collect();
-    assert_eq!(entries, vec!["journal.jsonl".to_string()]);
+    assert_eq!(entries, vec!["events.jsonl".to_string()]);
     let event = &journal_events(&dir)[0];
     assert_eq!(event["event"], "log");
     assert_eq!(event["message"], "consumed inbox X");
@@ -344,11 +317,10 @@ fn journal_catchup_lists_newest_first_and_json_parses() {
         "# Beta heading\nnew\n",
     )
     .unwrap();
-    fs::write(
-        dir.join("journal.md"),
-        "- 2026-01-01T00:00:00Z test old topic-a: prior journal line\n",
-    )
-    .unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "log", "topic-a", "prior journal line"])
+        .assert()
+        .success();
 
     // Text form is newest-first.
     let text = stdout(repo.arc(&repo.root).args(["journal", "catchup"]));
@@ -548,13 +520,13 @@ fn journal_log_is_append_only() {
         .assert()
         .success();
     let dir = journal_dir(&repo);
-    let after_first = fs::read(dir.join("journal.jsonl")).unwrap();
+    let after_first = fs::read(dir.join("events.jsonl")).unwrap();
 
     repo.arc(&repo.root)
         .args(["journal", "log", "topic-b", "second message"])
         .assert()
         .success();
-    let after_second = fs::read(dir.join("journal.jsonl")).unwrap();
+    let after_second = fs::read(dir.join("events.jsonl")).unwrap();
 
     // The earlier bytes are preserved verbatim; only new bytes are appended.
     assert!(after_second.starts_with(&after_first[..]));
@@ -775,11 +747,6 @@ fn journal_archive_moves_records_and_catchup_reads_cold_with_hot_journal() {
     fs::create_dir_all(&hot).unwrap();
     let name = "20260101T000000Z-history-note.md";
     fs::write(hot.join(name), "# History\n").unwrap();
-    fs::write(
-        hot.join("journal.md"),
-        "- 2026-01-01T00:00:00Z test old history: prior hot journal line\n",
-    )
-    .unwrap();
 
     repo.arc(&repo.root)
         .args(["journal", "archive", name, "--note", "cold storage"])
@@ -788,8 +755,8 @@ fn journal_archive_moves_records_and_catchup_reads_cold_with_hot_journal() {
     let cold = PathBuf::from(format!("{}-archive", hot.display()));
     assert!(!hot.join(name).exists());
     assert!(cold.join(name).is_file());
-    assert!(hot.join("journal.md").is_file());
-    assert!(!cold.join("journal.md").exists());
+    assert!(hot.join("events.jsonl").is_file());
+    assert!(!cold.join("events.jsonl").exists());
 
     let hot_catchup = stdout(repo.arc(&repo.root).args(["journal", "catchup"]));
     assert!(!hot_catchup.contains("history  note"), "{hot_catchup}");
@@ -798,10 +765,7 @@ fn journal_archive_moves_records_and_catchup_reads_cold_with_hot_journal() {
             .args(["journal", "catchup", "--archived"]),
     );
     assert!(cold_catchup.contains("history  note"), "{cold_catchup}");
-    assert!(
-        cold_catchup.contains("prior hot journal line"),
-        "{cold_catchup}"
-    );
+    assert!(cold_catchup.contains("cold storage"), "{cold_catchup}");
     let archived = journal_events(&hot).pop().unwrap();
     assert_eq!(archived["event"], "archived");
     assert_eq!(archived["file"], name);
@@ -821,7 +785,7 @@ fn journal_archive_refuses_unconsumed_later_then_accepts_consumed() {
         .assert()
         .failure();
     assert!(hot.join(name).is_file());
-    assert!(!hot.join("journal.md").exists());
+    assert!(!hot.join("events.jsonl").exists());
 
     repo.arc(&repo.root)
         .args(["journal", "consume", name])
@@ -1199,11 +1163,11 @@ fn journal_doctor_reports_problems_and_exits_one() {
     fs::remove_file(artifact).unwrap();
 
     let dir = journal_dir(&repo);
-    let journal = dir.join("journal.jsonl");
+    let journal = dir.join("events.jsonl");
     let mut contents = fs::read_to_string(&journal).unwrap();
     contents.push_str("not json\n");
     contents.push_str(
-        r#"{"schema":"thread-journal/1","ts":"2026-07-18T00:00:00Z","harness":"test","session":"session-a","topic":"unknown","event":"bogus"}"#,
+        r#"{"schema":"journal-events/1","ts":"2026-07-18T00:00:00Z","harness":"test","session":"session-a","topic":"unknown","event":"bogus"}"#,
     );
     contents.push('\n');
     fs::write(journal, contents).unwrap();
@@ -1315,8 +1279,8 @@ fn journal_doctor_ignores_non_artifact_file_references() {
     let dir = journal_dir(&repo);
     fs::create_dir_all(&dir).unwrap();
     fs::write(
-        dir.join("journal.jsonl"),
-        "{\"schema\":\"thread-journal/1\",\"ts\":\"2026-01-01T00:00:00Z\",\"harness\":\"h\",\"session\":\"s\",\"topic\":\"tidy\",\"event\":\"archived\",\"file\":\"prose with spaces\"}\n",
+        dir.join("events.jsonl"),
+        "{\"schema\":\"journal-events/1\",\"ts\":\"2026-01-01T00:00:00Z\",\"harness\":\"h\",\"session\":\"s\",\"topic\":\"tidy\",\"event\":\"archived\",\"file\":\"prose with spaces\"}\n",
     )
     .unwrap();
     repo.arc(&repo.root)
@@ -1326,20 +1290,49 @@ fn journal_doctor_ignores_non_artifact_file_references() {
         .stdout(predicates::str::contains("problems:\n  (none)"));
 }
 
-/// The legacy spellings stay wired as aliases: `arc thread` for the
-/// subcommand group and `journal` for the log-only append.
+/// The thread spellings are gone: no `arc thread` subcommand and no
+/// nested `journal` alias for the log-only append.
 #[test]
-fn journal_thread_and_nested_journal_aliases_still_work() {
+fn journal_thread_spellings_are_rejected() {
     let repo = Repo::new();
-    let via_alias = stdout(repo.arc(&repo.root).args(["thread", "dir"]));
-    let via_primary = stdout(repo.arc(&repo.root).args(["journal", "dir"]));
-    assert_eq!(via_alias, via_primary);
-
     repo.arc(&repo.root)
-        .args(["thread", "journal", "compat", "old spelling still lands"])
+        .args(["thread", "dir"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("unrecognized subcommand"));
+    repo.arc(&repo.root)
+        .args(["journal", "journal", "compat", "old spelling"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("unrecognized subcommand"));
+}
+
+/// A stray legacy `journal.md` is inert: events ignores it and doctor
+/// reports it as a malformed artifact name instead of reading it.
+#[test]
+fn journal_stray_legacy_file_is_inert() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("journal.md"),
+        "- 2026-01-01T00:00:00Z old legacy topic-a: old message\n",
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "log", "topic-a", "live message"])
         .assert()
         .success();
-    let events = journal_events(&journal_dir(&repo));
-    assert_eq!(events.last().unwrap()["event"], "log");
-    assert_eq!(events.last().unwrap()["topic"], "compat");
+    let output = stdout(repo.arc(&repo.root).args(["journal", "events"]));
+    assert!(!output.contains("old message"), "{output}");
+    let doctor = repo
+        .arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .failure();
+    let text = String::from_utf8_lossy(&doctor.get_output().stdout).to_string();
+    assert!(
+        text.contains("malformed-artifact-name: journal.md"),
+        "{text}"
+    );
 }

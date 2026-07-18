@@ -2,17 +2,12 @@
 //!
 //! The ledger is authoritative and gating; the journal is advisory and
 //! contextual. Artifacts stay freeform Markdown and remain readable and
-//! writable by a tool-less agent. The append-only event log uses versioned
-//! JSONL while legacy Markdown journals remain readable. `arc journal`
-//! (alias: `arc thread`) only encodes the invariants that drift in
-//! practice — directory resolution, timestamped filenames, and journal
-//! event semantics. It is a convenience and correctness layer, never a
-//! gatekeeper, and it is intentionally decoupled from the change ledger.
-//!
-//! Storage-tier names keep the legacy thread spelling as compatibility
-//! contracts: the `ARC_THREAD_DIR` env override, the `[threads]` config
-//! table, the `<ai_home>/threads/` default path, and the
-//! `thread-journal/1` event schema.
+//! writable by a tool-less agent; the append-only event log is versioned
+//! JSONL (`journal-events/1` in `events.jsonl`). `arc journal` only encodes
+//! the invariants that drift in practice — directory resolution, timestamped
+//! filenames, and journal event semantics. It is a convenience and
+//! correctness layer, never a gatekeeper, and it is intentionally decoupled
+//! from the change ledger.
 //!
 //! Lanes are advisory occupancy announced through journal events. Their
 //! liveness follows the owner's latest journal activity; they are never locks.
@@ -173,14 +168,13 @@ pub enum JournalCmd {
         title: Option<String>,
     },
     /// Append a log-only journal line (no artifact file is created)
-    #[command(alias = "journal")]
     Log {
         /// Kebab-case topic slug
         topic: String,
         /// Free-text journal message
         message: String,
     },
-    /// Dump the merged journal event log as newline-delimited JSON
+    /// Dump the journal event log as newline-delimited JSON
     Events {
         /// Cap the number of events (oldest first)
         #[arg(long)]
@@ -338,7 +332,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     let mut problems = Vec::new();
     let mut advice = Vec::new();
 
-    let jsonl = dir.join("journal.jsonl");
+    let jsonl = dir.join("events.jsonl");
     if jsonl.is_file() {
         let text = std::fs::read_to_string(&jsonl)
             .with_context(|| format!("cannot read {}", jsonl.display()))?;
@@ -347,11 +341,11 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
                 Ok(event) if event.known() => {}
                 Ok(_) => problems.push(DoctorFinding {
                     code: "unknown-jsonl-event",
-                    detail: format!("journal.jsonl line {}", index + 1),
+                    detail: format!("events.jsonl line {}", index + 1),
                 }),
                 Err(_) => problems.push(DoctorFinding {
                     code: "malformed-jsonl",
-                    detail: format!("journal.jsonl line {}", index + 1),
+                    detail: format!("events.jsonl line {}", index + 1),
                 }),
             }
         }
@@ -368,7 +362,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if name == "journal.jsonl" || name == "journal.md" {
+            if name == "events.jsonl" {
                 continue;
             }
             names.push(name);
@@ -389,8 +383,8 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
         }
     }
 
-    // Semantic checks run on the merged stream: legacy journal.md history
-    // still consumes items, keeps lanes alive, and anchors references.
+    // Semantic checks run on the event stream: consumption, lane liveness,
+    // and artifact references all derive from it.
     let events = read_events(&dir)?;
     for event in &events {
         if ["consumed", "archived"].contains(&event.event.as_str()) {
@@ -460,22 +454,6 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
         });
     }
 
-    let legacy = dir.join("journal.md");
-    if legacy.is_file() {
-        let text = std::fs::read_to_string(&legacy)
-            .with_context(|| format!("cannot read {}", legacy.display()))?;
-        let malformed = text
-            .lines()
-            .filter(|line| !line.trim().is_empty() && parse_journal_line(line).is_none())
-            .count();
-        if malformed > 0 {
-            advice.push(DoctorFinding {
-                code: "legacy-journal-lines",
-                detail: format!("{malformed} journal.md lines do not parse"),
-            });
-        }
-    }
-
     let exit = i32::from(!problems.is_empty());
     let report = DoctorReport {
         dir: dir.display().to_string(),
@@ -503,20 +481,20 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     Ok(exit)
 }
 
-/// Resolve the archive directory, override precedence: `ARC_THREAD_DIR`
-/// env, then a `[threads] dirs` config entry keyed by the repository-root
-/// path, then the default `<ai_home>/threads/<repo-root-slug>`.
+/// Resolve the journal directory, override precedence: `ARC_JOURNAL_DIR`
+/// env, then a `[journals] dirs` config entry keyed by the repository-root
+/// path, then the default `<ai_home>/journals/<repo-root-slug>`.
 pub fn resolve_dir(cwd: &Path) -> Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("ARC_THREAD_DIR") {
+    if let Some(dir) = std::env::var_os("ARC_JOURNAL_DIR") {
         return Ok(PathBuf::from(dir));
     }
     let cfg = config::load()?;
     let root = repo_root(cwd)?;
     let key = root.to_string_lossy();
-    if let Some(dir) = cfg.thread_dirs.get(key.as_ref()) {
+    if let Some(dir) = cfg.journal_dirs.get(key.as_ref()) {
         return config::expand_tilde(dir);
     }
-    Ok(cfg.ai_home.join("threads").join(config::path_slug(&root)))
+    Ok(cfg.ai_home.join("journals").join(config::path_slug(&root)))
 }
 
 /// The main repository root, shared by every worktree. Keying the archive
@@ -524,7 +502,7 @@ pub fn resolve_dir(cwd: &Path) -> Result<PathBuf> {
 /// resolve to the same directory.
 fn repo_root(cwd: &Path) -> Result<PathBuf> {
     let common = gitio::common_dir(cwd)
-        .context("not inside a Git repository (set ARC_THREAD_DIR to override)")?;
+        .context("not inside a Git repository (set ARC_JOURNAL_DIR to override)")?;
     let root = if common.file_name().is_some_and(|n| n == ".git") {
         common.parent().unwrap_or(&common).to_path_buf()
     } else {
@@ -658,48 +636,25 @@ fn log_line(ctx: &Ctx, topic: &str, message: &str) -> Result<i32> {
 
 fn events(ctx: &Ctx, limit: Option<usize>) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
-    let mut merged = Vec::new();
-    let legacy_path = dir.join("journal.md");
-    if legacy_path.is_file() {
-        let text = std::fs::read_to_string(&legacy_path)
-            .with_context(|| format!("cannot read {}", legacy_path.display()))?;
-        for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            merged.push(legacy_event(line).unwrap_or_else(|| JournalEvent {
-                schema: JOURNAL_SCHEMA.to_string(),
-                ts: "1970-01-01T00:00:00Z".to_string(),
-                harness: "unknown".to_string(),
-                session: "unknown".to_string(),
-                topic: "legacy".to_string(),
-                event: "log".to_string(),
-                message: Some(line.to_string()),
-                file: None,
-                title: None,
-                outcome: None,
-                note: None,
-                ttl_seconds: None,
-                scope: None,
-                status: None,
-            }));
-        }
-    }
-    let jsonl_path = dir.join("journal.jsonl");
+    let jsonl_path = dir.join("events.jsonl");
+    let mut events = Vec::new();
     if jsonl_path.is_file() {
         let text = std::fs::read_to_string(&jsonl_path)
             .with_context(|| format!("cannot read {}", jsonl_path.display()))?;
-        merged.extend(
+        events.extend(
             text.lines()
                 .filter_map(|line| serde_json::from_str::<JournalEvent>(line).ok())
                 .filter(JournalEvent::known),
         );
     }
-    merged.sort_by_key(JournalEvent::timestamp);
-    for event in merged.into_iter().take(limit.unwrap_or(usize::MAX)) {
+    events.sort_by_key(JournalEvent::timestamp);
+    for event in events.into_iter().take(limit.unwrap_or(usize::MAX)) {
         println!("{}", serde_json::to_string(&event)?);
     }
     Ok(0)
 }
 
-const JOURNAL_SCHEMA: &str = "thread-journal/1";
+const JOURNAL_SCHEMA: &str = "journal-events/1";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct JournalEvent {
@@ -844,7 +799,7 @@ fn append_event(dir: &Path, event: &JournalEvent) -> Result<()> {
     use std::io::Write;
     let mut line = serde_json::to_string(event)?;
     line.push('\n');
-    let journal_path = dir.join("journal.jsonl");
+    let journal_path = dir.join("events.jsonl");
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -962,95 +917,9 @@ fn parse_lane_marker(message: &str) -> Option<LaneMarker> {
     None
 }
 
-struct JournalLine<'a> {
-    timestamp: DateTime<Utc>,
-    harness: &'a str,
-    session: &'a str,
-    topic: &'a str,
-    message: &'a str,
-}
-
-fn legacy_event(line: &str) -> Option<JournalEvent> {
-    let parsed = parse_journal_line(line)?;
-    let mut event = JournalEvent {
-        schema: JOURNAL_SCHEMA.to_string(),
-        ts: parsed.timestamp.to_rfc3339_opts(SecondsFormat::Secs, true),
-        harness: parsed.harness.to_string(),
-        session: parsed.session.to_string(),
-        topic: parsed.topic.to_string(),
-        event: "log".to_string(),
-        message: Some(parsed.message.to_string()),
-        file: None,
-        title: None,
-        outcome: None,
-        note: None,
-        ttl_seconds: None,
-        scope: None,
-        status: None,
-    };
-    let message = parsed.message;
-    if let Some(marker) = parse_lane_marker(message) {
-        match marker {
-            LaneMarker::Opened { ttl, scope, status } => {
-                event.event = "lane-opened".into();
-                event.message = None;
-                event.ttl_seconds = Some(ttl);
-                event.scope = Some(scope);
-                event.status = status;
-            }
-            LaneMarker::Renewed { ttl, status } => {
-                event.event = "lane-renewed".into();
-                event.message = None;
-                event.ttl_seconds = ttl;
-                event.status = status;
-            }
-            LaneMarker::Closed { outcome, note } => {
-                event.event = "lane-closed".into();
-                event.message = None;
-                event.outcome = Some(outcome);
-                event.note = note;
-            }
-        }
-    } else if let Some(rest) = message.strip_prefix("consumed ") {
-        if let Some((file, tail)) = rest.split_once(" [") {
-            if let Some((outcome, note)) = tail.split_once(']') {
-                if ["done", "superseded", "discarded"].contains(&outcome) {
-                    event.event = "consumed".into();
-                    event.message = None;
-                    event.file = Some(file.into());
-                    event.outcome = Some(outcome.into());
-                    event.note = parse_optional_text(note).flatten();
-                }
-            }
-        }
-    } else if let Some((message, file)) = message.rsplit_once(" (") {
-        if let Some(file) = file.strip_suffix(')') {
-            event.event = "note".into();
-            event.message = None;
-            event.file = Some(file.into());
-            event.title = Some(message.into());
-        }
-    } else if let Some(rest) = message.strip_prefix("archived ") {
-        let (file, note) = rest
-            .split_once(": ")
-            .map_or((rest, None), |(file, note)| (file, Some(note)));
-        event.event = "archived".into();
-        event.message = None;
-        event.file = Some(file.into());
-        event.note = note.map(str::to_string);
-    }
-    Some(event)
-}
-
 fn read_events(dir: &Path) -> Result<Vec<JournalEvent>> {
     let mut events = Vec::new();
-    let legacy = dir.join("journal.md");
-    if legacy.is_file() {
-        let text = std::fs::read_to_string(&legacy)
-            .with_context(|| format!("cannot read {}", legacy.display()))?;
-        events.extend(text.lines().filter_map(legacy_event));
-    }
-    let jsonl = dir.join("journal.jsonl");
+    let jsonl = dir.join("events.jsonl");
     if jsonl.is_file() {
         let text = std::fs::read_to_string(&jsonl)
             .with_context(|| format!("cannot read {}", jsonl.display()))?;
@@ -1144,30 +1013,6 @@ fn render_event(event: &JournalEvent) -> String {
         }
     }
     line
-}
-
-fn parse_journal_line(line: &str) -> Option<JournalLine<'_>> {
-    let (prefix, message) = line.split_once(": ")?;
-    let mut fields = prefix.split_whitespace();
-    if fields.next()? != "-" {
-        return None;
-    }
-    let timestamp = DateTime::parse_from_rfc3339(fields.next()?)
-        .ok()?
-        .with_timezone(&Utc);
-    let harness = fields.next()?;
-    let session = fields.next()?;
-    let topic = fields.next()?;
-    if fields.next().is_some() || !valid_topic(topic) {
-        return None;
-    }
-    Some(JournalLine {
-        timestamp,
-        harness,
-        session,
-        topic,
-        message,
-    })
 }
 
 #[derive(Clone, Serialize)]
@@ -1617,7 +1462,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
         {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if name == "journal.md" || name == "journal.jsonl" {
+            if name == "events.jsonl" {
                 continue;
             }
             if parse_artifact_name(&name).is_some() {
@@ -2082,27 +1927,5 @@ mod tests {
         assert_eq!(parse_lane_marker("lane opened [0s]"), None);
         assert_eq!(parse_lane_marker("lane opened [2d]"), None);
         assert_eq!(parse_lane_marker("lane opened scope=Bad_Topic"), None);
-    }
-
-    #[test]
-    fn legacy_event_render_convert_round_trips_each_marker_shape() {
-        let cases = [
-            "lane opened [30m] scope=alpha,beta: working",
-            "lane renewed [1h]: still working",
-            "lane closed [handoff]: passed on",
-            "consumed 20260101T000000Z-alpha-todo.md [done]: complete",
-            "Artifact title (20260101T000000Z-alpha-note.md)",
-        ];
-        for message in cases {
-            let line = format!("- 2026-01-01T00:00:00Z test session alpha: {message}");
-            let event = legacy_event(&line).unwrap();
-            let rendered = render_event(&event);
-            let converted = legacy_event(&rendered).unwrap();
-            assert_eq!(converted.event, event.event, "{message}");
-            assert_eq!(converted.file, event.file, "{message}");
-            assert_eq!(converted.outcome, event.outcome, "{message}");
-            assert_eq!(converted.ttl_seconds, event.ttl_seconds, "{message}");
-            assert_eq!(converted.scope, event.scope, "{message}");
-        }
     }
 }

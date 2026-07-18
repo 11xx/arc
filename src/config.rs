@@ -18,18 +18,17 @@ pub struct ConfigFile {
     pub data_root: Option<String>,
     /// Per-project overrides for the project-journal directory. Keyed by
     /// the absolute repository-root path (the main checkout, shared by all
-    /// its worktrees); values may use a leading `~`. The table keeps its
-    /// legacy `[threads]` spelling as a compatibility contract.
+    /// its worktrees); values may use a leading `~`.
     #[serde(default)]
-    pub threads: ThreadsConfig,
+    pub journals: JournalsConfig,
 }
 
-/// The `[threads]` table: a `dirs` map from repository-root path to journal
+/// The `[journals]` table: a `dirs` map from repository-root path to journal
 /// directory. A dedicated table (rather than a general `[project."…"]`
 /// namespace) keeps the override self-documenting and matches config.rs's
 /// flat, single-purpose key idiom.
 #[derive(Debug, Default, Deserialize)]
-pub struct ThreadsConfig {
+pub struct JournalsConfig {
     #[serde(default)]
     pub dirs: BTreeMap<String, String>,
 }
@@ -40,9 +39,9 @@ pub struct Config {
     pub config_path: PathBuf,
     pub worktrees_dir: PathBuf,
     pub data_root: Option<PathBuf>,
-    /// Raw `[threads] dirs` map (repository-root path -> archive dir),
+    /// Raw `[journals] dirs` map (repository-root path -> archive dir),
     /// values not yet tilde-expanded (the consumer expands on lookup).
-    pub thread_dirs: BTreeMap<String, String>,
+    pub journal_dirs: BTreeMap<String, String>,
 }
 
 fn home() -> Result<PathBuf> {
@@ -99,7 +98,7 @@ pub fn load() -> Result<Config> {
         config_path,
         worktrees_dir,
         data_root,
-        thread_dirs: file.threads.dirs,
+        journal_dirs: file.journals.dirs,
     })
 }
 

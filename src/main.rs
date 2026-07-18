@@ -464,7 +464,6 @@ enum Cmd {
     /// Show the resolved configuration and store location as JSON
     Config,
     /// Cross-harness project journal mechanics (plain Markdown stays the contract)
-    #[command(alias = "thread")]
     Journal {
         #[command(subcommand)]
         cmd: journal::JournalCmd,
