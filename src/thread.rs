@@ -146,6 +146,12 @@ pub enum ThreadCmd {
         #[arg(long)]
         archive: bool,
     },
+    /// Check the thread archive for malformed or stale state (read-only)
+    Doctor {
+        /// Emit structured JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// Write a timestamped artifact and append its journal line
     Note {
         /// Kebab-case topic slug
@@ -243,6 +249,7 @@ pub fn run(ctx: &Ctx, cmd: ThreadCmd) -> Result<i32> {
             );
             Ok(0)
         }
+        ThreadCmd::Doctor { json } => doctor(ctx, json),
         ThreadCmd::Note {
             topic,
             kind,
@@ -285,6 +292,203 @@ pub fn archive_dir(hot: &Path) -> PathBuf {
     let mut cold = hot.as_os_str().to_os_string();
     cold.push("-archive");
     PathBuf::from(cold)
+}
+
+#[derive(Serialize)]
+struct DoctorFinding {
+    code: &'static str,
+    detail: String,
+}
+
+#[derive(Serialize)]
+struct DoctorReport {
+    dir: String,
+    problems: Vec<DoctorFinding>,
+    advice: Vec<DoctorFinding>,
+}
+
+fn known_kind(kind: &str) -> bool {
+    [
+        ThreadKind::Note,
+        ThreadKind::Memory,
+        ThreadKind::Plan,
+        ThreadKind::Handoff,
+        ThreadKind::Done,
+        ThreadKind::Review,
+        ThreadKind::Conclusion,
+        ThreadKind::Inbox,
+        ThreadKind::Spec,
+        ThreadKind::Todo,
+        ThreadKind::Later,
+    ]
+    .iter()
+    .any(|value| value.as_str() == kind)
+}
+
+fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    let cold = archive_dir(&dir);
+    let mut problems = Vec::new();
+    let mut advice = Vec::new();
+
+    let jsonl = dir.join("journal.jsonl");
+    if jsonl.is_file() {
+        let text = std::fs::read_to_string(&jsonl)
+            .with_context(|| format!("cannot read {}", jsonl.display()))?;
+        for (index, line) in text.lines().enumerate() {
+            match serde_json::from_str::<JournalEvent>(line) {
+                Ok(event) if event.known() => {}
+                Ok(_) => problems.push(DoctorFinding {
+                    code: "unknown-jsonl-event",
+                    detail: format!("journal.jsonl line {}", index + 1),
+                }),
+                Err(_) => problems.push(DoctorFinding {
+                    code: "malformed-jsonl",
+                    detail: format!("journal.jsonl line {}", index + 1),
+                }),
+            }
+        }
+    }
+
+    let mut hot_files = Vec::new();
+    if dir.is_dir() {
+        let mut names = Vec::new();
+        for entry in
+            std::fs::read_dir(&dir).with_context(|| format!("cannot read {}", dir.display()))?
+        {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "journal.jsonl" || name == "journal.md" {
+                continue;
+            }
+            names.push(name);
+        }
+        names.sort();
+        for name in names {
+            match parse_artifact_name(&name) {
+                None => problems.push(DoctorFinding {
+                    code: "malformed-artifact-name",
+                    detail: name,
+                }),
+                Some((_, _, kind)) if !known_kind(&kind) => problems.push(DoctorFinding {
+                    code: "unknown-artifact-kind",
+                    detail: format!("{name}: {kind}"),
+                }),
+                Some(_) => hot_files.push(name),
+            }
+        }
+    }
+
+    // Semantic checks run on the merged stream: legacy journal.md history
+    // still consumes items, keeps lanes alive, and anchors references.
+    let events = read_events(&dir)?;
+    for event in &events {
+        if ["consumed", "archived"].contains(&event.event.as_str()) {
+            if let Some(file) = &event.file {
+                if !dir.join(file).is_file() && !cold.join(file).is_file() {
+                    problems.push(DoctorFinding {
+                        code: "dangling-artifact-reference",
+                        detail: format!("{} references {file}", event.event),
+                    });
+                }
+            }
+        }
+    }
+
+    let archivable = hot_files
+        .iter()
+        .filter(|name| {
+            parse_artifact_name(name).is_some_and(|(_, _, kind)| {
+                (is_actionable_kind(&kind) || kind == "memory") && is_consumed(&events, name)
+            })
+        })
+        .count();
+    if archivable > 0 {
+        advice.push(DoctorFinding {
+            code: "archivable-artifacts",
+            detail: format!("{archivable} consumed actionable artifacts or retired memories remain in the hot dir; run thread archive --consumed"),
+        });
+    }
+
+    let now = Utc::now();
+    for lane in lanes_from_journal(&events, now)
+        .into_iter()
+        .filter(|lane| lane.state == "stale")
+    {
+        let age = now
+            .signed_duration_since(lane.last_activity_time)
+            .num_seconds()
+            .max(0) as u64;
+        advice.push(DoctorFinding {
+            code: "stale-lane",
+            detail: format!(
+                "{} owned by {} {} idle {}",
+                lane.topic,
+                lane.owner_harness,
+                lane.owner_session,
+                format_age(age)
+            ),
+        });
+    }
+
+    let live_memories = hot_files
+        .iter()
+        .filter(|name| {
+            parse_artifact_name(name).is_some_and(|(_, _, kind)| kind == "memory")
+                && !is_consumed(&events, name)
+        })
+        .count();
+    if live_memories > 20 {
+        advice.push(DoctorFinding {
+            code: "too-many-memories",
+            detail: format!("{live_memories} live memories; recall degrades; retire aggressively"),
+        });
+    }
+
+    let legacy = dir.join("journal.md");
+    if legacy.is_file() {
+        let text = std::fs::read_to_string(&legacy)
+            .with_context(|| format!("cannot read {}", legacy.display()))?;
+        let malformed = text
+            .lines()
+            .filter(|line| !line.trim().is_empty() && parse_journal_line(line).is_none())
+            .count();
+        if malformed > 0 {
+            advice.push(DoctorFinding {
+                code: "legacy-journal-lines",
+                detail: format!("{malformed} journal.md lines do not parse"),
+            });
+        }
+    }
+
+    let exit = i32::from(!problems.is_empty());
+    let report = DoctorReport {
+        dir: dir.display().to_string(),
+        problems,
+        advice,
+    };
+    if json {
+        println!("{}", serde_json::to_string(&report)?);
+    } else {
+        println!("problems:");
+        if report.problems.is_empty() {
+            println!("  (none)");
+        }
+        for finding in &report.problems {
+            println!("  {}: {}", finding.code, finding.detail);
+        }
+        println!("advice:");
+        if report.advice.is_empty() {
+            println!("  (none)");
+        }
+        for finding in &report.advice {
+            println!("  {}: {}", finding.code, finding.detail);
+        }
+    }
+    Ok(exit)
 }
 
 /// Resolve the archive directory, override precedence: `ARC_THREAD_DIR`
