@@ -379,6 +379,168 @@ fn thread_catchup_lists_newest_first_and_json_parses() {
 }
 
 #[test]
+fn thread_memory_note_lists_and_catchup_leads() {
+    let repo = Repo::new();
+    let body = repo.home.join("memory.md");
+    fs::write(&body, "A durable fact.\n").unwrap();
+    let body = body.to_str().unwrap();
+    stdout(repo.arc(&repo.root).args([
+        "thread",
+        "note",
+        "older-fact",
+        "--kind",
+        "memory",
+        "--body-file",
+        body,
+        "--title",
+        "Older fact",
+    ]));
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    stdout(repo.arc(&repo.root).args([
+        "thread",
+        "note",
+        "newer-fact",
+        "--kind",
+        "memory",
+        "--body-file",
+        body,
+        "--title",
+        "Newer fact",
+    ]));
+
+    let text = stdout(repo.arc(&repo.root).args(["thread", "memories"]));
+    assert!(text.find("# Newer fact").unwrap() < text.find("# Older fact").unwrap());
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["thread", "memories", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(value["memories"].as_array().unwrap().len(), 2);
+    assert_eq!(value["memories"][0]["topic"], "newer-fact");
+    assert_eq!(value["memories"][0]["heading"], "# Newer fact");
+    assert!(value["memories"][0].get("kind").is_none());
+    assert!(value["memories"][0].get("lane").is_none());
+
+    let catchup = stdout(
+        repo.arc(&repo.root)
+            .args(["thread", "catchup", "--limit", "1"]),
+    );
+    assert!(catchup.contains("# Newer fact"));
+    assert!(catchup.contains("# Older fact"));
+    assert!(catchup.find("lanes:").unwrap() < catchup.find("memory:").unwrap());
+    assert!(catchup.find("memory:").unwrap() < catchup.find("artifacts (newest first):").unwrap());
+    let catchup: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["thread", "catchup", "--limit", "1", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(catchup["memories"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn thread_memory_retire_via_consume() {
+    let repo = Repo::new();
+    let body = repo.home.join("memory.md");
+    fs::write(&body, "A durable fact.\n").unwrap();
+    let body = body.to_str().unwrap();
+    let retired = stdout(repo.arc(&repo.root).args([
+        "thread",
+        "note",
+        "retired",
+        "--kind",
+        "memory",
+        "--body-file",
+        body,
+        "--title",
+        "Retired fact",
+    ]));
+    let retired = PathBuf::from(retired.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let live = stdout(repo.arc(&repo.root).args([
+        "thread",
+        "note",
+        "live",
+        "--kind",
+        "memory",
+        "--body-file",
+        body,
+        "--title",
+        "Live fact",
+    ]));
+    let live = PathBuf::from(live.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    repo.arc(&repo.root)
+        .args(["thread", "consume", &retired, "--outcome", "superseded"])
+        .assert()
+        .success();
+    let memories = stdout(repo.arc(&repo.root).args(["thread", "memories"]));
+    assert!(!memories.contains("Retired fact"), "{memories}");
+    assert!(memories.contains("Live fact"), "{memories}");
+    let catchup = stdout(repo.arc(&repo.root).args(["thread", "catchup"]));
+    let memory_block = catchup
+        .split_once("memory:\n")
+        .unwrap()
+        .1
+        .split_once("dir:")
+        .unwrap()
+        .0;
+    assert!(!memory_block.contains("Retired fact"), "{memory_block}");
+    assert!(memory_block.contains("Live fact"), "{memory_block}");
+
+    let swept = stdout(
+        repo.arc(&repo.root)
+            .args(["thread", "archive", "--consumed"]),
+    );
+    assert!(swept.contains(&retired), "{swept}");
+    assert!(!swept.contains(&live), "{swept}");
+    repo.arc(&repo.root)
+        .args(["thread", "archive", &live])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "must be consumed before it can be archived",
+        ));
+}
+
+#[test]
+fn thread_memory_never_actionable() {
+    let repo = Repo::new();
+    let body = repo.home.join("memory.md");
+    fs::write(&body, "A durable fact.\n").unwrap();
+    stdout(repo.arc(&repo.root).args([
+        "thread",
+        "note",
+        "project-fact",
+        "--kind",
+        "memory",
+        "--body-file",
+        body.to_str().unwrap(),
+        "--title",
+        "Project fact",
+    ]));
+
+    let text = stdout(repo.arc(&repo.root).args(["thread", "open"]));
+    assert!(!text.contains("Project fact"), "{text}");
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["thread", "open", "--json"]),
+    ))
+    .unwrap();
+    assert!(value["open"].as_array().unwrap().is_empty());
+    assert!(value["later"].as_array().unwrap().is_empty());
+    repo.arc(&repo.root)
+        .args(["thread", "open", "--kind", "memory"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--kind memory is not actionable"));
+}
+
+#[test]
 fn thread_journal_is_append_only() {
     let repo = Repo::new();
     repo.arc(&repo.root)

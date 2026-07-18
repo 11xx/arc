@@ -407,6 +407,10 @@ first and then a separate later section until an explicit `thread consume
 item with a typed consumed event. The journal is append-only; consumption never edits or deletes
 the artifact.
 
+Memory artifacts are shared, always-surfaced project facts, one per file with
+a heading that describes the fact. Retire them with `thread consume`; list
+live memories with `thread memories`, and `catchup` leads with them after lanes.
+
 Advisory **lanes** announce which topics a session is actively working so
 parallel sessions sharing one archive see occupancy instead of guessing:
 `thread lane open <topic> [--scope t1,t2] [--ttl 2h] [--status <text>]`,

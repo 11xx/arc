@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum ThreadKind {
     Note,
+    Memory,
     Plan,
     Handoff,
     Done,
@@ -41,6 +42,7 @@ impl ThreadKind {
     fn as_str(self) -> &'static str {
         match self {
             ThreadKind::Note => "note",
+            ThreadKind::Memory => "memory",
             ThreadKind::Plan => "plan",
             ThreadKind::Handoff => "handoff",
             ThreadKind::Done => "done",
@@ -183,6 +185,12 @@ pub enum ThreadCmd {
         #[arg(long)]
         archived: bool,
     },
+    /// List live shared project memories newest first
+    Memories {
+        /// Emit structured JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// List actionable artifacts (todo/handoff/inbox/plan, then later) not yet consumed
     Open {
         /// Restrict to one actionable kind; later is shown separately
@@ -248,6 +256,7 @@ pub fn run(ctx: &Ctx, cmd: ThreadCmd) -> Result<i32> {
             json,
             archived,
         } => catchup(ctx, limit.unwrap_or(20), json, archived),
+        ThreadCmd::Memories { json } => memories(ctx, json),
         ThreadCmd::Open { kind, json } => open(ctx, kind, json),
         ThreadCmd::Lane { command } => lane(ctx, command),
         ThreadCmd::Consume {
@@ -1252,7 +1261,8 @@ struct ArtifactEntry {
     file: String,
     timestamp: String,
     topic: String,
-    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
     heading: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     lane: Option<ArtifactLane>,
@@ -1270,6 +1280,7 @@ struct ArtifactLane {
 struct Catchup {
     dir: String,
     lanes: Vec<LaneEntry>,
+    memories: Vec<ArtifactEntry>,
     files: Vec<ArtifactEntry>,
     journal_tail: Vec<String>,
 }
@@ -1298,6 +1309,76 @@ fn first_heading(path: &Path) -> Option<String> {
     text.lines()
         .find(|l| l.trim_start().starts_with('#'))
         .map(|l| l.trim().to_string())
+}
+
+fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
+    let journal = read_events(dir)?;
+    let mut names = Vec::new();
+    if dir.is_dir() {
+        for entry in
+            std::fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?
+        {
+            let name = entry?.file_name().to_string_lossy().to_string();
+            if parse_artifact_name(&name).is_some_and(|(_, _, kind)| kind == "memory")
+                && !is_consumed(&journal, &name)
+            {
+                names.push(name);
+            }
+        }
+    }
+    names.sort();
+    names.reverse();
+    Ok(names
+        .into_iter()
+        .filter_map(|name| {
+            let (timestamp, topic, _) = parse_artifact_name(&name)?;
+            Some(ArtifactEntry {
+                heading: first_heading(&dir.join(&name)),
+                file: name,
+                timestamp,
+                topic,
+                kind: None,
+                lane: None,
+            })
+        })
+        .collect())
+}
+
+fn render_memories(memories: &[ArtifactEntry]) {
+    println!("memory:");
+    if memories.is_empty() {
+        println!("  (none)");
+    }
+    for memory in memories {
+        println!(
+            "  {}  {}  {}",
+            memory.timestamp,
+            memory.topic,
+            memory.heading.as_deref().unwrap_or("")
+        );
+    }
+}
+
+fn memories(ctx: &Ctx, json: bool) -> Result<i32> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    let memories = live_memories(&dir)?;
+    if json {
+        #[derive(Serialize)]
+        struct Memories {
+            dir: String,
+            memories: Vec<ArtifactEntry>,
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&Memories {
+                dir: dir.display().to_string(),
+                memories,
+            })?
+        );
+    } else {
+        render_memories(&memories);
+    }
+    Ok(0)
 }
 
 fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
@@ -1333,7 +1414,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
                     file: name,
                     timestamp: ts,
                     topic,
-                    kind,
+                    kind: Some(kind),
                     heading,
                     lane: None,
                 });
@@ -1344,17 +1425,26 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
     let journal_tail = journal_tail(&hot_dir, limit)?;
     let now = Utc::now();
     let lanes = lanes_from_journal(&read_events(&hot_dir)?, now);
+    let memories = if archived {
+        Vec::new()
+    } else {
+        live_memories(&hot_dir)?
+    };
 
     if json {
         let out = Catchup {
             dir: dir.display().to_string(),
             lanes,
+            memories,
             files,
             journal_tail,
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         render_lanes(&lanes, now);
+        if !archived {
+            render_memories(&memories);
+        }
         println!("dir: {}", dir.display());
         println!("artifacts (newest first):");
         if files.is_empty() {
@@ -1362,7 +1452,13 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
         }
         for f in &files {
             let heading = f.heading.as_deref().unwrap_or("");
-            println!("  {}  {}  {}  {}", f.timestamp, f.topic, f.kind, heading);
+            println!(
+                "  {}  {}  {}  {}",
+                f.timestamp,
+                f.topic,
+                f.kind.as_deref().unwrap_or(""),
+                heading
+            );
         }
         println!("journal tail:");
         if journal_tail.is_empty() {
@@ -1450,7 +1546,7 @@ fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
                     timestamp: ts,
                     lane: lane_for_topic(&lanes, &topic, &caller_session),
                     topic,
-                    kind: file_kind,
+                    kind: Some(file_kind),
                     heading,
                 });
             }
@@ -1463,7 +1559,7 @@ fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
                     timestamp: ts,
                     lane: lane_for_topic(&lanes, &topic, &caller_session),
                     topic,
-                    kind: file_kind,
+                    kind: Some(file_kind),
                     heading,
                 });
             }
@@ -1489,7 +1585,7 @@ fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
                 "  {}  {}  {}  {}{}",
                 f.timestamp,
                 f.topic,
-                f.kind,
+                f.kind.as_deref().unwrap_or(""),
                 heading,
                 render_artifact_lane(f.lane.as_ref())
             );
@@ -1504,7 +1600,7 @@ fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
                 "  {}  {}  {}  {}{}",
                 f.timestamp,
                 f.topic,
-                f.kind,
+                f.kind.as_deref().unwrap_or(""),
                 heading,
                 render_artifact_lane(f.lane.as_ref())
             );
@@ -1585,7 +1681,7 @@ fn archive(
                 let Some((timestamp, _, kind)) = parse_artifact_name(&name) else {
                     continue;
                 };
-                if is_actionable_kind(&kind)
+                if (is_actionable_kind(&kind) || kind == "memory")
                     && is_consumed(&journal, &name)
                     && older_than_days.is_none_or(|days| timestamp_older_than(&timestamp, days))
                 {
@@ -1631,8 +1727,12 @@ fn archive_one(ctx: &Ctx, hot: &Path, filename: &str, note: Option<&str>) -> Res
     if !source.is_file() {
         bail!("no such artifact {} in {}", filename, hot.display());
     }
-    if is_actionable_kind(&kind) && !is_consumed(&read_events(hot)?, filename) {
+    let consumed = is_consumed(&read_events(hot)?, filename);
+    if is_actionable_kind(&kind) && !consumed {
         bail!("{filename} is actionable and must be consumed before it can be archived");
+    }
+    if kind == "memory" && !consumed {
+        bail!("{filename} must be consumed before it can be archived");
     }
 
     let cold = archive_dir(hot);
