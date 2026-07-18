@@ -166,6 +166,79 @@ fn approval_goes_stale_when_head_moves() {
         .code(3);
 }
 
+#[test]
+fn conflicting_target_movement_requires_rebase_before_integration() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "conflict-r"]));
+    let wt = repo.home.join(".worktrees").join("repo-conflict-r");
+    repo.commit(&wt, "README.md", "change head\n", "feat: change readme");
+    stdout(repo.arc(&wt).args(["snapshot", "conflict-r"]));
+    repo.arc(&wt)
+        .args(["review", "conflict-r", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    repo.commit(
+        &repo.root,
+        "README.md",
+        "target head\n",
+        "feat: move target",
+    );
+    let target_head = repo.head(&repo.root);
+
+    repo.arc(&wt)
+        .args(["check", "conflict-r"])
+        .assert()
+        .code(11);
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "conflict-r"]))).unwrap();
+    assert_eq!(status["schema"], "arc-status/5");
+    assert_eq!(status["needs_rebase"], true);
+    assert!(status["blockers"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("needs-rebase")));
+    assert_eq!(status["next_action"], "rebase");
+
+    repo.arc(&repo.root)
+        .args(["integrate", "conflict-r"])
+        .assert()
+        .code(11);
+    assert_eq!(
+        repo.head(&repo.root),
+        target_head,
+        "target must remain unmerged"
+    );
+}
+
+#[test]
+fn non_conflicting_target_movement_stays_ready_and_integrates() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "clean-r"]));
+    let wt = repo.home.join(".worktrees").join("repo-clean-r");
+    repo.commit(&wt, "change.txt", "change\n", "feat: change branch");
+    stdout(repo.arc(&wt).args(["snapshot", "clean-r"]));
+    repo.arc(&wt)
+        .args(["review", "clean-r", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    repo.commit(&repo.root, "target.txt", "target\n", "feat: move target");
+
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "clean-r"]))).unwrap();
+    assert_eq!(status["needs_rebase"], false);
+    repo.arc(&wt).args(["check", "clean-r"]).assert().success();
+    repo.arc(&repo.root)
+        .args(["integrate", "clean-r"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(repo.root.join("change.txt")).unwrap(),
+        "change\n"
+    );
+}
+
 /// integrate --cleanup invoked from INSIDE the change worktree must not
 /// die when that worktree is removed under it (regression: branch
 /// deletion used the vanished cwd).

@@ -402,6 +402,13 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                     );
                 }
             }
+            Blocker::NeedsRebase => {
+                let _ = writeln!(
+                    out,
+                    "  - needs rebase: target {} moved with conflicting changes; rebase, rerun gates, re-review",
+                    state.target_branch
+                );
+            }
             Blocker::BlockingFindings => {
                 for finding in report
                     .findings
@@ -442,6 +449,7 @@ fn blocker_title(blocker: Blocker) -> &'static str {
         Blocker::Closed => "change closed",
         Blocker::BranchMissing => "branch missing",
         Blocker::BlockedByChanges => "prerequisite changes unresolved",
+        Blocker::NeedsRebase => "target branch conflicts with change",
         Blocker::BlockingFindings => "open blocking findings",
         Blocker::NoValidApproval => "missing or stale approval",
         Blocker::GatesNotGreen => "required gates not green",

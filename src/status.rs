@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/4";
+pub const STATUS_SCHEMA: &str = "arc-status/5";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 
 /// Typed integration blockers, ordered by exit-code precedence.
@@ -18,6 +18,7 @@ pub enum Blocker {
     Closed,
     BranchMissing,
     BlockedByChanges,
+    NeedsRebase,
     BlockingFindings,
     NoValidApproval,
     GatesNotGreen,
@@ -29,6 +30,7 @@ impl Blocker {
         match self {
             Blocker::Closed | Blocker::BranchMissing => 6,
             Blocker::BlockedByChanges => 7,
+            Blocker::NeedsRebase => 11,
             Blocker::BlockingFindings => 2,
             Blocker::NoValidApproval => 3,
             Blocker::GatesNotGreen => 5,
@@ -41,6 +43,7 @@ impl Blocker {
             Blocker::Closed => "closed",
             Blocker::BranchMissing => "branch-missing",
             Blocker::BlockedByChanges => "blocked-by-changes",
+            Blocker::NeedsRebase => "needs-rebase",
             Blocker::BlockingFindings => "blocking-findings",
             Blocker::NoValidApproval => "no-valid-approval",
             Blocker::GatesNotGreen => "gates-not-green",
@@ -148,6 +151,7 @@ pub struct StatusReport {
     pub blocker_status: BlockerStatus,
     pub claim: Option<ClaimStatus>,
     pub current_head: Option<String>,
+    pub needs_rebase: bool,
     pub latest_patchset: Option<crate::state::Patchset>,
     pub head_matches_latest_patchset: bool,
     pub verdict: Option<VerdictStatus>,
@@ -164,7 +168,7 @@ pub struct StatusReport {
     pub blockers: Vec<Blocker>,
     pub closure: Option<crate::state::ClosureState>,
     /// Observed forge (hosted-PR) facts. Absent for changes with no forge
-    /// events that are not on the `forge` profile. Additive in arc-status/4.
+    /// events that are not on the `forge` profile. Additive in arc-status/5.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forge: Option<crate::forge::ForgeStatus>,
 }
@@ -198,6 +202,11 @@ pub fn build_at(
     now: DateTime<Utc>,
 ) -> Result<StatusReport> {
     let current_head = gitio::branch_head(cwd, &state.branch).ok();
+    let target_head = gitio::branch_head(cwd, &state.target_branch).ok();
+    let needs_rebase = match (&current_head, &target_head) {
+        (Some(head), Some(target)) => gitio::merge_conflicts(cwd, target, head)?,
+        _ => false,
+    };
 
     let latest_patchset = state.latest_patchset().cloned();
     let head_matches = match (&current_head, &latest_patchset) {
@@ -281,6 +290,9 @@ pub fn build_at(
     if dependency_status.blocked {
         blockers.push(Blocker::BlockedByChanges);
     }
+    if needs_rebase {
+        blockers.push(Blocker::NeedsRebase);
+    }
     if !open_blocking.is_empty() {
         blockers.push(Blocker::BlockingFindings);
     }
@@ -333,6 +345,8 @@ pub fn build_at(
         "repair_blockers:metadata".into()
     } else if dependency_status.blocked {
         "wait_for:blockers".into()
+    } else if needs_rebase {
+        "rebase".into()
     } else if !head_matches {
         "snapshot".into()
     } else if !open_blocking.is_empty() {
@@ -394,6 +408,7 @@ pub fn build_at(
         blocker_status: dependency_status,
         claim: claim_status_at(state, now),
         current_head,
+        needs_rebase,
         latest_patchset,
         head_matches_latest_patchset: head_matches,
         verdict,
@@ -455,6 +470,7 @@ pub fn check_exit_code(report: &StatusReport) -> i32 {
         Blocker::Closed,
         Blocker::BranchMissing,
         Blocker::BlockedByChanges,
+        Blocker::NeedsRebase,
         Blocker::BlockingFindings,
         Blocker::NoValidApproval,
         Blocker::GatesNotGreen,
