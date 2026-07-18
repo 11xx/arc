@@ -1267,3 +1267,61 @@ fn thread_doctor_advice_only_exits_zero() {
     assert!(text.contains("stale-lane"), "{text}");
     assert!(text.contains("problems:\n  (none)"), "{text}");
 }
+
+#[test]
+fn thread_journal_free_text_is_never_promoted_to_typed_events() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args([
+            "thread",
+            "journal",
+            "tidy",
+            "archived old files by hand: details",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "thread",
+            "journal",
+            "tidy",
+            "consumed nothing [done] just prose",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "thread",
+            "journal",
+            "tidy",
+            "lane opened [30m] scope=foo: prose",
+        ])
+        .assert()
+        .success();
+    let dir = thread_dir(&repo);
+    let events = journal_events(&dir);
+    assert_eq!(events.len(), 3);
+    for event in &events {
+        assert_eq!(event["event"], "log", "{event}");
+        assert!(event["message"].as_str().unwrap().len() > 10, "{event}");
+    }
+    let doctor = stdout(repo.arc(&repo.root).args(["thread", "doctor"]));
+    assert!(!doctor.contains("dangling-artifact-reference"), "{doctor}");
+}
+
+#[test]
+fn thread_doctor_ignores_non_artifact_file_references() {
+    let repo = Repo::new();
+    let dir = thread_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("journal.jsonl"),
+        "{\"schema\":\"thread-journal/1\",\"ts\":\"2026-01-01T00:00:00Z\",\"harness\":\"h\",\"session\":\"s\",\"topic\":\"tidy\",\"event\":\"archived\",\"file\":\"prose with spaces\"}\n",
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args(["thread", "doctor"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("problems:\n  (none)"));
+}
