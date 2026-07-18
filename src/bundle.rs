@@ -259,6 +259,7 @@ fn known_event_type(event_type: &str) -> bool {
         "change-opened"
             | "metadata-updated"
             | "message"
+            | "brief-recorded"
             | "patchset-added"
             | "claim-set"
             | "claim-released"
@@ -372,6 +373,7 @@ fn validate_claim_identity(event: &Event) -> Result<()> {
 
 fn event_type(payload: &Payload) -> &'static str {
     match payload {
+        Payload::BriefRecorded { .. } => "brief",
         Payload::ClaimSet { .. } => "claim",
         Payload::ClaimReleased { .. } => "claim-release",
         Payload::StageSet { .. } => "stage",

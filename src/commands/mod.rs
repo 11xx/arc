@@ -23,7 +23,7 @@ use clap::ValueEnum;
 pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_pr_state};
 pub use gatekeeping::{check_selection, close, hold, integrate, release_hold, verify, VerifyArgs};
 pub use lifecycle::{
-    begin, blocker_status_cmd, is_blocked, list, metadata, query, show_selection, status_cmd,
+    begin, blocker_status_cmd, brief, is_blocked, list, metadata, query, show_selection, status_cmd,
 };
 pub use messaging::{inbox, message, messages};
 pub use observe::{events, watch};
@@ -329,6 +329,16 @@ pub fn read_body(body: Option<String>, body_file: Option<String>) -> Result<Stri
     Ok(trimmed.to_string())
 }
 
+pub fn read_body_file_verbatim(path: &str) -> Result<String> {
+    if path == "-" {
+        let mut body = String::new();
+        std::io::stdin().read_to_string(&mut body)?;
+        Ok(body)
+    } else {
+        std::fs::read_to_string(path).with_context(|| format!("cannot read body file {path}"))
+    }
+}
+
 pub fn parse_duration(raw: &str) -> Result<u64> {
     let Some((suffix_index, suffix)) = raw.char_indices().last() else {
         bail!("duration is empty; expected a positive integer followed by s, m, or h");
@@ -462,6 +472,7 @@ mod tests {
             assigned_to: None,
             opened_at: Utc::now(),
             patchsets: Vec::new(),
+            briefs: Vec::new(),
             messages: Vec::new(),
             comments: Vec::new(),
             findings: BTreeMap::new(),

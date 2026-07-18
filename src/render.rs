@@ -158,6 +158,18 @@ pub fn markdown(
         }
     }
 
+    if let Some(brief) = state.latest_brief() {
+        let version = state.briefs.len();
+        let _ = writeln!(w, "\n## Brief (v{version})\n");
+        if let Some(title) = &brief.title {
+            let _ = writeln!(w, "### {title}\n");
+        }
+        let _ = write!(w, "{}", brief.body);
+        if !brief.body.ends_with('\n') {
+            let _ = writeln!(w);
+        }
+    }
+
     if let Some(v) = &report.verdict {
         let _ = writeln!(w, "\n## Verdict\n");
         let _ = writeln!(
