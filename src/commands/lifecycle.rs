@@ -1,4 +1,5 @@
 use super::*;
+use crate::ExecutionRole;
 
 #[allow(clippy::too_many_arguments)]
 pub fn begin(
@@ -249,6 +250,54 @@ pub fn show_selection(
         (Some(_), false) => bail!("provide a change or --tag, not both"),
         (None, true) => bail!("provide a change or at least one --tag"),
     }
+}
+
+pub fn brief(
+    ctx: &Ctx,
+    role: ExecutionRole,
+    reference: &str,
+    body_file: Option<String>,
+    title: Option<String>,
+    version: Option<usize>,
+) -> Result<i32> {
+    if let Some(path) = body_file {
+        if role != ExecutionRole::Lead {
+            eprintln!("role refusal: {} may not brief", role.as_str());
+            return Ok(9);
+        }
+        if version.is_some() {
+            bail!("--version cannot be used with --body-file");
+        }
+        let body = read_body_file_verbatim(&path)?;
+        let store = ctx.store()?;
+        let (change_id, _transition, state) = locked_state(&store, reference)?;
+        if state.is_closed() {
+            bail!("change {change_id} is closed");
+        }
+        let next_version = state.briefs.len() + 1;
+        let event = ctx.event(&store, &change_id, Payload::BriefRecorded { title, body });
+        store.append_event(&event)?;
+        println!("brief: v{next_version}");
+        println!("event: {}", event.event_id);
+        return Ok(0);
+    }
+
+    if title.is_some() {
+        bail!("--title requires --body-file");
+    }
+    let store = ctx.store()?;
+    let (_, state) = ctx.load_state(&store, reference)?;
+    let selected = match version {
+        Some(0) => None,
+        Some(version) => state.briefs.get(version - 1),
+        None => state.latest_brief(),
+    };
+    let selected = selected.ok_or_else(|| match version {
+        Some(version) => anyhow::anyhow!("brief version {version} not found"),
+        None => anyhow::anyhow!("no brief recorded for change {}", state.change_id),
+    })?;
+    print!("{}", selected.body);
+    Ok(0)
 }
 
 pub fn metadata(

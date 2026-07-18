@@ -186,6 +186,7 @@ pub struct StatusReport {
     pub current_head: Option<String>,
     pub needs_rebase: bool,
     pub latest_patchset: Option<crate::state::Patchset>,
+    pub brief: Option<BriefStatus>,
     pub head_matches_latest_patchset: bool,
     pub verdict: Option<VerdictStatus>,
     pub findings: Vec<FindingSummary>,
@@ -204,6 +205,13 @@ pub struct StatusReport {
     /// events that are not on the `forge` profile. Additive in arc-status/5.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forge: Option<crate::forge::ForgeStatus>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BriefStatus {
+    pub version: usize,
+    pub title: Option<String>,
+    pub recorded_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -445,6 +453,11 @@ pub fn build_at(
         current_head,
         needs_rebase,
         latest_patchset,
+        brief: state.latest_brief().map(|brief| BriefStatus {
+            version: state.briefs.len(),
+            title: brief.title.clone(),
+            recorded_at: brief.ts,
+        }),
         head_matches_latest_patchset: head_matches,
         verdict,
         findings,

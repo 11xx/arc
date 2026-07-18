@@ -44,7 +44,7 @@ struct Cli {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ExecutionRole {
+pub(crate) enum ExecutionRole {
     Implementer,
     Reviewer,
     Lead,
@@ -62,7 +62,7 @@ impl ExecutionRole {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Implementer => "implementer",
             Self::Reviewer => "reviewer",
@@ -183,6 +183,19 @@ enum Cmd {
         tag: Vec<String>,
         #[arg(long)]
         json: bool,
+    },
+    /// Record or read a change-scoped implementation contract
+    Brief {
+        change: String,
+        /// Read a new brief body from a file ('-' for stdin)
+        #[arg(long)]
+        body_file: Option<String>,
+        /// Optional title for a newly recorded brief
+        #[arg(long)]
+        title: Option<String>,
+        /// Read one derived brief version instead of the latest
+        #[arg(long)]
+        version: Option<usize>,
     },
     /// Append a structured cross-change announcement (never policy input)
     Message {
@@ -516,6 +529,8 @@ enum ForgeCmd {
 }
 
 fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<&'static str> {
+    // Brief reads are open to every role, while writes are lead-only; the
+    // handler must inspect --body-file, so Brief cannot live in this deny-list.
     match role {
         ExecutionRole::Lead => None,
         ExecutionRole::Reviewer => match command {
@@ -628,6 +643,12 @@ fn run(cli: Cli) -> Result<i32> {
             commands::show_selection(&ctx, change.as_deref(), tag, json)?;
             Ok(0)
         }
+        Cmd::Brief {
+            change,
+            body_file,
+            title,
+            version,
+        } => commands::brief(&ctx, role, &change, body_file, title, version),
         Cmd::Message {
             change,
             message_type,

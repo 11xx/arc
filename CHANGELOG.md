@@ -18,6 +18,8 @@ no version has been tagged yet.
 
 ### Added
 
+- Change-scoped implementation briefs stored in the ledger and carried by
+  export/import bundles (`change-briefs`).
 - Shared project memory artifacts listed by `thread memories` and always
   surfaced by hot `catchup` (`thread-memory`).
 - Advisory session work lanes in the thread archive: `thread lane

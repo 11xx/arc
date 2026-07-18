@@ -23,6 +23,9 @@ happened and what is allowed*.
 - A **patchset** is an immutable base/head snapshot of that branch,
   recorded with `arc snapshot`. Reviews and approvals bind to patchsets,
   never to moving branch names.
+- A **brief** is a change-scoped implementation contract stored in the ledger;
+  goal-scoped analysis briefs stay in the thread archive, and briefs never
+  gate checking or integration.
 - A **chain** is a tagged blocked-by series: independent siblings can run in
   parallel when ready, while dependent members wait mechanically until their
   prerequisites integrate.
@@ -68,9 +71,11 @@ arc blocker-status radio-refill-fix   # structured dependency detail
 
 cd ~/.worktrees/<repo>-radio-refill-fix
 export ARC_HARNESS=codex ARC_SESSION="$CODEX_THREAD_ID"
+arc brief radio-refill-fix --body-file executor-spec.md
+arc show radio-refill-fix               # includes the latest contract
 arc claim radio-refill-fix --ttl 2h
 arc stage radio-refill-fix started
-# ... read the executor spec ...
+# ... read the executor spec from arc show ...
 arc stage radio-refill-fix spec-read
 arc stage radio-refill-fix implementing
 # ... implement, commit ...

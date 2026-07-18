@@ -18,6 +18,15 @@ pub struct Patchset {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct Brief {
+    pub event_id: String,
+    pub ts: DateTime<Utc>,
+    pub actor: String,
+    pub title: Option<String>,
+    pub body: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GitIdentity {
     pub name: String,
@@ -244,6 +253,7 @@ pub struct ChangeState {
     pub assigned_to: Option<String>,
     pub opened_at: chrono::DateTime<chrono::Utc>,
     pub patchsets: Vec<Patchset>,
+    pub briefs: Vec<Brief>,
     pub messages: Vec<MessageEntry>,
     pub comments: Vec<CommentEntry>,
     pub findings: BTreeMap<String, FindingState>,
@@ -260,6 +270,10 @@ pub struct ChangeState {
 impl ChangeState {
     pub fn latest_patchset(&self) -> Option<&Patchset> {
         self.patchsets.last()
+    }
+
+    pub fn latest_brief(&self) -> Option<&Brief> {
+        self.briefs.last()
     }
 
     /// The latest verdict overall; validity against the current head is
@@ -335,6 +349,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     assigned_to: None,
                     opened_at: ev.created_at,
                     patchsets: Vec::new(),
+                    briefs: Vec::new(),
                     messages: Vec::new(),
                     comments: Vec::new(),
                     findings: BTreeMap::new(),
@@ -412,6 +427,13 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 harness: ev.harness.clone(),
                 session: ev.session.clone(),
                 created_at: ev.created_at,
+            }),
+            Payload::BriefRecorded { title, body } => state.briefs.push(Brief {
+                event_id: ev.event_id.clone(),
+                ts: ev.created_at,
+                actor: ev.actor.clone(),
+                title: title.clone(),
+                body: body.clone(),
             }),
             Payload::PatchsetAdded {
                 patchset_id,

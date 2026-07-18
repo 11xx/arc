@@ -64,6 +64,11 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
     },
+    BriefRecorded {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        body: String,
+    },
     PatchsetAdded {
         patchset_id: String,
         base: String,
