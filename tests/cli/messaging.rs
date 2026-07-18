@@ -323,6 +323,98 @@ fn inbox_buckets_classify_open_changes() {
 }
 
 #[test]
+fn inbox_claim_rows_show_active_details_and_keep_stale_claims_exclusive() {
+    let repo = Repo::new();
+    let active_id = begin_change(&repo, "inbox-active", None);
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "worker")
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_SESSION", "run-7")
+        .args(["claim", "inbox-active", "--stage-budget", "implementing=1m"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "worker")
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_SESSION", "run-7")
+        .args(["stage", "inbox-active", "implementing"])
+        .assert()
+        .success();
+
+    let stalled_id = begin_change(&repo, "inbox-stale", None);
+    repo.arc(&repo.root)
+        .args(["claim", "inbox-stale", "--stage-budget", "launch=1s"])
+        .assert()
+        .success();
+    age_event(&repo, &stalled_id, "claim-set", 2);
+
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    let active = inbox["in-progress"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["change_id"] == active_id)
+        .unwrap();
+    assert_eq!(active["next_actor"], "codex");
+    assert_eq!(active["owner"]["actor"], "worker");
+    assert_eq!(active["owner"]["harness"], "codex");
+    assert_eq!(active["owner"]["session"], "run-7");
+    assert_eq!(active["stage"], "implementing");
+    assert!(active["age_seconds"].is_u64());
+    assert!(!bucket_has(&inbox, "stalled", &active_id));
+
+    let stalled = inbox["stalled"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["change_id"] == stalled_id)
+        .unwrap();
+    assert_eq!(stalled["next_actor"], "test");
+    assert_eq!(stalled["owner"]["harness"], "test");
+    assert_eq!(stalled["stage"], "launch");
+    assert!(stalled["age_seconds"].is_u64());
+    assert!(!bucket_has(&inbox, "in-progress", &stalled_id));
+
+    let text = stdout(repo.arc(&repo.root).args(["inbox"]));
+    let active_line = text
+        .lines()
+        .find(|line| {
+            line.contains(&active_id)
+                && line.contains("[owner: worker/codex/run-7; stage: implementing; age:")
+        })
+        .unwrap();
+    assert!(active_line.contains("→ codex"));
+    assert!(active_line.ends_with("s]"));
+}
+
+#[test]
+fn inbox_omits_released_and_expired_claims() {
+    let repo = Repo::new();
+    let released_id = begin_change(&repo, "inbox-released", None);
+    repo.arc(&repo.root)
+        .args(["claim", "inbox-released"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["release-claim", "inbox-released"])
+        .assert()
+        .success();
+
+    let expired_id = begin_change(&repo, "inbox-expired", None);
+    repo.arc(&repo.root)
+        .args(["claim", "inbox-expired", "--ttl", "1s"])
+        .assert()
+        .success();
+    age_event(&repo, &expired_id, "claim-set", 2);
+
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    for bucket in ["in-progress", "stalled"] {
+        assert!(!bucket_has(&inbox, bucket, &released_id));
+        assert!(!bucket_has(&inbox, bucket, &expired_id));
+    }
+}
+
+#[test]
 fn assignment_set_override_clear_and_filter() {
     let repo = Repo::new();
     let assigned_id = begin_change(&repo, "assign-a", None);

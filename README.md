@@ -132,6 +132,11 @@ arc stage radio-refill-fix blocked-on --note "waiting for test fixture"
 arc release-claim radio-refill-fix
 ```
 
+`arc inbox` places active, non-stale claims in `in-progress`, showing their
+owner, stage, and age in text output and as additive JSON fields. Stale active
+claims remain exclusively in `stalled`; released and expired claims appear in
+neither claim bucket.
+
 Durations are positive integers ending in `s`, `m`, or `h`; the default claim
 TTL is `2h`. The resolved defaults are `launch=60s`, `started=5m`,
 `spec-read=2m`, `implementing=30m`, and `verifying=15m`. Repeating the current

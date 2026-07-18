@@ -1,6 +1,6 @@
 use crate::model::Verdict;
-use crate::state::ChangeState;
-use crate::status::StatusReport;
+use crate::state::{ChangeState, ClaimIdentity};
+use crate::status::{ClaimStatus, StatusReport};
 use serde::Serialize;
 
 pub const INBOX_SCHEMA: &str = "arc-inbox/1";
@@ -14,6 +14,15 @@ pub struct InboxRow {
     pub next_actor: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assigned_to: Option<String>,
+    /// The active claim owner when this is a claim-backed row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<ClaimIdentity>,
+    /// The active claim stage when this is a claim-backed row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    /// Seconds elapsed in the active claim stage when this is a claim-backed row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_seconds: Option<u64>,
 }
 
 /// The `arc-inbox/1` rollup: a lead-facing queue derived entirely from
@@ -34,6 +43,8 @@ pub struct Inbox {
     pub ready_to_integrate: Vec<InboxRow>,
     pub blocked: Vec<InboxRow>,
     pub held: Vec<InboxRow>,
+    #[serde(rename = "in-progress")]
+    pub in_progress: Vec<InboxRow>,
     pub stalled: Vec<InboxRow>,
 }
 
@@ -47,18 +58,20 @@ impl Inbox {
             ready_to_integrate: Vec::new(),
             blocked: Vec::new(),
             held: Vec::new(),
+            in_progress: Vec::new(),
             stalled: Vec::new(),
         }
     }
 
     /// Bucket names paired with their rows, in rendering order.
-    pub fn sections(&self) -> [(&'static str, &Vec<InboxRow>); 6] {
+    pub fn sections(&self) -> [(&'static str, &Vec<InboxRow>); 7] {
         [
             ("needs-review", &self.needs_review),
             ("changes-requested", &self.changes_requested),
             ("ready-to-integrate", &self.ready_to_integrate),
             ("blocked", &self.blocked),
             ("held", &self.held),
+            ("in-progress", &self.in_progress),
             ("stalled", &self.stalled),
         ]
     }
@@ -72,6 +85,25 @@ impl Inbox {
             title: state.title.clone(),
             next_actor: next_actor.to_string(),
             assigned_to: state.assigned_to.clone(),
+            owner: None,
+            stage: None,
+            age_seconds: None,
+        };
+        let claim_row = |claim: &ClaimStatus| {
+            let next_actor = if claim.owner.harness.is_empty() {
+                "implementer"
+            } else {
+                &claim.owner.harness
+            };
+            InboxRow {
+                change_id: state.change_id.clone(),
+                title: state.title.clone(),
+                next_actor: next_actor.to_string(),
+                assigned_to: state.assigned_to.clone(),
+                owner: Some(claim.owner.clone()),
+                stage: Some(claim.stage.clone()),
+                age_seconds: Some(claim.age_seconds),
+            }
         };
 
         if report.hold.is_some() {
@@ -80,17 +112,12 @@ impl Inbox {
         if report.blocker_status.blocked {
             self.blocked.push(row("wait"));
         }
-        if report
-            .claim
-            .as_ref()
-            .is_some_and(|claim| claim.active && claim.stale)
-        {
-            let owner = report
-                .claim
-                .as_ref()
-                .map(|claim| claim.owner.harness.as_str())
-                .unwrap_or("implementer");
-            self.stalled.push(row(owner));
+        if let Some(claim) = report.claim.as_ref().filter(|claim| claim.active) {
+            if claim.stale {
+                self.stalled.push(claim_row(claim));
+            } else {
+                self.in_progress.push(claim_row(claim));
+            }
         }
         if needs_review(state) {
             let actor = if state.latest_patchset().is_none() {

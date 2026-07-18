@@ -163,11 +163,24 @@ pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
                 println!("  (none)");
             }
             for row in rows {
+                let claim_details = row
+                    .owner
+                    .as_ref()
+                    .zip(row.stage.as_deref())
+                    .zip(row.age_seconds)
+                    .map(|((owner, stage), age_seconds)| {
+                        format!(
+                            " [owner: {}/{}/{}; stage: {stage}; age: {age_seconds}s]",
+                            owner.actor, owner.harness, owner.session
+                        )
+                    })
+                    .unwrap_or_default();
                 println!(
-                    "  {}  {} → {}{}",
+                    "  {}  {} → {}{}{}",
                     row.change_id,
                     row.title,
                     row.next_actor,
+                    claim_details,
                     row.assigned_to
                         .as_deref()
                         .map(|a| format!(" [assigned: {a}]"))
