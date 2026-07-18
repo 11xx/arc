@@ -3142,3 +3142,265 @@ fn import_preserves_unknown_event_bytes() {
     let streamed: serde_json::Value = serde_json::from_str(streamed.trim()).unwrap();
     assert_eq!(streamed, unknown);
 }
+
+// ---------------------------------------------------------------------------
+// arc thread — archive mechanics
+// ---------------------------------------------------------------------------
+
+fn thread_slug(path: &Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect()
+}
+
+fn thread_dir(repo: &Repo) -> PathBuf {
+    let out = stdout(repo.arc(&repo.root).args(["thread", "dir"]));
+    PathBuf::from(out.trim())
+}
+
+#[test]
+fn thread_dir_precedence_env_over_config_over_default() {
+    let repo = Repo::new();
+    let canon = fs::canonicalize(&repo.root).unwrap();
+
+    // Default: <ai_home>/threads/<repo-root-slug>.
+    let expected_default = repo
+        .home
+        .join(".local/ai/threads")
+        .join(thread_slug(&canon));
+    let got_default = thread_dir(&repo);
+    assert_eq!(got_default, expected_default);
+
+    // Config override keyed by the repository-root path.
+    let cfg_dir = repo.home.join(".local/ai/arc");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    let override_dir = repo.home.join("custom-thread-archive");
+    fs::write(
+        cfg_dir.join("config.toml"),
+        format!(
+            "[threads]\ndirs = {{ \"{}\" = \"{}\" }}\n",
+            canon.display(),
+            override_dir.display()
+        ),
+    )
+    .unwrap();
+    let got_config = thread_dir(&repo);
+    assert_eq!(got_config, override_dir);
+
+    // Env wins over both config and default.
+    let env_dir = repo.home.join("env-thread-archive");
+    let out = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_THREAD_DIR", &env_dir)
+            .args(["thread", "dir"]),
+    );
+    assert_eq!(PathBuf::from(out.trim()), env_dir);
+
+    // dir prints but never creates the directory.
+    assert!(!got_default.exists());
+    assert!(!override_dir.exists());
+}
+
+#[test]
+fn thread_note_writes_file_and_journal_line() {
+    let repo = Repo::new();
+    let body_path = repo.home.join("body.md");
+    let body = "# My Heading\n\nverbatim body\n";
+    fs::write(&body_path, body).unwrap();
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "thread",
+        "note",
+        "delegation-blocker-ux",
+        "--kind",
+        "handoff",
+        "--body-file",
+        body_path.to_str().unwrap(),
+    ]));
+    let file = PathBuf::from(out.trim());
+    let name = file.file_name().unwrap().to_string_lossy().to_string();
+
+    // Filename shape: <UTC yyyymmddTHHMMSSZ>-<topic>-<kind>.md
+    assert!(
+        name.ends_with("-delegation-blocker-ux-handoff.md"),
+        "{name}"
+    );
+    let ts = name.split('-').next().unwrap();
+    assert_eq!(ts.len(), 16, "timestamp {ts}");
+    assert!(ts.ends_with('Z'));
+    assert!(ts.contains('T'));
+
+    // Body is written verbatim.
+    assert_eq!(fs::read_to_string(&file).unwrap(), body);
+
+    // Journal line carries the harness/session identity and references the file.
+    let journal = fs::read_to_string(file.parent().unwrap().join("journal.md")).unwrap();
+    let line = journal.lines().next().unwrap();
+    assert!(line.starts_with("- "), "{line}");
+    assert!(
+        line.contains(" test session-a delegation-blocker-ux: "),
+        "{line}"
+    );
+    assert!(line.ends_with(&format!("({name})")), "{line}");
+}
+
+#[test]
+fn thread_note_title_prepends_heading() {
+    let repo = Repo::new();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "thread",
+                "note",
+                "topic-a",
+                "--kind",
+                "plan",
+                "--body-file",
+                "-",
+                "--title",
+                "The Plan",
+            ])
+            .write_stdin("plan contents\n"),
+    );
+    let file = PathBuf::from(out.trim());
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "# The Plan\n\nplan contents\n"
+    );
+    let journal = fs::read_to_string(file.parent().unwrap().join("journal.md")).unwrap();
+    assert!(journal.contains(" topic-a: The Plan ("), "{journal}");
+}
+
+#[test]
+fn thread_note_rejects_invalid_kind_and_topic_without_writing() {
+    let repo = Repo::new();
+    let dir = thread_dir(&repo);
+    let body_path = repo.home.join("body.md");
+    fs::write(&body_path, "body\n").unwrap();
+
+    // Invalid kind is a clap usage error (exit 2).
+    repo.arc(&repo.root)
+        .args([
+            "thread",
+            "note",
+            "topic-a",
+            "--kind",
+            "bogus",
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ])
+        .assert()
+        .code(2);
+
+    // Non-kebab topic is a usage error (exit 1).
+    repo.arc(&repo.root)
+        .args([
+            "thread",
+            "note",
+            "Bad_Topic",
+            "--kind",
+            "note",
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+
+    // Nothing was written.
+    assert!(!dir.exists());
+}
+
+#[test]
+fn thread_journal_appends_without_creating_artifact_file() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["thread", "journal", "topic-a", "consumed inbox X"])
+        .assert()
+        .success();
+    let dir = thread_dir(&repo);
+    let entries: Vec<String> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(entries, vec!["journal.md".to_string()]);
+    let journal = fs::read_to_string(dir.join("journal.md")).unwrap();
+    assert!(
+        journal.contains(" test session-a topic-a: consumed inbox X"),
+        "{journal}"
+    );
+    assert!(
+        !journal.contains('('),
+        "journal-only line has no filename: {journal}"
+    );
+}
+
+#[test]
+fn thread_catchup_lists_newest_first_and_json_parses() {
+    let repo = Repo::new();
+    let dir = thread_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    // Two crafted artifacts with distinct, deterministic timestamps.
+    fs::write(
+        dir.join("20260101T000000Z-alpha-note.md"),
+        "# Alpha heading\nold\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("20260202T000000Z-beta-plan.md"),
+        "# Beta heading\nnew\n",
+    )
+    .unwrap();
+    fs::write(dir.join("journal.md"), "- prior journal line\n").unwrap();
+
+    // Text form is newest-first.
+    let text = stdout(repo.arc(&repo.root).args(["thread", "catchup"]));
+    let beta = text.find("beta").unwrap();
+    let alpha = text.find("alpha").unwrap();
+    assert!(beta < alpha, "beta (newer) must list before alpha:\n{text}");
+
+    // JSON form parses and preserves order + parsed fields.
+    let json = stdout(repo.arc(&repo.root).args(["thread", "catchup", "--json"]));
+    let v: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
+    let files = v["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0]["topic"], "beta");
+    assert_eq!(files[0]["kind"], "plan");
+    assert_eq!(files[0]["timestamp"], "20260202T000000Z");
+    assert_eq!(files[0]["heading"], "# Beta heading");
+    assert_eq!(files[1]["topic"], "alpha");
+    assert_eq!(v["journal_tail"].as_array().unwrap().len(), 1);
+
+    // --limit caps the artifact list.
+    let limited = stdout(
+        repo.arc(&repo.root)
+            .args(["thread", "catchup", "--limit", "1", "--json"]),
+    );
+    let lv: serde_json::Value = serde_json::from_str(limited.trim()).unwrap();
+    assert_eq!(lv["files"].as_array().unwrap().len(), 1);
+    assert_eq!(lv["files"][0]["topic"], "beta");
+}
+
+#[test]
+fn thread_journal_is_append_only() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["thread", "journal", "topic-a", "first message"])
+        .assert()
+        .success();
+    let dir = thread_dir(&repo);
+    let after_first = fs::read(dir.join("journal.md")).unwrap();
+
+    repo.arc(&repo.root)
+        .args(["thread", "journal", "topic-b", "second message"])
+        .assert()
+        .success();
+    let after_second = fs::read(dir.join("journal.md")).unwrap();
+
+    // The earlier bytes are preserved verbatim; only new bytes are appended.
+    assert!(after_second.starts_with(&after_first[..]));
+    assert!(after_second.len() > after_first.len());
+    let text = String::from_utf8(after_second).unwrap();
+    assert!(text.contains("topic-a: first message"));
+    assert!(text.contains("topic-b: second message"));
+}

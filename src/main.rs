@@ -9,6 +9,7 @@ mod render;
 mod state;
 mod status;
 mod store;
+mod thread;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
@@ -379,6 +380,11 @@ enum Cmd {
     },
     /// Show the resolved configuration and store location as JSON
     Config,
+    /// Cross-harness `/thread` archive mechanics (plain Markdown stays the contract)
+    Thread {
+        #[command(subcommand)]
+        cmd: thread::ThreadCmd,
+    },
 }
 
 fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<&'static str> {
@@ -669,5 +675,6 @@ fn run(cli: Cli) -> Result<i32> {
             );
             Ok(0)
         }
+        Cmd::Thread { cmd } => thread::run(&ctx, cmd),
     }
 }

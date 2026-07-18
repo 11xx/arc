@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// User-level configuration. arc treats `~/.local/ai/` as the AI data
@@ -15,6 +16,21 @@ pub struct ConfigFile {
     /// of inside each repository's Git common dir.
     #[serde(default)]
     pub data_root: Option<String>,
+    /// Per-project overrides for the `/thread` archive directory. Keyed by
+    /// the absolute repository-root path (the main checkout, shared by all
+    /// its worktrees); values may use a leading `~`.
+    #[serde(default)]
+    pub threads: ThreadsConfig,
+}
+
+/// The `[threads]` table: a `dirs` map from repository-root path to archive
+/// directory. A dedicated table (rather than a general `[project."…"]`
+/// namespace) keeps the override self-documenting and matches config.rs's
+/// flat, single-purpose key idiom.
+#[derive(Debug, Default, Deserialize)]
+pub struct ThreadsConfig {
+    #[serde(default)]
+    pub dirs: BTreeMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -23,6 +39,9 @@ pub struct Config {
     pub config_path: PathBuf,
     pub worktrees_dir: PathBuf,
     pub data_root: Option<PathBuf>,
+    /// Raw `[threads] dirs` map (repository-root path -> archive dir),
+    /// values not yet tilde-expanded (the consumer expands on lookup).
+    pub thread_dirs: BTreeMap<String, String>,
 }
 
 fn home() -> Result<PathBuf> {
@@ -38,7 +57,7 @@ pub fn ai_home() -> Result<PathBuf> {
     }
 }
 
-fn expand_tilde(s: &str) -> Result<PathBuf> {
+pub fn expand_tilde(s: &str) -> Result<PathBuf> {
     if s == "~" {
         home()
     } else if let Some(rest) = s.strip_prefix("~/") {
@@ -79,6 +98,7 @@ pub fn load() -> Result<Config> {
         config_path,
         worktrees_dir,
         data_root,
+        thread_dirs: file.threads.dirs,
     })
 }
 
