@@ -20,7 +20,7 @@ changes.
 
 | Actor | Task | Mechanism | Rules |
 | --- | --- | --- | --- |
-| Claude | Plan a multi-change arc | Write the arc JSON export and a detailed thread spec | Make dependencies and ownership explicit. Generated executor prompts stop before review, merge, or integration. |
+| Claude | Plan an arc chain | Write the arc JSON export and a detailed thread spec | Make dependencies and ownership explicit. Generated executor prompts stop before review, merge, or integration. |
 | Claude | Delegate implementation to Codex | Use `/plan-for-codex`; Claude may invoke `codex exec` | Put `codex exec` only in instructions Claude itself will run. Do not ask the Codex executor to delegate again. |
 | Claude | Review and merge | Review `base..head`, record the verdict, then use `arc integrate` when every gate passes | Do not skip review or merge automatically from an implementation prompt. |
 | Codex | Execute a local arc | Import the bundle, read the thread spec, and work locally in the assigned worktree | Implement, verify, commit, run `arc snapshot`, and stop for review. Do not run `codex exec`, delegate, merge, or integrate. |
@@ -156,7 +156,7 @@ The strongest known pattern is programmatic orchestration: generate a
 dedicated one-off script that spawns each agent with an explicit prompt,
 model, effort, and input set, and encodes the control flow (fan-out,
 gates, joins) as code rather than conversation. Claude Code's workflow
-scripts work this way. A multi-change arc is the ledger-backed equivalent:
+scripts work this way. An arc chain is the ledger-backed equivalent:
 deterministic dependency order, curated per-executor specs, machine-checked
 gates. Prefer either over implicit inheritance.
 
@@ -303,16 +303,16 @@ After tests pass, run `arc integrate --cleanup` and merge to master.
 The executor does not own that decision. It must stop after the snapshot so
 Claude can review the exact patchset.
 
-### Correct: `/arc` coordinates a multi-change arc
+### Correct: `/arc` coordinates a chain
 
 An **arc** is the goal-level unit: a tagged series of one or more ledger
-changes carried to integration. Ready sibling changes may run in parallel,
-while dependent changes wait mechanically for their prerequisites
-(`--blocked-by`). The lead opens each change with its declared blockers,
-assigns local-only executor prompts, and starts downstream implementation
-only when the ledger reports it ready. Claude reviews and integrates each
-approved patchset. (Members are "changes", never "arcs" or "waves"; the arc
-is the whole series.)
+changes carried to integration. A **chain** is arc's orchestration of that
+series: the blocked-by graph in which ready sibling changes run in parallel
+while dependent changes wait mechanically for their prerequisites. The lead
+opens each change with its declared blockers, assigns local-only executor
+prompts, and starts downstream implementation only when the ledger reports
+it ready. Claude reviews and integrates each approved patchset. (Members
+are "changes", never "arcs"; parallel scheduling groups are not "waves".)
 
 ### Incorrect: `/arc` shares a checkout
 
