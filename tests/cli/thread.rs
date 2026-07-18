@@ -56,6 +56,29 @@ fn thread_dir_precedence_env_over_config_over_default() {
 }
 
 #[test]
+fn thread_dir_archive_prints_cold_sibling_and_respects_env() {
+    let repo = Repo::new();
+    let hot = thread_dir(&repo);
+    let cold = stdout(repo.arc(&repo.root).args(["thread", "dir", "--archive"]));
+    assert_eq!(
+        PathBuf::from(cold.trim()),
+        PathBuf::from(format!("{}-archive", hot.display()))
+    );
+
+    let env_hot = repo.home.join("custom-hot");
+    let env_cold = stdout(repo.arc(&repo.root).env("ARC_THREAD_DIR", &env_hot).args([
+        "thread",
+        "dir",
+        "--archive",
+    ]));
+    assert_eq!(
+        PathBuf::from(env_cold.trim()),
+        repo.home.join("custom-hot-archive")
+    );
+    assert!(!PathBuf::from(env_cold.trim()).exists());
+}
+
+#[test]
 fn thread_note_writes_file_and_journal_line() {
     let repo = Repo::new();
     let body_path = repo.home.join("body.md");
@@ -416,4 +439,132 @@ fn thread_open_and_consume_track_actionable_items() {
         .args(["thread", "consume", "sub/dir-file-todo.md"])
         .assert()
         .failure();
+}
+
+#[test]
+fn thread_archive_moves_records_and_catchup_reads_cold_with_hot_journal() {
+    let repo = Repo::new();
+    let hot = thread_dir(&repo);
+    fs::create_dir_all(&hot).unwrap();
+    let name = "20260101T000000Z-history-note.md";
+    fs::write(hot.join(name), "# History\n").unwrap();
+    fs::write(hot.join("journal.md"), "- prior hot journal line\n").unwrap();
+
+    repo.arc(&repo.root)
+        .args(["thread", "archive", name, "--note", "cold storage"])
+        .assert()
+        .success();
+    let cold = PathBuf::from(format!("{}-archive", hot.display()));
+    assert!(!hot.join(name).exists());
+    assert!(cold.join(name).is_file());
+    assert!(hot.join("journal.md").is_file());
+    assert!(!cold.join("journal.md").exists());
+
+    let hot_catchup = stdout(repo.arc(&repo.root).args(["thread", "catchup"]));
+    assert!(!hot_catchup.contains("history  note"), "{hot_catchup}");
+    let cold_catchup = stdout(
+        repo.arc(&repo.root)
+            .args(["thread", "catchup", "--archived"]),
+    );
+    assert!(cold_catchup.contains("history  note"), "{cold_catchup}");
+    assert!(
+        cold_catchup.contains("prior hot journal line"),
+        "{cold_catchup}"
+    );
+    let journal = fs::read_to_string(hot.join("journal.md")).unwrap();
+    assert!(
+        journal.contains(&format!("history: archived {name}: cold storage")),
+        "{journal}"
+    );
+}
+
+#[test]
+fn thread_archive_refuses_unconsumed_actionable_then_accepts_consumed() {
+    let repo = Repo::new();
+    let hot = thread_dir(&repo);
+    fs::create_dir_all(&hot).unwrap();
+    let name = "20260101T000000Z-next-todo.md";
+    fs::write(hot.join(name), "todo\n").unwrap();
+
+    repo.arc(&repo.root)
+        .args(["thread", "archive", name])
+        .assert()
+        .failure();
+    assert!(hot.join(name).is_file());
+    assert!(!hot.join("journal.md").exists());
+
+    repo.arc(&repo.root)
+        .args(["thread", "consume", name])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["thread", "archive", name])
+        .assert()
+        .success();
+    assert!(!hot.join(name).exists());
+    assert!(PathBuf::from(format!("{}-archive", hot.display()))
+        .join(name)
+        .is_file());
+}
+
+#[test]
+fn thread_archive_consumed_bulk_filters_age_and_rejects_flag_misuse() {
+    let repo = Repo::new();
+    let hot = thread_dir(&repo);
+    fs::create_dir_all(&hot).unwrap();
+    let old = "20200101T000000Z-old-todo.md";
+    let new = "29990101T000000Z-new-plan.md";
+    let open = "20200101T000000Z-open-inbox.md";
+    let record = "20200101T000000Z-record-note.md";
+    for name in [old, new, open, record] {
+        fs::write(hot.join(name), name).unwrap();
+    }
+    for name in [old, new] {
+        repo.arc(&repo.root)
+            .args(["thread", "consume", name])
+            .assert()
+            .success();
+    }
+
+    let output = stdout(repo.arc(&repo.root).args([
+        "thread",
+        "archive",
+        "--consumed",
+        "--older-than-days",
+        "30",
+    ]));
+    assert_eq!(output.trim(), old);
+    let cold = PathBuf::from(format!("{}-archive", hot.display()));
+    assert!(cold.join(old).is_file());
+    assert!(hot.join(new).is_file());
+    assert!(hot.join(open).is_file());
+    assert!(hot.join(record).is_file());
+
+    repo.arc(&repo.root)
+        .args(["thread", "archive", "--older-than-days", "30"])
+        .assert()
+        .code(2);
+    repo.arc(&repo.root)
+        .args(["thread", "archive", new, "--consumed"])
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn thread_archive_refuses_cold_name_collision_without_moving_source() {
+    let repo = Repo::new();
+    let hot = thread_dir(&repo);
+    let cold = PathBuf::from(format!("{}-archive", hot.display()));
+    fs::create_dir_all(&hot).unwrap();
+    fs::create_dir_all(&cold).unwrap();
+    let name = "20200101T000000Z-history-note.md";
+    fs::write(hot.join(name), "hot\n").unwrap();
+    fs::write(cold.join(name), "cold\n").unwrap();
+
+    repo.arc(&repo.root)
+        .args(["thread", "archive", name])
+        .assert()
+        .failure();
+    assert_eq!(fs::read_to_string(hot.join(name)).unwrap(), "hot\n");
+    assert_eq!(fs::read_to_string(cold.join(name)).unwrap(), "cold\n");
 }

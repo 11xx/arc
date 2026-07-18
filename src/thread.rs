@@ -11,7 +11,7 @@ use crate::commands::Ctx;
 use crate::config;
 use crate::gitio;
 use anyhow::{bail, Context, Result};
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -74,7 +74,11 @@ impl ConsumeOutcome {
 #[derive(Subcommand)]
 pub enum ThreadCmd {
     /// Print the resolved archive directory (creates nothing)
-    Dir,
+    Dir {
+        /// Print the cold sibling archive directory
+        #[arg(long)]
+        archive: bool,
+    },
     /// Write a timestamped artifact and append its journal line
     Note {
         /// Kebab-case topic slug
@@ -104,6 +108,9 @@ pub enum ThreadCmd {
         /// Emit structured JSON instead of text
         #[arg(long)]
         json: bool,
+        /// List cold archived artifacts (the journal tail remains hot)
+        #[arg(long)]
+        archived: bool,
     },
     /// List actionable artifacts (todo/handoff/inbox/plan) not yet consumed
     Open {
@@ -125,12 +132,31 @@ pub enum ThreadCmd {
         #[arg(long)]
         note: Option<String>,
     },
+    /// Move artifacts to the cold sibling archive without deleting history
+    Archive {
+        /// Artifact filename inside the hot dir (a name, not a path)
+        #[arg(required_unless_present = "consumed", conflicts_with = "consumed")]
+        filename: Option<String>,
+        /// Archive every consumed actionable artifact
+        #[arg(long)]
+        consumed: bool,
+        /// With --consumed, include only artifacts older than this many days
+        #[arg(long, requires = "consumed")]
+        older_than_days: Option<u64>,
+        /// Optional context appended to each journal line
+        #[arg(long)]
+        note: Option<String>,
+    },
 }
 
 pub fn run(ctx: &Ctx, cmd: ThreadCmd) -> Result<i32> {
     match cmd {
-        ThreadCmd::Dir => {
-            println!("{}", resolve_dir(&ctx.cwd)?.display());
+        ThreadCmd::Dir { archive } => {
+            let hot = resolve_dir(&ctx.cwd)?;
+            println!(
+                "{}",
+                if archive { archive_dir(&hot) } else { hot }.display()
+            );
             Ok(0)
         }
         ThreadCmd::Note {
@@ -140,14 +166,38 @@ pub fn run(ctx: &Ctx, cmd: ThreadCmd) -> Result<i32> {
             title,
         } => note(ctx, &topic, kind, &body_file, title.as_deref()),
         ThreadCmd::Journal { topic, message } => journal(ctx, &topic, &message),
-        ThreadCmd::Catchup { limit, json } => catchup(ctx, limit.unwrap_or(20), json),
+        ThreadCmd::Catchup {
+            limit,
+            json,
+            archived,
+        } => catchup(ctx, limit.unwrap_or(20), json, archived),
         ThreadCmd::Open { kind, json } => open(ctx, kind, json),
         ThreadCmd::Consume {
             filename,
             outcome,
             note,
         } => consume(ctx, &filename, outcome, note.as_deref()),
+        ThreadCmd::Archive {
+            filename,
+            consumed,
+            older_than_days,
+            note,
+        } => archive(
+            ctx,
+            filename.as_deref(),
+            consumed,
+            older_than_days,
+            note.as_deref(),
+        ),
     }
+}
+
+/// Derive the cold sibling by appending `-archive` to the hot directory's
+/// final path component, regardless of how the hot directory was configured.
+pub fn archive_dir(hot: &Path) -> PathBuf {
+    let mut cold = hot.as_os_str().to_os_string();
+    cold.push("-archive");
+    PathBuf::from(cold)
 }
 
 /// Resolve the archive directory, override precedence: `ARC_THREAD_DIR`
@@ -374,8 +424,13 @@ fn first_heading(path: &Path) -> Option<String> {
         .map(|l| l.trim().to_string())
 }
 
-fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
-    let dir = resolve_dir(&ctx.cwd)?;
+fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
+    let hot_dir = resolve_dir(&ctx.cwd)?;
+    let dir = if archived {
+        archive_dir(&hot_dir)
+    } else {
+        hot_dir.clone()
+    };
     let mut files: Vec<ArtifactEntry> = Vec::new();
     if dir.is_dir() {
         let mut names: Vec<String> = Vec::new();
@@ -409,7 +464,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         }
     }
 
-    let journal_tail = journal_tail(&dir, limit)?;
+    let journal_tail = journal_tail(&hot_dir, limit)?;
 
     if json {
         let out = Catchup {
@@ -566,6 +621,100 @@ fn consume(ctx: &Ctx, filename: &str, outcome: ConsumeOutcome, note: Option<&str
     append_journal(&dir, ctx, Utc::now(), &topic, &message, None)?;
     println!("consumed: {filename} [{}]", outcome.as_str());
     Ok(0)
+}
+
+fn archive(
+    ctx: &Ctx,
+    filename: Option<&str>,
+    consumed: bool,
+    older_than_days: Option<u64>,
+    note: Option<&str>,
+) -> Result<i32> {
+    let hot = resolve_dir(&ctx.cwd)?;
+    if consumed {
+        let journal = read_journal(&hot)?;
+        let mut names = Vec::new();
+        if hot.is_dir() {
+            for entry in
+                std::fs::read_dir(&hot).with_context(|| format!("cannot read {}", hot.display()))?
+            {
+                let name = entry?.file_name().to_string_lossy().to_string();
+                let Some((timestamp, _, kind)) = parse_artifact_name(&name) else {
+                    continue;
+                };
+                if ACTIONABLE_KINDS.contains(&kind.as_str())
+                    && is_consumed(&journal, &name)
+                    && older_than_days.is_none_or(|days| timestamp_older_than(&timestamp, days))
+                {
+                    names.push(name);
+                }
+            }
+        }
+        names.sort();
+        for name in names {
+            archive_one(ctx, &hot, &name, note)?;
+            println!("{name}");
+        }
+        return Ok(0);
+    }
+
+    let filename = filename.context("archive requires a filename or --consumed")?;
+    archive_one(ctx, &hot, filename, note)?;
+    println!("{filename}");
+    Ok(0)
+}
+
+fn timestamp_older_than(timestamp: &str, days: u64) -> bool {
+    let parsed = NaiveDateTime::parse_from_str(timestamp, "%Y%m%dT%H%M%SZ")
+        .or_else(|_| NaiveDateTime::parse_from_str(timestamp, "%Y%m%dT%H%M%S"));
+    let Ok(parsed) = parsed else {
+        return false;
+    };
+    let timestamp = DateTime::<Utc>::from_naive_utc_and_offset(parsed, Utc);
+    let Ok(days) = i64::try_from(days) else {
+        return false;
+    };
+    timestamp < Utc::now() - chrono::Duration::days(days)
+}
+
+fn archive_one(ctx: &Ctx, hot: &Path, filename: &str, note: Option<&str>) -> Result<()> {
+    if filename.contains(['/', '\\']) {
+        bail!("archive takes an artifact filename inside the hot dir, not a path");
+    }
+    let Some((_, topic, kind)) = parse_artifact_name(filename) else {
+        bail!("{filename:?} is not a thread artifact name (<timestamp>-<topic>-<kind>.md)");
+    };
+    let source = hot.join(filename);
+    if !source.is_file() {
+        bail!("no such artifact {} in {}", filename, hot.display());
+    }
+    if ACTIONABLE_KINDS.contains(&kind.as_str()) && !is_consumed(&read_journal(hot)?, filename) {
+        bail!("{filename} is actionable and must be consumed before it can be archived");
+    }
+
+    let cold = archive_dir(hot);
+    let destination = cold.join(filename);
+    if destination.exists() {
+        bail!(
+            "archive destination already exists: {}",
+            destination.display()
+        );
+    }
+    std::fs::create_dir_all(&cold)
+        .with_context(|| format!("cannot create archive dir {}", cold.display()))?;
+    std::fs::rename(&source, &destination).with_context(|| {
+        format!(
+            "cannot move {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    let mut message = format!("archived {filename}");
+    if let Some(note) = note {
+        message.push_str(&format!(": {note}"));
+    }
+    append_journal(hot, ctx, Utc::now(), &topic, &message, None)?;
+    Ok(())
 }
 
 fn journal_tail(dir: &Path, limit: usize) -> Result<Vec<String>> {
