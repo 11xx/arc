@@ -391,27 +391,29 @@ a real concurrent multi-machine need exists.
 ## Thread archive mechanics
 
 `arc thread` encodes the drift-prone mechanics of the cross-harness /thread
-archive while the content stays plain Markdown any tool-less agent can read
-and write: `dir` prints the resolved archive directory (`ARC_THREAD_DIR`,
+archive while artifacts stay plain Markdown any tool-less agent can read and
+write. The canonical agent-written journal is the append-only `journal.jsonl`,
+whose versioned `thread-journal/1` events can be streamed as NDJSON with
+`thread events [--limit N]`; legacy `journal.md` archives remain readable
+forever. `dir` prints the resolved archive directory (`ARC_THREAD_DIR`,
 then the `[threads.dirs]` map in the config file keyed by repository root,
 then `<ai_home>/threads/<repo-slug>`); `note` writes a timestamped
-`<ts>-<topic>-<kind>.md` artifact and its journal line; `journal` appends a
-journal-only line; `catchup` lists newest-first. Work waiting for a future
+`<ts>-<topic>-<kind>.md` artifact and its journal event; `journal` appends a
+journal-only event; `catchup` lists newest-first. Work waiting for a future
 session uses the primary actionable kinds — `todo`, `handoff`, `inbox`,
 `plan` — plus lower-priority `later`. `thread open` lists the primary queue
 first and then a separate later section until an explicit `thread consume
 <filename> [--outcome done|superseded|discarded] [--note <text>]` retires an
-item with a machine-readable journal line (`consumed <filename>
-[<outcome>]`). The journal is append-only; consumption never edits or deletes
+item with a typed consumed event. The journal is append-only; consumption never edits or deletes
 the artifact.
 
 Advisory **lanes** announce which topics a session is actively working so
 parallel sessions sharing one archive see occupancy instead of guessing:
 `thread lane open <topic> [--scope t1,t2] [--ttl 2h] [--status <text>]`,
 `renew`, `close [--outcome done|handoff|abandoned|expired]`, and `list`.
-Lanes are journal markers (`lane opened/renewed/closed` — hand-writable,
-malformed markers are inert), never locks. Liveness needs no heartbeats:
-any journal line by the owning session restarts the ttl window; idle lanes
+Lanes are typed journal events, never locks. Malformed JSONL lines are skipped
+so readers fail open. Liveness needs no heartbeats: any journal event by the
+owning session restarts the ttl window; idle lanes
 decay to stale, and anyone may close a stale lane `[expired]` — the
 explicit takeover path. Opening a lane implicitly closes the session's
 previous one (a session has at most one). `thread open` annotates items

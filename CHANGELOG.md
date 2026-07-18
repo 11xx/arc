@@ -11,6 +11,11 @@ no version has been tagged yet.
 
 ## [Unreleased]
 
+### Changed
+
+- The thread journal is now a typed `thread-journal/1` JSONL event log while
+  legacy Markdown journals remain readable (`journal-jsonl`).
+
 ### Added
 
 - Advisory session work lanes in the thread archive: `thread lane
