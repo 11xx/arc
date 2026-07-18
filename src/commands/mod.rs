@@ -21,7 +21,7 @@ pub use bundle_io::{export_bundle, import_bundle};
 pub use claims::{claim, release_claim, stage};
 use clap::ValueEnum;
 pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_pr_state};
-pub use gatekeeping::{check_selection, close, hold, integrate, release_hold, verify};
+pub use gatekeeping::{check_selection, close, hold, integrate, release_hold, verify, VerifyArgs};
 pub use lifecycle::{
     begin, blocker_status_cmd, is_blocked, list, metadata, query, show_selection, status_cmd,
 };

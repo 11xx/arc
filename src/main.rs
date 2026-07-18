@@ -382,6 +382,9 @@ enum Cmd {
     /// Run a declared gate (or ad hoc command) and record the evidence
     Verify {
         change: String,
+        /// Run every gate declared for the change profile
+        #[arg(long)]
+        all: bool,
         /// Gate name from .arc/gates.toml
         #[arg(long)]
         gate: Option<String>,
@@ -779,12 +782,24 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Verify {
             change,
+            all,
             gate,
             command,
             attest,
             result,
             note,
-        } => commands::verify(&ctx, &change, gate, command, attest, result, note),
+        } => commands::verify(
+            &ctx,
+            &change,
+            commands::VerifyArgs {
+                all,
+                gate,
+                command,
+                attest,
+                result,
+                note,
+            },
+        ),
         Cmd::Hold { change, reason } => {
             commands::hold(&ctx, &change, reason)?;
             Ok(0)
