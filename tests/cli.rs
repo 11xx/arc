@@ -4771,17 +4771,56 @@ fn thread_open_and_consume_track_actionable_items() {
         .collect();
     assert_eq!(open_files, vec![names["todo"].as_str()]);
 
-    // --kind filters, and accepts non-actionable kinds as an explicit filter.
+    // --kind filters within the actionable set; record kinds are refused.
     let filtered = stdout(
         repo.arc(&repo.root)
             .args(["thread", "open", "--kind", "todo"]),
     );
     assert!(filtered.contains("next-work"), "{filtered}");
-    let notes = stdout(
-        repo.arc(&repo.root)
-            .args(["thread", "open", "--kind", "note"]),
-    );
-    assert!(notes.contains("memo"), "{notes}");
+    repo.arc(&repo.root)
+        .args(["thread", "open", "--kind", "note"])
+        .assert()
+        .failure();
+
+    // Prose mentioning a filename near "consumed" is not the machine shape
+    // and must not retire the item.
+    repo.arc(&repo.root)
+        .args([
+            "thread",
+            "journal",
+            "next-work",
+            &format!("discussed consumed {} in passing", names["todo"]),
+        ])
+        .assert()
+        .success();
+    let still_open = stdout(repo.arc(&repo.root).args(["thread", "open"]));
+    assert!(still_open.contains("next-work"), "{still_open}");
+
+    // Exclusive creation: recreating the same timestamped path fails loudly
+    // instead of overwriting a queued artifact.
+    let clash = stdout(repo.arc(&repo.root).args([
+        "thread",
+        "note",
+        "clash",
+        "--kind",
+        "todo",
+        "--body-file",
+        body,
+    ]));
+    let clash_name = PathBuf::from(clash.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let manual = thread_dir(&repo).join(&clash_name);
+    assert!(manual.is_file());
+    // A direct second create of the identical path (what a same-second
+    // duplicate note would attempt) must be refused by exclusive creation.
+    assert!(fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&manual)
+        .is_err());
 
     // The journal carries the machine-readable consumption line.
     let journal = fs::read_to_string(thread_dir(&repo).join("journal.md")).unwrap();

@@ -107,7 +107,7 @@ pub enum ThreadCmd {
     },
     /// List actionable artifacts (todo/handoff/inbox/plan) not yet consumed
     Open {
-        /// Restrict to one kind (any kind is accepted as a filter)
+        /// Restrict to one actionable kind
         #[arg(long, value_enum)]
         kind: Option<ThreadKind>,
         /// Emit structured JSON instead of text
@@ -260,7 +260,23 @@ fn note(
         Some(t) => format!("# {t}\n\n{body}"),
         None => body,
     };
-    std::fs::write(&path, contents).with_context(|| format!("cannot write {}", path.display()))?;
+    // Exclusive creation: a same-second same-topic/kind collision must fail
+    // loudly rather than silently overwrite a queued artifact.
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| {
+                format!(
+                    "cannot create {} (an artifact with this second's timestamp already exists)",
+                    path.display()
+                )
+            })?;
+        f.write_all(contents.as_bytes())
+            .with_context(|| format!("cannot write {}", path.display()))?;
+    }
 
     // The note command takes no free-text message, so the journal line is
     // auto-derived: the title when given, otherwise "wrote <kind>". Callers
@@ -423,14 +439,26 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     Ok(0)
 }
 
-/// The journal marker `consume` writes and `open` scans for. Matching is a
-/// plain substring so tool-less agents can retire an item by hand-writing
-/// the same words in a journal line.
-fn consumed_marker(filename: &str) -> String {
-    format!("consumed {filename}")
+/// The machine shape `consume` writes and `open` scans for:
+/// `consumed <filename> [<outcome>]` with a known outcome, anywhere in a
+/// journal line. Tool-less agents can retire an item by hand-writing the
+/// same shape; prose that merely mentions the filename does not match.
+fn consumed_markers(filename: &str) -> [String; 3] {
+    [
+        format!("consumed {filename} [done]"),
+        format!("consumed {filename} [superseded]"),
+        format!("consumed {filename} [discarded]"),
+    ]
 }
 
-fn consumed_set(dir: &Path) -> Result<String> {
+fn is_consumed(journal: &str, filename: &str) -> bool {
+    let markers = consumed_markers(filename);
+    journal
+        .lines()
+        .any(|line| markers.iter().any(|marker| line.contains(marker.as_str())))
+}
+
+fn read_journal(dir: &Path) -> Result<String> {
     let path = dir.join("journal.md");
     if !path.is_file() {
         return Ok(String::new());
@@ -445,10 +473,19 @@ struct OpenItems {
 }
 
 fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
+    if let Some(kind) = kind {
+        if !ACTIONABLE_KINDS.contains(&kind.as_str()) {
+            bail!(
+                "--kind {} is not actionable; the open queue tracks {}",
+                kind.as_str(),
+                ACTIONABLE_KINDS.join("|")
+            );
+        }
+    }
     let dir = resolve_dir(&ctx.cwd)?;
     let mut open: Vec<ArtifactEntry> = Vec::new();
     if dir.is_dir() {
-        let journal = consumed_set(&dir)?;
+        let journal = read_journal(&dir)?;
         let mut names: Vec<String> = Vec::new();
         for entry in
             std::fs::read_dir(&dir).with_context(|| format!("cannot read {}", dir.display()))?
@@ -461,7 +498,7 @@ fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
                 Some(kind) => file_kind == kind.as_str(),
                 None => ACTIONABLE_KINDS.contains(&file_kind.as_str()),
             };
-            if wanted && !journal.contains(&consumed_marker(&name)) {
+            if wanted && !is_consumed(&journal, &name) {
                 names.push(name);
             }
         }
@@ -512,10 +549,10 @@ fn consume(ctx: &Ctx, filename: &str, outcome: ConsumeOutcome, note: Option<&str
     if !dir.join(filename).is_file() {
         bail!("no such artifact {} in {}", filename, dir.display());
     }
-    if consumed_set(&dir)?.contains(&consumed_marker(filename)) {
+    if is_consumed(&read_journal(&dir)?, filename) {
         bail!("{filename} is already consumed (see the journal)");
     }
-    let mut message = format!("{} [{}]", consumed_marker(filename), outcome.as_str());
+    let mut message = format!("consumed {filename} [{}]", outcome.as_str());
     if let Some(note) = note {
         message.push_str(&format!(": {note}"));
     }
