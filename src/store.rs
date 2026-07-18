@@ -250,6 +250,12 @@ impl Store {
             let bytes = fs::read(&path)?;
             let event: Event = serde_json::from_slice(&bytes)
                 .with_context(|| format!("malformed event file {}", path.display()))?;
+            // Skip (but never drop) events whose type this build does not
+            // recognize: the file stays on disk and raw export round-trips it,
+            // while typed replay tolerates a change that carries future events.
+            if matches!(event.payload, crate::model::Payload::Unknown) {
+                continue;
+            }
             events.push(event);
         }
         Ok(events)

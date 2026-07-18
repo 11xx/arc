@@ -16,7 +16,9 @@ mod thread;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use commands::{AnchorArgs, Ctx, ListFormat, QueryArgs};
-use model::{DispositionStatus, MessageSeverity, MessageType, Severity, Side, Verdict};
+use model::{
+    DispositionStatus, MessageSeverity, MessageType, Severity, Side, Verdict, VerifyResult,
+};
 
 /// Change, review, and integration state over plain Git for agentic
 /// coding arcs. Git owns content and history; arc owns the collaboration
@@ -386,6 +388,16 @@ enum Cmd {
         /// Ad hoc command (recorded, but not a declared gate)
         #[arg(long)]
         command: Option<String>,
+        /// Record externally observed evidence without running the command
+        /// (e.g. a sandboxed executor or another host ran the gate)
+        #[arg(long)]
+        attest: bool,
+        /// The attested result; required with --attest, rejected without it
+        #[arg(long, value_enum)]
+        result: Option<VerifyResult>,
+        /// Optional note recorded alongside the evidence
+        #[arg(long)]
+        note: Option<String>,
     },
     /// Set an integration hold
     Hold {
@@ -769,7 +781,10 @@ fn run(cli: Cli) -> Result<i32> {
             change,
             gate,
             command,
-        } => commands::verify(&ctx, &change, gate, command),
+            attest,
+            result,
+            note,
+        } => commands::verify(&ctx, &change, gate, command, attest, result, note),
         Cmd::Hold { change, reason } => {
             commands::hold(&ctx, &change, reason)?;
             Ok(0)

@@ -227,14 +227,15 @@ pub fn markdown(
         for g in &report.gates {
             let _ = writeln!(
                 w,
-                "- {}: `{}` — {}",
+                "- {}: `{}` — {}{}",
                 g.name,
                 g.command,
                 if g.green_at_head {
                     "green at head"
                 } else {
                     "NOT green at head"
-                }
+                },
+                if g.attested { " (attested)" } else { "" }
             );
         }
     }
@@ -244,11 +245,12 @@ pub fn markdown(
         for v in &state.verifications {
             let _ = writeln!(
                 w,
-                "- {} `{}` at `{}` → {:?} (on {})",
+                "- {} `{}` at `{}` → {:?}{} (on {})",
                 v.gate.as_deref().unwrap_or("(ad hoc)"),
                 v.command,
                 v.revision,
                 v.result,
+                if v.attested { " (attested)" } else { "" },
                 v.hostname
             );
         }

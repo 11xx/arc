@@ -74,6 +74,9 @@ pub struct GateStatus {
     pub command: String,
     pub result: String,
     pub green_at_head: bool,
+    /// The head evidence for this gate is attested (arc did not run it), so a
+    /// lead can apply stricter judgment even though it counts for green-ness.
+    pub attested: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -249,9 +252,10 @@ pub fn build_at(
         .required_for(&state.profile)
         .into_iter()
         .map(|(name, gate)| {
-            let result = current_head
+            let evidence = current_head
                 .as_deref()
-                .and_then(|head| state.gate_result_at(name, head));
+                .and_then(|head| state.gate_evidence_at(name, head));
+            let result = evidence.map(|e| e.result);
             GateStatus {
                 name: name.clone(),
                 command: gate.command.clone(),
@@ -262,6 +266,7 @@ pub fn build_at(
                 }
                 .into(),
                 green_at_head: result == Some(crate::model::VerifyResult::Pass),
+                attested: evidence.is_some_and(|e| e.attested),
             }
         })
         .collect();
