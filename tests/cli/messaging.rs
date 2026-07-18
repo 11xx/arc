@@ -208,6 +208,77 @@ fn messages_never_affect_check() {
 }
 
 #[test]
+fn status_lists_messages_and_assignment_without_changing_schema() {
+    let repo = Repo::new();
+    begin_change(&repo, "msg-status", None);
+
+    repo.arc(&repo.root)
+        .args([
+            "message",
+            "msg-status",
+            "--type",
+            "status",
+            "--summary",
+            "work started",
+            "--severity",
+            "info",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "message",
+            "msg-status",
+            "--type",
+            "discovery",
+            "--summary",
+            "edge case found",
+            "--detail",
+            "consumer needs context",
+            "--severity",
+            "warning",
+            "--json",
+            "{\"issue\":42}",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["metadata", "msg-status", "--assign", "codex"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "msg-status"]));
+    assert_eq!(status["schema"], "arc-status/5");
+    assert_eq!(status["assigned_to"], "codex");
+    let messages = status["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["message_type"], "status");
+    assert_eq!(messages[0]["severity"], "info");
+    assert_eq!(messages[0]["summary"], "work started");
+    assert_eq!(messages[0]["detail"], serde_json::Value::Null);
+    assert_eq!(messages[0]["metadata"], serde_json::Value::Null);
+    assert_eq!(messages[1]["message_type"], "discovery");
+    assert_eq!(messages[1]["severity"], "warning");
+    assert_eq!(messages[1]["summary"], "edge case found");
+    assert_eq!(messages[1]["detail"], "consumer needs context");
+    assert_eq!(messages[1]["metadata"]["issue"], 42);
+    for message in messages {
+        assert!(message["event_id"].is_string());
+        assert_eq!(message["actor"], "tester");
+        assert_eq!(message["harness"], "test");
+        assert_eq!(message["session"], "session-a");
+        assert!(message["created_at"].is_string());
+    }
+
+    repo.arc(&repo.root)
+        .args(["metadata", "msg-status", "--assign", ""])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "msg-status"]));
+    assert_eq!(status["assigned_to"], serde_json::Value::Null);
+}
+
+#[test]
 fn inbox_buckets_classify_open_changes() {
     let repo = Repo::new();
 
