@@ -137,9 +137,9 @@ with the routing policy:
 
 - Effort inheritance is the wrong direction. A high-effort orchestrator
   spawning same-effort context gatherers is the most expensive possible
-  configuration; the ladder routes gathering and extraction down (low/Luna)
-  and implementation to the cheapest tier the spec quality allows (Terra
-  high for planned slices).
+  configuration; the ladder routes bounded gathering and pre-resolved
+  implementation to Sol low, fixed-shape extraction to Luna, and lead
+  judgment to Sol high.
 - Whole-conversation inheritance is unscoped context transfer. It pays for
   the entire session history in every child and buries the task signal.
   Delegated work gets a curated, self-contained brief: the spec, the done
@@ -151,6 +151,14 @@ explicitly (`codex exec` with a chosen model and effort, an arc bundle plus
 spec, or an orchestration script) where model, effort, and context are all
 stated. Revisit if a harness ships per-subagent model/effort/context
 controls and they prove reliable.
+
+Explicit model selection does not remove prompting safeguards. Every Sol
+write-mode prompt, including Sol low, must name exact targets, set a scope
+ceiling, prohibit unrequested tests and refactors, and state abort conditions.
+If a named target or prerequisite is absent, the executor stops and reports it;
+it must not substitute another target or improvise a workaround. Sol's literal
+persistence is the reason it works well as the clear-spec executor and the
+reason these fences are mandatory.
 
 The strongest known pattern is programmatic orchestration: generate a
 dedicated one-off script that spawns each agent with an explicit prompt,
