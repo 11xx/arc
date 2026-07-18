@@ -43,6 +43,9 @@ pub fn markdown(
     if !state.tags.is_empty() {
         let _ = writeln!(w, "- Tags: {}", state.tags.join(", "));
     }
+    if let Some(assigned) = &state.assigned_to {
+        let _ = writeln!(w, "- Assigned to: {assigned}");
+    }
 
     if !report.blocker_status.blockers_ready.is_empty() {
         let _ = writeln!(w, "\n## Blocked by\n");
@@ -248,6 +251,23 @@ pub fn markdown(
                 v.result,
                 v.hostname
             );
+        }
+    }
+
+    if !state.messages.is_empty() {
+        let _ = writeln!(w, "\n## Messages\n");
+        for m in &state.messages {
+            let _ = writeln!(
+                w,
+                "- [{}/{}] {} ({})",
+                m.message_type.as_str(),
+                m.severity.as_str(),
+                m.summary,
+                m.actor
+            );
+            if let Some(detail) = &m.detail {
+                let _ = writeln!(w, "  - {detail}");
+            }
         }
     }
 

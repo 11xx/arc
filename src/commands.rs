@@ -1081,6 +1081,7 @@ pub fn metadata(
     remove_blocked_by: Vec<String>,
     tags: Vec<String>,
     remove_tags: Vec<String>,
+    assign: Option<String>,
 ) -> Result<()> {
     let store = ctx.store()?;
     let _graph = store.lock_graph()?;
@@ -1108,10 +1109,23 @@ pub fn metadata(
     }
     let add_tags = normalize_tags(tags)?;
     let remove_tags = normalize_tags(remove_tags)?;
+    // An assignment value may contain no whitespace-delimited surprises: a
+    // harness label, or empty to clear. Store the trimmed form verbatim.
+    let assign = match &assign {
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.chars().any(char::is_whitespace) {
+                bail!("assignment harness must not contain whitespace: {value:?}");
+            }
+            Some(trimmed.to_string())
+        }
+        None => None,
+    };
     if add_blocked_by.is_empty()
         && remove_blocked_by.is_empty()
         && add_tags.is_empty()
         && remove_tags.is_empty()
+        && assign.is_none()
     {
         bail!("provide at least one metadata change");
     }
@@ -1123,10 +1137,211 @@ pub fn metadata(
             remove_blocked_by,
             add_tags,
             remove_tags,
+            assign,
         },
     );
     store.append_event(&event)?;
     println!("event: {}", event.event_id);
+    Ok(())
+}
+
+pub fn message(
+    ctx: &Ctx,
+    reference: &str,
+    message_type: MessageType,
+    summary: String,
+    detail: Option<String>,
+    json: Option<String>,
+    severity: MessageSeverity,
+) -> Result<()> {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        bail!("message summary must be a non-empty single line");
+    }
+    if summary.contains(['\n', '\r']) {
+        bail!("message summary must be a single line");
+    }
+    let metadata = match json {
+        None => None,
+        Some(raw) => {
+            let value: serde_json::Value =
+                serde_json::from_str(&raw).context("--json must be valid JSON")?;
+            if !value.is_object() {
+                bail!("--json must be a JSON object");
+            }
+            Some(value)
+        }
+    };
+    let detail = detail.and_then(|detail| {
+        let trimmed = detail.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+
+    let store = ctx.store()?;
+    let (change_id, _st) = ctx.load_state(&store, reference)?;
+    let event = ctx.event(
+        &store,
+        &change_id,
+        Payload::Message {
+            message_type,
+            severity,
+            summary: summary.to_string(),
+            detail,
+            metadata,
+        },
+    );
+    store.append_event(&event)?;
+    println!("message: {} [{}]", message_type.as_str(), severity.as_str());
+    println!("event: {}", event.event_id);
+    Ok(())
+}
+
+/// A message joined with the change it belongs to, for the `messages` query.
+#[derive(Debug, Serialize)]
+struct MessageView<'a> {
+    change_id: &'a str,
+    event_id: &'a str,
+    event_type: &'static str,
+    message_type: MessageType,
+    severity: MessageSeverity,
+    summary: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<&'a serde_json::Value>,
+    actor: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    harness: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<&'a str>,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub fn messages(
+    ctx: &Ctx,
+    change: Option<&str>,
+    message_type: Option<MessageType>,
+    severity: Option<MessageSeverity>,
+    since: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let store = ctx.store()?;
+    let change_filter = change
+        .map(|reference| store.resolve_change(reference))
+        .transpose()?;
+    let since = since
+        .as_deref()
+        .map(|raw| {
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .with_context(|| format!("invalid --since instant {raw:?}; expected ISO 8601"))
+        })
+        .transpose()?;
+
+    let states = ctx.load_all_states(&store)?;
+    let mut views: Vec<MessageView> = Vec::new();
+    for state in states.values() {
+        if change_filter
+            .as_deref()
+            .is_some_and(|id| id != state.change_id)
+        {
+            continue;
+        }
+        for message in &state.messages {
+            if message_type.is_some_and(|wanted| wanted != message.message_type) {
+                continue;
+            }
+            if severity.is_some_and(|wanted| wanted != message.severity) {
+                continue;
+            }
+            if since.is_some_and(|floor| message.created_at < floor) {
+                continue;
+            }
+            views.push(MessageView {
+                change_id: &state.change_id,
+                event_id: &message.event_id,
+                event_type: "message",
+                message_type: message.message_type,
+                severity: message.severity,
+                summary: &message.summary,
+                detail: message.detail.as_deref(),
+                metadata: message.metadata.as_ref(),
+                actor: &message.actor,
+                harness: message.harness.as_deref(),
+                session: message.session.as_deref(),
+                created_at: message.created_at,
+            });
+        }
+    }
+    // Newest first; event IDs are ULIDs, so they break created_at ties in
+    // append order deterministically.
+    views.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.event_id.cmp(a.event_id))
+    });
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&views)?);
+    } else {
+        for view in &views {
+            println!(
+                "{} [{}/{}] {} — {} ({})",
+                view.change_id,
+                view.message_type.as_str(),
+                view.severity.as_str(),
+                view.summary,
+                view.actor,
+                view.created_at.to_rfc3339()
+            );
+        }
+    }
+    Ok(())
+}
+
+pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
+    let store = ctx.store()?;
+    let states = ctx.load_all_states(&store)?;
+    let filter = assigned_to
+        .as_deref()
+        .map(str::trim)
+        .filter(|f| !f.is_empty());
+    let mut inbox = crate::inbox::Inbox::new(filter.map(str::to_string));
+    for state in states.values() {
+        if state.is_closed() {
+            continue;
+        }
+        if let Some(wanted) = filter {
+            if state.assigned_to.as_deref() != Some(wanted) {
+                continue;
+            }
+        }
+        let report = ctx.report(&store, state)?;
+        inbox.absorb(state, &report);
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&inbox)?);
+    } else {
+        for (name, rows) in inbox.sections() {
+            println!("## {name}");
+            if rows.is_empty() {
+                println!("  (none)");
+            }
+            for row in rows {
+                println!(
+                    "  {}  {} → {}{}",
+                    row.change_id,
+                    row.title,
+                    row.next_actor,
+                    row.assigned_to
+                        .as_deref()
+                        .map(|a| format!(" [assigned: {a}]"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2126,8 +2341,10 @@ mod tests {
             opened_harness: Some("test".into()),
             blocked_by: blocked_by.iter().map(|id| (*id).into()).collect(),
             tags: Vec::new(),
+            assigned_to: None,
             opened_at: Utc::now(),
             patchsets: Vec::new(),
+            messages: Vec::new(),
             comments: Vec::new(),
             findings: BTreeMap::new(),
             verdicts: Vec::new(),
