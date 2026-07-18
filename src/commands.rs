@@ -2044,7 +2044,18 @@ pub fn verify(
     reference: &str,
     gate: Option<String>,
     command: Option<String>,
+    attest: bool,
+    result: Option<VerifyResult>,
+    note: Option<String>,
 ) -> Result<i32> {
+    // --attest records evidence arc did not observe (so it needs the caller's
+    // --result); without it arc runs the command and observing --result is a bug.
+    let attested_result = match (attest, result) {
+        (true, Some(result)) => Some(result),
+        (true, None) => bail!("--attest requires --result pass|fail"),
+        (false, Some(_)) => bail!("--result is only valid with --attest"),
+        (false, None) => None,
+    };
     let store = ctx.store()?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
     if st.is_closed() {
@@ -2070,20 +2081,42 @@ pub fn verify(
         .map(|h| h.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "unknown".into());
 
-    eprintln!("running: {cmd}");
-    let started = std::time::Instant::now();
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&cmd)
-        .current_dir(&ctx.cwd)
-        .status()
-        .context("failed to run gate command")?;
-    let duration_ms = started.elapsed().as_millis() as u64;
-    let exit_code = out.code().unwrap_or(-1);
-    let result = if out.success() {
-        VerifyResult::Pass
-    } else {
-        VerifyResult::Fail
+    let (result, exit_code, duration_ms) = match attested_result {
+        // Attested: record the caller's result without running anything. The
+        // gate did not execute here, so there is no observed exit code, timing,
+        // or head movement to re-check.
+        Some(result) => {
+            let exit_code = if result == VerifyResult::Pass { 0 } else { 1 };
+            (result, exit_code, 0)
+        }
+        None => {
+            eprintln!("running: {cmd}");
+            let started = std::time::Instant::now();
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .current_dir(&ctx.cwd)
+                .status()
+                .context("failed to run gate command")?;
+            let duration_ms = started.elapsed().as_millis() as u64;
+            let exit_code = out.code().unwrap_or(-1);
+            let result = if out.success() {
+                VerifyResult::Pass
+            } else {
+                VerifyResult::Fail
+            };
+            // The gate may have moved the branch head while it ran. Evidence
+            // stays pinned to the pre-gate revision; warn so a lead knows the
+            // recorded revision no longer matches the working head.
+            let post = gitio::head(&ctx.cwd)?;
+            if post != revision {
+                eprintln!(
+                    "warning: head moved during verification ({revision} -> {post}); \
+                     evidence recorded at {revision}"
+                );
+            }
+            (result, exit_code, duration_ms)
+        }
     };
 
     // Gates are arbitrary external commands and may legitimately invoke arc.
@@ -2103,12 +2136,15 @@ pub fn verify(
             exit_code,
             duration_ms,
             hostname,
+            attested: attest,
+            note,
         },
     );
     store.append_event(&ev)?;
-    println!("verification: {result:?} at {revision}");
+    let marker = if attest { " (attested)" } else { "" };
+    println!("verification: {result:?}{marker} at {revision}");
     println!("event: {}", ev.event_id);
-    Ok(if out.success() { 0 } else { 1 })
+    Ok(if result == VerifyResult::Pass { 0 } else { 1 })
 }
 
 pub fn hold(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {

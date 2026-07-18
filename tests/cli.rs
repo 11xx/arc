@@ -4427,3 +4427,276 @@ fn forge_events_round_trip_through_export_import() {
     assert_eq!(imported_status["forge"]["checks"], "passed");
     assert_eq!(imported_status["forge"]["pr_state"]["state"], "open");
 }
+
+/// The typed consumers (show/status/check/watch) reduce the ledger through the
+/// strongly typed Event enum. A change carrying an imported unknown-type event
+/// must still replay: typed loading skips the unknown event while raw storage
+/// and re-export preserve it byte-identically.
+#[test]
+fn typed_consumers_tolerate_imported_unknown_event_type() {
+    let source = Repo::new();
+    let (change_id, _wt, _head) = change_with_patchset(&source, "future-typed");
+    // Inject an event whose payload type this build does not recognize. A full
+    // envelope keeps only the event_type unknown; the ULID-max id sorts last.
+    let event_id = "ZZZZZZZZZZZZZZZZZZZZZZZZZZ";
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(source.root.join(".git/arc/config.json")).unwrap())
+            .unwrap();
+    let unknown = serde_json::json!({
+        "schema_version": 1,
+        "event_id": event_id,
+        "repository_id": config["repository_id"],
+        "change_id": change_id,
+        "actor": "future-agent",
+        "created_at": "2999-01-01T00:00:00Z",
+        "event_type": "quantum-entangled",
+        "future_payload": {"kept": [1, 2, 3], "nested": true}
+    });
+    let unknown_bytes = json_file_bytes(&unknown);
+    fs::write(
+        event_dir(&source, &change_id).join(format!("{event_id}.json")),
+        &unknown_bytes,
+    )
+    .unwrap();
+
+    let bundle = source.home.join("future-typed.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            "future-typed",
+            "--output",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let dest = Repo::new();
+    dest.arc(&dest.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Typed consumers must succeed instead of failing to parse the unknown event.
+    dest.arc(&dest.root)
+        .args(["show", &change_id])
+        .assert()
+        .success();
+    dest.arc(&dest.root)
+        .args(["status", &change_id])
+        .assert()
+        .success();
+    dest.arc(&dest.root)
+        .args(["check", &change_id])
+        .assert()
+        .stderr(predicates::str::contains("malformed event file").not())
+        .stderr(predicates::str::contains("unknown variant").not());
+    // The patchset is present in the ledger, so this condition is immediately
+    // satisfied and watch (also a typed consumer) returns without waiting.
+    dest.arc(&dest.root)
+        .args(["watch", &change_id, "--until", "snapshot", "--timeout", "5"])
+        .assert()
+        .success();
+
+    // Storage kept the unknown event byte-identically, and re-export round-trips it.
+    let dest_event = event_dir(&dest, &change_id).join(format!("{event_id}.json"));
+    assert_eq!(fs::read(dest_event).unwrap(), unknown_bytes);
+    let reexport = dest.home.join("reexport.json");
+    dest.arc(&dest.root)
+        .args(["export", &change_id, "--output", reexport.to_str().unwrap()])
+        .assert()
+        .success();
+    let reexported: serde_json::Value =
+        serde_json::from_slice(&fs::read(&reexport).unwrap()).unwrap();
+    let found = reexported["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["event_id"] == event_id)
+        .expect("unknown event survives re-export");
+    assert_eq!(*found, unknown);
+}
+
+/// `verify --attest --result` records externally observed evidence without
+/// running anything, counts it toward gate green-ness, and flags it attested
+/// in both the machine status and the human render.
+#[test]
+fn verify_attest_records_gate_evidence_without_running() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    let poison = repo.root.join("EXECUTED");
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        format!(
+            "[gates.smoke]\ncommand = \"touch '{}' && exit 1\"\n",
+            poison.display()
+        ),
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc"]);
+    git(&repo.root, &["commit", "-m", "gates"]);
+
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "feat-att", "--title", "Attested"]),
+    );
+    let wt = repo.home.join(".worktrees").join("repo-feat-att");
+    repo.commit(&wt, "att.txt", "att\n", "feat: add att");
+    stdout(repo.arc(&wt).args(["snapshot", "feat-att"]));
+
+    repo.arc(&wt)
+        .args([
+            "verify",
+            "feat-att",
+            "--gate",
+            "smoke",
+            "--attest",
+            "--result",
+            "pass",
+            "--note",
+            "ran in sandbox",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Pass (attested)"));
+    assert!(!poison.exists(), "attested verify must not run the command");
+
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "feat-att"]))).unwrap();
+    let gate = &status["gates"][0];
+    assert_eq!(gate["name"], "smoke");
+    assert_eq!(gate["result"], "pass");
+    assert_eq!(gate["green_at_head"], true);
+    assert_eq!(gate["attested"], true);
+
+    repo.arc(&repo.root)
+        .args(["show", "feat-att"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("green at head (attested)"))
+        .stdout(predicates::str::contains("Pass (attested)"));
+}
+
+/// --attest requires --result; --result without --attest is a usage error; and
+/// a failing attestation reports exit 1 while still recording evidence.
+#[test]
+fn verify_attest_result_flag_pairing_is_enforced() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "feat-pair", "--no-worktree"]),
+    );
+
+    repo.arc(&repo.root)
+        .args(["verify", "feat-pair", "--command", "true", "--attest"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--attest requires --result"));
+
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "feat-pair",
+            "--command",
+            "true",
+            "--result",
+            "pass",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--result is only valid with --attest",
+        ));
+
+    // A failing attestation is recorded and mirrors the result in the exit code.
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "feat-pair",
+            "--command",
+            "false",
+            "--attest",
+            "--result",
+            "fail",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("Fail (attested)"));
+}
+
+/// A gate that advances the branch head while running triggers an advisory
+/// warning; the recorded evidence stays pinned to the pre-gate revision.
+#[test]
+fn verify_warns_when_head_moves_during_the_gate() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "feat-move"]));
+    let wt = repo.home.join(".worktrees").join("repo-feat-move");
+    repo.commit(&wt, "move.txt", "move\n", "feat: add move");
+    let pre = repo.head(&wt);
+
+    repo.arc(&wt)
+        .args([
+            "verify",
+            "feat-move",
+            "--command",
+            "git commit --allow-empty -m moved-during-gate",
+        ])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(format!(
+            "head moved during verification ({pre}"
+        )));
+
+    let post = repo.head(&wt);
+    assert_ne!(pre, post, "the gate command must have moved the head");
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "feat-move",
+        "--type",
+        "verification-recorded",
+    ]));
+    let recorded: serde_json::Value = serde_json::from_str(events.lines().next().unwrap()).unwrap();
+    assert_eq!(recorded["revision"], pre);
+}
+
+/// Provenance comparison matches the claim actor against the git identity by
+/// name or email. An actor that differs from the author name but equals its
+/// email is the same identity, so no mismatch is raised.
+#[test]
+fn provenance_email_match_suppresses_name_only_false_positive() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "prov-eml"]));
+    let wt = repo.home.join(".worktrees").join("repo-prov-eml");
+    repo.arc(&wt)
+        .env("ARC_ACTOR", "tester@example.invalid")
+        .args(["claim", "prov-eml"])
+        .assert()
+        .success();
+    repo.commit(&wt, "prov.txt", "prov\n", "feat: prov");
+    repo.arc(&wt)
+        .args(["snapshot", "prov-eml"])
+        .assert()
+        .success();
+
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "prov-eml"]))).unwrap();
+    assert_eq!(status["latest_patchset"]["author"]["name"], "Tester");
+    assert_eq!(
+        status["latest_patchset"]["author"]["email"],
+        "tester@example.invalid"
+    );
+    assert_eq!(
+        status["latest_patchset"]["claim_actor"],
+        "tester@example.invalid"
+    );
+    assert_eq!(status["latest_patchset"]["provenance_mismatch"], false);
+    assert_eq!(status["claim"]["provenance_mismatch"], false);
+
+    repo.arc(&repo.root)
+        .args(["show", "prov-eml"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("PROVENANCE MISMATCH").not());
+}

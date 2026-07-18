@@ -149,6 +149,15 @@ pub enum Payload {
         exit_code: i32,
         duration_ms: u64,
         hostname: String,
+        /// Evidence that arc did not execute itself (e.g. a sandboxed
+        /// executor ran the gate, or the result comes from another host).
+        /// Absent = arc ran the command and observed the result, so existing
+        /// ledgers and bundles serialize and replay byte-identically.
+        #[serde(default, skip_serializing_if = "is_false")]
+        attested: bool,
+        /// Optional free-form note recorded alongside the evidence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     HoldSet {
         reason: String,
@@ -200,6 +209,15 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         merge_sha: Option<String>,
     },
+    /// An event whose `event_type` this build does not recognize (e.g. one
+    /// imported from a newer arc). Typed loading skips these entries; the
+    /// underlying files and raw export preserve their original bytes intact.
+    #[serde(other)]
+    Unknown,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The announcement class of a `message` event. Deliberately excludes
@@ -412,7 +430,7 @@ pub enum Closure {
     Superseded,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum VerifyResult {
     Pass,

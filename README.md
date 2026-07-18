@@ -295,6 +295,19 @@ command = "cargo test"
 profiles = ["local", "forge", "release"]   # omit = required for every profile
 ```
 
+By default `arc verify` runs the gate and observes the result itself. When
+the gate ran elsewhere — inside a sandbox, or on another host — record that
+external evidence with `--attest --result pass|fail` (optionally `--note`):
+
+```sh
+arc verify <change> --gate test --attest --result pass --note "ran in CI sandbox"
+```
+
+Attested evidence is recorded without executing the command and still counts
+toward gate green-ness, but `arc show` and `arc status` mark it `(attested)`
+so a lead can apply stricter judgment. `--attest` requires `--result`, and
+`--result` without `--attest` is a usage error (arc observes its own result).
+
 ## Identity
 
 Every event records an actor, and optionally a harness and native

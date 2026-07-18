@@ -188,6 +188,7 @@ pub struct VerificationEntry {
     pub command: String,
     pub revision: String,
     pub result: VerifyResult,
+    pub attested: bool,
     pub hostname: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -278,12 +279,11 @@ impl ChangeState {
         self.closure.is_some()
     }
 
-    /// Latest verification result per gate name at an exact revision.
-    pub fn gate_result_at(&self, gate: &str, revision: &str) -> Option<VerifyResult> {
+    /// Latest verification evidence per gate name at an exact revision.
+    pub fn gate_evidence_at(&self, gate: &str, revision: &str) -> Option<&VerificationEntry> {
         self.verifications
             .iter()
             .rfind(|v| v.gate.as_deref() == Some(gate) && v.revision == revision)
-            .map(|v| v.result)
     }
 
     pub fn resolve_finding_id(&self, needle: &str) -> Result<String> {
@@ -442,10 +442,19 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 }
                 let author = git_identity(author_name, author_email);
                 let committer = git_identity(committer_name, committer_email);
-                let provenance_mismatch = claim_actor
-                    .as_ref()
-                    .zip(author.as_ref())
-                    .map(|(actor, author)| actor != &author.name);
+                // Compare the claim actor against the recorded git identities by
+                // name or email. Email only adds match conditions, so it can cut
+                // a name-only false positive but never invent a new mismatch.
+                let provenance_mismatch =
+                    claim_actor
+                        .as_ref()
+                        .zip(author.as_ref())
+                        .map(|(actor, author)| {
+                            !(identity_matches(author, actor)
+                                || committer
+                                    .as_ref()
+                                    .is_some_and(|committer| identity_matches(committer, actor)))
+                        });
                 state.patchsets.push(Patchset {
                     id: patchset_id.clone(),
                     base: base.clone(),
@@ -676,6 +685,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 revision,
                 result,
                 hostname,
+                attested,
                 ..
             } => state.verifications.push(VerificationEntry {
                 event_id: ev.event_id.clone(),
@@ -683,6 +693,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 command: command.clone(),
                 revision: revision.clone(),
                 result: *result,
+                attested: *attested,
                 hostname: hostname.clone(),
                 created_at: ev.created_at,
             }),
@@ -756,6 +767,10 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     merge_sha: merge_sha.clone(),
                 });
             }
+            // An event this build does not recognize. Typed loading skips
+            // unknown events before replay, so this arm is defensive: keep the
+            // raw history intact without mutating the derived view.
+            Payload::Unknown => {}
         }
     }
     Ok(state)
@@ -766,6 +781,11 @@ fn git_identity(name: &Option<String>, email: &Option<String>) -> Option<GitIden
         name: name.clone(),
         email: email.clone(),
     })
+}
+
+/// A claim actor matches a git identity when it equals its name or email.
+fn identity_matches(identity: &GitIdentity, actor: &str) -> bool {
+    identity.name == actor || identity.email.as_deref() == Some(actor)
 }
 
 #[cfg(test)]
