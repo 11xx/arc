@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 /// Closed set of artifact kinds. Malformed kinds are rejected by clap at
 /// parse time, before anything is written.
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum ThreadKind {
     Note,
     Plan,
@@ -28,6 +28,7 @@ pub enum ThreadKind {
     Conclusion,
     Inbox,
     Spec,
+    Todo,
 }
 
 impl ThreadKind {
@@ -41,6 +42,31 @@ impl ThreadKind {
             ThreadKind::Conclusion => "conclusion",
             ThreadKind::Inbox => "inbox",
             ThreadKind::Spec => "spec",
+            ThreadKind::Todo => "todo",
+        }
+    }
+}
+
+/// Kinds that represent work waiting for a future session: they stay listed
+/// by `thread open` until an explicit `thread consume`. The other kinds are
+/// records, not queues.
+const ACTIONABLE_KINDS: [&str; 4] = ["todo", "handoff", "inbox", "plan"];
+
+/// How a consumed artifact was discharged. Advisory vocabulary recorded in
+/// the journal line; `done` covers the normal picked-up-and-finished path.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ConsumeOutcome {
+    Done,
+    Superseded,
+    Discarded,
+}
+
+impl ConsumeOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            ConsumeOutcome::Done => "done",
+            ConsumeOutcome::Superseded => "superseded",
+            ConsumeOutcome::Discarded => "discarded",
         }
     }
 }
@@ -79,6 +105,26 @@ pub enum ThreadCmd {
         #[arg(long)]
         json: bool,
     },
+    /// List actionable artifacts (todo/handoff/inbox/plan) not yet consumed
+    Open {
+        /// Restrict to one kind (any kind is accepted as a filter)
+        #[arg(long, value_enum)]
+        kind: Option<ThreadKind>,
+        /// Emit structured JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark an artifact consumed so it leaves the `open` queue
+    Consume {
+        /// Artifact filename inside the archive dir (a name, not a path)
+        filename: String,
+        /// How it was discharged
+        #[arg(long, value_enum, default_value = "done")]
+        outcome: ConsumeOutcome,
+        /// Optional context appended to the journal line
+        #[arg(long)]
+        note: Option<String>,
+    },
 }
 
 pub fn run(ctx: &Ctx, cmd: ThreadCmd) -> Result<i32> {
@@ -95,6 +141,12 @@ pub fn run(ctx: &Ctx, cmd: ThreadCmd) -> Result<i32> {
         } => note(ctx, &topic, kind, &body_file, title.as_deref()),
         ThreadCmd::Journal { topic, message } => journal(ctx, &topic, &message),
         ThreadCmd::Catchup { limit, json } => catchup(ctx, limit.unwrap_or(20), json),
+        ThreadCmd::Open { kind, json } => open(ctx, kind, json),
+        ThreadCmd::Consume {
+            filename,
+            outcome,
+            note,
+        } => consume(ctx, &filename, outcome, note.as_deref()),
     }
 }
 
@@ -368,6 +420,107 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
             println!("  {line}");
         }
     }
+    Ok(0)
+}
+
+/// The journal marker `consume` writes and `open` scans for. Matching is a
+/// plain substring so tool-less agents can retire an item by hand-writing
+/// the same words in a journal line.
+fn consumed_marker(filename: &str) -> String {
+    format!("consumed {filename}")
+}
+
+fn consumed_set(dir: &Path) -> Result<String> {
+    let path = dir.join("journal.md");
+    if !path.is_file() {
+        return Ok(String::new());
+    }
+    std::fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))
+}
+
+#[derive(Serialize)]
+struct OpenItems {
+    dir: String,
+    open: Vec<ArtifactEntry>,
+}
+
+fn open(ctx: &Ctx, kind: Option<ThreadKind>, json: bool) -> Result<i32> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    let mut open: Vec<ArtifactEntry> = Vec::new();
+    if dir.is_dir() {
+        let journal = consumed_set(&dir)?;
+        let mut names: Vec<String> = Vec::new();
+        for entry in
+            std::fs::read_dir(&dir).with_context(|| format!("cannot read {}", dir.display()))?
+        {
+            let name = entry?.file_name().to_string_lossy().to_string();
+            let Some((_, _, file_kind)) = parse_artifact_name(&name) else {
+                continue;
+            };
+            let wanted = match kind {
+                Some(kind) => file_kind == kind.as_str(),
+                None => ACTIONABLE_KINDS.contains(&file_kind.as_str()),
+            };
+            if wanted && !journal.contains(&consumed_marker(&name)) {
+                names.push(name);
+            }
+        }
+        names.sort();
+        names.reverse();
+        for name in names {
+            if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
+                let heading = first_heading(&dir.join(&name));
+                open.push(ArtifactEntry {
+                    file: name,
+                    timestamp: ts,
+                    topic,
+                    kind: file_kind,
+                    heading,
+                });
+            }
+        }
+    }
+
+    if json {
+        let out = OpenItems {
+            dir: dir.display().to_string(),
+            open,
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        println!("dir: {}", dir.display());
+        println!("open items (newest first):");
+        if open.is_empty() {
+            println!("  (none)");
+        }
+        for f in &open {
+            let heading = f.heading.as_deref().unwrap_or("");
+            println!("  {}  {}  {}  {}", f.timestamp, f.topic, f.kind, heading);
+        }
+    }
+    Ok(0)
+}
+
+fn consume(ctx: &Ctx, filename: &str, outcome: ConsumeOutcome, note: Option<&str>) -> Result<i32> {
+    if filename.contains(['/', '\\']) {
+        bail!("consume takes an artifact filename inside the archive dir, not a path");
+    }
+    let Some((_, topic, _)) = parse_artifact_name(filename) else {
+        bail!("{filename:?} is not a thread artifact name (<timestamp>-<topic>-<kind>.md)");
+    };
+    let dir = resolve_dir(&ctx.cwd)?;
+    if !dir.join(filename).is_file() {
+        bail!("no such artifact {} in {}", filename, dir.display());
+    }
+    if consumed_set(&dir)?.contains(&consumed_marker(filename)) {
+        bail!("{filename} is already consumed (see the journal)");
+    }
+    let mut message = format!("{} [{}]", consumed_marker(filename), outcome.as_str());
+    if let Some(note) = note {
+        message.push_str(&format!(": {note}"));
+    }
+    append_journal(&dir, ctx, Utc::now(), &topic, &message, None)?;
+    println!("consumed: {filename} [{}]", outcome.as_str());
     Ok(0)
 }
 
