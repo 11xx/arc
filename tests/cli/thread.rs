@@ -611,3 +611,239 @@ fn thread_archive_refuses_cold_name_collision_without_moving_source() {
     assert_eq!(fs::read_to_string(hot.join(name)).unwrap(), "hot\n");
     assert_eq!(fs::read_to_string(cold.join(name)).unwrap(), "cold\n");
 }
+
+#[test]
+fn thread_lane_open_writes_marker_and_list_shows_live() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args([
+            "thread",
+            "lane",
+            "open",
+            "work-a",
+            "--scope",
+            "topic-a,topic-b",
+            "--ttl",
+            "30m",
+            "--status",
+            "implementing",
+        ])
+        .assert()
+        .success();
+    let journal = fs::read_to_string(thread_dir(&repo).join("journal.md")).unwrap();
+    assert!(
+        journal.contains(" work-a: lane opened [30m] scope=topic-a,topic-b: implementing"),
+        "{journal}"
+    );
+
+    let text = stdout(repo.arc(&repo.root).args(["thread", "lane", "list"]));
+    assert!(text.contains("work-a  test session-a  live"), "{text}");
+    assert!(text.contains("+scope: topic-a, topic-b"), "{text}");
+    assert!(text.contains("implementing"), "{text}");
+
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["thread", "lane", "list", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(value["lanes"][0]["topic"], "work-a");
+    assert_eq!(value["lanes"][0]["owner_harness"], "test");
+    assert_eq!(value["lanes"][0]["owner_session"], "session-a");
+    assert_eq!(value["lanes"][0]["state"], "live");
+    assert_eq!(value["lanes"][0]["ttl_seconds"], 1800);
+    assert_eq!(
+        value["lanes"][0]["scope"],
+        serde_json::json!(["topic-a", "topic-b"])
+    );
+    assert_eq!(value["lanes"][0]["status"], "implementing");
+}
+
+#[test]
+fn thread_lane_requires_session_identity() {
+    let repo = Repo::new();
+    let dir = thread_dir(&repo);
+    repo.arc(&repo.root)
+        .env_remove("ARC_SESSION")
+        .args(["thread", "lane", "open", "work-a"])
+        .assert()
+        .failure();
+    assert!(!dir.exists());
+}
+
+#[test]
+fn thread_lane_rule_of_one_implicit_close() {
+    let repo = Repo::new();
+    for topic in ["lane-a", "lane-b"] {
+        repo.arc(&repo.root)
+            .args(["thread", "lane", "open", topic])
+            .assert()
+            .success();
+    }
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["thread", "lane", "list", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(value["lanes"].as_array().unwrap().len(), 1);
+    assert_eq!(value["lanes"][0]["topic"], "lane-b");
+}
+
+#[test]
+fn thread_lane_renew_owner_only_and_updates_ttl() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["thread", "lane", "open", "work-a"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["thread", "lane", "renew", "work-a", "--ttl", "45m"])
+        .assert()
+        .success();
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["thread", "lane", "list", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(value["lanes"][0]["ttl_seconds"], 2700);
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "session-b")
+        .args(["thread", "lane", "renew", "work-a"])
+        .assert()
+        .failure();
+    repo.arc(&repo.root)
+        .args(["thread", "lane", "renew", "unknown"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn thread_lane_close_owner_and_takeover_semantics() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["thread", "lane", "open", "done-lane"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["thread", "lane", "close", "done-lane"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["thread", "lane", "close", "done-lane"])
+        .assert()
+        .failure();
+
+    repo.arc(&repo.root)
+        .args(["thread", "lane", "open", "takeover", "--ttl", "1s"])
+        .assert()
+        .success();
+    let live_conflict = repo
+        .arc(&repo.root)
+        .env("ARC_SESSION", "session-b")
+        .args([
+            "thread",
+            "lane",
+            "close",
+            "takeover",
+            "--outcome",
+            "expired",
+        ])
+        .output()
+        .unwrap();
+    assert!(!live_conflict.status.success());
+    let stderr = String::from_utf8_lossy(&live_conflict.stderr);
+    assert!(stderr.contains("owner test session-a"), "{stderr}");
+    assert!(stderr.contains("idle"), "{stderr}");
+    assert!(stderr.contains("ttl 1s"), "{stderr}");
+    thread::sleep(Duration::from_secs(2));
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "session-b")
+        .args([
+            "thread",
+            "lane",
+            "close",
+            "takeover",
+            "--outcome",
+            "expired",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn thread_lane_liveness_refreshes_from_any_owner_journal_line() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["thread", "lane", "open", "work-a", "--ttl", "1s"])
+        .assert()
+        .success();
+    thread::sleep(Duration::from_secs(2));
+    repo.arc(&repo.root)
+        .args(["thread", "journal", "other-topic", "still active"])
+        .assert()
+        .success();
+    let text = stdout(repo.arc(&repo.root).args(["thread", "lane", "list"]));
+    assert!(text.contains("work-a  test session-a  live"), "{text}");
+}
+
+#[test]
+fn thread_open_annotates_items_covered_by_live_lanes() {
+    let repo = Repo::new();
+    let dir = thread_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("20260101T000000Z-covered-todo.md"), "# Covered\n").unwrap();
+    fs::write(dir.join("20260101T000001Z-free-todo.md"), "# Free\n").unwrap();
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "external-session")
+        .args([
+            "thread",
+            "lane",
+            "open",
+            "external-lane",
+            "--scope",
+            "covered",
+            "--ttl",
+            "1s",
+        ])
+        .assert()
+        .success();
+
+    let text = stdout(repo.arc(&repo.root).args(["thread", "open"]));
+    assert!(
+        text.contains("covered  todo  # Covered [lane: external-lane — test external, external]"),
+        "{text}"
+    );
+    assert!(!text.contains("# Free [lane:"), "{text}");
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["thread", "open", "--json"]),
+    ))
+    .unwrap();
+    let covered = value["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["topic"] == "covered")
+        .unwrap();
+    assert_eq!(covered["lane"]["topic"], "external-lane");
+    assert_eq!(covered["lane"]["owner_session"], "external-session");
+    assert_eq!(covered["lane"]["this_session"], false);
+    thread::sleep(Duration::from_secs(2));
+    let stale = stdout(repo.arc(&repo.root).args(["thread", "open"]));
+    assert!(!stale.contains("[lane:"), "{stale}");
+}
+
+#[test]
+fn thread_catchup_shows_lanes_block() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["thread", "lane", "open", "work-a"])
+        .assert()
+        .success();
+    let text = stdout(repo.arc(&repo.root).args(["thread", "catchup"]));
+    assert!(text.starts_with("lanes:\n"), "{text}");
+    assert!(text.find("lanes:").unwrap() < text.find("artifacts (newest first):").unwrap());
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["thread", "catchup", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(value["lanes"][0]["topic"], "work-a");
+}
