@@ -400,17 +400,15 @@ a real concurrent multi-machine need exists.
 > **The ledger is authoritative and gating; the journal is advisory and
 > contextual.**
 
-`arc journal` (alias: `arc thread`) encodes the drift-prone mechanics of the
-cross-harness project journal while artifacts stay plain Markdown any
-tool-less agent can read and write. The canonical agent-written event log is
-the append-only `journal.jsonl`, whose versioned `thread-journal/1` events can
-be streamed as NDJSON with `journal events [--limit N]`; legacy `journal.md`
-archives remain readable forever. `dir` prints the resolved journal directory
-(`ARC_THREAD_DIR`, then the `[threads.dirs]` map in the config file keyed by
-repository root, then `<ai_home>/threads/<repo-slug>` — storage-tier names
-keep the legacy thread spelling as compatibility contracts); `note` writes a
-timestamped `<ts>-<topic>-<kind>.md` artifact and its journal event; `log`
-(alias: `journal`) appends a log-only event; `catchup` lists newest-first.
+`arc journal` encodes the drift-prone mechanics of the cross-harness project
+journal while artifacts stay plain Markdown any tool-less agent can read and
+write. The canonical agent-written event log is the append-only
+`events.jsonl`, whose versioned `journal-events/1` events can be streamed as
+NDJSON with `journal events [--limit N]`. `dir` prints the resolved journal
+directory (`ARC_JOURNAL_DIR`, then the `[journals.dirs]` map in the config
+file keyed by repository root, then `<ai_home>/journals/<repo-slug>`); `note`
+writes a timestamped `<ts>-<topic>-<kind>.md` artifact and its journal event;
+`log` appends a log-only event; `catchup` lists newest-first.
 Work waiting for a future session uses the primary actionable kinds — `todo`,
 `handoff`, `inbox`, `plan` — plus lower-priority `later`. `journal open` lists
 the primary queue first and then a separate later section until an explicit

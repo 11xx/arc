@@ -18,13 +18,11 @@ daemon, no database, no network, no multi-machine ref sync.
 - The ledger is authoritative and gating; the journal is advisory and
   contextual. Claims, stages, and journal lanes are advisory liveness
   signals, never locks. Journal artifacts stay hand-writable Markdown; the
-  event log is typed JSONL (`thread-journal/1`), fails open on malformed
-  lines, and is versioned like every other output schema.
+  event log is typed JSONL (`journal-events/1` in `events.jsonl`), fails
+  open on malformed lines, and is versioned like every other output schema.
 - The project journal lives outside the repo (`arc journal dir`) so
   worktrees stay clean; cross-session context goes there, not into
-  tracked files. `arc thread` and the storage-tier thread spellings
-  (`ARC_THREAD_DIR`, `[threads]`, the `threads/` path, `thread-journal/1`)
-  are compatibility contracts for the journal surface.
+  tracked files.
 - DELEGATION.md is the canon for mechanism-routing prose and is referenced
   by global agent config — edit deliberately, keep it in sync with the
   `agent-routing` manifests.

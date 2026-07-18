@@ -21,11 +21,14 @@ no version has been tagged yet.
 
 ### Changed
 
+- The journal drops every thread spelling: no `arc thread` or nested
+  `journal` aliases, and the storage tier is `ARC_JOURNAL_DIR`,
+  `[journals]`, `<ai_home>/journals/`, and `journal-events/1` in
+  `events.jsonl`; the legacy `journal.md` merge-read is removed, so
+  existing archives need a one-time migration (`journal-clean-break`).
 - The thread surface is renamed to the project journal: `arc journal` with
-  nested `log` replaces `arc thread` with nested `journal`, both old
-  spellings remain as aliases, and storage-tier names (`ARC_THREAD_DIR`,
-  `[threads]`, the `threads/` path, `thread-journal/1`) keep the legacy
-  spelling as compatibility contracts (`journal-rename`).
+  nested `log` replaces `arc thread` with nested `journal`
+  (`journal-rename`).
 - The thread journal is now a typed `thread-journal/1` JSONL event log while
   legacy Markdown journals remain readable (`journal-jsonl`).
 
