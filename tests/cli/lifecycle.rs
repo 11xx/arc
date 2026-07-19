@@ -853,3 +853,63 @@ fn show_renders_messages_section_chronologically() {
     let second = rendered.find("second announced").unwrap();
     assert!(section < first && first < second, "chronological order");
 }
+
+#[test]
+fn piped_output_dies_on_sigpipe_without_panicking() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let repo = Repo::new();
+    // Produce enough ledger events that `arc events` output overflows the OS
+    // pipe buffer, so the child is guaranteed to still be writing when the
+    // reader goes away.
+    for i in 0..250 {
+        repo.arc(&repo.root)
+            .args(["begin", &format!("ch{i}"), "--no-worktree"])
+            .assert()
+            .success();
+    }
+
+    let binary = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo should provide arc binary");
+    let mut child = Command::new(binary)
+        .args(["events"])
+        .current_dir(&repo.root)
+        .env("HOME", &repo.home)
+        .env("ARC_ACTOR", "tester")
+        .env("ARC_HARNESS", "test")
+        .env("ARC_SESSION", "session-a")
+        .env_remove("ARC_ROLE")
+        .env_remove("ARC_DATA_DIR")
+        .env_remove("ARC_DATA_ROOT")
+        .env_remove("ARC_WORKTREES_DIR")
+        .env_remove("AI_HOME")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Read a single line, then drop the read end so the child's next write
+    // lands on a broken pipe.
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    drop(reader);
+
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    let status = child.wait().unwrap();
+
+    assert_eq!(
+        status.signal(),
+        Some(13),
+        "arc should be terminated by SIGPIPE, got {status:?} (stderr: {stderr})"
+    );
+    assert!(
+        !stderr.contains("panic"),
+        "arc must not panic on a broken pipe: {stderr}"
+    );
+}

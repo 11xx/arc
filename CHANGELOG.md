@@ -13,6 +13,9 @@ no version has been tagged yet.
 
 ### Fixed
 
+- Piped output dies silently when the reader goes away instead of panicking
+  with a broken-pipe error (e.g. `arc list --format compact | head`)
+  (`sigpipe-exit`).
 - Event publication fsyncs the containing directory after linking the event
   file, preserving acknowledged entries across power loss (`store-dir-fsync`).
 - Attested verification events omit unobserved exit codes and durations

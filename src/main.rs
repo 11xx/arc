@@ -615,6 +615,20 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<&'static str> {
 }
 
 fn main() {
+    // Rust ignores SIGPIPE by default, so a downstream reader closing the
+    // pipe (`arc list --format compact | head`) surfaces as a panic on the
+    // next write instead of a clean exit. arc is a pipeline citizen and must
+    // die silently like git or cat, so restore the default SIGPIPE
+    // disposition before any output can be produced.
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+    extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+    }
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+
     let cli = Cli::parse();
     match run(cli) {
         Ok(code) => std::process::exit(code),
