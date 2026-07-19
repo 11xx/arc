@@ -80,6 +80,14 @@ pub struct GateStatus {
     /// The head evidence for this gate is attested (arc did not run it), so a
     /// lead can apply stricter judgment even though it counts for green-ness.
     pub attested: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tail: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub timed_out: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Serialize)]
@@ -317,6 +325,11 @@ pub fn build_at(
                 .into(),
                 green_at_head: result == Some(crate::model::VerifyResult::Pass),
                 attested: evidence.is_some_and(|e| e.attested),
+                output_tail: evidence
+                    .filter(|e| e.result == crate::model::VerifyResult::Fail)
+                    .and_then(|e| e.output_tail.clone()),
+                timed_out: evidence
+                    .is_some_and(|e| e.result == crate::model::VerifyResult::Fail && e.timed_out),
             }
         })
         .collect();

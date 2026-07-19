@@ -1,5 +1,11 @@
+//! Repository-declared verification gates and their optional execution policy.
+//!
+//! Gate timeouts use the same positive `s`/`m`/`h` duration syntax as claim
+//! leases. Omitting a timeout preserves unbounded execution.
+
+use crate::commands::parse_duration;
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{de::Error as _, Deserialize, Deserializer};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -17,6 +23,17 @@ pub struct Gate {
     pub command: String,
     #[serde(default)]
     pub profiles: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_timeout")]
+    pub timeout: Option<u64>,
+}
+
+fn deserialize_timeout<'de, D>(deserializer: D) -> std::result::Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|raw| parse_duration(&raw).map_err(D::Error::custom))
+        .transpose()
 }
 
 pub fn load(repo_toplevel: &Path) -> Result<GatesFile> {

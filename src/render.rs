@@ -247,8 +247,25 @@ pub fn markdown(
                 } else {
                     "NOT green at head"
                 },
-                if g.attested { " (attested)" } else { "" }
+                if g.attested {
+                    " (attested)"
+                } else if g.timed_out {
+                    " (timed out)"
+                } else {
+                    ""
+                }
             );
+            if let Some(output_tail) = &g.output_tail {
+                let marker = if output_tail.len() >= 4096 {
+                    "[output truncated to final 4096 bytes]"
+                } else {
+                    "[output tail]"
+                };
+                let _ = writeln!(w, "  {marker}");
+                for line in output_tail.lines() {
+                    let _ = writeln!(w, "    {line}");
+                }
+            }
         }
     }
 
@@ -262,7 +279,13 @@ pub fn markdown(
                 v.command,
                 v.revision,
                 v.result,
-                if v.attested { " (attested)" } else { "" },
+                if v.attested {
+                    " (attested)"
+                } else if v.timed_out {
+                    " (timed out)"
+                } else {
+                    ""
+                },
                 v.hostname
             );
         }

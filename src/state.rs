@@ -198,6 +198,8 @@ pub struct VerificationEntry {
     pub revision: String,
     pub result: VerifyResult,
     pub attested: bool,
+    pub output_tail: Option<String>,
+    pub timed_out: bool,
     pub hostname: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -708,6 +710,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 result,
                 hostname,
                 attested,
+                output_tail,
+                timed_out,
                 ..
             } => state.verifications.push(VerificationEntry {
                 event_id: ev.event_id.clone(),
@@ -716,6 +720,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 revision: revision.clone(),
                 result: *result,
                 attested: *attested,
+                output_tail: output_tail.clone(),
+                timed_out: *timed_out,
                 hostname: hostname.clone(),
                 created_at: ev.created_at,
             }),

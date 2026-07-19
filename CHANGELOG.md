@@ -36,6 +36,7 @@ no version has been tagged yet.
 
 ### Added
 
+- Verification captures final output tails and enforces optional per-gate process-group timeouts (`gate-evidence-output`).
 - Read-only `arc doctor [--json]` ledger integrity and housekeeping checks
   (`ledger-doctor`).
 - Read-only `thread doctor [--json]` archive health and housekeeping checks
