@@ -301,6 +301,7 @@ pub fn brief(
     Ok(0)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn metadata(
     ctx: &Ctx,
     reference: &str,
