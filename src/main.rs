@@ -10,6 +10,7 @@ mod inbox;
 mod journal;
 mod model;
 mod policy;
+mod project;
 mod render;
 mod state;
 mod status;
@@ -276,6 +277,12 @@ enum Cmd {
         /// Accepted for compatibility; status output is always JSON
         #[arg(long)]
         json: bool,
+        /// Print one dotted object-key/array-index path
+        #[arg(long, conflicts_with = "fields")]
+        get: Option<String>,
+        /// Print a top-level JSON field subset
+        #[arg(long, conflicts_with = "get")]
+        fields: Option<String>,
     },
     /// Report whether declared prerequisite changes have integrated
     BlockerStatus { change: Option<String> },
@@ -356,6 +363,9 @@ enum Cmd {
         claim: bool,
         #[arg(long)]
         note: Option<String>,
+        /// Read the stage note from a file ('-' for stdin)
+        #[arg(long, conflicts_with = "note")]
+        note_file: Option<String>,
     },
     /// Record the current branch head as a new patchset
     Snapshot {
@@ -471,14 +481,23 @@ enum Cmd {
         change: Option<String>,
         #[arg(long)]
         json: bool,
+        /// Print one dotted object-key/array-index path
+        #[arg(long, conflicts_with = "fields")]
+        get: Option<String>,
+        /// Print a top-level JSON field subset
+        #[arg(long, conflicts_with = "get")]
+        fields: Option<String>,
     },
     /// Print one stable statusline summary for the current change
     Prompt { change: Option<String> },
     /// Set an integration hold
     Hold {
         change: String,
-        #[arg(long)]
-        reason: String,
+        #[arg(long, required_unless_present = "reason_file")]
+        reason: Option<String>,
+        /// Read the hold reason from a file ('-' for stdin)
+        #[arg(long, conflicts_with = "reason")]
+        reason_file: Option<String>,
     },
     /// Release the active hold
     ReleaseHold {
@@ -787,9 +806,14 @@ fn run(cli: Cli) -> Result<i32> {
             )?;
             Ok(0)
         }
-        Cmd::Status { change, json: _ } => {
+        Cmd::Status {
+            change,
+            json: _,
+            get,
+            fields,
+        } => {
             let change = infer(change.as_deref())?;
-            commands::status_cmd(&ctx, &change)?;
+            commands::status_cmd(&ctx, &change, get.as_deref(), fields.as_deref())?;
             Ok(0)
         }
         Cmd::BlockerStatus { change } => {
@@ -859,8 +883,13 @@ fn run(cli: Cli) -> Result<i32> {
             stage,
             claim,
             note,
+            note_file,
         } => {
             let change = infer(change.as_deref())?;
+            let note = match (note, note_file) {
+                (None, None) => None,
+                (note, note_file) => Some(commands::read_body(note, note_file)?),
+            };
             commands::stage(&ctx, &change, stage, note, claim)
         }
         Cmd::Snapshot {
@@ -972,15 +1001,31 @@ fn run(cli: Cli) -> Result<i32> {
             commands::done(&ctx, &change)
         }
         Cmd::Env => Ok(context::print_env()),
-        Cmd::Resume { change, json } => {
-            context::resume(&ctx, change.as_deref(), json)?;
+        Cmd::Resume {
+            change,
+            json,
+            get,
+            fields,
+        } => {
+            context::resume(
+                &ctx,
+                change.as_deref(),
+                json,
+                get.as_deref(),
+                fields.as_deref(),
+            )?;
             Ok(0)
         }
         Cmd::Prompt { change } => {
             context::prompt(&ctx, change.as_deref())?;
             Ok(0)
         }
-        Cmd::Hold { change, reason } => {
+        Cmd::Hold {
+            change,
+            reason,
+            reason_file,
+        } => {
+            let reason = commands::read_body(reason, reason_file)?;
             commands::hold(&ctx, &change, reason)?;
             Ok(0)
         }

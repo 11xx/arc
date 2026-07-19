@@ -39,6 +39,8 @@ no version has been tagged yet.
 
 ### Added
 
+- Status/resume field projection, discussion-event ID prefixes, and file-backed
+  lane, stage, and hold text input (`status-field-projection`).
 - Resumable event cursors, non-fatal event and watch command hooks, and
   first-winner multi-condition watches (`event-hooks-cursor`).
 - Atomic `arc take` scheduling claims the highest-priority ready change, with

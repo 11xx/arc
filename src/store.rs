@@ -1,6 +1,6 @@
 use crate::gitio;
 use crate::ids;
-use crate::model::Event;
+use crate::model::{Event, Payload};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -210,6 +210,37 @@ impl Store {
                 matches
                     .iter()
                     .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+
+    /// Resolve a finding or comment event ID exactly or by unique prefix.
+    pub fn resolve_discussion_event(&self, change_id: &str, needle: &str) -> Result<Event> {
+        ids::validate_id_component(needle)?;
+        let matches = self
+            .load_events(change_id)?
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event.payload,
+                    Payload::CommentAdded { .. } | Payload::FindingAdded { .. }
+                )
+            })
+            .filter(|event| event.event_id == needle || event.event_id.starts_with(needle))
+            .collect::<Vec<_>>();
+        if let Some(event) = matches.iter().find(|event| event.event_id == needle) {
+            return Ok(event.clone());
+        }
+        match matches.len() {
+            0 => bail!("no discussion event matches {needle:?}"),
+            1 => Ok(matches.into_iter().next().expect("one match")),
+            _ => bail!(
+                "ambiguous discussion event {needle:?}: matches {}",
+                matches
+                    .iter()
+                    .map(|event| event.event_id.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
             ),

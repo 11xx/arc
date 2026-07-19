@@ -131,22 +131,29 @@ struct ResumeOutput {
     journal: journal::ContextJournal,
 }
 
-pub fn resume(ctx: &Ctx, reference: Option<&str>, json: bool) -> Result<()> {
+pub fn resume(
+    ctx: &Ctx,
+    reference: Option<&str>,
+    json: bool,
+    get: Option<&str>,
+    fields: Option<&str>,
+) -> Result<()> {
     let store = ctx.store()?;
     let change_id = resolve_change_or_infer(&store, &ctx.cwd, reference)?;
     let (_, state) = ctx.load_state(&store, &change_id)?;
     let status = commands::status_output(ctx, &store, &state)?;
     let journal = journal::context_for_change(ctx, &state.slug)?;
 
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&ResumeOutput {
+    if json || get.is_some() || fields.is_some() {
+        commands::print_projected(
+            serde_json::to_value(ResumeOutput {
                 schema: "arc-resume/1",
                 status,
                 journal,
-            })?
-        );
+            })?,
+            get,
+            fields,
+        )?;
         return Ok(());
     }
 
