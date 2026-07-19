@@ -1,6 +1,7 @@
 use crate::gates::GatesFile;
 use crate::gitio;
 use crate::model::{MessageSeverity, MessageType, Verdict};
+use crate::policy::PolicyFile;
 use crate::state::{self, ChangeState, ClaimIdentity, GitIdentity};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -10,6 +11,7 @@ use std::path::Path;
 
 pub const STATUS_SCHEMA: &str = "arc-status/5";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
+pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 
 /// Typed integration blockers, ordered by exit-code precedence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -112,6 +114,8 @@ pub struct BlockerSummary {
     pub blocking_findings: usize,
     pub gate_status: BTreeMap<String, String>,
     pub hold: HoldSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,6 +206,8 @@ pub struct StatusReport {
     pub hold: Option<String>,
     pub gates: Vec<GateStatus>,
     pub blocker_summary: BlockerSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_rejection_reason: Option<String>,
     pub next_action: String,
     pub ready_reason: String,
     pub ready_to_integrate: bool,
@@ -236,16 +242,26 @@ pub fn build(
     state: &ChangeState,
     cwd: &Path,
     gates: &GatesFile,
+    policy: &PolicyFile,
     dependency_status: BlockerStatus,
     blocks: Vec<String>,
 ) -> Result<StatusReport> {
-    build_at(state, cwd, gates, dependency_status, blocks, Utc::now())
+    build_at(
+        state,
+        cwd,
+        gates,
+        policy,
+        dependency_status,
+        blocks,
+        Utc::now(),
+    )
 }
 
 pub fn build_at(
     state: &ChangeState,
     cwd: &Path,
     gates: &GatesFile,
+    policy: &PolicyFile,
     dependency_status: BlockerStatus,
     blocks: Vec<String>,
     now: DateTime<Utc>,
@@ -264,18 +280,34 @@ pub fn build_at(
     };
 
     let verdict = state.latest_verdict().map(|v| {
+        let approved_patchset = latest_patchset
+            .as_ref()
+            .filter(|patchset| patchset.id == v.patchset_id);
+        let rejected_self_approval = policy.policy.forbid_self_approval
+            && approved_patchset.is_some_and(|patchset| patchset.actor == v.actor);
         let valid = v.verdict == Verdict::Approved
             && latest_patchset
                 .as_ref()
                 .map(|p| p.id == v.patchset_id)
                 .unwrap_or(false)
-            && head_matches;
+            && head_matches
+            && !rejected_self_approval;
         VerdictStatus {
             verdict: v.verdict,
             patchset_id: v.patchset_id.clone(),
             actor: v.actor.clone(),
             valid_for_current_head: valid,
         }
+    });
+    let approval_rejection_reason = verdict.as_ref().and_then(|verdict| {
+        (!verdict.valid_for_current_head
+            && verdict.verdict == Verdict::Approved
+            && latest_patchset.as_ref().is_some_and(|patchset| {
+                policy.policy.forbid_self_approval
+                    && patchset.id == verdict.patchset_id
+                    && patchset.actor == verdict.actor
+            }))
+        .then(|| SELF_APPROVAL_REASON.to_string())
     });
 
     let findings: Vec<FindingSummary> = state
@@ -385,6 +417,7 @@ pub fn build_at(
             active: state.hold.is_some(),
             reason: state.hold.clone(),
         },
+        approval_reason: approval_rejection_reason.clone(),
     };
 
     let next_action = if state.is_closed() {
@@ -409,6 +442,8 @@ pub fn build_at(
         "release_hold".into()
     } else if let Some(gate) = gate_statuses.iter().find(|gate| !gate.green_at_head) {
         format!("run_gate:{}", gate.name)
+    } else if let Some(reason) = approval_rejection_reason.as_ref() {
+        reason.clone()
     } else if !verdict
         .as_ref()
         .map(|v| v.valid_for_current_head)
@@ -478,6 +513,7 @@ pub fn build_at(
         hold: state.hold.clone(),
         gates: gate_statuses,
         blocker_summary,
+        approval_rejection_reason,
         next_action,
         ready_reason,
         ready_to_integrate: ready,

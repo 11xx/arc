@@ -1,0 +1,31 @@
+//! Repository-declared integration policy.
+//!
+//! Policy is loaded from `.arc/policy.toml`. An absent file preserves the
+//! default behavior, with every policy disabled.
+
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::path::Path;
+
+/// Integration policy committed at `.arc/policy.toml` in the repository.
+#[derive(Debug, Default, Deserialize)]
+pub struct PolicyFile {
+    #[serde(default)]
+    pub policy: Policy,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct Policy {
+    #[serde(default)]
+    pub forbid_self_approval: bool,
+}
+
+pub fn load(repo_toplevel: &Path) -> Result<PolicyFile> {
+    let path = repo_toplevel.join(".arc").join("policy.toml");
+    if !path.is_file() {
+        return Ok(PolicyFile::default());
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    toml::from_str(&text).with_context(|| format!("malformed {}", path.display()))
+}

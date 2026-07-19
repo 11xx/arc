@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, Serialize)]
 pub struct Patchset {
     pub id: String,
+    pub actor: String,
     pub base: String,
     pub head: String,
     pub merge_base: Option<String>,
@@ -481,6 +482,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                         });
                 state.patchsets.push(Patchset {
                     id: patchset_id.clone(),
+                    actor: ev.actor.clone(),
                     base: base.clone(),
                     head: head.clone(),
                     merge_base: merge_base.clone(),

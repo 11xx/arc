@@ -36,6 +36,7 @@ no version has been tagged yet.
 
 ### Added
 
+- Opt-in repository policy rejects self-approval using snapshot and verdict actor strings (`self-approval-policy`).
 - Verification captures final output tails and enforces optional per-gate process-group timeouts (`gate-evidence-output`).
 - Read-only `arc doctor [--json]` ledger integrity and housekeeping checks
   (`ledger-doctor`).

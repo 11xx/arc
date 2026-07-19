@@ -8,6 +8,7 @@ mod ids;
 mod inbox;
 mod journal;
 mod model;
+mod policy;
 mod render;
 mod state;
 mod status;

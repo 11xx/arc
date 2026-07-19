@@ -1,0 +1,2 @@
+[policy]
+forbid_self_approval = true

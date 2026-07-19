@@ -184,6 +184,9 @@ pub fn markdown(
                 "STALE for current head"
             }
         );
+        if let Some(reason) = &report.approval_rejection_reason {
+            let _ = writeln!(w, "- {reason}");
+        }
     }
 
     if !state.findings.is_empty() {
@@ -458,7 +461,14 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                 }
             }
             Blocker::NoValidApproval => {
-                let _ = writeln!(out, "  - Current head has no valid approval");
+                let _ = writeln!(
+                    out,
+                    "  - {}",
+                    report
+                        .approval_rejection_reason
+                        .as_deref()
+                        .unwrap_or("Current head has no valid approval")
+                );
             }
             Blocker::GatesNotGreen => {
                 for gate in report.gates.iter().filter(|gate| !gate.green_at_head) {
