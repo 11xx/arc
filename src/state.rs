@@ -254,6 +254,7 @@ pub struct ChangeState {
     pub blocked_by: Vec<String>,
     pub tags: Vec<String>,
     pub assigned_to: Option<String>,
+    pub priority: i32,
     pub opened_at: chrono::DateTime<chrono::Utc>,
     pub patchsets: Vec<Patchset>,
     pub briefs: Vec<Brief>,
@@ -350,6 +351,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     blocked_by: blocked_by.clone(),
                     tags: tags.clone(),
                     assigned_to: None,
+                    priority: 0,
                     opened_at: ev.created_at,
                     patchsets: Vec::new(),
                     briefs: Vec::new(),
@@ -386,6 +388,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 add_tags,
                 remove_tags,
                 assign,
+                priority,
             } => {
                 state
                     .blocked_by
@@ -411,6 +414,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     } else {
                         Some(trimmed.to_string())
                     };
+                }
+                if let Some(priority) = priority {
+                    state.priority = *priority;
                 }
             }
             Payload::Message {

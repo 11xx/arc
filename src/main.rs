@@ -240,6 +240,18 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Atomically claim the highest-priority ready change
+    Take {
+        /// Require every supplied tag (repeatable)
+        #[arg(long)]
+        tag: Vec<String>,
+        /// Lease duration (positive integer with s, m, or h suffix; default 2h)
+        #[arg(long)]
+        ttl: Option<String>,
+        /// Print the full status JSON for the taken change
+        #[arg(long)]
+        json: bool,
+    },
     /// Append dependency, tag, or assignment metadata to an open change
     Metadata {
         change: String,
@@ -254,6 +266,9 @@ enum Cmd {
         /// Assign to a harness (advisory; latest wins; "" clears)
         #[arg(long)]
         assign: Option<String>,
+        /// Scheduling priority (higher values are taken first; default 0)
+        #[arg(long)]
+        priority: Option<i32>,
     },
     /// Machine-readable status report (the versioned arc-status/5 schema)
     Status {
@@ -727,6 +742,7 @@ fn run(cli: Cli) -> Result<i32> {
             commands::inbox(&ctx, assigned_to, json)?;
             Ok(0)
         }
+        Cmd::Take { tag, ttl, json } => commands::take(&ctx, tag, ttl, json),
         Cmd::Metadata {
             change,
             blocked_by,
@@ -734,6 +750,7 @@ fn run(cli: Cli) -> Result<i32> {
             tag,
             remove_tag,
             assign,
+            priority,
         } => {
             commands::metadata(
                 &ctx,
@@ -743,6 +760,7 @@ fn run(cli: Cli) -> Result<i32> {
                 tag,
                 remove_tag,
                 assign,
+                priority,
             )?;
             Ok(0)
         }

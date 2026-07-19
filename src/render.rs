@@ -46,6 +46,7 @@ pub fn markdown(
     if let Some(assigned) = &state.assigned_to {
         let _ = writeln!(w, "- Assigned to: {assigned}");
     }
+    let _ = writeln!(w, "- Priority: {}", state.priority);
 
     if !report.blocker_status.blockers_ready.is_empty() {
         let _ = writeln!(w, "\n## Blocked by\n");

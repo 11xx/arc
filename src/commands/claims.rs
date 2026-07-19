@@ -3,6 +3,89 @@
 
 use super::*;
 
+/// Select and claim one ready change while holding the repository graph lock.
+/// Competing `take` calls therefore cannot observe and claim the same winner.
+pub fn take(ctx: &Ctx, tags: Vec<String>, ttl: Option<String>, json: bool) -> Result<i32> {
+    let owner = command_identity(ctx)?;
+    let tags = normalize_tags(tags)?;
+    let ttl_seconds = ttl
+        .as_deref()
+        .map(parse_duration)
+        .transpose()?
+        .unwrap_or(2 * 60 * 60);
+    let store = ctx.store()?;
+    let _graph = store.lock_graph()?;
+    let states = ctx.load_all_states(&store)?;
+    let now = chrono::Utc::now();
+    let mut candidates = states
+        .values()
+        .filter(|candidate| {
+            !candidate.is_closed()
+                && candidate.hold.is_none()
+                && tags.iter().all(|tag| candidate.tags.contains(tag))
+                && !dependency_status(candidate, &states).blocked
+                && candidate.claim.as_ref().is_none_or(|claim| {
+                    let timing = state::claim_timing_at(claim, now);
+                    !timing.active || timing.stale
+                })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| a.opened_at.cmp(&b.opened_at))
+    });
+    let Some(candidate) = candidates.first() else {
+        return Ok(2);
+    };
+    let mut previous_event_id = store
+        .load_events(&candidate.change_id)?
+        .last()
+        .context("change has no opening event")?
+        .event_id
+        .clone();
+    if let Some(claim) = candidate.claim.as_ref().filter(|claim| {
+        let timing = state::claim_timing_at(claim, now);
+        timing.active && timing.stale
+    }) {
+        let mut release = identity_event_at(
+            ctx,
+            &store,
+            &candidate.change_id,
+            now,
+            &owner,
+            Payload::ClaimReleased {
+                claim_id: claim.claim_id.clone(),
+            },
+        );
+        release.event_id = event_id_after(&previous_event_id)?;
+        store.append_event(&release)?;
+        previous_event_id = release.event_id;
+    }
+    let mut event = identity_event_at(
+        ctx,
+        &store,
+        &candidate.change_id,
+        now,
+        &owner,
+        Payload::ClaimSet {
+            claim_id: ids::new_event_id(),
+            ttl_seconds,
+            stage_budgets: default_stage_budgets(),
+        },
+    );
+    event.event_id = event_id_after(&previous_event_id)?;
+    store.append_event(&event)?;
+    if json {
+        let state = state::reduce(&store.load_events(&candidate.change_id)?)?;
+        let output = status_output(ctx, &store, &state)?;
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("{}", candidate.change_id);
+    }
+    Ok(0)
+}
+
 pub fn claim(
     ctx: &Ctx,
     reference: &str,

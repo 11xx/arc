@@ -153,6 +153,7 @@ pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
         let report = ctx.report(&store, state)?;
         inbox.absorb(state, &report);
     }
+    inbox.sort_by_priority();
 
     if json {
         println!("{}", serde_json::to_string_pretty(&inbox)?);

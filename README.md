@@ -245,7 +245,22 @@ after creation:
 ```sh
 arc metadata radio-refill-fix --blocked-by radio-storage --tag '#radio'
 arc metadata radio-refill-fix --remove-blocked-by radio-storage --remove-tag '#radio'
+arc metadata radio-refill-fix --priority 20
 ```
+
+Fleet executors can atomically select and claim work instead of racing a
+separate query and claim:
+
+```sh
+arc take --tag '#radio' --ttl 2h
+```
+
+`arc take` considers open, unheld changes whose blockers are integrated and
+whose claims are absent, expired, or stale. It selects higher priorities first,
+then the oldest change, and exits 2 when nothing is ready. Repeated `--tag`
+filters are conjunctive. `--json` returns the selected change's full status.
+Selection and claim publication share the repository graph lock, so concurrent
+`take` calls serialize and cannot receive the same change.
 
 Sequential bundle import can expose a dependency cycle assembled across
 stores. Arc reports each member as blocked but does not mutate imported

@@ -12,4 +12,5 @@ mod observe;
 mod orchestrate;
 mod paths;
 mod roles;
+mod take;
 mod verify;
