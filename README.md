@@ -336,6 +336,16 @@ gates stay compact. A declared timeout terminates and reaps the gate's entire
 process group and records the failure as timed out. Without `timeout`, gate
 execution remains unbounded.
 
+## Policy
+
+Repository integration policy is declared in `.arc/policy.toml`. Policies are
+disabled when the file or setting is absent. Set
+`[policy] forbid_self_approval = true` to reject an approval when its actor
+string exactly matches the actor recorded by `arc snapshot` for that patchset.
+Actor identity remains advisory; this comparison does not redesign or verify
+identity. Rejected self-approval follows the existing no-valid-approval path
+and exits 3.
+
 ## Identity
 
 Every event records an actor, and optionally a harness and native

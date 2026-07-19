@@ -81,6 +81,121 @@ fn green_path_integrates_with_merge_commit() {
     assert_eq!(report["closure"]["outcome"], "integrated");
 }
 
+#[test]
+fn policy_rejects_same_actor_approval() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy"]);
+
+    stdout(repo.arc(&repo.root).args(["begin", "self-review"]));
+    let wt = repo.home.join(".worktrees").join("repo-self-review");
+    repo.commit(&wt, "review.txt", "review\n", "test: self review");
+    stdout(
+        repo.arc(&wt)
+            .env("ARC_ACTOR", "Same Actor")
+            .args(["snapshot", "self-review"]),
+    );
+    repo.arc(&wt)
+        .env("ARC_ACTOR", "Same Actor")
+        .args(["review", "self-review", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    repo.arc(&wt)
+        .args(["check", "self-review"])
+        .assert()
+        .code(3)
+        .stdout(predicates::str::contains(
+            "approval rejected by policy: self-approval",
+        ));
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "self-review"]))).unwrap();
+    assert_eq!(
+        status["approval_rejection_reason"],
+        "approval rejected by policy: self-approval"
+    );
+    assert_eq!(
+        status["blocker_summary"]["approval_reason"],
+        "approval rejected by policy: self-approval"
+    );
+    assert_eq!(
+        status["next_action"],
+        "approval rejected by policy: self-approval"
+    );
+    let show = stdout(repo.arc(&wt).args(["show", "self-review"]));
+    assert!(show.contains("approval rejected by policy: self-approval"));
+}
+
+#[test]
+fn policy_allows_different_actor_approval() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy"]);
+
+    stdout(repo.arc(&repo.root).args(["begin", "peer-review"]));
+    let wt = repo.home.join(".worktrees").join("repo-peer-review");
+    repo.commit(&wt, "review.txt", "review\n", "test: peer review");
+    stdout(
+        repo.arc(&wt)
+            .env("ARC_ACTOR", "Implementer")
+            .args(["snapshot", "peer-review"]),
+    );
+    repo.arc(&wt)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["review", "peer-review", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    repo.arc(&wt)
+        .args(["check", "peer-review"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn policy_absent_or_off_preserves_self_approval() {
+    for policy in [None, Some("[policy]\nforbid_self_approval = false\n")] {
+        let repo = Repo::new();
+        if let Some(policy) = policy {
+            fs::create_dir_all(repo.root.join(".arc")).unwrap();
+            fs::write(repo.root.join(".arc/policy.toml"), policy).unwrap();
+            git(&repo.root, &["add", ".arc/policy.toml"]);
+            git(&repo.root, &["commit", "-m", "policy"]);
+        }
+
+        stdout(repo.arc(&repo.root).args(["begin", "legacy-review"]));
+        let wt = repo.home.join(".worktrees").join("repo-legacy-review");
+        repo.commit(&wt, "review.txt", "review\n", "test: legacy review");
+        stdout(
+            repo.arc(&wt)
+                .env("ARC_ACTOR", "Same Actor")
+                .args(["snapshot", "legacy-review"]),
+        );
+        repo.arc(&wt)
+            .env("ARC_ACTOR", "Same Actor")
+            .args(["review", "legacy-review", "--verdict", "approved"])
+            .assert()
+            .success();
+
+        repo.arc(&wt)
+            .args(["check", "legacy-review"])
+            .assert()
+            .success();
+    }
+}
+
 /// Blocking finding → check exits 2 and integrate refuses; resolving it
 /// plus a renewed verdict unblocks.
 #[test]

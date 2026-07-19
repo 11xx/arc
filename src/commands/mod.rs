@@ -145,11 +145,13 @@ impl Ctx {
     fn report(&self, store: &Store, state: &ChangeState) -> Result<StatusReport> {
         let toplevel = gitio::toplevel(&self.cwd)?;
         let gates = gates::load(&toplevel)?;
+        let policy = crate::policy::load(&toplevel)?;
         let states = self.load_all_states(store)?;
         status::build(
             state,
             &self.cwd,
             &gates,
+            &policy,
             dependency_status(state, &states),
             changes_blocked_by(&state.change_id, &states),
         )
