@@ -376,6 +376,8 @@ fn create_private_dir_all(path: &Path) -> Result<()> {
         .with_context(|| format!("cannot create {}", path.display()))
 }
 
+/// Durably publishes a new file by fsyncing its contents, hard-linking it into
+/// place, and fsyncing the containing directory.
 fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
     let file_name = path
         .file_name()
@@ -398,6 +400,14 @@ fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
         // names do not end in .json, so readers ignore a file left by a crash.
         fs::hard_link(&temporary, path)
             .with_context(|| format!("cannot create {}", path.display()))?;
+        let dir = path
+            .parent()
+            .context("exclusive-write path has no parent directory")?;
+        let directory =
+            File::open(dir).with_context(|| format!("cannot fsync {}", dir.display()))?;
+        directory
+            .sync_all()
+            .with_context(|| format!("cannot fsync {}", dir.display()))?;
         Ok(())
     })();
     let _ = fs::remove_file(&temporary);

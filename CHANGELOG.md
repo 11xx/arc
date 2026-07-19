@@ -13,6 +13,8 @@ no version has been tagged yet.
 
 ### Fixed
 
+- Event publication fsyncs the containing directory after linking the event
+  file, preserving acknowledged entries across power loss (`store-dir-fsync`).
 - Attested verification events omit unobserved exit codes and durations
   (`attested-evidence-honesty`).
 - Free-text `thread journal` messages are never promoted into typed
