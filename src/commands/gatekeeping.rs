@@ -34,6 +34,14 @@ pub struct VerifyArgs {
     pub note: Option<String>,
 }
 
+struct VerificationInput {
+    gate: Option<String>,
+    command: String,
+    timeout_seconds: Option<u64>,
+    attested_result: Option<VerifyResult>,
+    note: Option<String>,
+}
+
 pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     let VerifyArgs {
         all,
@@ -73,11 +81,13 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 ctx,
                 &store,
                 &change_id,
-                Some(name.clone()),
-                gate.command.clone(),
-                gate.timeout,
-                None,
-                note.clone(),
+                VerificationInput {
+                    gate: Some(name.clone()),
+                    command: gate.command.clone(),
+                    timeout_seconds: gate.timeout,
+                    attested_result: None,
+                    note: note.clone(),
+                },
             )?;
             if result == 0 {
                 passed += 1;
@@ -103,11 +113,13 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         ctx,
         &store,
         &change_id,
-        gate,
-        cmd,
-        timeout,
-        attested_result,
-        note,
+        VerificationInput {
+            gate,
+            command: cmd,
+            timeout_seconds: timeout,
+            attested_result,
+            note,
+        },
     )
 }
 
@@ -115,12 +127,15 @@ fn record_verification(
     ctx: &Ctx,
     store: &Store,
     change_id: &str,
-    gate: Option<String>,
-    cmd: String,
-    timeout_seconds: Option<u64>,
-    attested_result: Option<VerifyResult>,
-    note: Option<String>,
+    input: VerificationInput,
 ) -> Result<i32> {
+    let VerificationInput {
+        gate,
+        command: cmd,
+        timeout_seconds,
+        attested_result,
+        note,
+    } = input;
     let revision = gitio::head(&ctx.cwd)?;
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().into_owned())
