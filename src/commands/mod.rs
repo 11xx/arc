@@ -25,6 +25,7 @@ pub use doctor::run as run_doctor;
 pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_pr_state};
 pub(crate) use gatekeeping::dependency_order;
 pub use gatekeeping::{check_selection, close, hold, integrate, release_hold, verify, VerifyArgs};
+pub(crate) use lifecycle::status_output;
 pub use lifecycle::{
     begin, blocker_status_cmd, brief, is_blocked, list, metadata, query, show_selection, status_cmd,
 };
@@ -98,7 +99,7 @@ fn locked_state(store: &Store, reference: &str) -> Result<(String, TransitionLoc
 }
 
 impl Ctx {
-    fn store(&self) -> Result<Store> {
+    pub(crate) fn store(&self) -> Result<Store> {
         Store::discover(&self.cwd)
     }
 
@@ -126,7 +127,11 @@ impl Ctx {
         }
     }
 
-    fn load_state(&self, store: &Store, reference: &str) -> Result<(String, ChangeState)> {
+    pub(crate) fn load_state(
+        &self,
+        store: &Store,
+        reference: &str,
+    ) -> Result<(String, ChangeState)> {
         let change_id = store.resolve_change(reference)?;
         let events = store.load_events(&change_id)?;
         let state = state::reduce(&events)?;
@@ -142,7 +147,7 @@ impl Ctx {
         Ok(states)
     }
 
-    fn report(&self, store: &Store, state: &ChangeState) -> Result<StatusReport> {
+    pub(crate) fn report(&self, store: &Store, state: &ChangeState) -> Result<StatusReport> {
         let toplevel = gitio::toplevel(&self.cwd)?;
         let gates = gates::load(&toplevel)?;
         let policy = crate::policy::load(&toplevel)?;
@@ -284,7 +289,7 @@ fn changes_blocked_by(change_id: &str, states: &BTreeMap<String, ChangeState>) -
         .collect()
 }
 
-fn find_unblocked_changes(
+pub(crate) fn find_unblocked_changes(
     current_change_id: &str,
     states: &BTreeMap<String, ChangeState>,
 ) -> Vec<ArcAlternative> {

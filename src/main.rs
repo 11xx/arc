@@ -1,6 +1,7 @@
 mod bundle;
 mod commands;
 mod config;
+mod context;
 mod forge;
 mod gates;
 mod gitio;
@@ -187,7 +188,7 @@ enum Cmd {
     },
     /// Record or read a change-scoped implementation contract
     Brief {
-        change: String,
+        change: Option<String>,
         /// Read a new brief body from a file ('-' for stdin)
         #[arg(long)]
         body_file: Option<String>,
@@ -256,15 +257,15 @@ enum Cmd {
     },
     /// Machine-readable status report (the versioned arc-status/5 schema)
     Status {
-        change: String,
+        change: Option<String>,
         /// Accepted for compatibility; status output is always JSON
         #[arg(long)]
         json: bool,
     },
     /// Report whether declared prerequisite changes have integrated
-    BlockerStatus { change: String },
+    BlockerStatus { change: Option<String> },
     /// Dependency probe: exit 0 ready, 1 blocked, 2 on lookup/ledger errors
-    IsBlocked { change: String },
+    IsBlocked { change: Option<String> },
     /// Replay raw ledger events as NDJSON, optionally following new events
     Events {
         /// Continue emitting matching events appended after the replay
@@ -310,7 +311,7 @@ enum Cmd {
     },
     /// Acquire or renew an advisory executor claim
     Claim {
-        change: String,
+        change: Option<String>,
         /// Lease duration (positive integer with s, m, or h suffix; default 2h)
         #[arg(long)]
         ttl: Option<String>,
@@ -319,10 +320,11 @@ enum Cmd {
         stage_budget: Vec<String>,
     },
     /// Release the current advisory executor claim
-    ReleaseClaim { change: String },
+    ReleaseClaim { change: Option<String> },
     /// Record typed executor progress (requires an owned live claim)
+    #[command(allow_missing_positional = true)]
     Stage {
-        change: String,
+        change: Option<String>,
         #[arg(value_enum)]
         stage: commands::StageArg,
         #[arg(long)]
@@ -330,14 +332,14 @@ enum Cmd {
     },
     /// Record the current branch head as a new patchset
     Snapshot {
-        change: String,
+        change: Option<String>,
         /// Override the recorded base revision
         #[arg(long)]
         base: Option<String>,
     },
     /// Add a discussion comment
     Comment {
-        change: String,
+        change: Option<String>,
         #[command(flatten)]
         body: BodyOpts,
         #[arg(long)]
@@ -347,7 +349,7 @@ enum Cmd {
     },
     /// Record a standalone review finding
     Finding {
-        change: String,
+        change: Option<String>,
         /// One-sentence statement of the defect
         #[arg(long)]
         summary: String,
@@ -363,15 +365,17 @@ enum Cmd {
         anchor: AnchorOpts,
     },
     /// Reply to a comment or finding event
+    #[command(allow_missing_positional = true)]
     Reply {
-        change: String,
+        change: Option<String>,
         event_id: String,
         #[command(flatten)]
         body: BodyOpts,
     },
     /// Record a finding disposition (supersedes current tips automatically)
+    #[command(allow_missing_positional = true)]
     Resolve {
-        change: String,
+        change: Option<String>,
         finding: String,
         #[arg(long, value_enum)]
         status: DispositionStatus,
@@ -383,7 +387,7 @@ enum Cmd {
     },
     /// Record a verdict, optionally with a findings batch, in one atomic event
     Review {
-        change: String,
+        change: Option<String>,
         #[arg(long, value_enum)]
         verdict: Verdict,
         /// Patchset under review (defaults to the latest)
@@ -395,7 +399,7 @@ enum Cmd {
     },
     /// Run a declared gate (or ad hoc command) and record the evidence
     Verify {
-        change: String,
+        change: Option<String>,
         /// Run every gate declared for the change profile
         #[arg(long)]
         all: bool,
@@ -416,6 +420,16 @@ enum Cmd {
         #[arg(long)]
         note: Option<String>,
     },
+    /// Print shell exports for an explicitly detected harness session
+    Env,
+    /// Resume one change with its brief, live state, and journal context
+    Resume {
+        change: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print one stable statusline summary for the current change
+    Prompt { change: Option<String> },
     /// Set an integration hold
     Hold {
         change: String,
@@ -588,6 +602,11 @@ fn run(cli: Cli) -> Result<i32> {
         session: cli.session,
     };
 
+    let infer = |change: Option<&str>| -> Result<String> {
+        let store = store::Store::discover(&ctx.cwd)?;
+        context::resolve_change_or_infer(&store, &ctx.cwd, change)
+    };
+
     match cli.cmd {
         Cmd::Begin {
             slug,
@@ -646,6 +665,11 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Show { change, tag, json } => {
+            let change = if tag.is_empty() {
+                Some(infer(change.as_deref())?)
+            } else {
+                change
+            };
             commands::show_selection(&ctx, change.as_deref(), tag, json)?;
             Ok(0)
         }
@@ -654,7 +678,10 @@ fn run(cli: Cli) -> Result<i32> {
             body_file,
             title,
             version,
-        } => commands::brief(&ctx, role, &change, body_file, title, version),
+        } => {
+            let change = infer(change.as_deref())?;
+            commands::brief(&ctx, role, &change, body_file, title, version)
+        }
         Cmd::Message {
             change,
             message_type,
@@ -700,20 +727,24 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Status { change, json: _ } => {
+            let change = infer(change.as_deref())?;
             commands::status_cmd(&ctx, &change)?;
             Ok(0)
         }
         Cmd::BlockerStatus { change } => {
+            let change = infer(change.as_deref())?;
             commands::blocker_status_cmd(&ctx, &change)?;
             Ok(0)
         }
-        Cmd::IsBlocked { change } => match commands::is_blocked(&ctx, &change) {
-            Ok(code) => Ok(code),
-            Err(error) => {
-                eprintln!("error: {error:#}");
-                Ok(2)
+        Cmd::IsBlocked { change } => {
+            match infer(change.as_deref()).and_then(|change| commands::is_blocked(&ctx, &change)) {
+                Ok(code) => Ok(code),
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    Ok(2)
+                }
             }
-        },
+        }
         Cmd::Events {
             follow,
             change,
@@ -732,19 +763,36 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Import { input, dry_run } => commands::import_bundle(&ctx, &input, dry_run),
-        Cmd::Check { change, tag } => commands::check_selection(&ctx, change.as_deref(), tag),
+        Cmd::Check { change, tag } => {
+            let change = if tag.is_empty() {
+                Some(infer(change.as_deref())?)
+            } else {
+                change
+            };
+            commands::check_selection(&ctx, change.as_deref(), tag)
+        }
         Cmd::Claim {
             change,
             ttl,
             stage_budget,
-        } => commands::claim(&ctx, &change, ttl, stage_budget),
-        Cmd::ReleaseClaim { change } => commands::release_claim(&ctx, &change),
+        } => {
+            let change = infer(change.as_deref())?;
+            commands::claim(&ctx, &change, ttl, stage_budget)
+        }
+        Cmd::ReleaseClaim { change } => {
+            let change = infer(change.as_deref())?;
+            commands::release_claim(&ctx, &change)
+        }
         Cmd::Stage {
             change,
             stage,
             note,
-        } => commands::stage(&ctx, &change, stage, note),
+        } => {
+            let change = infer(change.as_deref())?;
+            commands::stage(&ctx, &change, stage, note)
+        }
         Cmd::Snapshot { change, base } => {
+            let change = infer(change.as_deref())?;
             commands::snapshot(&ctx, &change, base)?;
             Ok(0)
         }
@@ -754,6 +802,7 @@ fn run(cli: Cli) -> Result<i32> {
             patchset,
             anchor,
         } => {
+            let change = infer(change.as_deref())?;
             let text = commands::read_body(body.body, body.body_file)?;
             commands::comment(&ctx, &change, text, patchset, &anchor.to_args())?;
             Ok(0)
@@ -767,6 +816,7 @@ fn run(cli: Cli) -> Result<i32> {
             patchset,
             anchor,
         } => {
+            let change = infer(change.as_deref())?;
             let text = match (&body.body, &body.body_file) {
                 (None, None) => None,
                 _ => Some(commands::read_body(body.body, body.body_file)?),
@@ -788,6 +838,7 @@ fn run(cli: Cli) -> Result<i32> {
             event_id,
             body,
         } => {
+            let change = infer(change.as_deref())?;
             let text = commands::read_body(body.body, body.body_file)?;
             commands::reply(&ctx, &change, event_id, text)?;
             Ok(0)
@@ -799,6 +850,7 @@ fn run(cli: Cli) -> Result<i32> {
             commit,
             evidence,
         } => {
+            let change = infer(change.as_deref())?;
             commands::resolve(&ctx, &change, finding, status, commit, evidence)?;
             Ok(0)
         }
@@ -808,6 +860,7 @@ fn run(cli: Cli) -> Result<i32> {
             patchset,
             findings_json,
         } => {
+            let change = infer(change.as_deref())?;
             commands::review(&ctx, &change, verdict, patchset, findings_json)?;
             Ok(0)
         }
@@ -819,18 +872,30 @@ fn run(cli: Cli) -> Result<i32> {
             attest,
             result,
             note,
-        } => commands::verify(
-            &ctx,
-            &change,
-            commands::VerifyArgs {
-                all,
-                gate,
-                command,
-                attest,
-                result,
-                note,
-            },
-        ),
+        } => {
+            let change = infer(change.as_deref())?;
+            commands::verify(
+                &ctx,
+                &change,
+                commands::VerifyArgs {
+                    all,
+                    gate,
+                    command,
+                    attest,
+                    result,
+                    note,
+                },
+            )
+        }
+        Cmd::Env => Ok(context::print_env()),
+        Cmd::Resume { change, json } => {
+            context::resume(&ctx, change.as_deref(), json)?;
+            Ok(0)
+        }
+        Cmd::Prompt { change } => {
+            context::prompt(&ctx, change.as_deref())?;
+            Ok(0)
+        }
         Cmd::Hold { change, reason } => {
             commands::hold(&ctx, &change, reason)?;
             Ok(0)
