@@ -1,6 +1,40 @@
 use super::common::*;
 
 #[test]
+fn stage_claim_acquires_default_claim_and_stamps_its_generation() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "stage-claim", "--no-worktree"]),
+    );
+
+    repo.arc(&repo.root)
+        .args(["stage", "stage-claim", "implementing", "--claim"])
+        .assert()
+        .success();
+
+    let events = stdout(
+        repo.arc(&repo.root)
+            .args(["events", "--change", "stage-claim"]),
+    );
+    let events = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let claim = events
+        .iter()
+        .find(|event| event["event_type"] == "claim-set")
+        .unwrap();
+    let stage = events
+        .iter()
+        .find(|event| event["event_type"] == "stage-set")
+        .unwrap();
+    assert_eq!(stage["claim_id"], claim["claim_id"]);
+    assert_eq!(stage["stage"], "implementing");
+    assert_eq!(claim["ttl_seconds"], 7200);
+}
+
+#[test]
 fn claim_lifecycle_reports_defaults_renewal_conflict_release_and_expiry() {
     let repo = Repo::new();
     let opened = stdout(repo.arc(&repo.root).args(["begin", "claim-life"]));

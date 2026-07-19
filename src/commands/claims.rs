@@ -1,3 +1,6 @@
+//! Advisory executor claims and stages remain separate ledger events.
+//! `stage --claim` only composes their acquisition and progress intent.
+
 use super::*;
 
 pub fn claim(
@@ -90,7 +93,13 @@ pub fn release_claim(ctx: &Ctx, reference: &str) -> Result<i32> {
     Ok(0)
 }
 
-pub fn stage(ctx: &Ctx, reference: &str, stage: StageArg, note: Option<String>) -> Result<i32> {
+pub fn stage(
+    ctx: &Ctx,
+    reference: &str,
+    stage: StageArg,
+    note: Option<String>,
+    claim_if_needed: bool,
+) -> Result<i32> {
     let owner = command_identity(ctx)?;
     let stage = ClaimStage::from(stage);
     let note = note.and_then(|note| {
@@ -104,11 +113,49 @@ pub fn stage(ctx: &Ctx, reference: &str, stage: StageArg, note: Option<String>) 
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
-    let state = state::reduce(&store.load_events(&change_id)?)?;
+    let events = store.load_events(&change_id)?;
+    let mut state = state::reduce(&events)?;
+    let mut previous_event_id = events
+        .last()
+        .context("change has no opening event")?
+        .event_id
+        .clone();
     if state.is_closed() {
         bail!("change {change_id} is closed");
     }
     let now = chrono::Utc::now();
+    let has_owned_live_claim = state
+        .claim
+        .as_ref()
+        .is_some_and(|claim| claim.owner == owner && state::claim_timing_at(claim, now).active);
+    if claim_if_needed && !has_owned_live_claim {
+        if let Some(existing) = &state.claim {
+            let timing = state::claim_timing_at(existing, now);
+            if timing.active && existing.owner != owner {
+                print_claim_conflict("claim is already held", existing, &timing);
+                return Ok(8);
+            }
+        }
+        let claim_id = ids::new_event_id();
+        let mut claim_event = identity_event_at(
+            ctx,
+            &store,
+            &change_id,
+            now,
+            &owner,
+            Payload::ClaimSet {
+                claim_id,
+                ttl_seconds: 2 * 60 * 60,
+                stage_budgets: default_stage_budgets(),
+            },
+        );
+        claim_event.event_id = event_id_after(&previous_event_id)?;
+        store.append_event(&claim_event)?;
+        previous_event_id = claim_event.event_id.clone();
+        println!("claimed: {change_id} for 7200s");
+        println!("event: {}", claim_event.event_id);
+        state = state::reduce(&store.load_events(&change_id)?)?;
+    }
     let Some(existing) = &state.claim else {
         eprintln!(
             "claim conflict: {change_id} has no claim for stage {}",
@@ -126,7 +173,7 @@ pub fn stage(ctx: &Ctx, reference: &str, stage: StageArg, note: Option<String>) 
         return Ok(8);
     }
 
-    let event = identity_event_at(
+    let mut event = identity_event_at(
         ctx,
         &store,
         &change_id,
@@ -138,10 +185,20 @@ pub fn stage(ctx: &Ctx, reference: &str, stage: StageArg, note: Option<String>) 
             note,
         },
     );
+    event.event_id = event_id_after(&previous_event_id)?;
     store.append_event(&event)?;
     println!("stage: {}", stage.as_str());
     println!("event: {}", event.event_id);
     Ok(0)
+}
+
+pub(super) fn owns_live_claim(ctx: &Ctx, reference: &str) -> Result<bool> {
+    let owner = command_identity(ctx)?;
+    let store = ctx.store()?;
+    let (_, state) = ctx.load_state(&store, reference)?;
+    Ok(state.claim.as_ref().is_some_and(|claim| {
+        claim.owner == owner && state::claim_timing_at(claim, chrono::Utc::now()).active
+    }))
 }
 
 fn command_identity(ctx: &Ctx) -> Result<state::ClaimIdentity> {

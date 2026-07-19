@@ -1,7 +1,8 @@
 //! Gate verification keeps observed process evidence distinct from attestation.
 //! Executed gates run in a process group, capture a bounded combined output
 //! tail, and honor an optional declared timeout; attested gates carry only the
-//! externally supplied result.
+//! externally supplied result. Declared gates may run concurrently, but their
+//! evidence is appended afterward in deterministic gate-name order.
 
 use super::*;
 use std::io;
@@ -27,6 +28,7 @@ pub fn check_selection(ctx: &Ctx, reference: Option<&str>, tags: Vec<String>) ->
 
 pub struct VerifyArgs {
     pub all: bool,
+    pub parallel: bool,
     pub gate: Option<String>,
     pub command: Option<String>,
     pub attest: bool,
@@ -42,9 +44,24 @@ struct VerificationInput {
     note: Option<String>,
 }
 
+struct CompletedVerification {
+    gate: Option<String>,
+    command: String,
+    revision: String,
+    result: VerifyResult,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
+    output_tail: Option<String>,
+    timed_out: bool,
+    hostname: String,
+    attested: bool,
+    note: Option<String>,
+}
+
 pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     let VerifyArgs {
         all,
+        parallel,
         gate,
         command,
         attest,
@@ -53,6 +70,9 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     } = args;
     if all && (gate.is_some() || command.is_some() || attest || result.is_some()) {
         bail!("--all cannot be combined with --gate, --command, --attest, or --result");
+    }
+    if parallel && !all {
+        bail!("--parallel requires --all");
     }
     // --attest records evidence arc did not observe (so it needs the caller's
     // --result); without it arc runs the command and observing --result is a bug.
@@ -75,6 +95,9 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             bail!("no gates declared for profile {}", st.profile);
         }
         let total = required.len();
+        if parallel {
+            return verify_all_parallel(ctx, &store, &change_id, required, note);
+        }
         let mut passed = 0;
         for (name, gate) in required {
             let result = record_verification(
@@ -123,33 +146,206 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     )
 }
 
+pub fn snapshot_with_verify(
+    ctx: &Ctx,
+    reference: &str,
+    base: Option<String>,
+    verify_requested: bool,
+    gates: Vec<String>,
+    all: bool,
+) -> Result<i32> {
+    if !verify_requested && (!gates.is_empty() || all) {
+        bail!("--gate and --all require --verify");
+    }
+    if all && !gates.is_empty() {
+        bail!("--all cannot be combined with --gate");
+    }
+    super::review::snapshot(ctx, reference, base)?;
+    if !verify_requested {
+        return Ok(0);
+    }
+    if all || gates.is_empty() {
+        return verify(
+            ctx,
+            reference,
+            VerifyArgs {
+                all: true,
+                parallel: false,
+                gate: None,
+                command: None,
+                attest: false,
+                result: None,
+                note: None,
+            },
+        );
+    }
+    let total = gates.len();
+    let mut passed = 0;
+    for gate in gates {
+        let code = verify(
+            ctx,
+            reference,
+            VerifyArgs {
+                all: false,
+                parallel: false,
+                gate: Some(gate),
+                command: None,
+                attest: false,
+                result: None,
+                note: None,
+            },
+        )?;
+        if code == 0 {
+            passed += 1;
+        }
+    }
+    println!("gates: {passed}/{total} pass");
+    Ok(if passed == total { 0 } else { 1 })
+}
+
+pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
+    if super::claims::owns_live_claim(ctx, reference)? {
+        let code = super::claims::stage(ctx, reference, StageArg::Verifying, None, false)?;
+        if code != 0 {
+            return Ok(code);
+        }
+    }
+    super::review::snapshot(ctx, reference, None)?;
+    let _ = verify(
+        ctx,
+        reference,
+        VerifyArgs {
+            all: true,
+            parallel: false,
+            gate: None,
+            command: None,
+            attest: false,
+            result: None,
+            note: None,
+        },
+    )?;
+    check(ctx, reference)
+}
+
+fn verify_all_parallel(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    required: Vec<(&String, &gates::Gate)>,
+    note: Option<String>,
+) -> Result<i32> {
+    let revision = gitio::head(&ctx.cwd)?;
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "unknown".into());
+    let cwd = ctx.cwd.clone();
+    let inputs = required
+        .into_iter()
+        .map(|(name, gate)| VerificationInput {
+            gate: Some(name.clone()),
+            command: gate.command.clone(),
+            timeout_seconds: gate.timeout,
+            attested_result: None,
+            note: note.clone(),
+        })
+        .collect::<Vec<_>>();
+    for input in &inputs {
+        eprintln!(
+            "running {}: {}",
+            input.gate.as_deref().unwrap_or("command"),
+            input.command
+        );
+    }
+    let handles = inputs
+        .into_iter()
+        .map(|input| {
+            let cwd = cwd.clone();
+            let revision = revision.clone();
+            let hostname = hostname.clone();
+            thread::spawn(move || execute_verification(input, &cwd, revision, hostname))
+        })
+        .collect::<Vec<_>>();
+    let mut completed = Vec::with_capacity(handles.len());
+    let mut first_error = None;
+    for handle in handles {
+        let outcome = handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("gate worker panicked"))
+            .and_then(|result| result);
+        match outcome {
+            Ok(item) => completed.push(item),
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Err(_) => {}
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    let post = gitio::head(&ctx.cwd)?;
+    if post != revision {
+        eprintln!(
+            "warning: head moved during parallel verification ({revision} -> {post}); evidence recorded at {revision}"
+        );
+    }
+    let passed = completed
+        .iter()
+        .filter(|item| item.result == VerifyResult::Pass)
+        .count();
+    let total = completed.len();
+    append_verifications(ctx, store, change_id, completed)?;
+    println!("gates: {passed}/{total} pass");
+    Ok(if passed == total { 0 } else { 1 })
+}
+
 fn record_verification(
     ctx: &Ctx,
     store: &Store,
     change_id: &str,
     input: VerificationInput,
 ) -> Result<i32> {
-    let VerificationInput {
-        gate,
-        command: cmd,
-        timeout_seconds,
-        attested_result,
-        note,
-    } = input;
     let revision = gitio::head(&ctx.cwd)?;
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "unknown".into());
+    if input.attested_result.is_none() {
+        eprintln!("running: {}", input.command);
+    }
+    let completed = execute_verification(input, &ctx.cwd, revision.clone(), hostname)?;
+    if !completed.attested {
+        let post = gitio::head(&ctx.cwd)?;
+        if post != revision {
+            eprintln!(
+                "warning: head moved during verification ({revision} -> {post}); \
+                 evidence recorded at {revision}"
+            );
+        }
+    }
+    let result = completed.result;
+    append_verifications(ctx, store, change_id, vec![completed])?;
+    Ok(if result == VerifyResult::Pass { 0 } else { 1 })
+}
 
-    let attest = attested_result.is_some();
+fn execute_verification(
+    input: VerificationInput,
+    cwd: &Path,
+    revision: String,
+    hostname: String,
+) -> Result<CompletedVerification> {
+    let VerificationInput {
+        gate,
+        command,
+        timeout_seconds,
+        attested_result,
+        note,
+    } = input;
+    let attested = attested_result.is_some();
     let (result, exit_code, duration_ms, output_tail, timed_out) = match attested_result {
         // Attested evidence has only the caller's result because arc did not
         // execute a process or observe an exit code or duration.
         Some(result) => (result, None, None, None, false),
         None => {
-            eprintln!("running: {cmd}");
             let started = std::time::Instant::now();
-            let observed = run_gate(&cmd, &ctx.cwd, timeout_seconds)?;
+            let observed = run_gate(&command, cwd, timeout_seconds)?;
             let duration_ms = started.elapsed().as_millis() as u64;
             let exit_code = observed.status.code().unwrap_or(-1);
             let result = if observed.status.success() && !observed.timed_out {
@@ -157,16 +353,6 @@ fn record_verification(
             } else {
                 VerifyResult::Fail
             };
-            // The gate may have moved the branch head while it ran. Evidence
-            // stays pinned to the pre-gate revision; warn so a lead knows the
-            // recorded revision no longer matches the working head.
-            let post = gitio::head(&ctx.cwd)?;
-            if post != revision {
-                eprintln!(
-                    "warning: head moved during verification ({revision} -> {post}); \
-                     evidence recorded at {revision}"
-                );
-            }
             (
                 result,
                 Some(exit_code),
@@ -176,35 +362,73 @@ fn record_verification(
             )
         }
     };
+    Ok(CompletedVerification {
+        gate,
+        command,
+        revision,
+        result,
+        exit_code,
+        duration_ms,
+        output_tail,
+        timed_out,
+        hostname,
+        attested,
+        note,
+    })
+}
 
+fn append_verifications(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    completed: Vec<CompletedVerification>,
+) -> Result<()> {
     // Gates are arbitrary external commands and may legitimately invoke arc.
     // Acquire the append lock only after they return, then re-check closure.
-    let (_, _transition, st) = locked_state(store, change_id)?;
+    let _transition = store.lock_transition(change_id)?;
+    let events = store.load_events(change_id)?;
+    let st = state::reduce(&events)?;
     if st.is_closed() {
         bail!("change {change_id} closed while verification was running");
     }
-    let ev = ctx.event(
-        store,
-        change_id,
-        Payload::VerificationRecorded {
-            gate,
-            command: cmd,
-            revision: revision.clone(),
-            result,
-            exit_code,
-            duration_ms,
-            output_tail,
-            timed_out,
-            hostname,
-            attested: attest,
-            note,
-        },
-    );
-    store.append_event(&ev)?;
-    let marker = if attest { " (attested)" } else { "" };
-    println!("verification: {result:?}{marker} at {revision}");
-    println!("event: {}", ev.event_id);
-    Ok(if result == VerifyResult::Pass { 0 } else { 1 })
+    let mut previous_id = events
+        .last()
+        .context("change has no opening event")?
+        .event_id
+        .clone();
+    for item in completed {
+        let gate_label = item.gate.clone();
+        let result = item.result;
+        let revision = item.revision.clone();
+        let attested = item.attested;
+        let mut ev = ctx.event(
+            store,
+            change_id,
+            Payload::VerificationRecorded {
+                gate: item.gate,
+                command: item.command,
+                revision: item.revision,
+                result: item.result,
+                exit_code: item.exit_code,
+                duration_ms: item.duration_ms,
+                output_tail: item.output_tail,
+                timed_out: item.timed_out,
+                hostname: item.hostname,
+                attested: item.attested,
+                note: item.note,
+            },
+        );
+        previous_id = event_id_after(&previous_id)?;
+        ev.event_id = previous_id.clone();
+        store.append_event(&ev)?;
+        if let Some(gate) = gate_label {
+            println!("gate: {gate}");
+        }
+        let marker = if attested { " (attested)" } else { "" };
+        println!("verification: {result:?}{marker} at {revision}");
+        println!("event: {}", ev.event_id);
+    }
+    Ok(())
 }
 
 struct GateRun {

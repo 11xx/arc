@@ -327,6 +327,9 @@ enum Cmd {
         change: Option<String>,
         #[arg(value_enum)]
         stage: commands::StageArg,
+        /// Acquire a default claim first when this session has no live claim
+        #[arg(long)]
+        claim: bool,
         #[arg(long)]
         note: Option<String>,
     },
@@ -336,6 +339,15 @@ enum Cmd {
         /// Override the recorded base revision
         #[arg(long)]
         base: Option<String>,
+        /// Run verification after recording the patchset
+        #[arg(long)]
+        verify: bool,
+        /// Gate name from .arc/gates.toml (repeatable with --verify)
+        #[arg(long)]
+        gate: Vec<String>,
+        /// Run every gate declared for the change profile
+        #[arg(long)]
+        all: bool,
     },
     /// Add a discussion comment
     Comment {
@@ -390,6 +402,9 @@ enum Cmd {
         change: Option<String>,
         #[arg(long, value_enum)]
         verdict: Verdict,
+        /// Snapshot the clean change worktree before recording the verdict
+        #[arg(long)]
+        snapshot: bool,
         /// Patchset under review (defaults to the latest)
         #[arg(long)]
         patchset: Option<String>,
@@ -403,6 +418,9 @@ enum Cmd {
         /// Run every gate declared for the change profile
         #[arg(long)]
         all: bool,
+        /// Run all declared gates concurrently and append evidence in name order
+        #[arg(long)]
+        parallel: bool,
         /// Gate name from .arc/gates.toml
         #[arg(long)]
         gate: Option<String>,
@@ -420,6 +438,8 @@ enum Cmd {
         #[arg(long)]
         note: Option<String>,
     },
+    /// Finish implementation: snapshot, verify all gates, then print check state
+    Done { change: Option<String> },
     /// Print shell exports for an explicitly detected harness session
     Env,
     /// Resume one change with its brief, live state, and journal context
@@ -786,15 +806,21 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Stage {
             change,
             stage,
+            claim,
             note,
         } => {
             let change = infer(change.as_deref())?;
-            commands::stage(&ctx, &change, stage, note)
+            commands::stage(&ctx, &change, stage, note, claim)
         }
-        Cmd::Snapshot { change, base } => {
+        Cmd::Snapshot {
+            change,
+            base,
+            verify,
+            gate,
+            all,
+        } => {
             let change = infer(change.as_deref())?;
-            commands::snapshot(&ctx, &change, base)?;
-            Ok(0)
+            commands::snapshot_with_verify(&ctx, &change, base, verify, gate, all)
         }
         Cmd::Comment {
             change,
@@ -857,16 +883,18 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Review {
             change,
             verdict,
+            snapshot,
             patchset,
             findings_json,
         } => {
             let change = infer(change.as_deref())?;
-            commands::review(&ctx, &change, verdict, patchset, findings_json)?;
+            commands::review(&ctx, &change, verdict, patchset, findings_json, snapshot)?;
             Ok(0)
         }
         Cmd::Verify {
             change,
             all,
+            parallel,
             gate,
             command,
             attest,
@@ -879,6 +907,7 @@ fn run(cli: Cli) -> Result<i32> {
                 &change,
                 commands::VerifyArgs {
                     all,
+                    parallel,
                     gate,
                     command,
                     attest,
@@ -886,6 +915,10 @@ fn run(cli: Cli) -> Result<i32> {
                     note,
                 },
             )
+        }
+        Cmd::Done { change } => {
+            let change = infer(change.as_deref())?;
+            commands::done(&ctx, &change)
         }
         Cmd::Env => Ok(context::print_env()),
         Cmd::Resume { change, json } => {

@@ -1,10 +1,15 @@
+//! Patchsets and reviews can be recorded separately or composed safely.
+//! A composed review snapshots only a clean, checked-out change worktree so
+//! the verdict binds to the exact committed head the reviewer inspected.
+
 use super::*;
 
 pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
-    let st = state::reduce(&store.load_events(&change_id)?)?;
+    let events = store.load_events(&change_id)?;
+    let st = state::reduce(&events)?;
     if st.is_closed() {
         bail!("change {change_id} is closed");
     }
@@ -30,7 +35,7 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
         .as_ref()
         .filter(|claim| state::claim_timing_at(claim, now).active);
     let patchset_id = format!("ps-{:02}", st.patchsets.len() + 1);
-    let ev = ctx.event_at(
+    let mut ev = ctx.event_at(
         &store,
         &change_id,
         now,
@@ -47,6 +52,12 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
             claim_actor: snapshot_claim.map(|claim| claim.owner.actor.clone()),
         },
     );
+    ev.event_id = event_id_after(
+        &events
+            .last()
+            .context("change has no opening event")?
+            .event_id,
+    )?;
     store.append_event(&ev)?;
     // Pin this head with its own ref: reviewed heads must stay reachable
     // individually, even if the branch is rewound or deleted later.
@@ -194,9 +205,26 @@ pub fn review(
     verdict: Verdict,
     patchset: Option<String>,
     findings_json: Option<String>,
+    snapshot_first: bool,
 ) -> Result<()> {
+    if snapshot_first {
+        if patchset.is_some() {
+            bail!("--snapshot cannot be combined with --patchset");
+        }
+        let store = ctx.store()?;
+        let (_, st) = ctx.load_state(&store, reference)?;
+        if gitio::current_branch(&ctx.cwd)?.as_deref() != Some(st.branch.as_str())
+            || !gitio::is_clean(&ctx.cwd)?
+        {
+            bail!("review --snapshot requires the change branch checked out in a clean worktree");
+        }
+        snapshot(ctx, reference, None)?;
+    }
     let store = ctx.store()?;
-    let (change_id, _transition, st) = locked_state(&store, reference)?;
+    let change_id = store.resolve_change(reference)?;
+    let _transition = store.lock_transition(&change_id)?;
+    let events = store.load_events(&change_id)?;
+    let st = state::reduce(&events)?;
     if st.is_closed() {
         bail!("change {change_id} is closed");
     }
@@ -249,7 +277,7 @@ pub fn review(
     }
 
     let finding_ids: Vec<String> = inline.iter().map(|f| f.finding_id.clone()).collect();
-    let ev = ctx.event(
+    let mut ev = ctx.event(
         &store,
         &change_id,
         Payload::VerdictRecorded {
@@ -258,6 +286,12 @@ pub fn review(
             findings: inline,
         },
     );
+    ev.event_id = event_id_after(
+        &events
+            .last()
+            .context("change has no opening event")?
+            .event_id,
+    )?;
     store.append_event(&ev)?;
     println!("verdict: {verdict:?} on {patchset_id}");
     for id in finding_ids {

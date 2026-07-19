@@ -1,5 +1,111 @@
 use super::common::*;
 
+fn commit_composed_gates(repo: &Repo) {
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.alpha]\ncommand = \"true\"\n[gates.beta]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gates"]);
+}
+
+#[test]
+fn snapshot_verify_records_patchset_and_selected_or_all_evidence_at_the_same_head() {
+    for (slug, selection) in [
+        ("snap-gates", vec!["--gate", "alpha", "--gate", "beta"]),
+        ("snap-all", Vec::new()),
+    ] {
+        let repo = Repo::new();
+        commit_composed_gates(&repo);
+        stdout(repo.arc(&repo.root).args(["begin", slug]));
+        let wt = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+        repo.commit(&wt, "change.txt", "change\n", "feat: change");
+        let head = repo.head(&wt);
+        let mut args = vec!["snapshot", slug, "--verify"];
+        args.extend(selection);
+        repo.arc(&wt).args(args).assert().success();
+
+        let status: serde_json::Value =
+            serde_json::from_str(&stdout(repo.arc(&wt).args(["status", slug]))).unwrap();
+        assert_eq!(status["latest_patchset"]["head"], head);
+        let events = stdout(repo.arc(&wt).args([
+            "events",
+            "--change",
+            slug,
+            "--type",
+            "verification-recorded",
+        ]));
+        let evidence = events
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(evidence.len(), 2);
+        assert!(evidence.iter().all(|event| event["revision"] == head));
+    }
+}
+
+#[test]
+fn review_snapshot_approval_is_immediately_valid_for_the_fresh_patchset() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "review-snapshot"]));
+    let wt = repo.home.join(".worktrees/repo-review-snapshot");
+    repo.commit(&wt, "review.txt", "review\n", "feat: review");
+
+    repo.arc(&wt)
+        .args([
+            "review",
+            "review-snapshot",
+            "--snapshot",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "review-snapshot"]))).unwrap();
+    assert_eq!(status["head_matches_latest_patchset"], true);
+    assert_eq!(status["verdict"]["patchset_id"], "ps-01");
+    assert_eq!(status["verdict"]["valid_for_current_head"], true);
+}
+
+#[test]
+fn done_records_stage_patchset_and_evidence_then_returns_check_code() {
+    let repo = Repo::new();
+    commit_composed_gates(&repo);
+    stdout(repo.arc(&repo.root).args(["begin", "done-sequence"]));
+    let wt = repo.home.join(".worktrees/repo-done-sequence");
+    repo.arc(&wt)
+        .args(["claim", "done-sequence"])
+        .assert()
+        .success();
+    repo.commit(&wt, "done.txt", "done\n", "feat: done");
+
+    repo.arc(&wt)
+        .args(["done", "done-sequence"])
+        .assert()
+        .code(3)
+        .stdout(predicates::str::contains("missing or stale approval"));
+
+    let events = stdout(repo.arc(&wt).args(["events", "--change", "done-sequence"]));
+    let types = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .map(|event| event["event_type"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(types.iter().any(|kind| kind == "stage-set"));
+    assert!(types.iter().any(|kind| kind == "patchset-added"));
+    assert_eq!(
+        types
+            .iter()
+            .filter(|kind| kind.as_str() == "verification-recorded")
+            .count(),
+        2
+    );
+}
+
 /// begin → worktree + branch + ledger; list/status see the change.
 #[test]
 fn begin_creates_change_branch_and_worktree() {
