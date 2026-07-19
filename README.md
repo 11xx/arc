@@ -74,27 +74,23 @@ cd ~/.worktrees/<repo>-radio-refill-fix
 eval "$(arc env)"                         # detects this harness session explicitly
 arc brief radio-refill-fix --body-file executor-spec.md
 arc show                                  # includes the latest contract
-arc claim --ttl 2h
-arc stage started
 # ... read the executor spec from arc show ...
-arc stage spec-read
-arc stage implementing
+arc stage implementing --claim            # default claim + stage
 # ... implement, commit ...
 
-arc stage verifying
-arc snapshot                             # record patchset ps-01
-arc verify --gate test
+arc done                                 # verifying → snapshot → verify --all → check
+# Or select gates while snapshotting:
+# arc snapshot --verify --gate build --gate test
 
 # reviewer (any harness, any session) — one atomic call:
-arc review radio-refill-fix --verdict changes-requested --findings-json - <<'EOF'
+arc review radio-refill-fix --snapshot --verdict changes-requested --findings-json - <<'EOF'
 [{"blocking": true, "severity": "major", "summary": "stale batch can commit",
   "anchor": {"path": "src/ops.py", "line_start": 214}}]
 EOF
 
 # ... fix, then:
 arc resolve radio-refill-fix f01ABC... --status resolved --commit HEAD
-arc snapshot radio-refill-fix          # ps-02; old verdict is now stale
-arc review radio-refill-fix --verdict approved
+arc review radio-refill-fix --snapshot --verdict approved # fresh ps-02 + verdict
 
 arc check radio-refill-fix             # exit 0 = ready
 arc integrate radio-refill-fix --cleanup
@@ -108,7 +104,7 @@ arc integrate --tag '#radio-series' --cleanup
 
 Inside an open change's recorded worktree, `show`, `status`, `check`,
 `snapshot`, `stage`, `claim`, `release-claim`, `verify`, `brief`, `comment`,
-`finding`, `reply`, `resolve`, `review`, `blocker-status`, and `is-blocked`
+`finding`, `reply`, `resolve`, `review`, `done`, `blocker-status`, and `is-blocked`
 infer an omitted change from the current branch, then the recorded worktree
 path. An explicit change always wins. Commands that integrate, close, hold,
 export, or otherwise act destructively or across changes still require an

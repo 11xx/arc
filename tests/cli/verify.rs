@@ -70,6 +70,41 @@ fn verify_all_continues_after_a_failure() {
 }
 
 #[test]
+fn verify_all_parallel_completes_sleep_gates_and_appends_evidence_in_name_order() {
+    let repo = Repo::new();
+    write_two_gates(&repo, "sleep 1", "sleep 1");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "parallel-gates", "--no-worktree"]),
+    );
+
+    let started = Instant::now();
+    repo.arc(&repo.root)
+        .args(["verify", "parallel-gates", "--all", "--parallel"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("gates: 2/2 pass"));
+    assert!(
+        started.elapsed() < Duration::from_millis(1800),
+        "two one-second gates should overlap"
+    );
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "parallel-gates",
+        "--type",
+        "verification-recorded",
+    ]));
+    let gates = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .map(|event| event["gate"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(gates, ["alpha", "beta"]);
+}
+
+#[test]
 fn failing_gate_exposes_only_the_final_4096_output_bytes_in_status() {
     let repo = Repo::new();
     fs::create_dir_all(repo.root.join(".arc")).unwrap();

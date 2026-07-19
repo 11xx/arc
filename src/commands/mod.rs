@@ -24,14 +24,17 @@ use clap::ValueEnum;
 pub use doctor::run as run_doctor;
 pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_pr_state};
 pub(crate) use gatekeeping::dependency_order;
-pub use gatekeeping::{check_selection, close, hold, integrate, release_hold, verify, VerifyArgs};
+pub use gatekeeping::{
+    check_selection, close, done, hold, integrate, release_hold, snapshot_with_verify, verify,
+    VerifyArgs,
+};
 pub(crate) use lifecycle::status_output;
 pub use lifecycle::{
     begin, blocker_status_cmd, brief, is_blocked, list, metadata, query, show_selection, status_cmd,
 };
 pub use messaging::{inbox, message, messages};
 pub use observe::{events, watch};
-pub use review::{comment, finding, reply, resolve, review, snapshot};
+pub use review::{comment, finding, reply, resolve, review};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -96,6 +99,21 @@ fn locked_state(store: &Store, reference: &str) -> Result<(String, TransitionLoc
     let transition = store.lock_transition(&change_id)?;
     let state = state::reduce(&store.load_events(&change_id)?)?;
     Ok((change_id, transition, state))
+}
+
+fn event_id_after(previous: &str) -> Result<String> {
+    let previous = previous
+        .parse::<ulid::Ulid>()
+        .with_context(|| format!("event ID {previous:?} is not a ULID"))?;
+    let current = ulid::Ulid::new();
+    if current > previous {
+        Ok(current.to_string())
+    } else {
+        previous
+            .increment()
+            .context("event ID sequence overflowed")
+            .map(|id| id.to_string())
+    }
 }
 
 impl Ctx {
