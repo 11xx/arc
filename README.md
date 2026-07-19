@@ -129,8 +129,11 @@ shell orchestration:
 
 ```sh
 arc events --change radio-refill-fix --type patchset-added
+arc events --since 01J00000000000000000000000
 arc events --follow                     # replay, then stream raw NDJSON events
+arc events --follow --exec './handle-event'
 arc watch radio-refill-fix --until snapshot --timeout 30
+arc watch radio-refill-fix --until ready,stalled --exec './notify'
 arc watch radio-refill-fix --until stalled
 arc watch radio-refill-fix --until ready
 ```
@@ -143,6 +146,16 @@ timeout. `snapshot` waits for a patchset, `ready` matches `arc check` success,
 `stalled` reaches only when a live claim is stale, `integrated` requires that
 closure outcome, and `closed` accepts integrated, abandoned, or superseded
 changes.
+
+`--since <event-id>` treats a valid ULID as an exclusive lower bound and
+composes with replay, follow, change, and type filters. `events --exec <cmd>`
+runs `sh -c <cmd>` once per emitted NDJSON line; handler failures are warnings
+and do not stop the stream. `watch --exec <cmd>` runs once only when a watch
+condition is reached, with a JSON diagnostic containing the winning
+`condition` on stdin. Both hooks receive `ARC_EVENT_ID`, `ARC_EVENT_TYPE`, and
+`ARC_CHANGE_ID`; watch hooks use `watch-reached` as the event type. Comma-separated
+watch conditions are checked in their supplied order and the first reached
+condition wins.
 
 `arc status <change>` prints the versioned `arc-status/5` JSON report —
 the contract orchestrating agents program against. It includes dependency

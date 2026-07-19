@@ -1,3 +1,6 @@
+//! Raw event replay/follow with resumable cursors and shell hooks, plus
+//! polling watches that can wait for the first of several conditions.
+
 use super::*;
 
 /// Replay raw ledger events as compact NDJSON, optionally continuing as new
@@ -8,6 +11,8 @@ pub fn events(
     follow: bool,
     change: Option<&str>,
     event_type: Option<&str>,
+    since: Option<ulid::Ulid>,
+    exec_command: Option<&str>,
 ) -> Result<()> {
     let store = ctx.store()?;
     let change_id = change
@@ -15,6 +20,7 @@ pub fn events(
         .transpose()?;
     let mut seen = BTreeSet::new();
     let mut poll_interval = POLL_MIN;
+    let since = since.map(|cursor| cursor.to_string());
 
     loop {
         let raw_events = match &change_id {
@@ -24,15 +30,25 @@ pub fn events(
         let observed_events = !raw_events.is_empty();
         let mut out = std::io::stdout().lock();
         for (event_id, value) in raw_events {
-            seen.insert(event_id);
+            seen.insert(event_id.clone());
+            if since
+                .as_deref()
+                .is_some_and(|cursor| event_id.as_str() <= cursor)
+            {
+                continue;
+            }
             if !event_type.is_none_or(|wanted| {
                 value.get("event_type").and_then(serde_json::Value::as_str) == Some(wanted)
             }) {
                 continue;
             }
-            serde_json::to_writer(&mut out, &value)?;
-            out.write_all(b"\n")?;
+            let mut line = serde_json::to_vec(&value)?;
+            line.push(b'\n');
+            out.write_all(&line)?;
             out.flush()?;
+            if let Some(command) = exec_command {
+                run_hook(command, &line, &value);
+            }
         }
         if !follow {
             return Ok(());
@@ -49,24 +65,36 @@ pub fn events(
 pub fn watch(
     ctx: &Ctx,
     reference: &str,
-    until: WatchUntil,
+    until: &[WatchUntil],
     timeout_secs: Option<u64>,
+    exec_command: Option<&str>,
 ) -> Result<i32> {
     let deadline = timeout_secs.map(|timeout| Instant::now() + Duration::from_secs(timeout));
     let result = gitio::with_deadline(deadline, || {
         watch_until_reached(ctx, reference, until, deadline)
     });
     match result {
-        Ok(true) => {
-            println!("reached: {}", until.label());
+        Ok(Some(condition)) => {
+            println!("reached: {}", condition.label());
+            if let Some(command) = exec_command {
+                let value = serde_json::json!({
+                    "change_id": ctx.store()?.resolve_change(reference)?,
+                    "condition": condition.label(),
+                    "event_id": "",
+                    "event_type": "watch-reached",
+                });
+                let mut diagnostic = serde_json::to_vec(&value)?;
+                diagnostic.push(b'\n');
+                run_hook(command, &diagnostic, &value);
+            }
             Ok(0)
         }
-        Ok(false) => {
-            println!("timeout: {}", until.label());
+        Ok(None) => {
+            println!("timeout: {}", until_labels(until));
             Ok(2)
         }
         Err(_) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
-            println!("timeout: {}", until.label());
+            println!("timeout: {}", until_labels(until));
             Ok(2)
         }
         Err(error) => Err(error),
@@ -76,18 +104,20 @@ pub fn watch(
 fn watch_until_reached(
     ctx: &Ctx,
     reference: &str,
-    until: WatchUntil,
+    until: &[WatchUntil],
     deadline: Option<Instant>,
-) -> Result<bool> {
+) -> Result<Option<WatchUntil>> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let mut poll_interval = POLL_MIN;
     loop {
-        if watch_reached(ctx, &store, &change_id, until)? {
-            return Ok(true);
+        for condition in until {
+            if watch_reached(ctx, &store, &change_id, *condition)? {
+                return Ok(Some(*condition));
+            }
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Ok(false);
+            return Ok(None);
         }
         // Poll the derived condition itself rather than gating checks on event
         // discovery. `ready` also depends on live Git state. Backoff keeps idle
@@ -97,6 +127,45 @@ fn watch_until_reached(
             .map_or(poll_interval, |remaining| poll_interval.min(remaining));
         thread::sleep(sleep_for);
         poll_interval = (poll_interval * 2).min(POLL_MAX);
+    }
+}
+
+fn until_labels(until: &[WatchUntil]) -> String {
+    until
+        .iter()
+        .map(|condition| condition.label())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn run_hook(command: &str, input: &[u8], value: &serde_json::Value) {
+    let event_id = value
+        .get("event_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let event_type = value
+        .get("event_type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let change_id = value
+        .get("change_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let result = std::process::Command::new("sh")
+        .args(["-c", command])
+        .env("ARC_EVENT_ID", event_id)
+        .env("ARC_EVENT_TYPE", event_type)
+        .env("ARC_CHANGE_ID", change_id)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().unwrap().write_all(input)?;
+            child.wait()
+        });
+    match result {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!("warning: event hook exited with {status}"),
+        Err(error) => eprintln!("warning: event hook failed: {error}"),
     }
 }
 

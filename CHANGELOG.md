@@ -36,6 +36,8 @@ no version has been tagged yet.
 
 ### Added
 
+- Resumable event cursors, non-fatal event and watch command hooks, and
+  first-winner multi-condition watches (`event-hooks-cursor`).
 - Atomic `arc take` scheduling claims the highest-priority ready change, with
   additive priority metadata and priority-aware queue ordering (`take-next`).
 - Composed transitions cover claim-and-stage, snapshot-and-verify, snapshot-and-review, implementation completion without integration, and deterministic parallel gate execution (`composed-transitions`).

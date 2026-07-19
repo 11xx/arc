@@ -44,6 +44,49 @@ fn events_replays_parseable_ndjson_and_filters_change_and_type() {
 }
 
 #[test]
+fn events_since_replays_only_the_suffix() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "events-since"]));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["comment", "events-since", "--body", "first"]),
+    );
+    let replay = stdout(
+        repo.arc(&repo.root)
+            .args(["events", "--change", "events-since"]),
+    );
+    let cursor = replay
+        .lines()
+        .next()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["event_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .unwrap();
+
+    let suffix = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "events-since",
+        "--since",
+        &cursor,
+    ]));
+    let ids = suffix
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["event_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert!(!ids.is_empty());
+    assert!(ids.iter().all(|id| id > &cursor));
+}
+
+#[test]
 fn events_follow_emits_a_later_snapshot_once() {
     let repo = Repo::new();
     let (_, worktree, _) = change_with_patchset(&repo, "events-follow");
@@ -103,6 +146,49 @@ fn events_follow_emits_a_later_snapshot_once() {
 }
 
 #[test]
+fn events_follow_exec_observes_each_emitted_event() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "events-exec");
+    let observed = repo.root.join("observed-events");
+    let command = format!("cat >> {}", observed.display());
+    let mut child = spawn_arc(
+        &repo,
+        &repo.root,
+        &[
+            "events",
+            "--follow",
+            "--change",
+            "events-exec",
+            "--type",
+            "patchset-added",
+            "--exec",
+            &command,
+        ],
+    );
+    for expected in 1..=2 {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while fs::read_to_string(&observed)
+            .map(|contents| contents.lines().count())
+            .unwrap_or(0)
+            < expected
+        {
+            assert!(
+                Instant::now() < deadline,
+                "hook did not observe event {expected}"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+        if expected == 1 {
+            repo.commit(&worktree, "next.txt", "next\n", "test: next patchset");
+            stdout(repo.arc(&worktree).args(["snapshot", "events-exec"]));
+        }
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(fs::read_to_string(observed).unwrap().lines().count(), 2);
+}
+
+#[test]
 fn watch_snapshot_observes_a_later_snapshot() {
     let repo = Repo::new();
     let opened = stdout(repo.arc(&repo.root).args(["begin", "watch-snapshot"]));
@@ -131,6 +217,59 @@ fn watch_snapshot_observes_a_later_snapshot() {
     stdout(repo.arc(&worktree).args(["snapshot", "watch-snapshot"]));
     assert!(wait_for_exit(&mut child).success());
     assert_eq!(child_stdout(&mut child).trim(), "reached: snapshot");
+}
+
+#[test]
+fn watch_exec_fires_exactly_once_on_snapshot() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "watch-exec"]));
+    let worktree = repo.home.join(".worktrees").join("repo-watch-exec");
+    repo.commit(&worktree, "snapshot.txt", "snapshot\n", "test: snapshot");
+    let observed = repo.root.join("watch-hook");
+    let command = format!("cat >> {}", observed.display());
+    let mut child = spawn_arc(
+        &repo,
+        &repo.root,
+        &[
+            "watch",
+            "watch-exec",
+            "--until",
+            "snapshot",
+            "--timeout",
+            "2",
+            "--exec",
+            &command,
+        ],
+    );
+    thread::sleep(Duration::from_millis(50));
+    stdout(repo.arc(&worktree).args(["snapshot", "watch-exec"]));
+    assert!(wait_for_exit(&mut child).success());
+    let diagnostic: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(observed).unwrap().trim()).unwrap();
+    assert_eq!(diagnostic["condition"], "snapshot");
+    assert_eq!(diagnostic["event_type"], "watch-reached");
+}
+
+#[test]
+fn watch_multiple_conditions_reports_the_winner() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "watch-many"]));
+    repo.arc(&repo.root)
+        .args(["claim", "watch-many", "--stage-budget", "launch=1s"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "watch",
+            "watch-many",
+            "--until",
+            "ready,stalled",
+            "--timeout",
+            "4",
+        ])
+        .assert()
+        .success()
+        .stdout("reached: stalled\n");
 }
 
 #[test]
