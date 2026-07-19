@@ -19,7 +19,7 @@ use crate::status::{self, StatusReport};
 use crate::store::{Store, TransitionLock};
 use anyhow::{bail, Context, Result};
 pub use bundle_io::{export_bundle, import_bundle};
-pub use claims::{claim, release_claim, stage};
+pub use claims::{claim, release_claim, stage, take};
 use clap::ValueEnum;
 pub use doctor::run as run_doctor;
 pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_pr_state};
@@ -187,6 +187,7 @@ pub struct ArcAlternative {
     pub slug: String,
     pub status: String,
     pub reason: String,
+    pub priority: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -311,7 +312,7 @@ pub(crate) fn find_unblocked_changes(
     current_change_id: &str,
     states: &BTreeMap<String, ChangeState>,
 ) -> Vec<ArcAlternative> {
-    states
+    let mut candidates = states
         .values()
         .filter(|candidate| {
             candidate.change_id != current_change_id
@@ -332,8 +333,17 @@ pub(crate) fn find_unblocked_changes(
             } else {
                 "all blockers integrated, ready to work".into()
             },
+            priority: candidate.priority,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
+        b.priority.cmp(&a.priority).then_with(|| {
+            states[&a.change_id]
+                .opened_at
+                .cmp(&states[&b.change_id].opened_at)
+        })
+    });
+    candidates
 }
 
 pub fn read_body(body: Option<String>, body_file: Option<String>) -> Result<String> {
@@ -498,6 +508,7 @@ mod tests {
             blocked_by: blocked_by.iter().map(|id| (*id).into()).collect(),
             tags: Vec::new(),
             assigned_to: None,
+            priority: 0,
             opened_at: Utc::now(),
             patchsets: Vec::new(),
             briefs: Vec::new(),

@@ -10,6 +10,7 @@ pub const INBOX_SCHEMA: &str = "arc-inbox/1";
 pub struct InboxRow {
     pub change_id: String,
     pub title: String,
+    pub priority: i32,
     /// Who should act next on this change while it sits in this bucket.
     pub next_actor: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -83,6 +84,7 @@ impl Inbox {
         let row = |next_actor: &str| InboxRow {
             change_id: state.change_id.clone(),
             title: state.title.clone(),
+            priority: state.priority,
             next_actor: next_actor.to_string(),
             assigned_to: state.assigned_to.clone(),
             owner: None,
@@ -98,6 +100,7 @@ impl Inbox {
             InboxRow {
                 change_id: state.change_id.clone(),
                 title: state.title.clone(),
+                priority: state.priority,
                 next_actor: next_actor.to_string(),
                 assigned_to: state.assigned_to.clone(),
                 owner: Some(claim.owner.clone()),
@@ -133,6 +136,23 @@ impl Inbox {
         if report.ready_to_integrate {
             self.ready_to_integrate.push(row("lead"));
         }
+    }
+
+    /// Order every queue bucket by descending scheduling priority.
+    pub fn sort_by_priority(&mut self) {
+        self.needs_review
+            .sort_by_key(|row| std::cmp::Reverse(row.priority));
+        self.changes_requested
+            .sort_by_key(|row| std::cmp::Reverse(row.priority));
+        self.ready_to_integrate
+            .sort_by_key(|row| std::cmp::Reverse(row.priority));
+        self.blocked
+            .sort_by_key(|row| std::cmp::Reverse(row.priority));
+        self.held.sort_by_key(|row| std::cmp::Reverse(row.priority));
+        self.in_progress
+            .sort_by_key(|row| std::cmp::Reverse(row.priority));
+        self.stalled
+            .sort_by_key(|row| std::cmp::Reverse(row.priority));
     }
 }
 

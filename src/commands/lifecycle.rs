@@ -155,13 +155,14 @@ pub fn list(ctx: &Ctx, open_only: bool, json: bool, format: ListFormat) -> Resul
             }
             ListFormat::Wide => {
                 println!(
-                    "{:<36} {:<12} {:<18} {:<24} Target",
-                    "Change", "Status", "Verdict", "Blocker"
+                    "{:<36} {:>8} {:<12} {:<18} {:<24} Target",
+                    "Change", "Priority", "Status", "Verdict", "Blocker"
                 );
                 for state in selected {
                     println!(
-                        "{:<36} {:<12} {:<18} {:<24} {}",
+                        "{:<36} {:>8} {:<12} {:<18} {:<24} {}",
                         state.change_id,
+                        state.priority,
                         change_status(state),
                         verdict_label(state),
                         blocker_label(state, &states),
@@ -308,6 +309,7 @@ pub fn metadata(
     tags: Vec<String>,
     remove_tags: Vec<String>,
     assign: Option<String>,
+    priority: Option<i32>,
 ) -> Result<()> {
     let store = ctx.store()?;
     let _graph = store.lock_graph()?;
@@ -352,6 +354,7 @@ pub fn metadata(
         && add_tags.is_empty()
         && remove_tags.is_empty()
         && assign.is_none()
+        && priority.is_none()
     {
         bail!("provide at least one metadata change");
     }
@@ -364,6 +367,7 @@ pub fn metadata(
             add_tags,
             remove_tags,
             assign,
+            priority,
         },
     );
     store.append_event(&event)?;
@@ -449,6 +453,7 @@ fn list_row(state: &ChangeState, states: &BTreeMap<String, ChangeState>) -> serd
         "blocked_by": state.blocked_by,
         "blocker": blocker_label(state, states),
         "tags": state.tags,
+        "priority": state.priority,
     })
 }
 

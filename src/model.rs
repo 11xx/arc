@@ -52,6 +52,8 @@ pub enum Payload {
         /// the current assignment untouched. Advisory only — never enforced.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assign: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<i32>,
     },
     /// A structured cross-change announcement. Messages are announcements,
     /// never policy input: `check`/`integrate` ignore them entirely.
