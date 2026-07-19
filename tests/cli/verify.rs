@@ -70,6 +70,91 @@ fn verify_all_continues_after_a_failure() {
 }
 
 #[test]
+fn failing_gate_exposes_only_the_final_4096_output_bytes_in_status() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.failure]\ncommand = \"printf discard; head -c 4096 /dev/zero | tr '\\\\000' x; printf err >&2; exit 1\"\n",
+    )
+    .unwrap();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "output-tail", "--no-worktree"]),
+    );
+
+    repo.arc(&repo.root)
+        .args(["verify", "output-tail", "--gate", "failure"])
+        .assert()
+        .code(1);
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "output-tail"]),
+    ))
+    .unwrap();
+    let tail = status["gates"][0]["output_tail"].as_str().unwrap();
+    assert_eq!(tail.len(), 4096);
+    assert_eq!(tail, format!("{}err", "x".repeat(4093)));
+}
+
+#[test]
+fn gate_timeout_records_failure_and_kills_the_process_group() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.slow]\ncommand = \"sleep 5 &\"\ntimeout = \"1s\"\n",
+    )
+    .unwrap();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "gate-timeout", "--no-worktree"]),
+    );
+
+    let started = Instant::now();
+    repo.arc(&repo.root)
+        .args(["verify", "gate-timeout", "--gate", "slow"])
+        .assert()
+        .code(1);
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "timed-out process group was not terminated promptly"
+    );
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "gate-timeout"]),
+    ))
+    .unwrap();
+    assert_eq!(status["gates"][0]["result"], "fail");
+    assert_eq!(status["gates"][0]["timed_out"], true);
+}
+
+#[test]
+fn passing_gate_output_is_not_rendered_in_show() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.success]\ncommand = \"printf '\\\\164\\\\157\\\\153\\\\145\\\\156\\\\064\\\\062'\"\n",
+    )
+    .unwrap();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "pass-tail", "--no-worktree"]),
+    );
+    repo.arc(&repo.root)
+        .args(["verify", "pass-tail", "--gate", "success"])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args(["show", "pass-tail"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("token42").not());
+}
+
+#[test]
 fn verify_all_rejects_conflicting_flags_without_appending() {
     let repo = Repo::new();
     let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args([

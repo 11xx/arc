@@ -1,8 +1,20 @@
-//! Gate verification keeps observed process evidence distinct from attestation:
-//! executed gates carry exit code and duration, while attested gates carry only
-//! the externally supplied result.
+//! Gate verification keeps observed process evidence distinct from attestation.
+//! Executed gates run in a process group, capture a bounded combined output
+//! tail, and honor an optional declared timeout; attested gates carry only the
+//! externally supplied result.
 
 use super::*;
+use std::io;
+use std::os::unix::process::CommandExt;
+use std::process::{ExitStatus, Stdio};
+use std::sync::mpsc::{self, TryRecvError};
+
+const OUTPUT_TAIL_BYTES: usize = 4096;
+const SIGKILL: i32 = 9;
+
+extern "C" {
+    fn kill(pid: i32, signal: i32) -> i32;
+}
 
 pub fn check_selection(ctx: &Ctx, reference: Option<&str>, tags: Vec<String>) -> Result<i32> {
     match (reference, tags.is_empty()) {
@@ -20,6 +32,14 @@ pub struct VerifyArgs {
     pub attest: bool,
     pub result: Option<VerifyResult>,
     pub note: Option<String>,
+}
+
+struct VerificationInput {
+    gate: Option<String>,
+    command: String,
+    timeout_seconds: Option<u64>,
+    attested_result: Option<VerifyResult>,
+    note: Option<String>,
 }
 
 pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
@@ -61,10 +81,13 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 ctx,
                 &store,
                 &change_id,
-                Some(name.clone()),
-                gate.command.clone(),
-                None,
-                note.clone(),
+                VerificationInput {
+                    gate: Some(name.clone()),
+                    command: gate.command.clone(),
+                    timeout_seconds: gate.timeout,
+                    attested_result: None,
+                    note: note.clone(),
+                },
             )?;
             if result == 0 {
                 passed += 1;
@@ -73,54 +96,63 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         println!("gates: {passed}/{total} pass");
         return Ok(if passed == total { 0 } else { 1 });
     }
-    let cmd = match (&gate, command) {
+    let (cmd, timeout) = match (&gate, command) {
         (Some(name), None) => {
             let gates = gates::load(&toplevel)?;
-            gates
+            let declared = gates
                 .gates
                 .get(name)
-                .with_context(|| format!("gate {name:?} not declared in .arc/gates.toml"))?
-                .command
-                .clone()
+                .with_context(|| format!("gate {name:?} not declared in .arc/gates.toml"))?;
+            (declared.command.clone(), declared.timeout)
         }
-        (None, Some(c)) => c,
+        (None, Some(c)) => (c, None),
         (Some(_), Some(_)) => bail!("--gate and --command are mutually exclusive"),
         (None, None) => bail!("provide --gate <name> or --command <cmd>"),
     };
-    record_verification(ctx, &store, &change_id, gate, cmd, attested_result, note)
+    record_verification(
+        ctx,
+        &store,
+        &change_id,
+        VerificationInput {
+            gate,
+            command: cmd,
+            timeout_seconds: timeout,
+            attested_result,
+            note,
+        },
+    )
 }
 
 fn record_verification(
     ctx: &Ctx,
     store: &Store,
     change_id: &str,
-    gate: Option<String>,
-    cmd: String,
-    attested_result: Option<VerifyResult>,
-    note: Option<String>,
+    input: VerificationInput,
 ) -> Result<i32> {
+    let VerificationInput {
+        gate,
+        command: cmd,
+        timeout_seconds,
+        attested_result,
+        note,
+    } = input;
     let revision = gitio::head(&ctx.cwd)?;
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "unknown".into());
 
     let attest = attested_result.is_some();
-    let (result, exit_code, duration_ms) = match attested_result {
+    let (result, exit_code, duration_ms, output_tail, timed_out) = match attested_result {
         // Attested evidence has only the caller's result because arc did not
         // execute a process or observe an exit code or duration.
-        Some(result) => (result, None, None),
+        Some(result) => (result, None, None, None, false),
         None => {
             eprintln!("running: {cmd}");
             let started = std::time::Instant::now();
-            let out = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&cmd)
-                .current_dir(&ctx.cwd)
-                .status()
-                .context("failed to run gate command")?;
+            let observed = run_gate(&cmd, &ctx.cwd, timeout_seconds)?;
             let duration_ms = started.elapsed().as_millis() as u64;
-            let exit_code = out.code().unwrap_or(-1);
-            let result = if out.success() {
+            let exit_code = observed.status.code().unwrap_or(-1);
+            let result = if observed.status.success() && !observed.timed_out {
                 VerifyResult::Pass
             } else {
                 VerifyResult::Fail
@@ -135,7 +167,13 @@ fn record_verification(
                      evidence recorded at {revision}"
                 );
             }
-            (result, Some(exit_code), Some(duration_ms))
+            (
+                result,
+                Some(exit_code),
+                Some(duration_ms),
+                observed.output_tail,
+                observed.timed_out,
+            )
         }
     };
 
@@ -155,6 +193,8 @@ fn record_verification(
             result,
             exit_code,
             duration_ms,
+            output_tail,
+            timed_out,
             hostname,
             attested: attest,
             note,
@@ -165,6 +205,127 @@ fn record_verification(
     println!("verification: {result:?}{marker} at {revision}");
     println!("event: {}", ev.event_id);
     Ok(if result == VerifyResult::Pass { 0 } else { 1 })
+}
+
+struct GateRun {
+    status: ExitStatus,
+    output_tail: Option<String>,
+    timed_out: bool,
+}
+
+fn run_gate(cmd: &str, cwd: &Path, timeout_seconds: Option<u64>) -> Result<GateRun> {
+    let started = Instant::now();
+    let deadline = timeout_seconds
+        .map(|seconds| {
+            started
+                .checked_add(Duration::from_secs(seconds))
+                .context("gate timeout is too large")
+        })
+        .transpose()?;
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("exec 2>&1\n{cmd}"))
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .context("failed to run gate command")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("gate output pipe unavailable")?;
+    let (reader_done_tx, reader_done_rx) = mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        let output = read_output_tail(stdout);
+        let _ = reader_done_tx.send(());
+        output
+    });
+
+    let mut status = None;
+    let mut reader_done = false;
+    let timed_out = loop {
+        if status.is_none() {
+            status = child
+                .try_wait()
+                .context("failed to wait for gate command")?;
+        }
+        if !reader_done {
+            reader_done = match reader_done_rx.try_recv() {
+                Ok(()) | Err(TryRecvError::Disconnected) => true,
+                Err(TryRecvError::Empty) => false,
+            };
+        }
+        if status.is_some() && reader_done {
+            break false;
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            if let Err(error) = kill_process_group(child.id()) {
+                // The final group member may exit between the completion poll
+                // and kill(2). Preserve its verification evidence instead of
+                // turning that normal race into a command error.
+                if error.raw_os_error() != Some(3) {
+                    return Err(error).context("failed to kill timed-out gate process group");
+                }
+            }
+            if status.is_none() {
+                status = Some(
+                    child
+                        .wait()
+                        .context("failed to reap timed-out gate command")?,
+                );
+            }
+            break true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    let output = reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("gate output reader panicked"))?
+        .context("failed to read gate output")?;
+    let status = status.context("gate leader exited without an observed status")?;
+    let output_tail = (!output.is_empty()).then(|| String::from_utf8_lossy(&output).into_owned());
+    Ok(GateRun {
+        status,
+        output_tail,
+        timed_out,
+    })
+}
+
+fn read_output_tail(mut output: impl Read) -> io::Result<Vec<u8>> {
+    let mut tail = Vec::with_capacity(OUTPUT_TAIL_BYTES);
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read = output.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(tail);
+        }
+        if read >= OUTPUT_TAIL_BYTES {
+            tail.clear();
+            tail.extend_from_slice(&chunk[read - OUTPUT_TAIL_BYTES..read]);
+            continue;
+        }
+        let overflow = tail
+            .len()
+            .saturating_add(read)
+            .saturating_sub(OUTPUT_TAIL_BYTES);
+        if overflow > 0 {
+            tail.drain(..overflow);
+        }
+        tail.extend_from_slice(&chunk[..read]);
+    }
+}
+
+fn kill_process_group(pid: u32) -> io::Result<()> {
+    let pid = i32::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "gate pid exceeds i32"))?;
+    // SAFETY: `kill` is called with a negated child PID created as the leader
+    // of its own process group; SIGKILL requires no borrowed memory contract.
+    if unsafe { kill(-pid, SIGKILL) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 pub fn hold(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {

@@ -159,6 +159,12 @@ pub enum Payload {
         /// carry this field and round-trip byte-identically as `Some`.
         #[serde(skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
+        /// Final bytes of combined stdout and stderr observed by arc.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_tail: Option<String>,
+        /// Arc terminated the gate after its declared timeout elapsed.
+        #[serde(default, skip_serializing_if = "is_false")]
+        timed_out: bool,
         hostname: String,
         /// Evidence that arc did not execute itself (e.g. a sandboxed
         /// executor ran the gate, or the result comes from another host).

@@ -310,6 +310,10 @@ command = "cargo build"
 [gates.test]
 command = "cargo test"
 profiles = ["local", "forge", "release"]   # omit = required for every profile
+
+[gates.integration]
+command = "cargo test --test integration"
+timeout = "10m"                              # optional; s, m, or h
 ```
 
 By default `arc verify` runs the gate and observes the result itself. When
@@ -325,6 +329,12 @@ toward gate green-ness, but `arc show` and `arc status` mark it `(attested)`
 so a lead can apply stricter judgment. It has no exit code or duration because
 arc did not run a process. `--attest` requires `--result`, and `--result`
 without `--attest` is a usage error (arc observes its own result).
+
+Executed gates capture combined stdout and stderr, retaining only the final
+4096 bytes. Failed-gate tails appear in `arc show` and `arc status`; successful
+gates stay compact. A declared timeout terminates and reaps the gate's entire
+process group and records the failure as timed out. Without `timeout`, gate
+execution remains unbounded.
 
 ## Identity
 
