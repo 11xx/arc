@@ -36,6 +36,8 @@ no version has been tagged yet.
 
 ### Added
 
+- Atomic `arc take` scheduling claims the highest-priority ready change, with
+  additive priority metadata and priority-aware queue ordering (`take-next`).
 - Composed transitions cover claim-and-stage, snapshot-and-verify, snapshot-and-review, implementation completion without integration, and deterministic parallel gate execution (`composed-transitions`).
 - Change-worktree inference, explicit harness environment bootstrap, resumable context, and a statusline prompt (`cwd-context`).
 - Opt-in repository policy rejects self-approval using snapshot and verdict actor strings (`self-approval-policy`).
