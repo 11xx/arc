@@ -71,19 +71,19 @@ arc is-blocked radio-refill-fix        # 0 ready, 1 blocked, 2 lookup/ledger err
 arc blocker-status radio-refill-fix   # structured dependency detail
 
 cd ~/.worktrees/<repo>-radio-refill-fix
-export ARC_HARNESS=codex ARC_SESSION="$CODEX_THREAD_ID"
+eval "$(arc env)"                         # detects this harness session explicitly
 arc brief radio-refill-fix --body-file executor-spec.md
-arc show radio-refill-fix               # includes the latest contract
-arc claim radio-refill-fix --ttl 2h
-arc stage radio-refill-fix started
+arc show                                  # includes the latest contract
+arc claim --ttl 2h
+arc stage started
 # ... read the executor spec from arc show ...
-arc stage radio-refill-fix spec-read
-arc stage radio-refill-fix implementing
+arc stage spec-read
+arc stage implementing
 # ... implement, commit ...
 
-arc stage radio-refill-fix verifying
-arc snapshot radio-refill-fix          # record patchset ps-01
-arc verify radio-refill-fix --gate test
+arc stage verifying
+arc snapshot                             # record patchset ps-01
+arc verify --gate test
 
 # reviewer (any harness, any session) — one atomic call:
 arc review radio-refill-fix --verdict changes-requested --findings-json - <<'EOF'
@@ -103,6 +103,30 @@ arc integrate radio-refill-fix --cleanup
 # allowed here; --into and --message are intentionally per-change only.
 arc integrate --tag '#radio-series' --cleanup
 ```
+
+## Context awareness
+
+Inside an open change's recorded worktree, `show`, `status`, `check`,
+`snapshot`, `stage`, `claim`, `release-claim`, `verify`, `brief`, `comment`,
+`finding`, `reply`, `resolve`, `review`, `blocker-status`, and `is-blocked`
+infer an omitted change from the current branch, then the recorded worktree
+path. An explicit change always wins. Commands that integrate, close, hold,
+export, or otherwise act destructively or across changes still require an
+explicit change. Ambiguous or absent context fails with the candidate list and
+asks for `CHANGE`.
+
+`arc env` is the explicit identity bootstrap. It prints eval-able
+`ARC_HARNESS` and `ARC_SESSION` exports from the first available variable in
+this order: `CLAUDE_SESSION_ID`, `CODEX_THREAD_ID`, `OPENCODE_SESSION`. It does
+not inject identity into other commands; without a detected session it prints
+commented placeholders and exits 1.
+
+`arc resume [CHANGE]` renders the latest brief, claim and stage, open findings,
+head gate state, next action, live journal lanes, and matching open journal
+items in one view. `--json` emits the versioned `arc-resume/1` schema with the
+existing status payload and a journal block. `arc prompt [CHANGE]` prints the
+stable one-line change summary used by statuslines, and exits successfully
+with no output outside a change worktree.
 
 Observe a change without scraping status views, or wait for one condition for
 shell orchestration:

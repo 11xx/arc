@@ -1016,16 +1016,16 @@ fn render_event(event: &JournalEvent) -> String {
 }
 
 #[derive(Clone, Serialize)]
-struct LaneEntry {
-    topic: String,
-    owner_harness: String,
-    owner_session: String,
-    state: String,
-    opened_at: String,
-    last_activity: String,
-    ttl_seconds: u64,
-    scope: Vec<String>,
-    status: Option<String>,
+pub(crate) struct LaneEntry {
+    pub(crate) topic: String,
+    pub(crate) owner_harness: String,
+    pub(crate) owner_session: String,
+    pub(crate) state: String,
+    pub(crate) opened_at: String,
+    pub(crate) last_activity: String,
+    pub(crate) ttl_seconds: u64,
+    pub(crate) scope: Vec<String>,
+    pub(crate) status: Option<String>,
     #[serde(skip)]
     opened_time: DateTime<Utc>,
     #[serde(skip)]
@@ -1332,6 +1332,91 @@ struct ArtifactEntry {
     heading: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     lane: Option<ArtifactLane>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ContextJournalItem {
+    pub(crate) file: String,
+    pub(crate) topic: String,
+    pub(crate) kind: String,
+    pub(crate) heading: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ContextJournal {
+    pub(crate) lanes: Vec<LaneEntry>,
+    pub(crate) open_items: Vec<ContextJournalItem>,
+}
+
+impl ContextJournal {
+    pub(crate) fn render_markdown(&self) {
+        println!("\n## Journal\n");
+        println!("### Live lanes");
+        if self.lanes.is_empty() {
+            println!("- (none)");
+        } else {
+            for lane in &self.lanes {
+                println!(
+                    "- {}: {}/{}{}",
+                    lane.topic,
+                    lane.owner_harness,
+                    lane.owner_session,
+                    lane.status
+                        .as_deref()
+                        .map(|status| format!(" — {status}"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        println!("\n### Open items");
+        if self.open_items.is_empty() {
+            println!("- (none)");
+        } else {
+            for item in &self.open_items {
+                println!(
+                    "- {} [{}]{}",
+                    item.file,
+                    item.kind,
+                    item.heading
+                        .as_deref()
+                        .map(|heading| format!(" — {heading}"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+    }
+}
+
+/// Read the live lanes and unconsumed actionable journal items relevant to a
+/// change slug. This is advisory context for `arc resume`, never policy input.
+pub(crate) fn context_for_change(ctx: &Ctx, slug: &str) -> Result<ContextJournal> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    let events = read_events(&dir)?;
+    let lanes = lanes_from_journal(&events, Utc::now())
+        .into_iter()
+        .filter(|lane| lane.state == "live")
+        .collect();
+    let mut open_items = Vec::new();
+    if dir.is_dir() {
+        for entry in
+            std::fs::read_dir(&dir).with_context(|| format!("cannot read {}", dir.display()))?
+        {
+            let name = entry?.file_name().to_string_lossy().to_string();
+            let Some((_, topic, kind)) = parse_artifact_name(&name) else {
+                continue;
+            };
+            if topic.contains(slug) && is_actionable_kind(&kind) && !is_consumed(&events, &name) {
+                open_items.push(ContextJournalItem {
+                    heading: first_heading(&dir.join(&name)),
+                    file: name,
+                    topic,
+                    kind,
+                });
+            }
+        }
+    }
+    open_items.sort_by(|left, right| right.file.cmp(&left.file));
+    Ok(ContextJournal { lanes, open_items })
 }
 
 #[derive(Clone, Serialize)]

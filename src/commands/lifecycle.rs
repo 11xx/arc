@@ -374,19 +374,23 @@ pub fn metadata(
 pub fn status_cmd(ctx: &Ctx, reference: &str) -> Result<()> {
     let store = ctx.store()?;
     let (_, st) = ctx.load_state(&store, reference)?;
-    let states = ctx.load_all_states(&store)?;
-    let report = ctx.report(&store, &st)?;
+    let output = status_output(ctx, &store, &st)?;
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+pub(crate) fn status_output(ctx: &Ctx, store: &Store, state: &ChangeState) -> Result<StatusOutput> {
+    let states = ctx.load_all_states(store)?;
+    let report = ctx.report(store, state)?;
     let suggested_alternatives = if report.blocker_status.blocked {
-        find_unblocked_changes(&st.change_id, &states)
+        find_unblocked_changes(&state.change_id, &states)
     } else {
         Vec::new()
     };
-    let output = StatusOutput {
+    Ok(StatusOutput {
         report,
         suggested_alternatives,
-    };
-    println!("{}", serde_json::to_string_pretty(&output)?);
-    Ok(())
+    })
 }
 
 pub fn blocker_status_cmd(ctx: &Ctx, reference: &str) -> Result<()> {
