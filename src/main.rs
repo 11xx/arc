@@ -292,15 +292,24 @@ enum Cmd {
         /// Limit events to one raw kebab-case event_type value
         #[arg(long = "type")]
         event_type: Option<String>,
+        /// Emit only events whose ULID is strictly greater than this cursor
+        #[arg(long)]
+        since: Option<ulid::Ulid>,
+        /// Run a shell command for every emitted event
+        #[arg(long = "exec")]
+        exec_command: Option<String>,
     },
     /// Wait for a change to reach a selected ledger-derived condition
     Watch {
         change: String,
-        #[arg(long, value_enum)]
-        until: commands::WatchUntil,
+        #[arg(long, value_enum, value_delimiter = ',', required = true)]
+        until: Vec<commands::WatchUntil>,
         /// Fail with exit 2 after this many seconds
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: Option<u64>,
+        /// Run a shell command once when a condition is reached
+        #[arg(long = "exec")]
+        exec_command: Option<String>,
     },
     /// Export one change as a deterministic, versioned JSON bundle
     Export {
@@ -787,15 +796,25 @@ fn run(cli: Cli) -> Result<i32> {
             follow,
             change,
             event_type,
+            since,
+            exec_command,
         } => {
-            commands::events(&ctx, follow, change.as_deref(), event_type.as_deref())?;
+            commands::events(
+                &ctx,
+                follow,
+                change.as_deref(),
+                event_type.as_deref(),
+                since,
+                exec_command.as_deref(),
+            )?;
             Ok(0)
         }
         Cmd::Watch {
             change,
             until,
             timeout,
-        } => commands::watch(&ctx, &change, until, timeout),
+            exec_command,
+        } => commands::watch(&ctx, &change, &until, timeout, exec_command.as_deref()),
         Cmd::Export { change, output } => {
             commands::export_bundle(&ctx, &change, &output)?;
             Ok(0)
