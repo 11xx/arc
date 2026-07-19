@@ -2,6 +2,7 @@ mod briefs;
 mod bundle;
 mod claims;
 mod common;
+mod doctor;
 mod forge;
 mod journal;
 mod lifecycle;

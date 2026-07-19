@@ -440,6 +440,14 @@ malformed journal lines, artifact names and kinds, and dangling references as
 problems with a failing exit status, while stale lanes and archive housekeeping
 remain non-failing advice; it never creates the journal directory.
 
+`arc doctor [--json]` performs the same read-only split for the authoritative
+change ledger. Malformed events, store configuration, IDs, and missing open
+events are problems; orphaned temporary files and retention refs, missing open
+branches, long-expired claims, dependency cycles, and future event types are
+non-failing advice. Human output names each affected path or ref; JSON uses the
+versioned `arc-doctor/1` report. The exit status is 0 for a clean or advice-only
+ledger and 1 when problems are present.
+
 ## Roadmap
 
 Shipped: local core +

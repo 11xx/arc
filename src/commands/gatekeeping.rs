@@ -382,7 +382,7 @@ fn integrate_tagged(ctx: &Ctx, tags: Vec<String>, cleanup: bool) -> Result<i32> 
 
 /// Return selected changes in dependency order. Unrelated members are stable
 /// by their ledger opening time, then immutable change ID.
-fn dependency_order(selected: &BTreeMap<String, ChangeState>) -> Result<Vec<String>> {
+pub(crate) fn dependency_order(selected: &BTreeMap<String, ChangeState>) -> Result<Vec<String>> {
     let mut pending = selected.keys().cloned().collect::<BTreeSet<_>>();
     let mut ordered = Vec::with_capacity(pending.len());
 
