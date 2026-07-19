@@ -621,6 +621,91 @@ fn comment_reply_roundtrip_and_prefix_resolution() {
     assert!(show.contains("explained"));
 }
 
+#[test]
+fn discussion_event_prefixes_resolve_or_list_ambiguous_candidates() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "prefixes"]));
+    let wt = repo.home.join(".worktrees").join("repo-prefixes");
+    let first = stdout(repo.arc(&wt).args([
+        "finding",
+        "prefixes",
+        "--summary",
+        "first",
+        "--body",
+        "first body",
+    ]));
+    let first_event = first
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+    let second = stdout(repo.arc(&wt).args([
+        "finding",
+        "prefixes",
+        "--summary",
+        "second",
+        "--body",
+        "second body",
+    ]));
+    let second_event = second
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+
+    let unique_prefix = (1..=first_event.len())
+        .map(|length| &first_event[..length])
+        .find(|prefix| !second_event.starts_with(*prefix))
+        .unwrap();
+    repo.arc(&wt)
+        .args(["resolve", "prefixes", unique_prefix, "--status", "resolved"])
+        .assert()
+        .success();
+
+    let shared_prefix = &first_event[..1];
+    repo.arc(&wt)
+        .args(["reply", "prefixes", shared_prefix, "--body", "ambiguous"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous discussion event"))
+        .stderr(predicates::str::contains(&first_event))
+        .stderr(predicates::str::contains(&second_event));
+}
+
+#[test]
+fn status_projection_and_stage_note_file_read_stdin() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "projected"]));
+    let wt = repo.home.join(".worktrees").join("repo-projected");
+
+    repo.arc(&wt)
+        .args(["status", "projected", "--get", "claim.owner.actor"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no value at claim.owner.actor"));
+    repo.arc(&wt)
+        .args(["status", "projected", "--get", "schema"])
+        .assert()
+        .success()
+        .stdout("arc-status/5\n");
+
+    repo.arc(&wt)
+        .args([
+            "stage",
+            "projected",
+            "implementing",
+            "--claim",
+            "--note-file",
+            "-",
+        ])
+        .write_stdin("from stdin\n")
+        .assert()
+        .success();
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "projected"]))).unwrap();
+    assert_eq!(status["claim"]["note"], "from stdin");
+}
+
 /// Approving while recording blocking findings is contradictory.
 #[test]
 fn approve_with_blocking_findings_refused() {

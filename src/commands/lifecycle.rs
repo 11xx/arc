@@ -376,11 +376,43 @@ pub fn metadata(
     Ok(())
 }
 
-pub fn status_cmd(ctx: &Ctx, reference: &str) -> Result<()> {
+pub fn status_cmd(
+    ctx: &Ctx,
+    reference: &str,
+    get: Option<&str>,
+    fields: Option<&str>,
+) -> Result<()> {
     let store = ctx.store()?;
     let (_, st) = ctx.load_state(&store, reference)?;
     let output = status_output(ctx, &store, &st)?;
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    print_projected(serde_json::to_value(output)?, get, fields)?;
+    Ok(())
+}
+
+pub(crate) fn print_projected(
+    value: serde_json::Value,
+    get: Option<&str>,
+    fields: Option<&str>,
+) -> Result<()> {
+    match (get, fields) {
+        (Some(path), None) => {
+            let value =
+                crate::project::get(value, path).with_context(|| format!("no value at {path}"))?;
+            match value {
+                serde_json::Value::String(value) => println!("{value}"),
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                    println!("{}", serde_json::to_string(&value)?);
+                }
+                value => println!("{value}"),
+            }
+        }
+        (None, Some(fields)) => println!(
+            "{}",
+            serde_json::to_string(&crate::project::fields(value, fields))?
+        ),
+        (None, None) => println!("{}", serde_json::to_string_pretty(&value)?),
+        (Some(_), Some(_)) => unreachable!("clap rejects conflicting projection flags"),
+    }
     Ok(())
 }
 

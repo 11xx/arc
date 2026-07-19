@@ -137,15 +137,10 @@ pub fn finding(
 
 pub fn reply(ctx: &Ctx, reference: &str, parent_event_id: String, body: String) -> Result<()> {
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
-    let known = st.comments.iter().any(|c| c.event_id == parent_event_id)
-        || st
-            .findings
-            .values()
-            .any(|f| f.origin_event == parent_event_id);
-    if !known {
-        bail!("no comment or finding event {parent_event_id:?} in this change");
-    }
+    let (change_id, _) = ctx.load_state(&store, reference)?;
+    let parent_event_id = store
+        .resolve_discussion_event(&change_id, &parent_event_id)?
+        .event_id;
     let ev = ctx.event(
         &store,
         &change_id,
@@ -172,7 +167,17 @@ pub fn resolve(
     if st.is_closed() {
         bail!("change {change_id} is closed");
     }
-    let finding_id = st.resolve_finding_id(&finding)?;
+    let finding_id = match store.resolve_discussion_event(&change_id, &finding) {
+        Ok(event) => match event.payload {
+            Payload::FindingAdded { finding_id, .. } => finding_id,
+            Payload::CommentAdded { .. } => {
+                bail!("discussion event {finding:?} is a comment, not a finding")
+            }
+            _ => unreachable!("discussion event resolution filters payloads"),
+        },
+        Err(_error) if st.findings.contains_key(&finding) => st.resolve_finding_id(&finding)?,
+        Err(error) => return Err(error),
+    };
     let commit = match commit {
         Some(c) => Some(gitio::rev_parse(&ctx.cwd, &c)?),
         None => None,

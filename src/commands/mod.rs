@@ -28,10 +28,10 @@ pub use gatekeeping::{
     check_selection, close, done, hold, integrate, release_hold, snapshot_with_verify, verify,
     VerifyArgs,
 };
-pub(crate) use lifecycle::status_output;
 pub use lifecycle::{
     begin, blocker_status_cmd, brief, is_blocked, list, metadata, query, show_selection, status_cmd,
 };
+pub(crate) use lifecycle::{print_projected, status_output};
 pub use messaging::{inbox, message, messages};
 pub use observe::{events, watch};
 pub use review::{comment, finding, reply, resolve, review};

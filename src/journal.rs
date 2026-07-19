@@ -105,6 +105,9 @@ pub enum LaneCmd {
         ttl: String,
         #[arg(long)]
         status: Option<String>,
+        /// Read the lane status from a file ('-' for stdin)
+        #[arg(long, conflicts_with = "status")]
+        status_file: Option<String>,
     },
     /// Renew a lane owned by this session
     Renew {
@@ -113,6 +116,9 @@ pub enum LaneCmd {
         ttl: Option<String>,
         #[arg(long)]
         status: Option<String>,
+        /// Read the lane status from a file ('-' for stdin)
+        #[arg(long, conflicts_with = "status")]
+        status_file: Option<String>,
     },
     /// Close a lane
     Close {
@@ -1209,7 +1215,12 @@ fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
             scope,
             ttl,
             status,
+            status_file,
         } => {
+            let status = match (status, status_file) {
+                (None, None) => None,
+                (status, status_file) => Some(crate::commands::read_body(status, status_file)?),
+            };
             let session = require_lane_session(ctx)?;
             if !valid_topic(&topic) {
                 bail!("topic {topic:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
@@ -1243,7 +1254,16 @@ fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
                 .with_context(|| format!("cannot create archive dir {}", dir.display()))?;
             append_journal(&dir, ctx, now, &topic, &message, None)?;
         }
-        LaneCmd::Renew { topic, ttl, status } => {
+        LaneCmd::Renew {
+            topic,
+            ttl,
+            status,
+            status_file,
+        } => {
+            let status = match (status, status_file) {
+                (None, None) => None,
+                (status, status_file) => Some(crate::commands::read_body(status, status_file)?),
+            };
             let session = require_lane_session(ctx)?;
             let current = lanes
                 .iter()

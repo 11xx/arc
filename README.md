@@ -168,6 +168,11 @@ expired claims reappear. `--json` is accepted for compatibility although
 status is always JSON. `arc show <change>` renders the same actionable state as
 Markdown, visibly marking stale, expired, and `blocked-on` progress.
 
+For scripts that only need part of a report, `arc status` and `arc resume`
+accept `--get <dotted.path>` (including numeric array indices) and
+`--fields <top-level,keys>`. `--get` prints scalars without JSON quotes and
+objects or arrays as compact JSON; `--fields` prints a compact object subset.
+
 Claims are advisory rather than merge locks:
 
 ```sh
@@ -502,6 +507,10 @@ previous one (a session has at most one). `journal open` annotates items
 covered by a live lane, distinguishing this-session from external
 occupancy, and `catchup` leads with the lanes block so a newly opened
 session sees who else is here first.
+
+Long free text can come from a file (or stdin with `-`) instead of shell
+quoting: `journal lane open|renew --status-file`, `stage --note-file`, and
+`hold --reason-file` are mutually exclusive with their inline counterparts.
 
 `journal doctor [--json]` performs a read-only health check. It reports
 malformed journal lines, artifact names and kinds, and dangling references as
