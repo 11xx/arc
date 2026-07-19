@@ -463,6 +463,11 @@ enum Cmd {
     },
     /// Show the resolved configuration and store location as JSON
     Config,
+    /// Check the append-only ledger for malformed or stale state (read-only)
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
     /// Cross-harness project journal mechanics (plain Markdown stays the contract)
     Journal {
         #[command(subcommand)]
@@ -922,6 +927,7 @@ fn run(cli: Cli) -> Result<i32> {
             );
             Ok(0)
         }
+        Cmd::Doctor { json } => commands::run_doctor(&ctx, json),
         Cmd::Journal { cmd } => journal::run(&ctx, cmd),
     }
 }

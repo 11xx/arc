@@ -36,6 +36,8 @@ no version has been tagged yet.
 
 ### Added
 
+- Read-only `arc doctor [--json]` ledger integrity and housekeeping checks
+  (`ledger-doctor`).
 - Read-only `thread doctor [--json]` archive health and housekeeping checks
   (`thread-doctor`).
 - Change-scoped implementation briefs stored in the ledger and carried by
