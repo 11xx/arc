@@ -262,6 +262,10 @@ enum Cmd {
         /// Read one derived brief version instead of the latest
         #[arg(long)]
         version: Option<usize>,
+        /// Prepend a scaffold template (.arc/templates/<name>.md or a built-in:
+        /// sol-low, sol-high, reviewer)
+        #[arg(long)]
+        scaffold: Option<String>,
     },
     /// Append a structured cross-change announcement (never policy input)
     Message {
@@ -636,6 +640,18 @@ enum Cmd {
         #[command(subcommand)]
         cmd: HooksCmd,
     },
+    /// Aggregate open changes or inboxes across a configured data_root
+    Workspace {
+        #[command(subcommand)]
+        cmd: WorkspaceCmd,
+    },
+    /// Advise (never execute) rebases for open dependents of a change
+    Restack {
+        change: Option<String>,
+        /// Print the rebase commands without running them
+        #[arg(long)]
+        advise: bool,
+    },
     /// Internal hook entry point invoked by installed hook scripts
     #[command(hide = true)]
     HookRun {
@@ -649,6 +665,20 @@ enum Cmd {
     Journal {
         #[command(subcommand)]
         cmd: journal::JournalCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkspaceCmd {
+    /// Per-repo open-change rows across the data_root
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// The inbox rollup for every repo under the data_root
+    Inbox {
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -929,9 +959,10 @@ fn run(cli: Cli) -> Result<i32> {
             body_file,
             title,
             version,
+            scaffold,
         } => {
             let change = infer(change.as_deref())?;
-            commands::brief(&ctx, role, &change, body_file, title, version)
+            commands::brief(&ctx, role, &change, body_file, title, version, scaffold)
         }
         Cmd::Message {
             change,
@@ -1341,6 +1372,19 @@ fn run(cli: Cli) -> Result<i32> {
             }
         },
         Cmd::HookRun { name, args } => Ok(commands::hook_run(&ctx, &name, &args)),
+        Cmd::Workspace { cmd } => {
+            let (view, json) = match cmd {
+                WorkspaceCmd::List { json } => (commands::WorkspaceView::List, json),
+                WorkspaceCmd::Inbox { json } => (commands::WorkspaceView::Inbox, json),
+            };
+            commands::workspace(&ctx, view, json)?;
+            Ok(0)
+        }
+        Cmd::Restack { change, advise } => {
+            let change = infer(change.as_deref())?;
+            commands::restack(&ctx, &change, advise)?;
+            Ok(0)
+        }
         Cmd::Journal { cmd } => journal::run(&ctx, cmd),
     }
 }

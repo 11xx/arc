@@ -450,6 +450,35 @@ whose patchset heads or integration/closure commit match a revision (a unique
 prefix is accepted). It searches the ledger only; it does not scan commit
 trailers.
 
+## Workspace, brief scaffolds, and restack advice
+
+Three read-only conveniences for a lead working across repos and handoffs.
+
+`arc workspace list|inbox [--json]` aggregates every arc store under a
+configured `data_root` (it errors otherwise, since per-repo git-common-dir
+ledgers are not enumerable). `list` prints per-repo open-change rows; `inbox`
+concatenates each repo's inbox rollup, tagged with the repo. The scan opens
+each store read-only, never creates one, and skips unreadable entries with a
+warning. JSON is versioned `arc-workspace/1`. The workspace inbox is
+ledger-derived — it consults no per-repo working tree, so rebase and gate
+buckets are not evaluated there.
+
+`arc brief <change> --scaffold <name>` prepends a template to the brief being
+recorded (`--scaffold` alone records the template). A repo-local
+`.arc/templates/<name>.md` wins; otherwise a built-in applies (`sol-low`,
+`sol-high`, `reviewer`). The built-ins encode the delegation fences — scope
+ceiling, no tests beyond those listed, stop on a missing target, release the
+claim on stop, never review or integrate — and the sandbox facts an
+arc-driving executor needs (`.git` must be writable; stage and report
+"staged, no SHA" when signing is unavailable so the lead commits then
+snapshots then reviews; keep claim/stage heartbeats current).
+
+`arc restack <change> --advise` prints, for each open dependent of a change,
+the exact `git rebase --onto <target> <base>` command to run in that
+dependent's worktree once the change integrates. It only prints — arc never
+rewrites a branch — and writes no events; with no dependents it says so and
+exits 0.
+
 ## Policy
 
 Repository integration policy is declared in `.arc/policy.toml`. Policies are

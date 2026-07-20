@@ -79,6 +79,20 @@ impl Store {
         })
     }
 
+    /// Open an existing store at an exact root directory, read-only. Returns
+    /// `None` when the directory is not an arc store (no `config.json`), so
+    /// callers scanning a `data_root` can skip non-store entries. Never
+    /// creates anything.
+    pub fn open_at(root: &Path) -> Result<Option<Store>> {
+        match Self::repository_id_at(root)? {
+            Some(repository_id) => Ok(Some(Store {
+                root: root.to_path_buf(),
+                repository_id,
+            })),
+            None => Ok(None),
+        }
+    }
+
     pub fn resolve_root(cwd: &Path) -> Result<PathBuf> {
         if let Some(dir) = std::env::var_os("ARC_DATA_DIR") {
             return Ok(PathBuf::from(dir));
