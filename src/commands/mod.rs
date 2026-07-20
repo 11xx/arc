@@ -11,6 +11,7 @@ mod lifecycle;
 mod messaging;
 mod observe;
 mod review;
+mod timeline;
 
 use crate::gates;
 use crate::gitio;
@@ -47,6 +48,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
+pub use timeline::log;
 
 pub struct Ctx {
     pub cwd: PathBuf,
@@ -185,6 +187,38 @@ impl Ctx {
             changes_blocked_by(&state.change_id, &states),
         )
     }
+
+    /// Build a report for a state replayed to a past event: the derived
+    /// latest-patchset head stands in for the live branch head, so approval
+    /// validity reflects what the actor saw at that point rather than the
+    /// current worktree. Cross-change dependency state is still evaluated
+    /// against the present ledger.
+    pub(crate) fn report_as_of(&self, store: &Store, state: &ChangeState) -> Result<StatusReport> {
+        let toplevel = gitio::toplevel(&self.cwd)?;
+        let gates = gates::load(&toplevel)?;
+        let policy = crate::policy::load(&toplevel)?;
+        let states = self.load_all_states(store)?;
+        status::build_as_of(
+            state,
+            &gates,
+            &policy,
+            dependency_status(state, &states),
+            changes_blocked_by(&state.change_id, &states),
+            chrono::Utc::now(),
+        )
+    }
+}
+
+/// Replay a change's ledger up to and including `event_id`, answering
+/// "what did an actor see at this point?". Rejects an event ID absent from
+/// this change's ledger.
+pub(crate) fn reduce_at(store: &Store, change_id: &str, event_id: &str) -> Result<ChangeState> {
+    let events = store.load_events(change_id)?;
+    let position = events
+        .iter()
+        .position(|event| event.event_id == event_id)
+        .with_context(|| format!("unknown event {event_id:?} in {change_id}"))?;
+    state::reduce(&events[..=position])
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

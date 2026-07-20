@@ -17,13 +17,34 @@ extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;
 }
 
-pub fn check_selection(ctx: &Ctx, reference: Option<&str>, tags: Vec<String>) -> Result<i32> {
+pub fn check_selection(
+    ctx: &Ctx,
+    reference: Option<&str>,
+    tags: Vec<String>,
+    explain: bool,
+    json: bool,
+) -> Result<i32> {
     match (reference, tags.is_empty()) {
-        (Some(reference), true) => check(ctx, reference),
+        (Some(reference), true) => check(ctx, reference, explain, json),
         (None, false) => check_tagged(ctx, normalize_tags(tags)?),
         (Some(_), false) => bail!("provide a change or --tag, not both"),
         (None, true) => bail!("provide a change or at least one --tag"),
     }
+}
+
+#[derive(serde::Serialize)]
+struct CheckOutput<'a> {
+    schema: &'static str,
+    change_id: &'a str,
+    ready: bool,
+    exit_code: i32,
+    blockers: Vec<CheckBlocker>,
+}
+
+#[derive(serde::Serialize)]
+struct CheckBlocker {
+    blocker: &'static str,
+    exit_code: i32,
 }
 
 pub struct VerifyArgs {
@@ -224,7 +245,7 @@ pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
             note: None,
         },
     )?;
-    check(ctx, reference)
+    check(ctx, reference, false, false)
 }
 
 fn verify_all_parallel(
@@ -583,6 +604,7 @@ pub fn integrate(
     into: Option<String>,
     message: Option<String>,
     cleanup: bool,
+    dry_run: bool,
 ) -> Result<i32> {
     match (reference, tags.is_empty()) {
         (Some(reference), true) => integrate_one(
@@ -592,6 +614,7 @@ pub fn integrate(
             message,
             cleanup,
             ClosedBehavior::Refuse,
+            dry_run,
         ),
         (None, false) => {
             if into.is_some() {
@@ -599,6 +622,9 @@ pub fn integrate(
             }
             if message.is_some() {
                 bail!("--message is only valid when integrating one change");
+            }
+            if dry_run {
+                bail!("--dry-run is only valid when integrating one change");
             }
             integrate_tagged(ctx, normalize_tags(tags)?, cleanup)
         }
@@ -616,6 +642,7 @@ enum ClosedBehavior {
 /// Integrate one already-selected change. Tagged integration reuses this
 /// guarded path for every open member so each merge gets the normal target,
 /// approval, gate, and dependency checks.
+#[allow(clippy::too_many_arguments)]
 fn integrate_one(
     ctx: &Ctx,
     reference: &str,
@@ -623,11 +650,15 @@ fn integrate_one(
     message: Option<String>,
     cleanup: bool,
     closed_behavior: ClosedBehavior,
+    dry_run: bool,
 ) -> Result<i32> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let initial = state::reduce(&store.load_events(&change_id)?)?;
     let target = into.unwrap_or_else(|| initial.target_branch.clone());
+    if dry_run {
+        return integrate_dry_run(ctx, &store, &initial, &target, message.as_deref());
+    }
     // Cross-change order is always target, then change. This serializes the
     // target worktree without allowing an integration/metadata lock cycle.
     let target_lock = store.lock_target(&target)?;
@@ -732,6 +763,57 @@ fn integrate_one(
     Ok(0)
 }
 
+/// Report what `integrate` would do without merging, closing, or writing
+/// anything: run the same readiness preflight, then simulate the merge with
+/// the needs-rebase machinery. Exit code mirrors `check`: 0 when the merge
+/// would proceed cleanly, otherwise the first blocker's code.
+fn integrate_dry_run(
+    ctx: &Ctx,
+    store: &Store,
+    st: &ChangeState,
+    target: &str,
+    message: Option<&str>,
+) -> Result<i32> {
+    let report = ctx.report(store, st)?;
+    if !report.integrate_ready {
+        eprint!("{}", render::blocker_explanation(st, &report));
+        println!(
+            "dry-run: would not integrate {} ({})",
+            st.change_id, report.ready_reason
+        );
+        return Ok(status::check_exit_code(&report));
+    }
+
+    let approved_head = st
+        .latest_patchset()
+        .context("no patchset recorded")?
+        .head
+        .clone();
+    let target_head = gitio::branch_head(&ctx.cwd, target)?;
+    let conflicts = gitio::merge_conflicts(&ctx.cwd, &target_head, &approved_head)?;
+    let msg = message
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
+
+    println!("dry-run: would integrate {} into {target}", st.change_id);
+    println!("  merge message: {msg}");
+    println!("  merge parents: [{target_head}, {approved_head}]");
+    println!(
+        "  merge result: {}",
+        if conflicts {
+            "conflict — rebase required"
+        } else {
+            "clean"
+        }
+    );
+    println!("  no events, refs, or worktrees were modified");
+    Ok(if conflicts {
+        status::Blocker::NeedsRebase.exit_code()
+    } else {
+        0
+    })
+}
+
 fn integrate_tagged(ctx: &Ctx, tags: Vec<String>, cleanup: bool) -> Result<i32> {
     let batch_ctx = Ctx {
         cwd: gitio::primary_worktree(&ctx.cwd)?,
@@ -757,6 +839,7 @@ fn integrate_tagged(ctx: &Ctx, tags: Vec<String>, cleanup: bool) -> Result<i32> 
             None,
             cleanup,
             ClosedBehavior::SkipTagged,
+            false,
         )?;
         if code != 0 {
             return Ok(code);
@@ -854,16 +937,35 @@ pub fn close(
     Ok(())
 }
 
-fn check(ctx: &Ctx, reference: &str) -> Result<i32> {
+fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
     let store = ctx.store()?;
-    let (_, st) = ctx.load_state(&store, reference)?;
+    let (change_id, st) = ctx.load_state(&store, reference)?;
     let report = ctx.report(&store, &st)?;
-    if report.integrate_ready {
+    let code = status::check_exit_code(&report);
+    if json {
+        let output = CheckOutput {
+            schema: "arc-check/1",
+            change_id: &change_id,
+            ready: report.integrate_ready,
+            exit_code: code,
+            blockers: report
+                .blockers
+                .iter()
+                .map(|blocker| CheckBlocker {
+                    blocker: blocker.as_str(),
+                    exit_code: blocker.exit_code(),
+                })
+                .collect(),
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if explain {
+        print!("{}", render::check_explanation(&st, &report));
+    } else if report.integrate_ready {
         println!("ready: all integration gates pass");
     } else {
         print!("{}", render::blocker_explanation(&st, &report));
     }
-    Ok(status::check_exit_code(&report))
+    Ok(code)
 }
 
 fn check_tagged(ctx: &Ctx, tags: Vec<String>) -> Result<i32> {

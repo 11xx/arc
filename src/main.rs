@@ -186,6 +186,16 @@ enum Cmd {
         tag: Vec<String>,
         #[arg(long)]
         json: bool,
+        /// Replay state as of this event ID ("what did the actor see?")
+        #[arg(long, conflicts_with = "tag")]
+        at: Option<String>,
+    },
+    /// Print the change's ledger events one line each, in ledger order
+    Log {
+        change: Option<String>,
+        /// Newest event first
+        #[arg(long)]
+        reverse: bool,
     },
     /// Render a recorded patchset using Git's native diff output
     Diff {
@@ -312,6 +322,9 @@ enum Cmd {
         /// Print a top-level JSON field subset
         #[arg(long, conflicts_with = "get")]
         fields: Option<String>,
+        /// Replay state as of this event ID ("what did the actor see?")
+        #[arg(long)]
+        at: Option<String>,
     },
     /// Report whether declared prerequisite changes have integrated
     BlockerStatus { change: Option<String> },
@@ -368,6 +381,12 @@ enum Cmd {
         /// Check every change carrying all supplied tags
         #[arg(long)]
         tag: Vec<String>,
+        /// Print a full readiness checklist of every gate condition
+        #[arg(long)]
+        explain: bool,
+        /// Emit all blockers and the resulting exit code as JSON
+        #[arg(long, conflicts_with = "tag")]
+        json: bool,
     },
     /// Acquire or renew an advisory executor claim
     Claim {
@@ -550,6 +569,9 @@ enum Cmd {
         /// Remove the change worktree and branch after a verified merge
         #[arg(long)]
         cleanup: bool,
+        /// Report what would happen without merging, closing, or writing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Close a change without arc performing the merge
     Close {
@@ -777,13 +799,23 @@ fn run(cli: Cli) -> Result<i32> {
             )?;
             Ok(0)
         }
-        Cmd::Show { change, tag, json } => {
+        Cmd::Show {
+            change,
+            tag,
+            json,
+            at,
+        } => {
             let change = if tag.is_empty() {
                 Some(infer(change.as_deref())?)
             } else {
                 change
             };
-            commands::show_selection(&ctx, role, change.as_deref(), tag, json)?;
+            commands::show_selection(&ctx, role, change.as_deref(), tag, json, at.as_deref())?;
+            Ok(0)
+        }
+        Cmd::Log { change, reverse } => {
+            let change = infer(change.as_deref())?;
+            commands::log(&ctx, &change, reverse)?;
             Ok(0)
         }
         Cmd::Diff {
@@ -874,9 +906,16 @@ fn run(cli: Cli) -> Result<i32> {
             json: _,
             get,
             fields,
+            at,
         } => {
             let change = infer(change.as_deref())?;
-            commands::status_cmd(&ctx, &change, get.as_deref(), fields.as_deref())?;
+            commands::status_cmd(
+                &ctx,
+                &change,
+                get.as_deref(),
+                fields.as_deref(),
+                at.as_deref(),
+            )?;
             Ok(0)
         }
         Cmd::BlockerStatus { change } => {
@@ -921,13 +960,18 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Import { input, dry_run } => commands::import_bundle(&ctx, &input, dry_run),
-        Cmd::Check { change, tag } => {
+        Cmd::Check {
+            change,
+            tag,
+            explain,
+            json,
+        } => {
             let change = if tag.is_empty() {
                 Some(infer(change.as_deref())?)
             } else {
                 change
             };
-            commands::check_selection(&ctx, change.as_deref(), tag)
+            commands::check_selection(&ctx, change.as_deref(), tag, explain, json)
         }
         Cmd::Claim {
             change,
@@ -1102,7 +1146,16 @@ fn run(cli: Cli) -> Result<i32> {
             into,
             message,
             cleanup,
-        } => commands::integrate(&ctx, change.as_deref(), tag, into, message, cleanup),
+            dry_run,
+        } => commands::integrate(
+            &ctx,
+            change.as_deref(),
+            tag,
+            into,
+            message,
+            cleanup,
+            dry_run,
+        ),
         Cmd::Close {
             change,
             integrated,

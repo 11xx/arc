@@ -39,6 +39,11 @@ no version has been tagged yet.
 
 ### Added
 
+- `arc log [CHANGE] [--reverse]` prints one line per ledger event; `--at
+  <event-id>` on `arc show`/`arc status` replays a change to that point;
+  `arc check --explain` lists every gate condition (and `--json` every
+  blocker), and `arc integrate --dry-run` simulates a merge without writing
+  (`timeline-views`).
 - `arc diff --between ps-A ps-B` and `--since-approved` make re-review deltas
   explicit; `arc findings --format json|sarif` exports current dispositions and
   open findings for external review tooling (`interdiff-sarif`).

@@ -273,7 +273,55 @@ pub fn build_at(
         (Some(head), Some(target)) => gitio::merge_conflicts(cwd, target, head)?,
         _ => false,
     };
+    build_report(
+        state,
+        gates,
+        policy,
+        dependency_status,
+        blocks,
+        now,
+        current_head,
+        needs_rebase,
+    )
+}
 
+/// Build a report from a state replayed to a past event. Live Git facts are
+/// not consulted: the derived latest-patchset head is taken as the head that
+/// was current then, and rebase state is not simulated. Used by `--at`.
+pub fn build_as_of(
+    state: &ChangeState,
+    gates: &GatesFile,
+    policy: &PolicyFile,
+    dependency_status: BlockerStatus,
+    blocks: Vec<String>,
+    now: DateTime<Utc>,
+) -> Result<StatusReport> {
+    let current_head = state
+        .latest_patchset()
+        .map(|patchset| patchset.head.clone());
+    build_report(
+        state,
+        gates,
+        policy,
+        dependency_status,
+        blocks,
+        now,
+        current_head,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_report(
+    state: &ChangeState,
+    gates: &GatesFile,
+    policy: &PolicyFile,
+    dependency_status: BlockerStatus,
+    blocks: Vec<String>,
+    now: DateTime<Utc>,
+    current_head: Option<String>,
+    needs_rebase: bool,
+) -> Result<StatusReport> {
     let latest_patchset = state.latest_patchset().cloned();
     let head_matches = match (&current_head, &latest_patchset) {
         (Some(h), Some(p)) => *h == p.head,

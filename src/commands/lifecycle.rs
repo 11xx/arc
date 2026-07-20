@@ -246,9 +246,10 @@ pub fn show_selection(
     reference: Option<&str>,
     tags: Vec<String>,
     json: bool,
+    at: Option<&str>,
 ) -> Result<()> {
     match (reference, tags.is_empty()) {
-        (Some(reference), true) => show(ctx, reference, json, role),
+        (Some(reference), true) => show(ctx, reference, json, role, at),
         (None, false) => show_tagged(ctx, normalize_tags(tags)?, json),
         (Some(_), false) => bail!("provide a change or --tag, not both"),
         (None, true) => bail!("provide a change or at least one --tag"),
@@ -383,10 +384,20 @@ pub fn status_cmd(
     reference: &str,
     get: Option<&str>,
     fields: Option<&str>,
+    at: Option<&str>,
 ) -> Result<()> {
     let store = ctx.store()?;
-    let (_, st) = ctx.load_state(&store, reference)?;
-    let output = status_output(ctx, &store, &st)?;
+    let change_id = store.resolve_change(reference)?;
+    let output = match at {
+        Some(at) => {
+            let st = super::reduce_at(&store, &change_id, at)?;
+            status_output_as_of(ctx, &store, &st)?
+        }
+        None => {
+            let st = state::reduce(&store.load_events(&change_id)?)?;
+            status_output(ctx, &store, &st)?
+        }
+    };
     print_projected(serde_json::to_value(output)?, get, fields)?;
     Ok(())
 }
@@ -419,8 +430,20 @@ pub(crate) fn print_projected(
 }
 
 pub(crate) fn status_output(ctx: &Ctx, store: &Store, state: &ChangeState) -> Result<StatusOutput> {
+    status_output_with(ctx, store, state, ctx.report(store, state)?)
+}
+
+fn status_output_as_of(ctx: &Ctx, store: &Store, state: &ChangeState) -> Result<StatusOutput> {
+    status_output_with(ctx, store, state, ctx.report_as_of(store, state)?)
+}
+
+fn status_output_with(
+    ctx: &Ctx,
+    store: &Store,
+    state: &ChangeState,
+    report: StatusReport,
+) -> Result<StatusOutput> {
     let states = ctx.load_all_states(store)?;
-    let report = ctx.report(store, state)?;
     let suggested_alternatives = if report.blocker_status.blocked {
         find_unblocked_changes(&state.change_id, &states)
     } else {
@@ -526,14 +549,27 @@ fn blocker_label(state: &ChangeState, states: &BTreeMap<String, ChangeState>) ->
     "—".into()
 }
 
-fn show(ctx: &Ctx, reference: &str, json: bool, role: ExecutionRole) -> Result<()> {
+fn show(
+    ctx: &Ctx,
+    reference: &str,
+    json: bool,
+    role: ExecutionRole,
+    at: Option<&str>,
+) -> Result<()> {
     let store = ctx.store()?;
-    let (_, st) = ctx.load_state(&store, reference)?;
+    let change_id = store.resolve_change(reference)?;
+    let st = match at {
+        Some(at) => super::reduce_at(&store, &change_id, at)?,
+        None => state::reduce(&store.load_events(&change_id)?)?,
+    };
     if json {
         println!("{}", serde_json::to_string_pretty(&st)?);
     } else {
         let states = ctx.load_all_states(&store)?;
-        let report = ctx.report(&store, &st)?;
+        let report = match at {
+            Some(_) => ctx.report_as_of(&store, &st)?,
+            None => ctx.report(&store, &st)?,
+        };
         let alternatives = if report.blocker_status.blocked {
             find_unblocked_changes(&st.change_id, &states)
         } else {

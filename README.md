@@ -177,6 +177,31 @@ accept `--get <dotted.path>` (including numeric array indices) and
 `--fields <top-level,keys>`. `--get` prints scalars without JSON quotes and
 objects or arrays as compact JSON; `--fields` prints a compact object subset.
 
+Four derived views strengthen audit and orchestration without new events —
+each is pure replay over the existing ledger:
+
+```sh
+arc log radio-refill-fix                 # one line per event, oldest first
+arc log radio-refill-fix --reverse       # newest first
+arc show radio-refill-fix --at <event>   # state as the actor saw it then
+arc status radio-refill-fix --at <event> # same replay, JSON report
+arc check radio-refill-fix --explain     # full readiness checklist
+arc check radio-refill-fix --json        # every blocker + exit code as JSON
+arc integrate radio-refill-fix --dry-run # simulate the merge, write nothing
+```
+
+`arc log` prints `<ts>  <actor>@<harness>  <event-type>  <summary>` per event
+in ledger order; take event IDs from `arc events`. `--at <event-id>` replays a
+change to that point and answers "what did the actor see?": the derived
+latest-patchset head stands in for the live branch head, so an approval that a
+later snapshot invalidated still shows valid as of the review. Unknown event
+IDs are rejected. `check --explain` evaluates every gate condition — passing
+and failing — and prints the exit code the first blocker sets; the plain
+`check` exit code is unchanged, so existing automation keeps working.
+`integrate --dry-run` runs the same readiness preflight and merge simulation
+and reports the would-be merge parents and result without appending an event,
+moving a ref, or touching a worktree.
+
 Claims are advisory rather than merge locks:
 
 ```sh
