@@ -197,6 +197,20 @@ enum Cmd {
         #[arg(long)]
         reverse: bool,
     },
+    /// Derived ledger analytics: stage, review, and gate durations
+    Stats {
+        /// Report a single change
+        #[arg(long, conflicts_with_all = ["tag", "all"])]
+        change: Option<String>,
+        /// Report every change carrying this tag
+        #[arg(long, conflicts_with_all = ["change", "all"])]
+        tag: Option<String>,
+        /// Report all changes (the default)
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Render a recorded patchset using Git's native diff output
     Diff {
         #[arg(index = 1)]
@@ -816,6 +830,21 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Log { change, reverse } => {
             let change = infer(change.as_deref())?;
             commands::log(&ctx, &change, reverse)?;
+            Ok(0)
+        }
+        Cmd::Stats {
+            change,
+            tag,
+            all: _,
+            json,
+        } => {
+            let selection = match (change, tag) {
+                (Some(change), None) => commands::StatsSelection::Change(change),
+                (None, Some(tag)) => commands::StatsSelection::Tag(tag),
+                (None, None) => commands::StatsSelection::All,
+                (Some(_), Some(_)) => unreachable!("clap rejects --change with --tag"),
+            };
+            commands::stats(&ctx, selection, json)?;
             Ok(0)
         }
         Cmd::Diff {

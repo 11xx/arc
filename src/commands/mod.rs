@@ -11,6 +11,7 @@ mod lifecycle;
 mod messaging;
 mod observe;
 mod review;
+mod stats;
 mod timeline;
 
 use crate::gates;
@@ -43,6 +44,7 @@ pub use messaging::{inbox, message, messages};
 pub use observe::{events, watch};
 pub use review::{comment, finding, reply, resolve, review};
 use serde::Serialize;
+pub use stats::{stats, StatsSelection};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

@@ -202,6 +202,16 @@ and failing — and prints the exit code the first blocker sets; the plain
 and reports the would-be merge parents and result without appending an event,
 moving a ref, or touching a worktree.
 
+`arc stats [--change <c> | --tag <t> | --all] [--json]` (default `--all`)
+projects the durations and counts the ledger already holds: per change the
+open→integrated wall time, seconds in each typed stage, snapshot→first-verdict
+review latency, observed gate wall times, findings by severity, and patchset
+count. The aggregate block adds median and p90 per stage and per gate, plus
+`suggested_stage_budgets` — each stage's p90 rounded up to a clean duration,
+offered for `--stage-budget` tuning and never applied automatically. Attested
+gate evidence carries no observed duration and is excluded from gate timing.
+JSON is versioned `arc-stats/1`.
+
 Claims are advisory rather than merge locks:
 
 ```sh

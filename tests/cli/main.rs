@@ -14,6 +14,7 @@ mod observe;
 mod orchestrate;
 mod paths;
 mod roles;
+mod stats;
 mod take;
 mod timeline;
 mod verify;
