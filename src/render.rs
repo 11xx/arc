@@ -1,4 +1,5 @@
 use crate::commands::ArcAlternative;
+use crate::model::{Event, Payload};
 use crate::state::ChangeState;
 use crate::status::{Blocker, StatusReport};
 use std::fmt::Write;
@@ -501,4 +502,263 @@ fn blocker_title(blocker: Blocker) -> &'static str {
         Blocker::GatesNotGreen => "required gates not green",
         Blocker::HoldActive => "hold active",
     }
+}
+
+/// One chronological log line for a ledger event:
+/// `<ts>  <actor>@<harness>  <event-type>  <summary>`.
+pub fn event_line(event: &Event) -> String {
+    let ts = event.created_at.format("%Y-%m-%dT%H:%M:%SZ");
+    let who = format!(
+        "{}@{}",
+        event.actor,
+        event.harness.as_deref().unwrap_or("-")
+    );
+    let (kind, summary) = event_kind_summary(&event.payload);
+    if summary.is_empty() {
+        format!("{ts}  {who}  {kind}")
+    } else {
+        format!("{ts}  {who}  {kind}  {summary}")
+    }
+}
+
+/// Stable kebab event type plus a type-specific one-line summary.
+fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
+    match payload {
+        Payload::ChangeOpened { slug, title, .. } => ("change-opened", format!("{slug}: {title}")),
+        Payload::MetadataUpdated {
+            add_blocked_by,
+            remove_blocked_by,
+            add_tags,
+            remove_tags,
+            assign,
+            priority,
+        } => {
+            let mut parts = Vec::new();
+            for blocker in add_blocked_by {
+                parts.push(format!("+blocked-by {blocker}"));
+            }
+            for blocker in remove_blocked_by {
+                parts.push(format!("-blocked-by {blocker}"));
+            }
+            for tag in add_tags {
+                parts.push(format!("+{tag}"));
+            }
+            for tag in remove_tags {
+                parts.push(format!("-{tag}"));
+            }
+            if let Some(assign) = assign {
+                parts.push(if assign.is_empty() {
+                    "unassign".into()
+                } else {
+                    format!("assign {assign}")
+                });
+            }
+            if let Some(priority) = priority {
+                parts.push(format!("priority {priority}"));
+            }
+            ("metadata-updated", parts.join(", "))
+        }
+        Payload::Message {
+            severity, summary, ..
+        } => ("message", format!("[{severity:?}] {summary}")),
+        Payload::BriefRecorded { title, .. } => (
+            "brief-recorded",
+            title.clone().unwrap_or_else(|| "brief".into()),
+        ),
+        Payload::PatchsetAdded {
+            patchset_id, head, ..
+        } => (
+            "patchset-added",
+            format!("{patchset_id} {}", short_sha(head)),
+        ),
+        Payload::ClaimSet { claim_id, .. } => ("claim-set", claim_id.clone()),
+        Payload::ClaimReleased { claim_id } => ("claim-released", claim_id.clone()),
+        Payload::StageSet { stage, note, .. } => {
+            let stage = format!("{stage:?}").to_lowercase();
+            match note {
+                Some(note) => ("stage-set", format!("{stage} — {note}")),
+                None => ("stage-set", stage),
+            }
+        }
+        Payload::CommentAdded { body, .. } => ("comment-added", first_line(body)),
+        Payload::FindingAdded {
+            finding_id,
+            severity,
+            summary,
+            ..
+        } => (
+            "finding-added",
+            format!("{finding_id} [{severity:?}] {summary}"),
+        ),
+        Payload::ReplyAdded { body, .. } => ("reply-added", first_line(body)),
+        Payload::DispositionRecorded {
+            finding_id, status, ..
+        } => (
+            "disposition-recorded",
+            format!("{finding_id} {}", format!("{status:?}").to_lowercase()),
+        ),
+        Payload::VerdictRecorded {
+            patchset_id,
+            verdict,
+            ..
+        } => (
+            "verdict-recorded",
+            format!("{} {patchset_id}", format!("{verdict:?}").to_lowercase()),
+        ),
+        Payload::VerificationRecorded { gate, result, .. } => (
+            "verification-recorded",
+            format!(
+                "{} {}",
+                gate.as_deref().unwrap_or("-"),
+                format!("{result:?}").to_lowercase()
+            ),
+        ),
+        Payload::HoldSet { reason } => ("hold-set", reason.clone()),
+        Payload::HoldReleased { reason } => ("hold-released", reason.clone().unwrap_or_default()),
+        Payload::ChangeClosed {
+            outcome,
+            integrated_commit,
+            ..
+        } => {
+            let outcome = format!("{outcome:?}").to_lowercase();
+            match integrated_commit {
+                Some(commit) => (
+                    "change-closed",
+                    format!("{outcome} at {}", short_sha(commit)),
+                ),
+                None => ("change-closed", outcome),
+            }
+        }
+        Payload::ForgeProjection { base_repo, .. } => ("forge-projection", base_repo.clone()),
+        Payload::ForgeLink { pr_number, .. } => ("forge-link", format!("#{pr_number}")),
+        Payload::ForgeChecks { state, .. } => ("forge-checks", format!("{state:?}").to_lowercase()),
+        Payload::ForgePrState { state, .. } => {
+            ("forge-pr-state", format!("{state:?}").to_lowercase())
+        }
+        Payload::Unknown => ("unknown", String::new()),
+    }
+}
+
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(12).collect()
+}
+
+fn first_line(body: &str) -> String {
+    body.lines().next().unwrap_or_default().to_string()
+}
+
+/// Full integration-readiness checklist: every gate condition, passing or
+/// failing, in exit-code precedence order. Unlike `blocker_explanation`
+/// (which lists only blockers), this renders the complete evaluation so a
+/// reviewer sees what already passes alongside what does not.
+pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "Integration readiness for {}", state.change_id);
+    let _ = writeln!(out);
+
+    let blocked = |blocker: Blocker| report.blockers.contains(&blocker);
+    let condition = |out: &mut String, blocker: Blocker, label: &str, detail: String| {
+        if blocked(blocker) {
+            let _ = writeln!(out, "  [ ] {label}");
+            if !detail.is_empty() {
+                for line in detail.lines() {
+                    let _ = writeln!(out, "        {line}");
+                }
+            }
+        } else {
+            let _ = writeln!(out, "  [x] {label}");
+        }
+    };
+
+    condition(
+        &mut out,
+        Blocker::BranchMissing,
+        "branch present",
+        format!("branch `{}` is missing", state.branch),
+    );
+    condition(
+        &mut out,
+        Blocker::BlockedByChanges,
+        "prerequisites integrated",
+        report
+            .blocker_status
+            .blockers_ready
+            .iter()
+            .filter(|dependency| !dependency.integrated)
+            .map(|dependency| {
+                format!(
+                    "{} (`{}`): {}",
+                    dependency.slug, dependency.change_id, dependency.status
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    condition(
+        &mut out,
+        Blocker::NeedsRebase,
+        "rebased on target",
+        format!(
+            "target `{}` moved with conflicting changes",
+            state.target_branch
+        ),
+    );
+    condition(
+        &mut out,
+        Blocker::BlockingFindings,
+        "no open blocking findings",
+        report
+            .findings
+            .iter()
+            .filter(|finding| report.open_blocking_findings.contains(&finding.id))
+            .map(|finding| {
+                format!(
+                    "`{}` [{:?}] {}",
+                    finding.id, finding.severity, finding.summary
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    condition(
+        &mut out,
+        Blocker::NoValidApproval,
+        "valid approval at head",
+        report
+            .approval_rejection_reason
+            .clone()
+            .unwrap_or_else(|| "current head has no valid approval".into()),
+    );
+    condition(
+        &mut out,
+        Blocker::GatesNotGreen,
+        "required gates green",
+        report
+            .gates
+            .iter()
+            .filter(|gate| !gate.green_at_head)
+            .map(|gate| format!("gate `{}` is not green at head", gate.name))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    condition(
+        &mut out,
+        Blocker::HoldActive,
+        "no active hold",
+        report.hold.clone().unwrap_or_default(),
+    );
+
+    let _ = writeln!(out);
+    if report.integrate_ready {
+        let _ = writeln!(out, "Ready to integrate (exit 0)");
+    } else {
+        let code = crate::status::check_exit_code(report);
+        let first = report
+            .blockers
+            .first()
+            .map(|blocker| blocker.as_str())
+            .unwrap_or("blocked");
+        let _ = writeln!(out, "Exit code: {code} ({first})");
+    }
+    out
 }
