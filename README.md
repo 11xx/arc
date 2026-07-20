@@ -15,6 +15,25 @@ unreviewed commits) live in code instead of in prompt discipline.
 The `/arc` skill layer decides *what* to do; this CLI guarantees *what
 happened and what is allowed*.
 
+New to arc? [docs/QUICKSTART.md](docs/QUICKSTART.md) walks a foreign repo
+from install to a first integrated change.
+
+## Installation
+
+arc builds to a single binary and is Unix-only (see Storage and data-safety
+guarantees for why):
+
+```sh
+cargo install --path .          # from a checkout of this repository
+```
+
+Optional shell completions and man page:
+
+```sh
+arc completions <bash|zsh|fish> > <completion-path>   # e.g. ~/.zfunc/_arc
+arc mangen <dir>                                      # writes <dir>/arc.1
+```
+
 ## The model
 
 - A **change** is the unit of work (Gerrit's sense): a stable ID and
@@ -576,6 +595,10 @@ pipe-friendly IDs, a scannable orchestration table, or structured rows.
   acceleration must live under a `derived/` cache that is deletable,
   rebuildable, and never authoritative — the ledger remains the only source
   of truth.
+- **Unix-only, deliberately.** arc relies on POSIX semantics for its safety
+  guarantees: `0700` private directories, atomic hard-link event publication,
+  and process-group kill for gate timeouts. There is no Windows port and one
+  is out of scope; run it under WSL there.
 
 ## Non-goals
 

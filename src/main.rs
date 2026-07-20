@@ -16,8 +16,8 @@ mod state;
 mod status;
 mod store;
 
-use anyhow::{bail, Result};
-use clap::{Parser, Subcommand};
+use anyhow::{bail, Context, Result};
+use clap::{CommandFactory, Parser, Subcommand};
 use commands::{AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{
     DispositionStatus, MessageSeverity, MessageType, Severity, Side, Verdict, VerifyResult,
@@ -555,6 +555,17 @@ enum Cmd {
     Done { change: Option<String> },
     /// Print shell exports for an explicitly detected harness session
     Env,
+    /// Print a shell completion script to stdout
+    Completions {
+        /// Target shell
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Render the man page (arc.1) into a directory
+    Mangen {
+        /// Output directory (created if absent)
+        out_dir: std::path::PathBuf,
+    },
     /// Resume one change with its brief, live state, and journal context
     Resume {
         change: Option<String>,
@@ -1220,6 +1231,22 @@ fn run(cli: Cli) -> Result<i32> {
             commands::done(&ctx, &change)
         }
         Cmd::Env => Ok(context::print_env()),
+        Cmd::Completions { shell } => {
+            let mut command = Cli::command();
+            clap_complete::generate(shell, &mut command, "arc", &mut std::io::stdout());
+            Ok(0)
+        }
+        Cmd::Mangen { out_dir } => {
+            std::fs::create_dir_all(&out_dir)
+                .with_context(|| format!("cannot create {}", out_dir.display()))?;
+            let mut buffer = Vec::new();
+            clap_mangen::Man::new(Cli::command()).render(&mut buffer)?;
+            let path = out_dir.join("arc.1");
+            std::fs::write(&path, buffer)
+                .with_context(|| format!("cannot write {}", path.display()))?;
+            println!("{}", path.display());
+            Ok(0)
+        }
         Cmd::Resume {
             change,
             json,

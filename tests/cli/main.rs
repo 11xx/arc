@@ -15,6 +15,7 @@ mod observe;
 mod orchestrate;
 mod paths;
 mod provenance;
+mod release;
 mod roles;
 mod skip_green;
 mod stats;

@@ -6,10 +6,13 @@ truth for full detail (`arc list`, `arc show <change>`); this file is the
 human-readable projection. Add a line under `[Unreleased]` as part of each
 integrated change.
 
-The format loosely follows [Keep a Changelog](https://keepachangelog.com/);
-no version has been tagged yet.
+The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
+
+_Nothing yet._
+
+## [0.1.0] - 2026-07-20
 
 ### Fixed
 
@@ -39,6 +42,9 @@ no version has been tagged yet.
 
 ### Added
 
+- `arc completions <shell>` and `arc mangen <dir>` generate shell completions
+  and a man page; `docs/QUICKSTART.md` and a README Installation section cover
+  foreign-repo setup; arc is documented as Unix-only (`release-polish`).
 - `arc workspace list|inbox` aggregates open changes and inbox rollups across a
   configured `data_root`; `arc brief --scaffold <sol-low|sol-high|reviewer>`
   (or a repo `.arc/templates/<name>.md`) prepends a delegation-fenced template;
