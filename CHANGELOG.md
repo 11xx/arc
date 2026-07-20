@@ -39,6 +39,9 @@ no version has been tagged yet.
 
 ### Added
 
+- `arc diff --between ps-A ps-B` and `--since-approved` make re-review deltas
+  explicit; `arc findings --format json|sarif` exports current dispositions and
+  open findings for external review tooling (`interdiff-sarif`).
 - `arc diff [CHANGE] [--patchset ps-NN] [--stat] [--findings] [-- <path>...]`
   renders native patchset diffs with unresolved finding-anchor drift markers
   (`arc-diff`).
