@@ -1,4 +1,5 @@
 use super::*;
+use crate::policy;
 use crate::ExecutionRole;
 
 #[allow(clippy::too_many_arguments)]
@@ -241,12 +242,13 @@ pub fn query(ctx: &Ctx, args: QueryArgs) -> Result<()> {
 
 pub fn show_selection(
     ctx: &Ctx,
+    role: ExecutionRole,
     reference: Option<&str>,
     tags: Vec<String>,
     json: bool,
 ) -> Result<()> {
     match (reference, tags.is_empty()) {
-        (Some(reference), true) => show(ctx, reference, json),
+        (Some(reference), true) => show(ctx, reference, json, role),
         (None, false) => show_tagged(ctx, normalize_tags(tags)?, json),
         (Some(_), false) => bail!("provide a change or --tag, not both"),
         (None, true) => bail!("provide a change or at least one --tag"),
@@ -524,7 +526,7 @@ fn blocker_label(state: &ChangeState, states: &BTreeMap<String, ChangeState>) ->
     "—".into()
 }
 
-fn show(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
+fn show(ctx: &Ctx, reference: &str, json: bool, role: ExecutionRole) -> Result<()> {
     let store = ctx.store()?;
     let (_, st) = ctx.load_state(&store, reference)?;
     if json {
@@ -538,6 +540,15 @@ fn show(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
             Vec::new()
         };
         print!("{}", render::markdown(&st, &report, &alternatives));
+        if !matches!(role, ExecutionRole::Implementer) {
+            let policy = policy::load(&gitio::toplevel(&ctx.cwd)?)?;
+            if !policy.review.checklist.is_empty() {
+                println!("\n## Review checklist\n");
+                for item in policy.review.checklist {
+                    println!("- [ ] {item}");
+                }
+            }
+        }
     }
     Ok(())
 }

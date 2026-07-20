@@ -75,3 +75,29 @@ fn diff_findings_marks_changed_blobs_drifted_and_unchanged_blobs_anchored() {
         .stdout(predicates::str::contains("[drifted] drift.txt:1-1"))
         .stdout(predicates::str::contains("[anchored] steady.txt:1-1"));
 }
+
+#[test]
+fn diff_between_and_since_approved_render_only_the_review_delta() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "interdiff-view"]));
+    let wt = repo.home.join(".worktrees/repo-interdiff-view");
+    repo.commit(&wt, "first.txt", "first\n", "feat: first review");
+    stdout(repo.arc(&wt).args(["snapshot", "interdiff-view"]));
+    repo.arc(&wt)
+        .args(["review", "interdiff-view", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.commit(&wt, "second.txt", "second\n", "feat: review delta");
+    stdout(repo.arc(&wt).args(["snapshot", "interdiff-view"]));
+    repo.arc(&wt)
+        .args(["diff", "interdiff-view", "--between", "ps-01", "ps-02"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("+second"))
+        .stdout(predicates::str::contains("first.txt").not());
+    repo.arc(&wt)
+        .args(["diff", "interdiff-view", "--since-approved"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("+second"));
+}

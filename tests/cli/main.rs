@@ -5,6 +5,7 @@ mod common;
 mod context;
 mod diff;
 mod doctor;
+mod findings;
 mod forge;
 mod journal;
 mod lifecycle;

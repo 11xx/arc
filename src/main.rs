@@ -200,9 +200,21 @@ enum Cmd {
         /// Render unresolved finding anchors after the diff
         #[arg(long)]
         findings: bool,
+        /// Compare two recorded patchsets instead of a patchset base and head
+        #[arg(long, num_args = 2, value_names = ["OLDER", "NEWER"], conflicts_with_all = ["since_approved", "patchset"])]
+        between: Option<Vec<String>>,
+        /// Compare the last approved patchset with the latest snapshot
+        #[arg(long, conflicts_with = "patchset")]
+        since_approved: bool,
         /// Git pathspecs, passed after -- to git diff
         #[arg(index = 2, last = true)]
         paths: Vec<String>,
+    },
+    /// List findings in text, JSON, or SARIF 2.1.0 form
+    Findings {
+        change: Option<String>,
+        #[arg(long, value_enum, default_value = "text")]
+        format: commands::FindingsFormat,
     },
     /// Record or read a change-scoped implementation contract
     Brief {
@@ -771,7 +783,7 @@ fn run(cli: Cli) -> Result<i32> {
             } else {
                 change
             };
-            commands::show_selection(&ctx, change.as_deref(), tag, json)?;
+            commands::show_selection(&ctx, role, change.as_deref(), tag, json)?;
             Ok(0)
         }
         Cmd::Diff {
@@ -779,10 +791,26 @@ fn run(cli: Cli) -> Result<i32> {
             patchset,
             stat,
             findings,
+            between,
+            since_approved,
             paths,
         } => {
             let change = infer(change.as_deref())?;
-            commands::diff(&ctx, &change, patchset, stat, findings, paths)?;
+            commands::diff(
+                &ctx,
+                &change,
+                patchset,
+                stat,
+                findings,
+                between,
+                since_approved,
+                paths,
+            )?;
+            Ok(0)
+        }
+        Cmd::Findings { change, format } => {
+            let change = infer(change.as_deref())?;
+            commands::findings(&ctx, &change, format)?;
             Ok(0)
         }
         Cmd::Brief {

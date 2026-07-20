@@ -4,6 +4,7 @@ mod claims;
 mod config_cmd;
 mod diff;
 mod doctor;
+mod findings;
 mod forge_cmd;
 mod gatekeeping;
 mod lifecycle;
@@ -26,6 +27,7 @@ use clap::ValueEnum;
 pub use config_cmd::check_writable;
 pub use diff::diff;
 pub use doctor::run as run_doctor;
+pub use findings::{findings, FindingsFormat};
 pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_pr_state};
 pub(crate) use gatekeeping::dependency_order;
 pub use gatekeeping::{

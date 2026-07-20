@@ -85,6 +85,8 @@ arc done                                 # verifying → snapshot → verify --a
 # reviewer (any harness, any session) — one atomic call:
 arc diff radio-refill-fix --findings         # native patchset diff + anchor drift
 arc diff radio-refill-fix --stat -- src/ops.py
+arc diff radio-refill-fix --since-approved   # re-review only the new patchset delta
+arc findings radio-refill-fix --format sarif # export open findings to tooling
 arc review radio-refill-fix --snapshot --verdict changes-requested --findings-json - <<'EOF'
 [{"blocking": true, "severity": "major", "summary": "stale batch can commit",
   "anchor": {"path": "src/ops.py", "line_start": 214}}]
@@ -400,6 +402,10 @@ string exactly matches the actor recorded by `arc snapshot` for that patchset.
 Actor identity remains advisory; this comparison does not redesign or verify
 identity. Rejected self-approval follows the existing no-valid-approval path
 and exits 3.
+
+Optional reviewer reminders live in the same file under `[review]`, for
+example `checklist = ["exercise the failure path"]`. `arc show` renders these
+advisory items only for reviewer and lead roles; they never block integration.
 
 ## Identity
 

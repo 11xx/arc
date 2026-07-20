@@ -12,12 +12,20 @@ use std::path::Path;
 pub struct PolicyFile {
     #[serde(default)]
     pub policy: Policy,
+    #[serde(default)]
+    pub review: Review,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Policy {
     #[serde(default)]
     pub forbid_self_approval: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct Review {
+    #[serde(default)]
+    pub checklist: Vec<String>,
 }
 
 pub fn load(repo_toplevel: &Path) -> Result<PolicyFile> {
