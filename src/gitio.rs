@@ -88,6 +88,18 @@ pub fn toplevel(cwd: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(git(cwd, &["rev-parse", "--show-toplevel"])?))
 }
 
+/// Resolve a path under the Git directory, honoring `core.hooksPath` and
+/// worktree layout the way Git itself does (e.g. `git_path("hooks")`).
+pub fn git_path(cwd: &Path, name: &str) -> Result<PathBuf> {
+    let raw = git(cwd, &["rev-parse", "--git-path", name])?;
+    let path = PathBuf::from(raw);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    })
+}
+
 pub fn rev_parse(cwd: &Path, rev: &str) -> Result<String> {
     git(
         cwd,

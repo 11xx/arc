@@ -7,6 +7,7 @@ mod doctor;
 mod findings;
 mod forge_cmd;
 mod gatekeeping;
+mod hooks;
 mod lifecycle;
 mod messaging;
 mod observe;
@@ -35,6 +36,10 @@ pub(crate) use gatekeeping::dependency_order;
 pub use gatekeeping::{
     check_selection, close, done, hold, integrate, release_hold, snapshot_with_verify, verify,
     VerifyArgs,
+};
+pub use hooks::{
+    hook_run, install as hooks_install, query_commit, status as hooks_status,
+    uninstall as hooks_uninstall,
 };
 pub use lifecycle::{
     begin, blocker_status_cmd, brief, is_blocked, list, metadata, query, show_selection, status_cmd,

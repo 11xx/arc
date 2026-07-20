@@ -182,6 +182,10 @@ enum Cmd {
         actor: Option<String>,
         #[arg(long)]
         harness: Option<String>,
+        /// Report changes whose patchset, integration, or closure commit
+        /// matches this revision (unique prefix accepted)
+        #[arg(long)]
+        commit: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -624,11 +628,39 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Manage the opt-in Git hook pack (never installed automatically)
+    Hooks {
+        #[command(subcommand)]
+        cmd: HooksCmd,
+    },
+    /// Internal hook entry point invoked by installed hook scripts
+    #[command(hide = true)]
+    HookRun {
+        /// Hook name (e.g. post-commit, prepare-commit-msg)
+        name: String,
+        /// Remaining hook arguments, passed through verbatim
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Cross-harness project journal mechanics (plain Markdown stays the contract)
     Journal {
         #[command(subcommand)]
         cmd: journal::JournalCmd,
     },
+}
+
+#[derive(Subcommand)]
+enum HooksCmd {
+    /// Install the arc hook scripts into this repository's hooks dir
+    Install {
+        /// Replace a foreign hook, saving it as <hook>.pre-arc
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove arc-authored hook scripts (leaves foreign hooks untouched)
+    Uninstall,
+    /// Report which hooks are installed and whether arc manages them
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -807,20 +839,25 @@ fn run(cli: Cli) -> Result<i32> {
             verdict,
             actor,
             harness,
+            commit,
             json,
         } => {
-            commands::query(
-                &ctx,
-                QueryArgs {
-                    status,
-                    target,
-                    tags: tag,
-                    verdict,
-                    actor,
-                    harness,
-                    json,
-                },
-            )?;
+            if let Some(commit) = commit {
+                commands::query_commit(&ctx, &commit)?;
+            } else {
+                commands::query(
+                    &ctx,
+                    QueryArgs {
+                        status,
+                        target,
+                        tags: tag,
+                        verdict,
+                        actor,
+                        harness,
+                        json,
+                    },
+                )?;
+            }
             Ok(0)
         }
         Cmd::Show {
@@ -1284,6 +1321,21 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Doctor { json } => commands::run_doctor(&ctx, json),
+        Cmd::Hooks { cmd } => match cmd {
+            HooksCmd::Install { force } => {
+                commands::hooks_install(&ctx, force)?;
+                Ok(0)
+            }
+            HooksCmd::Uninstall => {
+                commands::hooks_uninstall(&ctx)?;
+                Ok(0)
+            }
+            HooksCmd::Status => {
+                commands::hooks_status(&ctx)?;
+                Ok(0)
+            }
+        },
+        Cmd::HookRun { name, args } => Ok(commands::hook_run(&ctx, &name, &args)),
         Cmd::Journal { cmd } => journal::run(&ctx, cmd),
     }
 }

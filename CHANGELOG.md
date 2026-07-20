@@ -39,6 +39,11 @@ no version has been tagged yet.
 
 ### Added
 
+- Opt-in Git hook pack: `arc hooks install|uninstall|status` manages
+  `post-commit` (stale-approval and closed-branch notices) and
+  `prepare-commit-msg` (`Arc-Change:` trailer) scripts that always exit 0, plus
+  `arc query --commit <rev>` to find changes by patchset or integration commit
+  (`git-hooks-changeid`).
 - Global `--on-behalf-of <subject>` (`ARC_ON_BEHALF_OF`) records the subject a
   lead runs delegated ceremony for while `actor` stays the invoker; the
   effective author (`on_behalf_of.unwrap_or(actor)`) drives `forbid_self_approval`

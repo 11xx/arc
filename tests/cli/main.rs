@@ -7,6 +7,7 @@ mod diff;
 mod doctor;
 mod findings;
 mod forge;
+mod hooks;
 mod journal;
 mod lifecycle;
 mod messaging;
