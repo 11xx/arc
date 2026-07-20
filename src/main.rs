@@ -151,6 +151,9 @@ enum Cmd {
         /// Batch/query tag (repeatable)
         #[arg(long)]
         tag: Vec<String>,
+        /// Open from an actionable journal artifact, consuming it
+        #[arg(long = "from-journal")]
+        from_journal: Option<String>,
     },
     /// List changes
     List {
@@ -769,6 +772,7 @@ fn run(cli: Cli) -> Result<i32> {
             adopt,
             blocked_by,
             tag,
+            from_journal,
         } => {
             commands::begin(
                 &ctx,
@@ -783,6 +787,7 @@ fn run(cli: Cli) -> Result<i32> {
                 adopt,
                 blocked_by,
                 tag,
+                from_journal,
             )?;
             Ok(0)
         }

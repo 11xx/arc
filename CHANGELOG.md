@@ -39,6 +39,11 @@ no version has been tagged yet.
 
 ### Added
 
+- `arc begin --from-journal <artifact>` opens a change from an open actionable
+  journal item, stamping `journal_ref` and consuming the item as superseded;
+  opt-in `[journal] auto_log` narrates begin/integrate/close into the journal
+  (advisory, warns on failure); and `journal open` annotates items taken up by
+  an open change (`journal-bridge`).
 - `arc stats [--change | --tag | --all] [--json]` projects ledger durations
   and counts — per-change wall time, stage and gate timing, review latency,
   findings, and patchset count, plus aggregate median/p90 and suggested stage

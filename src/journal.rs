@@ -15,6 +15,8 @@
 use crate::commands::Ctx;
 use crate::config;
 use crate::gitio;
+use crate::state::{self, ChangeState};
+use crate::store::Store;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use clap::{Subcommand, ValueEnum};
@@ -1352,6 +1354,15 @@ struct ArtifactEntry {
     heading: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     lane: Option<ArtifactLane>,
+    /// The open change that has taken this item up, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    change: Option<ChangeRef>,
+}
+
+#[derive(Serialize)]
+struct ChangeRef {
+    id: String,
+    status: String,
 }
 
 #[derive(Serialize)]
@@ -1510,6 +1521,7 @@ fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
                 topic,
                 kind: None,
                 lane: None,
+                change: None,
             })
         })
         .collect())
@@ -1588,6 +1600,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
                     kind: Some(kind),
                     heading,
                     lane: None,
+                    change: None,
                 });
             }
         }
@@ -1682,6 +1695,7 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
     let now = Utc::now();
     let journal = read_events(&dir)?;
     let lanes = lanes_from_journal(&journal, now);
+    let changes = open_changes_for_annotation(&ctx.cwd);
     let (_, caller_session) = identity(ctx);
     if dir.is_dir() {
         let mut open_names: Vec<String> = Vec::new();
@@ -1712,10 +1726,12 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
         for name in open_names {
             if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
                 let heading = first_heading(&dir.join(&name));
+                let change = change_annotation(&changes, &topic, &name);
                 open.push(ArtifactEntry {
+                    lane: lane_for_topic(&lanes, &topic, &caller_session),
+                    change,
                     file: name,
                     timestamp: ts,
-                    lane: lane_for_topic(&lanes, &topic, &caller_session),
                     topic,
                     kind: Some(file_kind),
                     heading,
@@ -1725,10 +1741,12 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
         for name in later_names {
             if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
                 let heading = first_heading(&dir.join(&name));
+                let change = change_annotation(&changes, &topic, &name);
                 later.push(ArtifactEntry {
+                    lane: lane_for_topic(&lanes, &topic, &caller_session),
+                    change,
                     file: name,
                     timestamp: ts,
-                    lane: lane_for_topic(&lanes, &topic, &caller_session),
                     topic,
                     kind: Some(file_kind),
                     heading,
@@ -1753,11 +1771,12 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
         for f in &open {
             let heading = f.heading.as_deref().unwrap_or("");
             println!(
-                "  {}  {}  {}  {}{}",
+                "  {}  {}  {}  {}{}{}",
                 f.timestamp,
                 f.topic,
                 f.kind.as_deref().unwrap_or(""),
                 heading,
+                render_change(f.change.as_ref()),
                 render_artifact_lane(f.lane.as_ref())
             );
         }
@@ -1768,11 +1787,12 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
         for f in &later {
             let heading = f.heading.as_deref().unwrap_or("");
             println!(
-                "  {}  {}  {}  {}{}",
+                "  {}  {}  {}  {}{}{}",
                 f.timestamp,
                 f.topic,
                 f.kind.as_deref().unwrap_or(""),
                 heading,
+                render_change(f.change.as_ref()),
                 render_artifact_lane(f.lane.as_ref())
             );
         }
@@ -1793,6 +1813,13 @@ fn lane_for_topic(lanes: &[LaneEntry], topic: &str, caller_session: &str) -> Opt
             owner_session: lane.owner_session.clone(),
             this_session: lane.owner_session == caller_session,
         })
+}
+
+fn render_change(change: Option<&ChangeRef>) -> String {
+    match change {
+        Some(change) => format!(" [change {}: {}]", change.id, change.status),
+        None => String::new(),
+    }
 }
 
 fn render_artifact_lane(lane: Option<&ArtifactLane>) -> String {
@@ -1939,6 +1966,104 @@ fn journal_tail(dir: &Path, limit: usize) -> Result<Vec<String>> {
         .collect();
     let start = lines.len().saturating_sub(limit);
     Ok(lines[start..].to_vec())
+}
+
+// --- Ledger bridge: begin --from-journal, lifecycle auto-log, annotation ---
+
+/// Verify a journal artifact exists and is an open, unconsumed actionable
+/// item suitable to open a change from. Errors otherwise.
+pub fn require_open_actionable(ctx: &Ctx, filename: &str) -> Result<()> {
+    if filename.contains(['/', '\\']) {
+        bail!("--from-journal takes an artifact filename inside the journal dir, not a path");
+    }
+    let Some((_, _, kind)) = parse_artifact_name(filename) else {
+        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+    };
+    if !is_actionable_kind(&kind) {
+        bail!(
+            "{filename} is a {kind} artifact, not an actionable item ({}|{})",
+            PRIMARY_ACTIONABLE_KINDS.join("|"),
+            LATER_KIND
+        );
+    }
+    let dir = resolve_dir(&ctx.cwd)?;
+    if !dir.join(filename).is_file() {
+        bail!("no such artifact {} in {}", filename, dir.display());
+    }
+    if is_consumed(&read_events(&dir)?, filename) {
+        bail!("{filename} is already consumed (see the journal)");
+    }
+    Ok(())
+}
+
+/// Append a journal `consumed` event marking an artifact superseded by the
+/// change opened from it. The artifact file itself is never edited.
+pub fn consume_superseded_by_change(ctx: &Ctx, filename: &str, change_id: &str) -> Result<()> {
+    let Some((_, topic, _)) = parse_artifact_name(filename) else {
+        bail!("{filename:?} is not a journal artifact name");
+    };
+    let dir = resolve_dir(&ctx.cwd)?;
+    let message = format!("consumed {filename} [superseded]: change {change_id}");
+    append_journal(&dir, ctx, Utc::now(), &topic, &message, None)
+}
+
+/// Best-effort lifecycle narration into the advisory journal. Does nothing
+/// unless `[journal] auto_log` is set. A write failure is a warning, never a
+/// propagated error: the authoritative ledger transition already succeeded.
+pub fn auto_log(ctx: &Ctx, topic: &str, message: &str) {
+    let enabled = config::load()
+        .map(|cfg| cfg.journal_auto_log)
+        .unwrap_or(false);
+    if !enabled || !valid_topic(topic) {
+        return;
+    }
+    if let Err(error) = try_auto_log(ctx, topic, message) {
+        eprintln!("warning: journal auto-log failed: {error:#}");
+    }
+}
+
+fn try_auto_log(ctx: &Ctx, topic: &str, message: &str) -> Result<()> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("cannot create journal dir {}", dir.display()))?;
+    append_journal(&dir, ctx, Utc::now(), topic, message, None)
+}
+
+/// Open changes in this repo, for annotating journal items. Empty on any
+/// lookup failure (outside a repo, unreadable ledger): annotation is a
+/// convenience layer that must never make `journal open` fail.
+fn open_changes_for_annotation(cwd: &Path) -> Vec<ChangeState> {
+    let Ok(store) = Store::discover(cwd) else {
+        return Vec::new();
+    };
+    let Ok(ids) = store.list_change_ids() else {
+        return Vec::new();
+    };
+    ids.into_iter()
+        .filter_map(|id| store.load_events(&id).ok())
+        .filter_map(|events| state::reduce(&events).ok())
+        .filter(|state| !state.is_closed())
+        .collect()
+}
+
+/// `[change <id>: <stage|state>]` for an item covered by an open change,
+/// matched by topic-slug equality or an explicit `journal_ref`.
+fn change_annotation(changes: &[ChangeState], topic: &str, filename: &str) -> Option<ChangeRef> {
+    let change = changes
+        .iter()
+        .find(|state| state.slug == topic || state.journal_ref.as_deref() == Some(filename))?;
+    let status = match change
+        .claim
+        .as_ref()
+        .and_then(|claim| claim.progress.as_ref())
+    {
+        Some(progress) => format!("{:?}", progress.stage).to_lowercase(),
+        None => "open".to_string(),
+    };
+    Some(ChangeRef {
+        id: change.change_id.clone(),
+        status,
+    })
 }
 
 #[cfg(test)]

@@ -38,6 +38,10 @@ pub enum Payload {
         blocked_by: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tags: Vec<String>,
+        /// Journal artifact filename this change was opened from, if any.
+        /// Additive: absent for changes not begun via `--from-journal`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        journal_ref: Option<String>,
     },
     MetadataUpdated {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

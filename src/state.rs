@@ -251,6 +251,8 @@ pub struct ChangeState {
     pub worktree: Option<String>,
     pub opened_by: String,
     pub opened_harness: Option<String>,
+    /// Journal artifact this change was opened from, if any.
+    pub journal_ref: Option<String>,
     pub blocked_by: Vec<String>,
     pub tags: Vec<String>,
     pub assigned_to: Option<String>,
@@ -336,6 +338,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 worktree,
                 blocked_by,
                 tags,
+                journal_ref,
             } => (
                 ChangeState {
                     change_id: ev.change_id.clone(),
@@ -348,6 +351,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     worktree: worktree.clone(),
                     opened_by: ev.actor.clone(),
                     opened_harness: ev.harness.clone(),
+                    journal_ref: journal_ref.clone(),
                     blocked_by: blocked_by.clone(),
                     tags: tags.clone(),
                     assigned_to: None,
@@ -856,6 +860,7 @@ mod tests {
                 worktree: None,
                 blocked_by: Vec::new(),
                 tags: Vec::new(),
+                journal_ref: None,
             },
         )
     }

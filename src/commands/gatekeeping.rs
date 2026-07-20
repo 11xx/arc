@@ -745,6 +745,11 @@ fn integrate_one(
 
     println!("integrated: {merged}");
     println!("event: {}", ev.event_id);
+    crate::journal::auto_log(
+        ctx,
+        &st.slug,
+        &format!("integrated {change_id} at {merged}"),
+    );
 
     if cleanup {
         // Run cleanup git commands from the target worktree: ctx.cwd may be
@@ -932,6 +937,7 @@ pub fn close(
     let ev = ctx.event(&store, &change_id, payload);
     store.append_event(&ev)?;
     release_retention_refs(ctx, &change_id, integrated_rev.as_deref())?;
+    crate::journal::auto_log(ctx, &st.slug, &format!("closed change {change_id}"));
     println!("closed: {change_id}");
     println!("event: {}", ev.event_id);
     Ok(())
