@@ -39,6 +39,10 @@ no version has been tagged yet.
 
 ### Added
 
+- `arc stats [--change | --tag | --all] [--json]` projects ledger durations
+  and counts — per-change wall time, stage and gate timing, review latency,
+  findings, and patchset count, plus aggregate median/p90 and suggested stage
+  budgets (`arc-stats/1`) (`ledger-stats`).
 - `arc log [CHANGE] [--reverse]` prints one line per ledger event; `--at
   <event-id>` on `arc show`/`arc status` replays a change to that point;
   `arc check --explain` lists every gate condition (and `--json` every
