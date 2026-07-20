@@ -39,6 +39,9 @@ no version has been tagged yet.
 
 ### Added
 
+- `arc diff [CHANGE] [--patchset ps-NN] [--stat] [--findings] [-- <path>...]`
+  renders native patchset diffs with unresolved finding-anchor drift markers
+  (`arc-diff`).
 - `arc config --check-writable [--json]` probes the local ledger and Git-ref
   paths before a sandboxed executor starts work (`ledger-writability-probe`).
 - Status/resume field projection, discussion-event ID prefixes, and file-backed

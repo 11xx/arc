@@ -83,6 +83,8 @@ arc done                                 # verifying → snapshot → verify --a
 # arc snapshot --verify --gate build --gate test
 
 # reviewer (any harness, any session) — one atomic call:
+arc diff radio-refill-fix --findings         # native patchset diff + anchor drift
+arc diff radio-refill-fix --stat -- src/ops.py
 arc review radio-refill-fix --snapshot --verdict changes-requested --findings-json - <<'EOF'
 [{"blocking": true, "severity": "major", "summary": "stale batch can commit",
   "anchor": {"path": "src/ops.py", "line_start": 214}}]

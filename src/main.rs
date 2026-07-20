@@ -187,6 +187,23 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Render a recorded patchset using Git's native diff output
+    Diff {
+        #[arg(index = 1)]
+        change: Option<String>,
+        /// Patchset to render (defaults to the latest snapshot)
+        #[arg(long)]
+        patchset: Option<String>,
+        /// Pass --stat through to git diff
+        #[arg(long)]
+        stat: bool,
+        /// Render unresolved finding anchors after the diff
+        #[arg(long)]
+        findings: bool,
+        /// Git pathspecs, passed after -- to git diff
+        #[arg(index = 2, last = true)]
+        paths: Vec<String>,
+    },
     /// Record or read a change-scoped implementation contract
     Brief {
         change: Option<String>,
@@ -755,6 +772,17 @@ fn run(cli: Cli) -> Result<i32> {
                 change
             };
             commands::show_selection(&ctx, change.as_deref(), tag, json)?;
+            Ok(0)
+        }
+        Cmd::Diff {
+            change,
+            patchset,
+            stat,
+            findings,
+            paths,
+        } => {
+            let change = infer(change.as_deref())?;
+            commands::diff(&ctx, &change, patchset, stat, findings, paths)?;
             Ok(0)
         }
         Cmd::Brief {

@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::cell::Cell;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -33,6 +34,24 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+/// Run Git and forward its raw output through this process's standard streams.
+///
+/// Forwarding preserves Git's diff rendering while keeping command output
+/// visible to callers that capture Arc itself, including the CLI test harness.
+pub fn git_inherit(cwd: &Path, args: &[String]) -> Result<()> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+    std::io::stdout().write_all(&output.stdout)?;
+    std::io::stderr().write_all(&output.stderr)?;
+    if !output.status.success() {
+        bail!("git {} failed with {}", args.join(" "), output.status);
+    }
+    Ok(())
 }
 
 fn command_output(command: &mut Command) -> Result<Output> {

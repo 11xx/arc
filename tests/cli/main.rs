@@ -3,6 +3,7 @@ mod bundle;
 mod claims;
 mod common;
 mod context;
+mod diff;
 mod doctor;
 mod forge;
 mod journal;
