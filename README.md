@@ -427,6 +427,11 @@ isolated and arc never writes outside them (worktrees, ledger) beyond
 ordinary Git operations in the repository itself. `arc config` prints
 the resolved paths as JSON.
 
+Before starting an executor in a sandbox, run `arc config --check-writable`.
+It probes the ledger root, lock, event-path, and Git-ref writes without adding
+an event; `--json` emits `arc-writability/1` for automation and stops at the
+first blocked path.
+
 Change derivation: `begin` targets the branch checked out in the
 **primary worktree** (the main checkout — normally master/main), not
 whatever branch the invoking worktree happens to be on. Deriving from an

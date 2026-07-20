@@ -80,6 +80,28 @@ pub fn head(cwd: &Path) -> Result<String> {
     rev_parse(cwd, "HEAD")
 }
 
+/// Resolve HEAD when the repository has one. An unborn repository is a
+/// normal probe condition, while other Git failures remain errors.
+pub fn head_if_present(cwd: &Path) -> Result<Option<String>> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--verify", "-q", "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+    if out.status.success() {
+        return Ok(Some(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        ));
+    }
+    if out.status.code() == Some(1) {
+        return Ok(None);
+    }
+    bail!(
+        "git rev-parse --verify -q HEAD failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    )
+}
+
 pub fn branch_head(cwd: &Path, branch: &str) -> Result<String> {
     rev_parse(cwd, &format!("refs/heads/{branch}"))
 }

@@ -122,6 +122,18 @@ impl Store {
         self.lock_file("graph.lock", "repository graph", LOCK_TIMEOUT)
     }
 
+    /// Prove the store's advisory-lock path is writable without mutating state.
+    pub fn lock_probe(&self) -> Result<TransitionLock> {
+        self.lock_file("probe.lock", "writability probe", LOCK_TIMEOUT)
+    }
+
+    /// Create and return the directory used for probe-only event-path writes.
+    pub fn probe_events_dir(&self) -> Result<PathBuf> {
+        let dir = self.changes_dir();
+        create_private_dir_all(&dir)?;
+        Ok(dir)
+    }
+
     /// Serialize integrations that mutate the same target branch/worktree.
     pub fn lock_target(&self, target: &str) -> Result<TransitionLock> {
         if target.is_empty() {

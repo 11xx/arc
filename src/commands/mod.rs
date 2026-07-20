@@ -1,6 +1,7 @@
 use crate::bundle::{Bundle, ValidatedBundle};
 mod bundle_io;
 mod claims;
+mod config_cmd;
 mod doctor;
 mod forge_cmd;
 mod gatekeeping;
@@ -21,6 +22,7 @@ use anyhow::{bail, Context, Result};
 pub use bundle_io::{export_bundle, import_bundle};
 pub use claims::{claim, release_claim, stage, take};
 use clap::ValueEnum;
+pub use config_cmd::check_writable;
 pub use doctor::run as run_doctor;
 pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_pr_state};
 pub(crate) use gatekeeping::dependency_order;

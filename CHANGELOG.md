@@ -39,6 +39,8 @@ no version has been tagged yet.
 
 ### Added
 
+- `arc config --check-writable [--json]` probes the local ledger and Git-ref
+  paths before a sandboxed executor starts work (`ledger-writability-probe`).
 - Status/resume field projection, discussion-event ID prefixes, and file-backed
   lane, stage, and hold text input (`status-field-projection`).
 - Resumable event cursors, non-fatal event and watch command hooks, and

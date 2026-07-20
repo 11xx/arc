@@ -540,7 +540,14 @@ enum Cmd {
         cmd: ForgeCmd,
     },
     /// Show the resolved configuration and store location as JSON
-    Config,
+    Config {
+        /// Probe every local path required to write the ledger
+        #[arg(long)]
+        check_writable: bool,
+        /// Emit the writability probe as structured JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Check the append-only ledger for malformed or stale state (read-only)
     Doctor {
         #[arg(long)]
@@ -1104,7 +1111,13 @@ fn run(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
         },
-        Cmd::Config => {
+        Cmd::Config {
+            check_writable,
+            json,
+        } => {
+            if check_writable {
+                return commands::check_writable(&ctx, json);
+            }
             let cfg = config::load()?;
             let store_root = store::Store::resolve_root(&ctx.cwd)
                 .map(|p| p.display().to_string())
