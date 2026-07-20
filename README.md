@@ -541,6 +541,12 @@ pipe-friendly IDs, a scannable orchestration table, or structured rows.
   `integrate` is always an explicit invocation.
 - Gates execute repo-committed commands (`.arc/gates.toml`): the trust
   level is the same as running `make` in that repository.
+- Derived views (`list`, `inbox`, `status`, `query`) replay the ledger on
+  every invocation and hold no persistent cache. This stays fast in practice
+  (measured ~8 ms for `list` and `inbox` over 300 changes). Any future
+  acceleration must live under a `derived/` cache that is deletable,
+  rebuildable, and never authoritative — the ledger remains the only source
+  of truth.
 
 ## Non-goals
 

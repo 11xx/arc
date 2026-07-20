@@ -50,6 +50,7 @@ struct CheckBlocker {
 pub struct VerifyArgs {
     pub all: bool,
     pub parallel: bool,
+    pub skip_green: bool,
     pub gate: Option<String>,
     pub command: Option<String>,
     pub attest: bool,
@@ -83,6 +84,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     let VerifyArgs {
         all,
         parallel,
+        skip_green,
         gate,
         command,
         attest,
@@ -94,6 +96,9 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     }
     if parallel && !all {
         bail!("--parallel requires --all");
+    }
+    if skip_green && !all {
+        bail!("--skip-green requires --all");
     }
     // --attest records evidence arc did not observe (so it needs the caller's
     // --result); without it arc runs the command and observing --result is a bug.
@@ -116,11 +121,36 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             bail!("no gates declared for profile {}", st.profile);
         }
         let total = required.len();
+        // A gate is green at head when its latest evidence at the exact current
+        // commit is a pass, whether arc observed it or it was attested.
+        let head = gitio::head(&ctx.cwd)?;
+        let is_green = |name: &str| {
+            skip_green
+                && st
+                    .gate_evidence_at(name, &head)
+                    .is_some_and(|evidence| evidence.result == VerifyResult::Pass)
+        };
         if parallel {
-            return verify_all_parallel(ctx, &store, &change_id, required, note);
+            let to_run = required
+                .into_iter()
+                .filter(|(name, _)| {
+                    if is_green(name.as_str()) {
+                        println!("gate {name}: skipped (green at head)");
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect::<Vec<_>>();
+            return verify_all_parallel(ctx, &store, &change_id, to_run, total, note);
         }
         let mut passed = 0;
         for (name, gate) in required {
+            if is_green(name) {
+                println!("gate {name}: skipped (green at head)");
+                passed += 1;
+                continue;
+            }
             let result = record_verification(
                 ctx,
                 &store,
@@ -192,6 +222,7 @@ pub fn snapshot_with_verify(
             VerifyArgs {
                 all: true,
                 parallel: false,
+                skip_green: false,
                 gate: None,
                 command: None,
                 attest: false,
@@ -209,6 +240,7 @@ pub fn snapshot_with_verify(
             VerifyArgs {
                 all: false,
                 parallel: false,
+                skip_green: false,
                 gate: Some(gate),
                 command: None,
                 attest: false,
@@ -238,6 +270,7 @@ pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
         VerifyArgs {
             all: true,
             parallel: false,
+            skip_green: false,
             gate: None,
             command: None,
             attest: false,
@@ -253,8 +286,12 @@ fn verify_all_parallel(
     store: &Store,
     change_id: &str,
     required: Vec<(&String, &gates::Gate)>,
+    total: usize,
     note: Option<String>,
 ) -> Result<i32> {
+    // Gates already green at head were filtered out by the caller and counted
+    // as passing; only the remainder run here.
+    let skipped_green = total.saturating_sub(required.len());
     let revision = gitio::head(&ctx.cwd)?;
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().into_owned())
@@ -308,12 +345,12 @@ fn verify_all_parallel(
             "warning: head moved during parallel verification ({revision} -> {post}); evidence recorded at {revision}"
         );
     }
-    let passed = completed
+    let ran_passed = completed
         .iter()
         .filter(|item| item.result == VerifyResult::Pass)
         .count();
-    let total = completed.len();
     append_verifications(ctx, store, change_id, completed)?;
+    let passed = ran_passed + skipped_green;
     println!("gates: {passed}/{total} pass");
     Ok(if passed == total { 0 } else { 1 })
 }

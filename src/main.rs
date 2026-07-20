@@ -527,6 +527,9 @@ enum Cmd {
         /// Run all declared gates concurrently and append evidence in name order
         #[arg(long)]
         parallel: bool,
+        /// With --all, skip gates already green at the current head
+        #[arg(long = "skip-green")]
+        skip_green: bool,
         /// Gate name from .arc/gates.toml
         #[arg(long)]
         gate: Option<String>,
@@ -1158,6 +1161,7 @@ fn run(cli: Cli) -> Result<i32> {
             change,
             all,
             parallel,
+            skip_green,
             gate,
             command,
             attest,
@@ -1171,6 +1175,7 @@ fn run(cli: Cli) -> Result<i32> {
                 commands::VerifyArgs {
                     all,
                     parallel,
+                    skip_green,
                     gate,
                     command,
                     attest,

@@ -39,6 +39,12 @@ no version has been tagged yet.
 
 ### Added
 
+- `arc verify --all --skip-green` skips gates already green at the exact
+  current head (observed or attested), printing `skipped (green at head)` per
+  gate, to avoid re-running expensive gates. A measurement (300 changes:
+  `list` ~8.5 ms, `inbox` ~8.0 ms — well under budget) showed derived views
+  need no on-disk cache yet, so the closure/summary caches are deferred
+  (`view-cache`).
 - Opt-in Git hook pack: `arc hooks install|uninstall|status` manages
   `post-commit` (stale-approval and closed-branch notices) and
   `prepare-commit-msg` (`Arc-Change:` trailer) scripts that always exit 0, plus
