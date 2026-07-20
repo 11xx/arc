@@ -411,6 +411,7 @@ mod tests {
             repository_id: "repo".into(),
             change_id: "c".into(),
             actor: "tester".into(),
+            on_behalf_of: None,
             harness: Some("test".into()),
             session: Some("s".into()),
             created_at: DateTime::<Utc>::from_timestamp(1_000_000 + seconds, 0).unwrap(),

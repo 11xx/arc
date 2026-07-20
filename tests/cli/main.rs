@@ -13,6 +13,7 @@ mod messaging;
 mod observe;
 mod orchestrate;
 mod paths;
+mod provenance;
 mod roles;
 mod stats;
 mod take;

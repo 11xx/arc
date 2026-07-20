@@ -57,6 +57,9 @@ pub struct Ctx {
     pub actor: String,
     pub harness: Option<String>,
     pub session: Option<String>,
+    /// Subject a lead runs delegated ceremony for (`--on-behalf-of`). The
+    /// effective author of any event is `on_behalf_of.unwrap_or(actor)`.
+    pub on_behalf_of: Option<String>,
 }
 
 const POLL_MIN: Duration = Duration::from_millis(100);
@@ -148,6 +151,7 @@ impl Ctx {
             repository_id: store.repository_id.clone(),
             change_id: change_id.to_string(),
             actor: self.actor.clone(),
+            on_behalf_of: self.on_behalf_of.clone(),
             harness: self.harness.clone(),
             session: self.session.clone(),
             created_at,
