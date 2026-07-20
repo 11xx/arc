@@ -21,3 +21,4 @@ mod stats;
 mod take;
 mod timeline;
 mod verify;
+mod workspace;

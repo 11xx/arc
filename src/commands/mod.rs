@@ -14,6 +14,7 @@ mod observe;
 mod review;
 mod stats;
 mod timeline;
+mod workspace;
 
 use crate::gates;
 use crate::gitio;
@@ -56,6 +57,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 pub use timeline::log;
+pub use workspace::{restack, workspace, WorkspaceView};
 
 pub struct Ctx {
     pub cwd: PathBuf,
@@ -248,7 +250,7 @@ pub struct StatusOutput {
     pub suggested_alternatives: Vec<ArcAlternative>,
 }
 
-fn dependency_status(
+pub(crate) fn dependency_status(
     state: &ChangeState,
     states: &BTreeMap<String, ChangeState>,
 ) -> status::BlockerStatus {
@@ -351,7 +353,10 @@ fn resolve_supersession(
     }
 }
 
-fn changes_blocked_by(change_id: &str, states: &BTreeMap<String, ChangeState>) -> Vec<String> {
+pub(crate) fn changes_blocked_by(
+    change_id: &str,
+    states: &BTreeMap<String, ChangeState>,
+) -> Vec<String> {
     states
         .values()
         .filter(|candidate| candidate.blocked_by.iter().any(|id| id == change_id))

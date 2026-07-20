@@ -274,6 +274,37 @@ pub fn show_selection(
     }
 }
 
+/// Built-in brief scaffolds. They encode the delegation-canon fences and the
+/// sandbox facts an arc-driving executor must respect.
+const SCAFFOLD_SOL_LOW: &str = include_str!("scaffolds/sol-low.md");
+const SCAFFOLD_SOL_HIGH: &str = include_str!("scaffolds/sol-high.md");
+const SCAFFOLD_REVIEWER: &str = include_str!("scaffolds/reviewer.md");
+
+/// Resolve a scaffold template: a repo-local `.arc/templates/<name>.md` wins,
+/// otherwise a compiled-in default (`sol-low`, `sol-high`, `reviewer`).
+fn resolve_scaffold(ctx: &Ctx, name: &str) -> Result<String> {
+    let repo_template = gitio::toplevel(&ctx.cwd).ok().map(|top| {
+        top.join(".arc")
+            .join("templates")
+            .join(format!("{name}.md"))
+    });
+    if let Some(path) = repo_template {
+        if path.is_file() {
+            return std::fs::read_to_string(&path)
+                .with_context(|| format!("cannot read scaffold {}", path.display()));
+        }
+    }
+    match name {
+        "sol-low" => Ok(SCAFFOLD_SOL_LOW.to_string()),
+        "sol-high" => Ok(SCAFFOLD_SOL_HIGH.to_string()),
+        "reviewer" => Ok(SCAFFOLD_REVIEWER.to_string()),
+        other => bail!(
+            "unknown scaffold {other:?}; provide .arc/templates/{other}.md or use \
+             a built-in (sol-low, sol-high, reviewer)"
+        ),
+    }
+}
+
 pub fn brief(
     ctx: &Ctx,
     role: ExecutionRole,
@@ -281,16 +312,32 @@ pub fn brief(
     body_file: Option<String>,
     title: Option<String>,
     version: Option<usize>,
+    scaffold: Option<String>,
 ) -> Result<i32> {
-    if let Some(path) = body_file {
+    if body_file.is_some() || scaffold.is_some() {
         if role != ExecutionRole::Lead {
             eprintln!("role refusal: {} may not brief", role.as_str());
             return Ok(9);
         }
         if version.is_some() {
-            bail!("--version cannot be used with --body-file");
+            bail!("--version cannot be used when recording a brief");
         }
-        let body = read_body_file_verbatim(&path)?;
+        // A scaffold template is prepended to the body being recorded;
+        // --scaffold with no --body-file records the template alone.
+        let mut body = String::new();
+        if let Some(name) = &scaffold {
+            body.push_str(&resolve_scaffold(ctx, name)?);
+            if !body.ends_with('\n') {
+                body.push('\n');
+            }
+        }
+        if let Some(path) = &body_file {
+            let content = read_body_file_verbatim(path)?;
+            if !body.is_empty() && !content.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(&content);
+        }
         let store = ctx.store()?;
         let (change_id, _transition, state) = locked_state(&store, reference)?;
         if state.is_closed() {
@@ -305,7 +352,7 @@ pub fn brief(
     }
 
     if title.is_some() {
-        bail!("--title requires --body-file");
+        bail!("--title requires --body-file or --scaffold");
     }
     let store = ctx.store()?;
     let (_, state) = ctx.load_state(&store, reference)?;

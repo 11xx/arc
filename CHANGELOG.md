@@ -39,6 +39,11 @@ no version has been tagged yet.
 
 ### Added
 
+- `arc workspace list|inbox` aggregates open changes and inbox rollups across a
+  configured `data_root`; `arc brief --scaffold <sol-low|sol-high|reviewer>`
+  (or a repo `.arc/templates/<name>.md`) prepends a delegation-fenced template;
+  and `arc restack <change> --advise` prints the exact rebase commands for open
+  dependents without executing them (`workspace-scaffolds`).
 - `arc verify --all --skip-green` skips gates already green at the exact
   current head (observed or attested), printing `skipped (green at head)` per
   gate, to avoid re-running expensive gates. A measurement (300 changes:
