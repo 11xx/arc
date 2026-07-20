@@ -39,6 +39,11 @@ no version has been tagged yet.
 
 ### Added
 
+- Global `--on-behalf-of <subject>` (`ARC_ON_BEHALF_OF`) records the subject a
+  lead runs delegated ceremony for while `actor` stays the invoker; the
+  effective author (`on_behalf_of.unwrap_or(actor)`) drives `forbid_self_approval`
+  and is rendered in show/log/status. Claim ownership still matches the invoker
+  tuple. The event field is additive (`ceremony-provenance`).
 - `arc begin --from-journal <artifact>` opens a change from an open actionable
   journal item, stamping `journal_ref` and consuming the item as superseded;
   opt-in `[journal] auto_log` narrates begin/integrate/close into the journal

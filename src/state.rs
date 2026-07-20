@@ -8,6 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct Patchset {
     pub id: String,
     pub actor: String,
+    /// Subject the snapshot was taken for, when a lead ran delegated ceremony.
+    pub on_behalf_of: Option<String>,
     pub base: String,
     pub head: String,
     pub merge_base: Option<String>,
@@ -17,6 +19,14 @@ pub struct Patchset {
     pub claim_actor: Option<String>,
     pub provenance_mismatch: Option<bool>,
     pub created_at: DateTime<Utc>,
+}
+
+impl Patchset {
+    /// The author policy attributes this snapshot to: the subject when taken on
+    /// behalf of one, otherwise the invoker.
+    pub fn effective_author(&self) -> &str {
+        self.on_behalf_of.as_deref().unwrap_or(&self.actor)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -188,7 +198,17 @@ pub struct VerdictEntry {
     pub patchset_id: String,
     pub verdict: Verdict,
     pub actor: String,
+    /// Subject the verdict was cast for, when a lead reviewed on behalf of one.
+    pub on_behalf_of: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl VerdictEntry {
+    /// The author policy attributes this verdict to: the subject when cast on
+    /// behalf of one, otherwise the invoker.
+    pub fn effective_author(&self) -> &str {
+        self.on_behalf_of.as_deref().unwrap_or(&self.actor)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -493,6 +513,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 state.patchsets.push(Patchset {
                     id: patchset_id.clone(),
                     actor: ev.actor.clone(),
+                    on_behalf_of: ev.on_behalf_of.clone(),
                     base: base.clone(),
                     head: head.clone(),
                     merge_base: merge_base.clone(),
@@ -712,6 +733,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     patchset_id: patchset_id.clone(),
                     verdict: *verdict,
                     actor: ev.actor.clone(),
+                    on_behalf_of: ev.on_behalf_of.clone(),
                     created_at: ev.created_at,
                 });
             }
@@ -840,6 +862,7 @@ mod tests {
             repository_id: "repo".into(),
             change_id: change.into(),
             actor: "tester".into(),
+            on_behalf_of: None,
             harness: None,
             session: None,
             created_at: Utc::now(),

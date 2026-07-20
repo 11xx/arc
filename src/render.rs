@@ -121,6 +121,9 @@ pub fn markdown(
         let _ = writeln!(w, "\n## Patchsets\n");
         for p in &state.patchsets {
             let _ = writeln!(w, "- `{}`: `{}` → `{}`", p.id, p.base, p.head);
+            if let Some(subject) = &p.on_behalf_of {
+                let _ = writeln!(w, "  - snapshot by: {} (for {subject})", p.actor);
+            }
             if let Some(author) = &p.author {
                 let _ = writeln!(
                     w,
@@ -174,12 +177,16 @@ pub fn markdown(
 
     if let Some(v) = &report.verdict {
         let _ = writeln!(w, "\n## Verdict\n");
+        let by = match &v.on_behalf_of {
+            Some(subject) => format!("{} (for {subject})", v.actor),
+            None => v.actor.clone(),
+        };
         let _ = writeln!(
             w,
             "- {:?} on `{}` by {} — {}",
             v.verdict,
             v.patchset_id,
-            v.actor,
+            by,
             if v.valid_for_current_head {
                 "valid for current head"
             } else {
@@ -508,11 +515,11 @@ fn blocker_title(blocker: Blocker) -> &'static str {
 /// `<ts>  <actor>@<harness>  <event-type>  <summary>`.
 pub fn event_line(event: &Event) -> String {
     let ts = event.created_at.format("%Y-%m-%dT%H:%M:%SZ");
-    let who = format!(
-        "{}@{}",
-        event.actor,
-        event.harness.as_deref().unwrap_or("-")
-    );
+    let actor = match &event.on_behalf_of {
+        Some(subject) => format!("{} (for {subject})", event.actor),
+        None => event.actor.clone(),
+    };
+    let who = format!("{actor}@{}", event.harness.as_deref().unwrap_or("-"));
     let (kind, summary) = event_kind_summary(&event.payload);
     if summary.is_empty() {
         format!("{ts}  {who}  {kind}")

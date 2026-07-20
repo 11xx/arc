@@ -234,6 +234,8 @@ pub struct VerdictStatus {
     pub verdict: Verdict,
     pub patchset_id: String,
     pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<String>,
     pub valid_for_current_head: bool,
 }
 
@@ -332,8 +334,12 @@ fn build_report(
         let approved_patchset = latest_patchset
             .as_ref()
             .filter(|patchset| patchset.id == v.patchset_id);
+        // Self-approval compares effective authors, so a lead snapshotting for
+        // an executor and then approving as itself is not self-approval, while
+        // approving --on-behalf-of that executor is.
         let rejected_self_approval = policy.policy.forbid_self_approval
-            && approved_patchset.is_some_and(|patchset| patchset.actor == v.actor);
+            && approved_patchset
+                .is_some_and(|patchset| patchset.effective_author() == v.effective_author());
         let valid = v.verdict == Verdict::Approved
             && latest_patchset
                 .as_ref()
@@ -345,6 +351,7 @@ fn build_report(
             verdict: v.verdict,
             patchset_id: v.patchset_id.clone(),
             actor: v.actor.clone(),
+            on_behalf_of: v.on_behalf_of.clone(),
             valid_for_current_head: valid,
         }
     });
@@ -352,9 +359,13 @@ fn build_report(
         (!verdict.valid_for_current_head
             && verdict.verdict == Verdict::Approved
             && latest_patchset.as_ref().is_some_and(|patchset| {
+                let verdict_author = verdict
+                    .on_behalf_of
+                    .as_deref()
+                    .unwrap_or(verdict.actor.as_str());
                 policy.policy.forbid_self_approval
                     && patchset.id == verdict.patchset_id
-                    && patchset.actor == verdict.actor
+                    && patchset.effective_author() == verdict_author
             }))
         .then(|| SELF_APPROVAL_REASON.to_string())
     });

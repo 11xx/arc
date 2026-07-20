@@ -13,6 +13,12 @@ pub struct Event {
     pub repository_id: String,
     pub change_id: String,
     pub actor: String,
+    /// The subject an action is performed for when a lead runs delegated
+    /// ceremony. `actor` stays the invoker who ran the command; the effective
+    /// author of the event is `on_behalf_of.unwrap_or(actor)`. Additive:
+    /// serialized only when set, so old events and bundles round-trip intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
