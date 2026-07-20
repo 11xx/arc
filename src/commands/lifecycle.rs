@@ -16,8 +16,14 @@ pub fn begin(
     adopt: Option<String>,
     blocked_by: Vec<String>,
     tags: Vec<String>,
+    from_journal: Option<String>,
 ) -> Result<()> {
     ids::validate_slug(slug)?;
+    // Validate the journal source before writing anything: a bad
+    // --from-journal must fail cleanly with no branch, worktree, or event.
+    if let Some(filename) = &from_journal {
+        crate::journal::require_open_actionable(ctx, filename)?;
+    }
     let store = ctx.store()?;
     let blocked_by = blocked_by
         .iter()
@@ -119,9 +125,21 @@ pub fn begin(
             worktree: worktree_path.clone(),
             blocked_by,
             tags,
+            journal_ref: from_journal.clone(),
         },
     );
     store.append_event(&ev)?;
+
+    // Advisory bridge to the journal, both best-effort: mark the source item
+    // consumed, and narrate the opening if auto-log is enabled. Neither can
+    // fail the authoritative change that already exists.
+    if let Some(filename) = &from_journal {
+        if let Err(error) = crate::journal::consume_superseded_by_change(ctx, filename, &change_id)
+        {
+            eprintln!("warning: could not mark {filename} consumed: {error:#}");
+        }
+    }
+    crate::journal::auto_log(ctx, slug, &format!("opened change {change_id}"));
 
     println!("change: {change_id}");
     println!("branch: {branch_name}");

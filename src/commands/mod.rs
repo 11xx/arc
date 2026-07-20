@@ -547,6 +547,7 @@ mod tests {
             worktree: None,
             opened_by: "tester".into(),
             opened_harness: Some("test".into()),
+            journal_ref: None,
             blocked_by: blocked_by.iter().map(|id| (*id).into()).collect(),
             tags: Vec::new(),
             assigned_to: None,

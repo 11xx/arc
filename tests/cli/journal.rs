@@ -1336,3 +1336,143 @@ fn journal_stray_legacy_file_is_inert() {
         "{text}"
     );
 }
+
+#[test]
+fn begin_from_journal_consumes_item_and_stamps_ref() {
+    let repo = Repo::new();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "widget",
+                "--kind",
+                "todo",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("do the widget\n"),
+    );
+    let file = PathBuf::from(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    repo.arc(&repo.root)
+        .args(["begin", "widget", "--no-worktree", "--from-journal", &file])
+        .assert()
+        .success();
+
+    // The change records where it came from.
+    let show = json_stdout(repo.arc(&repo.root).args(["show", "widget", "--json"]));
+    assert_eq!(show["journal_ref"], file);
+
+    // The source item is consumed as superseded and leaves the open queue.
+    let events = journal_events(&journal_dir(&repo));
+    assert!(
+        events.iter().any(|event| event["event"] == "consumed"
+            && event["outcome"] == "superseded"
+            && event["file"] == file),
+        "{events:?}"
+    );
+    let open = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(!open.contains(&file), "consumed item still open:\n{open}");
+}
+
+#[test]
+fn begin_from_journal_rejects_a_missing_item() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args([
+            "begin",
+            "widget",
+            "--no-worktree",
+            "--from-journal",
+            "nope.md",
+        ])
+        .assert()
+        .failure();
+    // No change was created by the rejected begin.
+    repo.arc(&repo.root)
+        .args(["show", "widget"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn auto_log_narrates_integrate_when_enabled() {
+    let repo = Repo::new();
+    let cfg = repo.home.join(".local/ai/arc");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("config.toml"), "[journal]\nauto_log = true\n").unwrap();
+
+    let (change_id, worktree, _head) = change_with_patchset(&repo, "feat-x");
+    repo.arc(&worktree)
+        .args(["review", "feat-x", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "feat-x"])
+        .assert()
+        .success();
+
+    let events = journal_events(&journal_dir(&repo));
+    assert!(
+        events.iter().any(|event| event["event"] == "log"
+            && event["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with(&format!("integrated {change_id}")))),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn journal_open_annotates_a_matching_change() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "feat-x",
+                "--kind",
+                "todo",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("x\n"),
+    );
+    repo.arc(&repo.root)
+        .args(["begin", "feat-x", "--no-worktree"])
+        .assert()
+        .success();
+
+    let open = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(open.contains("[change feat-x-"), "{open}");
+}
+
+#[test]
+fn auto_log_write_failure_is_a_warning_not_a_command_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let cfg = repo.home.join(".local/ai/arc");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("config.toml"), "[journal]\nauto_log = true\n").unwrap();
+
+    // Pre-create the journal dir read-only so the advisory append fails.
+    let jd = journal_dir(&repo);
+    fs::create_dir_all(&jd).unwrap();
+    fs::set_permissions(&jd, fs::Permissions::from_mode(0o500)).unwrap();
+
+    let assert = repo
+        .arc(&repo.root)
+        .args(["begin", "feat-x", "--no-worktree"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+
+    // Restore permissions so the tempdir can be cleaned up.
+    fs::set_permissions(&jd, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(stderr.contains("auto-log failed"), "stderr was: {stderr}");
+}

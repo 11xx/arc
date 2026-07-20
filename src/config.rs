@@ -21,6 +21,20 @@ pub struct ConfigFile {
     /// its worktrees); values may use a leading `~`.
     #[serde(default)]
     pub journals: JournalsConfig,
+    /// Journal behavior toggles (distinct from the per-project `[journals]`
+    /// directory map).
+    #[serde(default)]
+    pub journal: JournalBehavior,
+}
+
+/// The `[journal]` table: opt-in behavior for the advisory journal.
+#[derive(Debug, Default, Deserialize)]
+pub struct JournalBehavior {
+    /// When true, `begin`/`integrate`/`close` append a journal `log` event
+    /// narrating the lifecycle transition. Advisory: a write failure is a
+    /// warning, never a command failure.
+    #[serde(default)]
+    pub auto_log: bool,
 }
 
 /// The `[journals]` table: a `dirs` map from repository-root path to journal
@@ -42,6 +56,8 @@ pub struct Config {
     /// Raw `[journals] dirs` map (repository-root path -> archive dir),
     /// values not yet tilde-expanded (the consumer expands on lookup).
     pub journal_dirs: BTreeMap<String, String>,
+    /// Whether lifecycle transitions append advisory journal log events.
+    pub journal_auto_log: bool,
 }
 
 fn home() -> Result<PathBuf> {
@@ -99,6 +115,7 @@ pub fn load() -> Result<Config> {
         worktrees_dir,
         data_root,
         journal_dirs: file.journals.dirs,
+        journal_auto_log: file.journal.auto_log,
     })
 }
 

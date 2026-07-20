@@ -575,6 +575,7 @@ mod tests {
                     worktree: None,
                     blocked_by: Vec::new(),
                     tags: Vec::new(),
+                    journal_ref: None,
                 },
             ),
             event(

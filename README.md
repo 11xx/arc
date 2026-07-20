@@ -537,6 +537,20 @@ the primary queue first and then a separate later section until an explicit
 [--note <text>]` retires an item with a typed consumed event. The journal is
 append-only; consumption never edits or deletes the artifact.
 
+The journal and the ledger bridge in three advisory ways, none of which can
+gate the authoritative ledger. `arc begin --from-journal <artifact>` opens a
+change from an open actionable item: it records the artifact filename as the
+change's `journal_ref`, appends a `consumed` event with outcome `superseded`
+and note `change <id>` (leaving the artifact file untouched), and refuses a
+missing, non-actionable, or already-consumed source before writing anything.
+With `[journal] auto_log = true` in the config file, `begin`, `integrate`, and
+`close` append a narrating `log` event (`opened change <id>`,
+`integrated <id> at <sha>`, `closed change <id>`); a failure to write the
+journal is a warning, never a command failure. Finally, `journal open`
+annotates any item whose topic matches an open change slug, or that a change's
+`journal_ref` points at, with `[change <id>: <stage|state>]`, using the
+in-repo ledger; outside a repository the annotation is skipped silently.
+
 Memory artifacts are shared, always-surfaced project facts, one per file with
 a heading that describes the fact. Retire them with `journal consume`; list
 live memories with `journal memories`, and `catchup` leads with them after
