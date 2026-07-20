@@ -53,3 +53,56 @@ fn config_file_under_ai_home() {
     );
     assert!(repo.home.join("cfg-wts").join("repo-cfg-c").is_dir());
 }
+
+#[test]
+fn config_check_writable_leaves_no_events_or_probe_refs() {
+    let repo = Repo::new();
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "probe-clean",
+        "--no-worktree",
+    ])));
+    let before = event_count(&repo, &change_id);
+
+    repo.arc(&repo.root)
+        .args(["config", "--check-writable"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ok: store-root"))
+        .stdout(predicates::str::contains("ok: lock"))
+        .stdout(predicates::str::contains("ok: events"))
+        .stdout(predicates::str::contains("ok: git-ref"));
+
+    assert_eq!(event_count(&repo, &change_id), before);
+    assert!(git_out(&repo.root, &["for-each-ref", "refs/arc/probe/"]).is_empty());
+}
+
+#[test]
+fn config_check_writable_reports_store_failure_and_json_schema() {
+    let repo = Repo::new();
+    let store = repo.root.join("blocked-store");
+    fs::create_dir_all(&store).unwrap();
+    fs::set_permissions(&store, std::os::unix::fs::PermissionsExt::from_mode(0o555)).unwrap();
+    let failed = repo
+        .arc(&repo.root)
+        .env("ARC_DATA_DIR", &store)
+        .args(["config", "--check-writable"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("fail: store-root"))
+        .stdout(predicates::str::contains(store.to_string_lossy().as_ref()));
+    drop(failed);
+    fs::set_permissions(&store, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+
+    let json = stdout(
+        repo.arc(&repo.root)
+            .args(["config", "--check-writable", "--json"]),
+    );
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["schema"], "arc-writability/1");
+    assert!(value["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|check| check["ok"] == true));
+}
