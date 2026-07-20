@@ -428,6 +428,28 @@ gates stay compact. A declared timeout terminates and reaps the gate's entire
 process group and records the failure as timed out. Without `timeout`, gate
 execution remains unbounded.
 
+## Git integration
+
+Git hooks are strictly opt-in: arc never installs them silently. `arc hooks
+install [--force]` writes two scripts into the resolved hooks directory (it
+honors `core.hooksPath`), each a two-liner delegating to `arc hook-run`. It
+refuses to overwrite a foreign hook unless `--force` is given, which first
+saves the original as `<hook>.pre-arc`. `arc hooks uninstall` removes only
+arc-authored scripts (a marker comment identifies them), and `arc hooks
+status` reports whether each hook is absent, arc-managed, or foreign.
+
+Both hooks are advisory and always exit 0, so they can never block a commit.
+The `post-commit` hook, on a change branch, prints a notice when the new
+commit has staled an approval bound to the previously approved snapshot, or
+warns when the branch's change is already closed. The `prepare-commit-msg`
+hook appends an `Arc-Change: <change-id>` trailer on a change branch when one
+is not already present, giving commits durable linkage back to their change.
+
+Independent of hooks, `arc query --commit <revision>` reports the changes
+whose patchset heads or integration/closure commit match a revision (a unique
+prefix is accepted). It searches the ledger only; it does not scan commit
+trailers.
+
 ## Policy
 
 Repository integration policy is declared in `.arc/policy.toml`. Policies are
