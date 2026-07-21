@@ -18,6 +18,10 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `arc journal show <file>` prints one artifact's raw body (hot directory,
   then the cold archive), so long-form kinds no longer require `cat`-ing
   paths from `journal dir` (`journal-list-and-show`).
+- `arc journal stamp` prints the current UTC timestamp in the journal house
+  format (RFC 3339 seconds, `Z` — the exact spelling of event-log `ts`), so
+  dated inline headings are tool-computed rather than agent-authored
+  (`journal-timestamp-stamp`).
 
 ## [0.1.0] - 2026-07-20
 

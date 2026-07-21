@@ -627,7 +627,10 @@ directory newest-first —
 including the non-actionable kinds `open` and `memories` do not show —
 marking each consumed item with its outcome; `show <filename>` prints one
 artifact's raw Markdown body, resolving the hot directory first and then the
-cold archive.
+cold archive. Dated inline headings (positions, conclusions, review stamps)
+take the house timestamp from `journal stamp` — RFC 3339 seconds in UTC, the
+same spelling as the event log's `ts`, so prose and log cross-grep — never
+an agent-authored date.
 Work waiting for a future session uses the primary actionable kinds — `todo`,
 `handoff`, `inbox`, `plan` — plus lower-priority `later`. `journal open` lists
 the primary queue first and then a separate later section until an explicit

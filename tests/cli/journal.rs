@@ -1685,3 +1685,43 @@ fn journal_show_rejects_paths_and_unknown_names() {
         .assert()
         .failure();
 }
+
+#[test]
+fn journal_stamp_prints_house_format_matching_event_ts() {
+    let repo = Repo::new();
+
+    let before = stdout(repo.arc(&repo.root).args(["journal", "stamp"]));
+    let before = before.trim();
+    // House format: RFC 3339 seconds, Z suffix, no fractional part.
+    assert!(before.ends_with('Z'), "{before}");
+    assert!(!before.contains('.'), "{before}");
+    let parsed = chrono::DateTime::parse_from_rfc3339(before).unwrap();
+    // Within a small tolerance of the test's own clock.
+    let skew = (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc))
+        .num_seconds()
+        .abs();
+    assert!(skew < 60, "stamp off by {skew}s: {before}");
+
+    // An event written between two stamps carries a ts lexically between
+    // them — the exact same spelling, so prose and log cross-grep.
+    let body = repo.home.join("body.md");
+    fs::write(&body, "x\n").unwrap();
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "stamped",
+        "--kind",
+        "note",
+        "--body-file",
+        body.to_str().unwrap(),
+    ]));
+    let after = stdout(repo.arc(&repo.root).args(["journal", "stamp"]));
+    let after = after.trim();
+    assert!(before <= after, "{before} !<= {after}");
+
+    let dir = journal_dir(&repo);
+    let events = journal_events(&dir);
+    let ts = events[0]["ts"].as_str().unwrap();
+    assert!(before <= ts && ts <= after, "{before} <= {ts} <= {after}");
+    assert!(!ts.contains('.'), "{ts}");
+}

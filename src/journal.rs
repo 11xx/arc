@@ -229,6 +229,8 @@ pub enum JournalCmd {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
     },
+    /// Print the current UTC timestamp in the journal house format (read-only)
+    Stamp,
     /// Manage advisory session work lanes
     Lane {
         #[command(subcommand)]
@@ -290,6 +292,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
         JournalCmd::Open { kind, json } => open(ctx, kind, json),
         JournalCmd::List { kind, json } => list(ctx, kind, json),
         JournalCmd::Show { filename } => show(ctx, &filename),
+        JournalCmd::Stamp => stamp(),
         JournalCmd::Lane { command } => lane(ctx, command),
         JournalCmd::Consume {
             filename,
@@ -1958,6 +1961,16 @@ fn show(ctx: &Ctx, filename: &str) -> Result<i32> {
         "no such artifact {filename} in {} or its cold archive",
         hot.display()
     )
+}
+
+/// The journal house timestamp: RFC 3339 seconds in UTC with a `Z` suffix —
+/// the exact spelling `JournalEvent.ts` uses, so an inline prose stamp and an
+/// event-log stamp are lexically identical and cross-greppable. Dated inline
+/// headings come from here: the tool computes `now`, an agent never authors
+/// a clock value it could skip or fabricate.
+fn stamp() -> Result<i32> {
+    println!("{}", Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
+    Ok(0)
 }
 
 fn consume(ctx: &Ctx, filename: &str, outcome: ConsumeOutcome, note: Option<&str>) -> Result<i32> {
