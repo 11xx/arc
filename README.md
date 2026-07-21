@@ -136,14 +136,16 @@ asks for `CHANGE`.
 
 `arc env` is the explicit identity bootstrap. It prints eval-able
 `ARC_HARNESS` and `ARC_SESSION` exports from the first available variable in
-this order: `CLAUDE_SESSION_ID`, `CODEX_THREAD_ID`, `OPENCODE_SESSION`. When the
-harness's own session store yields the model, it appends an `ARC_MODEL` export
-(`model-slug[#effort]`): claude reads the newest assistant model from its
-project transcript, codex reads the model and reasoning effort from its session
-rollout. Harnesses without a dependency-free read path (opencode, pi) rely on an
-explicit `ARC_MODEL` instead; detection failure is a silent omission, never an
-error. It does not inject identity into other commands; without a detected
-session it prints commented placeholders (naming `ARC_MODEL` too) and exits 1.
+this order: `CLAUDE_SESSION_ID`, `CODEX_THREAD_ID`, `OPENCODE_SESSION`,
+`PI_SESSION_ID`. When the harness's own session store yields the model, it
+appends an `ARC_MODEL` export (`model-slug[#effort]`): Claude reads the newest
+assistant model from its project transcript; Codex honors `CODEX_HOME` and
+reads the latest turn's model and effort; OpenCode reads the selected model and
+variant from its SQLite session row when `sqlite3` is available; and Pi reads
+model and thinking-level changes from its JSONL session. Detection failure is
+a silent omission, never an error. It does not inject identity into other
+commands; without a detected session it prints commented placeholders (naming
+`ARC_MODEL` too) and exits 1.
 
 `arc resume [CHANGE]` renders the latest brief, claim and stage, open findings,
 head gate state, next action, live journal lanes, and matching open journal
@@ -646,7 +648,8 @@ an agent-authored date.
 Work waiting for a future session uses the primary actionable kinds — `todo`,
 `handoff`, `inbox`, `plan`, `discussion` — plus lower-priority `later`. `journal open` lists
 the primary queue first and then a separate later section, annotating each item
-with how long it has waited (its age), until an explicit
+with how long it has waited (for discussions, since the latest typed position;
+otherwise since creation), until an explicit
 `journal consume <filename> [--outcome done|superseded|discarded]
 [--note <text>]` retires an item with a typed consumed event. The journal is
 append-only; consumption never edits or deletes the artifact.
@@ -655,14 +658,16 @@ A `discussion` is the answer-owed actionable kind: an open debate rides the
 same queue until someone resolves it, and `arc begin --from-journal` promotes
 one straight into a change. `journal append <filename> [--ref <target>]
 --body-file <src>` adds one position: it writes a
-`### Position (<model[#effort]> via <harness>, <utc-ts>)` block — the heading
-tool-computed so the timestamp is never hand-authored — below the file's
-existing content, and emits a typed `position` journal event carrying the same
-identity plus the optional `--ref` (the position timestamp or item slug it
-answers). The Markdown is for people, the event is what stance tallies,
-resolver-participation flags, and reply graphs derive from; the file stays
-hand-writable, and the append is advisory and fail-open like every journal
-write. `journal note --kind discussion --scaffold discussion` seeds the
+`### Position pos-<ulid> (<model[#effort]> via <harness>, <utc-ts>)` block —
+the heading tool-computed so its stable reply target and timestamp are never
+hand-authored — below the file's existing content, and emits a typed `position`
+journal event carrying the same ID and identity plus the optional `--ref` (a
+position ID, legacy timestamp, or item slug it answers). Consumed artifacts
+reject late appends; re-litigation starts a successor discussion. The Markdown
+is for people and block-scoped stance parsing; the event supplies activity,
+identity, resolver-participation, and reply edges. The file stays hand-writable,
+and the append is advisory and fail-open like every journal write.
+`journal note --kind discussion --scaffold discussion` seeds the
 conventions at birth (the `Position: for|against|amend` stance line, reply-to
 quoting, the resolution vocabulary, and the norm that a contested discussion is
 resolved by a non-author of the winning position or by the user). A repo-local
@@ -670,10 +675,10 @@ resolved by a non-author of the winning position or by the user). A repo-local
 on any `journal note`: the template is prepended to `--body-file` content, or
 recorded alone. `journal discussion <filename> [--json]` renders the derived
 view of one debate: its age, the stance tally (`for`/`against`/`amend` parsed
-from the file, so hand-written positions count too), the distinct participants
-and reply-refs from the typed `position` events, and — once resolved — the
-outcome with a resolver-participation flag that surfaces a resolver who also
-argued a side.
+once per actual position block, so hand-written positions count too), the
+distinct participants and reply-refs from the typed `position` events, and —
+once resolved — the outcome with a resolver-participation flag that surfaces a
+resolver who also argued a side under the same harness-native session identity.
 
 The journal and the ledger bridge in three advisory ways, none of which can
 gate the authoritative ledger. `arc begin --from-journal <artifact>` opens a

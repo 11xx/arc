@@ -2027,14 +2027,15 @@ fn journal_append_writes_position_block_and_typed_event() {
 
     let dir = journal_dir(&repo);
     let body = fs::read_to_string(dir.join(&file)).unwrap();
-    // Headings are tool-computed: `model via harness` when the model is known,
-    // bare harness otherwise, always with a house-format timestamp.
+    // Headings are tool-computed: every position gets a stable ULID-backed
+    // reply target, plus model via harness when the model is known.
     assert!(
-        body.contains("### Position (kimi-k3#high via opencode, 20")
+        body.contains("### Position pos-")
+            && body.contains("(kimi-k3#high via opencode, 20")
             && body.contains("Because reasons."),
         "{body}"
     );
-    assert!(body.contains("### Position (codex, 20"), "{body}");
+    assert!(body.contains("(codex, 20"), "{body}");
     assert!(!body.contains("via codex"), "{body}");
 
     // The typed events are the machine-readable half; ref and model are
@@ -2047,6 +2048,12 @@ fn journal_append_writes_position_block_and_typed_event() {
     assert_eq!(positions[0]["file"], file);
     assert_eq!(positions[0]["model"], "kimi-k3#high");
     assert_eq!(positions[0]["ref"], "2026-01-01T00:00:00Z");
+    let first_id = positions[0]["position_id"].as_str().unwrap();
+    let second_id = positions[1]["position_id"].as_str().unwrap();
+    assert!(first_id.starts_with("pos-") && first_id.len() == 30);
+    assert!(second_id.starts_with("pos-") && second_id.len() == 30);
+    assert_ne!(first_id, second_id);
+    assert!(body.contains(first_id) && body.contains(second_id));
     assert!(positions[1].get("model").is_none());
     assert!(positions[1].get("ref").is_none());
 
@@ -2091,6 +2098,53 @@ fn journal_append_rejects_paths_missing_files_and_non_artifacts() {
 }
 
 #[test]
+fn journal_append_rejects_consumed_artifact() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "closed-debate",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Closed debate\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file, "--outcome", "done"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "append", &file, "--body-file", "-"])
+        .write_stdin("Position: for\nToo late.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "cannot append to consumed artifact",
+        ));
+
+    let dir = journal_dir(&repo);
+    assert!(!fs::read_to_string(dir.join(file))
+        .unwrap()
+        .contains("Too late"));
+    assert_eq!(
+        journal_events(&dir)
+            .iter()
+            .filter(|event| event["event"] == "position")
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn journal_open_annotates_item_age() {
     let repo = Repo::new();
     repo.arc(&repo.root)
@@ -2114,6 +2168,35 @@ fn journal_open_annotates_item_age() {
         .stdout(predicates::str::contains("s old)"));
     let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
     assert!(open["open"][0]["age_seconds"].as_u64().is_some(), "{open}");
+}
+
+#[test]
+fn journal_open_uses_latest_position_activity_for_discussion_age() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    let file = "20000101T000000Z-active-debate-discussion.md";
+    fs::write(dir.join(file), "# Active debate\n\n## Positions\n").unwrap();
+
+    repo.arc(&repo.root)
+        .args(["journal", "append", file, "--body-file", "-"])
+        .write_stdin("Position: for\nFresh answer.\n")
+        .assert()
+        .success();
+
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let item = open["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file"] == file)
+        .unwrap();
+    assert!(item["age_seconds"].as_u64().unwrap() < 60, "{item}");
+    let summary = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "discussion", file, "--json"]),
+    );
+    assert!(summary["age_seconds"].as_u64().unwrap() < 60, "{summary}");
 }
 
 #[test]
@@ -2201,6 +2284,89 @@ fn journal_discussion_summarizes_stances_participants_and_resolution() {
         .stdout(predicates::str::contains(
             "resolver also authored a position",
         ));
+}
+
+#[test]
+fn journal_discussion_scopes_stances_to_position_blocks() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "stance-scope",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin(
+                "# Stance scope\n\nAn example outside a position says Position: for.\n\nPosition: for\n",
+            ),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    repo.arc(&repo.root)
+        .args(["journal", "append", &file, "--body-file", "-"])
+        .write_stdin("Position: against\nPosition: for is quoted below, not a second vote.\n")
+        .assert()
+        .success();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["positions"], 1);
+    assert_eq!(summary["stances"]["for"], 0);
+    assert_eq!(summary["stances"]["against"], 1);
+    assert_eq!(summary["stances"]["other"], 0);
+}
+
+#[test]
+fn resolver_participation_requires_matching_harness_and_session() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "native-identity",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Native identity\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    repo.arc(&repo.root)
+        .args(["journal", "append", &file, "--body-file", "-"])
+        .env("ARC_HARNESS", "opencode")
+        .env("ARC_SESSION", "same-native-id")
+        .write_stdin("Position: for\nOpenCode position.\n")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file, "--outcome", "done"])
+        .env("ARC_HARNESS", "pi")
+        .env("ARC_SESSION", "same-native-id")
+        .assert()
+        .success();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["resolution"]["resolver_participated"], false);
 }
 
 #[test]

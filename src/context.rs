@@ -13,13 +13,15 @@ use crate::store::Store;
 use anyhow::{bail, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Environment variables recognized by `arc env`, in precedence order.
 /// Detection is deliberately not part of normal command identity resolution.
-const HARNESS_ENV: [(&str, &str); 3] = [
+const HARNESS_ENV: [(&str, &str); 4] = [
     ("CLAUDE_SESSION_ID", "claude"),
     ("CODEX_THREAD_ID", "codex"),
     ("OPENCODE_SESSION", "opencode"),
+    ("PI_SESSION_ID", "pi"),
 ];
 
 /// Resolve an explicit change reference or infer one from the current branch
@@ -125,7 +127,7 @@ pub fn print_env() -> i32 {
         }
     }
     println!(
-        "# export ARC_HARNESS=<claude|codex|opencode> ARC_SESSION=<session-id> \
+        "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id> \
          ARC_MODEL=<model[#effort]>"
     );
     1
@@ -134,14 +136,14 @@ pub fn print_env() -> i32 {
 /// Best-effort model detection for `arc env`: read the harness's own session
 /// store and extract the model (plus effort, where the store records one).
 /// Detection is a convenience layered on the explicit `ARC_MODEL` contract —
-/// every failure mode is a silent omission, never an error. Harnesses whose
-/// stores have no dependency-free read path (opencode's sqlite DB, pi's
-/// env-var-less session dir) simply return `None` for now.
+/// every failure mode is a silent omission, never an error.
 fn detect_model(harness: &str, session: &str) -> Option<String> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     match harness {
         "claude" => detect_claude_model(&home, session),
         "codex" => detect_codex_model(&home, session),
+        "opencode" => detect_opencode_model(&home, session),
+        "pi" => detect_pi_model(&home, session),
         _ => None,
     }
 }
@@ -170,11 +172,15 @@ fn detect_claude_model(home: &Path, session: &str) -> Option<String> {
     None
 }
 
-/// `~/.codex/sessions/<y>/<m>/<d>/rollout-*<session>.jsonl`: the newest
-/// `turn_context` payload carries `model` (and sometimes
-/// `reasoning_effort`); combined as `model#effort` when both exist.
+/// `$CODEX_HOME/sessions/<y>/<m>/<d>/rollout-*<session>.jsonl` (falling back
+/// to `~/.codex`): the newest `turn_context` payload carries `model` and
+/// `effort`; combined as `model#effort` when both exist. Older effort fields
+/// remain readable for compatibility.
 fn detect_codex_model(home: &Path, session: &str) -> Option<String> {
-    let file = find_rollout(&home.join(".codex/sessions"), session, 0)?;
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".codex"));
+    let file = find_session_file(&codex_home.join("sessions"), session, 0)?;
     let text = std::fs::read_to_string(file).ok()?;
     let mut model: Option<String> = None;
     let mut effort: Option<String> = None;
@@ -189,8 +195,9 @@ fn detect_codex_model(home: &Path, session: &str) -> Option<String> {
         if let Some(m) = payload["model"].as_str() {
             model = Some(m.to_string());
         }
-        if let Some(e) = payload["reasoning_effort"]
+        if let Some(e) = payload["effort"]
             .as_str()
+            .or_else(|| payload["reasoning_effort"].as_str())
             .or_else(|| payload["collaboration_mode"]["settings"]["reasoning_effort"].as_str())
         {
             effort = Some(e.to_string());
@@ -203,16 +210,103 @@ fn detect_codex_model(home: &Path, session: &str) -> Option<String> {
     })
 }
 
+/// OpenCode stores the selected model as JSON in its SQLite session row. Both
+/// stable and preview store names are checked. `sqlite3` is an optional
+/// best-effort reader: its absence leaves ARC_MODEL unset without making
+/// `arc env` fail.
+fn detect_opencode_model(home: &Path, session: &str) -> Option<String> {
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"));
+    let session = session.replace('\'', "''");
+    let query = format!("SELECT model FROM session WHERE id = '{session}' LIMIT 1;");
+    for database in ["opencode.db", "opencode-next.db"] {
+        let path = data_home.join("opencode").join(database);
+        if !path.is_file() {
+            continue;
+        }
+        let output = Command::new("sqlite3")
+            .arg("-noheader")
+            .arg(&path)
+            .arg(&query)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            continue;
+        }
+        let raw = String::from_utf8(output.stdout).ok()?;
+        if let Some(model) = parse_opencode_model(raw.trim()) {
+            return Some(model);
+        }
+    }
+    None
+}
+
+fn parse_opencode_model(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let model = value["id"].as_str()?.trim();
+    if model.is_empty() {
+        return None;
+    }
+    Some(
+        match value["variant"].as_str().filter(|value| !value.is_empty()) {
+            Some(effort) => format!("{model}#{effort}"),
+            None => model.to_string(),
+        },
+    )
+}
+
+/// Pi session JSONL carries model and thinking-level changes. The current Pi
+/// runtime bridge exposes its native ID as `PI_SESSION_ID`; custom agent and
+/// session roots are honored before the default store.
+fn detect_pi_model(home: &Path, session: &str) -> Option<String> {
+    let sessions = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("PI_CODING_AGENT_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".pi/agent"))
+                .join("sessions")
+        });
+    let file = find_session_file(&sessions, session, 0)?;
+    let text = std::fs::read_to_string(file).ok()?;
+    let mut model: Option<String> = None;
+    let mut effort: Option<String> = None;
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match value["type"].as_str() {
+            Some("model_change") => {
+                if let Some(value) = value["modelId"].as_str() {
+                    model = Some(value.to_string());
+                }
+            }
+            Some("thinking_level_change") => {
+                if let Some(value) = value["thinkingLevel"].as_str() {
+                    effort = Some(value.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    let model = model?;
+    Some(match effort {
+        Some(effort) => format!("{model}#{effort}"),
+        None => model,
+    })
+}
+
 /// Sessions nest as `<year>/<month>/<day>/rollout-*.jsonl`; walk shallowly
 /// and stop at the first file whose name contains the session id.
-fn find_rollout(dir: &Path, session: &str, depth: u8) -> Option<PathBuf> {
+fn find_session_file(dir: &Path, session: &str, depth: u8) -> Option<PathBuf> {
     if depth > 4 || !dir.is_dir() {
         return None;
     }
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if let Some(found) = find_rollout(&path, session, depth + 1) {
+            if let Some(found) = find_session_file(&path, session, depth + 1) {
                 return Some(found);
             }
         } else if entry.file_name().to_string_lossy().contains(session)

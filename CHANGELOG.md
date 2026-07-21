@@ -47,6 +47,13 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `arc journal doctor` no longer reports `discussion` artifacts as an unknown
   kind: doctor derives its known-kind set from the kind enum instead of a
   hand-maintained duplicate list (`journal-append`).
+- Discussion lifecycle and identity are now structural: consumed discussions
+  reject late appends, new positions carry unique `pos-<ulid>` reply targets,
+  stance tallying is scoped to actual position blocks, activity age follows
+  the latest typed position, and resolver participation requires the same
+  harness plus native session. `arc env` also completes model discovery for
+  OpenCode and Pi while honoring Codex's canonical `CODEX_HOME` and `effort`
+  fields (`discussion-integrity`).
 
 ## [0.1.0] - 2026-07-20
 
