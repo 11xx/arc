@@ -1522,6 +1522,13 @@ fn journal_list_enumerates_all_kinds_newest_first() {
         );
     assert!(conclusions.contains("beta"), "{conclusions}");
 
+    // A kind with no matches lists nothing, successfully.
+    let specs = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "list", "--kind", "spec"]),
+    );
+    assert!(specs.contains("(none)"), "{specs}");
+
     // JSON form parses and carries the full field set.
     let json = stdout(repo.arc(&repo.root).args(["journal", "list", "--json"]));
     let v: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
@@ -1565,6 +1572,32 @@ fn journal_list_marks_consumed_without_hiding() {
 }
 
 #[test]
+fn journal_list_fails_open_on_malformed_and_unknown_outcomes() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    let name = "20260101T000000Z-duty-todo.md";
+    fs::write(dir.join(name), "# Duty\n").unwrap();
+    // A malformed line and a consumed event with an unrecognized outcome:
+    // both must be skipped, leaving the item unmarked.
+    fs::write(
+        dir.join("events.jsonl"),
+        concat!(
+            "not json at all\n",
+            "{\"schema\":\"journal-events/1\",\"ts\":\"2026-01-01T00:00:01Z\",",
+            "\"harness\":\"test\",\"session\":\"test\",\"topic\":\"duty\",",
+            "\"event\":\"consumed\",\"file\":\"20260101T000000Z-duty-todo.md\",",
+            "\"outcome\":\"maybe\"}\n",
+        ),
+    )
+    .unwrap();
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "list"]));
+    assert!(text.contains("duty"), "{text}");
+    assert!(!text.contains("[consumed:"), "{text}");
+}
+
+#[test]
 fn journal_show_prints_body_and_resolves_cold_archive() {
     let repo = Repo::new();
     let body = repo.home.join("body.md");
@@ -1596,6 +1629,11 @@ fn journal_show_prints_body_and_resolves_cold_archive() {
     assert!(!hot.join(&file).exists());
     let shown = stdout(repo.arc(&repo.root).args(["journal", "show", &file]));
     assert_eq!(shown, "# Show me\n\nexact body, verbatim\n");
+
+    // With the same filename in both dirs, hot takes precedence.
+    fs::write(hot.join(&file), "# Hotter\n").unwrap();
+    let shown = stdout(repo.arc(&repo.root).args(["journal", "show", &file]));
+    assert_eq!(shown, "# Hotter\n");
 }
 
 #[test]

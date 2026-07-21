@@ -12,7 +12,8 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- `arc journal list` enumerates every journal artifact newest-first
+- `arc journal list` enumerates every live journal artifact in the hot
+  directory newest-first
   (optionally `--kind`, `--json`) with consumption markers, and
   `arc journal show <file>` prints one artifact's raw body (hot directory,
   then the cold archive), so long-form kinds no longer require `cat`-ing

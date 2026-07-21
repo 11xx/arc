@@ -215,7 +215,7 @@ pub enum JournalCmd {
         #[arg(long)]
         json: bool,
     },
-    /// List every artifact newest first, optionally filtered by kind (read-only)
+    /// List live artifacts (hot journal dir) newest first, optionally filtered by kind (read-only)
     List {
         /// Restrict to one kind
         #[arg(long, value_enum)]
@@ -1675,9 +1675,14 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
 }
 
 /// The outcome an artifact was consumed with, if it was consumed at all.
+/// Last consume wins: the `consume` command refuses an already-consumed
+/// artifact, but the journal is hand-writable and derived views must be
+/// robust to a re-consume event anyway — display the latest, not the
+/// earliest.
 fn consumption(events: &[JournalEvent], filename: &str) -> Option<String> {
     events
         .iter()
+        .rev()
         .find(|event| {
             event.known()
                 && event.event == "consumed"
