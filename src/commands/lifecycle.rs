@@ -274,37 +274,6 @@ pub fn show_selection(
     }
 }
 
-/// Built-in brief scaffolds. They encode the delegation-canon fences and the
-/// sandbox facts an arc-driving executor must respect.
-const SCAFFOLD_SOL_LOW: &str = include_str!("scaffolds/sol-low.md");
-const SCAFFOLD_SOL_HIGH: &str = include_str!("scaffolds/sol-high.md");
-const SCAFFOLD_REVIEWER: &str = include_str!("scaffolds/reviewer.md");
-
-/// Resolve a scaffold template: a repo-local `.arc/templates/<name>.md` wins,
-/// otherwise a compiled-in default (`sol-low`, `sol-high`, `reviewer`).
-fn resolve_scaffold(ctx: &Ctx, name: &str) -> Result<String> {
-    let repo_template = gitio::toplevel(&ctx.cwd).ok().map(|top| {
-        top.join(".arc")
-            .join("templates")
-            .join(format!("{name}.md"))
-    });
-    if let Some(path) = repo_template {
-        if path.is_file() {
-            return std::fs::read_to_string(&path)
-                .with_context(|| format!("cannot read scaffold {}", path.display()));
-        }
-    }
-    match name {
-        "sol-low" => Ok(SCAFFOLD_SOL_LOW.to_string()),
-        "sol-high" => Ok(SCAFFOLD_SOL_HIGH.to_string()),
-        "reviewer" => Ok(SCAFFOLD_REVIEWER.to_string()),
-        other => bail!(
-            "unknown scaffold {other:?}; provide .arc/templates/{other}.md or use \
-             a built-in (sol-low, sol-high, reviewer)"
-        ),
-    }
-}
-
 pub fn brief(
     ctx: &Ctx,
     role: ExecutionRole,
@@ -324,20 +293,15 @@ pub fn brief(
         }
         // A scaffold template is prepended to the body being recorded;
         // --scaffold with no --body-file records the template alone.
-        let mut body = String::new();
-        if let Some(name) = &scaffold {
-            body.push_str(&resolve_scaffold(ctx, name)?);
-            if !body.ends_with('\n') {
-                body.push('\n');
-            }
-        }
-        if let Some(path) = &body_file {
-            let content = read_body_file_verbatim(path)?;
-            if !body.is_empty() && !content.is_empty() {
-                body.push('\n');
-            }
-            body.push_str(&content);
-        }
+        let template = match &scaffold {
+            Some(name) => super::scaffold::resolve(ctx, name)?,
+            None => String::new(),
+        };
+        let content = match &body_file {
+            Some(path) => read_body_file_verbatim(path)?,
+            None => String::new(),
+        };
+        let body = super::scaffold::prepended(&template, &content);
         let store = ctx.store()?;
         let (change_id, _transition, state) = locked_state(&store, reference)?;
         if state.is_closed() {

@@ -39,6 +39,7 @@ pub enum JournalKind {
     Spec,
     Todo,
     Later,
+    Discussion,
 }
 
 impl JournalKind {
@@ -55,13 +56,16 @@ impl JournalKind {
             JournalKind::Spec => "spec",
             JournalKind::Todo => "todo",
             JournalKind::Later => "later",
+            JournalKind::Discussion => "discussion",
         }
     }
 }
 
 /// Primary kinds that represent work waiting for a future session: they stay
 /// in the main `journal open` queue until an explicit `journal consume`.
-const PRIMARY_ACTIONABLE_KINDS: [&str; 4] = ["todo", "handoff", "inbox", "plan"];
+/// `discussion` is the actionable answer-owed kind: an open debate rides the
+/// queue until someone resolves it.
+const PRIMARY_ACTIONABLE_KINDS: [&str; 5] = ["todo", "handoff", "inbox", "plan", "discussion"];
 const LATER_KIND: &str = "later";
 
 fn is_actionable_kind(kind: &str) -> bool {
@@ -169,11 +173,14 @@ pub enum JournalCmd {
         #[arg(long, value_enum)]
         kind: JournalKind,
         /// Body source: a file path, or '-' for stdin (written verbatim)
-        #[arg(long)]
-        body_file: String,
+        #[arg(long, required_unless_present = "scaffold")]
+        body_file: Option<String>,
         /// Optional title; when set, a `# <title>` heading is prepended
         #[arg(long)]
         title: Option<String>,
+        /// Scaffold template prepended to the body (records the template alone with no --body-file)
+        #[arg(long)]
+        scaffold: Option<String>,
     },
     /// Append a log-only journal line (no artifact file is created)
     Log {
@@ -206,7 +213,7 @@ pub enum JournalCmd {
         #[arg(long)]
         json: bool,
     },
-    /// List actionable artifacts (todo/handoff/inbox/plan, then later) not yet consumed
+    /// List actionable artifacts (todo/handoff/inbox/plan/discussion, then later) not yet consumed
     Open {
         /// Restrict to one actionable kind; later is shown separately
         #[arg(long, value_enum)]
@@ -280,7 +287,15 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             kind,
             body_file,
             title,
-        } => note(ctx, &topic, kind, &body_file, title.as_deref()),
+            scaffold,
+        } => note(
+            ctx,
+            &topic,
+            kind,
+            body_file.as_deref(),
+            title.as_deref(),
+            scaffold.as_deref(),
+        ),
         JournalCmd::Log { topic, message } => log_line(ctx, &topic, &message),
         JournalCmd::Events { limit } => events(ctx, limit),
         JournalCmd::Catchup {
@@ -595,15 +610,25 @@ fn note(
     ctx: &Ctx,
     topic: &str,
     kind: JournalKind,
-    body_file: &str,
+    body_file: Option<&str>,
     title: Option<&str>,
+    scaffold: Option<&str>,
 ) -> Result<i32> {
     if !valid_topic(topic) {
         bail!("topic {topic:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
     }
-    // Read the body before touching the filesystem so a bad source path
-    // leaves nothing written.
-    let body = read_body_verbatim(body_file)?;
+    // Read the body before touching the filesystem so a bad source path or
+    // scaffold name leaves nothing written. A scaffold template is prepended
+    // to the body; --scaffold with no --body-file records the template alone.
+    let template = match scaffold {
+        Some(name) => crate::commands::scaffold::resolve(ctx, name)?,
+        None => String::new(),
+    };
+    let content = match body_file {
+        Some(source) => read_body_verbatim(source)?,
+        None => String::new(),
+    };
+    let body = crate::commands::scaffold::prepended(&template, &content);
 
     let dir = resolve_dir(&ctx.cwd)?;
     std::fs::create_dir_all(&dir)

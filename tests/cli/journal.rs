@@ -1725,3 +1725,207 @@ fn journal_stamp_prints_house_format_matching_event_ts() {
     assert!(before <= ts && ts <= after, "{before} <= {ts} <= {after}");
     assert!(!ts.contains('.'), "{ts}");
 }
+
+#[test]
+fn discussion_kind_rides_the_open_queue_and_promotes() {
+    let repo = Repo::new();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "naming",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# What do we call it?\n"),
+    );
+    let file = PathBuf::from(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    // Open queue: primary section, not later.
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let open_files: Vec<&str> = open["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["file"].as_str().unwrap())
+        .collect();
+    assert!(open_files.contains(&file.as_str()), "{open}");
+    assert_eq!(open["later"].as_array().unwrap().len(), 0, "{open}");
+
+    // Enumerated by list --kind discussion.
+    let listed = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "list", "--kind", "discussion"]),
+    );
+    assert!(listed.contains("naming"), "{listed}");
+
+    // Promote: begin --from-journal accepts an open discussion and
+    // consumes it superseded; a second begin is refused as consumed.
+    repo.arc(&repo.root)
+        .args(["begin", "naming", "--no-worktree", "--from-journal", &file])
+        .assert()
+        .success();
+    let show = json_stdout(repo.arc(&repo.root).args(["show", "naming", "--json"]));
+    assert_eq!(show["journal_ref"], file);
+    let events = journal_events(&journal_dir(&repo));
+    assert!(
+        events.iter().any(|event| event["event"] == "consumed"
+            && event["outcome"] == "superseded"
+            && event["file"] == file),
+        "{events:?}"
+    );
+    repo.arc(&repo.root)
+        .args([
+            "begin",
+            "naming-again",
+            "--no-worktree",
+            "--from-journal",
+            &file,
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn journal_note_scaffold_records_template_and_prepends() {
+    let repo = Repo::new();
+
+    // Scaffold alone records the built-in template.
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "debate",
+        "--kind",
+        "discussion",
+        "--scaffold",
+        "discussion",
+    ]));
+    let path = PathBuf::from(out.trim());
+    let body = fs::read_to_string(&path).unwrap();
+    assert!(body.contains("## Positions"), "{body}");
+    assert!(body.contains("### Position (<model[#effort]"), "{body}");
+
+    // With a body, the template is prepended ahead of it.
+    let src = repo.home.join("position.md");
+    fs::write(&src, "my own opening take\n").unwrap();
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "debate-two",
+        "--kind",
+        "discussion",
+        "--scaffold",
+        "discussion",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    let body = fs::read_to_string(out.trim()).unwrap();
+    let template_at = body.find("## Positions").unwrap();
+    let take_at = body.find("my own opening take").unwrap();
+    assert!(template_at < take_at, "{body}");
+}
+
+#[test]
+fn journal_note_scaffold_repo_override_wins_and_unknown_bails() {
+    let repo = Repo::new();
+    let templates = repo.root.join(".arc/templates");
+    fs::create_dir_all(&templates).unwrap();
+    fs::write(templates.join("discussion.md"), "HOUSE STYLE\n").unwrap();
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "house",
+        "--kind",
+        "discussion",
+        "--scaffold",
+        "discussion",
+    ]));
+    let body = fs::read_to_string(out.trim()).unwrap();
+    assert_eq!(body, "HOUSE STYLE\n");
+
+    // Unknown scaffold: fails cleanly and writes nothing.
+    let before = stdout(repo.arc(&repo.root).args(["journal", "list", "--json"]));
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "nope",
+            "--kind",
+            "note",
+            "--scaffold",
+            "no-such-scaffold",
+        ])
+        .assert()
+        .failure();
+    let after = stdout(repo.arc(&repo.root).args(["journal", "list", "--json"]));
+    assert_eq!(before, after);
+}
+
+#[test]
+fn journal_note_requires_a_body_source() {
+    let repo = Repo::new();
+    // Neither --body-file nor --scaffold: clap refuses before anything runs.
+    repo.arc(&repo.root)
+        .args(["journal", "note", "empty", "--kind", "note"])
+        .assert()
+        .failure();
+    let listed = stdout(repo.arc(&repo.root).args(["journal", "list"]));
+    assert!(listed.contains("(none)"), "{listed}");
+}
+
+#[test]
+fn discussion_consume_done_records_decision_with_note() {
+    let repo = Repo::new();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "naming",
+                "--kind",
+                "discussion",
+                "--scaffold",
+                "discussion",
+            ])
+            .write_stdin("unused"),
+    );
+    let file = PathBuf::from(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    // Decided, no code: consume done with a pointer to the conclusion.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "consume",
+            &file,
+            "--outcome",
+            "done",
+            "--note",
+            "settled: change over slice",
+        ])
+        .assert()
+        .success();
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert_eq!(open["open"].as_array().unwrap().len(), 0, "{open}");
+    let events = journal_events(&journal_dir(&repo));
+    let consumed = events
+        .iter()
+        .find(|event| event["event"] == "consumed" && event["file"] == file)
+        .unwrap();
+    assert_eq!(consumed["outcome"], "done");
+    assert_eq!(consumed["note"], "settled: change over slice");
+    // The decision stays visible in list with its outcome marker.
+    let listed = stdout(repo.arc(&repo.root).args(["journal", "list"]));
+    assert!(listed.contains("[consumed: done]"), "{listed}");
+}

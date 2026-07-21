@@ -12,6 +12,7 @@ mod lifecycle;
 mod messaging;
 mod observe;
 mod review;
+pub(crate) mod scaffold;
 mod stats;
 mod timeline;
 mod workspace;

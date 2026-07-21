@@ -632,11 +632,24 @@ take the house timestamp from `journal stamp` — RFC 3339 seconds in UTC, the
 same spelling as the event log's `ts`, so prose and log cross-grep — never
 an agent-authored date.
 Work waiting for a future session uses the primary actionable kinds — `todo`,
-`handoff`, `inbox`, `plan` — plus lower-priority `later`. `journal open` lists
+`handoff`, `inbox`, `plan`, `discussion` — plus lower-priority `later`. `journal open` lists
 the primary queue first and then a separate later section until an explicit
 `journal consume <filename> [--outcome done|superseded|discarded]
 [--note <text>]` retires an item with a typed consumed event. The journal is
 append-only; consumption never edits or deletes the artifact.
+
+A `discussion` is the answer-owed actionable kind: an open debate rides the
+same queue until someone resolves it, and `arc begin --from-journal` promotes
+one straight into a change. Positions are appended as plain Markdown by
+convention, never schema — `journal note --kind discussion --scaffold
+discussion` seeds the conventions at birth (one
+`### Position (<model[#effort]> via <harness>, <utc-ts>)` heading per
+position with the timestamp from `journal stamp`, a `Position:
+for|against|amend` stance line, reply-to quoting, the resolution vocabulary,
+and the norm that a contested discussion is resolved by a non-author of the
+winning position or by the user). A repo-local `.arc/templates/discussion.md`
+overrides the built-in, and `--scaffold` works on any `journal note`: the
+template is prepended to `--body-file` content, or recorded alone.
 
 The journal and the ledger bridge in three advisory ways, none of which can
 gate the authoritative ledger. `arc begin --from-journal <artifact>` opens a
