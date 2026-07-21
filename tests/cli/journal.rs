@@ -1868,3 +1868,64 @@ fn journal_note_scaffold_repo_override_wins_and_unknown_bails() {
     let after = stdout(repo.arc(&repo.root).args(["journal", "list", "--json"]));
     assert_eq!(before, after);
 }
+
+#[test]
+fn journal_note_requires_a_body_source() {
+    let repo = Repo::new();
+    // Neither --body-file nor --scaffold: clap refuses before anything runs.
+    repo.arc(&repo.root)
+        .args(["journal", "note", "empty", "--kind", "note"])
+        .assert()
+        .failure();
+    let listed = stdout(repo.arc(&repo.root).args(["journal", "list"]));
+    assert!(listed.contains("(none)"), "{listed}");
+}
+
+#[test]
+fn discussion_consume_done_records_decision_with_note() {
+    let repo = Repo::new();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "naming",
+                "--kind",
+                "discussion",
+                "--scaffold",
+                "discussion",
+            ])
+            .write_stdin("unused"),
+    );
+    let file = PathBuf::from(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    // Decided, no code: consume done with a pointer to the conclusion.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "consume",
+            &file,
+            "--outcome",
+            "done",
+            "--note",
+            "settled: change over slice",
+        ])
+        .assert()
+        .success();
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert_eq!(open["open"].as_array().unwrap().len(), 0, "{open}");
+    let events = journal_events(&journal_dir(&repo));
+    let consumed = events
+        .iter()
+        .find(|event| event["event"] == "consumed" && event["file"] == file)
+        .unwrap();
+    assert_eq!(consumed["outcome"], "done");
+    assert_eq!(consumed["note"], "settled: change over slice");
+    // The decision stays visible in list with its outcome marker.
+    let listed = stdout(repo.arc(&repo.root).args(["journal", "list"]));
+    assert!(listed.contains("[consumed: done]"), "{listed}");
+}

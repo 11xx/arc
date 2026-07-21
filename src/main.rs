@@ -263,7 +263,7 @@ enum Cmd {
         #[arg(long)]
         version: Option<usize>,
         /// Prepend a scaffold template (.arc/templates/<name>.md or a built-in:
-        /// sol-low, sol-high, reviewer)
+        /// sol-low, sol-high, reviewer, discussion)
         #[arg(long)]
         scaffold: Option<String>,
     },
