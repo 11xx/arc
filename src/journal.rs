@@ -215,6 +215,20 @@ pub enum JournalCmd {
         #[arg(long)]
         json: bool,
     },
+    /// List every artifact newest first, optionally filtered by kind (read-only)
+    List {
+        /// Restrict to one kind
+        #[arg(long, value_enum)]
+        kind: Option<JournalKind>,
+        /// Emit structured JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print one artifact's raw Markdown body to stdout (read-only)
+    Show {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+    },
     /// Manage advisory session work lanes
     Lane {
         #[command(subcommand)]
@@ -274,6 +288,8 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
         } => catchup(ctx, limit.unwrap_or(20), json, archived),
         JournalCmd::Memories { json } => memories(ctx, json),
         JournalCmd::Open { kind, json } => open(ctx, kind, json),
+        JournalCmd::List { kind, json } => list(ctx, kind, json),
+        JournalCmd::Show { filename } => show(ctx, &filename),
         JournalCmd::Lane { command } => lane(ctx, command),
         JournalCmd::Consume {
             filename,
@@ -1493,6 +1509,26 @@ fn first_heading(path: &Path) -> Option<String> {
         .map(|l| l.trim().to_string())
 }
 
+/// All artifact filenames in `dir`, newest first: filenames lead with a
+/// lexically sortable UTC stamp, so descending string order is newest-first.
+/// `events.jsonl` and other non-artifact files never parse and drop out.
+fn sorted_artifact_names(dir: &Path) -> Result<Vec<String>> {
+    let mut names: Vec<String> = Vec::new();
+    if dir.is_dir() {
+        for entry in
+            std::fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?
+        {
+            let name = entry?.file_name().to_string_lossy().to_string();
+            if parse_artifact_name(&name).is_some() {
+                names.push(name);
+            }
+        }
+    }
+    names.sort();
+    names.reverse();
+    Ok(names)
+}
+
 fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
     let journal = read_events(dir)?;
     let mut names = Vec::new();
@@ -1573,24 +1609,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
     };
     let mut files: Vec<ArtifactEntry> = Vec::new();
     if dir.is_dir() {
-        let mut names: Vec<String> = Vec::new();
-        for entry in
-            std::fs::read_dir(&dir).with_context(|| format!("cannot read {}", dir.display()))?
-        {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name == "events.jsonl" {
-                continue;
-            }
-            if parse_artifact_name(&name).is_some() {
-                names.push(name);
-            }
-        }
-        // Filenames lead with a lexically sortable UTC stamp: descending
-        // string order is newest-first.
-        names.sort();
-        names.reverse();
-        for name in names.into_iter().take(limit) {
+        for name in sorted_artifact_names(&dir)?.into_iter().take(limit) {
             if let Some((ts, topic, kind)) = parse_artifact_name(&name) {
                 let heading = first_heading(&dir.join(&name));
                 files.push(ArtifactEntry {
@@ -1655,16 +1674,24 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// The outcome an artifact was consumed with, if it was consumed at all.
+fn consumption(events: &[JournalEvent], filename: &str) -> Option<String> {
+    events
+        .iter()
+        .find(|event| {
+            event.known()
+                && event.event == "consumed"
+                && event.file.as_deref() == Some(filename)
+                && event
+                    .outcome
+                    .as_deref()
+                    .is_some_and(|outcome| ["done", "superseded", "discarded"].contains(&outcome))
+        })
+        .and_then(|event| event.outcome.clone())
+}
+
 fn is_consumed(events: &[JournalEvent], filename: &str) -> bool {
-    events.iter().any(|event| {
-        event.known()
-            && event.event == "consumed"
-            && event.file.as_deref() == Some(filename)
-            && event
-                .outcome
-                .as_deref()
-                .is_some_and(|outcome| ["done", "superseded", "discarded"].contains(&outcome))
-    })
+    consumption(events, filename).is_some()
 }
 
 #[derive(Serialize)]
@@ -1700,10 +1727,7 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
     if dir.is_dir() {
         let mut open_names: Vec<String> = Vec::new();
         let mut later_names: Vec<String> = Vec::new();
-        for entry in
-            std::fs::read_dir(&dir).with_context(|| format!("cannot read {}", dir.display()))?
-        {
-            let name = entry?.file_name().to_string_lossy().to_string();
+        for name in sorted_artifact_names(&dir)? {
             let Some((_, _, file_kind)) = parse_artifact_name(&name) else {
                 continue;
             };
@@ -1719,10 +1743,6 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
                 }
             }
         }
-        open_names.sort();
-        open_names.reverse();
-        later_names.sort();
-        later_names.reverse();
         for name in open_names {
             if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
                 let heading = first_heading(&dir.join(&name));
@@ -1835,6 +1855,104 @@ fn render_artifact_lane(lane: Option<&ArtifactLane>) -> String {
             lane.topic, lane.owner_harness, short_session
         )
     }
+}
+
+#[derive(Serialize)]
+struct ListEntry {
+    file: String,
+    timestamp: String,
+    topic: String,
+    kind: String,
+    heading: Option<String>,
+    consumed: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ListItems {
+    dir: String,
+    artifacts: Vec<ListEntry>,
+}
+
+/// The general artifact listing the kind-specific views (`open`, `memories`)
+/// are special cases of: every artifact in the hot journal dir, newest first,
+/// with its consumption state. Read-only; derives everything from filenames
+/// and the event log.
+fn list(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    let events = read_events(&dir)?;
+    let mut artifacts: Vec<ListEntry> = Vec::new();
+    for name in sorted_artifact_names(&dir)? {
+        let Some((ts, topic, file_kind)) = parse_artifact_name(&name) else {
+            continue;
+        };
+        if let Some(kind) = kind {
+            if file_kind != kind.as_str() {
+                continue;
+            }
+        }
+        let heading = first_heading(&dir.join(&name));
+        let consumed = consumption(&events, &name);
+        artifacts.push(ListEntry {
+            file: name,
+            timestamp: ts,
+            topic,
+            kind: file_kind,
+            heading,
+            consumed,
+        });
+    }
+
+    if json {
+        let out = ListItems {
+            dir: dir.display().to_string(),
+            artifacts,
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        println!("dir: {}", dir.display());
+        println!("artifacts (newest first):");
+        if artifacts.is_empty() {
+            println!("  (none)");
+        }
+        for entry in &artifacts {
+            let heading = entry.heading.as_deref().unwrap_or("");
+            let consumed = entry
+                .consumed
+                .as_deref()
+                .map(|outcome| format!("  [consumed: {outcome}]"))
+                .unwrap_or_default();
+            println!(
+                "  {}  {}  {}  {}{}",
+                entry.timestamp, entry.topic, entry.kind, heading, consumed
+            );
+        }
+    }
+    Ok(0)
+}
+
+/// Print one artifact's raw Markdown body: the read side of `note`. Resolves
+/// the hot journal dir first, then the cold sibling archive.
+fn show(ctx: &Ctx, filename: &str) -> Result<i32> {
+    if filename.contains(['/', '\\']) {
+        bail!("journal show takes an artifact filename inside the journal dir, not a path");
+    }
+    if parse_artifact_name(filename).is_none() {
+        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+    }
+    let hot = resolve_dir(&ctx.cwd)?;
+    for dir in [hot.clone(), archive_dir(&hot)] {
+        let path = dir.join(filename);
+        if path.is_file() {
+            let body = std::fs::read_to_string(&path)
+                .with_context(|| format!("cannot read {}", path.display()))?;
+            print!("{body}");
+            return Ok(0);
+        }
+    }
+    bail!(
+        "no such artifact {filename} in {} or its cold archive",
+        hot.display()
+    )
 }
 
 fn consume(ctx: &Ctx, filename: &str, outcome: ConsumeOutcome, note: Option<&str>) -> Result<i32> {

@@ -622,6 +622,11 @@ directory (`ARC_JOURNAL_DIR`, then the `[journals.dirs]` map in the config
 file keyed by repository root, then `<ai_home>/journals/<repo-slug>`); `note`
 writes a timestamped `<ts>-<topic>-<kind>.md` artifact and its journal event;
 `log` appends a log-only event; `catchup` lists newest-first.
+`list [--kind <k>] [--json]` enumerates every artifact newest-first —
+including the non-actionable kinds `open` and `memories` do not show —
+marking each consumed item with its outcome; `show <filename>` prints one
+artifact's raw Markdown body, resolving the hot directory first and then the
+cold archive.
 Work waiting for a future session uses the primary actionable kinds — `todo`,
 `handoff`, `inbox`, `plan` — plus lower-priority `later`. `journal open` lists
 the primary queue first and then a separate later section until an explicit

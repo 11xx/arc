@@ -1476,3 +1476,148 @@ fn auto_log_write_failure_is_a_warning_not_a_command_failure() {
     fs::set_permissions(&jd, fs::Permissions::from_mode(0o700)).unwrap();
     assert!(stderr.contains("auto-log failed"), "stderr was: {stderr}");
 }
+
+#[test]
+fn journal_list_enumerates_all_kinds_newest_first() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("20260101T000000Z-alpha-note.md"),
+        "# Alpha heading\nold\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("20260202T000000Z-beta-conclusion.md"),
+        "# Beta heading\nmid\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("20260303T000000Z-gamma-plan.md"),
+        "# Gamma heading\nnew\n",
+    )
+    .unwrap();
+    // Non-artifact files never list.
+    fs::write(dir.join("README.md"), "not an artifact\n").unwrap();
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "list"]));
+    let gamma = text.find("gamma").unwrap();
+    let beta = text.find("beta").unwrap();
+    let alpha = text.find("alpha").unwrap();
+    assert!(gamma < beta && beta < alpha, "newest first:\n{text}");
+    assert!(text.contains("# Alpha heading"), "{text}");
+    assert!(!text.contains("not an artifact"), "{text}");
+
+    // Non-actionable kinds are listed too — the gap `open`/`memories` leave.
+    let notes = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "list", "--kind", "note"]),
+    );
+    assert!(notes.contains("alpha"), "{notes}");
+    assert!(!notes.contains("gamma"), "{notes}");
+    let conclusions =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "list", "--kind", "conclusion"]),
+        );
+    assert!(conclusions.contains("beta"), "{conclusions}");
+
+    // JSON form parses and carries the full field set.
+    let json = stdout(repo.arc(&repo.root).args(["journal", "list", "--json"]));
+    let v: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
+    let artifacts = v["artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 3);
+    assert_eq!(artifacts[0]["topic"], "gamma");
+    assert_eq!(artifacts[0]["kind"], "plan");
+    assert_eq!(artifacts[0]["timestamp"], "20260303T000000Z");
+    assert_eq!(artifacts[0]["heading"], "# Gamma heading");
+    assert_eq!(artifacts[0]["file"], "20260303T000000Z-gamma-plan.md");
+    assert!(artifacts[0]["consumed"].is_null());
+    assert_eq!(artifacts[2]["topic"], "alpha");
+}
+
+#[test]
+fn journal_list_marks_consumed_without_hiding() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    let name = "20260101T000000Z-duty-todo.md";
+    fs::write(dir.join(name), "# Duty\n").unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "consume", name, "--outcome", "discarded"])
+        .assert()
+        .success();
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "list"]));
+    assert!(text.contains("duty"), "{text}");
+    assert!(text.contains("[consumed: discarded]"), "{text}");
+
+    let json = stdout(repo.arc(&repo.root).args(["journal", "list", "--json"]));
+    let v: serde_json::Value = serde_json::from_str(json.trim()).unwrap();
+    let artifacts = v["artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0]["consumed"], "discarded");
+
+    // An empty journal lists nothing and still succeeds.
+    let repo = Repo::new();
+    let text = stdout(repo.arc(&repo.root).args(["journal", "list"]));
+    assert!(text.contains("(none)"), "{text}");
+}
+
+#[test]
+fn journal_show_prints_body_and_resolves_cold_archive() {
+    let repo = Repo::new();
+    let body = repo.home.join("body.md");
+    fs::write(&body, "# Show me\n\nexact body, verbatim\n").unwrap();
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "printable",
+        "--kind",
+        "note",
+        "--body-file",
+        body.to_str().unwrap(),
+    ]));
+    let file = PathBuf::from(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let shown = stdout(repo.arc(&repo.root).args(["journal", "show", &file]));
+    assert_eq!(shown, "# Show me\n\nexact body, verbatim\n");
+
+    // After archiving, show falls back to the cold sibling.
+    repo.arc(&repo.root)
+        .args(["journal", "archive", &file])
+        .assert()
+        .success();
+    let hot = journal_dir(&repo);
+    assert!(!hot.join(&file).exists());
+    let shown = stdout(repo.arc(&repo.root).args(["journal", "show", &file]));
+    assert_eq!(shown, "# Show me\n\nexact body, verbatim\n");
+}
+
+#[test]
+fn journal_show_rejects_paths_and_unknown_names() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+
+    for bad in ["../escape-note.md", "sub/dir-note.md"] {
+        repo.arc(&repo.root)
+            .args(["journal", "show", bad])
+            .assert()
+            .failure();
+    }
+    // Well-formed artifact name that does not exist: clean failure.
+    repo.arc(&repo.root)
+        .args(["journal", "show", "20260101T000000Z-ghost-note.md"])
+        .assert()
+        .failure();
+    // Not an artifact name at all: clean failure, no panic.
+    repo.arc(&repo.root)
+        .args(["journal", "show", "events.jsonl"])
+        .assert()
+        .failure();
+}
