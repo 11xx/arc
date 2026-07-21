@@ -65,6 +65,10 @@ pub struct Ctx {
     pub actor: String,
     pub harness: Option<String>,
     pub session: Option<String>,
+    /// Model identity (`--model`/`ARC_MODEL`): a model slug with optional
+    /// `#effort`, e.g. `kimi-k3#high`. Optional everywhere it is recorded;
+    /// absent means absent and is never rendered as "unknown".
+    pub model: Option<String>,
     /// Subject a lead runs delegated ceremony for (`--on-behalf-of`). The
     /// effective author of any event is `on_behalf_of.unwrap_or(actor)`.
     pub on_behalf_of: Option<String>,
