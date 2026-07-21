@@ -632,7 +632,8 @@ NDJSON with `journal events [--limit N]`. `dir` prints the resolved journal
 directory (`ARC_JOURNAL_DIR`, then the `[journals.dirs]` map in the config
 file keyed by repository root, then `<ai_home>/journals/<repo-slug>`); `note`
 writes a timestamped `<ts>-<topic>-<kind>.md` artifact and its journal event;
-`log` appends a log-only event; `catchup` lists newest-first.
+`log` appends a log-only event; `append` adds a position to an existing
+artifact; `catchup` lists newest-first.
 `list [--kind <k>] [--json]` enumerates every live artifact in the hot
 directory newest-first —
 including the non-actionable kinds `open` and `memories` do not show —
@@ -651,16 +652,22 @@ append-only; consumption never edits or deletes the artifact.
 
 A `discussion` is the answer-owed actionable kind: an open debate rides the
 same queue until someone resolves it, and `arc begin --from-journal` promotes
-one straight into a change. Positions are appended as plain Markdown by
-convention, never schema — `journal note --kind discussion --scaffold
-discussion` seeds the conventions at birth (one
-`### Position (<model[#effort]> via <harness>, <utc-ts>)` heading per
-position with the timestamp from `journal stamp`, a `Position:
-for|against|amend` stance line, reply-to quoting, the resolution vocabulary,
-and the norm that a contested discussion is resolved by a non-author of the
-winning position or by the user). A repo-local `.arc/templates/discussion.md`
-overrides the built-in, and `--scaffold` works on any `journal note`: the
-template is prepended to `--body-file` content, or recorded alone.
+one straight into a change. `journal append <filename> [--ref <target>]
+--body-file <src>` adds one position: it writes a
+`### Position (<model[#effort]> via <harness>, <utc-ts>)` block — the heading
+tool-computed so the timestamp is never hand-authored — below the file's
+existing content, and emits a typed `position` journal event carrying the same
+identity plus the optional `--ref` (the position timestamp or item slug it
+answers). The Markdown is for people, the event is what stance tallies,
+resolver-participation flags, and reply graphs derive from; the file stays
+hand-writable, and the append is advisory and fail-open like every journal
+write. `journal note --kind discussion --scaffold discussion` seeds the
+conventions at birth (the `Position: for|against|amend` stance line, reply-to
+quoting, the resolution vocabulary, and the norm that a contested discussion is
+resolved by a non-author of the winning position or by the user). A repo-local
+`.arc/templates/discussion.md` overrides the built-in, and `--scaffold` works
+on any `journal note`: the template is prepended to `--body-file` content, or
+recorded alone.
 
 The journal and the ledger bridge in three advisory ways, none of which can
 gate the authoritative ledger. `arc begin --from-journal <artifact>` opens a

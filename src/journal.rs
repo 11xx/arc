@@ -189,6 +189,18 @@ pub enum JournalCmd {
         /// Free-text journal message
         message: String,
     },
+    /// Append a position block to an artifact and emit a typed `position` event
+    Append {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// Position or item this answers: a position timestamp or item slug
+        #[arg(long = "ref")]
+        reference: Option<String>,
+        /// Body source: a file path, or '-' for stdin (the position argument,
+        /// written verbatim below a tool-computed `### Position` heading)
+        #[arg(long)]
+        body_file: String,
+    },
     /// Dump the journal event log as newline-delimited JSON
     Events {
         /// Cap the number of events (oldest first)
@@ -297,6 +309,11 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             scaffold.as_deref(),
         ),
         JournalCmd::Log { topic, message } => log_line(ctx, &topic, &message),
+        JournalCmd::Append {
+            filename,
+            reference,
+            body_file,
+        } => append(ctx, &filename, reference.as_deref(), &body_file),
         JournalCmd::Events { limit } => events(ctx, limit),
         JournalCmd::Catchup {
             limit,
@@ -351,21 +368,11 @@ struct DoctorReport {
 }
 
 fn known_kind(kind: &str) -> bool {
-    [
-        JournalKind::Note,
-        JournalKind::Memory,
-        JournalKind::Plan,
-        JournalKind::Handoff,
-        JournalKind::Done,
-        JournalKind::Review,
-        JournalKind::Conclusion,
-        JournalKind::Inbox,
-        JournalKind::Spec,
-        JournalKind::Todo,
-        JournalKind::Later,
-    ]
-    .iter()
-    .any(|value| value.as_str() == kind)
+    // Derived from the kind enum itself so a newly added kind (e.g. discussion)
+    // is recognized by doctor without a second list to keep in sync.
+    JournalKind::value_variants()
+        .iter()
+        .any(|value| value.as_str() == kind)
 }
 
 fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
@@ -686,6 +693,64 @@ fn log_line(ctx: &Ctx, topic: &str, message: &str) -> Result<i32> {
     Ok(0)
 }
 
+/// Append a position to a live artifact and emit a typed `position` event.
+/// The Markdown block and the event are the two halves of the design: the
+/// block is for people, the event is what stance tallies, resolver-
+/// participation flags, and reply graphs derive from. Advisory and fail-open
+/// like every journal write — the block is appended even if the identity is
+/// only partially known, and the file stays hand-writable.
+fn append(ctx: &Ctx, filename: &str, reference: Option<&str>, body_file: &str) -> Result<i32> {
+    if filename.contains(['/', '\\']) {
+        bail!("journal append takes an artifact filename inside the journal dir, not a path");
+    }
+    let Some((_, topic, _)) = parse_artifact_name(filename) else {
+        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+    };
+    // Read the body before touching the filesystem so a bad source path leaves
+    // the artifact untouched.
+    let body = read_body_verbatim(body_file)?;
+
+    // Positions ride an open discussion in the hot directory; a cold archived
+    // artifact is a closed record, not an append target.
+    let dir = resolve_dir(&ctx.cwd)?;
+    let path = dir.join(filename);
+    if !path.is_file() {
+        bail!("no such artifact {} in {}", filename, dir.display());
+    }
+
+    let now = Utc::now();
+    let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let (harness, _) = identity(ctx);
+    // The heading is tool-computed so the position timestamp is never authored
+    // by hand. The model, when known, is the primary attribution — the whole
+    // reason positions carry `### Position (<model> via <harness>, <ts>)`.
+    let heading = match ctx.model.as_deref().filter(|value| !value.is_empty()) {
+        Some(model) => format!("### Position ({model} via {harness}, {ts})"),
+        None => format!("### Position ({harness}, {ts})"),
+    };
+    let block = format!("\n{heading}\n\n{}\n", body.trim_end_matches('\n'));
+
+    // Append-only write: O_APPEND places the block at the current end even if
+    // another writer added a position since, so concurrent appends never clobber
+    // each other the way a read-modify-write would.
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("cannot open {} for append", path.display()))?;
+        f.write_all(block.as_bytes())
+            .with_context(|| format!("cannot append to {}", path.display()))?;
+    }
+
+    let mut event = JournalEvent::base(ctx, now, &topic, "position");
+    event.file = Some(filename.to_string());
+    event.reference = reference.map(str::to_string);
+    append_event(&dir, &event)?;
+    println!("{}", path.display());
+    Ok(0)
+}
+
 fn events(ctx: &Ctx, limit: Option<usize>) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
     let jsonl_path = dir.join("events.jsonl");
@@ -734,6 +799,11 @@ struct JournalEvent {
     scope: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<String>,
+    /// The position or item a `position` event answers (`--ref`): a position
+    /// timestamp or an item slug. The machine-readable half of the reply-to
+    /// convention; optional, and never authored for non-position events.
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    reference: Option<String>,
 }
 
 impl JournalEvent {
@@ -761,6 +831,7 @@ impl JournalEvent {
             ttl_seconds: None,
             scope: None,
             status: None,
+            reference: None,
         }
     }
 
@@ -778,6 +849,7 @@ impl JournalEvent {
         match self.event.as_str() {
             "log" => self.message.is_some(),
             "note" => self.file.is_some(),
+            "position" => self.file.is_some(),
             "consumed" => {
                 self.file.is_some()
                     && self
