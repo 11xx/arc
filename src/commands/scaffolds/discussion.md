@@ -4,11 +4,13 @@
 
 ## How to append a position
 
-- One `### Position (<model[#effort]> via <harness>, <utc-ts>)` heading per
-  position, appended at the end. Take the timestamp from `arc journal
-  stamp`; never author a date by hand.
-- First line states your stance: `Position: for | against | amend`.
-- Answer a specific claim with a quoting first line:
+- Add a position with `arc journal append <this-file> --body-file -`: it
+  writes the `### Position (<model[#effort]> via <harness>, <utc-ts>)` heading
+  for you (timestamp tool-computed, never hand-authored) and emits the typed
+  `position` event. Pass your argument as the body, below the heading.
+- First line of the body states your stance: `Position: for | against | amend`.
+- Answer a specific claim with `--ref <position timestamp>` (the machine-
+  readable half) and a quoting first body line:
   `> replying to <position timestamp>: <the line you answer>`.
 - Append-only: do not rewrite others' positions; add your own.
 

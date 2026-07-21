@@ -1975,3 +1975,117 @@ fn journal_events_stamp_model_only_when_set() {
     assert_eq!(events[0]["harness"], "test");
     assert_eq!(events[0]["session"], "session-a");
 }
+
+#[test]
+fn journal_append_writes_position_block_and_typed_event() {
+    let repo = Repo::new();
+    // Seed a discussion to argue in.
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "debate",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Debate\n\n## Positions\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    // First position: model known, answering another position via --ref.
+    let p1 = repo.home.join("p1.md");
+    fs::write(&p1, "Position: for\nBecause reasons.\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "append",
+            &file,
+            "--ref",
+            "2026-01-01T00:00:00Z",
+            "--body-file",
+            p1.to_str().unwrap(),
+        ])
+        .env("ARC_HARNESS", "opencode")
+        .env("ARC_MODEL", "kimi-k3#high")
+        .assert()
+        .success();
+
+    // Second position: no model, no ref.
+    repo.arc(&repo.root)
+        .args(["journal", "append", &file, "--body-file", "-"])
+        .env("ARC_HARNESS", "codex")
+        .write_stdin("Position: against\nCounter.\n")
+        .assert()
+        .success();
+
+    let dir = journal_dir(&repo);
+    let body = fs::read_to_string(dir.join(&file)).unwrap();
+    // Headings are tool-computed: `model via harness` when the model is known,
+    // bare harness otherwise, always with a house-format timestamp.
+    assert!(
+        body.contains("### Position (kimi-k3#high via opencode, 20")
+            && body.contains("Because reasons."),
+        "{body}"
+    );
+    assert!(body.contains("### Position (codex, 20"), "{body}");
+    assert!(!body.contains("via codex"), "{body}");
+
+    // The typed events are the machine-readable half; ref and model are
+    // recorded only when present.
+    let events = journal_events(&dir);
+    let positions: Vec<&serde_json::Value> =
+        events.iter().filter(|e| e["event"] == "position").collect();
+    assert_eq!(positions.len(), 2);
+    assert_eq!(positions[0]["topic"], "debate");
+    assert_eq!(positions[0]["file"], file);
+    assert_eq!(positions[0]["model"], "kimi-k3#high");
+    assert_eq!(positions[0]["ref"], "2026-01-01T00:00:00Z");
+    assert!(positions[1].get("model").is_none());
+    assert!(positions[1].get("ref").is_none());
+
+    // A position event is a known event: doctor must not flag it.
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("unknown-jsonl-event").not());
+}
+
+#[test]
+fn journal_append_rejects_paths_missing_files_and_non_artifacts() {
+    let repo = Repo::new();
+    // A path, not a bare filename.
+    repo.arc(&repo.root)
+        .args(["journal", "append", "sub/x.md", "--body-file", "-"])
+        .write_stdin("x\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a path"));
+    // A well-formed name that does not exist.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "append",
+            "20260101T000000Z-ghost-discussion.md",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("x\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no such artifact"));
+    // A name that is not artifact-shaped.
+    repo.arc(&repo.root)
+        .args(["journal", "append", "notes.md", "--body-file", "-"])
+        .write_stdin("x\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a journal artifact name"));
+}

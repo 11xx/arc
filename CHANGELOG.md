@@ -31,6 +31,17 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   and `ARC_MODEL` env (`model-slug[#effort]`) stamp an optional `model` on
   journal events, and `arc env` detects and exports it from the claude and
   codex session stores (`arc-model-identity`).
+- `arc journal append <file> [--ref <target>] --body-file <src>` adds a
+  position to a discussion: it writes a tool-stamped
+  `### Position (<model> via <harness>, <ts>)` block and emits a typed
+  `position` journal event (the machine-readable half that stance tallies and
+  reply graphs derive from) (`journal-append`).
+
+### Fixed
+
+- `arc journal doctor` no longer reports `discussion` artifacts as an unknown
+  kind: doctor derives its known-kind set from the kind enum instead of a
+  hand-maintained duplicate list (`journal-append`).
 
 ## [0.1.0] - 2026-07-20
 
