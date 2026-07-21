@@ -136,9 +136,14 @@ asks for `CHANGE`.
 
 `arc env` is the explicit identity bootstrap. It prints eval-able
 `ARC_HARNESS` and `ARC_SESSION` exports from the first available variable in
-this order: `CLAUDE_SESSION_ID`, `CODEX_THREAD_ID`, `OPENCODE_SESSION`. It does
-not inject identity into other commands; without a detected session it prints
-commented placeholders and exits 1.
+this order: `CLAUDE_SESSION_ID`, `CODEX_THREAD_ID`, `OPENCODE_SESSION`. When the
+harness's own session store yields the model, it appends an `ARC_MODEL` export
+(`model-slug[#effort]`): claude reads the newest assistant model from its
+project transcript, codex reads the model and reasoning effort from its session
+rollout. Harnesses without a dependency-free read path (opencode, pi) rely on an
+explicit `ARC_MODEL` instead; detection failure is a silent omission, never an
+error. It does not inject identity into other commands; without a detected
+session it prints commented placeholders (naming `ARC_MODEL` too) and exits 1.
 
 `arc resume [CHANGE]` renders the latest brief, claim and stage, open findings,
 head gate state, next action, live journal lanes, and matching open journal
@@ -519,6 +524,12 @@ session ID: `--actor/--harness/--session` or `ARC_ACTOR`, `ARC_HARNESS`,
 `ARC_SESSION`. Actor defaults to `git config user.name`. `claim`,
 `release-claim`, and `stage` require nonempty harness and session values;
 identity is the actor + harness + session tuple.
+
+Journal events additionally record the acting model via `--model` or
+`ARC_MODEL`, a `model-slug[#effort]` string (e.g. `kimi-k3#high`,
+`gpt-5.6-sol#low`) matching the `Assisted-by: Harness:Model#Effort` grammar.
+It is optional everywhere: an empty value is treated as unset, and an absent
+model is serialized as absent — never stamped "unknown".
 
 When a lead runs ceremony for a sandboxed executor — committing its staged
 work, then claiming, snapshotting, or reviewing — `--on-behalf-of <subject>`

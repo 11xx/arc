@@ -862,6 +862,7 @@ fn integrate_tagged(ctx: &Ctx, tags: Vec<String>, cleanup: bool) -> Result<i32> 
         actor: ctx.actor.clone(),
         harness: ctx.harness.clone(),
         session: ctx.session.clone(),
+        model: ctx.model.clone(),
         on_behalf_of: ctx.on_behalf_of.clone(),
     };
     let store = batch_ctx.store()?;

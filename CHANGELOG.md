@@ -27,6 +27,10 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `journal note --scaffold discussion` (or a repo-local
   `.arc/templates/discussion.md`) seeds the position conventions at birth
   (`journal-discussion-kind`).
+- Model identity as first-class journal attribution: a global `--model` flag
+  and `ARC_MODEL` env (`model-slug[#effort]`) stamp an optional `model` on
+  journal events, and `arc env` detects and exports it from the claude and
+  codex session stores (`arc-model-identity`).
 
 ## [0.1.0] - 2026-07-20
 

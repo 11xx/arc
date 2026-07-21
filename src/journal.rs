@@ -714,6 +714,8 @@ struct JournalEvent {
     ts: String,
     harness: String,
     session: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
     topic: String,
     event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -742,6 +744,13 @@ impl JournalEvent {
             ts: now.to_rfc3339_opts(SecondsFormat::Secs, true),
             harness,
             session,
+            // Model identity is optional end to end: absent means absent,
+            // never "unknown".
+            model: ctx
+                .model
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
             topic: topic.to_string(),
             event: event.to_string(),
             message: None,

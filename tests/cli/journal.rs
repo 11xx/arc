@@ -1929,3 +1929,49 @@ fn discussion_consume_done_records_decision_with_note() {
     let listed = stdout(repo.arc(&repo.root).args(["journal", "list"]));
     assert!(listed.contains("[consumed: done]"), "{listed}");
 }
+
+#[test]
+fn journal_events_stamp_model_only_when_set() {
+    let repo = Repo::new();
+    let body = repo.home.join("body.md");
+    fs::write(&body, "stamped\n").unwrap();
+
+    // Via the flag.
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "stamped",
+        "--kind",
+        "note",
+        "--body-file",
+        body.to_str().unwrap(),
+        "--model",
+        "kimi-k3#high",
+    ]));
+    // Via the env var.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "log", "stamped", "env path"])
+            .env("ARC_MODEL", "gpt-5.6-sol#low"),
+    );
+    // Unset and empty both omit the field.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "log", "stamped", "unset path"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "log", "stamped", "empty path", "--model", ""]),
+    );
+
+    let dir = journal_dir(&repo);
+    let events = journal_events(&dir);
+    assert_eq!(events.len(), 4);
+    assert_eq!(events[0]["model"], "kimi-k3#high");
+    assert_eq!(events[1]["model"], "gpt-5.6-sol#low");
+    assert!(events[2].get("model").is_none());
+    assert!(events[3].get("model").is_none());
+    // Harness/session keep their existing behavior alongside.
+    assert_eq!(events[0]["harness"], "test");
+    assert_eq!(events[0]["session"], "session-a");
+}

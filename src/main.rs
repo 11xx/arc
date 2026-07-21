@@ -39,6 +39,9 @@ struct Cli {
     /// Native session ID of the acting harness thread
     #[arg(long, global = true, env = "ARC_SESSION")]
     session: Option<String>,
+    /// Model identity: a model slug with optional #effort, e.g. kimi-k3#high
+    #[arg(long, global = true, env = "ARC_MODEL")]
+    model: Option<String>,
     /// Subject a lead runs delegated ceremony for; recorded beside the invoker
     #[arg(long = "on-behalf-of", global = true, env = "ARC_ON_BEHALF_OF")]
     on_behalf_of: Option<String>,
@@ -831,6 +834,8 @@ fn run(cli: Cli) -> Result<i32> {
         actor,
         harness: cli.harness,
         session: cli.session,
+        // An empty --model is the same as absent.
+        model: cli.model.filter(|value| !value.trim().is_empty()),
         // An empty --on-behalf-of is the same as absent: today's behavior.
         on_behalf_of: cli.on_behalf_of.filter(|value| !value.trim().is_empty()),
     };
