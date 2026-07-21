@@ -5,7 +5,8 @@
 //! writable by a tool-less agent; the append-only event log is versioned
 //! JSONL (`journal-events/1` in `events.jsonl`). `arc journal` only encodes
 //! the invariants that drift in practice — directory resolution, timestamped
-//! filenames, and journal event semantics. It is a convenience and
+//! filenames, position identity and lifecycle, and journal event semantics.
+//! It is a convenience and
 //! correctness layer, never a gatekeeper, and it is intentionally decoupled
 //! from the change ledger.
 //!
@@ -193,7 +194,7 @@ pub enum JournalCmd {
     Append {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
-        /// Position or item this answers: a position timestamp or item slug
+        /// Position or item this answers: a position ID, legacy timestamp, or item slug
         #[arg(long = "ref")]
         reference: Option<String>,
         /// Body source: a file path, or '-' for stdin (the position argument,
@@ -705,10 +706,10 @@ fn log_line(ctx: &Ctx, topic: &str, message: &str) -> Result<i32> {
 
 /// Append a position to a live artifact and emit a typed `position` event.
 /// The Markdown block and the event are the two halves of the design: the
-/// block is for people, the event is what stance tallies, resolver-
-/// participation flags, and reply graphs derive from. Advisory and fail-open
-/// like every journal write — the block is appended even if the identity is
-/// only partially known, and the file stays hand-writable.
+/// block is for people and structural stance parsing; the event supplies the
+/// stable position ID, activity time, identity, and reply edge. Advisory and
+/// fail-open like every journal write — the block is appended even if the
+/// identity is only partially known, and the file stays hand-writable.
 fn append(ctx: &Ctx, filename: &str, reference: Option<&str>, body_file: &str) -> Result<i32> {
     if filename.contains(['/', '\\']) {
         bail!("journal append takes an artifact filename inside the journal dir, not a path");
@@ -727,16 +728,20 @@ fn append(ctx: &Ctx, filename: &str, reference: Option<&str>, body_file: &str) -
     if !path.is_file() {
         bail!("no such artifact {} in {}", filename, dir.display());
     }
+    if is_consumed(&read_events(&dir)?, filename) {
+        bail!("cannot append to consumed artifact {filename}; open a successor discussion");
+    }
 
     let now = Utc::now();
     let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let position_id = format!("pos-{}", ulid::Ulid::new().to_string().to_ascii_lowercase());
     let (harness, _) = identity(ctx);
     // The heading is tool-computed so the position timestamp is never authored
     // by hand. The model, when known, is the primary attribution — the whole
-    // reason positions carry `### Position (<model> via <harness>, <ts>)`.
+    // reason positions carry `### Position <id> (<model> via <harness>, <ts>)`.
     let heading = match ctx.model.as_deref().filter(|value| !value.is_empty()) {
-        Some(model) => format!("### Position ({model} via {harness}, {ts})"),
-        None => format!("### Position ({harness}, {ts})"),
+        Some(model) => format!("### Position {position_id} ({model} via {harness}, {ts})"),
+        None => format!("### Position {position_id} ({harness}, {ts})"),
     };
     let block = format!("\n{heading}\n\n{}\n", body.trim_end_matches('\n'));
 
@@ -755,6 +760,7 @@ fn append(ctx: &Ctx, filename: &str, reference: Option<&str>, body_file: &str) -
 
     let mut event = JournalEvent::base(ctx, now, &topic, "position");
     event.file = Some(filename.to_string());
+    event.position_id = Some(position_id);
     event.reference = reference.map(str::to_string);
     append_event(&dir, &event)?;
     println!("{}", path.display());
@@ -809,9 +815,14 @@ struct JournalEvent {
     scope: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<String>,
+    /// Stable reply target for a position. Optional so pre-ID journal events
+    /// remain valid `journal-events/1` input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    position_id: Option<String>,
     /// The position or item a `position` event answers (`--ref`): a position
-    /// timestamp or an item slug. The machine-readable half of the reply-to
-    /// convention; optional, and never authored for non-position events.
+    /// ID, a legacy timestamp, or an item slug. The machine-readable half of
+    /// the reply-to convention; optional, and never authored for non-position
+    /// events.
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
     reference: Option<String>,
 }
@@ -841,6 +852,7 @@ impl JournalEvent {
             ttl_seconds: None,
             scope: None,
             status: None,
+            position_id: None,
             reference: None,
         }
     }
@@ -1293,6 +1305,24 @@ fn artifact_age_seconds(now: DateTime<Utc>, stamp: &str) -> Option<u64> {
     Some(now.signed_duration_since(created).num_seconds().max(0) as u64)
 }
 
+/// A discussion waits from its newest typed position, falling back to artifact
+/// creation before anyone has answered. Malformed timestamps fail open to the
+/// creation age just like malformed event lines are ignored by `read_events`.
+fn discussion_age_seconds(
+    now: DateTime<Utc>,
+    stamp: &str,
+    filename: &str,
+    events: &[JournalEvent],
+) -> Option<u64> {
+    events
+        .iter()
+        .rev()
+        .find(|event| event.event == "position" && event.file.as_deref() == Some(filename))
+        .and_then(JournalEvent::timestamp)
+        .map(|activity| now.signed_duration_since(activity).num_seconds().max(0) as u64)
+        .or_else(|| artifact_age_seconds(now, stamp))
+}
+
 fn format_age(seconds: u64) -> String {
     if seconds < 60 {
         format!("{seconds}s")
@@ -1497,8 +1527,8 @@ struct ArtifactEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
     heading: Option<String>,
-    /// Seconds since the artifact's creation stamp; how long it has waited in
-    /// the queue. Absent only if the filename stamp does not parse.
+    /// Seconds since the artifact's latest position event for discussions, or
+    /// creation stamp for other kinds. Absent only if neither timestamp parses.
     #[serde(skip_serializing_if = "Option::is_none")]
     age_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1890,7 +1920,11 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
                 open.push(ArtifactEntry {
                     lane: lane_for_topic(&lanes, &topic, &caller_session),
                     change,
-                    age_seconds: artifact_age_seconds(now, &ts),
+                    age_seconds: if file_kind == JournalKind::Discussion.as_str() {
+                        discussion_age_seconds(now, &ts, &name, &journal)
+                    } else {
+                        artifact_age_seconds(now, &ts)
+                    },
                     file: name,
                     timestamp: ts,
                     topic,
@@ -2151,16 +2185,38 @@ fn event_identity_label(event: &JournalEvent) -> String {
     }
 }
 
-/// Count the file's stated stances. Each position states its stance on a line
-/// `Position: for|against|amend` by convention; anything else after `Position:`
-/// falls to `other`, and non-position prose never starts a trimmed line with
-/// `Position:`.
-fn tally_stances(body: &str) -> StanceTally {
+fn is_position_heading(line: &str) -> bool {
+    let Some(rest) = line.trim_start().strip_prefix("### Position") else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with(char::is_whitespace)
+}
+
+/// Count actual position blocks and at most one stated stance within each.
+/// A `Position:` example or explanation elsewhere in the document is prose,
+/// not a vote; a second stance-looking line inside one block is prose too.
+fn position_structure(body: &str) -> (usize, StanceTally) {
+    let mut positions = 0;
     let mut tally = StanceTally::default();
+    let mut in_position = false;
+    let mut saw_stance = false;
     for line in body.lines() {
+        if is_position_heading(line) {
+            positions += 1;
+            in_position = true;
+            saw_stance = false;
+            continue;
+        }
+        if line.trim_start().starts_with('#') {
+            in_position = false;
+        }
+        if !in_position || saw_stance {
+            continue;
+        }
         let Some(rest) = line.trim().strip_prefix("Position:") else {
             continue;
         };
+        saw_stance = true;
         match rest
             .split_whitespace()
             .next()
@@ -2174,7 +2230,7 @@ fn tally_stances(body: &str) -> StanceTally {
             None => {}
         }
     }
-    tally
+    (positions, tally)
 }
 
 /// Derived summary of a discussion. Structural counts (positions, stances) come
@@ -2193,11 +2249,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
     let events = read_events(&dir)?;
 
-    let positions = body
-        .lines()
-        .filter(|line| line.trim_start().starts_with("### Position"))
-        .count();
-    let stances = tally_stances(&body);
+    let (positions, stances) = position_structure(&body);
 
     // Typed position events for this file, in ledger order.
     let position_events: Vec<&JournalEvent> = events
@@ -2217,7 +2269,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         .count();
 
     // Resolution: the newest consumed event for this file, if any. The resolver
-    // participated when a position event shares its session.
+    // participated when a position event shares its harness-native session.
     let resolution = events
         .iter()
         .rev()
@@ -2225,13 +2277,13 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         .map(|event| Resolution {
             outcome: event.outcome.clone().unwrap_or_default(),
             resolver: event_identity_label(event),
-            resolver_participated: position_events
-                .iter()
-                .any(|position| position.session == event.session),
+            resolver_participated: position_events.iter().any(|position| {
+                position.harness == event.harness && position.session == event.session
+            }),
         });
 
     let summary = DiscussionSummary {
-        age_seconds: artifact_age_seconds(Utc::now(), &ts),
+        age_seconds: discussion_age_seconds(Utc::now(), &ts, filename, &events),
         file: filename.to_string(),
         topic,
         positions,

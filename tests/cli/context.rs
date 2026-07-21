@@ -1,5 +1,6 @@
 use super::common::*;
 use predicates::prelude::*;
+use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn no_arg_snapshot_stage_and_show_work_inside_change_worktree() {
@@ -64,6 +65,7 @@ fn env_detects_codex_thread_and_prints_exports() {
         .env_remove("CLAUDE_SESSION_ID")
         .env("CODEX_THREAD_ID", "thread-123")
         .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
         .assert()
         .success()
         .stdout("export ARC_HARNESS='codex' ARC_SESSION='thread-123'\n");
@@ -119,6 +121,7 @@ fn env_detects_claude_model_from_transcript() {
         .env("CLAUDE_SESSION_ID", session)
         .env_remove("CODEX_THREAD_ID")
         .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
         .assert()
         .success()
         .stdout(format!(
@@ -130,7 +133,8 @@ fn env_detects_claude_model_from_transcript() {
 fn env_detects_codex_model_and_effort_from_rollout() {
     let repo = Repo::new();
     let session = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
-    let day = repo.home.join(".codex/sessions/2026/07/20");
+    let codex_home = repo.home.join("custom-codex-state");
+    let day = codex_home.join("sessions/2026/07/20");
     fs::create_dir_all(&day).unwrap();
     fs::write(
         day.join(format!("rollout-2026-07-20T00-00-00-{session}.jsonl")),
@@ -138,7 +142,7 @@ fn env_detects_codex_model_and_effort_from_rollout() {
             "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\"}}\n",
             "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.5\"}}\n",
             "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-sol\",",
-            "\"reasoning_effort\":\"high\"}}\n",
+            "\"effort\":\"high\"}}\n",
         ),
     )
     .unwrap();
@@ -148,11 +152,84 @@ fn env_detects_codex_model_and_effort_from_rollout() {
         .arg("env")
         .env_remove("CLAUDE_SESSION_ID")
         .env("CODEX_THREAD_ID", session)
+        .env("CODEX_HOME", &codex_home)
         .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
         .assert()
         .success()
         .stdout(format!(
             "export ARC_HARNESS='codex' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-sol#high'\n"
+        ));
+}
+
+#[test]
+fn env_detects_opencode_model_and_variant_from_session_store() {
+    let repo = Repo::new();
+    let session = "ses_test123";
+    let data_home = repo.home.join("data");
+    let store = data_home.join("opencode/opencode-next.db");
+    fs::create_dir_all(store.parent().unwrap()).unwrap();
+    fs::write(&store, "test placeholder").unwrap();
+
+    // Detection deliberately shells only to sqlite3, so the test supplies a
+    // deterministic reader without depending on a host SQLite installation.
+    let bin = repo.home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let sqlite = bin.join("sqlite3");
+    fs::write(
+        &sqlite,
+        "#!/bin/sh\nprintf '%s\\n' '{\"id\":\"kimi-k3\",\"providerID\":\"opencode-go\",\"variant\":\"max\"}'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&sqlite, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    repo.arc(&repo.root)
+        .arg("env")
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env("OPENCODE_SESSION", session)
+        .env_remove("PI_SESSION_ID")
+        .env("XDG_DATA_HOME", &data_home)
+        .env("PATH", path)
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='opencode' ARC_SESSION='{session}' ARC_MODEL='kimi-k3#max'\n"
+        ));
+}
+
+#[test]
+fn env_detects_pi_model_and_thinking_level_from_session_store() {
+    let repo = Repo::new();
+    let session = "019f7520-3278-7736-a3d9-2442c7a51fa0";
+    let sessions = repo.home.join("pi-sessions/project");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join(format!("2026-07-18T12-07-52Z_{session}.jsonl")),
+        concat!(
+            "{\"type\":\"session\",\"id\":\"x\"}\n",
+            "{\"type\":\"model_change\",\"modelId\":\"gpt-5.6-sol\"}\n",
+            "{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"medium\"}\n",
+        ),
+    )
+    .unwrap();
+
+    repo.arc(&repo.root)
+        .arg("env")
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .env("PI_SESSION_ID", session)
+        .env("PI_CODING_AGENT_SESSION_DIR", repo.home.join("pi-sessions"))
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-sol#medium'\n"
         ));
 }
 
@@ -165,6 +242,7 @@ fn env_omits_model_when_no_session_store_matches() {
         .env_remove("CLAUDE_SESSION_ID")
         .env("CODEX_THREAD_ID", "no-such-thread")
         .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
         .assert()
         .success()
         .stdout("export ARC_HARNESS='codex' ARC_SESSION='no-such-thread'\n");
@@ -175,6 +253,7 @@ fn env_omits_model_when_no_session_store_matches() {
         .env_remove("CLAUDE_SESSION_ID")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
         .assert()
         .failure()
         .stdout(predicate::str::contains("ARC_MODEL=<model[#effort]>"));
