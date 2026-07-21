@@ -2089,3 +2089,180 @@ fn journal_append_rejects_paths_missing_files_and_non_artifacts() {
         .failure()
         .stderr(predicates::str::contains("not a journal artifact name"));
 }
+
+#[test]
+fn journal_open_annotates_item_age() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "waiting",
+            "--kind",
+            "todo",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("x\n")
+        .assert()
+        .success();
+    // Text: a fresh item reads "(<n>s old)"; JSON: a numeric age_seconds.
+    repo.arc(&repo.root)
+        .args(["journal", "open"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("s old)"));
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert!(open["open"][0]["age_seconds"].as_u64().is_some(), "{open}");
+}
+
+#[test]
+fn journal_discussion_summarizes_stances_participants_and_resolution() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "colors",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Colors\n\n## Positions\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    // Two "for" (one with a model, session s1), one "against" (session s2).
+    repo.arc(&repo.root)
+        .args(["journal", "append", &file, "--body-file", "-"])
+        .env("ARC_HARNESS", "opencode")
+        .env("ARC_SESSION", "s1")
+        .env("ARC_MODEL", "kimi-k3#high")
+        .write_stdin("Position: for\nBlue.\n")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "append",
+            &file,
+            "--ref",
+            "2026-01-01T00:00:00Z",
+            "--body-file",
+            "-",
+        ])
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_SESSION", "s2")
+        .write_stdin("Position: against\nRed.\n")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "append", &file, "--body-file", "-"])
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_SESSION", "s1")
+        .write_stdin("Position: for\nBlue again.\n")
+        .assert()
+        .success();
+
+    // Resolve from session s1 — which authored a position — so the flag trips.
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file, "--outcome", "done"])
+        .env("ARC_HARNESS", "opencode")
+        .env("ARC_SESSION", "s1")
+        .assert()
+        .success();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["positions"], 3);
+    assert_eq!(summary["stances"]["for"], 2);
+    assert_eq!(summary["stances"]["against"], 1);
+    assert_eq!(summary["stances"]["amend"], 0);
+    // Three distinct sessions authored via journal append; one named a --ref.
+    assert_eq!(summary["participants"].as_array().unwrap().len(), 3);
+    assert_eq!(summary["reply_refs"], 1);
+    assert_eq!(summary["resolution"]["outcome"], "done");
+    assert_eq!(summary["resolution"]["resolver_participated"], true);
+
+    // Text form names the resolver-participation.
+    repo.arc(&repo.root)
+        .args(["journal", "discussion", &file])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "resolver also authored a position",
+        ));
+}
+
+#[test]
+fn journal_discussion_rejects_non_discussion_kinds() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "plain",
+                "--kind",
+                "todo",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("x\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    repo.arc(&repo.root)
+        .args(["journal", "discussion", &file])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a discussion"));
+}
+
+#[test]
+fn begin_from_journal_seeds_an_initial_brief() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "naming",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Naming\n\nWe will call it a chain.\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    repo.arc(&repo.root)
+        .args(["begin", "naming", "--no-worktree", "--from-journal", &file])
+        .assert()
+        .success();
+
+    // The change opens with a v1 brief threaded from the source artifact.
+    repo.arc(&repo.root)
+        .args(["brief", "naming"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Seeded from journal artifact"))
+        .stdout(predicates::str::contains("We will call it a chain."));
+}

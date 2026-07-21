@@ -645,7 +645,8 @@ same spelling as the event log's `ts`, so prose and log cross-grep — never
 an agent-authored date.
 Work waiting for a future session uses the primary actionable kinds — `todo`,
 `handoff`, `inbox`, `plan`, `discussion` — plus lower-priority `later`. `journal open` lists
-the primary queue first and then a separate later section until an explicit
+the primary queue first and then a separate later section, annotating each item
+with how long it has waited (its age), until an explicit
 `journal consume <filename> [--outcome done|superseded|discarded]
 [--note <text>]` retires an item with a typed consumed event. The journal is
 append-only; consumption never edits or deletes the artifact.
@@ -667,14 +668,21 @@ quoting, the resolution vocabulary, and the norm that a contested discussion is
 resolved by a non-author of the winning position or by the user). A repo-local
 `.arc/templates/discussion.md` overrides the built-in, and `--scaffold` works
 on any `journal note`: the template is prepended to `--body-file` content, or
-recorded alone.
+recorded alone. `journal discussion <filename> [--json]` renders the derived
+view of one debate: its age, the stance tally (`for`/`against`/`amend` parsed
+from the file, so hand-written positions count too), the distinct participants
+and reply-refs from the typed `position` events, and — once resolved — the
+outcome with a resolver-participation flag that surfaces a resolver who also
+argued a side.
 
 The journal and the ledger bridge in three advisory ways, none of which can
 gate the authoritative ledger. `arc begin --from-journal <artifact>` opens a
 change from an open actionable item: it records the artifact filename as the
 change's `journal_ref`, appends a `consumed` event with outcome `superseded`
-and note `change <id>` (leaving the artifact file untouched), and refuses a
-missing, non-actionable, or already-consumed source before writing anything.
+and note `change <id>` (leaving the artifact file untouched), seeds an initial
+brief threaded from the source body so the change starts with the resolution,
+and refuses a missing, non-actionable, or already-consumed source before writing
+anything.
 With `[journal] auto_log = true` in the config file, `begin`, `integrate`, and
 `close` append a narrating `log` event (`opened change <id>`,
 `integrated <id> at <sha>`, `closed change <id>`); a failure to write the

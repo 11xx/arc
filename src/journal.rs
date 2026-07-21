@@ -248,6 +248,15 @@ pub enum JournalCmd {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
     },
+    /// Derived summary of a discussion: stance tally, participants, replies,
+    /// age, and resolution with a resolver-participation flag (read-only)
+    Discussion {
+        /// Discussion artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// Emit structured JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the current UTC timestamp in the journal house format (read-only)
     Stamp,
     /// Manage advisory session work lanes
@@ -324,6 +333,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
         JournalCmd::Open { kind, json } => open(ctx, kind, json),
         JournalCmd::List { kind, json } => list(ctx, kind, json),
         JournalCmd::Show { filename } => show(ctx, &filename),
+        JournalCmd::Discussion { filename, json } => discussion_summary(ctx, &filename, json),
         JournalCmd::Stamp => stamp(),
         JournalCmd::Lane { command } => lane(ctx, command),
         JournalCmd::Consume {
@@ -1273,6 +1283,16 @@ fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEn
     lanes
 }
 
+/// Seconds between an artifact's creation stamp (`%Y%m%dT%H%M%SZ`, the leading
+/// filename component) and `now`. `None` when the stamp does not parse, so a
+/// malformed name degrades to no age rather than a bogus one.
+fn artifact_age_seconds(now: DateTime<Utc>, stamp: &str) -> Option<u64> {
+    let created = NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%SZ")
+        .ok()?
+        .and_utc();
+    Some(now.signed_duration_since(created).num_seconds().max(0) as u64)
+}
+
 fn format_age(seconds: u64) -> String {
     if seconds < 60 {
         format!("{seconds}s")
@@ -1477,6 +1497,10 @@ struct ArtifactEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
     heading: Option<String>,
+    /// Seconds since the artifact's creation stamp; how long it has waited in
+    /// the queue. Absent only if the filename stamp does not parse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    age_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     lane: Option<ArtifactLane>,
     /// The open change that has taken this item up, if any.
@@ -1665,6 +1689,7 @@ fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
                 timestamp,
                 topic,
                 kind: None,
+                age_seconds: None,
                 lane: None,
                 change: None,
             })
@@ -1727,6 +1752,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
                     topic,
                     kind: Some(kind),
                     heading,
+                    age_seconds: None,
                     lane: None,
                     change: None,
                 });
@@ -1864,6 +1890,7 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
                 open.push(ArtifactEntry {
                     lane: lane_for_topic(&lanes, &topic, &caller_session),
                     change,
+                    age_seconds: artifact_age_seconds(now, &ts),
                     file: name,
                     timestamp: ts,
                     topic,
@@ -1879,6 +1906,7 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
                 later.push(ArtifactEntry {
                     lane: lane_for_topic(&lanes, &topic, &caller_session),
                     change,
+                    age_seconds: artifact_age_seconds(now, &ts),
                     file: name,
                     timestamp: ts,
                     topic,
@@ -1903,35 +1931,35 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
             println!("  (none)");
         }
         for f in &open {
-            let heading = f.heading.as_deref().unwrap_or("");
-            println!(
-                "  {}  {}  {}  {}{}{}",
-                f.timestamp,
-                f.topic,
-                f.kind.as_deref().unwrap_or(""),
-                heading,
-                render_change(f.change.as_ref()),
-                render_artifact_lane(f.lane.as_ref())
-            );
+            render_open_entry(f);
         }
         println!("later items (newest first):");
         if later.is_empty() {
             println!("  (none)");
         }
         for f in &later {
-            let heading = f.heading.as_deref().unwrap_or("");
-            println!(
-                "  {}  {}  {}  {}{}{}",
-                f.timestamp,
-                f.topic,
-                f.kind.as_deref().unwrap_or(""),
-                heading,
-                render_change(f.change.as_ref()),
-                render_artifact_lane(f.lane.as_ref())
-            );
+            render_open_entry(f);
         }
     }
     Ok(0)
+}
+
+/// One `journal open` line: the creation stamp and its age, then topic, kind,
+/// heading, and any change/lane annotations.
+fn render_open_entry(f: &ArtifactEntry) {
+    let age = f.age_seconds.map_or_else(String::new, |seconds| {
+        format!(" ({} old)", format_age(seconds))
+    });
+    println!(
+        "  {}{}  {}  {}  {}{}{}",
+        f.timestamp,
+        age,
+        f.topic,
+        f.kind.as_deref().unwrap_or(""),
+        f.heading.as_deref().unwrap_or(""),
+        render_change(f.change.as_ref()),
+        render_artifact_lane(f.lane.as_ref())
+    );
 }
 
 fn lane_for_topic(lanes: &[LaneEntry], topic: &str, caller_session: &str) -> Option<ArtifactLane> {
@@ -2047,26 +2075,213 @@ fn list(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
 /// Print one artifact's raw Markdown body: the read side of `note`. Resolves
 /// the hot journal dir first, then the cold sibling archive.
 fn show(ctx: &Ctx, filename: &str) -> Result<i32> {
-    if filename.contains(['/', '\\']) {
-        bail!("journal show takes an artifact filename inside the journal dir, not a path");
-    }
     if parse_artifact_name(filename).is_none() {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+    }
+    print!("{}", read_artifact_body(ctx, filename)?);
+    Ok(0)
+}
+
+/// Read one artifact's raw body from the hot journal dir, then the cold
+/// archive. For callers that thread an artifact's content elsewhere — `show`
+/// prints it, `begin --from-journal` seeds a brief from it. Rejects path
+/// separators so the argument stays a filename inside the journal dir.
+pub fn read_artifact_body(ctx: &Ctx, filename: &str) -> Result<String> {
+    if filename.contains(['/', '\\']) {
+        bail!("artifact reference must be a filename inside the journal dir, not a path");
     }
     let hot = resolve_dir(&ctx.cwd)?;
     for dir in [hot.clone(), archive_dir(&hot)] {
         let path = dir.join(filename);
         if path.is_file() {
-            let body = std::fs::read_to_string(&path)
-                .with_context(|| format!("cannot read {}", path.display()))?;
-            print!("{body}");
-            return Ok(0);
+            return std::fs::read_to_string(&path)
+                .with_context(|| format!("cannot read {}", path.display()));
         }
     }
     bail!(
         "no such artifact {filename} in {} or its cold archive",
         hot.display()
     )
+}
+
+#[derive(Default, Serialize)]
+struct StanceTally {
+    #[serde(rename = "for")]
+    in_favor: usize,
+    against: usize,
+    amend: usize,
+    other: usize,
+}
+
+#[derive(Serialize)]
+struct Resolution {
+    outcome: String,
+    resolver: String,
+    /// Whether the resolving session also authored a position — the norm is
+    /// that a contested discussion is resolved by a non-author of the winning
+    /// position, so this flag surfaces a resolver who argued a side.
+    resolver_participated: bool,
+}
+
+#[derive(Serialize)]
+struct DiscussionSummary {
+    file: String,
+    topic: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    age_seconds: Option<u64>,
+    /// `### Position` headings in the file — every position, however added.
+    positions: usize,
+    stances: StanceTally,
+    /// Distinct `<model via harness>` identities from typed `position` events.
+    /// Hand-written positions that never ran `journal append` are not counted
+    /// here (they still count toward `positions` and `stances`).
+    participants: Vec<String>,
+    /// Typed `position` events that named a `--ref`.
+    reply_refs: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution: Option<Resolution>,
+}
+
+/// The identity label a position or resolution carries: `<model> via <harness>`
+/// when the model is known, else the bare harness.
+fn event_identity_label(event: &JournalEvent) -> String {
+    match event.model.as_deref().filter(|value| !value.is_empty()) {
+        Some(model) => format!("{model} via {}", event.harness),
+        None => event.harness.clone(),
+    }
+}
+
+/// Count the file's stated stances. Each position states its stance on a line
+/// `Position: for|against|amend` by convention; anything else after `Position:`
+/// falls to `other`, and non-position prose never starts a trimmed line with
+/// `Position:`.
+fn tally_stances(body: &str) -> StanceTally {
+    let mut tally = StanceTally::default();
+    for line in body.lines() {
+        let Some(rest) = line.trim().strip_prefix("Position:") else {
+            continue;
+        };
+        match rest
+            .split_whitespace()
+            .next()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("for") => tally.in_favor += 1,
+            Some("against") => tally.against += 1,
+            Some("amend") => tally.amend += 1,
+            Some(_) => tally.other += 1,
+            None => {}
+        }
+    }
+    tally
+}
+
+/// Derived summary of a discussion. Structural counts (positions, stances) come
+/// from the artifact so hand-written positions are included; participation and
+/// reply metrics come from the typed `position` events; resolution and the
+/// resolver-participation flag come from the consumed event correlated against
+/// those position events. Read-only.
+fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
+    let Some((ts, topic, kind)) = parse_artifact_name(filename) else {
+        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+    };
+    if kind != JournalKind::Discussion.as_str() {
+        bail!("{filename} is a {kind}, not a discussion");
+    }
+    let body = read_artifact_body(ctx, filename)?;
+    let dir = resolve_dir(&ctx.cwd)?;
+    let events = read_events(&dir)?;
+
+    let positions = body
+        .lines()
+        .filter(|line| line.trim_start().starts_with("### Position"))
+        .count();
+    let stances = tally_stances(&body);
+
+    // Typed position events for this file, in ledger order.
+    let position_events: Vec<&JournalEvent> = events
+        .iter()
+        .filter(|event| event.event == "position" && event.file.as_deref() == Some(filename))
+        .collect();
+    let mut participants: Vec<String> = Vec::new();
+    for event in &position_events {
+        let label = event_identity_label(event);
+        if !participants.contains(&label) {
+            participants.push(label);
+        }
+    }
+    let reply_refs = position_events
+        .iter()
+        .filter(|event| event.reference.is_some())
+        .count();
+
+    // Resolution: the newest consumed event for this file, if any. The resolver
+    // participated when a position event shares its session.
+    let resolution = events
+        .iter()
+        .rev()
+        .find(|event| event.event == "consumed" && event.file.as_deref() == Some(filename))
+        .map(|event| Resolution {
+            outcome: event.outcome.clone().unwrap_or_default(),
+            resolver: event_identity_label(event),
+            resolver_participated: position_events
+                .iter()
+                .any(|position| position.session == event.session),
+        });
+
+    let summary = DiscussionSummary {
+        age_seconds: artifact_age_seconds(Utc::now(), &ts),
+        file: filename.to_string(),
+        topic,
+        positions,
+        stances,
+        participants,
+        reply_refs,
+        resolution,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(0);
+    }
+
+    println!("discussion: {} (topic {})", summary.file, summary.topic);
+    if let Some(age) = summary.age_seconds {
+        println!("age: {} old", format_age(age));
+    }
+    println!(
+        "positions: {} — for {}, against {}, amend {}, other {}",
+        summary.positions,
+        summary.stances.in_favor,
+        summary.stances.against,
+        summary.stances.amend,
+        summary.stances.other
+    );
+    let participants = if summary.participants.is_empty() {
+        "(none via journal append)".to_string()
+    } else {
+        summary.participants.join(", ")
+    };
+    println!(
+        "participants: {participants} ({} reply-ref{})",
+        summary.reply_refs,
+        if summary.reply_refs == 1 { "" } else { "s" }
+    );
+    match &summary.resolution {
+        Some(resolution) => println!(
+            "resolution: {} by {} — resolver {}",
+            resolution.outcome,
+            resolution.resolver,
+            if resolution.resolver_participated {
+                "also authored a position"
+            } else {
+                "did not author a position"
+            }
+        ),
+        None => println!("resolution: open"),
+    }
+    Ok(0)
 }
 
 /// The journal house timestamp: RFC 3339 seconds in UTC with a `Z` suffix —
