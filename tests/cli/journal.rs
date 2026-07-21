@@ -1045,6 +1045,9 @@ fn journal_open_annotates_items_covered_by_live_lanes() {
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("20260101T000000Z-covered-todo.md"), "# Covered\n").unwrap();
     fs::write(dir.join("20260101T000001Z-free-todo.md"), "# Free\n").unwrap();
+    // A generous TTL keeps the lane comfortably live across the several CLI
+    // round-trips these assertions make; the staleness path is exercised
+    // separately so this test never races the liveness clock under load.
     repo.arc(&repo.root)
         .env("ARC_SESSION", "external-session")
         .args([
@@ -1055,7 +1058,7 @@ fn journal_open_annotates_items_covered_by_live_lanes() {
             "--scope",
             "covered",
             "--ttl",
-            "1s",
+            "1h",
         ])
         .assert()
         .success();
@@ -1079,6 +1082,29 @@ fn journal_open_annotates_items_covered_by_live_lanes() {
     assert_eq!(covered["lane"]["topic"], "external-lane");
     assert_eq!(covered["lane"]["owner_session"], "external-session");
     assert_eq!(covered["lane"]["this_session"], false);
+}
+
+#[test]
+fn journal_open_drops_annotation_once_a_lane_goes_stale() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("20260101T000000Z-covered-todo.md"), "# Covered\n").unwrap();
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "external-session")
+        .args([
+            "journal",
+            "lane",
+            "open",
+            "external-lane",
+            "--scope",
+            "covered",
+            "--ttl",
+            "1s",
+        ])
+        .assert()
+        .success();
+
     thread::sleep(Duration::from_secs(2));
     let stale = stdout(repo.arc(&repo.root).args(["journal", "open"]));
     assert!(!stale.contains("[lane:"), "{stale}");
