@@ -36,6 +36,11 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `### Position (<model> via <harness>, <ts>)` block and emits a typed
   `position` journal event (the machine-readable half that stance tallies and
   reply graphs derive from) (`journal-append`).
+- Discussion derived renderings: `journal open` annotates each item with its
+  age; `journal discussion <file> [--json]` reports the stance tally,
+  participants, reply-refs, and resolution with a resolver-participation flag;
+  and `begin --from-journal` seeds an initial brief threaded from the source
+  artifact (`journal-discussion-derived`).
 
 ### Fixed
 

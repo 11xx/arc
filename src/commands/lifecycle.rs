@@ -138,6 +138,32 @@ pub fn begin(
         {
             eprintln!("warning: could not mark {filename} consumed: {error:#}");
         }
+        // Thread the source's content into an initial brief so the change
+        // starts with the resolution instead of an empty contract. Advisory:
+        // a read or write failure warns but never unwinds the change that
+        // already exists.
+        match crate::journal::read_artifact_body(ctx, filename) {
+            Ok(body) => {
+                let seeded = format!(
+                    "> Seeded from journal artifact `{filename}` by `begin --from-journal`.\n\n{}",
+                    body.trim_end_matches('\n')
+                );
+                let event = ctx.event(
+                    &store,
+                    &change_id,
+                    Payload::BriefRecorded {
+                        title: Some(format!("Seeded from {filename}")),
+                        body: seeded,
+                    },
+                );
+                if let Err(error) = store.append_event(&event) {
+                    eprintln!("warning: could not seed a brief from {filename}: {error:#}");
+                }
+            }
+            Err(error) => {
+                eprintln!("warning: could not read {filename} to seed a brief: {error:#}")
+            }
+        }
     }
     crate::journal::auto_log(ctx, slug, &format!("opened change {change_id}"));
 
