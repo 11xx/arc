@@ -22,6 +22,11 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   format (RFC 3339 seconds, `Z` — the exact spelling of event-log `ts`), so
   dated inline headings are tool-computed rather than agent-authored
   (`journal-timestamp-stamp`).
+- `discussion` journal kind: an answer-owed actionable artifact that rides
+  `journal open` until resolved and promotes via `begin --from-journal`;
+  `journal note --scaffold discussion` (or a repo-local
+  `.arc/templates/discussion.md`) seeds the position conventions at birth
+  (`journal-discussion-kind`).
 
 ## [0.1.0] - 2026-07-20
 
