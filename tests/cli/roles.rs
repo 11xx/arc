@@ -12,10 +12,12 @@ fn implementer_role_refuses_lead_owned_commands_without_appending_events() {
     let refused = [
         (
             "review",
+            "reviewer or lead",
             vec!["review", "role-guard", "--verdict", "approved"],
         ),
         (
             "resolve",
+            "reviewer or lead",
             vec![
                 "resolve",
                 "role-guard",
@@ -24,19 +26,29 @@ fn implementer_role_refuses_lead_owned_commands_without_appending_events() {
                 "resolved",
             ],
         ),
-        ("hold", vec!["hold", "role-guard", "--reason", "pause"]),
-        ("release-hold", vec!["release-hold", "role-guard"]),
-        ("close", vec!["close", "role-guard", "--abandoned"]),
-        ("integrate", vec!["integrate", "role-guard"]),
+        (
+            "hold",
+            "reviewer or lead",
+            vec!["hold", "role-guard", "--reason", "pause"],
+        ),
+        (
+            "release-hold",
+            "reviewer or lead",
+            vec!["release-hold", "role-guard"],
+        ),
+        ("close", "lead", vec!["close", "role-guard", "--abandoned"]),
+        ("integrate", "lead", vec!["integrate", "role-guard"]),
     ];
 
-    for (name, args) in refused {
+    for (name, required, args) in refused {
         repo.arc(&repo.root)
             .env("ARC_ROLE", "implementer")
             .args(args)
             .assert()
             .code(9)
-            .stderr(format!("role refusal: implementer may not {name}\n"));
+            .stderr(format!(
+                "role refusal: implementer may not {name} (requires {required})\n"
+            ));
         assert_eq!(
             event_count(&repo, &change_id),
             initial_events,
@@ -87,7 +99,9 @@ fn reviewer_role_can_review_and_resolve_but_cannot_close_or_integrate() {
             .args(args)
             .assert()
             .code(9)
-            .stderr(format!("role refusal: reviewer may not {name}\n"));
+            .stderr(format!(
+                "role refusal: reviewer may not {name} (requires lead)\n"
+            ));
         assert_eq!(event_count(&repo, &change_id), allowed_events);
     }
 }
@@ -139,7 +153,7 @@ fn role_flag_and_environment_binding_are_equivalent() {
     assert_eq!(from_env.stderr, from_flag.stderr);
     assert_eq!(
         String::from_utf8_lossy(&from_env.stderr),
-        "role refusal: implementer may not hold\n"
+        "role refusal: implementer may not hold (requires reviewer or lead)\n"
     );
     assert_eq!(event_count(&repo, &change_id), initial_events);
 }

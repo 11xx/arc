@@ -77,6 +77,9 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Role refusals name the role that can perform the command, and top-level
+  nested leaf verbs suggest their complete command path
+  (`cold-start-ergonomics`).
 - The journal drops every thread spelling: no `arc thread` or nested
   `journal` aliases, and the storage tier is `ARC_JOURNAL_DIR`,
   `[journals]`, `<ai_home>/journals/`, and `journal-events/1` in

@@ -23,3 +23,27 @@ mod take;
 mod timeline;
 mod verify;
 mod workspace;
+
+use common::Repo;
+
+#[test]
+fn nested_leaf_at_top_level_suggests_its_command_path() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["note"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("journal note"));
+}
+
+#[test]
+fn top_level_typo_retains_clap_suggestion() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journl"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains(
+            "a similar subcommand exists: 'journal'",
+        ));
+}

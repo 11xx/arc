@@ -768,25 +768,44 @@ enum ForgeCmd {
     },
 }
 
-fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<&'static str> {
+fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'static str)> {
     // Brief reads are open to every role, while writes are lead-only; the
     // handler must inspect --body-file, so Brief cannot live in this deny-list.
     match role {
         ExecutionRole::Lead => None,
         ExecutionRole::Reviewer => match command {
-            Cmd::Integrate { .. } => Some("integrate"),
-            Cmd::Close { .. } => Some("close"),
+            Cmd::Integrate { .. } => Some(("integrate", "lead")),
+            Cmd::Close { .. } => Some(("close", "lead")),
             _ => None,
         },
         ExecutionRole::Implementer => match command {
-            Cmd::Review { .. } => Some("review"),
-            Cmd::Resolve { .. } => Some("resolve"),
-            Cmd::Hold { .. } => Some("hold"),
-            Cmd::ReleaseHold { .. } => Some("release-hold"),
-            Cmd::Close { .. } => Some("close"),
-            Cmd::Integrate { .. } => Some("integrate"),
+            Cmd::Review { .. } => Some(("review", "reviewer or lead")),
+            Cmd::Resolve { .. } => Some(("resolve", "reviewer or lead")),
+            Cmd::Hold { .. } => Some(("hold", "reviewer or lead")),
+            Cmd::ReleaseHold { .. } => Some(("release-hold", "reviewer or lead")),
+            Cmd::Close { .. } => Some(("close", "lead")),
+            Cmd::Integrate { .. } => Some(("integrate", "lead")),
             _ => None,
         },
+    }
+}
+
+fn nested_subcommand_path(typed: Option<&str>) -> Option<&'static str> {
+    match typed {
+        Some("dir") => Some("journal dir"),
+        Some("note") => Some("journal note"),
+        Some("append") => Some("journal append"),
+        Some("catchup") => Some("journal catchup"),
+        Some("memories") => Some("journal memories"),
+        Some("open") => Some("journal open"),
+        Some("consume") => Some("journal consume"),
+        Some("archive") => Some("journal archive"),
+        Some("stamp") => Some("journal stamp"),
+        Some("lane") => Some("journal lane"),
+        Some("discussion") => Some("journal discussion"),
+        Some("install") => Some("hooks install"),
+        Some("uninstall") => Some("hooks uninstall"),
+        _ => None,
     }
 }
 
@@ -805,7 +824,20 @@ fn main() {
         signal(SIGPIPE, SIG_DFL);
     }
 
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let kind = error.kind();
+            let typed = std::env::args().nth(1);
+            error.print().ok();
+            if kind == clap::error::ErrorKind::InvalidSubcommand {
+                if let Some(path) = nested_subcommand_path(typed.as_deref()) {
+                    eprintln!("  tip: a similar subcommand exists: '{path}'\n");
+                }
+            }
+            std::process::exit(error.exit_code());
+        }
+    };
     match run(cli) {
         Ok(code) => std::process::exit(code),
         Err(e) => {
@@ -817,8 +849,11 @@ fn main() {
 
 fn run(cli: Cli) -> Result<i32> {
     let role = ExecutionRole::parse(cli.role.as_deref())?;
-    if let Some(command) = role_refusal(role, &cli.cmd) {
-        eprintln!("role refusal: {} may not {command}", role.as_str());
+    if let Some((command, required)) = role_refusal(role, &cli.cmd) {
+        eprintln!(
+            "role refusal: {} may not {command} (requires {required})",
+            role.as_str()
+        );
         return Ok(9);
     }
 
