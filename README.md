@@ -166,6 +166,14 @@ existing status payload and a journal block. `arc prompt [CHANGE]` prints the
 stable one-line change summary used by statuslines, and exits successfully
 with no output outside a change worktree.
 
+Use `arc resume` to continue your own session's change. Use
+`arc rescue [CHANGE]` when another session stopped and left work behind:
+it joins the ledger state with worktree divergence and assesses a stale or
+expired foreign claim as abandoned. Rescue is read-only unless `--take` is
+given; takeover follows the same stale-claim rules as `arc claim --takeover`,
+records the displaced owner, and narrates the handover to journal auto-log.
+`--json` emits the versioned `arc-rescue/1` object.
+
 Observe a change without scraping status views, or wait for one condition for
 shell orchestration:
 

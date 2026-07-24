@@ -1,0 +1,198 @@
+use super::*;
+use crate::state::{Brief, ClaimIdentity};
+use crate::status::{FindingSummary, GateStatus};
+
+const RESCUE_SCHEMA: &str = "arc-rescue/1";
+
+#[derive(Serialize)]
+struct RescueOutput<'a> {
+    schema: &'static str,
+    change_id: &'a str,
+    title: &'a str,
+    brief: Option<&'a Brief>,
+    stage: Option<String>,
+    open_findings: Vec<&'a FindingSummary>,
+    gates: &'a [GateStatus],
+    next_action: &'a str,
+    worktree_dirty: Option<bool>,
+    head_state: &'static str,
+    claim: Option<RescueClaim<'a>>,
+    abandoned: bool,
+}
+
+#[derive(Serialize)]
+struct RescueClaim<'a> {
+    owner: &'a ClaimIdentity,
+    stage: String,
+    active: bool,
+    stale: bool,
+    expired: bool,
+    age_seconds: u64,
+}
+
+pub fn rescue(ctx: &Ctx, reference: &str, json: bool, take: bool) -> Result<i32> {
+    if take {
+        let (code, previous_owner) = super::claims::takeover_abandoned(ctx, reference)?;
+        if code != 0 {
+            return Ok(code);
+        }
+        let previous_owner =
+            previous_owner.context("abandoned takeover did not capture the previous owner")?;
+        let store = ctx.store()?;
+        let change_id = store.resolve_change(reference)?;
+        let (_, state) = ctx.load_state(&store, &change_id)?;
+        crate::journal::auto_log(
+            ctx,
+            &state.slug,
+            &format!(
+                "rescued change {change_id} from {} via {}/{}",
+                previous_owner.actor, previous_owner.harness, previous_owner.session
+            ),
+        );
+    }
+
+    let store = ctx.store()?;
+    let change_id = store.resolve_change(reference)?;
+    let (_, state) = ctx.load_state(&store, &change_id)?;
+    let report = ctx.report(&store, &state)?;
+    let now = chrono::Utc::now();
+    let claim = state.claim.as_ref().map(|claim| {
+        let timing = state::claim_timing_at(claim, now);
+        RescueClaim {
+            owner: &claim.owner,
+            stage: timing.stage,
+            active: timing.active,
+            stale: timing.stale,
+            expired: timing.expired,
+            age_seconds: timing.age_seconds,
+        }
+    });
+    let abandoned = state.claim.as_ref().is_some_and(|held| {
+        let timing = state::claim_timing_at(held, now);
+        let caller = (
+            ctx.actor.as_str(),
+            ctx.harness.as_deref(),
+            ctx.session.as_deref(),
+        );
+        let owner = (
+            held.owner.actor.as_str(),
+            Some(held.owner.harness.as_str()),
+            Some(held.owner.session.as_str()),
+        );
+        caller != owner && (timing.stale || timing.expired)
+    });
+    let open_findings = report
+        .findings
+        .iter()
+        .filter(|finding| {
+            !matches!(
+                finding.status.as_str(),
+                "resolved" | "acceptedrisk" | "obsolete"
+            )
+        })
+        .collect::<Vec<_>>();
+    let head_state = match (
+        report.latest_patchset.as_ref(),
+        report.head_matches_latest_patchset,
+    ) {
+        (None, _) => "no-patchset",
+        (Some(_), true) => "matches",
+        (Some(_), false) => "moved-past",
+    };
+    let output = RescueOutput {
+        schema: RESCUE_SCHEMA,
+        change_id: &state.change_id,
+        title: &state.title,
+        brief: state.latest_brief(),
+        stage: claim.as_ref().map(|claim| claim.stage.clone()),
+        open_findings,
+        gates: &report.gates,
+        next_action: &report.next_action,
+        worktree_dirty: report.worktree_dirty,
+        head_state,
+        claim,
+        abandoned,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        render(&output);
+    }
+    Ok(0)
+}
+
+fn render(output: &RescueOutput<'_>) {
+    println!("# {} (`{}`)", output.title, output.change_id);
+    if let Some(brief) = output.brief {
+        println!("\n## Brief\n");
+        print!("{}", brief.body);
+        if !brief.body.ends_with('\n') {
+            println!();
+        }
+    }
+    println!("\n## Claim / Stage\n");
+    match &output.claim {
+        Some(claim) => {
+            println!(
+                "- Owner: {} via {}/{}",
+                claim.owner.actor, claim.owner.harness, claim.owner.session
+            );
+            println!("- Stage: `{}`", claim.stage);
+            println!(
+                "- State: {}",
+                if claim.expired {
+                    "expired"
+                } else if claim.stale {
+                    "stale"
+                } else {
+                    "active"
+                }
+            );
+            println!("- Last activity: {}s ago", claim.age_seconds);
+        }
+        None => println!("- (unclaimed)"),
+    }
+    println!("\n## Worktree\n");
+    println!(
+        "- Branch head: {}",
+        match output.head_state {
+            "no-patchset" => "no patchset recorded",
+            "matches" => "matches the newest approved/snapshotted head",
+            _ => "has moved past the newest patchset",
+        }
+    );
+    println!(
+        "- Uncommitted edits: {}",
+        match output.worktree_dirty {
+            Some(true) => "present",
+            Some(false) => "absent",
+            None => "unknown",
+        }
+    );
+    println!("\n## Open Findings\n");
+    if output.open_findings.is_empty() {
+        println!("- (none)");
+    } else {
+        for finding in &output.open_findings {
+            println!(
+                "- `{}` [{}] {}",
+                finding.id, finding.status, finding.summary
+            );
+        }
+    }
+    println!("\n## Gates at Head\n");
+    if output.gates.is_empty() {
+        println!("- (none)");
+    } else {
+        for gate in output.gates {
+            println!("- {}: {}", gate.name, gate.result);
+        }
+    }
+    println!("\n## Assessment\n");
+    println!(
+        "- Abandoned: {}",
+        if output.abandoned { "yes" } else { "no" }
+    );
+    println!("\nNext action: {}", output.next_action);
+}
