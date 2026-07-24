@@ -1,9 +1,9 @@
 //! Change-worktree context and explicit harness bootstrap helpers.
 //!
-//! Explicit change references and `ARC_HARNESS`/`ARC_SESSION` remain
-//! authoritative. This module only infers an omitted reference from the
-//! current Git branch or recorded worktree, and exposes identity detection
-//! through the opt-in `arc env` command.
+//! Explicit change references and identity always remain authoritative. This
+//! module infers an omitted reference from the current Git branch or recorded
+//! worktree, and provides identity detection as an opt-in fallback enabled by
+//! `[identity] detect`.
 
 use crate::commands::{self, Ctx, StatusOutput};
 use crate::gitio;
@@ -15,8 +15,8 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Environment variables recognized by `arc env`, in precedence order.
-/// Detection is deliberately not part of normal command identity resolution.
+/// Environment variables recognized for opt-in identity detection, in
+/// precedence order. Explicit identity always wins over detected values.
 const HARNESS_ENV: [(&str, &str); 4] = [
     ("CLAUDE_SESSION_ID", "claude"),
     ("CODEX_THREAD_ID", "codex"),
@@ -103,28 +103,46 @@ fn ambiguous<T>(cwd: &Path, matches: &[&ChangeState]) -> Result<T> {
     )
 }
 
-pub fn print_env() -> i32 {
+pub struct DetectedIdentity {
+    pub harness: String,
+    pub session: String,
+    pub model: Option<String>,
+}
+
+pub fn detect_identity() -> Option<DetectedIdentity> {
     for (variable, harness) in HARNESS_ENV {
         if let Some(session) = std::env::var_os(variable) {
             let session = session.to_string_lossy();
             if session.is_empty() {
                 continue;
             }
-            match detect_model(harness, &session) {
-                Some(model) => println!(
-                    "export ARC_HARNESS={} ARC_SESSION={} ARC_MODEL={}",
-                    shell_quote(harness),
-                    shell_quote(&session),
-                    shell_quote(&model)
-                ),
-                None => println!(
-                    "export ARC_HARNESS={} ARC_SESSION={}",
-                    shell_quote(harness),
-                    shell_quote(&session)
-                ),
-            }
-            return 0;
+            let model = detect_model(harness, &session);
+            return Some(DetectedIdentity {
+                harness: harness.to_string(),
+                session: session.into_owned(),
+                model,
+            });
         }
+    }
+    None
+}
+
+pub fn print_env() -> i32 {
+    if let Some(identity) = detect_identity() {
+        match identity.model {
+            Some(model) => println!(
+                "export ARC_HARNESS={} ARC_SESSION={} ARC_MODEL={}",
+                shell_quote(&identity.harness),
+                shell_quote(&identity.session),
+                shell_quote(&model)
+            ),
+            None => println!(
+                "export ARC_HARNESS={} ARC_SESSION={}",
+                shell_quote(&identity.harness),
+                shell_quote(&identity.session)
+            ),
+        }
+        return 0;
     }
     println!(
         "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id> \

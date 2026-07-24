@@ -2,6 +2,32 @@ use super::common::*;
 use predicates::prelude::*;
 use std::os::unix::fs::PermissionsExt;
 
+fn recorded_journal_event(repo: &Repo) -> serde_json::Value {
+    let dir = stdout(repo.arc(&repo.root).args(["journal", "dir"]));
+    let events = fs::read_to_string(Path::new(dir.trim()).join("events.jsonl")).unwrap();
+    serde_json::from_str(events.lines().last().unwrap()).unwrap()
+}
+
+fn opened_event(repo: &Repo, change_id: &str) -> serde_json::Value {
+    let path = fs::read_dir(event_dir(repo, change_id))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+fn enable_identity_detection(repo: &Repo) {
+    let config_dir = repo.home.join(".local/ai/arc");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "[identity]\ndetect = true\n",
+    )
+    .unwrap();
+}
+
 #[test]
 fn no_arg_snapshot_stage_and_show_work_inside_change_worktree() {
     let repo = Repo::new();
@@ -257,4 +283,101 @@ fn env_omits_model_when_no_session_store_matches() {
         .assert()
         .failure()
         .stdout(predicate::str::contains("ARC_MODEL=<model[#effort]>"));
+}
+
+#[test]
+fn ambient_identity_detection_is_off_without_config() {
+    let repo = Repo::new();
+    let output = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "detect-off"])
+            .env_remove("ARC_HARNESS")
+            .env_remove("ARC_SESSION")
+            .env_remove("ARC_MODEL")
+            .env_remove("CLAUDE_SESSION_ID")
+            .env("CODEX_THREAD_ID", "ambient-thread")
+            .env_remove("OPENCODE_SESSION")
+            .env_remove("PI_SESSION_ID"),
+    );
+    let event = opened_event(&repo, &opened_change_id(&output));
+
+    assert!(event["harness"].is_null());
+    assert!(event["session"].is_null());
+}
+
+#[test]
+fn ambient_identity_detection_fills_harness_session_and_model() {
+    let repo = Repo::new();
+    enable_identity_detection(&repo);
+    let session = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
+    let day = repo.home.join(".codex/sessions/2026/07/24");
+    fs::create_dir_all(&day).unwrap();
+    fs::write(
+        day.join(format!("rollout-2026-07-24T00-00-00-{session}.jsonl")),
+        concat!(
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-sol\",",
+            "\"effort\":\"low\"}}\n",
+        ),
+    )
+    .unwrap();
+
+    repo.arc(&repo.root)
+        .args(["journal", "log", "detect-on", "event"])
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION")
+        .env_remove("ARC_MODEL")
+        .env_remove("CLAUDE_SESSION_ID")
+        .env("CODEX_THREAD_ID", session)
+        .env("CODEX_HOME", repo.home.join(".codex"))
+        .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
+        .assert()
+        .success();
+    let event = recorded_journal_event(&repo);
+
+    assert_eq!(event["harness"], "codex");
+    assert_eq!(event["session"], session);
+    assert_eq!(event["model"], "gpt-5.6-sol#low");
+}
+
+#[test]
+fn explicit_environment_identity_wins_over_detection() {
+    let repo = Repo::new();
+    enable_identity_detection(&repo);
+    let output = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "explicit-identity"])
+            .env("ARC_HARNESS", "explicit")
+            .env("ARC_SESSION", "explicit-session")
+            .env_remove("ARC_MODEL")
+            .env_remove("CLAUDE_SESSION_ID")
+            .env("CODEX_THREAD_ID", "ambient-thread")
+            .env_remove("OPENCODE_SESSION")
+            .env_remove("PI_SESSION_ID"),
+    );
+    let event = opened_event(&repo, &opened_change_id(&output));
+
+    assert_eq!(event["harness"], "explicit");
+    assert_eq!(event["session"], "explicit-session");
+}
+
+#[test]
+fn differing_explicit_harness_suppresses_detected_session() {
+    let repo = Repo::new();
+    enable_identity_detection(&repo);
+    let output = stdout(
+        repo.arc(&repo.root)
+            .args(["--harness", "explicit", "begin", "different-harness"])
+            .env_remove("ARC_HARNESS")
+            .env_remove("ARC_SESSION")
+            .env_remove("ARC_MODEL")
+            .env_remove("CLAUDE_SESSION_ID")
+            .env("CODEX_THREAD_ID", "ambient-thread")
+            .env_remove("OPENCODE_SESSION")
+            .env_remove("PI_SESSION_ID"),
+    );
+    let event = opened_event(&repo, &opened_change_id(&output));
+
+    assert_eq!(event["harness"], "explicit");
+    assert!(event["session"].is_null());
 }

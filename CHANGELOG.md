@@ -12,6 +12,8 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Opt-in `[identity] detect` fills omitted harness, session, and model identity
+  from the running harness while preserving explicit values (`identity-detect`).
 - `arc journal list` enumerates every live journal artifact in the hot
   directory newest-first
   (optionally `--kind`, `--json`) with consumption markers, and
