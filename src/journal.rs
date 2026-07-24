@@ -41,6 +41,7 @@ pub enum JournalKind {
     Todo,
     Later,
     Discussion,
+    FeatureRequest,
 }
 
 impl JournalKind {
@@ -58,6 +59,7 @@ impl JournalKind {
             JournalKind::Todo => "todo",
             JournalKind::Later => "later",
             JournalKind::Discussion => "discussion",
+            JournalKind::FeatureRequest => "feature-request",
         }
     }
 }
@@ -68,9 +70,10 @@ impl JournalKind {
 /// queue until someone resolves it.
 const PRIMARY_ACTIONABLE_KINDS: [&str; 5] = ["todo", "handoff", "inbox", "plan", "discussion"];
 const LATER_KIND: &str = "later";
+const FEATURE_REQUEST_KIND: &str = "feature-request";
 
 fn is_actionable_kind(kind: &str) -> bool {
-    PRIMARY_ACTIONABLE_KINDS.contains(&kind) || kind == LATER_KIND
+    PRIMARY_ACTIONABLE_KINDS.contains(&kind) || kind == LATER_KIND || kind == FEATURE_REQUEST_KIND
 }
 
 /// How a consumed artifact was discharged. Advisory vocabulary recorded in
@@ -226,9 +229,9 @@ pub enum JournalCmd {
         #[arg(long)]
         json: bool,
     },
-    /// List actionable artifacts (todo/handoff/inbox/plan/discussion, then later) not yet consumed
+    /// List actionable artifacts in primary, later, and feature-request tiers
     Open {
-        /// Restrict to one actionable kind; later is shown separately
+        /// Restrict to one actionable kind; lower-priority tiers stay separate
         #[arg(long, value_enum)]
         kind: Option<JournalKind>,
         /// Emit structured JSON instead of text
@@ -281,7 +284,7 @@ pub enum JournalCmd {
         /// Artifact filename inside the hot dir (a name, not a path)
         #[arg(required_unless_present = "consumed", conflicts_with = "consumed")]
         filename: Option<String>,
-        /// Archive every consumed actionable artifact, including later items
+        /// Archive every consumed actionable artifact, including lower-priority tiers
         #[arg(long)]
         consumed: bool,
         /// With --consumed, include only artifacts older than this many days
@@ -1646,19 +1649,29 @@ struct Catchup {
     journal_tail: Vec<String>,
 }
 
-/// Split `<ts>-<topic>-<kind>.md` into its parts. Timestamps carry no
-/// hyphen and kinds are single words, so the first and last segments are
-/// unambiguous and the topic is whatever lies between.
+/// Split `<ts>-<topic>-<kind>.md` into its parts.
 fn parse_artifact_name(name: &str) -> Option<(String, String, String)> {
     let stem = name.strip_suffix(".md")?;
     let first = stem.find('-')?;
-    let last = stem.rfind('-')?;
-    if last <= first {
-        return None;
-    }
     let ts = &stem[..first];
-    let topic = &stem[first + 1..last];
-    let kind = &stem[last + 1..];
+    let remainder = &stem[first + 1..];
+    let known = JournalKind::value_variants()
+        .iter()
+        .map(|kind| kind.as_str())
+        .filter_map(|kind| {
+            remainder
+                .strip_suffix(kind)
+                .and_then(|topic| topic.strip_suffix('-'))
+                .map(|topic| (topic, kind))
+        })
+        .max_by_key(|(_, kind)| kind.len());
+    let (topic, kind) = match known {
+        Some(parts) => parts,
+        None => {
+            let last = remainder.rfind('-')?;
+            (&remainder[..last], &remainder[last + 1..])
+        }
+    };
     if ts.is_empty() || topic.is_empty() || kind.is_empty() {
         return None;
     }
@@ -1869,6 +1882,7 @@ struct OpenItems {
     dir: String,
     open: Vec<ArtifactEntry>,
     later: Vec<ArtifactEntry>,
+    feature_requests: Vec<ArtifactEntry>,
 }
 
 fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
@@ -1881,6 +1895,7 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
                     .iter()
                     .copied()
                     .chain(std::iter::once(LATER_KIND))
+                    .chain(std::iter::once(FEATURE_REQUEST_KIND))
                     .collect::<Vec<_>>()
                     .join("|")
             );
@@ -1889,6 +1904,7 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
     let mut open: Vec<ArtifactEntry> = Vec::new();
     let mut later: Vec<ArtifactEntry> = Vec::new();
+    let mut feature_requests: Vec<ArtifactEntry> = Vec::new();
     let now = Utc::now();
     let journal = read_events(&dir)?;
     let lanes = lanes_from_journal(&journal, now);
@@ -1897,6 +1913,7 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
     if dir.is_dir() {
         let mut open_names: Vec<String> = Vec::new();
         let mut later_names: Vec<String> = Vec::new();
+        let mut feature_request_names: Vec<String> = Vec::new();
         for name in sorted_artifact_names(&dir)? {
             let Some((_, _, file_kind)) = parse_artifact_name(&name) else {
                 continue;
@@ -1908,6 +1925,8 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
             if wanted && !is_consumed(&journal, &name) {
                 if file_kind == LATER_KIND {
                     later_names.push(name);
+                } else if file_kind == FEATURE_REQUEST_KIND {
+                    feature_request_names.push(name);
                 } else {
                     open_names.push(name);
                 }
@@ -1949,6 +1968,22 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
                 });
             }
         }
+        for name in feature_request_names {
+            if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
+                let heading = first_heading(&dir.join(&name));
+                let change = change_annotation(&changes, &topic, &name);
+                feature_requests.push(ArtifactEntry {
+                    lane: lane_for_topic(&lanes, &topic, &caller_session),
+                    change,
+                    age_seconds: artifact_age_seconds(now, &ts),
+                    file: name,
+                    timestamp: ts,
+                    topic,
+                    kind: Some(file_kind),
+                    heading,
+                });
+            }
+        }
     }
 
     if json {
@@ -1956,6 +1991,7 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
             dir: dir.display().to_string(),
             open,
             later,
+            feature_requests,
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
@@ -1972,6 +2008,13 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
             println!("  (none)");
         }
         for f in &later {
+            render_open_entry(f);
+        }
+        println!("feature requests (newest first):");
+        if feature_requests.is_empty() {
+            println!("  (none)");
+        }
+        for f in &feature_requests {
             render_open_entry(f);
         }
     }
@@ -2596,10 +2639,10 @@ mod tests {
     #[test]
     fn artifact_name_parsing() {
         assert_eq!(
-            parse_artifact_name("20260717T062830Z-delegation-blocker-ux-note.md"),
+            parse_artifact_name("20260717T062830Z-topic-note.md"),
             Some((
                 "20260717T062830Z".to_string(),
-                "delegation-blocker-ux".to_string(),
+                "topic".to_string(),
                 "note".to_string()
             ))
         );
@@ -2610,6 +2653,30 @@ mod tests {
                 "20260717T062830".to_string(),
                 "topic".to_string(),
                 "plan".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_artifact_name("20260717T062830Z-topic-feature-request.md"),
+            Some((
+                "20260717T062830Z".to_string(),
+                "topic".to_string(),
+                "feature-request".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_artifact_name("20260717T062830Z-topic-with-hyphens-feature-request.md"),
+            Some((
+                "20260717T062830Z".to_string(),
+                "topic-with-hyphens".to_string(),
+                "feature-request".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_artifact_name("20260717T062830Z-topic-unknown-kind.md"),
+            Some((
+                "20260717T062830Z".to_string(),
+                "topic-unknown".to_string(),
+                "kind".to_string()
             ))
         );
         assert_eq!(parse_artifact_name("journal.md"), None);

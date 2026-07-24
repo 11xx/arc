@@ -651,10 +651,12 @@ take the house timestamp from `journal stamp` — RFC 3339 seconds in UTC, the
 same spelling as the event log's `ts`, so prose and log cross-grep — never
 an agent-authored date.
 Work waiting for a future session uses the primary actionable kinds — `todo`,
-`handoff`, `inbox`, `plan`, `discussion` — plus lower-priority `later`. `journal open` lists
-the primary queue first and then a separate later section, annotating each item
-with how long it has waited (for discussions, since the latest typed position;
-otherwise since creation), until an explicit
+`handoff`, `inbox`, `plan`, `discussion` — plus lower-priority `later` and
+`feature-request`. A feature request describes a wanted capability without
+assigning execution priority. `journal open` lists the primary queue first,
+then separate later and feature-request sections, annotating each item with how
+long it has waited (for discussions, since the latest typed position; otherwise
+since creation), until an explicit
 `journal consume <filename> [--outcome done|superseded|discarded]
 [--note <text>]` retires an item with a typed consumed event. The journal is
 append-only; consumption never edits or deletes the artifact.
