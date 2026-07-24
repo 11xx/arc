@@ -45,6 +45,8 @@ arc mangen <dir>                                      # writes <dir>/arc.1
 - A **brief** is a change-scoped implementation contract stored in the ledger;
   goal-scoped analysis briefs stay in the project journal, and briefs never
   gate checking or integration.
+- A **changelog entry** is change-scoped release copy stored in the ledger.
+  Integrated entries project into the generated `[Unreleased]` block.
 - A **chain** is a tagged blocked-by series: independent siblings can run in
   parallel when ready, while dependent members wait mechanically until their
   prerequisites integrate.
@@ -92,6 +94,7 @@ arc blocker-status radio-refill-fix   # structured dependency detail
 cd ~/.worktrees/<repo>-radio-refill-fix
 eval "$(arc env)"                         # detects this harness session explicitly
 arc brief radio-refill-fix --body-file executor-spec.md
+arc changelog radio-refill-fix --section fixed --body-file changelog-entry.md
 arc show                                  # includes the latest contract
 # ... read the executor spec from arc show ...
 arc stage implementing --claim            # default claim + stage
@@ -133,6 +136,14 @@ path. An explicit change always wins. Commands that integrate, close, hold,
 export, or otherwise act destructively or across changes still require an
 explicit change. Ambiguous or absent context fails with the candidate list and
 asks for `CHANGE`.
+
+`arc changelog <change>` reads the latest entry for one change; adding
+`--section <added|changed|deprecated|removed|fixed|security> --body-file <file>`
+records replacement release copy as a new append-only event. `arc changelog`
+projects entries from integrated changes newer than the latest reachable tag,
+grouped in Keep a Changelog order; `--since <revision>` overrides that
+boundary, `--json` emits the derived entries, and `--write` replaces only the
+generated `[Unreleased]` block in `CHANGELOG.md`.
 
 `arc env` is the explicit identity bootstrap. It prints eval-able
 `ARC_HARNESS` and `ARC_SESSION` exports from the first available variable in

@@ -38,6 +38,12 @@ pub struct Brief {
     pub body: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ChangelogEntry {
+    pub section: ChangelogSection,
+    pub body: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GitIdentity {
     pub name: String,
@@ -280,6 +286,7 @@ pub struct ChangeState {
     pub opened_at: chrono::DateTime<chrono::Utc>,
     pub patchsets: Vec<Patchset>,
     pub briefs: Vec<Brief>,
+    pub changelog: Option<ChangelogEntry>,
     pub messages: Vec<MessageEntry>,
     pub comments: Vec<CommentEntry>,
     pub findings: BTreeMap<String, FindingState>,
@@ -379,6 +386,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     opened_at: ev.created_at,
                     patchsets: Vec::new(),
                     briefs: Vec::new(),
+                    changelog: None,
                     messages: Vec::new(),
                     comments: Vec::new(),
                     findings: BTreeMap::new(),
@@ -468,6 +476,12 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 title: title.clone(),
                 body: body.clone(),
             }),
+            Payload::ChangelogRecorded { section, body } => {
+                state.changelog = Some(ChangelogEntry {
+                    section: *section,
+                    body: body.clone(),
+                });
+            }
             Payload::PatchsetAdded {
                 patchset_id,
                 base,

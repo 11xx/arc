@@ -39,5 +39,5 @@ daemon, no database, no network, no multi-machine ref sync.
   that split.
 - After integrating a CLI change, refresh the installed binary:
   `cargo install --path . --locked`.
-- Update `[Unreleased]` CHANGELOG.md line in the same change that alters behavior.
-
+- Record behavior changes on their arc change via `arc changelog`; the
+  `[Unreleased]` block in `CHANGELOG.md` is generated at release time.

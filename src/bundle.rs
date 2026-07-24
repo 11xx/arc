@@ -378,6 +378,7 @@ fn validate_claim_identity(event: &Event) -> Result<()> {
 fn event_type(payload: &Payload) -> &'static str {
     match payload {
         Payload::BriefRecorded { .. } => "brief",
+        Payload::ChangelogRecorded { .. } => "changelog",
         Payload::ClaimSet { .. } => "claim",
         Payload::ClaimReleased { .. } => "claim-release",
         Payload::StageSet { .. } => "stage",

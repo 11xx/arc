@@ -1,5 +1,6 @@
 use crate::bundle::{Bundle, ValidatedBundle};
 mod bundle_io;
+mod changelog;
 mod claims;
 mod config_cmd;
 mod diff;
@@ -27,6 +28,7 @@ use crate::status::{self, StatusReport};
 use crate::store::{Store, TransitionLock};
 use anyhow::{bail, Context, Result};
 pub use bundle_io::{export_bundle, import_bundle};
+pub use changelog::changelog;
 pub use claims::{claim, release_claim, stage, take};
 use clap::ValueEnum;
 pub use config_cmd::check_writable;
@@ -574,6 +576,7 @@ mod tests {
             opened_at: Utc::now(),
             patchsets: Vec::new(),
             briefs: Vec::new(),
+            changelog: None,
             messages: Vec::new(),
             comments: Vec::new(),
             findings: BTreeMap::new(),
