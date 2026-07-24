@@ -17,6 +17,10 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `feature-request` is a first-class journal kind in its own lowest-priority
   `journal open` tier and additive `feature_requests` JSON field, with no
   journal event or open-output schema version change (`feature-request-kind`).
+- `arc status` and `arc resume` report whether the recorded worktree has
+  uncommitted edits and whether its branch head has moved past the newest
+  patchset, without changing the `arc-status/5` schema version
+  (`worktree-divergence`).
 - `arc journal list` enumerates every live journal artifact in the hot
   directory newest-first
   (optionally `--kind`, `--json`) with consumption markers, and

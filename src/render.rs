@@ -48,6 +48,20 @@ pub fn markdown(
         let _ = writeln!(w, "- Assigned to: {assigned}");
     }
     let _ = writeln!(w, "- Priority: {}", state.priority);
+    let _ = writeln!(
+        w,
+        "- Worktree state: head {}; uncommitted edits {}",
+        if report.head_matches_latest_patchset {
+            "matches newest approved/snapshotted head"
+        } else {
+            "has moved past newest patchset"
+        },
+        match report.worktree_dirty {
+            Some(true) => "present",
+            Some(false) => "absent",
+            None => "unknown",
+        }
+    );
 
     if !report.blocker_status.blockers_ready.is_empty() {
         let _ = writeln!(w, "\n## Blocked by\n");

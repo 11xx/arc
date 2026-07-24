@@ -397,6 +397,23 @@ pub fn resume(
         ),
         None => println!("- (unclaimed)"),
     }
+    println!("\n## Worktree\n");
+    println!(
+        "- Branch head: {}",
+        if status.report.head_matches_latest_patchset {
+            "matches the newest approved/snapshotted head"
+        } else {
+            "has moved past the newest patchset"
+        }
+    );
+    println!(
+        "- Uncommitted edits: {}",
+        match status.report.worktree_dirty {
+            Some(true) => "present",
+            Some(false) => "absent",
+            None => "unknown",
+        }
+    );
     println!("\n## Open Findings\n");
     let findings = status
         .report
