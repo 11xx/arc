@@ -32,11 +32,12 @@ struct RescueClaim<'a> {
 
 pub fn rescue(ctx: &Ctx, reference: &str, json: bool, take: bool) -> Result<i32> {
     if take {
-        let (code, displaced) = super::claims::takeover_stale(ctx, reference)?;
+        let (code, previous_owner) = super::claims::takeover_abandoned(ctx, reference)?;
         if code != 0 {
             return Ok(code);
         }
-        let displaced = displaced.context("stale takeover did not record a displaced claim")?;
+        let previous_owner =
+            previous_owner.context("abandoned takeover did not capture the previous owner")?;
         let store = ctx.store()?;
         let change_id = store.resolve_change(reference)?;
         let (_, state) = ctx.load_state(&store, &change_id)?;
@@ -45,7 +46,7 @@ pub fn rescue(ctx: &Ctx, reference: &str, json: bool, take: bool) -> Result<i32>
             &state.slug,
             &format!(
                 "rescued change {change_id} from {} via {}/{}",
-                displaced.actor, displaced.harness, displaced.session
+                previous_owner.actor, previous_owner.harness, previous_owner.session
             ),
         );
     }

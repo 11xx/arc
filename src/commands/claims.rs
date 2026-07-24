@@ -2,6 +2,7 @@
 //! `stage --claim` only composes their acquisition and progress intent.
 
 use super::*;
+use crate::state::ClaimIdentity;
 
 /// Select and claim one ready change while holding the repository graph lock.
 /// Competing `take` calls therefore cannot observe and claim the same winner.
@@ -104,14 +105,23 @@ pub fn claim(
     Ok(code)
 }
 
-pub(crate) fn takeover_stale(ctx: &Ctx, reference: &str) -> Result<(i32, Option<DisplacedClaim>)> {
-    claim_inner(ctx, reference, None, Vec::new(), ClaimMode::RequireStale)
+pub(crate) fn takeover_abandoned(
+    ctx: &Ctx,
+    reference: &str,
+) -> Result<(i32, Option<ClaimIdentity>)> {
+    claim_inner(
+        ctx,
+        reference,
+        None,
+        Vec::new(),
+        ClaimMode::RequireAbandoned,
+    )
 }
 
 #[derive(Clone, Copy)]
 enum ClaimMode {
     Standard { takeover: bool },
-    RequireStale,
+    RequireAbandoned,
 }
 
 fn claim_inner(
@@ -120,7 +130,7 @@ fn claim_inner(
     ttl: Option<String>,
     stage_budgets: Vec<String>,
     mode: ClaimMode,
-) -> Result<(i32, Option<DisplacedClaim>)> {
+) -> Result<(i32, Option<ClaimIdentity>)> {
     let owner = command_identity(ctx)?;
     let ttl_seconds = ttl
         .as_deref()
@@ -141,6 +151,7 @@ fn claim_inner(
     if state.is_closed() {
         bail!("change {change_id} is closed");
     }
+    let mut previous_owner = None;
     let displaced = if let Some(existing) = &state.claim {
         let timing = state::claim_timing_at(existing, now);
         if timing.active && existing.owner != owner {
@@ -154,6 +165,7 @@ fn claim_inner(
                 eprintln!("--takeover would displace this stale claim");
                 return Ok((8, None));
             }
+            previous_owner = Some(existing.owner.clone());
             Some(DisplacedClaim {
                 claim_id: existing.claim_id.clone(),
                 actor: existing.owner.actor.clone(),
@@ -161,14 +173,24 @@ fn claim_inner(
                 session: existing.owner.session.clone(),
                 stage: timing.stage,
             })
-        } else if matches!(mode, ClaimMode::RequireStale) {
-            eprintln!("rescue --take requires an active stale claim owned by another identity");
+        } else if matches!(mode, ClaimMode::RequireAbandoned)
+            && existing.owner != owner
+            && timing.expired
+        {
+            previous_owner = Some(existing.owner.clone());
+            None
+        } else if matches!(mode, ClaimMode::RequireAbandoned) {
+            eprintln!(
+                "rescue --take requires a claim owned by another identity that is stale or expired"
+            );
             return Ok((8, None));
         } else {
             None
         }
-    } else if matches!(mode, ClaimMode::RequireStale) {
-        eprintln!("rescue --take requires an active stale claim owned by another identity");
+    } else if matches!(mode, ClaimMode::RequireAbandoned) {
+        eprintln!(
+            "rescue --take requires a claim owned by another identity that is stale or expired"
+        );
         return Ok((8, None));
     } else {
         None
@@ -206,7 +228,7 @@ fn claim_inner(
         println!("claimed: {change_id} for {ttl_seconds}s");
         println!("event: {}", event.event_id);
     }
-    Ok((0, displaced))
+    Ok((0, previous_owner))
 }
 
 pub fn release_claim(ctx: &Ctx, reference: &str) -> Result<i32> {

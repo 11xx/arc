@@ -111,6 +111,37 @@ fn take_transfers_a_stale_claim_and_records_displaced_owner() {
 }
 
 #[test]
+fn take_claims_an_expired_foreign_claim_without_recording_displacement() {
+    let repo = Repo::new();
+    let (change_id, worktree) = begin(&repo, "expired-rescue");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "dead actor")
+        .env("ARC_HARNESS", "dead-harness")
+        .env("ARC_SESSION", "dead-session")
+        .args(["claim", "expired-rescue", "--ttl", "1s"])
+        .assert()
+        .success();
+    age_event(&repo, &change_id, "claim-set", 5);
+
+    repo.arc(&worktree)
+        .args(["rescue", "--take"])
+        .assert()
+        .success();
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&worktree).arg("status"))).unwrap();
+    assert_eq!(status["claim"]["owner"]["session"], "session-a");
+    let claims = stdout(repo.arc(&worktree).args([
+        "events",
+        "--change",
+        "expired-rescue",
+        "--type",
+        "claim-set",
+    ]));
+    let takeover: serde_json::Value = serde_json::from_str(claims.lines().last().unwrap()).unwrap();
+    assert!(takeover.get("displaced").is_none());
+}
+
+#[test]
 fn take_refuses_a_fresh_claim_without_changing_owner() {
     let repo = Repo::new();
     let (_, worktree) = begin(&repo, "refuse-rescue");
