@@ -589,6 +589,10 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             "brief-recorded",
             title.clone().unwrap_or_else(|| "brief".into()),
         ),
+        Payload::ChangelogRecorded { section, body } => (
+            "changelog-recorded",
+            format!("{}: {}", section.as_str(), first_line(body)),
+        ),
         Payload::PatchsetAdded {
             patchset_id, head, ..
         } => (

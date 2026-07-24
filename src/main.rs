@@ -20,7 +20,8 @@ use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use commands::{AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{
-    DispositionStatus, MessageSeverity, MessageType, Severity, Side, Verdict, VerifyResult,
+    ChangelogSection, DispositionStatus, MessageSeverity, MessageType, Severity, Side, Verdict,
+    VerifyResult,
 };
 
 /// Change, review, and integration state over plain Git for agentic
@@ -269,6 +270,25 @@ enum Cmd {
         /// sol-low, sol-high, reviewer, discussion)
         #[arg(long)]
         scaffold: Option<String>,
+    },
+    /// Record, read, or project changelog entries
+    Changelog {
+        change: Option<String>,
+        /// Keep a Changelog section for a newly recorded entry
+        #[arg(long, value_enum)]
+        section: Option<ChangelogSection>,
+        /// Read a new entry body from a file ('-' for stdin)
+        #[arg(long)]
+        body_file: Option<String>,
+        /// Emit a read result as JSON
+        #[arg(long)]
+        json: bool,
+        /// Override the latest-tag release boundary
+        #[arg(long)]
+        since: Option<String>,
+        /// Replace the generated [Unreleased] block in CHANGELOG.md
+        #[arg(long)]
+        write: bool,
     },
     /// Append a structured cross-change announcement (never policy input)
     Message {
@@ -1038,6 +1058,23 @@ fn run(cli: Cli) -> Result<i32> {
             let change = infer(change.as_deref())?;
             commands::brief(&ctx, role, &change, body_file, title, version, scaffold)
         }
+        Cmd::Changelog {
+            change,
+            section,
+            body_file,
+            json,
+            since,
+            write,
+        } => commands::changelog(
+            &ctx,
+            role,
+            change.as_deref(),
+            section,
+            body_file,
+            json,
+            since,
+            write,
+        ),
         Cmd::Message {
             change,
             message_type,

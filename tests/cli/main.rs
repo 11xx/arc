@@ -1,5 +1,6 @@
 mod briefs;
 mod bundle;
+mod changelog;
 mod claims;
 mod common;
 mod context;

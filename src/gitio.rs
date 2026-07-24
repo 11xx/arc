@@ -111,6 +111,21 @@ pub fn head(cwd: &Path) -> Result<String> {
     rev_parse(cwd, "HEAD")
 }
 
+pub fn latest_tag(cwd: &Path) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args(["describe", "--tags", "--abbrev=0"])
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+    if output.status.success() {
+        Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Resolve HEAD when the repository has one. An unborn repository is a
 /// normal probe condition, while other Git failures remain errors.
 pub fn head_if_present(cwd: &Path) -> Result<Option<String>> {
