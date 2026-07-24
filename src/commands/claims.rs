@@ -375,8 +375,10 @@ fn parse_stage_budget(raw: &str) -> Result<(StageBudget, u64)> {
         "spec-read" => StageBudget::SpecRead,
         "implementing" => StageBudget::Implementing,
         "verifying" => StageBudget::Verifying,
+        "blocked-on" => StageBudget::BlockedOn,
+        "snapshotted" => StageBudget::Snapshotted,
         _ => bail!(
-            "unknown stage budget {name:?}; expected launch, started, spec-read, implementing, or verifying"
+            "unknown stage budget {name:?}; expected launch, started, spec-read, implementing, verifying, blocked-on, or snapshotted"
         ),
     };
     Ok((key, parse_duration(duration)?))
@@ -389,6 +391,8 @@ fn default_stage_budgets() -> BTreeMap<StageBudget, u64> {
         (StageBudget::SpecRead, 2 * 60),
         (StageBudget::Implementing, 30 * 60),
         (StageBudget::Verifying, 15 * 60),
+        (StageBudget::BlockedOn, 15 * 60),
+        (StageBudget::Snapshotted, 60 * 60),
     ]
     .into_iter()
     .collect()

@@ -309,6 +309,8 @@ pub enum StageBudget {
     SpecRead,
     Implementing,
     Verifying,
+    BlockedOn,
+    Snapshotted,
 }
 
 impl StageBudget {
@@ -319,6 +321,8 @@ impl StageBudget {
             StageBudget::SpecRead => "spec-read",
             StageBudget::Implementing => "implementing",
             StageBudget::Verifying => "verifying",
+            StageBudget::BlockedOn => "blocked-on",
+            StageBudget::Snapshotted => "snapshotted",
         }
     }
 }
@@ -346,13 +350,14 @@ impl ClaimStage {
         }
     }
 
-    pub fn budget_key(self) -> Option<StageBudget> {
+    pub fn budget_key(self) -> StageBudget {
         match self {
-            ClaimStage::Started => Some(StageBudget::Started),
-            ClaimStage::SpecRead => Some(StageBudget::SpecRead),
-            ClaimStage::Implementing => Some(StageBudget::Implementing),
-            ClaimStage::Verifying => Some(StageBudget::Verifying),
-            ClaimStage::BlockedOn | ClaimStage::Snapshotted => None,
+            ClaimStage::Started => StageBudget::Started,
+            ClaimStage::SpecRead => StageBudget::SpecRead,
+            ClaimStage::Implementing => StageBudget::Implementing,
+            ClaimStage::Verifying => StageBudget::Verifying,
+            ClaimStage::BlockedOn => StageBudget::BlockedOn,
+            ClaimStage::Snapshotted => StageBudget::Snapshotted,
         }
     }
 }

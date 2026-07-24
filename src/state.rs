@@ -95,10 +95,10 @@ pub fn claim_timing_at(claim: &ClaimState, now: DateTime<Utc>) -> ClaimTiming {
         Some(progress) => (
             progress.stage.as_str().to_string(),
             progress.changed_at,
-            progress
-                .stage
-                .budget_key()
-                .and_then(|key| claim.stage_budgets.get(&key).copied()),
+            claim
+                .stage_budgets
+                .get(&progress.stage.budget_key())
+                .copied(),
         ),
         None => (
             StageBudget::Launch.as_str().to_string(),
