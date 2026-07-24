@@ -400,10 +400,13 @@ pub fn resume(
     println!("\n## Worktree\n");
     println!(
         "- Branch head: {}",
-        if status.report.head_matches_latest_patchset {
-            "matches the newest approved/snapshotted head"
-        } else {
-            "has moved past the newest patchset"
+        match (
+            status.report.latest_patchset.as_ref(),
+            status.report.head_matches_latest_patchset,
+        ) {
+            (None, _) => "no patchset recorded",
+            (Some(_), true) => "matches the newest approved/snapshotted head",
+            (Some(_), false) => "has moved past the newest patchset",
         }
     );
     println!(

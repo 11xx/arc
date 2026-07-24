@@ -115,6 +115,16 @@ fn resume_reports_worktree_state_and_head_drift() {
     let repo = Repo::new();
     stdout(repo.arc(&repo.root).args(["begin", "resume-worktree"]));
     let worktree = repo.home.join(".worktrees/repo-resume-worktree");
+
+    repo.arc(&worktree)
+        .arg("resume")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Branch head: no patchset recorded",
+        ))
+        .stdout(predicate::str::contains("Uncommitted edits: absent"));
+
     repo.commit(&worktree, "first.txt", "first\n", "test: add first");
     stdout(repo.arc(&worktree).arg("snapshot"));
 

@@ -51,10 +51,13 @@ pub fn markdown(
     let _ = writeln!(
         w,
         "- Worktree state: head {}; uncommitted edits {}",
-        if report.head_matches_latest_patchset {
-            "matches newest approved/snapshotted head"
-        } else {
-            "has moved past newest patchset"
+        match (
+            report.latest_patchset.as_ref(),
+            report.head_matches_latest_patchset,
+        ) {
+            (None, _) => "has no recorded patchset",
+            (Some(_), true) => "matches newest approved/snapshotted head",
+            (Some(_), false) => "has moved past newest patchset",
         },
         match report.worktree_dirty {
             Some(true) => "present",
