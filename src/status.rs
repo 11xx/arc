@@ -201,6 +201,7 @@ pub struct StatusReport {
     pub latest_patchset: Option<crate::state::Patchset>,
     pub brief: Option<BriefStatus>,
     pub head_matches_latest_patchset: bool,
+    pub worktree_dirty: Option<bool>,
     pub verdict: Option<VerdictStatus>,
     pub findings: Vec<FindingSummary>,
     pub open_blocking_findings: Vec<String>,
@@ -275,6 +276,17 @@ pub fn build_at(
         (Some(head), Some(target)) => gitio::merge_conflicts(cwd, target, head)?,
         _ => false,
     };
+    let worktree_dirty = if state.is_closed() {
+        None
+    } else {
+        state
+            .worktree
+            .as_deref()
+            .map(Path::new)
+            .filter(|worktree| worktree.exists())
+            .map(|worktree| gitio::is_clean(worktree).map(|clean| !clean))
+            .transpose()?
+    };
     build_report(
         state,
         gates,
@@ -284,6 +296,7 @@ pub fn build_at(
         now,
         current_head,
         needs_rebase,
+        worktree_dirty,
     )
 }
 
@@ -310,6 +323,7 @@ pub fn build_as_of(
         now,
         current_head,
         false,
+        None,
     )
 }
 
@@ -323,6 +337,7 @@ fn build_report(
     now: DateTime<Utc>,
     current_head: Option<String>,
     needs_rebase: bool,
+    worktree_dirty: Option<bool>,
 ) -> Result<StatusReport> {
     let latest_patchset = state.latest_patchset().cloned();
     let head_matches = match (&current_head, &latest_patchset) {
@@ -568,6 +583,7 @@ fn build_report(
             recorded_at: brief.ts,
         }),
         head_matches_latest_patchset: head_matches,
+        worktree_dirty,
         verdict,
         findings,
         open_blocking_findings: open_blocking,

@@ -72,6 +72,35 @@ fn review_snapshot_approval_is_immediately_valid_for_the_fresh_patchset() {
 }
 
 #[test]
+fn status_reports_clean_dirty_and_missing_worktrees() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "worktree-state"]));
+    let worktree = repo.home.join(".worktrees/repo-worktree-state");
+
+    let clean: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&worktree).args(["status", "--json"]))).unwrap();
+    assert_eq!(clean["worktree_dirty"], false);
+
+    fs::write(worktree.join("untracked.txt"), "uncommitted\n").unwrap();
+    let dirty: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&worktree).args(["status", "--json"]))).unwrap();
+    assert_eq!(dirty["worktree_dirty"], true);
+
+    fs::remove_file(worktree.join("untracked.txt")).unwrap();
+    git(
+        &repo.root,
+        &["worktree", "remove", worktree.to_str().unwrap()],
+    );
+    let missing: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "status",
+        "worktree-state",
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(missing["worktree_dirty"], serde_json::Value::Null);
+}
+
+#[test]
 fn done_records_stage_patchset_and_evidence_then_returns_check_code() {
     let repo = Repo::new();
     commit_composed_gates(&repo);

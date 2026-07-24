@@ -111,6 +111,45 @@ fn resume_json_uses_arc_resume_schema() {
 }
 
 #[test]
+fn resume_reports_worktree_state_and_head_drift() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "resume-worktree"]));
+    let worktree = repo.home.join(".worktrees/repo-resume-worktree");
+
+    repo.arc(&worktree)
+        .arg("resume")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Branch head: no patchset recorded",
+        ))
+        .stdout(predicate::str::contains("Uncommitted edits: absent"));
+
+    repo.commit(&worktree, "first.txt", "first\n", "test: add first");
+    stdout(repo.arc(&worktree).arg("snapshot"));
+
+    repo.arc(&worktree)
+        .arg("resume")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("## Worktree"))
+        .stdout(predicate::str::contains(
+            "Branch head: matches the newest approved/snapshotted head",
+        ))
+        .stdout(predicate::str::contains("Uncommitted edits: absent"));
+
+    repo.commit(&worktree, "second.txt", "second\n", "test: add second");
+    repo.arc(&worktree)
+        .arg("resume")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Branch head: has moved past the newest patchset",
+        ))
+        .stdout(predicate::str::contains("Uncommitted edits: absent"));
+}
+
+#[test]
 fn prompt_is_empty_outside_change_worktree() {
     let repo = Repo::new();
     repo.arc(&repo.root)
