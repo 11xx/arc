@@ -1,6 +1,8 @@
 use super::*;
+use crate::session_store::{self, Turn};
 use crate::state::{Brief, ClaimIdentity};
 use crate::status::{FindingSummary, GateStatus};
+use std::path::PathBuf;
 
 const RESCUE_SCHEMA: &str = "arc-rescue/1";
 
@@ -18,6 +20,8 @@ struct RescueOutput<'a> {
     head_state: &'static str,
     claim: Option<RescueClaim<'a>>,
     abandoned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transcript: Option<RescueTranscript>,
 }
 
 #[derive(Serialize)]
@@ -30,8 +34,24 @@ struct RescueClaim<'a> {
     age_seconds: u64,
 }
 
-pub fn rescue(ctx: &Ctx, reference: &str, json: bool, take: bool) -> Result<i32> {
-    if take {
+#[derive(Serialize)]
+struct RescueTranscript {
+    path: Option<PathBuf>,
+    count: usize,
+    turns: Vec<Turn>,
+    #[serde(skip)]
+    unavailable: Option<&'static str>,
+}
+
+pub fn rescue(
+    ctx: &Ctx,
+    reference: &str,
+    json: bool,
+    take: bool,
+    include_transcript: bool,
+    tail: usize,
+) -> Result<i32> {
+    let rescued_owner = if take {
         let (code, previous_owner) = super::claims::takeover_abandoned(ctx, reference)?;
         if code != 0 {
             return Ok(code);
@@ -49,7 +69,10 @@ pub fn rescue(ctx: &Ctx, reference: &str, json: bool, take: bool) -> Result<i32>
                 previous_owner.actor, previous_owner.harness, previous_owner.session
             ),
         );
-    }
+        Some(previous_owner)
+    } else {
+        None
+    };
 
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
@@ -99,6 +122,41 @@ pub fn rescue(ctx: &Ctx, reference: &str, json: bool, take: bool) -> Result<i32>
         (Some(_), true) => "matches",
         (Some(_), false) => "moved-past",
     };
+    let transcript_owner = rescued_owner
+        .as_ref()
+        .or_else(|| state.claim.as_ref().map(|claim| &claim.owner));
+    let transcript = include_transcript
+        .then(|| {
+            let identity_known = transcript_owner.is_some_and(|owner| {
+                !owner.session.trim().is_empty()
+                    && matches!(
+                        owner.harness.as_str(),
+                        "claude" | "codex" | "opencode" | "pi"
+                    )
+            });
+            let path = transcript_owner
+                .filter(|_| identity_known)
+                .and_then(|owner| session_store::transcript_path(&owner.harness, &owner.session));
+            let turns = path
+                .as_deref()
+                .map(|path| session_store::operator_turns(path, tail))
+                .transpose()?
+                .unwrap_or_default();
+            let unavailable = if !identity_known {
+                Some("claim harness/session is unknown")
+            } else if path.is_none() {
+                Some("no transcript file exists for the claimed session")
+            } else {
+                None
+            };
+            Ok::<_, anyhow::Error>(RescueTranscript {
+                path,
+                count: turns.len(),
+                turns,
+                unavailable,
+            })
+        })
+        .transpose()?;
     let output = RescueOutput {
         schema: RESCUE_SCHEMA,
         change_id: &state.change_id,
@@ -112,6 +170,7 @@ pub fn rescue(ctx: &Ctx, reference: &str, json: bool, take: bool) -> Result<i32>
         head_state,
         claim,
         abandoned,
+        transcript,
     };
 
     if json {
@@ -152,6 +211,27 @@ fn render(output: &RescueOutput<'_>) {
             println!("- Last activity: {}s ago", claim.age_seconds);
         }
         None => println!("- (unclaimed)"),
+    }
+    if let Some(transcript) = &output.transcript {
+        println!("\n## Transcript\n");
+        match &transcript.path {
+            Some(path) => {
+                println!("- Path: `{}`", path.display());
+                println!("- Turns: {}", transcript.count);
+                for turn in &transcript.turns {
+                    match &turn.ts {
+                        Some(ts) => println!("\n### {} ({ts})\n\n{}", turn.role, turn.text),
+                        None => println!("\n### {}\n\n{}", turn.role, turn.text),
+                    }
+                }
+            }
+            None => println!(
+                "- Unavailable: {}",
+                transcript
+                    .unavailable
+                    .expect("missing transcript should carry an explanation")
+            ),
+        }
     }
     println!("\n## Worktree\n");
     println!(
