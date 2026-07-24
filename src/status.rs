@@ -138,6 +138,7 @@ pub struct ClaimStatus {
     pub snapshot_author: Option<GitIdentity>,
     pub snapshot_committer: Option<GitIdentity>,
     pub snapshot_claim_actor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance_mismatch: Option<bool>,
 }
 
@@ -221,6 +222,8 @@ pub struct StatusReport {
     /// events that are not on the `forge` profile. Additive in arc-status/5.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forge: Option<crate::forge::ForgeStatus>,
+    #[serde(skip)]
+    pub provenance_check_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -341,7 +344,17 @@ fn build_report(
     needs_rebase: bool,
     worktree_dirty: Option<bool>,
 ) -> Result<StatusReport> {
-    let latest_patchset = state.latest_patchset().cloned();
+    let provenance_mode = policy.provenance.git_identity;
+    let provenance_check_enabled = provenance_mode == crate::config::GitIdentityMode::PerActor;
+    let mut latest_patchset = state.latest_patchset().cloned();
+    if let Some(patchset) = &mut latest_patchset {
+        patchset.provenance_mismatch = state::provenance_mismatch(
+            provenance_mode,
+            patchset.claim_actor.as_deref(),
+            patchset.author.as_ref(),
+            patchset.committer.as_ref(),
+        );
+    }
     let head_matches = match (&current_head, &latest_patchset) {
         (Some(h), Some(p)) => *h == p.head,
         _ => false,
@@ -576,7 +589,7 @@ fn build_report(
         messages: state.messages.iter().map(MessageStatus::from).collect(),
         blocks,
         blocker_status: dependency_status,
-        claim: claim_status_at(state, now),
+        claim: claim_status_at(state, now, provenance_mode),
         current_head,
         needs_rebase,
         latest_patchset,
@@ -601,10 +614,15 @@ fn build_report(
         blockers,
         closure: state.closure.clone(),
         forge,
+        provenance_check_enabled,
     })
 }
 
-pub fn claim_status_at(state: &ChangeState, now: DateTime<Utc>) -> Option<ClaimStatus> {
+pub fn claim_status_at(
+    state: &ChangeState,
+    now: DateTime<Utc>,
+    provenance_mode: crate::config::GitIdentityMode,
+) -> Option<ClaimStatus> {
     let claim = state.claim.as_ref()?;
     let timing = state::claim_timing_at(claim, now);
     let snapshot = state.latest_patchset().filter(|patchset| {
@@ -633,7 +651,14 @@ pub fn claim_status_at(state: &ChangeState, now: DateTime<Utc>) -> Option<ClaimS
         snapshot_author: snapshot.and_then(|patchset| patchset.author.clone()),
         snapshot_committer: snapshot.and_then(|patchset| patchset.committer.clone()),
         snapshot_claim_actor: snapshot.and_then(|patchset| patchset.claim_actor.clone()),
-        provenance_mismatch: snapshot.and_then(|patchset| patchset.provenance_mismatch),
+        provenance_mismatch: snapshot.and_then(|patchset| {
+            state::provenance_mismatch(
+                provenance_mode,
+                patchset.claim_actor.as_deref(),
+                patchset.author.as_ref(),
+                patchset.committer.as_ref(),
+            )
+        }),
     })
 }
 

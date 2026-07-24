@@ -17,6 +17,7 @@ pub struct Patchset {
     pub committer: Option<GitIdentity>,
     pub claim_id: Option<String>,
     pub claim_actor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance_mismatch: Option<bool>,
     pub created_at: DateTime<Utc>,
 }
@@ -512,19 +513,12 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 }
                 let author = git_identity(author_name, author_email);
                 let committer = git_identity(committer_name, committer_email);
-                // Compare the claim actor against the recorded git identities by
-                // name or email. Email only adds match conditions, so it can cut
-                // a name-only false positive but never invent a new mismatch.
-                let provenance_mismatch =
-                    claim_actor
-                        .as_ref()
-                        .zip(author.as_ref())
-                        .map(|(actor, author)| {
-                            !(identity_matches(author, actor)
-                                || committer
-                                    .as_ref()
-                                    .is_some_and(|committer| identity_matches(committer, actor)))
-                        });
+                let provenance_mismatch = provenance_mismatch(
+                    crate::config::GitIdentityMode::PerActor,
+                    claim_actor.as_deref(),
+                    author.as_ref(),
+                    committer.as_ref(),
+                );
                 state.patchsets.push(Patchset {
                     id: patchset_id.clone(),
                     actor: ev.actor.clone(),
@@ -877,6 +871,23 @@ fn git_identity(name: &Option<String>, email: &Option<String>) -> Option<GitIden
 /// A claim actor matches a git identity when it equals its name or email.
 fn identity_matches(identity: &GitIdentity, actor: &str) -> bool {
     identity.name == actor || identity.email.as_deref() == Some(actor)
+}
+
+/// Compare a claim actor with Git identities only when the project assigns a
+/// distinct Git identity to each actor.
+pub(crate) fn provenance_mismatch(
+    mode: crate::config::GitIdentityMode,
+    claim_actor: Option<&str>,
+    author: Option<&GitIdentity>,
+    committer: Option<&GitIdentity>,
+) -> Option<bool> {
+    if mode == crate::config::GitIdentityMode::Shared {
+        return None;
+    }
+    claim_actor.zip(author).map(|(actor, author)| {
+        !(identity_matches(author, actor)
+            || committer.is_some_and(|committer| identity_matches(committer, actor)))
+    })
 }
 
 #[cfg(test)]

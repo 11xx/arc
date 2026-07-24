@@ -28,6 +28,9 @@ pub struct ConfigFile {
     /// Identity behavior toggles.
     #[serde(default)]
     pub identity: IdentityBehavior,
+    /// Git provenance behavior.
+    #[serde(default)]
+    pub provenance: ProvenanceBehavior,
 }
 
 /// The `[journal]` table: opt-in behavior for the advisory journal.
@@ -47,6 +50,22 @@ pub struct IdentityBehavior {
     /// back to detecting them from the running harness's own session store.
     #[serde(default)]
     pub detect: bool,
+}
+
+/// The `[provenance]` table: how ledger actors relate to Git identities.
+#[derive(Debug, Default, Deserialize)]
+pub struct ProvenanceBehavior {
+    /// Whether each actor has its own Git identity or commits use a shared one.
+    #[serde(default)]
+    pub git_identity: GitIdentityMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GitIdentityMode {
+    #[default]
+    PerActor,
+    Shared,
 }
 
 /// The `[journals]` table: a `dirs` map from repository-root path to journal
@@ -72,6 +91,8 @@ pub struct Config {
     pub journal_auto_log: bool,
     /// Whether omitted identity fields fall back to ambient detection.
     pub identity_detect: bool,
+    /// How ledger actors relate to Git author and committer identities.
+    pub provenance_git_identity: GitIdentityMode,
 }
 
 fn home() -> Result<PathBuf> {
@@ -131,6 +152,7 @@ pub fn load() -> Result<Config> {
         journal_dirs: file.journals.dirs,
         journal_auto_log: file.journal.auto_log,
         identity_detect: file.identity.detect,
+        provenance_git_identity: file.provenance.git_identity,
     })
 }
 

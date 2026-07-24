@@ -170,8 +170,8 @@ pub fn markdown(
                     w,
                     "  - claim actor at snapshot: {}{}",
                     actor,
-                    if p.provenance_mismatch == Some(true) {
-                        " — **PROVENANCE MISMATCH**"
+                    if report.provenance_check_enabled && p.provenance_mismatch == Some(true) {
+                        " — **PROVENANCE MISMATCH**; use `--on-behalf-of` for a delegated snapshot or set `[provenance] git_identity = \"shared\"` when the project uses one committing identity"
                     } else {
                         ""
                     }
