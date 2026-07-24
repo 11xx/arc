@@ -576,6 +576,7 @@ mod tests {
             opened_at: Utc::now(),
             patchsets: Vec::new(),
             briefs: Vec::new(),
+            changelog: None,
             messages: Vec::new(),
             comments: Vec::new(),
             findings: BTreeMap::new(),

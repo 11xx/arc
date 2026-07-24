@@ -15,6 +15,7 @@ struct ProjectedEntry<'a> {
     body: &'a str,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn changelog(
     ctx: &Ctx,
     role: ExecutionRole,
