@@ -741,6 +741,112 @@ fn journal_open_and_consume_track_actionable_items() {
 }
 
 #[test]
+fn journal_feature_requests_have_their_own_open_queue_tier() {
+    let repo = Repo::new();
+    let body_path = repo.home.join("body.md");
+    fs::write(&body_path, "# Requested capability\n\nbody\n").unwrap();
+    let body = body_path.to_str().unwrap();
+
+    let mut names = std::collections::HashMap::new();
+    for (topic, kind) in [
+        ("primary-work", "todo"),
+        ("deferred-work", "later"),
+        ("requested-capability", "feature-request"),
+    ] {
+        let out = stdout(repo.arc(&repo.root).args([
+            "journal",
+            "note",
+            topic,
+            "--kind",
+            kind,
+            "--body-file",
+            body,
+        ]));
+        names.insert(
+            kind,
+            PathBuf::from(out.trim())
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+    }
+
+    assert!(
+        names["feature-request"].ends_with("-requested-capability-feature-request.md"),
+        "{:?}",
+        names["feature-request"]
+    );
+    let event = journal_events(&journal_dir(&repo))
+        .into_iter()
+        .find(|event| event["file"] == names["feature-request"])
+        .unwrap();
+    assert_eq!(event["event"], "note");
+
+    let crafted_name = "20260101T000000Z-capability-with-hyphens-feature-request.md";
+    fs::write(journal_dir(&repo).join(crafted_name), "# Crafted request\n").unwrap();
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    let open_section = text.find("open items (newest first):").unwrap();
+    let later_section = text.find("later items (newest first):").unwrap();
+    let feature_section = text.find("feature requests (newest first):").unwrap();
+    assert!(
+        open_section < later_section && later_section < feature_section,
+        "{text}"
+    );
+    assert!(text[open_section..later_section].contains("primary-work"));
+    assert!(text[later_section..feature_section].contains("deferred-work"));
+    assert!(text[feature_section..].contains("requested-capability"));
+    assert!(text[feature_section..].contains("capability-with-hyphens"));
+
+    let json: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["journal", "open", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(json["open"][0]["file"], names["todo"]);
+    assert_eq!(json["later"][0]["file"], names["later"]);
+    let feature_requests = json["feature_requests"].as_array().unwrap();
+    assert_eq!(feature_requests.len(), 2);
+    assert_eq!(feature_requests[0]["file"], names["feature-request"]);
+    assert_eq!(feature_requests[1]["file"], crafted_name);
+    assert_eq!(feature_requests[1]["topic"], "capability-with-hyphens");
+
+    let filtered: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "journal",
+        "open",
+        "--kind",
+        "feature-request",
+        "--json",
+    ])))
+    .unwrap();
+    assert!(filtered["open"].as_array().unwrap().is_empty());
+    assert!(filtered["later"].as_array().unwrap().is_empty());
+    assert_eq!(filtered["feature_requests"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        filtered["feature_requests"][0]["file"],
+        names["feature-request"]
+    );
+
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &names["feature-request"]])
+        .assert()
+        .success();
+    let after = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(!after.contains("requested-capability"), "{after}");
+    assert!(after.contains("capability-with-hyphens"), "{after}");
+    let doctor = repo
+        .arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let doctor = String::from_utf8(doctor).unwrap();
+    assert!(!doctor.contains("unknown-artifact-kind"), "{doctor}");
+}
+
+#[test]
 fn journal_archive_moves_records_and_catchup_reads_cold_with_hot_journal() {
     let repo = Repo::new();
     let hot = journal_dir(&repo);
