@@ -829,13 +829,33 @@ fn run(cli: Cli) -> Result<i32> {
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "unknown".into()),
     };
+    let mut harness = cli.harness;
+    let mut session = cli.session;
+    // An empty --model is the same as absent.
+    let mut model = cli.model.filter(|value| !value.trim().is_empty());
+    if config::load()
+        .map(|config| config.identity_detect)
+        .unwrap_or(false)
+    {
+        if let Some(detected) = context::detect_identity() {
+            if harness
+                .as_deref()
+                .is_none_or(|explicit| explicit == detected.harness)
+            {
+                harness.get_or_insert(detected.harness);
+                session.get_or_insert(detected.session);
+                if model.is_none() {
+                    model = detected.model;
+                }
+            }
+        }
+    }
     let ctx = Ctx {
         cwd,
         actor,
-        harness: cli.harness,
-        session: cli.session,
-        // An empty --model is the same as absent.
-        model: cli.model.filter(|value| !value.trim().is_empty()),
+        harness,
+        session,
+        model,
         // An empty --on-behalf-of is the same as absent: today's behavior.
         on_behalf_of: cli.on_behalf_of.filter(|value| !value.trim().is_empty()),
     };

@@ -25,6 +25,9 @@ pub struct ConfigFile {
     /// directory map).
     #[serde(default)]
     pub journal: JournalBehavior,
+    /// Identity behavior toggles.
+    #[serde(default)]
+    pub identity: IdentityBehavior,
 }
 
 /// The `[journal]` table: opt-in behavior for the advisory journal.
@@ -35,6 +38,15 @@ pub struct JournalBehavior {
     /// warning, never a command failure.
     #[serde(default)]
     pub auto_log: bool,
+}
+
+/// The `[identity]` table: opt-in ambient identity resolution.
+#[derive(Debug, Default, Deserialize)]
+pub struct IdentityBehavior {
+    /// When true, a command with no explicit harness/session/model falls
+    /// back to detecting them from the running harness's own session store.
+    #[serde(default)]
+    pub detect: bool,
 }
 
 /// The `[journals]` table: a `dirs` map from repository-root path to journal
@@ -58,6 +70,8 @@ pub struct Config {
     pub journal_dirs: BTreeMap<String, String>,
     /// Whether lifecycle transitions append advisory journal log events.
     pub journal_auto_log: bool,
+    /// Whether omitted identity fields fall back to ambient detection.
+    pub identity_detect: bool,
 }
 
 fn home() -> Result<PathBuf> {
@@ -116,6 +130,7 @@ pub fn load() -> Result<Config> {
         data_root,
         journal_dirs: file.journals.dirs,
         journal_auto_log: file.journal.auto_log,
+        identity_detect: file.identity.detect,
     })
 }
 

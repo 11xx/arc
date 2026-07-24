@@ -527,6 +527,11 @@ session ID: `--actor/--harness/--session` or `ARC_ACTOR`, `ARC_HARNESS`,
 `release-claim`, and `stage` require nonempty harness and session values;
 identity is the actor + harness + session tuple.
 
+Explicit identity always wins. Set `[identity] detect = true` in the config
+file to fill omitted harness, session, and model values from the running
+harness's own session store. Detection is off by default and does not mix a
+detected session into a different explicitly selected harness.
+
 Journal events additionally record the acting model via `--model` or
 `ARC_MODEL`, a `model-slug[#effort]` string (e.g. `kimi-k3#high`,
 `gpt-5.6-sol#low`) matching the `Assisted-by: Harness:Model#Effort` grammar.
