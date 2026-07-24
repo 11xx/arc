@@ -109,6 +109,8 @@ arc diff radio-refill-fix --findings         # native patchset diff + anchor dri
 arc diff radio-refill-fix --stat -- src/ops.py
 arc diff radio-refill-fix --since-approved   # re-review only the new patchset delta
 arc findings radio-refill-fix --format sarif # export open findings to tooling
+arc review radio-refill-fix                  # verdict history, findings, and next action
+arc review radio-refill-fix --json           # the versioned arc-review/1 view
 arc review radio-refill-fix --snapshot --verdict changes-requested \
   --body "The concurrency path still permits a stale commit." --findings-json - <<'EOF'
 [{"blocking": true, "severity": "major", "summary": "stale batch can commit",

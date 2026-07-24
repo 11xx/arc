@@ -18,6 +18,7 @@ mod paths;
 mod provenance;
 mod release;
 mod rescue;
+mod review;
 mod roles;
 mod skip_green;
 mod stats;

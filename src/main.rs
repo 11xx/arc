@@ -534,11 +534,14 @@ enum Cmd {
         #[arg(long)]
         evidence: Option<String>,
     },
-    /// Record a verdict, optionally with a findings batch, in one atomic event
+    /// Read review state, or record a verdict with an optional findings batch
     Review {
         change: Option<String>,
         #[arg(long, value_enum)]
-        verdict: Verdict,
+        verdict: Option<Verdict>,
+        /// Emit the read view as a versioned JSON object
+        #[arg(long, conflicts_with = "verdict")]
+        json: bool,
         #[command(flatten)]
         body: BodyOpts,
         /// Snapshot the clean change worktree before recording the verdict
@@ -820,7 +823,9 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
             _ => None,
         },
         ExecutionRole::Implementer => match command {
-            Cmd::Review { .. } => Some(("review", "reviewer or lead")),
+            Cmd::Review {
+                verdict: Some(_), ..
+            } => Some(("review", "reviewer or lead")),
             Cmd::Resolve { .. } => Some(("resolve", "reviewer or lead")),
             Cmd::Hold { .. } => Some(("hold", "reviewer or lead")),
             Cmd::ReleaseHold { .. } => Some(("release-hold", "reviewer or lead")),
@@ -1310,25 +1315,38 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Review {
             change,
             verdict,
+            json,
             body,
             snapshot,
             patchset,
             findings_json,
         } => {
             let change = infer(change.as_deref())?;
-            let body = match (&body.body, &body.body_file) {
-                (None, None) => None,
-                _ => Some(commands::read_body(body.body, body.body_file)?),
-            };
-            commands::review(
-                &ctx,
-                &change,
-                verdict,
-                body,
-                patchset,
-                findings_json,
-                snapshot,
-            )?;
+            if let Some(verdict) = verdict {
+                let body = match (&body.body, &body.body_file) {
+                    (None, None) => None,
+                    _ => Some(commands::read_body(body.body, body.body_file)?),
+                };
+                commands::review(
+                    &ctx,
+                    &change,
+                    verdict,
+                    body,
+                    patchset,
+                    findings_json,
+                    snapshot,
+                )?;
+            } else {
+                if body.body.is_some()
+                    || body.body_file.is_some()
+                    || snapshot
+                    || patchset.is_some()
+                    || findings_json.is_some()
+                {
+                    anyhow::bail!("--verdict is required for the review write path");
+                }
+                commands::read_review(&ctx, &change, json)?;
+            }
             Ok(0)
         }
         Cmd::Verify {

@@ -3,6 +3,150 @@
 //! the verdict binds to the exact committed head the reviewer inspected.
 
 use super::*;
+use crate::state::{FindingState, VerdictEntry};
+use crate::status::{FindingSummary, StatusReport};
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct ReviewView<'a> {
+    schema: &'static str,
+    change_id: &'a str,
+    verdicts: Vec<ReviewVerdict<'a>>,
+    open_findings: Vec<&'a FindingSummary>,
+    has_valid_approval: bool,
+    next_action: &'a str,
+}
+
+#[derive(Serialize)]
+struct ReviewVerdict<'a> {
+    verdict: Verdict,
+    patchset_id: &'a str,
+    actor: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_behalf_of: Option<&'a str>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    valid_for_current_head: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<&'a str>,
+    findings: Vec<&'a FindingState>,
+}
+
+pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
+    let store = ctx.store()?;
+    let (_, state) = ctx.load_state(&store, reference)?;
+    let report = ctx.report(&store, &state)?;
+    let view = ReviewView {
+        schema: "arc-review/1",
+        change_id: &state.change_id,
+        verdicts: state
+            .verdicts
+            .iter()
+            .rev()
+            .map(|verdict| review_verdict(verdict, &state, &report))
+            .collect(),
+        open_findings: report
+            .findings
+            .iter()
+            .filter(|finding| finding.status == "open")
+            .collect(),
+        has_valid_approval: report
+            .verdict
+            .as_ref()
+            .is_some_and(|verdict| verdict.valid_for_current_head),
+        next_action: &report.next_action,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+        return Ok(());
+    }
+
+    println!("# Review: {}", state.change_id);
+    println!("\n## Verdict history\n");
+    if view.verdicts.is_empty() {
+        println!("No verdicts recorded.");
+    }
+    for verdict in &view.verdicts {
+        let reviewer = verdict
+            .on_behalf_of
+            .map(|subject| format!("{} (for {subject})", verdict.actor))
+            .unwrap_or_else(|| verdict.actor.to_string());
+        println!(
+            "- {:?} on `{}` by {} at {} — {}",
+            verdict.verdict,
+            verdict.patchset_id,
+            reviewer,
+            verdict.created_at.to_rfc3339(),
+            if verdict.valid_for_current_head {
+                "valid for current head"
+            } else {
+                "STALE for current head"
+            }
+        );
+        if let Some(body) = verdict.body {
+            println!("  {body}");
+        }
+        for finding in &verdict.findings {
+            println!(
+                "  - `{}` [{}{:?}] {}",
+                finding.id,
+                if finding.blocking { "blocking/" } else { "" },
+                finding.severity,
+                finding.summary
+            );
+        }
+    }
+
+    println!("\n## Open findings\n");
+    if view.open_findings.is_empty() {
+        println!("No open findings.");
+    } else {
+        for finding in &view.open_findings {
+            println!(
+                "- `{}` [{}{:?}] {}",
+                finding.id,
+                if finding.blocking { "blocking/" } else { "" },
+                finding.severity,
+                finding.summary
+            );
+        }
+    }
+    println!("\n## Review needed\n");
+    println!(
+        "Valid approval for current head: {}",
+        if view.has_valid_approval { "yes" } else { "no" }
+    );
+    println!("Next action: {}", view.next_action);
+    Ok(())
+}
+
+fn review_verdict<'a>(
+    verdict: &'a VerdictEntry,
+    state: &'a ChangeState,
+    report: &StatusReport,
+) -> ReviewVerdict<'a> {
+    let valid_for_current_head = state.latest_verdict().is_some_and(|latest| {
+        latest.event_id == verdict.event_id
+            && report
+                .verdict
+                .as_ref()
+                .is_some_and(|current| current.valid_for_current_head)
+    });
+    ReviewVerdict {
+        verdict: verdict.verdict,
+        patchset_id: &verdict.patchset_id,
+        actor: &verdict.actor,
+        on_behalf_of: verdict.on_behalf_of.as_deref(),
+        created_at: verdict.created_at,
+        valid_for_current_head,
+        body: verdict.body.as_deref(),
+        findings: state
+            .findings
+            .values()
+            .filter(|finding| finding.origin_event == verdict.event_id)
+            .collect(),
+    }
+}
 
 pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> {
     let store = ctx.store()?;
