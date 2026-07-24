@@ -12,6 +12,85 @@ fn commit_composed_gates(repo: &Repo) {
 }
 
 #[test]
+fn verdict_body_round_trips_through_show_status_and_log() {
+    let repo = Repo::new();
+    let (_change_id, wt, _head) = change_with_patchset(&repo, "review-body");
+    repo.arc(&wt)
+        .args([
+            "review",
+            "review-body",
+            "--verdict",
+            "approved",
+            "--body",
+            "The implementation preserves the required invariant.\nNo findings remain.",
+        ])
+        .assert()
+        .success();
+
+    let show = stdout(repo.arc(&wt).args(["show", "review-body"]));
+    assert!(show.contains("The implementation preserves the required invariant."));
+    assert!(show.contains("No findings remain."));
+
+    let status = json_stdout(repo.arc(&wt).args(["status", "review-body"]));
+    assert_eq!(
+        status["verdict"]["body"],
+        "The implementation preserves the required invariant.\nNo findings remain."
+    );
+
+    let log = stdout(repo.arc(&wt).args(["log", "review-body"]));
+    assert!(log.contains(
+        "verdict-recorded  approved ps-01 — The implementation preserves the required invariant."
+    ));
+}
+
+#[test]
+fn verdict_without_body_omits_the_field() {
+    let repo = Repo::new();
+    let (change_id, wt, _head) = change_with_patchset(&repo, "review-no-body");
+    repo.arc(&wt)
+        .args(["review", "review-no-body", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&wt).args(["status", "review-no-body"]));
+    assert!(!status["verdict"].as_object().unwrap().contains_key("body"));
+
+    let verdict = fs::read_dir(event_dir(&repo, &change_id))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find_map(|path| {
+            let event: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            (event["event_type"] == "verdict-recorded").then_some(event)
+        })
+        .unwrap();
+    assert!(!verdict.as_object().unwrap().contains_key("body"));
+}
+
+#[test]
+fn verdict_body_and_body_file_conflict() {
+    let repo = Repo::new();
+    let (_change_id, wt, _head) = change_with_patchset(&repo, "review-body-conflict");
+    repo.arc(&wt)
+        .write_stdin("file body")
+        .args([
+            "review",
+            "review-body-conflict",
+            "--verdict",
+            "approved",
+            "--body",
+            "inline body",
+            "--body-file",
+            "-",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--body and --body-file are mutually exclusive",
+        ));
+}
+
+#[test]
 fn snapshot_verify_records_patchset_and_selected_or_all_evidence_at_the_same_head() {
     for (slug, selection) in [
         ("snap-gates", vec!["--gate", "alpha", "--gate", "beta"]),

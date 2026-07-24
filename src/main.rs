@@ -538,6 +538,8 @@ enum Cmd {
         change: Option<String>,
         #[arg(long, value_enum)]
         verdict: Verdict,
+        #[command(flatten)]
+        body: BodyOpts,
         /// Snapshot the clean change worktree before recording the verdict
         #[arg(long)]
         snapshot: bool,
@@ -1292,12 +1294,25 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Review {
             change,
             verdict,
+            body,
             snapshot,
             patchset,
             findings_json,
         } => {
             let change = infer(change.as_deref())?;
-            commands::review(&ctx, &change, verdict, patchset, findings_json, snapshot)?;
+            let body = match (&body.body, &body.body_file) {
+                (None, None) => None,
+                _ => Some(commands::read_body(body.body, body.body_file)?),
+            };
+            commands::review(
+                &ctx,
+                &change,
+                verdict,
+                body,
+                patchset,
+                findings_json,
+                snapshot,
+            )?;
             Ok(0)
         }
         Cmd::Verify {

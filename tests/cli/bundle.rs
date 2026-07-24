@@ -135,6 +135,53 @@ fn old_patchset_events_without_identity_fields_remain_readable() {
 }
 
 #[test]
+fn verdict_event_without_body_remains_readable() {
+    let source = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&source, "old-verdict");
+    source
+        .arc(&worktree)
+        .args([
+            "review",
+            "old-verdict",
+            "--verdict",
+            "approved",
+            "--body",
+            "temporary body",
+        ])
+        .assert()
+        .success();
+    rewrite_event(&source, &change_id, "verdict-recorded", |event| {
+        assert!(event.as_object_mut().unwrap().remove("body").is_some());
+    });
+
+    let bundle = source.home.join("old-verdict.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            "old-verdict",
+            "--output",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let status = json_stdout(
+        destination
+            .arc(&destination.root)
+            .args(["status", &change_id]),
+    );
+    assert_eq!(status["verdict"]["verdict"], "approved");
+    assert!(!status["verdict"].as_object().unwrap().contains_key("body"));
+}
+
+#[test]
 fn claim_events_without_generation_fields_are_rejected() {
     let repo = Repo::new();
     let opened =

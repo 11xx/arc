@@ -213,6 +213,9 @@ pub fn markdown(
         if let Some(reason) = &report.approval_rejection_reason {
             let _ = writeln!(w, "- {reason}");
         }
+        if let Some(body) = &v.body {
+            let _ = writeln!(w, "\n{body}");
+        }
     }
 
     if !state.findings.is_empty() {
@@ -628,11 +631,16 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
         Payload::VerdictRecorded {
             patchset_id,
             verdict,
+            body,
             ..
-        } => (
-            "verdict-recorded",
-            format!("{} {patchset_id}", format!("{verdict:?}").to_lowercase()),
-        ),
+        } => {
+            let mut summary = format!("{} {patchset_id}", format!("{verdict:?}").to_lowercase());
+            if let Some(body) = body {
+                summary.push_str(" — ");
+                summary.push_str(&first_line(body));
+            }
+            ("verdict-recorded", summary)
+        }
         Payload::VerificationRecorded { gate, result, .. } => (
             "verification-recorded",
             format!(
