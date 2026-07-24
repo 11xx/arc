@@ -101,3 +101,79 @@ fn diff_between_and_since_approved_render_only_the_review_delta() {
         .success()
         .stdout(predicates::str::contains("+second"));
 }
+
+#[test]
+fn snapshot_after_rebase_records_the_current_merge_base() {
+    let repo = Repo::new();
+    let original_base = repo.head(&repo.root);
+    stdout(repo.arc(&repo.root).args(["begin", "rebased-base"]));
+    let wt = repo.home.join(".worktrees/repo-rebased-base");
+    repo.commit(&wt, "change.txt", "change\n", "feat: add change");
+    repo.commit(
+        &repo.root,
+        "upstream.txt",
+        "upstream\n",
+        "feat: advance target",
+    );
+    git(&wt, &["rebase", "master"]);
+    stdout(repo.arc(&wt).args(["snapshot", "rebased-base"]));
+
+    let state: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&wt).args([
+        "show",
+        "rebased-base",
+        "--json",
+    ])))
+    .unwrap();
+    let patchset = state["patchsets"].as_array().unwrap().last().unwrap();
+    let merge_base = git_out(&wt, &["merge-base", "HEAD", "master"]);
+    assert_eq!(patchset["base"], merge_base);
+    assert_eq!(patchset["merge_base"], merge_base);
+    assert_ne!(patchset["base"], original_base);
+}
+
+#[test]
+fn diff_after_rebase_renders_only_the_change() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "rebased-diff"]));
+    let wt = repo.home.join(".worktrees/repo-rebased-diff");
+    repo.commit(&wt, "change.txt", "change\n", "feat: add change");
+    repo.commit(
+        &repo.root,
+        "upstream.txt",
+        "upstream\n",
+        "feat: advance target",
+    );
+    git(&wt, &["rebase", "master"]);
+    stdout(repo.arc(&wt).args(["snapshot", "rebased-diff"]));
+
+    repo.arc(&wt)
+        .args(["diff", "rebased-diff"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("change.txt"))
+        .stdout(predicates::str::contains("upstream.txt").not());
+}
+
+#[test]
+fn snapshot_without_rebase_keeps_the_original_base_behavior() {
+    let repo = Repo::new();
+    let original_base = repo.head(&repo.root);
+    stdout(repo.arc(&repo.root).args(["begin", "steady-base"]));
+    let wt = repo.home.join(".worktrees/repo-steady-base");
+    repo.commit(&wt, "change.txt", "change\n", "feat: add change");
+    stdout(repo.arc(&wt).args(["snapshot", "steady-base"]));
+
+    let state: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&wt).args([
+        "show",
+        "steady-base",
+        "--json",
+    ])))
+    .unwrap();
+    let patchset = state["patchsets"].as_array().unwrap().last().unwrap();
+    assert_eq!(patchset["base"], original_base);
+    repo.arc(&wt)
+        .args(["diff", "steady-base"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("change.txt"));
+}

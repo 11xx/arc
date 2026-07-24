@@ -14,9 +14,11 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
         bail!("change {change_id} is closed");
     }
     let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
+    let target_head = gitio::branch_head(&ctx.cwd, &st.target_branch)?;
+    let merge_base = gitio::merge_base(&ctx.cwd, &target_head, &head)?;
     let base_rev = match base {
         Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
-        None => st.base.clone(),
+        None => merge_base.clone(),
     };
     if let Some(p) = st.latest_patchset() {
         if p.head == head && p.base == base_rev {
@@ -24,10 +26,6 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
             return Ok(());
         }
     }
-    let target_head = gitio::branch_head(&ctx.cwd, &st.target_branch).ok();
-    let merge_base = target_head
-        .as_deref()
-        .and_then(|t| gitio::merge_base(&ctx.cwd, t, &head).ok());
     let identity = gitio::commit_identity(&ctx.cwd, &head)?;
     let now = chrono::Utc::now();
     let snapshot_claim = st
@@ -43,7 +41,7 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
             patchset_id: patchset_id.clone(),
             base: base_rev,
             head: head.clone(),
-            merge_base,
+            merge_base: Some(merge_base),
             author_name: Some(identity.author_name),
             author_email: Some(identity.author_email),
             committer_name: Some(identity.committer_name),
