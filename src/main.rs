@@ -606,6 +606,15 @@ enum Cmd {
         #[arg(long, conflicts_with = "get")]
         fields: Option<String>,
     },
+    /// Recover work abandoned by another session
+    Rescue {
+        change: Option<String>,
+        #[arg(long)]
+        json: bool,
+        /// Take over an active stale claim
+        #[arg(long)]
+        take: bool,
+    },
     /// Print one stable statusline summary for the current change
     Prompt { change: Option<String> },
     /// Set an integration hold
@@ -1377,6 +1386,10 @@ fn run(cli: Cli) -> Result<i32> {
                 fields.as_deref(),
             )?;
             Ok(0)
+        }
+        Cmd::Rescue { change, json, take } => {
+            let change = infer(change.as_deref())?;
+            commands::rescue(&ctx, &change, json, take)
         }
         Cmd::Prompt { change } => {
             context::prompt(&ctx, change.as_deref())?;

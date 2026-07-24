@@ -12,6 +12,7 @@ mod hooks;
 mod lifecycle;
 mod messaging;
 mod observe;
+mod rescue;
 mod review;
 pub(crate) mod scaffold;
 mod stats;
@@ -51,6 +52,7 @@ pub use lifecycle::{
 pub(crate) use lifecycle::{print_projected, status_output};
 pub use messaging::{inbox, message, messages};
 pub use observe::{events, watch};
+pub use rescue::rescue;
 pub use review::{comment, finding, reply, resolve, review};
 use serde::Serialize;
 pub use stats::{stats, StatsSelection};
