@@ -961,5 +961,95 @@ fn snapshot_captures_git_identities_and_renders_claim_actor_mismatch() {
         .args(["show", "snapshot-who"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("PROVENANCE MISMATCH"));
+        .stdout(predicates::str::contains("PROVENANCE MISMATCH"))
+        .stdout(predicates::str::contains("--on-behalf-of"));
+}
+
+#[test]
+fn shared_git_identity_omits_inapplicable_provenance_mismatch() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[provenance]\ngit_identity = \"shared\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy: share git identity"]);
+    stdout(repo.arc(&repo.root).args(["begin", "snapshot-shared"]));
+    let worktree = repo.home.join(".worktrees/repo-snapshot-shared");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Executor Person")
+        .args(["claim", "snapshot-shared"])
+        .assert()
+        .success();
+    repo.commit(&worktree, "who.txt", "who\n", "feat: record identity");
+    repo.arc(&worktree)
+        .args(["snapshot", "snapshot-shared"])
+        .assert()
+        .success();
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "snapshot-shared"]),
+    ))
+    .unwrap();
+    assert!(status["latest_patchset"]
+        .as_object()
+        .unwrap()
+        .get("provenance_mismatch")
+        .is_none());
+    assert!(status["claim"]
+        .as_object()
+        .unwrap()
+        .get("provenance_mismatch")
+        .is_none());
+    repo.arc(&repo.root)
+        .args(["show", "snapshot-shared"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("PROVENANCE MISMATCH").not());
+}
+
+#[test]
+fn matching_git_identity_is_unaffected_by_shared_mode() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[provenance]\ngit_identity = \"shared\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy: share git identity"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "snapshot-shared-match"]),
+    );
+    let worktree = repo.home.join(".worktrees/repo-snapshot-shared-match");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Tester")
+        .args(["claim", "snapshot-shared-match"])
+        .assert()
+        .success();
+    repo.commit(&worktree, "who.txt", "who\n", "feat: record identity");
+    repo.arc(&worktree)
+        .args(["snapshot", "snapshot-shared-match"])
+        .assert()
+        .success();
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["status", "snapshot-shared-match"]),
+    ))
+    .unwrap();
+    assert!(status["latest_patchset"]
+        .as_object()
+        .unwrap()
+        .get("provenance_mismatch")
+        .is_none());
+    assert!(status["claim"]
+        .as_object()
+        .unwrap()
+        .get("provenance_mismatch")
+        .is_none());
 }

@@ -69,9 +69,10 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   CI checks. Attested verification records no exit code or duration because arc
   did not run the command.
 - **Snapshots record Git author and committer identity.** When a claim is live,
-  the snapshot also records its generation and actor at snapshot time and
-  reports an author mismatch as provenance evidence, never as an integration
-  blocker.
+  the snapshot also records its generation and actor at snapshot time. Projects
+  using per-actor Git identities report a mismatch as provenance evidence,
+  never as an integration blocker; projects using one shared committing
+  identity can explicitly disable that inapplicable comparison.
 - **`arc integrate`** performs the merge only when, atomically checked:
   the head equals the approved patchset head, no blocking finding is
   open, every required gate is green at that exact head, and no hold is
@@ -585,6 +586,9 @@ arc treats `~/.local/ai/` as the AI data home (relocate it with
 ```toml
 worktrees_dir = "~/.worktrees"   # where change worktrees are created
 data_root = "~/.local/ai/arc-data"  # optional: ledgers at <data_root>/<repo-path-slug>/
+
+[provenance]
+git_identity = "per-actor"         # default; use "shared" for one Git identity
 ```
 
 Environment variables override the file: `ARC_WORKTREES_DIR`,
@@ -596,6 +600,12 @@ repositories — useful for sandboxing: point the paths somewhere
 isolated and arc never writes outside them (worktrees, ledger) beyond
 ordinary Git operations in the repository itself. `arc config` prints
 the resolved paths as JSON.
+
+The committed `.arc/policy.toml` may set the same `[provenance]` table for a
+repository. `per-actor` compares the claim actor with the snapshot author and
+committer; `shared` omits `provenance_mismatch` because that comparison does
+not apply. A delegated snapshot can instead declare its subject with
+`--on-behalf-of`.
 
 Before starting an executor in a sandbox, run `arc config --check-writable`.
 It probes the ledger root, lock, event-path, and Git-ref writes without adding
