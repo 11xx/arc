@@ -515,6 +515,7 @@ mod tests {
                 Payload::VerdictRecorded {
                     patchset_id: "ps-01".into(),
                     verdict: Verdict::Approved,
+                    body: None,
                     findings: Vec::new(),
                 },
             ),

@@ -234,6 +234,8 @@ pub struct BriefStatus {
 pub struct VerdictStatus {
     pub verdict: Verdict,
     pub patchset_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
     pub actor: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_behalf_of: Option<String>,
@@ -365,6 +367,7 @@ fn build_report(
         VerdictStatus {
             verdict: v.verdict,
             patchset_id: v.patchset_id.clone(),
+            body: v.body.clone(),
             actor: v.actor.clone(),
             on_behalf_of: v.on_behalf_of.clone(),
             valid_for_current_head: valid,

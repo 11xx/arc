@@ -168,6 +168,8 @@ pub enum Payload {
     VerdictRecorded {
         patchset_id: String,
         verdict: Verdict,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
         /// Findings recorded atomically with the verdict (one review, one event).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         findings: Vec<InlineFinding>,

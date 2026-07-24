@@ -208,6 +208,7 @@ pub fn review(
     ctx: &Ctx,
     reference: &str,
     verdict: Verdict,
+    body: Option<String>,
     patchset: Option<String>,
     findings_json: Option<String>,
     snapshot_first: bool,
@@ -288,6 +289,7 @@ pub fn review(
         Payload::VerdictRecorded {
             patchset_id: patchset_id.clone(),
             verdict,
+            body,
             findings: inline,
         },
     );
