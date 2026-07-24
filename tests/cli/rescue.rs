@@ -10,10 +10,14 @@ fn begin(repo: &Repo, slug: &str) -> (String, PathBuf) {
 }
 
 fn claim_from_dead_session(repo: &Repo, slug: &str) {
+    claim_from_session(repo, slug, "dead-harness", "dead-session");
+}
+
+fn claim_from_session(repo: &Repo, slug: &str, harness: &str, session: &str) {
     repo.arc(&repo.root)
         .env("ARC_ACTOR", "dead actor")
-        .env("ARC_HARNESS", "dead-harness")
-        .env("ARC_SESSION", "dead-session")
+        .env("ARC_HARNESS", harness)
+        .env("ARC_SESSION", session)
         .args(["claim", slug, "--stage-budget", "launch=1s"])
         .assert()
         .success();
@@ -165,4 +169,128 @@ fn rescue_json_uses_versioned_schema() {
     let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(value["schema"], "arc-rescue/1");
+    assert!(value.get("transcript").is_none());
+}
+
+#[test]
+fn claude_transcript_returns_newest_window_oldest_first() {
+    let repo = Repo::new();
+    let session = "claude-dead-session";
+    let (_, worktree) = begin(&repo, "claude-transcript");
+    claim_from_session(&repo, "claude-transcript", "claude", session);
+    let project = repo.home.join(".claude/projects/-test-repo");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{session}.jsonl")),
+        concat!(
+            "{\"type\":\"user\",\"timestamp\":\"1\",\"message\":{\"role\":\"user\",\"content\":\"first\"}}\n",
+            "{\"type\":\"assistant\",\"timestamp\":\"2\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"intermediate\"}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"3\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"second\"}]}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"4\",\"message\":{\"role\":\"user\",\"content\":\"third\"}}\n",
+            "{\"type\":\"assistant\",\"timestamp\":\"5\",\"message\":{\"role\":\"assistant\",\"content\":\"final answer\"}}\n",
+        ),
+    )
+    .unwrap();
+
+    let output =
+        stdout(
+            repo.arc(&worktree)
+                .args(["rescue", "--transcript", "--tail", "3", "--json"]),
+        );
+    let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let turns = value["transcript"]["turns"].as_array().unwrap();
+    assert_eq!(value["transcript"]["count"], 3);
+    assert_eq!(turns[0]["text"], "second");
+    assert_eq!(turns[1]["text"], "third");
+    assert_eq!(turns[2]["text"], "final answer");
+}
+
+#[test]
+fn codex_rollout_yields_operator_turns() {
+    let repo = Repo::new();
+    let session = "codex-dead-session";
+    let (_, worktree) = begin(&repo, "codex-transcript");
+    claim_from_session(&repo, "codex-transcript", "codex", session);
+    let codex_home = repo.home.join("codex-state");
+    let day = codex_home.join("sessions/2026/07/24");
+    fs::create_dir_all(&day).unwrap();
+    fs::write(
+        day.join(format!("rollout-{session}.jsonl")),
+        concat!(
+            "{\"type\":\"response_item\",\"timestamp\":\"1\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"do the work\"}]}}\n",
+            "{\"type\":\"response_item\",\"timestamp\":\"2\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"work done\"}]}}\n",
+        ),
+    )
+    .unwrap();
+
+    let output = stdout(repo.arc(&worktree).env("CODEX_HOME", &codex_home).args([
+        "rescue",
+        "--transcript",
+        "--json",
+    ]));
+    let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["transcript"]["turns"][0]["text"], "do the work");
+    assert_eq!(value["transcript"]["turns"][1]["text"], "work done");
+}
+
+#[test]
+fn missing_transcript_is_reported_without_failure() {
+    let repo = Repo::new();
+    let (_, worktree) = begin(&repo, "missing-transcript");
+    claim_from_session(&repo, "missing-transcript", "claude", "missing-session");
+
+    repo.arc(&worktree)
+        .args(["rescue", "--transcript"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Unavailable: no transcript file exists for the claimed session",
+        ));
+}
+
+#[test]
+fn unknown_claim_identity_is_reported_without_failure() {
+    let repo = Repo::new();
+    let (_, worktree) = begin(&repo, "unknown-transcript");
+    claim_from_session(
+        &repo,
+        "unknown-transcript",
+        "unknown-harness",
+        "unknown-session",
+    );
+
+    repo.arc(&worktree)
+        .args(["rescue", "--transcript"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Unavailable: claim harness/session is unknown",
+        ));
+}
+
+#[test]
+fn malformed_transcript_lines_are_skipped() {
+    let repo = Repo::new();
+    let session = "malformed-session";
+    let (_, worktree) = begin(&repo, "malformed-transcript");
+    claim_from_session(&repo, "malformed-transcript", "claude", session);
+    let project = repo.home.join(".claude/projects/-test-repo");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{session}.jsonl")),
+        concat!(
+            "not json\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"kept\"}}\n",
+            "{\"broken\":\n",
+        ),
+    )
+    .unwrap();
+
+    let output = stdout(
+        repo.arc(&worktree)
+            .args(["rescue", "--transcript", "--json"]),
+    );
+    let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["transcript"]["count"], 1);
+    assert_eq!(value["transcript"]["turns"][0]["text"], "kept");
 }

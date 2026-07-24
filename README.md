@@ -173,6 +173,9 @@ expired foreign claim as abandoned. Rescue is read-only unless `--take` is
 given; takeover follows the same stale-claim rules as `arc claim --takeover`,
 records the displaced owner, and narrates the handover to journal auto-log.
 `--json` emits the versioned `arc-rescue/1` object.
+`--transcript [--tail N]` includes the claimed session's latest operator turns;
+arc prints what the transcript contains and performs no redaction, so the
+option is opt-in and its output should be treated as sensitive.
 
 Observe a change without scraping status views, or wait for one condition for
 shell orchestration:

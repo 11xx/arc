@@ -12,6 +12,7 @@ mod model;
 mod policy;
 mod project;
 mod render;
+mod session_store;
 mod state;
 mod status;
 mod store;
@@ -611,6 +612,12 @@ enum Cmd {
         change: Option<String>,
         #[arg(long)]
         json: bool,
+        /// Include the claimed session's sensitive transcript
+        #[arg(long)]
+        transcript: bool,
+        /// Maximum transcript turns to include
+        #[arg(long, default_value_t = 5, requires = "transcript")]
+        tail: usize,
         /// Take over an active stale claim
         #[arg(long)]
         take: bool,
@@ -1387,9 +1394,15 @@ fn run(cli: Cli) -> Result<i32> {
             )?;
             Ok(0)
         }
-        Cmd::Rescue { change, json, take } => {
+        Cmd::Rescue {
+            change,
+            json,
+            transcript,
+            tail,
+            take,
+        } => {
             let change = infer(change.as_deref())?;
-            commands::rescue(&ctx, &change, json, take)
+            commands::rescue(&ctx, &change, json, take, transcript, tail)
         }
         Cmd::Prompt { change } => {
             context::prompt(&ctx, change.as_deref())?;
