@@ -95,10 +95,10 @@ pub fn claim_timing_at(claim: &ClaimState, now: DateTime<Utc>) -> ClaimTiming {
         Some(progress) => (
             progress.stage.as_str().to_string(),
             progress.changed_at,
-            progress
-                .stage
-                .budget_key()
-                .and_then(|key| claim.stage_budgets.get(&key).copied()),
+            claim
+                .stage_budgets
+                .get(&progress.stage.budget_key())
+                .copied(),
         ),
         None => (
             StageBudget::Launch.as_str().to_string(),
@@ -529,6 +529,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 claim_id,
                 ttl_seconds,
                 stage_budgets,
+                displaced,
             } => {
                 let harness = ev
                     .harness
@@ -544,6 +545,17 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     session,
                 };
                 crate::ids::validate_id_component(claim_id)?;
+                if let Some(displaced) = displaced {
+                    crate::ids::validate_id_component(&displaced.claim_id)?;
+                    state.retired_claim_ids.insert(displaced.claim_id.clone());
+                    if state
+                        .claim
+                        .as_ref()
+                        .is_some_and(|claim| claim.claim_id == displaced.claim_id)
+                    {
+                        state.claim = None;
+                    }
+                }
                 let claim_id = claim_id.clone();
                 if state.retired_claim_ids.contains(&claim_id) {
                     continue;

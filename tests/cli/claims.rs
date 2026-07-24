@@ -64,6 +64,8 @@ fn claim_lifecycle_reports_defaults_renewal_conflict_release_and_expiry() {
     assert_eq!(status["claim"]["stage_budgets"]["spec-read"], 120);
     assert_eq!(status["claim"]["stage_budgets"]["implementing"], 60);
     assert_eq!(status["claim"]["stage_budgets"]["verifying"], 900);
+    assert_eq!(status["claim"]["stage_budgets"]["blocked-on"], 900);
+    assert_eq!(status["claim"]["stage_budgets"]["snapshotted"], 3600);
     assert_eq!(status["claim"]["active"], true);
 
     let original_claim_id = status["claim"]["claim_id"].clone();
@@ -495,7 +497,238 @@ fn stale_claims_are_time_derived_and_watch_until_stalled_reaches() {
         serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "stale-impl"]))).unwrap();
     assert_eq!(blocked["claim"]["stage"], "blocked-on");
     assert_eq!(blocked["claim"]["stale"], false);
-    assert!(blocked["claim"]["budget_seconds"].is_null());
+    assert_eq!(blocked["claim"]["budget_seconds"], 900);
+}
+
+#[test]
+fn takeover_refuses_an_active_claim_that_is_not_stale() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "takeover-fresh"]));
+    repo.arc(&repo.root)
+        .args(["claim", "takeover-fresh"])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "taker")
+        .env("ARC_HARNESS", "other")
+        .env("ARC_SESSION", "session-b")
+        .args(["claim", "takeover-fresh", "--takeover"])
+        .assert()
+        .code(8)
+        .stderr(predicates::str::contains(
+            "--takeover is unavailable because the claim is not yet stale",
+        ));
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "takeover-fresh"]),
+    ))
+    .unwrap();
+    assert_eq!(status["claim"]["owner"]["actor"], "tester");
+    assert_eq!(status["claim"]["owner"]["session"], "session-a");
+}
+
+#[test]
+fn stale_claim_conflict_names_the_explicit_takeover_path() {
+    let repo = Repo::new();
+    let opened = stdout(repo.arc(&repo.root).args(["begin", "takeover-offered"]));
+    let change_id = opened_change_id(&opened);
+    repo.arc(&repo.root)
+        .args(["claim", "takeover-offered", "--stage-budget", "launch=1s"])
+        .assert()
+        .success();
+    age_event(&repo, &change_id, "claim-set", 5);
+
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "session-b")
+        .args(["claim", "takeover-offered"])
+        .assert()
+        .code(8)
+        .stderr(predicates::str::contains(
+            "--takeover would displace this stale claim",
+        ));
+}
+
+#[test]
+fn takeover_records_and_reports_the_displaced_claim() {
+    let repo = Repo::new();
+    let opened = stdout(repo.arc(&repo.root).args(["begin", "takeover-recorded"]));
+    let change_id = opened_change_id(&opened);
+    repo.arc(&repo.root)
+        .args([
+            "claim",
+            "takeover-recorded",
+            "--stage-budget",
+            "implementing=1s",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["stage", "takeover-recorded", "implementing"])
+        .assert()
+        .success();
+    age_event(&repo, &change_id, "stage-set", 5);
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "taker")
+        .env("ARC_HARNESS", "other")
+        .env("ARC_SESSION", "session-b")
+        .args(["claim", "takeover-recorded", "--takeover"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "displaced: owner=tester harness=test session=session-a stage=implementing",
+        ));
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "takeover-recorded",
+        "--type",
+        "claim-set",
+    ]));
+    let replacement: serde_json::Value =
+        serde_json::from_str(events.lines().last().unwrap()).unwrap();
+    assert_eq!(replacement["displaced"]["actor"], "tester");
+    assert_eq!(replacement["displaced"]["harness"], "test");
+    assert_eq!(replacement["displaced"]["session"], "session-a");
+    assert_eq!(replacement["displaced"]["stage"], "implementing");
+    assert!(replacement["displaced"]["claim_id"].is_string());
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "takeover-recorded"]),
+    ))
+    .unwrap();
+    assert_eq!(status["claim"]["owner"]["actor"], "taker");
+    assert_eq!(status["claim"]["owner"]["harness"], "other");
+    assert_eq!(status["claim"]["owner"]["session"], "session-b");
+}
+
+#[test]
+fn takeover_displaces_a_stale_snapshotted_claim() {
+    let repo = Repo::new();
+    let opened = stdout(repo.arc(&repo.root).args(["begin", "takeover-snapshotted"]));
+    let change_id = opened_change_id(&opened);
+    let worktree = repo.home.join(".worktrees/repo-takeover-snapshotted");
+    repo.commit(
+        &worktree,
+        "change.txt",
+        "change\n",
+        "feat: add snapshot change",
+    );
+    repo.arc(&worktree)
+        .args([
+            "claim",
+            "takeover-snapshotted",
+            "--stage-budget",
+            "snapshotted=1s",
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["snapshot", "takeover-snapshotted"])
+        .assert()
+        .success();
+    age_event(&repo, &change_id, "patchset-added", 5);
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "taker")
+        .env("ARC_HARNESS", "other")
+        .env("ARC_SESSION", "session-b")
+        .args(["claim", "takeover-snapshotted", "--takeover"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "displaced: owner=tester harness=test session=session-a stage=snapshotted",
+        ));
+}
+
+#[test]
+fn takeover_displaces_a_stale_blocked_on_claim() {
+    let repo = Repo::new();
+    let opened = stdout(repo.arc(&repo.root).args(["begin", "takeover-blocked"]));
+    let change_id = opened_change_id(&opened);
+    repo.arc(&repo.root)
+        .args([
+            "claim",
+            "takeover-blocked",
+            "--stage-budget",
+            "blocked-on=1s",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "stage",
+            "takeover-blocked",
+            "blocked-on",
+            "--note",
+            "waiting",
+        ])
+        .assert()
+        .success();
+    age_event(&repo, &change_id, "stage-set", 5);
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "taker")
+        .env("ARC_HARNESS", "other")
+        .env("ARC_SESSION", "session-b")
+        .args(["claim", "takeover-blocked", "--takeover"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "displaced: owner=tester harness=test session=session-a stage=blocked-on",
+        ));
+}
+
+#[test]
+fn takeover_replay_has_exactly_one_live_claim_owned_by_the_taker() {
+    let repo = Repo::new();
+    let opened = stdout(repo.arc(&repo.root).args(["begin", "takeover-replay"]));
+    let change_id = opened_change_id(&opened);
+    repo.arc(&repo.root)
+        .args(["claim", "takeover-replay", "--stage-budget", "launch=1s"])
+        .assert()
+        .success();
+    age_event(&repo, &change_id, "claim-set", 5);
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "taker")
+        .env("ARC_SESSION", "session-b")
+        .args(["claim", "takeover-replay", "--takeover"])
+        .assert()
+        .success();
+
+    let replayed: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "takeover-replay"]),
+    ))
+    .unwrap();
+    assert_eq!(replayed["claim"]["owner"]["actor"], "taker");
+    assert_eq!(replayed["claim"]["owner"]["session"], "session-b");
+    assert!(replayed["claim"].is_object());
+}
+
+#[test]
+fn claim_event_without_displaced_still_deserializes() {
+    let repo = Repo::new();
+    let opened = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "claim-backward-compatible"]),
+    );
+    let change_id = opened_change_id(&opened);
+    repo.arc(&repo.root)
+        .args(["claim", "claim-backward-compatible"])
+        .assert()
+        .success();
+    rewrite_event(&repo, &change_id, "claim-set", |event| {
+        assert!(event.as_object_mut().unwrap().remove("displaced").is_none());
+    });
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["status", "claim-backward-compatible"]),
+    ))
+    .unwrap();
+    assert_eq!(status["claim"]["owner"]["actor"], "tester");
 }
 
 #[test]

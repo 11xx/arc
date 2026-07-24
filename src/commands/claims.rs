@@ -72,6 +72,7 @@ pub fn take(ctx: &Ctx, tags: Vec<String>, ttl: Option<String>, json: bool) -> Re
             claim_id: ids::new_event_id(),
             ttl_seconds,
             stage_budgets: default_stage_budgets(),
+            displaced: None,
         },
     );
     event.event_id = event_id_after(&previous_event_id)?;
@@ -91,6 +92,7 @@ pub fn claim(
     reference: &str,
     ttl: Option<String>,
     stage_budgets: Vec<String>,
+    takeover: bool,
 ) -> Result<i32> {
     let owner = command_identity(ctx)?;
     let ttl_seconds = ttl
@@ -112,17 +114,38 @@ pub fn claim(
     if state.is_closed() {
         bail!("change {change_id} is closed");
     }
-    if let Some(existing) = &state.claim {
+    let displaced = if let Some(existing) = &state.claim {
         let timing = state::claim_timing_at(existing, now);
         if timing.active && existing.owner != owner {
-            print_claim_conflict("claim is already held", existing, &timing);
-            return Ok(8);
+            if !timing.stale {
+                print_claim_conflict("claim is already held", existing, &timing);
+                eprintln!("--takeover is unavailable because the claim is not yet stale");
+                return Ok(8);
+            }
+            if !takeover {
+                print_claim_conflict("claim is already held", existing, &timing);
+                eprintln!("--takeover would displace this stale claim");
+                return Ok(8);
+            }
+            Some(DisplacedClaim {
+                claim_id: existing.claim_id.clone(),
+                actor: existing.owner.actor.clone(),
+                harness: existing.owner.harness.clone(),
+                session: existing.owner.session.clone(),
+                stage: timing.stage,
+            })
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
     let claim_id = state
         .claim
         .as_ref()
-        .filter(|claim| claim.owner == owner && state::claim_timing_at(claim, now).active)
+        .filter(|claim| {
+            displaced.is_none() && claim.owner == owner && state::claim_timing_at(claim, now).active
+        })
         .map(|claim| claim.claim_id.clone())
         .unwrap_or_else(ids::new_event_id);
 
@@ -136,9 +159,16 @@ pub fn claim(
             claim_id,
             ttl_seconds,
             stage_budgets: budgets,
+            displaced: displaced.clone(),
         },
     );
     store.append_event(&event)?;
+    if let Some(displaced) = displaced {
+        println!(
+            "displaced: owner={} harness={} session={} stage={}",
+            displaced.actor, displaced.harness, displaced.session, displaced.stage
+        );
+    }
     println!("claimed: {change_id} for {ttl_seconds}s");
     println!("event: {}", event.event_id);
     Ok(0)
@@ -230,6 +260,7 @@ pub fn stage(
                 claim_id,
                 ttl_seconds: 2 * 60 * 60,
                 stage_budgets: default_stage_budgets(),
+                displaced: None,
             },
         );
         claim_event.event_id = event_id_after(&previous_event_id)?;
@@ -344,8 +375,10 @@ fn parse_stage_budget(raw: &str) -> Result<(StageBudget, u64)> {
         "spec-read" => StageBudget::SpecRead,
         "implementing" => StageBudget::Implementing,
         "verifying" => StageBudget::Verifying,
+        "blocked-on" => StageBudget::BlockedOn,
+        "snapshotted" => StageBudget::Snapshotted,
         _ => bail!(
-            "unknown stage budget {name:?}; expected launch, started, spec-read, implementing, or verifying"
+            "unknown stage budget {name:?}; expected launch, started, spec-read, implementing, verifying, blocked-on, or snapshotted"
         ),
     };
     Ok((key, parse_duration(duration)?))
@@ -358,6 +391,8 @@ fn default_stage_budgets() -> BTreeMap<StageBudget, u64> {
         (StageBudget::SpecRead, 2 * 60),
         (StageBudget::Implementing, 30 * 60),
         (StageBudget::Verifying, 15 * 60),
+        (StageBudget::BlockedOn, 15 * 60),
+        (StageBudget::Snapshotted, 60 * 60),
     ]
     .into_iter()
     .collect()

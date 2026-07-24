@@ -294,9 +294,13 @@ pub fn parse_known_event(value: &Value) -> Result<Option<Event>> {
             claim_id,
             ttl_seconds,
             stage_budgets,
+            displaced,
         } => {
             validate_claim_identity(&event)?;
             ids::validate_id_component(claim_id)?;
+            if let Some(displaced) = displaced {
+                ids::validate_id_component(&displaced.claim_id)?;
+            }
             if *ttl_seconds == 0 {
                 bail!("claim event {} has a zero TTL", event.event_id);
             }

@@ -429,6 +429,7 @@ mod tests {
                     claim_id: "cl".into(),
                     ttl_seconds: 7200,
                     stage_budgets: Default::default(),
+                    displaced: None,
                 },
             ),
             event(
@@ -472,6 +473,7 @@ mod tests {
                     claim_id: "cl".into(),
                     ttl_seconds: 100,
                     stage_budgets: Default::default(),
+                    displaced: None,
                 },
             ),
             event(

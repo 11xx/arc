@@ -21,6 +21,7 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   uncommitted edits and whether its branch head has moved past the newest
   patchset, without changing the `arc-status/5` schema version
   (`worktree-divergence`).
+- `arc claim --takeover` explicitly displaces and records an active stale claim while preserving fresh-claim conflicts (claim-takeover).
 - `arc journal list` enumerates every live journal artifact in the hot
   directory newest-first
   (optionally `--kind`, `--json`) with consumption markers, and

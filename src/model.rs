@@ -4,6 +4,15 @@ use std::collections::BTreeMap;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DisplacedClaim {
+    pub claim_id: String,
+    pub actor: String,
+    pub harness: String,
+    pub session: String,
+    pub stage: String,
+}
+
 /// One append-only ledger entry. The envelope is common to every event;
 /// the payload is internally tagged by `event_type`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +113,8 @@ pub enum Payload {
         claim_id: String,
         ttl_seconds: u64,
         stage_budgets: BTreeMap<StageBudget, u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        displaced: Option<DisplacedClaim>,
     },
     ClaimReleased {
         claim_id: String,
@@ -298,6 +309,8 @@ pub enum StageBudget {
     SpecRead,
     Implementing,
     Verifying,
+    BlockedOn,
+    Snapshotted,
 }
 
 impl StageBudget {
@@ -308,6 +321,8 @@ impl StageBudget {
             StageBudget::SpecRead => "spec-read",
             StageBudget::Implementing => "implementing",
             StageBudget::Verifying => "verifying",
+            StageBudget::BlockedOn => "blocked-on",
+            StageBudget::Snapshotted => "snapshotted",
         }
     }
 }
@@ -335,13 +350,14 @@ impl ClaimStage {
         }
     }
 
-    pub fn budget_key(self) -> Option<StageBudget> {
+    pub fn budget_key(self) -> StageBudget {
         match self {
-            ClaimStage::Started => Some(StageBudget::Started),
-            ClaimStage::SpecRead => Some(StageBudget::SpecRead),
-            ClaimStage::Implementing => Some(StageBudget::Implementing),
-            ClaimStage::Verifying => Some(StageBudget::Verifying),
-            ClaimStage::BlockedOn | ClaimStage::Snapshotted => None,
+            ClaimStage::Started => StageBudget::Started,
+            ClaimStage::SpecRead => StageBudget::SpecRead,
+            ClaimStage::Implementing => StageBudget::Implementing,
+            ClaimStage::Verifying => StageBudget::Verifying,
+            ClaimStage::BlockedOn => StageBudget::BlockedOn,
+            ClaimStage::Snapshotted => StageBudget::Snapshotted,
         }
     }
 }
