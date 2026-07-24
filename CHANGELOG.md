@@ -44,6 +44,9 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Git hooks exit successfully without changing commit messages when `arc` is
+  unavailable on `PATH`, so managed hooks cannot block commits
+  (`hooks-path-guard`).
 - `arc journal doctor` no longer reports `discussion` artifacts as an unknown
   kind: doctor derives its known-kind set from the kind enum instead of a
   hand-maintained duplicate list (`journal-append`).

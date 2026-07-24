@@ -1,7 +1,7 @@
 //! Opt-in Git hook pack and commit↔change linkage. arc never installs hooks
 //! silently: `hooks install` is an explicit action, hook scripts are marked so
-//! `uninstall` only removes arc's own, and every hook exits 0 so it can never
-//! block a commit.
+//! `uninstall` only removes arc's own, and every hook probes for `arc` on PATH
+//! before running it and unconditionally exits 0 so it can never block a commit.
 
 use super::*;
 
@@ -10,7 +10,9 @@ const MARKER: &str = "# arc-managed hook";
 const HOOKS: [&str; 2] = ["post-commit", "prepare-commit-msg"];
 
 fn hook_script(name: &str) -> String {
-    format!("#!/bin/sh\n{MARKER}\nexec arc hook-run {name} \"$@\"\n")
+    format!(
+        "#!/bin/sh\n{MARKER}\ncommand -v arc >/dev/null 2>&1 || exit 0\narc hook-run {name} \"$@\"\nexit 0\n"
+    )
 }
 
 fn is_arc_hook(path: &Path) -> bool {
