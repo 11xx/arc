@@ -65,6 +65,28 @@ fn install_writes_both_hooks_and_status_reports_them() {
 }
 
 #[test]
+fn prepare_commit_msg_succeeds_unchanged_when_arc_is_not_on_path() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["hooks", "install"])
+        .assert()
+        .success();
+
+    let message = repo.root.join("commit-message");
+    let contents = b"known contents\n";
+    fs::write(&message, contents).unwrap();
+
+    let status = Command::new(repo.root.join(".git/hooks/prepare-commit-msg"))
+        .arg(&message)
+        .env("PATH", "")
+        .status()
+        .unwrap();
+
+    assert!(status.success());
+    assert_eq!(fs::read(message).unwrap(), contents);
+}
+
+#[test]
 fn install_refuses_foreign_hook_without_force() {
     let repo = Repo::new();
     let hooks = repo.root.join(".git/hooks");
