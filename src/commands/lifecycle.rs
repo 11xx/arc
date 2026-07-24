@@ -311,7 +311,10 @@ pub fn brief(
 ) -> Result<i32> {
     if body_file.is_some() || scaffold.is_some() {
         if role != ExecutionRole::Lead {
-            eprintln!("role refusal: {} may not brief", role.as_str());
+            eprintln!(
+                "role refusal: {} may not brief (requires lead)",
+                role.as_str()
+            );
             return Ok(9);
         }
         if version.is_some() {
