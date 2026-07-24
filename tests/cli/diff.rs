@@ -177,3 +177,24 @@ fn snapshot_without_rebase_keeps_the_original_base_behavior() {
         .success()
         .stdout(predicates::str::contains("change.txt"));
 }
+
+#[test]
+fn snapshot_succeeds_when_the_target_branch_is_missing() {
+    let repo = Repo::new();
+    let original_base = repo.head(&repo.root);
+    stdout(repo.arc(&repo.root).args(["begin", "missing-target"]));
+    let wt = repo.home.join(".worktrees/repo-missing-target");
+    repo.commit(&wt, "change.txt", "change\n", "feat: add change");
+    git(&repo.root, &["branch", "-m", "master", "renamed"]);
+    stdout(repo.arc(&wt).args(["snapshot", "missing-target"]));
+
+    let state: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&wt).args([
+        "show",
+        "missing-target",
+        "--json",
+    ])))
+    .unwrap();
+    let patchset = state["patchsets"].as_array().unwrap().last().unwrap();
+    assert_eq!(patchset["base"], original_base);
+    assert!(patchset["merge_base"].is_null());
+}

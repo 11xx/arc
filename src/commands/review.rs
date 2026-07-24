@@ -14,11 +14,12 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
         bail!("change {change_id} is closed");
     }
     let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
-    let target_head = gitio::branch_head(&ctx.cwd, &st.target_branch)?;
-    let merge_base = gitio::merge_base(&ctx.cwd, &target_head, &head)?;
+    let merge_base = gitio::branch_head(&ctx.cwd, &st.target_branch)
+        .ok()
+        .and_then(|target_head| gitio::merge_base(&ctx.cwd, &target_head, &head).ok());
     let base_rev = match base {
         Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
-        None => merge_base.clone(),
+        None => merge_base.clone().unwrap_or_else(|| st.base.clone()),
     };
     if let Some(p) = st.latest_patchset() {
         if p.head == head && p.base == base_rev {
@@ -41,7 +42,7 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
             patchset_id: patchset_id.clone(),
             base: base_rev,
             head: head.clone(),
-            merge_base: Some(merge_base),
+            merge_base,
             author_name: Some(identity.author_name),
             author_email: Some(identity.author_email),
             committer_name: Some(identity.committer_name),
