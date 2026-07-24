@@ -4,6 +4,15 @@ use std::collections::BTreeMap;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DisplacedClaim {
+    pub claim_id: String,
+    pub actor: String,
+    pub harness: String,
+    pub session: String,
+    pub stage: String,
+}
+
 /// One append-only ledger entry. The envelope is common to every event;
 /// the payload is internally tagged by `event_type`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +113,8 @@ pub enum Payload {
         claim_id: String,
         ttl_seconds: u64,
         stage_budgets: BTreeMap<StageBudget, u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        displaced: Option<DisplacedClaim>,
     },
     ClaimReleased {
         claim_id: String,

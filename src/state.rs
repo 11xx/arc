@@ -529,6 +529,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 claim_id,
                 ttl_seconds,
                 stage_budgets,
+                displaced,
             } => {
                 let harness = ev
                     .harness
@@ -544,6 +545,17 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     session,
                 };
                 crate::ids::validate_id_component(claim_id)?;
+                if let Some(displaced) = displaced {
+                    crate::ids::validate_id_component(&displaced.claim_id)?;
+                    state.retired_claim_ids.insert(displaced.claim_id.clone());
+                    if state
+                        .claim
+                        .as_ref()
+                        .is_some_and(|claim| claim.claim_id == displaced.claim_id)
+                    {
+                        state.claim = None;
+                    }
+                }
                 let claim_id = claim_id.clone();
                 if state.retired_claim_ids.contains(&claim_id) {
                     continue;

@@ -428,6 +428,9 @@ enum Cmd {
         /// Override one stage budget as <name>=<duration> (repeatable)
         #[arg(long = "stage-budget")]
         stage_budget: Vec<String>,
+        /// Explicitly displace an active stale claim
+        #[arg(long)]
+        takeover: bool,
     },
     /// Release the current advisory executor claim
     ReleaseClaim { change: Option<String> },
@@ -1158,9 +1161,10 @@ fn run(cli: Cli) -> Result<i32> {
             change,
             ttl,
             stage_budget,
+            takeover,
         } => {
             let change = infer(change.as_deref())?;
-            commands::claim(&ctx, &change, ttl, stage_budget)
+            commands::claim(&ctx, &change, ttl, stage_budget, takeover)
         }
         Cmd::ReleaseClaim { change } => {
             let change = infer(change.as_deref())?;

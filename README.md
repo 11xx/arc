@@ -243,6 +243,7 @@ Claims are advisory rather than merge locks:
 ```sh
 arc claim radio-refill-fix \
   --stage-budget launch=60s --stage-budget implementing=30m
+arc claim radio-refill-fix --takeover
 arc stage radio-refill-fix blocked-on --note "waiting for test fixture"
 arc release-claim radio-refill-fix
 ```
@@ -259,7 +260,10 @@ stage is a heartbeat: it refreshes claim activity and age-in-stage. `blocked-on`
 requires a note and is distress rather than stale;
 claim TTL still applies. `snapshotted` comes only from a real `arc snapshot`
 event and cannot be supplied to `arc stage`. An identified caller may release
-any live claim so a lead can recover stale foreign work. Every claim, release,
+any live claim so a lead can recover stale foreign work. `claim --takeover`
+explicitly replaces an active stale claim, records the displaced owner and
+stage, and refuses active claims that have not exceeded their stage budget.
+Every claim, release,
 and stage event carries its generation (snapshots carry the one observed at
 snapshot time), so imported stale events cannot clear, advance, or claim
 provenance for a replacement lease; a claim event without a generation is
