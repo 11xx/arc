@@ -43,22 +43,26 @@ backward-compatible behavior for delegated work.
 
 The verdict never comes from the model that authored the diff, and review
 effort is priced by stakes, not applied uniformly. The reviewer tiers are
-exactly **Sol high**, **Sol medium**, and **Opus high** — Sol low never
-reviews (too shallow for a verdict), Sol xhigh authors rather than reviews,
-and Opus high doubles as the reviewer fallback when Codex quota is
-exhausted. Machine form: `agent-routing models` (`[policy].review`).
+exactly **Opus 5 high**, **Sol high**, and **Sol medium** — Sol low never
+reviews (too shallow for a verdict) and Sol xhigh authors rather than
+reviews. Machine form: `agent-routing models` (`[policy].review`).
 
 | Author | Routine / docs-only | Behavior-affecting | High-stakes* |
 | --- | --- | --- | --- |
-| Fable (trusted lead) | none — its own agency suffices | Sol medium read-only skim | Sol high, mandatory |
-| Sol executor (any effort) | lead reads the diff | lead review | lead + Opus high or a second Sol high pass |
-| Opus | none | Sol medium | Sol high |
+| Opus 5 (head model) | none — its own agency suffices | Sol medium read-only skim | Sol high, mandatory |
+| Sol executor (any effort) | lead reads the diff | Opus 5 lead review | lead + a second Sol high pass |
 
 *High-stakes: data migrations, schema or breaking changes, destructive
 operations, security-sensitive surfaces.
 
+Opus 5 is the head model and therefore authors most planning and taste
+work, which makes the no-self-review rule load-bearing rather than
+ceremonial. When the Codex pool is exhausted, Opus 5 is the only reviewer
+left: routine and behavior-affecting work may proceed on its judgment, but
+a high-stakes verdict waits for the reset instead of being self-issued.
+
 Futures, listed so activation is a data update rather than a policy
-rewrite: Grok 4.5 (roughly the Opus-high band) and Kimi K3 (Fable
+rewrite: Grok 4.5 (roughly the Opus-4.8-high band) and Kimi K3 (Fable
 medium/high band on good days, variable) are reachable through the
 OpenCode subscription but stay inactive until that backend is probed and
 real benchmark rows land in the model matrix.
