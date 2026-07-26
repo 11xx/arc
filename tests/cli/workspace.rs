@@ -62,7 +62,10 @@ fn brief_scaffold_sol_low_records_the_fences() {
     assert!(brief.contains("heartbeat"), "{brief}");
     assert!(brief.contains("Acceptance probes"), "{brief}");
     assert!(brief.contains("arc verify --command"), "{brief}");
-    assert!(brief.contains("never edit a probe to make it pass"), "{brief}");
+    assert!(
+        brief.contains("never edit a probe to make it pass"),
+        "{brief}"
+    );
 }
 
 #[test]
