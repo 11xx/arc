@@ -62,6 +62,7 @@ pub struct VerifyArgs {
 }
 
 struct VerificationInput {
+    run_id: Option<String>,
     gate: Option<String>,
     command: String,
     timeout_seconds: Option<u64>,
@@ -73,6 +74,7 @@ struct VerificationInput {
 }
 
 struct CompletedVerification {
+    run_id: Option<String>,
     gate: Option<String>,
     command: String,
     revision: String,
@@ -158,41 +160,50 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             bail!("no gates declared for profile {}", st.profile);
         }
         let total = required.len();
-        // A gate is green at head when its latest evidence at the exact current
-        // commit is a pass, whether arc observed it or it was attested.
         let head = gitio::head(&ctx.cwd)?;
-        let is_green = |name: &str| {
-            skip_green
-                && st
-                    .gate_evidence_at(name, &head)
-                    .is_some_and(|evidence| evidence.result == VerifyResult::Pass)
+        let mode = if parallel {
+            VerificationRunMode::Parallel
+        } else {
+            VerificationRunMode::Sequential
         };
-        if parallel {
-            let to_run = required
-                .into_iter()
-                .filter(|(name, _)| {
-                    if is_green(name.as_str()) {
-                        println!("gate {name}: skipped (green at head)");
-                        false
-                    } else {
-                        true
-                    }
-                })
-                .collect::<Vec<_>>();
-            return verify_all_parallel(ctx, &store, &change_id, to_run, total, note);
-        }
-        let mut passed = 0;
+        let run_id =
+            start_verification_run(ctx, &store, &change_id, &head, mode, skip_green, &required)?;
+        let mut reused = Vec::new();
+        let mut to_run = Vec::new();
         for (name, gate) in required {
-            if is_green(name) {
+            let reusable = skip_green
+                .then(|| st.gate_evidence_at(name, &head))
+                .flatten()
+                .filter(|evidence| evidence.result == VerifyResult::Pass);
+            if let Some(evidence) = reusable {
                 println!("gate {name}: skipped (green at head)");
-                passed += 1;
-                continue;
+                reused.push((name.clone(), evidence.event_id.clone()));
+            } else {
+                to_run.push((name, gate));
             }
+        }
+        append_reuses(ctx, &store, &change_id, &run_id, &head, &reused)?;
+        if parallel {
+            return verify_all_parallel(
+                ctx,
+                &store,
+                &change_id,
+                to_run,
+                total,
+                reused.len(),
+                &run_id,
+                &head,
+                note,
+            );
+        }
+        let mut passed = reused.len();
+        for (name, gate) in to_run {
             let result = record_verification(
                 ctx,
                 &store,
                 &change_id,
                 VerificationInput {
+                    run_id: Some(run_id.clone()),
                     gate: Some(name.clone()),
                     command: gate.command.clone(),
                     timeout_seconds: gate.timeout,
@@ -228,6 +239,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         &store,
         &change_id,
         VerificationInput {
+            run_id: None,
             gate,
             command: cmd,
             timeout_seconds: timeout,
@@ -238,6 +250,82 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             note,
         },
     )
+}
+
+fn start_verification_run(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    revision: &str,
+    mode: VerificationRunMode,
+    skip_green: bool,
+    gates: &[(&String, &gates::Gate)],
+) -> Result<String> {
+    let _transition = store.lock_transition(change_id)?;
+    let state = state::reduce(&store.load_events(change_id)?)?;
+    if state.is_closed() {
+        bail!("change {change_id} is closed");
+    }
+    let event = ctx.event(
+        store,
+        change_id,
+        Payload::VerificationRunStarted {
+            revision: revision.to_owned(),
+            mode,
+            skip_green,
+            gates: gates
+                .iter()
+                .map(|(name, gate)| VerificationRunGate {
+                    name: (*name).clone(),
+                    command: gate.command.clone(),
+                    timeout_seconds: gate.timeout,
+                })
+                .collect(),
+        },
+    );
+    let run_id = event.event_id.clone();
+    store.append_event(&event)?;
+    Ok(run_id)
+}
+
+fn append_reuses(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    run_id: &str,
+    revision: &str,
+    reused: &[(String, String)],
+) -> Result<()> {
+    if reused.is_empty() {
+        return Ok(());
+    }
+    let _transition = store.lock_transition(change_id)?;
+    let events = store.load_events(change_id)?;
+    let state = state::reduce(&events)?;
+    if state.is_closed() {
+        bail!("change {change_id} closed while verification was running");
+    }
+    let mut previous_id = events
+        .last()
+        .context("change has no opening event")?
+        .event_id
+        .clone();
+    for (gate, evidence_event_id) in reused {
+        let mut event = ctx.event(
+            store,
+            change_id,
+            Payload::VerificationReused {
+                run_id: run_id.to_owned(),
+                gate: gate.clone(),
+                revision: revision.to_owned(),
+                evidence_event_id: evidence_event_id.clone(),
+            },
+        );
+        previous_id = event_id_after(&previous_id)?;
+        event.event_id = previous_id.clone();
+        store.append_event(&event)?;
+    }
+    Ok(())
 }
 
 pub fn snapshot_with_verify(
@@ -277,6 +365,60 @@ pub fn snapshot_with_verify(
                 note: None,
             },
         );
+    }
+    if gates.len() > 1 {
+        let unique = gates.iter().collect::<BTreeSet<_>>();
+        if unique.len() != gates.len() {
+            bail!("--gate values must be unique within one verification run");
+        }
+        let store = ctx.store()?;
+        let (change_id, _) = ctx.load_state(&store, reference)?;
+        let toplevel = gitio::toplevel(&ctx.cwd)?;
+        let declarations = gates::load(&toplevel)?;
+        let selected = gates
+            .iter()
+            .map(|name| {
+                declarations
+                    .gates
+                    .get_key_value(name)
+                    .with_context(|| format!("gate {name:?} not declared in .arc/gates.toml"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let revision = gitio::head(&ctx.cwd)?;
+        let run_id = start_verification_run(
+            ctx,
+            &store,
+            &change_id,
+            &revision,
+            VerificationRunMode::Sequential,
+            false,
+            &selected,
+        )?;
+        let total = selected.len();
+        let mut passed = 0;
+        for (name, gate) in selected {
+            let code = record_verification(
+                ctx,
+                &store,
+                &change_id,
+                VerificationInput {
+                    run_id: Some(run_id.clone()),
+                    gate: Some(name.clone()),
+                    command: gate.command.clone(),
+                    timeout_seconds: gate.timeout,
+                    attested_result: None,
+                    tested_revision: None,
+                    execution_host: None,
+                    runner: None,
+                    note: None,
+                },
+            )?;
+            if code == 0 {
+                passed += 1;
+            }
+        }
+        println!("gates: {passed}/{total} pass");
+        return Ok(if passed == total { 0 } else { 1 });
     }
     let total = gates.len();
     let mut passed = 0;
@@ -334,18 +476,18 @@ pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
     check(ctx, reference, false, false)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify_all_parallel(
     ctx: &Ctx,
     store: &Store,
     change_id: &str,
     required: Vec<(&String, &gates::Gate)>,
     total: usize,
+    skipped_green: usize,
+    run_id: &str,
+    revision: &str,
     note: Option<String>,
 ) -> Result<i32> {
-    // Gates already green at head were filtered out by the caller and counted
-    // as passing; only the remainder run here.
-    let skipped_green = total.saturating_sub(required.len());
-    let revision = gitio::head(&ctx.cwd)?;
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "unknown".into());
@@ -353,6 +495,7 @@ fn verify_all_parallel(
     let inputs = required
         .into_iter()
         .map(|(name, gate)| VerificationInput {
+            run_id: Some(run_id.to_owned()),
             gate: Some(name.clone()),
             command: gate.command.clone(),
             timeout_seconds: gate.timeout,
@@ -374,7 +517,7 @@ fn verify_all_parallel(
         .into_iter()
         .map(|input| {
             let cwd = cwd.clone();
-            let revision = revision.clone();
+            let revision = revision.to_owned();
             let hostname = hostname.clone();
             thread::spawn(move || execute_verification(input, &cwd, revision, hostname))
         })
@@ -452,6 +595,7 @@ fn execute_verification(
     hostname: String,
 ) -> Result<CompletedVerification> {
     let VerificationInput {
+        run_id,
         gate,
         command,
         timeout_seconds,
@@ -486,6 +630,7 @@ fn execute_verification(
         }
     };
     Ok(CompletedVerification {
+        run_id,
         gate,
         command,
         revision,
@@ -529,6 +674,7 @@ fn append_verifications(
             store,
             change_id,
             Payload::VerificationRecorded {
+                run_id: item.run_id,
                 gate: item.gate,
                 command: item.command,
                 revision: item.revision,

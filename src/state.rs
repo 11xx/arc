@@ -250,6 +250,7 @@ impl VerdictEntry {
 #[derive(Debug, Clone, Serialize)]
 pub struct VerificationEntry {
     pub event_id: String,
+    pub run_id: Option<String>,
     pub gate: Option<String>,
     pub command: String,
     pub revision: String,
@@ -260,6 +261,42 @@ pub struct VerificationEntry {
     pub hostname: String,
     pub runner: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VerificationRunEntry {
+    pub run_id: String,
+    pub revision: String,
+    pub mode: VerificationRunMode,
+    pub skip_green: bool,
+    pub gates: Vec<VerificationRunGate>,
+    pub terminals: Vec<VerificationRunTerminal>,
+    pub missing_gates: Vec<String>,
+    pub complete: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum VerificationRunTerminal {
+    Recorded {
+        gate: String,
+        evidence_event_id: String,
+        result: VerifyResult,
+    },
+    Reused {
+        gate: String,
+        evidence_event_id: String,
+        reuse_event_id: String,
+    },
+}
+
+impl VerificationRunTerminal {
+    fn gate(&self) -> &str {
+        match self {
+            Self::Recorded { gate, .. } | Self::Reused { gate, .. } => gate,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -325,6 +362,7 @@ pub struct ChangeState {
     pub findings: BTreeMap<String, FindingState>,
     pub verdicts: Vec<VerdictEntry>,
     pub verifications: Vec<VerificationEntry>,
+    pub verification_runs: Vec<VerificationRunEntry>,
     pub claim: Option<ClaimState>,
     #[serde(skip)]
     pub(crate) retired_claim_ids: BTreeSet<String>,
@@ -431,6 +469,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     findings: BTreeMap::new(),
                     verdicts: Vec::new(),
                     verifications: Vec::new(),
+                    verification_runs: Vec::new(),
                     claim: None,
                     retired_claim_ids: BTreeSet::new(),
                     hold: None,
@@ -822,6 +861,34 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     created_at: ev.created_at,
                 });
             }
+            Payload::VerificationRunStarted {
+                revision,
+                mode,
+                skip_green,
+                gates,
+            } => {
+                let gate_names = gates
+                    .iter()
+                    .map(|gate| gate.name.clone())
+                    .collect::<BTreeSet<_>>();
+                if gate_names.len() != gates.len() || gates.is_empty() {
+                    bail!(
+                        "verification run {} must declare a nonempty unique gate set",
+                        ev.event_id
+                    );
+                }
+                state.verification_runs.push(VerificationRunEntry {
+                    run_id: ev.event_id.clone(),
+                    revision: revision.clone(),
+                    mode: *mode,
+                    skip_green: *skip_green,
+                    gates: gates.clone(),
+                    terminals: Vec::new(),
+                    missing_gates: gates.iter().map(|gate| gate.name.clone()).collect(),
+                    complete: false,
+                    created_at: ev.created_at,
+                });
+            }
             Payload::VerificationRecorded {
                 gate,
                 command,
@@ -829,23 +896,82 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 result,
                 hostname,
                 attested,
+                run_id,
                 runner,
                 output_tail,
                 timed_out,
                 ..
-            } => state.verifications.push(VerificationEntry {
-                event_id: ev.event_id.clone(),
-                gate: gate.clone(),
-                command: command.clone(),
-                revision: revision.clone(),
-                result: *result,
-                attested: *attested,
-                output_tail: output_tail.clone(),
-                timed_out: *timed_out,
-                hostname: hostname.clone(),
-                runner: runner.clone(),
-                created_at: ev.created_at,
-            }),
+            } => {
+                if let Some(run_id) = run_id {
+                    let gate = gate.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "verification {} belongs to run {run_id} but has no gate",
+                            ev.event_id
+                        )
+                    })?;
+                    add_run_terminal(
+                        &mut state.verification_runs,
+                        run_id,
+                        revision,
+                        VerificationRunTerminal::Recorded {
+                            gate: gate.to_owned(),
+                            evidence_event_id: ev.event_id.clone(),
+                            result: *result,
+                        },
+                    )?;
+                }
+                state.verifications.push(VerificationEntry {
+                    event_id: ev.event_id.clone(),
+                    run_id: run_id.clone(),
+                    gate: gate.clone(),
+                    command: command.clone(),
+                    revision: revision.clone(),
+                    result: *result,
+                    attested: *attested,
+                    output_tail: output_tail.clone(),
+                    timed_out: *timed_out,
+                    hostname: hostname.clone(),
+                    runner: runner.clone(),
+                    created_at: ev.created_at,
+                });
+            }
+            Payload::VerificationReused {
+                run_id,
+                gate,
+                revision,
+                evidence_event_id,
+            } => {
+                let evidence = state
+                    .verifications
+                    .iter()
+                    .find(|entry| entry.event_id == *evidence_event_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "verification reuse {} references unknown or later evidence {}",
+                            ev.event_id,
+                            evidence_event_id
+                        )
+                    })?;
+                if evidence.gate.as_deref() != Some(gate)
+                    || evidence.revision != *revision
+                    || evidence.result != VerifyResult::Pass
+                {
+                    bail!(
+                        "verification reuse {} does not match passing {gate} evidence at {revision}",
+                        ev.event_id
+                    );
+                }
+                add_run_terminal(
+                    &mut state.verification_runs,
+                    run_id,
+                    revision,
+                    VerificationRunTerminal::Reused {
+                        gate: gate.clone(),
+                        evidence_event_id: evidence_event_id.clone(),
+                        reuse_event_id: ev.event_id.clone(),
+                    },
+                )?;
+            }
             Payload::HoldSet { reason } => state.hold = Some(reason.clone()),
             Payload::HoldReleased { .. } => state.hold = None,
             Payload::ChangeClosed {
@@ -973,6 +1099,44 @@ fn attach_reply(state: &mut ChangeState, reply: &Event) {
             body: body.clone(),
         });
     }
+}
+
+fn add_run_terminal(
+    runs: &mut [VerificationRunEntry],
+    run_id: &str,
+    revision: &str,
+    terminal: VerificationRunTerminal,
+) -> Result<()> {
+    let run = runs
+        .iter_mut()
+        .find(|run| run.run_id == run_id)
+        .ok_or_else(|| anyhow::anyhow!("verification references unknown or later run {run_id}"))?;
+    if run.revision != revision {
+        bail!(
+            "verification run {run_id} is at {} but terminal is at {revision}",
+            run.revision
+        );
+    }
+    let gate = terminal.gate();
+    if !run.gates.iter().any(|declared| declared.name == gate) {
+        bail!("verification run {run_id} does not declare gate {gate}");
+    }
+    if run.terminals.iter().any(|existing| existing.gate() == gate) {
+        bail!("verification run {run_id} has duplicate terminal edge for gate {gate}");
+    }
+    run.terminals.push(terminal);
+    run.missing_gates = run
+        .gates
+        .iter()
+        .filter(|declared| {
+            !run.terminals
+                .iter()
+                .any(|terminal| terminal.gate() == declared.name)
+        })
+        .map(|declared| declared.name.clone())
+        .collect();
+    run.complete = run.missing_gates.is_empty();
+    Ok(())
 }
 
 fn git_identity(name: &Option<String>, email: &Option<String>) -> Option<GitIdentity> {

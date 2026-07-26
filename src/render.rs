@@ -322,6 +322,52 @@ pub fn markdown(
         }
     }
 
+    if !state.verification_runs.is_empty() {
+        let _ = writeln!(w, "\n## Verification runs\n");
+        for run in &state.verification_runs {
+            let _ = writeln!(
+                w,
+                "### Verification run `{}` — {}\n",
+                run.run_id,
+                if run.complete {
+                    "complete"
+                } else {
+                    "incomplete"
+                }
+            );
+            let _ = writeln!(
+                w,
+                "- Revision: `{}`; mode: {:?}; skip green: {}",
+                run.revision, run.mode, run.skip_green
+            );
+            for terminal in &run.terminals {
+                match terminal {
+                    crate::state::VerificationRunTerminal::Recorded {
+                        gate,
+                        evidence_event_id,
+                        result,
+                    } => {
+                        let _ =
+                            writeln!(w, "- {gate}: observed {:?} (`{evidence_event_id}`)", result);
+                    }
+                    crate::state::VerificationRunTerminal::Reused {
+                        gate,
+                        evidence_event_id,
+                        reuse_event_id,
+                    } => {
+                        let _ = writeln!(
+                            w,
+                            "- {gate}: reused `{evidence_event_id}` (`{reuse_event_id}`)"
+                        );
+                    }
+                }
+            }
+            if !run.missing_gates.is_empty() {
+                let _ = writeln!(w, "- Missing: {}", run.missing_gates.join(", "));
+            }
+        }
+    }
+
     if !state.verifications.is_empty() {
         let _ = writeln!(w, "\n## Verifications\n");
         for v in &state.verifications {
@@ -680,6 +726,15 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             }
             ("verdict-recorded", summary)
         }
+        Payload::VerificationRunStarted {
+            mode,
+            gates,
+            skip_green,
+            ..
+        } => (
+            "verification-run-started",
+            format!("{mode:?} {} gate(s), skip-green={skip_green}", gates.len()),
+        ),
         Payload::VerificationRecorded { gate, result, .. } => (
             "verification-recorded",
             format!(
@@ -687,6 +742,14 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                 gate.as_deref().unwrap_or("-"),
                 format!("{result:?}").to_lowercase()
             ),
+        ),
+        Payload::VerificationReused {
+            gate,
+            evidence_event_id,
+            ..
+        } => (
+            "verification-reused",
+            format!("{gate} reused {evidence_event_id}"),
         ),
         Payload::HoldSet { reason } => ("hold-set", reason.clone()),
         Payload::HoldReleased { reason } => ("hold-released", reason.clone().unwrap_or_default()),

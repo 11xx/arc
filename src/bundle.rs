@@ -270,7 +270,9 @@ fn known_event_type(event_type: &str) -> bool {
             | "reply-added"
             | "disposition-recorded"
             | "verdict-recorded"
+            | "verification-run-started"
             | "verification-recorded"
+            | "verification-reused"
             | "hold-set"
             | "hold-released"
             | "change-closed"
@@ -411,7 +413,8 @@ mod tests {
     use super::*;
     use crate::forge::{ForgeCheckState, ForgePolicy, ForgePrState};
     use crate::model::{
-        Closure, DispositionStatus, MessageSeverity, MessageType, Severity, Verdict, VerifyResult,
+        Closure, DispositionStatus, MessageSeverity, MessageType, Severity, Verdict,
+        VerificationRunGate, VerificationRunMode, VerifyResult,
     };
     use serde_json::json;
 
@@ -431,7 +434,9 @@ mod tests {
             | Payload::ReplyAdded { .. }
             | Payload::DispositionRecorded { .. }
             | Payload::VerdictRecorded { .. }
+            | Payload::VerificationRunStarted { .. }
             | Payload::VerificationRecorded { .. }
+            | Payload::VerificationReused { .. }
             | Payload::HoldSet { .. }
             | Payload::HoldReleased { .. }
             | Payload::ChangeClosed { .. }
@@ -542,6 +547,16 @@ mod tests {
                 body: None,
                 findings: Vec::new(),
             },
+            Payload::VerificationRunStarted {
+                revision: "head".into(),
+                mode: VerificationRunMode::Sequential,
+                skip_green: false,
+                gates: vec![VerificationRunGate {
+                    name: "test".into(),
+                    command: "true".into(),
+                    timeout_seconds: None,
+                }],
+            },
             Payload::VerificationRecorded {
                 gate: None,
                 command: "true".into(),
@@ -553,8 +568,15 @@ mod tests {
                 timed_out: false,
                 hostname: "host".into(),
                 attested: false,
+                run_id: None,
                 runner: None,
                 note: None,
+            },
+            Payload::VerificationReused {
+                run_id: "run".into(),
+                gate: "test".into(),
+                revision: "head".into(),
+                evidence_event_id: "evidence".into(),
             },
             Payload::HoldSet {
                 reason: "reason".into(),

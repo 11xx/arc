@@ -188,6 +188,12 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         findings: Vec<InlineFinding>,
     },
+    VerificationRunStarted {
+        revision: String,
+        mode: VerificationRunMode,
+        skip_green: bool,
+        gates: Vec<VerificationRunGate>,
+    },
     VerificationRecorded {
         #[serde(skip_serializing_if = "Option::is_none")]
         gate: Option<String>,
@@ -215,12 +221,20 @@ pub enum Payload {
         /// ledgers and bundles serialize and replay byte-identically.
         #[serde(default, skip_serializing_if = "is_false")]
         attested: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
         /// Stable external runner identity for attested evidence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         runner: Option<String>,
         /// Optional free-form note recorded alongside the evidence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+    },
+    VerificationReused {
+        run_id: String,
+        gate: String,
+        revision: String,
+        evidence_event_id: String,
     },
     HoldSet {
         reason: String,
@@ -302,7 +316,9 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::FindingAdded { .. }
         | Payload::DispositionRecorded { .. }
         | Payload::VerdictRecorded { .. }
+        | Payload::VerificationRunStarted { .. }
         | Payload::VerificationRecorded { .. }
+        | Payload::VerificationReused { .. }
         | Payload::HoldSet { .. }
         | Payload::ForgeProjection { .. } => AppendPermission::OpenOnly,
         Payload::Message { .. }
@@ -545,4 +561,19 @@ pub enum Closure {
 pub enum VerifyResult {
     Pass,
     Fail,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerificationRunMode {
+    Sequential,
+    Parallel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationRunGate {
+    pub name: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
 }
