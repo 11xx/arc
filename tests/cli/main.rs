@@ -32,6 +32,11 @@ mod workspace;
 use common::Repo;
 
 #[test]
+fn doctor_groups_advice_and_ignores_closed_claims() {
+    doctor::doctor_groups_advice_and_ignores_closed_claims();
+}
+
+#[test]
 fn nested_leaf_at_top_level_suggests_its_command_path() {
     let repo = Repo::new();
     repo.arc(&repo.root)

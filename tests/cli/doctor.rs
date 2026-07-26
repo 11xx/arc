@@ -52,8 +52,7 @@ fn doctor_reports_orphaned_tmp_as_advice_without_failing() {
     assert!(temporary.is_file(), "doctor must be read-only");
 }
 
-#[test]
-fn doctor_groups_advice_and_ignores_closed_claims() {
+pub(crate) fn doctor_groups_advice_and_ignores_closed_claims() {
     let repo = Repo::new();
     let expired_claim = |slug: &str| {
         let opened = stdout(repo.arc(&repo.root).args(["begin", slug, "--no-worktree"]));
