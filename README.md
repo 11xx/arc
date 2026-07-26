@@ -700,12 +700,15 @@ an agent-authored date.
 Work waiting for a future session uses the primary actionable kinds — `todo`,
 `handoff`, `plan`, `discussion` — plus lower-priority `later` and
 `feature-request`. A feature request describes a wanted capability without
-assigning execution priority. `journal open` lists the primary queue first,
+assigning execution priority. A `decision` records a settled question as a
+terminal, non-actionable artifact. `journal open` lists the primary queue first,
 then separate later and feature-request sections, annotating each item with how
 long it has waited (for discussions, since the latest typed position; otherwise
 since creation), until an explicit
 `journal consume <filename> [--outcome done|superseded|discarded]
-[--note <text>]` retires an item with a typed consumed event. The journal is
+[--decision <decision-file>] [--note <text>]` retires an item with a typed
+consumed event. A decision link is valid only with outcome `done` and may name
+a decision from a different topic. The journal is
 append-only; consumption never edits or deletes the artifact.
 
 A `discussion` is the answer-owed actionable kind: an open debate rides the
@@ -731,8 +734,9 @@ recorded alone. `journal discussion <filename> [--json]` renders the derived
 view of one debate: its age, the stance tally (`for`/`against`/`amend` parsed
 once per actual position block, so hand-written positions count too), the
 distinct participants and reply-refs from the typed `position` events, and —
-once resolved — the outcome with a resolver-participation flag that surfaces a
-resolver who also argued a side under the same harness-native session identity.
+once resolved — the outcome, optional decision artifact, and a
+resolver-participation flag that surfaces a resolver who also argued a side
+under the same harness-native session identity.
 
 The journal and the ledger bridge in three advisory ways, none of which can
 gate the authoritative ledger. `arc begin --from-journal <artifact>` opens a

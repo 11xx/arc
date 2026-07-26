@@ -2249,6 +2249,290 @@ fn journal_note_requires_a_body_source() {
 }
 
 #[test]
+fn decision_records_without_joining_journal_open() {
+    let repo = Repo::new();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "chosen-name",
+                "--kind",
+                "decision",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Use arc\n"),
+    );
+    let file = PathBuf::from(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert!(
+        !open["open"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["file"] == file),
+        "{open}"
+    );
+}
+
+#[test]
+fn begin_from_journal_refuses_decision() {
+    let repo = Repo::new();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "chosen-name",
+                "--kind",
+                "decision",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Use arc\n"),
+    );
+    let file = PathBuf::from(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    repo.arc(&repo.root)
+        .args([
+            "begin",
+            "chosen-name",
+            "--no-worktree",
+            "--from-journal",
+            &file,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not an actionable item"));
+}
+
+#[test]
+fn consume_done_links_decision_in_discussion_resolution() {
+    let repo = Repo::new();
+    let decision = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "colors",
+                "--kind",
+                "decision",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Blue\n"),
+    );
+    let decision = PathBuf::from(decision.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let discussion = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "colors",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Which color?\n"),
+    );
+    let discussion = PathBuf::from(discussion.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "consume",
+            &discussion,
+            "--outcome",
+            "done",
+            "--decision",
+            &decision,
+        ])
+        .assert()
+        .success();
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &discussion, "--json"]),
+        );
+    assert_eq!(summary["resolution"]["decision"], decision);
+}
+
+#[test]
+fn invalid_decision_targets_leave_discussion_open() {
+    let repo = Repo::new();
+    let non_decision = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "background",
+                "--kind",
+                "note",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Context\n"),
+    );
+    let non_decision = PathBuf::from(non_decision.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let discussion = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "colors",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Which color?\n"),
+    );
+    let discussion = PathBuf::from(discussion.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    for target in [
+        "20260101T000000Z-missing-decision.md",
+        non_decision.as_str(),
+        "nested/20260101T000000Z-colors-decision.md",
+    ] {
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "consume",
+                &discussion,
+                "--outcome",
+                "done",
+                "--decision",
+                target,
+            ])
+            .assert()
+            .failure();
+        let summary = json_stdout(repo.arc(&repo.root).args([
+            "journal",
+            "discussion",
+            &discussion,
+            "--json",
+        ]));
+        assert!(summary.get("resolution").is_none(), "{summary}");
+    }
+}
+
+#[test]
+fn decision_can_resolve_discussion_with_different_topic() {
+    let repo = Repo::new();
+    let decision = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "shared-policy",
+                "--kind",
+                "decision",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Use blue everywhere\n"),
+    );
+    let decision = PathBuf::from(decision.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let discussion = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "button-color",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Which button color?\n"),
+    );
+    let discussion = PathBuf::from(discussion.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "consume",
+            &discussion,
+            "--outcome",
+            "done",
+            "--decision",
+            &decision,
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn discussion_consumed_without_decision_still_reads() {
+    let repo = Repo::new();
+    let discussion = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "colors",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Which color?\n"),
+    );
+    let discussion = PathBuf::from(discussion.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &discussion, "--outcome", "done"])
+        .assert()
+        .success();
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &discussion, "--json"]),
+        );
+    assert_eq!(summary["resolution"]["outcome"], "done");
+    assert!(summary["resolution"].get("decision").is_none(), "{summary}");
+}
+
+#[test]
 fn discussion_consume_done_records_decision_with_note() {
     let repo = Repo::new();
     let out = stdout(

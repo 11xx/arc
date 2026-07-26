@@ -16,10 +16,9 @@
 
 ## How it resolves
 
-- `arc journal consume <file> --outcome done` — decided, no code. Write a
-  companion `conclusion` artifact in the same breath and point at it with
-  `--note`; this file stays the argument record, the conclusion is the
-  citable verdict.
+- `arc journal consume <file> --outcome done --decision <decision-file>` —
+  decided, no code. The terminal `decision` artifact is the citable verdict;
+  this file stays the argument record.
 - `--outcome superseded` — the decision becomes work. Open the change with
   `arc begin --from-journal <file>` (it consumes this file as superseded
   itself).
