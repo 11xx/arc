@@ -23,6 +23,254 @@ fn finding_with_reply_target(repo: &Repo, slug: &str) -> (std::path::PathBuf, St
     (wt, event_id)
 }
 
+fn inline_findings(repo: &Repo, slug: &str) -> (std::path::PathBuf, String, Vec<String>, String) {
+    let begin = stdout(repo.arc(&repo.root).args(["begin", slug]));
+    let change_id = opened_change_id(&begin);
+    let wt = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(&wt, "reviewed.rs", "broken\n", "test: add reviewed file");
+    stdout(repo.arc(&wt).args(["snapshot", slug]));
+    let output = repo
+        .arc(&wt)
+        .args([
+            "review",
+            slug,
+            "--verdict",
+            "changes-requested",
+            "--findings-json",
+            "-",
+        ])
+        .write_stdin(
+            r#"[{"severity":"major","summary":"first"},
+                {"severity":"minor","summary":"second"}]"#,
+        )
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let output = String::from_utf8(output.stdout).unwrap();
+    let finding_ids = output
+        .lines()
+        .filter_map(|line| line.strip_prefix("finding: "))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let verdict_event = output
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_owned();
+    (wt, change_id, finding_ids, verdict_event)
+}
+
+#[test]
+fn finding_without_replies_omits_replies_member() {
+    let repo = Repo::new();
+    let (wt, _) = finding_with_reply_target(&repo, "finding-without-replies");
+    let output =
+        stdout(
+            repo.arc(&wt)
+                .args(["findings", "finding-without-replies", "--format", "json"]),
+        );
+    let findings: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(findings["findings"][0].get("replies").is_none());
+}
+
+#[test]
+fn inline_finding_can_be_replied_to_by_finding_id() {
+    let repo = Repo::new();
+    let (wt, _, finding_ids, _) = inline_findings(&repo, "inline-finding-id-reply");
+    repo.arc(&wt)
+        .args([
+            "reply",
+            "inline-finding-id-reply",
+            &finding_ids[0],
+            "--body",
+            "only the first finding",
+        ])
+        .assert()
+        .success();
+
+    let output =
+        stdout(
+            repo.arc(&wt)
+                .args(["findings", "inline-finding-id-reply", "--format", "json"]),
+        );
+    let findings: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let findings = findings["findings"].as_array().unwrap();
+    let first = findings
+        .iter()
+        .find(|finding| finding["id"] == finding_ids[0])
+        .unwrap();
+    let second = findings
+        .iter()
+        .find(|finding| finding["id"] == finding_ids[1])
+        .unwrap();
+    assert_eq!(first["replies"][0]["body"], "only the first finding");
+    assert!(second.get("replies").is_none());
+}
+
+#[test]
+fn inline_finding_prefixes_reject_ambiguity_without_writing() {
+    let repo = Repo::new();
+    let (wt, change_id, finding_ids, _) = inline_findings(&repo, "inline-finding-prefix-reply");
+    let events = event_dir(&repo, &change_id);
+    let event_count = fs::read_dir(&events).unwrap().count();
+
+    repo.arc(&wt)
+        .args([
+            "reply",
+            "inline-finding-prefix-reply",
+            "f",
+            "--body",
+            "must not be written",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous discussion event"));
+    assert_eq!(fs::read_dir(&events).unwrap().count(), event_count);
+
+    let unique_prefix_len = (1..finding_ids[0].len())
+        .find(|&len| !finding_ids[1].starts_with(&finding_ids[0][..len]))
+        .unwrap();
+    repo.arc(&wt)
+        .args([
+            "reply",
+            "inline-finding-prefix-reply",
+            &finding_ids[0][..unique_prefix_len],
+            "--body",
+            "unique prefix",
+        ])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "reply",
+            "inline-finding-prefix-reply",
+            &finding_ids[1],
+            "--body",
+            "exact id",
+        ])
+        .assert()
+        .success();
+
+    let output = stdout(repo.arc(&wt).args([
+        "findings",
+        "inline-finding-prefix-reply",
+        "--format",
+        "json",
+    ]));
+    let findings: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let findings = findings["findings"].as_array().unwrap();
+    assert_eq!(
+        findings
+            .iter()
+            .find(|finding| finding["id"] == finding_ids[0])
+            .unwrap()["replies"][0]["body"],
+        "unique prefix"
+    );
+    assert_eq!(
+        findings
+            .iter()
+            .find(|finding| finding["id"] == finding_ids[1])
+            .unwrap()["replies"][0]["body"],
+        "exact id"
+    );
+}
+
+#[test]
+fn shared_origin_event_reply_attaches_to_no_finding() {
+    let repo = Repo::new();
+    let (wt, change_id, finding_ids, verdict_event) = inline_findings(&repo, "shared-origin-reply");
+    repo.arc(&wt)
+        .args([
+            "reply",
+            "shared-origin-reply",
+            &finding_ids[0],
+            "--body",
+            "ambiguous parent",
+        ])
+        .assert()
+        .success();
+    rewrite_event(&repo, &change_id, "reply-added", |event| {
+        event["parent_event_id"] = verdict_event.clone().into();
+    });
+
+    let output =
+        stdout(
+            repo.arc(&wt)
+                .args(["findings", "shared-origin-reply", "--format", "json"]),
+        );
+    let findings: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert!(findings["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|finding| finding.get("replies").is_none()));
+}
+
+#[test]
+fn reply_replays_when_its_event_id_sorts_before_its_parent() {
+    let repo = Repo::new();
+    let begin = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "out-of-order-finding-reply"]),
+    );
+    let change_id = opened_change_id(&begin);
+    let wt = repo
+        .home
+        .join(".worktrees")
+        .join("repo-out-of-order-finding-reply");
+    let finding = stdout(repo.arc(&wt).args([
+        "finding",
+        "out-of-order-finding-reply",
+        "--summary",
+        "late parent",
+    ]));
+    let finding_event = finding
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap();
+    stdout(repo.arc(&wt).args([
+        "reply",
+        "out-of-order-finding-reply",
+        finding_event,
+        "--body",
+        "early reply",
+    ]));
+
+    let events = event_dir(&repo, &change_id);
+    for path in fs::read_dir(&events)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>()
+    {
+        let mut event: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let (event_id, parent_event_id) = match event["event_type"].as_str().unwrap() {
+            "reply-added" => ("event-1", Some("event-3")),
+            "change-opened" => ("event-2", None),
+            "finding-added" => ("event-3", None),
+            other => panic!("unexpected event type {other}"),
+        };
+        event["event_id"] = event_id.into();
+        if let Some(parent_event_id) = parent_event_id {
+            event["parent_event_id"] = parent_event_id.into();
+        }
+        fs::remove_file(&path).unwrap();
+        fs::write(
+            events.join(format!("{event_id}.json")),
+            serde_json::to_vec_pretty(&event).unwrap(),
+        )
+        .unwrap();
+    }
+
+    let output =
+        stdout(
+            repo.arc(&wt)
+                .args(["findings", "out-of-order-finding-reply", "--format", "json"]),
+        );
+    let findings: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(findings["findings"][0]["replies"][0]["body"], "early reply");
+}
+
 #[test]
 fn finding_replies_are_json_objects_in_ledger_order() {
     let repo = Repo::new();

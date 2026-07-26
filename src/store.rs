@@ -242,12 +242,13 @@ impl Store {
         }
     }
 
-    /// Resolve a finding or comment event ID exactly or by unique prefix.
+    /// Resolve a comment or finding event ID, then a finding ID, exactly or by
+    /// unique prefix.
     pub fn resolve_discussion_event(&self, change_id: &str, needle: &str) -> Result<Event> {
         ids::validate_id_component(needle)?;
-        let matches = self
-            .load_events(change_id)?
-            .into_iter()
+        let events = self.load_events(change_id)?;
+        let matches = events
+            .iter()
             .filter(|event| {
                 matches!(
                     event.payload,
@@ -257,16 +258,81 @@ impl Store {
             .filter(|event| event.event_id == needle || event.event_id.starts_with(needle))
             .collect::<Vec<_>>();
         if let Some(event) = matches.iter().find(|event| event.event_id == needle) {
-            return Ok(event.clone());
+            return Ok((*event).clone());
         }
         match matches.len() {
-            0 => bail!("no discussion event matches {needle:?}"),
-            1 => Ok(matches.into_iter().next().expect("one match")),
+            0 => {}
+            1 => return Ok(matches[0].clone()),
             _ => bail!(
                 "ambiguous discussion event {needle:?}: matches {}",
                 matches
                     .iter()
                     .map(|event| event.event_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+
+        let finding_matches = events
+            .iter()
+            .flat_map(|event| match &event.payload {
+                Payload::FindingAdded { finding_id, .. }
+                    if finding_id == needle || finding_id.starts_with(needle) =>
+                {
+                    vec![(event, finding_id)]
+                }
+                Payload::VerdictRecorded { findings, .. } => findings
+                    .iter()
+                    .filter(|finding| {
+                        finding.finding_id == needle || finding.finding_id.starts_with(needle)
+                    })
+                    .map(|finding| (event, &finding.finding_id))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let resolved_finding = |event: &Event, finding_id: &str| {
+            let mut resolved = event.clone();
+            if let Payload::VerdictRecorded {
+                patchset_id,
+                findings,
+                ..
+            } = &event.payload
+            {
+                let finding = findings
+                    .iter()
+                    .find(|finding| finding.finding_id == finding_id)
+                    .expect("matched inline finding remains present");
+                resolved.payload = Payload::FindingAdded {
+                    finding_id: finding.finding_id.clone(),
+                    blocking: finding.blocking,
+                    severity: finding.severity,
+                    summary: finding.summary.clone(),
+                    body: finding.body.clone(),
+                    patchset_id: Some(patchset_id.clone()),
+                    anchor: finding.anchor.clone(),
+                };
+            }
+            resolved.event_id = finding_id.to_string();
+            resolved
+        };
+        if let Some((event, finding_id)) = finding_matches
+            .iter()
+            .find(|(_, finding_id)| finding_id.as_str() == needle)
+        {
+            return Ok(resolved_finding(event, finding_id));
+        }
+        match finding_matches.len() {
+            0 => bail!("no discussion event matches {needle:?}"),
+            1 => {
+                let (event, finding_id) = finding_matches[0];
+                Ok(resolved_finding(event, finding_id))
+            }
+            _ => bail!(
+                "ambiguous discussion event {needle:?}: matches {}",
+                finding_matches
+                    .iter()
+                    .map(|(_, finding_id)| finding_id.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
