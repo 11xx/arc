@@ -38,6 +38,7 @@ pub enum JournalKind {
     Todo,
     Later,
     Discussion,
+    Decision,
     FeatureRequest,
 }
 
@@ -53,6 +54,7 @@ impl JournalKind {
             JournalKind::Todo => "todo",
             JournalKind::Later => "later",
             JournalKind::Discussion => "discussion",
+            JournalKind::Decision => "decision",
             JournalKind::FeatureRequest => "feature-request",
         }
     }
@@ -284,6 +286,9 @@ pub enum JournalCmd {
         /// Optional context appended to the journal line
         #[arg(long)]
         note: Option<String>,
+        /// Decision artifact that records the verdict (valid with --outcome done)
+        #[arg(long)]
+        decision: Option<String>,
     },
     /// Move artifacts to the cold sibling archive without deleting history
     Archive {
@@ -350,7 +355,14 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             filename,
             outcome,
             note,
-        } => consume(ctx, &filename, outcome, note.as_deref()),
+            decision,
+        } => consume(
+            ctx,
+            &filename,
+            outcome,
+            note.as_deref(),
+            decision.as_deref(),
+        ),
         JournalCmd::Archive {
             filename,
             consumed,
@@ -830,6 +842,8 @@ struct JournalEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    decision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ttl_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<Vec<String>>,
@@ -869,6 +883,7 @@ impl JournalEvent {
             title: None,
             outcome: None,
             note: None,
+            decision: None,
             ttl_seconds: None,
             scope: None,
             status: None,
@@ -2209,6 +2224,8 @@ struct StanceTally {
 struct Resolution {
     outcome: String,
     resolver: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision: Option<String>,
     /// Whether the resolving session also authored a position — the norm is
     /// that a contested discussion is resolved by a non-author of the winning
     /// position, so this flag surfaces a resolver who argued a side.
@@ -2335,6 +2352,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         .map(|event| Resolution {
             outcome: event.outcome.clone().unwrap_or_default(),
             resolver: event_identity_label(event),
+            decision: event.decision.clone(),
             resolver_participated: position_events.iter().any(|position| {
                 position.harness == event.harness && position.session == event.session
             }),
@@ -2379,16 +2397,21 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         if summary.reply_refs == 1 { "" } else { "s" }
     );
     match &summary.resolution {
-        Some(resolution) => println!(
-            "resolution: {} by {} — resolver {}",
-            resolution.outcome,
-            resolution.resolver,
-            if resolution.resolver_participated {
-                "also authored a position"
-            } else {
-                "did not author a position"
+        Some(resolution) => {
+            println!(
+                "resolution: {} by {} — resolver {}",
+                resolution.outcome,
+                resolution.resolver,
+                if resolution.resolver_participated {
+                    "also authored a position"
+                } else {
+                    "did not author a position"
+                }
+            );
+            if let Some(decision) = &resolution.decision {
+                println!("decision: {decision}");
             }
-        ),
+        }
         None => println!("resolution: open"),
     }
     Ok(0)
@@ -2404,25 +2427,52 @@ fn stamp() -> Result<i32> {
     Ok(0)
 }
 
-fn consume(ctx: &Ctx, filename: &str, outcome: ConsumeOutcome, note: Option<&str>) -> Result<i32> {
+fn consume(
+    ctx: &Ctx,
+    filename: &str,
+    outcome: ConsumeOutcome,
+    note: Option<&str>,
+    decision: Option<&str>,
+) -> Result<i32> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    if let Some(decision) = decision {
+        if !matches!(outcome, ConsumeOutcome::Done) {
+            bail!("--decision is valid only with --outcome done");
+        }
+        if decision.contains(['/', '\\']) {
+            bail!("--decision takes an artifact filename, not a path");
+        }
+        let Some((_, _, kind)) = parse_artifact_name(decision) else {
+            bail!("{decision:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+        };
+        if kind != JournalKind::Decision.as_str() {
+            bail!("{decision} is a {kind} artifact, not a decision");
+        }
+        if !dir.join(decision).is_file() && !archive_dir(&dir).join(decision).is_file() {
+            bail!(
+                "no such decision artifact {decision} in {} or its cold archive",
+                dir.display()
+            );
+        }
+    }
     if filename.contains(['/', '\\']) {
         bail!("consume takes an artifact filename inside the archive dir, not a path");
     }
     let Some((_, topic, _)) = parse_artifact_name(filename) else {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     };
-    let dir = resolve_dir(&ctx.cwd)?;
     if !dir.join(filename).is_file() {
         bail!("no such artifact {} in {}", filename, dir.display());
     }
     if is_consumed(&read_events(&dir)?, filename) {
         bail!("{filename} is already consumed (see the journal)");
     }
-    let mut message = format!("consumed {filename} [{}]", outcome.as_str());
-    if let Some(note) = note {
-        message.push_str(&format!(": {note}"));
-    }
-    append_journal(&dir, ctx, Utc::now(), &topic, &message, None)?;
+    let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "consumed");
+    event.file = Some(filename.to_string());
+    event.outcome = Some(outcome.as_str().to_string());
+    event.note = note.map(str::to_string);
+    event.decision = decision.map(str::to_string);
+    append_event(&dir, &event)?;
     println!("consumed: {filename} [{}]", outcome.as_str());
     Ok(0)
 }
