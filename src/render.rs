@@ -186,6 +186,10 @@ pub fn markdown(
         if let Some(title) = &brief.title {
             let _ = writeln!(w, "### {title}\n");
         }
+        if let (Some(plan_ref), Some(plan_slice)) = (&brief.plan_ref, &brief.plan_slice) {
+            let _ = writeln!(w, "- Plan: `{plan_ref}`");
+            let _ = writeln!(w, "- Slice: `{plan_slice}`\n");
+        }
         let _ = write!(w, "{}", brief.body);
         if !brief.body.ends_with('\n') {
             let _ = writeln!(w);

@@ -2211,6 +2211,22 @@ pub fn read_artifact_body(ctx: &Ctx, filename: &str) -> Result<String> {
     )
 }
 
+/// Validate that a filename identifies an existing plan in the hot journal or
+/// its cold archive.
+pub fn validate_plan_artifact(ctx: &Ctx, filename: &str) -> Result<()> {
+    if filename.contains(['/', '\\']) {
+        bail!("plan reference must be a journal artifact filename, not a path");
+    }
+    let Some((_, _, kind)) = parse_artifact_name(filename) else {
+        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+    };
+    if kind != "plan" {
+        bail!("{filename:?} is a {kind} artifact, not a plan");
+    }
+    read_artifact_body(ctx, filename)?;
+    Ok(())
+}
+
 #[derive(Default, Serialize)]
 struct StanceTally {
     #[serde(rename = "for")]

@@ -271,6 +271,12 @@ enum Cmd {
         /// sol-low, sol-high, reviewer, discussion)
         #[arg(long)]
         scaffold: Option<String>,
+        /// Journal plan artifact implemented by this brief
+        #[arg(long)]
+        plan_ref: Option<String>,
+        /// Opaque plan slice slug implemented by this brief
+        #[arg(long)]
+        plan_slice: Option<String>,
     },
     /// Record, read, or project changelog entries
     Changelog {
@@ -1080,9 +1086,13 @@ fn run(cli: Cli) -> Result<i32> {
             title,
             version,
             scaffold,
+            plan_ref,
+            plan_slice,
         } => {
             let change = infer(change.as_deref())?;
-            commands::brief(&ctx, role, &change, body_file, title, version, scaffold)
+            commands::brief(
+                &ctx, role, &change, body_file, title, version, scaffold, plan_ref, plan_slice,
+            )
         }
         Cmd::Changelog {
             change,

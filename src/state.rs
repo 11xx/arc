@@ -37,6 +37,8 @@ pub struct Brief {
     pub actor: String,
     pub title: Option<String>,
     pub body: String,
+    pub plan_ref: Option<String>,
+    pub plan_slice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -479,12 +481,19 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 session: ev.session.clone(),
                 created_at: ev.created_at,
             }),
-            Payload::BriefRecorded { title, body } => state.briefs.push(Brief {
+            Payload::BriefRecorded {
+                title,
+                body,
+                plan_ref,
+                plan_slice,
+            } => state.briefs.push(Brief {
                 event_id: ev.event_id.clone(),
                 ts: ev.created_at,
                 actor: ev.actor.clone(),
                 title: title.clone(),
                 body: body.clone(),
+                plan_ref: plan_ref.clone(),
+                plan_slice: plan_slice.clone(),
             }),
             Payload::ChangelogRecorded { section, body } => {
                 state.changelog = Some(ChangelogEntry {

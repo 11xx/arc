@@ -98,6 +98,9 @@ arc blocker-status radio-refill-fix   # structured dependency detail
 cd ~/.worktrees/<repo>-radio-refill-fix
 eval "$(arc env)"                         # detects this harness session explicitly
 arc brief radio-refill-fix --body-file executor-spec.md
+arc brief radio-refill-fix --body-file executor-spec.md \
+  --plan-ref 20260726T120000Z-radio-reliability-plan.md \
+  --plan-slice refill-worker
 arc changelog radio-refill-fix --section fixed --body-file changelog-entry.md
 arc show                                  # includes the latest contract
 # ... read the executor spec from arc show ...
@@ -539,6 +542,11 @@ claim on stop, never review or integrate — and the sandbox facts an
 arc-driving executor needs (`.git` must be writable; stage and report
 "staged, no SHA" when signing is unavailable so the lead commits then
 snapshots then reviews; keep claim/stage heartbeats current).
+
+`--plan-ref <artifact> --plan-slice <slug>` records which opaque slice of an
+existing journal plan the brief implements. The flags are required together;
+the plan may be in the hot journal or its cold archive. Later brief versions
+may repoint the link, and multiple briefs may name the same plan and slice.
 
 `arc restack <change> --advise` prints, for each open dependent of a change,
 the exact `git rebase --onto <target> <base>` command to run in that
