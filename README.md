@@ -382,6 +382,20 @@ separate query and claim:
 arc take --tag '#radio' --ttl 2h
 ```
 
+Inspect the whole tagged program without collapsing it into queue buckets:
+
+```sh
+arc chain '#radio'
+arc chain '#radio' --json
+```
+
+`arc chain` includes open and closed members exactly once in dependency order,
+reports their current brief plan bindings and the referenced plan history, and
+names the same next ready change that `arc take --tag` would select. The JSON
+form uses the `arc-chain/1` schema. The view is entirely derived and does not
+infer aggregate completion, pauses, unopened slices, duplicate slices, or a
+progress percentage.
+
 `arc take` considers open, unheld changes whose blockers are integrated and
 whose claims are absent, expired, or stale. It selects higher priorities first,
 then the oldest change, and exits 2 when nothing is ready. Repeated `--tag`
