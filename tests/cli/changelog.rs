@@ -399,6 +399,93 @@ fn free_form_categories_render_after_canonical_categories() {
 }
 
 #[test]
+fn configured_target_uses_keep_a_changelog_renderer() {
+    let repo = Repo::new();
+    fs::create_dir(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/changelog.toml"),
+        "target = \"NEWS.md\"\nrenderer = \"keep-a-changelog\"\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.root.join("NEWS.md"),
+        "# News\n\n## [Unreleased]\n\nold\n\n## [1.0.0]\n\nreleased\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", "."]);
+    git(&repo.root, &["commit", "-m", "docs: configure news"]);
+
+    begin(&repo, "configured-write");
+    let worktree = repo.home.join(".worktrees/repo-configured-write");
+    record(
+        &repo,
+        &worktree,
+        "configured-write",
+        "Highlights",
+        "- configured target\n",
+    );
+    integrate(&repo, "configured-write");
+
+    let projection = json_stdout(repo.arc(&repo.root).args(["changelog", "--json"]));
+    assert_eq!(projection["target"], "NEWS.md");
+    assert_eq!(projection["renderer"], "keep-a-changelog");
+    repo.arc(&repo.root)
+        .args(["changelog", "--write"])
+        .assert()
+        .success()
+        .stdout("");
+    let written = fs::read_to_string(repo.root.join("NEWS.md")).unwrap();
+    assert!(written.contains("### Highlights\n\n- configured target"));
+    assert!(written.ends_with("## [1.0.0]\n\nreleased\n"));
+    assert!(!repo.root.join("CHANGELOG.md").exists());
+
+    fs::write(
+        repo.root.join("NEWS.md"),
+        "format arc does not understand\n",
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args(["changelog", "--write"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("## [Unreleased]"))
+        .stdout(predicate::str::contains("- configured target"));
+    assert_eq!(
+        fs::read_to_string(repo.root.join("NEWS.md")).unwrap(),
+        "format arc does not understand\n"
+    );
+
+    let outside = repo.root.parent().unwrap().join("outside.md");
+    fs::write(&outside, "outside\n").unwrap();
+    fs::write(
+        repo.root.join(".arc/changelog.toml"),
+        "target = \"../outside.md\"\nrenderer = \"keep-a-changelog\"\n",
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args(["changelog", "--write"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "changelog target must stay inside the repository",
+        ));
+    assert_eq!(fs::read_to_string(outside).unwrap(), "outside\n");
+
+    fs::write(
+        repo.root.join(".arc/changelog.toml"),
+        "target = \"NEWS.md\"\nrenderer = \"command\"\n",
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args(["changelog"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "unsupported changelog renderer `command`",
+        ));
+}
+
+#[test]
 fn write_splices_only_unreleased_and_is_idempotent() {
     let repo = Repo::new();
     repo.commit(

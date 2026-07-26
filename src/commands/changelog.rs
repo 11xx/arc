@@ -4,14 +4,31 @@ use crate::model::{Closure, Payload};
 use crate::state::{ChangeState, ChangelogEntry};
 use crate::ExecutionRole;
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
 
 const CHANGELOG_SCHEMA: &str = "arc-changelog/1";
-const CHANGELOG_TARGET: &str = "CHANGELOG.md";
+const DEFAULT_CHANGELOG_TARGET: &str = "CHANGELOG.md";
 const CHANGELOG_RENDERER: &str = "keep-a-changelog";
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ChangelogConfig {
+    target: String,
+    renderer: String,
+}
+
+impl Default for ChangelogConfig {
+    fn default() -> Self {
+        Self {
+            target: DEFAULT_CHANGELOG_TARGET.into(),
+            renderer: CHANGELOG_RENDERER.into(),
+        }
+    }
+}
 
 #[derive(Serialize)]
 struct ProjectedEntry<'a> {
@@ -39,8 +56,8 @@ struct RecordedProvenance<'a> {
 struct ChangelogProjection<'a> {
     schema: &'static str,
     boundary: Option<&'a str>,
-    target: &'static str,
-    renderer: &'static str,
+    target: &'a str,
+    renderer: &'a str,
     entries: Vec<ProjectedEntry<'a>>,
 }
 
@@ -85,6 +102,8 @@ pub fn changelog(
         return Ok(0);
     }
 
+    let config = load_changelog_config(ctx)?;
+
     if let Some(reference) = reference {
         if write {
             bail!("--write cannot be used with CHANGE");
@@ -101,8 +120,8 @@ pub fn changelog(
             let projection = ChangelogProjection {
                 schema: CHANGELOG_SCHEMA,
                 boundary: None,
-                target: CHANGELOG_TARGET,
-                renderer: CHANGELOG_RENDERER,
+                target: &config.target,
+                renderer: &config.renderer,
                 entries,
             };
             println!("{}", serde_json::to_string_pretty(&projection)?);
@@ -137,8 +156,8 @@ pub fn changelog(
         let projection = ChangelogProjection {
             schema: CHANGELOG_SCHEMA,
             boundary: boundary.as_deref(),
-            target: CHANGELOG_TARGET,
-            renderer: CHANGELOG_RENDERER,
+            target: &config.target,
+            renderer: &config.renderer,
             entries,
         };
         println!("{}", serde_json::to_string_pretty(&projection)?);
@@ -147,7 +166,9 @@ pub fn changelog(
 
     let rendered = render_unreleased(&entries, provenance);
     if write {
-        write_changelog(ctx, &rendered)?;
+        if !write_changelog(ctx, &config, &rendered)? {
+            print!("{rendered}");
+        }
     } else {
         print!("{rendered}");
     }
@@ -318,33 +339,98 @@ fn provenance_line(entry: &ProjectedEntry<'_>) -> String {
     )
 }
 
-fn write_changelog(ctx: &Ctx, rendered: &str) -> Result<()> {
+fn load_changelog_config(ctx: &Ctx) -> Result<ChangelogConfig> {
     let root = gitio::toplevel(&ctx.cwd)?;
-    let path = root.join("CHANGELOG.md");
-    let original = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let path = root.join(".arc/changelog.toml");
+    let config = match fs::read_to_string(&path) {
+        Ok(contents) => toml::from_str::<ChangelogConfig>(&contents)
+            .with_context(|| format!("parse {}", path.display()))?,
+        Err(error) if error.kind() == ErrorKind::NotFound => ChangelogConfig::default(),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    if config.renderer != CHANGELOG_RENDERER {
+        bail!(
+            "unsupported changelog renderer `{}`; only `{CHANGELOG_RENDERER}` is available",
+            config.renderer
+        );
+    }
+    normalize_target(&config.target)?;
+    Ok(config)
+}
+
+fn normalize_target(target: &str) -> Result<PathBuf> {
+    let path = Path::new(target);
+    if path.is_absolute() {
+        bail!("changelog target must stay inside the repository");
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir => {}
+            Component::ParentDir if normalized.pop() => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                bail!("changelog target must stay inside the repository");
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        bail!("changelog target must name a repository-relative file");
+    }
+    Ok(normalized)
+}
+
+fn target_path(root: &Path, target: &str) -> Result<PathBuf> {
+    let path = root.join(normalize_target(target)?);
+    let canonical_root =
+        fs::canonicalize(root).with_context(|| format!("resolve {}", root.display()))?;
+    let containment_probe = if path.exists() {
+        fs::canonicalize(&path).with_context(|| format!("resolve {}", path.display()))?
+    } else {
+        let parent = path
+            .parent()
+            .context("changelog target has no parent directory")?;
+        fs::canonicalize(parent).with_context(|| format!("resolve {}", parent.display()))?
+    };
+    if !containment_probe.starts_with(&canonical_root) {
+        bail!("changelog target must stay inside the repository");
+    }
+    Ok(path)
+}
+
+fn write_changelog(ctx: &Ctx, config: &ChangelogConfig, rendered: &str) -> Result<bool> {
+    let root = gitio::toplevel(&ctx.cwd)?;
+    let path = target_path(&root, &config.target)?;
+    let original = match fs::read_to_string(&path) {
+        Ok(original) => original,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
     let heading = "## [Unreleased]";
-    let heading_start = original
-        .match_indices(heading)
-        .find_map(|(offset, _)| {
-            let line_start = offset == 0 || original.as_bytes()[offset - 1] == b'\n';
-            let line_end = original
-                .as_bytes()
-                .get(offset + heading.len())
-                .is_none_or(|byte| *byte == b'\n' || *byte == b'\r');
-            (line_start && line_end).then_some(offset)
-        })
-        .context("CHANGELOG.md has no ## [Unreleased] heading")?;
+    let Some(heading_start) = original.match_indices(heading).find_map(|(offset, _)| {
+        let line_start = offset == 0 || original.as_bytes()[offset - 1] == b'\n';
+        let line_end = original
+            .as_bytes()
+            .get(offset + heading.len())
+            .is_none_or(|byte| *byte == b'\n' || *byte == b'\r');
+        (line_start && line_end).then_some(offset)
+    }) else {
+        return Ok(false);
+    };
     let after_heading = original[heading_start..]
         .find('\n')
         .map(|offset| heading_start + offset + 1)
         .unwrap_or(original.len());
-    let next_release = original[after_heading..]
-        .match_indices("## [")
-        .find_map(|(offset, _)| {
-            let absolute = after_heading + offset;
-            (absolute == 0 || original.as_bytes()[absolute - 1] == b'\n').then_some(absolute)
-        })
-        .context("CHANGELOG.md has no released section after [Unreleased]")?;
+    let Some(next_release) =
+        original[after_heading..]
+            .match_indices("## [")
+            .find_map(|(offset, _)| {
+                let absolute = after_heading + offset;
+                (absolute == 0 || original.as_bytes()[absolute - 1] == b'\n').then_some(absolute)
+            })
+    else {
+        return Ok(false);
+    };
     let replacement = rendered
         .strip_prefix("## [Unreleased]\n")
         .expect("renderer always emits the unreleased heading");
@@ -355,5 +441,6 @@ fn write_changelog(ctx: &Ctx, rendered: &str) -> Result<()> {
         updated.push('\n');
     }
     updated.push_str(&original[next_release..]);
-    fs::write(&path, updated).with_context(|| format!("write {}", path.display()))
+    fs::write(&path, updated).with_context(|| format!("write {}", path.display()))?;
+    Ok(true)
 }
