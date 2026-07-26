@@ -741,7 +741,7 @@ append-only; consumption never edits or deletes the artifact.
 
 A `discussion` is the answer-owed actionable kind: an open debate rides the
 same queue until someone resolves it, and `arc begin --from-journal` promotes
-one straight into a change. `journal append <filename> [--ref <target>]
+one straight into a change. `journal position <filename> [--ref <target>]
 --body-file <src>` adds one position: it writes a
 `### Position pos-<ulid> (<model[#effort]> via <harness>, <utc-ts>)` block —
 the heading tool-computed so its stable reply target and timestamp are never

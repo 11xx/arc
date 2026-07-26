@@ -856,7 +856,7 @@ fn nested_subcommand_path(typed: Option<&str>) -> Option<&'static str> {
     match typed {
         Some("dir") => Some("journal dir"),
         Some("note") => Some("journal note"),
-        Some("append") => Some("journal append"),
+        Some("append") => Some("journal position"),
         Some("catchup") => Some("journal catchup"),
         Some("memories") => Some("journal memories"),
         Some("open") => Some("journal open"),

@@ -2662,7 +2662,7 @@ fn journal_events_stamp_model_only_when_set() {
 }
 
 #[test]
-fn journal_append_writes_position_block_and_typed_event() {
+fn journal_position_writes_position_block_and_typed_event() {
     let repo = Repo::new();
     // Seed a discussion to argue in.
     let seed = stdout(
@@ -2690,7 +2690,7 @@ fn journal_append_writes_position_block_and_typed_event() {
     repo.arc(&repo.root)
         .args([
             "journal",
-            "append",
+            "position",
             &file,
             "--ref",
             "2026-01-01T00:00:00Z",
@@ -2704,7 +2704,7 @@ fn journal_append_writes_position_block_and_typed_event() {
 
     // Second position: no model, no ref.
     repo.arc(&repo.root)
-        .args(["journal", "append", &file, "--body-file", "-"])
+        .args(["journal", "position", &file, "--body-file", "-"])
         .env("ARC_HARNESS", "codex")
         .write_stdin("Position: against\nCounter.\n")
         .assert()
@@ -2751,11 +2751,23 @@ fn journal_append_writes_position_block_and_typed_event() {
 }
 
 #[test]
-fn journal_append_rejects_paths_missing_files_and_non_artifacts() {
+fn journal_append_is_rejected_as_unknown() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "append"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains(
+            "unrecognized subcommand 'append'",
+        ));
+}
+
+#[test]
+fn journal_position_rejects_paths_missing_files_and_non_artifacts() {
     let repo = Repo::new();
     // A path, not a bare filename.
     repo.arc(&repo.root)
-        .args(["journal", "append", "sub/x.md", "--body-file", "-"])
+        .args(["journal", "position", "sub/x.md", "--body-file", "-"])
         .write_stdin("x\n")
         .assert()
         .failure()
@@ -2764,7 +2776,7 @@ fn journal_append_rejects_paths_missing_files_and_non_artifacts() {
     repo.arc(&repo.root)
         .args([
             "journal",
-            "append",
+            "position",
             "20260101T000000Z-ghost-discussion.md",
             "--body-file",
             "-",
@@ -2775,7 +2787,7 @@ fn journal_append_rejects_paths_missing_files_and_non_artifacts() {
         .stderr(predicates::str::contains("no such artifact"));
     // A name that is not artifact-shaped.
     repo.arc(&repo.root)
-        .args(["journal", "append", "notes.md", "--body-file", "-"])
+        .args(["journal", "position", "notes.md", "--body-file", "-"])
         .write_stdin("x\n")
         .assert()
         .failure()
@@ -2783,7 +2795,7 @@ fn journal_append_rejects_paths_missing_files_and_non_artifacts() {
 }
 
 #[test]
-fn journal_append_rejects_consumed_artifact() {
+fn journal_position_rejects_consumed_artifact() {
     let repo = Repo::new();
     let seed = stdout(
         repo.arc(&repo.root)
@@ -2808,7 +2820,7 @@ fn journal_append_rejects_consumed_artifact() {
         .assert()
         .success();
     repo.arc(&repo.root)
-        .args(["journal", "append", &file, "--body-file", "-"])
+        .args(["journal", "position", &file, "--body-file", "-"])
         .write_stdin("Position: for\nToo late.\n")
         .assert()
         .failure()
@@ -2864,7 +2876,7 @@ fn journal_open_uses_latest_position_activity_for_discussion_age() {
     fs::write(dir.join(file), "# Active debate\n\n## Positions\n").unwrap();
 
     repo.arc(&repo.root)
-        .args(["journal", "append", file, "--body-file", "-"])
+        .args(["journal", "position", file, "--body-file", "-"])
         .write_stdin("Position: for\nFresh answer.\n")
         .assert()
         .success();
@@ -2908,7 +2920,7 @@ fn journal_discussion_summarizes_stances_participants_and_resolution() {
 
     // Two "for" (one with a model, session s1), one "against" (session s2).
     repo.arc(&repo.root)
-        .args(["journal", "append", &file, "--body-file", "-"])
+        .args(["journal", "position", &file, "--body-file", "-"])
         .env("ARC_HARNESS", "opencode")
         .env("ARC_SESSION", "s1")
         .env("ARC_MODEL", "kimi-k3#high")
@@ -2918,7 +2930,7 @@ fn journal_discussion_summarizes_stances_participants_and_resolution() {
     repo.arc(&repo.root)
         .args([
             "journal",
-            "append",
+            "position",
             &file,
             "--ref",
             "2026-01-01T00:00:00Z",
@@ -2931,7 +2943,7 @@ fn journal_discussion_summarizes_stances_participants_and_resolution() {
         .assert()
         .success();
     repo.arc(&repo.root)
-        .args(["journal", "append", &file, "--body-file", "-"])
+        .args(["journal", "position", &file, "--body-file", "-"])
         .env("ARC_HARNESS", "claude")
         .env("ARC_SESSION", "s1")
         .write_stdin("Position: for\nBlue again.\n")
@@ -2956,7 +2968,7 @@ fn journal_discussion_summarizes_stances_participants_and_resolution() {
     assert_eq!(summary["stances"]["for"], 2);
     assert_eq!(summary["stances"]["against"], 1);
     assert_eq!(summary["stances"]["amend"], 0);
-    // Three distinct sessions authored via journal append; one named a --ref.
+    // Three distinct sessions authored via journal position; one named a --ref.
     assert_eq!(summary["participants"].as_array().unwrap().len(), 3);
     assert_eq!(summary["reply_refs"], 1);
     assert_eq!(summary["resolution"]["outcome"], "done");
@@ -3061,13 +3073,13 @@ fn journal_discussion_ignores_consumed_events_with_invalid_outcomes() {
     assert!(summary["resolution"].is_null(), "{summary}");
 }
 
-fn append_discussion_position(
+fn add_discussion_position(
     repo: &Repo,
     file: &str,
     reference: Option<&str>,
     harness: &str,
 ) -> String {
-    let mut args = vec!["journal", "append", file];
+    let mut args = vec!["journal", "position", file];
     if let Some(reference) = reference {
         args.extend(["--ref", reference]);
     }
@@ -3092,9 +3104,9 @@ fn append_discussion_position(
 fn journal_discussion_groups_three_deep_chain_into_rounds() {
     let repo = Repo::new();
     let file = discussion_fixture(&repo, "deep-rounds");
-    let first = append_discussion_position(&repo, &file, None, "claude");
-    let second = append_discussion_position(&repo, &file, Some(&first), "codex");
-    let third = append_discussion_position(&repo, &file, Some(&second), "opencode");
+    let first = add_discussion_position(&repo, &file, None, "claude");
+    let second = add_discussion_position(&repo, &file, Some(&first), "codex");
+    let third = add_discussion_position(&repo, &file, Some(&second), "opencode");
 
     let summary =
         json_stdout(
@@ -3122,9 +3134,9 @@ fn journal_discussion_groups_three_deep_chain_into_rounds() {
 fn journal_discussion_groups_sibling_replies_into_one_round() {
     let repo = Repo::new();
     let file = discussion_fixture(&repo, "sibling-round");
-    let parent = append_discussion_position(&repo, &file, None, "claude");
-    let first = append_discussion_position(&repo, &file, Some(&parent), "codex");
-    let second = append_discussion_position(&repo, &file, Some(&parent), "opencode");
+    let parent = add_discussion_position(&repo, &file, None, "claude");
+    let first = add_discussion_position(&repo, &file, Some(&parent), "codex");
+    let second = add_discussion_position(&repo, &file, Some(&parent), "opencode");
 
     let summary =
         json_stdout(
@@ -3141,9 +3153,9 @@ fn journal_discussion_groups_sibling_replies_into_one_round() {
 fn journal_discussion_reports_participants_per_round() {
     let repo = Repo::new();
     let file = discussion_fixture(&repo, "round-participants");
-    let parent = append_discussion_position(&repo, &file, None, "claude");
-    append_discussion_position(&repo, &file, Some(&parent), "codex");
-    append_discussion_position(&repo, &file, Some(&parent), "opencode");
+    let parent = add_discussion_position(&repo, &file, None, "claude");
+    add_discussion_position(&repo, &file, Some(&parent), "codex");
+    add_discussion_position(&repo, &file, Some(&parent), "opencode");
 
     let summary =
         json_stdout(
@@ -3164,9 +3176,9 @@ fn journal_discussion_reports_participants_per_round() {
 fn journal_discussion_lists_exactly_unanswered_leaf_positions() {
     let repo = Repo::new();
     let file = discussion_fixture(&repo, "unanswered-leaves");
-    let parent = append_discussion_position(&repo, &file, None, "claude");
-    let first_leaf = append_discussion_position(&repo, &file, Some(&parent), "codex");
-    let second_leaf = append_discussion_position(&repo, &file, Some(&parent), "opencode");
+    let parent = add_discussion_position(&repo, &file, None, "claude");
+    let first_leaf = add_discussion_position(&repo, &file, Some(&parent), "codex");
+    let second_leaf = add_discussion_position(&repo, &file, Some(&parent), "opencode");
 
     let summary =
         json_stdout(
@@ -3183,8 +3195,8 @@ fn journal_discussion_lists_exactly_unanswered_leaf_positions() {
 fn journal_discussion_places_positions_without_refs_in_round_one() {
     let repo = Repo::new();
     let file = discussion_fixture(&repo, "root-positions");
-    let first = append_discussion_position(&repo, &file, None, "claude");
-    let second = append_discussion_position(&repo, &file, None, "codex");
+    let first = add_discussion_position(&repo, &file, None, "claude");
+    let second = add_discussion_position(&repo, &file, None, "codex");
 
     let summary =
         json_stdout(
@@ -3203,9 +3215,9 @@ fn journal_discussion_places_positions_without_refs_in_round_one() {
 fn journal_discussion_bounds_ref_cycles() {
     let repo = Repo::new();
     let file = discussion_fixture(&repo, "cyclic-replies");
-    let first = append_discussion_position(&repo, &file, None, "claude");
-    let second = append_discussion_position(&repo, &file, Some(&first), "codex");
-    let third = append_discussion_position(&repo, &file, Some(&first), "opencode");
+    let first = add_discussion_position(&repo, &file, None, "claude");
+    let second = add_discussion_position(&repo, &file, Some(&first), "codex");
+    let third = add_discussion_position(&repo, &file, Some(&first), "opencode");
     let dir = journal_dir(&repo);
     let events_path = dir.join("events.jsonl");
     let mut events = journal_events(&dir);
@@ -3308,7 +3320,7 @@ fn journal_discussion_scopes_stances_to_position_blocks() {
         .to_string_lossy()
         .to_string();
     repo.arc(&repo.root)
-        .args(["journal", "append", &file, "--body-file", "-"])
+        .args(["journal", "position", &file, "--body-file", "-"])
         .write_stdin("Position: against\nPosition: for is quoted below, not a second vote.\n")
         .assert()
         .success();
@@ -3346,7 +3358,7 @@ fn resolver_participation_requires_matching_harness_and_session() {
         .to_string_lossy()
         .to_string();
     repo.arc(&repo.root)
-        .args(["journal", "append", &file, "--body-file", "-"])
+        .args(["journal", "position", &file, "--body-file", "-"])
         .env("ARC_HARNESS", "opencode")
         .env("ARC_SESSION", "same-native-id")
         .write_stdin("Position: for\nOpenCode position.\n")
