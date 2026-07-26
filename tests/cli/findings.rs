@@ -108,6 +108,74 @@ fn inline_finding_can_be_replied_to_by_finding_id() {
 }
 
 #[test]
+fn inline_finding_prefixes_reject_ambiguity_without_writing() {
+    let repo = Repo::new();
+    let (wt, change_id, finding_ids, _) = inline_findings(&repo, "inline-finding-prefix-reply");
+    let events = event_dir(&repo, &change_id);
+    let event_count = fs::read_dir(&events).unwrap().count();
+
+    repo.arc(&wt)
+        .args([
+            "reply",
+            "inline-finding-prefix-reply",
+            "f",
+            "--body",
+            "must not be written",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous discussion event"));
+    assert_eq!(fs::read_dir(&events).unwrap().count(), event_count);
+
+    let unique_prefix_len = (1..finding_ids[0].len())
+        .find(|&len| !finding_ids[1].starts_with(&finding_ids[0][..len]))
+        .unwrap();
+    repo.arc(&wt)
+        .args([
+            "reply",
+            "inline-finding-prefix-reply",
+            &finding_ids[0][..unique_prefix_len],
+            "--body",
+            "unique prefix",
+        ])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "reply",
+            "inline-finding-prefix-reply",
+            &finding_ids[1],
+            "--body",
+            "exact id",
+        ])
+        .assert()
+        .success();
+
+    let output = stdout(repo.arc(&wt).args([
+        "findings",
+        "inline-finding-prefix-reply",
+        "--format",
+        "json",
+    ]));
+    let findings: serde_json::Value = serde_json::from_str(&output).unwrap();
+    let findings = findings["findings"].as_array().unwrap();
+    assert_eq!(
+        findings
+            .iter()
+            .find(|finding| finding["id"] == finding_ids[0])
+            .unwrap()["replies"][0]["body"],
+        "unique prefix"
+    );
+    assert_eq!(
+        findings
+            .iter()
+            .find(|finding| finding["id"] == finding_ids[1])
+            .unwrap()["replies"][0]["body"],
+        "exact id"
+    );
+}
+
+#[test]
 fn shared_origin_event_reply_attaches_to_no_finding() {
     let repo = Repo::new();
     let (wt, change_id, finding_ids, verdict_event) = inline_findings(&repo, "shared-origin-reply");

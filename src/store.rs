@@ -275,19 +275,20 @@ impl Store {
 
         let finding_matches = events
             .iter()
-            .filter_map(|event| match &event.payload {
+            .flat_map(|event| match &event.payload {
                 Payload::FindingAdded { finding_id, .. }
                     if finding_id == needle || finding_id.starts_with(needle) =>
                 {
-                    Some((event, finding_id))
+                    vec![(event, finding_id)]
                 }
                 Payload::VerdictRecorded { findings, .. } => findings
                     .iter()
-                    .find(|finding| {
+                    .filter(|finding| {
                         finding.finding_id == needle || finding.finding_id.starts_with(needle)
                     })
-                    .map(|finding| (event, &finding.finding_id)),
-                _ => None,
+                    .map(|finding| (event, &finding.finding_id))
+                    .collect(),
+                _ => Vec::new(),
             })
             .collect::<Vec<_>>();
         let resolved_finding = |event: &Event, finding_id: &str| {
