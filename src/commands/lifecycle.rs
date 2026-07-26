@@ -122,7 +122,7 @@ pub fn begin(
             profile: profile.to_string(),
             target_branch,
             branch: branch_name.clone(),
-            base: base_rev,
+            base: base_rev.clone(),
             worktree: worktree_path.clone(),
             blocked_by,
             tags,
@@ -158,6 +158,7 @@ pub fn begin(
                     Payload::BriefRecorded {
                         title: Some(format!("Seeded from {filename}")),
                         body: seeded,
+                        base_revision: Some(base_rev.clone()),
                         plan_ref: None,
                         plan_slice: None,
                     },
@@ -313,6 +314,7 @@ pub fn brief(
     reference: &str,
     body_file: Option<String>,
     title: Option<String>,
+    base: Option<String>,
     version: Option<usize>,
     scaffold: Option<String>,
     plan_ref: Option<String>,
@@ -347,6 +349,10 @@ pub fn brief(
             None => String::new(),
         };
         let body = super::scaffold::prepended(&template, &content);
+        let base_revision = Some(gitio::rev_parse(
+            &ctx.cwd,
+            base.as_deref().unwrap_or("HEAD"),
+        )?);
         let store = ctx.store()?;
         let (change_id, _transition, state) = locked_state(&store, reference)?;
         if state.is_closed() {
@@ -359,6 +365,7 @@ pub fn brief(
             Payload::BriefRecorded {
                 title,
                 body,
+                base_revision,
                 plan_ref,
                 plan_slice,
             },
@@ -371,6 +378,9 @@ pub fn brief(
 
     if title.is_some() {
         bail!("--title requires --body-file or --scaffold");
+    }
+    if base.is_some() {
+        bail!("--base requires --body-file or --scaffold");
     }
     if plan_ref.is_some() {
         bail!("--plan-ref and --plan-slice require --body-file or --scaffold");
@@ -386,6 +396,9 @@ pub fn brief(
         Some(version) => anyhow::anyhow!("brief version {version} not found"),
         None => anyhow::anyhow!("no brief recorded for change {}", state.change_id),
     })?;
+    if let Some(base_revision) = &selected.base_revision {
+        println!("base-revision: {base_revision}");
+    }
     if let (Some(plan_ref), Some(plan_slice)) = (&selected.plan_ref, &selected.plan_slice) {
         println!("plan-ref: {plan_ref}");
         println!("plan-slice: {plan_slice}");

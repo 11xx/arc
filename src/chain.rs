@@ -13,6 +13,8 @@ pub struct ChainMember {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_slice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub review: Option<ChainReview>,
 }
 

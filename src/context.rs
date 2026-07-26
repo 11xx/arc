@@ -332,6 +332,9 @@ pub fn resume(
     println!("# {} (`{}`)", state.title, state.change_id);
     if let Some(brief) = state.latest_brief() {
         println!("\n## Brief (v{})\n", state.briefs.len());
+        if let Some(base_revision) = &brief.base_revision {
+            println!("- Base revision: `{base_revision}`\n");
+        }
         print!("{}", brief.body);
         if !brief.body.ends_with('\n') {
             println!();

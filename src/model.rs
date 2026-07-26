@@ -90,6 +90,8 @@ pub enum Payload {
         title: Option<String>,
         body: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_revision: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_ref: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_slice: Option<String>,

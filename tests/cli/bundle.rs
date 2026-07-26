@@ -812,6 +812,7 @@ fn export_import_roundtrips_message_events() {
 #[test]
 fn export_import_preserves_plan_links_on_every_brief_version() {
     let source = Repo::new();
+    let base_revision = source.head(&source.root);
     stdout(
         source
             .arc(&source.root)
@@ -890,7 +891,7 @@ fn export_import_preserves_plan_links_on_every_brief_version() {
             .assert()
             .success()
             .stdout(format!(
-                "plan-ref: {plan_ref}\nplan-slice: {plan_slice}\n\n{body}"
+                "base-revision: {base_revision}\nplan-ref: {plan_ref}\nplan-slice: {plan_slice}\n\n{body}"
             ));
     }
 }

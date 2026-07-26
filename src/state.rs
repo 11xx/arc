@@ -37,6 +37,7 @@ pub struct Brief {
     pub actor: String,
     pub title: Option<String>,
     pub body: String,
+    pub base_revision: Option<String>,
     pub plan_ref: Option<String>,
     pub plan_slice: Option<String>,
 }
@@ -505,6 +506,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             Payload::BriefRecorded {
                 title,
                 body,
+                base_revision,
                 plan_ref,
                 plan_slice,
             } => state.briefs.push(Brief {
@@ -513,6 +515,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 actor: ev.actor.clone(),
                 title: title.clone(),
                 body: body.clone(),
+                base_revision: base_revision.clone(),
                 plan_ref: plan_ref.clone(),
                 plan_slice: plan_slice.clone(),
             }),

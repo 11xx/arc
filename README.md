@@ -582,6 +582,9 @@ snapshots then reviews; keep claim/stage heartbeats current).
 existing journal plan the brief implements. The flags are required together;
 the plan may be in the hot journal or its cold archive. Later brief versions
 may repoint the link, and multiple briefs may name the same plan and slice.
+Every newly written brief also records the full current `HEAD` as its immutable
+base revision. `--base <revision>` selects another revision and resolves it at
+write time; legacy briefs alone may have no base revision.
 
 `arc restack <change> --advise` prints, for each open dependent of a change,
 the exact `git rebase --onto <target> <base>` command to run in that

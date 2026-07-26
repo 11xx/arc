@@ -185,6 +185,9 @@ fn render(output: &RescueOutput<'_>) {
     println!("# {} (`{}`)", output.title, output.change_id);
     if let Some(brief) = output.brief {
         println!("\n## Brief\n");
+        if let Some(base_revision) = &brief.base_revision {
+            println!("- Base revision: `{base_revision}`\n");
+        }
         print!("{}", brief.body);
         if !brief.body.ends_with('\n') {
             println!();
