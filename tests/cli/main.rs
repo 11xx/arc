@@ -37,6 +37,11 @@ fn doctor_groups_advice_and_ignores_closed_claims() {
 }
 
 #[test]
+fn doctor_reports_closed_registered_worktrees_without_removing_them() {
+    doctor::doctor_reports_closed_registered_worktrees_without_removing_them();
+}
+
+#[test]
 fn nested_leaf_at_top_level_suggests_its_command_path() {
     let repo = Repo::new();
     repo.arc(&repo.root)
