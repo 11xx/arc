@@ -19,9 +19,15 @@ pub struct ChainMember {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChainReview {
     pub subject: Option<String>,
+    pub non_self_verdict: bool,
+    pub at_final: ChainReviewWindow,
+    pub lifetime: ChainReviewWindow,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainReviewWindow {
     pub verdicts: usize,
     pub identities: Vec<String>,
-    pub non_self_verdict: bool,
     pub findings: usize,
     pub ad_hoc_verifications: usize,
 }

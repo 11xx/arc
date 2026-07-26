@@ -397,10 +397,12 @@ form uses the `arc-chain/1` schema. The view is entirely derived and does not
 infer aggregate completion, pauses, unopened slices, duplicate slices, or a
 progress percentage.
 
-With `--review`, each member also gets a compact summary derived from its final
-patchset. The JSON view includes the recorded subject, distinct verdict
+With `--review`, each member also gets a compact lifetime summary with its
+final-patchset verdict count alongside it. The JSON view includes the recorded
+subject and `at_final` and `lifetime` windows, each containing distinct verdict
 identities, verdict and finding counts, and ad hoc verification count.
-Superseded patchsets do not contribute.
+`non_self_verdict` reports whether any lifetime verdict identity differs from
+the subject.
 
 `arc take` considers open, unheld changes whose blockers are integrated and
 whose claims are absent, expired, or stale. It selects higher priorities first,

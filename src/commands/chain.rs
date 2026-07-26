@@ -1,5 +1,5 @@
 use super::*;
-use crate::chain::{Chain, ChainMember, ChainPlan, ChainReview, CHAIN_SCHEMA};
+use crate::chain::{Chain, ChainMember, ChainPlan, ChainReview, ChainReviewWindow, CHAIN_SCHEMA};
 
 pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
     let tags = normalize_tags(vec![tag])?;
@@ -26,11 +26,19 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                 let Some(patchset) = state.latest_patchset() else {
                     return ChainReview {
                         subject: None,
-                        verdicts: 0,
-                        identities: Vec::new(),
                         non_self_verdict: false,
-                        findings: 0,
-                        ad_hoc_verifications: 0,
+                        at_final: ChainReviewWindow {
+                            verdicts: 0,
+                            identities: Vec::new(),
+                            findings: 0,
+                            ad_hoc_verifications: 0,
+                        },
+                        lifetime: ChainReviewWindow {
+                            verdicts: 0,
+                            identities: Vec::new(),
+                            findings: 0,
+                            ad_hoc_verifications: 0,
+                        },
                     };
                 };
                 let subject = patchset
@@ -38,38 +46,68 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                     .as_deref()
                     .unwrap_or(&patchset.actor)
                     .to_string();
-                let verdicts = state
-                    .verdicts
-                    .iter()
-                    .filter(|verdict| verdict.patchset_id == patchset.id)
-                    .collect::<Vec<_>>();
-                let identities = verdicts
-                    .iter()
-                    .map(|verdict| {
-                        verdict
-                            .on_behalf_of
-                            .as_deref()
-                            .unwrap_or(&verdict.actor)
-                            .to_string()
-                    })
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                ChainReview {
-                    non_self_verdict: identities.iter().any(|identity| identity != &subject),
-                    subject: Some(subject),
-                    verdicts: verdicts.len(),
-                    identities,
-                    findings: state
-                        .findings
-                        .values()
-                        .filter(|finding| finding.patchset_id.as_deref() == Some(&patchset.id))
-                        .count(),
-                    ad_hoc_verifications: state
-                        .verifications
+                let window = |patchset_ids: &BTreeSet<&str>, heads: &BTreeSet<&str>| {
+                    let verdicts = state
+                        .verdicts
                         .iter()
-                        .filter(|entry| entry.revision == patchset.head && entry.gate.is_none())
-                        .count(),
+                        .filter(|verdict| patchset_ids.contains(verdict.patchset_id.as_str()))
+                        .collect::<Vec<_>>();
+                    let identities = verdicts
+                        .iter()
+                        .map(|verdict| {
+                            verdict
+                                .on_behalf_of
+                                .as_deref()
+                                .unwrap_or(&verdict.actor)
+                                .to_string()
+                        })
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    ChainReviewWindow {
+                        verdicts: verdicts.len(),
+                        identities,
+                        findings: state
+                            .findings
+                            .values()
+                            .filter(|finding| {
+                                finding
+                                    .patchset_id
+                                    .as_deref()
+                                    .is_some_and(|id| patchset_ids.contains(id))
+                            })
+                            .count(),
+                        ad_hoc_verifications: state
+                            .verifications
+                            .iter()
+                            .filter(|entry| {
+                                heads.contains(entry.revision.as_str()) && entry.gate.is_none()
+                            })
+                            .count(),
+                    }
+                };
+                let final_patchset_ids = BTreeSet::from([patchset.id.as_str()]);
+                let final_heads = BTreeSet::from([patchset.head.as_str()]);
+                let lifetime_patchset_ids = state
+                    .patchsets
+                    .iter()
+                    .map(|patchset| patchset.id.as_str())
+                    .collect::<BTreeSet<_>>();
+                let lifetime_heads = state
+                    .patchsets
+                    .iter()
+                    .map(|patchset| patchset.head.as_str())
+                    .collect::<BTreeSet<_>>();
+                let at_final = window(&final_patchset_ids, &final_heads);
+                let lifetime = window(&lifetime_patchset_ids, &lifetime_heads);
+                ChainReview {
+                    non_self_verdict: lifetime
+                        .identities
+                        .iter()
+                        .any(|identity| identity != &subject),
+                    subject: Some(subject),
+                    at_final,
+                    lifetime,
                 }
             });
             ChainMember {
@@ -147,11 +185,12 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                 }
                 if let Some(review) = &member.review {
                     println!(
-                        "  review: {} verdicts, {} identities, {} findings, {} ad hoc verifications",
-                        review.verdicts,
-                        review.identities.len(),
-                        review.findings,
-                        review.ad_hoc_verifications
+                        "  review: {} verdicts ({} at final), {} identities, {} findings, {} ad hoc verifications",
+                        review.lifetime.verdicts,
+                        review.at_final.verdicts,
+                        review.lifetime.identities.len(),
+                        review.lifetime.findings,
+                        review.lifetime.ad_hoc_verifications
                     );
                 }
             }

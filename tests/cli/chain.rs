@@ -217,13 +217,13 @@ fn chain_review_distinguishes_self_and_non_self_verdicts() {
         .unwrap();
     assert_eq!(self_review["review"]["subject"], "Alice");
     assert_eq!(
-        self_review["review"]["identities"],
+        self_review["review"]["lifetime"]["identities"],
         serde_json::json!(["Alice"])
     );
     assert_eq!(self_review["review"]["non_self_verdict"], false);
     assert_eq!(other_review["review"]["subject"], "Bob");
     assert_eq!(
-        other_review["review"]["identities"],
+        other_review["review"]["lifetime"]["identities"],
         serde_json::json!(["Carol"])
     );
     assert_eq!(other_review["review"]["non_self_verdict"], true);
@@ -267,12 +267,14 @@ fn chain_review_counts_recorded_final_patchset_evidence_exactly() {
         .iter()
         .find(|member| member["slug"] == "review-zero")
         .unwrap();
-    assert_eq!(counted["review"]["verdicts"], 2);
-    assert_eq!(counted["review"]["findings"], 1);
-    assert_eq!(counted["review"]["ad_hoc_verifications"], 1);
-    assert_eq!(zero["review"]["verdicts"], 0);
-    assert_eq!(zero["review"]["findings"], 0);
-    assert_eq!(zero["review"]["ad_hoc_verifications"], 0);
+    assert_eq!(counted["review"]["at_final"]["verdicts"], 2);
+    assert_eq!(counted["review"]["at_final"]["findings"], 1);
+    assert_eq!(counted["review"]["at_final"]["ad_hoc_verifications"], 1);
+    assert_eq!(counted["review"]["lifetime"], counted["review"]["at_final"]);
+    assert_eq!(zero["review"]["at_final"]["verdicts"], 0);
+    assert_eq!(zero["review"]["at_final"]["findings"], 0);
+    assert_eq!(zero["review"]["at_final"]["ad_hoc_verifications"], 0);
+    assert_eq!(zero["review"]["lifetime"], zero["review"]["at_final"]);
 }
 
 #[test]
@@ -280,10 +282,18 @@ fn chain_review_ignores_superseded_patchsets() {
     let repo = Repo::new();
     let worktree = tagged_patchset(&repo, "review-stale");
     stdout(repo.arc(&worktree).args(["snapshot", "review-stale"]));
-    stdout(
-        repo.arc(&repo.root)
-            .args(["review", "review-stale", "--verdict", "approved"]),
-    );
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Carol").args([
+        "review",
+        "review-stale",
+        "--verdict",
+        "approved",
+    ]));
+    stdout(repo.arc(&repo.root).args([
+        "finding",
+        "review-stale",
+        "--summary",
+        "superseded problem",
+    ]));
     repo.commit(
         &worktree,
         "review-stale.txt",
@@ -293,12 +303,19 @@ fn chain_review_ignores_superseded_patchsets() {
     stdout(repo.arc(&worktree).args(["snapshot", "review-stale"]));
 
     let output = chain_review_json(&repo, "program");
-    assert_eq!(output["members"][0]["review"]["verdicts"], 0);
+    assert_eq!(output["members"][0]["review"]["at_final"]["verdicts"], 0);
     assert_eq!(
-        output["members"][0]["review"]["identities"],
+        output["members"][0]["review"]["at_final"]["identities"],
         serde_json::json!([])
     );
-    assert_eq!(output["members"][0]["review"]["non_self_verdict"], false);
+    assert_eq!(output["members"][0]["review"]["at_final"]["findings"], 0);
+    assert_eq!(output["members"][0]["review"]["lifetime"]["verdicts"], 1);
+    assert_eq!(
+        output["members"][0]["review"]["lifetime"]["identities"],
+        serde_json::json!(["Carol"])
+    );
+    assert_eq!(output["members"][0]["review"]["lifetime"]["findings"], 1);
+    assert_eq!(output["members"][0]["review"]["non_self_verdict"], true);
 }
 
 #[test]
