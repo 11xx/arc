@@ -20,6 +20,7 @@ struct ReviewView<'a> {
 #[derive(Serialize)]
 struct ReviewVerdict<'a> {
     verdict: Verdict,
+    causes: &'a [ReviewCause],
     patchset_id: &'a str,
     actor: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -145,6 +146,7 @@ fn review_verdict<'a>(
         .find(|patchset| patchset.id == verdict.patchset_id);
     ReviewVerdict {
         verdict: verdict.verdict,
+        causes: &verdict.causes,
         patchset_id: &verdict.patchset_id,
         actor: &verdict.actor,
         on_behalf_of: verdict.on_behalf_of.as_deref(),
@@ -378,15 +380,35 @@ pub fn resolve(
     Ok(())
 }
 
-pub fn review(
-    ctx: &Ctx,
-    reference: &str,
-    verdict: Verdict,
-    body: Option<String>,
-    patchset: Option<String>,
-    findings_json: Option<String>,
-    snapshot_first: bool,
-) -> Result<()> {
+pub struct ReviewArgs {
+    pub verdict: Verdict,
+    pub body: Option<String>,
+    pub patchset: Option<String>,
+    pub causes: Vec<ReviewCause>,
+    pub findings_json: Option<String>,
+    pub snapshot_first: bool,
+}
+
+pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
+    let ReviewArgs {
+        verdict,
+        body,
+        patchset,
+        mut causes,
+        findings_json,
+        snapshot_first,
+    } = args;
+    causes.sort_unstable();
+    causes.dedup();
+    match verdict {
+        Verdict::ChangesRequested if causes.is_empty() => {
+            bail!("--cause is required with --verdict changes-requested")
+        }
+        Verdict::Approved | Verdict::CommentOnly if !causes.is_empty() => {
+            bail!("--cause is only valid with --verdict changes-requested")
+        }
+        _ => {}
+    }
     if snapshot_first {
         if patchset.is_some() {
             bail!("--snapshot cannot be combined with --patchset");
@@ -463,6 +485,7 @@ pub fn review(
         Payload::VerdictRecorded {
             patchset_id: patchset_id.clone(),
             verdict,
+            causes,
             body,
             findings: inline,
         },

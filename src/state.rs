@@ -233,6 +233,7 @@ pub struct VerdictEntry {
     pub event_id: String,
     pub patchset_id: String,
     pub verdict: Verdict,
+    pub causes: Vec<ReviewCause>,
     pub body: Option<String>,
     pub actor: String,
     /// Subject the verdict was cast for, when a lead reviewed on behalf of one.
@@ -834,6 +835,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             Payload::VerdictRecorded {
                 patchset_id,
                 verdict,
+                causes,
                 body,
                 findings,
             } => {
@@ -859,6 +861,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     event_id: ev.event_id.clone(),
                     patchset_id: patchset_id.clone(),
                     verdict: *verdict,
+                    causes: causes.clone(),
                     body: body.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),

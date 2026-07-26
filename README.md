@@ -121,6 +121,7 @@ arc findings radio-refill-fix --format sarif # export open findings to tooling
 arc review radio-refill-fix                  # verdict history, findings, and next action
 arc review radio-refill-fix --json           # the versioned arc-review/1 view
 arc review radio-refill-fix --snapshot --verdict changes-requested \
+  --cause executor \
   --body "The concurrency path still permits a stale commit." --findings-json - <<'EOF'
 [{"blocking": true, "severity": "major", "summary": "stale batch can commit",
   "anchor": {"path": "src/ops.py", "line_start": 214}}]
@@ -137,6 +138,14 @@ arc integrate radio-refill-fix --cleanup
 # allowed here; --into and --message are intentionally per-change only.
 arc integrate --tag '#radio-series' --cleanup
 ```
+
+Every `changes-requested` round classifies its root cause with one or more
+`--cause` values. `brief` means the patchset faithfully exposed a missing,
+false, or ambiguous premise; `executor` means it violated a correct applicable
+brief; `integration-staleness` means later target work invalidated a brief and
+implementation that were correct at their base. Other verdicts do not accept
+causes. `arc review --json` and `arc stats --json` expose these classifications
+without inferring them from verdict prose.
 
 ## Context awareness
 

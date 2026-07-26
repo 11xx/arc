@@ -22,8 +22,8 @@ use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use commands::{AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{
-    DispositionStatus, MessageSeverity, MessageType, ProbePhase, Severity, Side, Verdict,
-    VerifyResult,
+    DispositionStatus, MessageSeverity, MessageType, ProbePhase, ReviewCause, Severity, Side,
+    Verdict, VerifyResult,
 };
 
 /// Change, review, and integration state over plain Git for agentic
@@ -581,6 +581,9 @@ enum Cmd {
         /// Patchset under review (defaults to the latest)
         #[arg(long)]
         patchset: Option<String>,
+        /// Root cause of requested rework; repeat for a mixed round
+        #[arg(long, value_enum)]
+        cause: Vec<ReviewCause>,
         /// JSON array of findings ('-' for stdin); IDs are assigned by arc
         #[arg(long)]
         findings_json: Option<String>,
@@ -1408,6 +1411,7 @@ fn run(cli: Cli) -> Result<i32> {
             body,
             snapshot,
             patchset,
+            cause,
             findings_json,
         } => {
             let change = infer(change.as_deref())?;
@@ -1419,17 +1423,21 @@ fn run(cli: Cli) -> Result<i32> {
                 commands::review(
                     &ctx,
                     &change,
-                    verdict,
-                    body,
-                    patchset,
-                    findings_json,
-                    snapshot,
+                    commands::ReviewArgs {
+                        verdict,
+                        body,
+                        patchset,
+                        causes: cause,
+                        findings_json,
+                        snapshot_first: snapshot,
+                    },
                 )?;
             } else {
                 if body.body.is_some()
                     || body.body_file.is_some()
                     || snapshot
                     || patchset.is_some()
+                    || !cause.is_empty()
                     || findings_json.is_some()
                 {
                     anyhow::bail!("--verdict is required for the review write path");

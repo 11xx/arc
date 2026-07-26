@@ -56,7 +56,7 @@ pub(crate) use lifecycle::{print_projected, status_output};
 pub use messaging::{inbox, message, messages};
 pub use observe::{events, watch};
 pub use rescue::rescue;
-pub use review::{comment, finding, read_review, reply, resolve, review};
+pub use review::{comment, finding, read_review, reply, resolve, review, ReviewArgs};
 use serde::Serialize;
 pub use stats::{stats, StatsSelection};
 use std::collections::{BTreeMap, BTreeSet};

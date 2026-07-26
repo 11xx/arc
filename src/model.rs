@@ -190,6 +190,8 @@ pub enum Payload {
     VerdictRecorded {
         patchset_id: String,
         verdict: Verdict,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        causes: Vec<ReviewCause>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         body: Option<String>,
         /// Findings recorded atomically with the verdict (one review, one event).
@@ -534,6 +536,20 @@ pub enum Verdict {
     Approved,
     ChangesRequested,
     CommentOnly,
+}
+
+/// Reviewer-classified root causes for a requested-rework round.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewCause {
+    /// The patchset faithfully exposed a missing, false, or ambiguous premise.
+    Brief,
+    /// The patchset violated a correct applicable brief.
+    Executor,
+    /// Later target work invalidated a correct brief and implementation.
+    IntegrationStaleness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]

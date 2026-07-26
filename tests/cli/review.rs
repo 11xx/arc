@@ -87,3 +87,75 @@ fn review_write_path_still_records_a_verdict() {
         .success()
         .stdout(predicates::str::contains("verdict: Approved on ps-01"));
 }
+
+#[test]
+fn changes_requested_requires_typed_causes_and_stats_tallies_them() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "review-causes");
+    let before = event_count(&repo, &change_id);
+
+    repo.arc(&worktree)
+        .args(["review", "review-causes", "--verdict", "changes-requested"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--cause"));
+    assert_eq!(event_count(&repo, &change_id), before);
+
+    repo.arc(&worktree)
+        .args([
+            "review",
+            "review-causes",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+            "--cause",
+            "brief",
+            "--cause",
+            "executor",
+        ])
+        .assert()
+        .success();
+    assert_eq!(event_count(&repo, &change_id), before + 1);
+
+    let review = json_stdout(
+        repo.arc(&worktree)
+            .args(["review", "review-causes", "--json"]),
+    );
+    assert_eq!(
+        review["verdicts"][0]["causes"],
+        serde_json::json!(["brief", "executor"])
+    );
+
+    let stats =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["stats", "--change", "review-causes", "--json"]),
+        );
+    assert_eq!(
+        stats["changes"][0]["review_rounds_by_cause"],
+        serde_json::json!({"brief": 1, "executor": 1})
+    );
+    assert_eq!(
+        stats["aggregate"]["review_rounds_by_cause"],
+        serde_json::json!({"brief": 1, "executor": 1})
+    );
+
+    for verdict in ["approved", "comment-only"] {
+        repo.arc(&worktree)
+            .args([
+                "review",
+                "review-causes",
+                "--verdict",
+                verdict,
+                "--cause",
+                "brief",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "--cause is only valid with --verdict changes-requested",
+            ));
+    }
+    assert_eq!(event_count(&repo, &change_id), before + 1);
+}
