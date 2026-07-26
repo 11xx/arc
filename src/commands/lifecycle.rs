@@ -306,6 +306,7 @@ pub fn show_selection(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn brief(
     ctx: &Ctx,
     role: ExecutionRole,
