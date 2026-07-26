@@ -158,6 +158,14 @@ pub struct FindingState {
     pub origin_event: String,
     pub reported_by: String,
     pub dispositions: Vec<DispositionEntry>,
+    pub replies: Vec<ReplyEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplyEntry {
+    pub event_id: String,
+    pub actor: String,
+    pub body: String,
 }
 
 impl FindingState {
@@ -687,6 +695,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                         origin_event: ev.event_id.clone(),
                         reported_by: ev.actor.clone(),
                         dispositions: Vec::new(),
+                        replies: Vec::new(),
                     },
                 );
             }
@@ -701,9 +710,20 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 {
                     c.replies
                         .push((ev.event_id.clone(), ev.actor.clone(), body.clone()));
+                    continue;
                 }
-                // Replies to findings/other events are kept in the ledger and
-                // shown by render; no state transition needed here.
+                if let Some(f) = state
+                    .findings
+                    .values_mut()
+                    .find(|f| &f.origin_event == parent_event_id)
+                {
+                    f.replies.push(ReplyEntry {
+                        event_id: ev.event_id.clone(),
+                        actor: ev.actor.clone(),
+                        body: body.clone(),
+                    });
+                }
+                // Replies to unsupported parent event types remain ledger-only.
             }
             Payload::DispositionRecorded {
                 finding_id,
@@ -747,6 +767,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                             origin_event: ev.event_id.clone(),
                             reported_by: ev.actor.clone(),
                             dispositions: Vec::new(),
+                            replies: Vec::new(),
                         },
                     );
                 }

@@ -263,6 +263,9 @@ pub fn markdown(
                         .unwrap_or_default()
                 );
             }
+            for reply in &f.replies {
+                let _ = writeln!(w, "  - {}: {}", reply.actor, reply.body);
+            }
         }
     }
 
