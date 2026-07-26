@@ -160,6 +160,7 @@ pub struct FindingState {
     pub origin_event: String,
     pub reported_by: String,
     pub dispositions: Vec<DispositionEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replies: Vec<ReplyEntry>,
 }
 
@@ -364,6 +365,7 @@ impl ChangeState {
 
 pub fn reduce(events: &[Event]) -> Result<ChangeState> {
     let mut iter = events.iter();
+    let mut replies = Vec::new();
     let first = iter.next();
     let (mut state, first_event) = match first {
         Some(ev) => match &ev.payload {
@@ -709,31 +711,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 );
             }
             Payload::ReplyAdded {
-                parent_event_id,
-                body,
-            } => {
-                if let Some(c) = state
-                    .comments
-                    .iter_mut()
-                    .find(|c| &c.event_id == parent_event_id)
-                {
-                    c.replies
-                        .push((ev.event_id.clone(), ev.actor.clone(), body.clone()));
-                    continue;
-                }
-                if let Some(f) = state
-                    .findings
-                    .values_mut()
-                    .find(|f| &f.origin_event == parent_event_id)
-                {
-                    f.replies.push(ReplyEntry {
-                        event_id: ev.event_id.clone(),
-                        actor: ev.actor.clone(),
-                        body: body.clone(),
-                    });
-                }
-                // Replies to unsupported parent event types remain ledger-only.
-            }
+                parent_event_id: _,
+                body: _,
+            } => replies.push(ev),
             Payload::DispositionRecorded {
                 finding_id,
                 status,
@@ -888,7 +868,56 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             Payload::Unknown => {}
         }
     }
+    for reply in replies {
+        attach_reply(&mut state, reply);
+    }
     Ok(state)
+}
+
+fn attach_reply(state: &mut ChangeState, reply: &Event) {
+    let Payload::ReplyAdded {
+        parent_event_id,
+        body,
+    } = &reply.payload
+    else {
+        return;
+    };
+    if let Some(comment) = state
+        .comments
+        .iter_mut()
+        .find(|comment| &comment.event_id == parent_event_id)
+    {
+        comment
+            .replies
+            .push((reply.event_id.clone(), reply.actor.clone(), body.clone()));
+        return;
+    }
+    if let Some(finding) = state.findings.get_mut(parent_event_id) {
+        finding.replies.push(ReplyEntry {
+            event_id: reply.event_id.clone(),
+            actor: reply.actor.clone(),
+            body: body.clone(),
+        });
+        return;
+    }
+    let mut matches = state
+        .findings
+        .values()
+        .filter(|finding| &finding.origin_event == parent_event_id)
+        .map(|finding| finding.id.clone());
+    let Some(finding_id) = matches.next() else {
+        return;
+    };
+    if matches.next().is_some() {
+        return;
+    }
+    if let Some(finding) = state.findings.get_mut(&finding_id) {
+        finding.replies.push(ReplyEntry {
+            event_id: reply.event_id.clone(),
+            actor: reply.actor.clone(),
+            body: body.clone(),
+        });
+    }
 }
 
 fn git_identity(name: &Option<String>, email: &Option<String>) -> Option<GitIdentity> {

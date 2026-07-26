@@ -242,12 +242,13 @@ impl Store {
         }
     }
 
-    /// Resolve a finding or comment event ID exactly or by unique prefix.
+    /// Resolve a comment or finding event ID, then a finding ID, exactly or by
+    /// unique prefix.
     pub fn resolve_discussion_event(&self, change_id: &str, needle: &str) -> Result<Event> {
         ids::validate_id_component(needle)?;
-        let matches = self
-            .load_events(change_id)?
-            .into_iter()
+        let events = self.load_events(change_id)?;
+        let matches = events
+            .iter()
             .filter(|event| {
                 matches!(
                     event.payload,
@@ -257,16 +258,59 @@ impl Store {
             .filter(|event| event.event_id == needle || event.event_id.starts_with(needle))
             .collect::<Vec<_>>();
         if let Some(event) = matches.iter().find(|event| event.event_id == needle) {
-            return Ok(event.clone());
+            return Ok((*event).clone());
         }
         match matches.len() {
-            0 => bail!("no discussion event matches {needle:?}"),
-            1 => Ok(matches.into_iter().next().expect("one match")),
+            0 => {}
+            1 => return Ok(matches[0].clone()),
             _ => bail!(
                 "ambiguous discussion event {needle:?}: matches {}",
                 matches
                     .iter()
                     .map(|event| event.event_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+
+        let finding_matches = events
+            .iter()
+            .filter_map(|event| match &event.payload {
+                Payload::FindingAdded { finding_id, .. }
+                    if finding_id == needle || finding_id.starts_with(needle) =>
+                {
+                    Some((event, finding_id))
+                }
+                Payload::VerdictRecorded { findings, .. } => findings
+                    .iter()
+                    .find(|finding| {
+                        finding.finding_id == needle || finding.finding_id.starts_with(needle)
+                    })
+                    .map(|finding| (event, &finding.finding_id)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if let Some((event, finding_id)) = finding_matches
+            .iter()
+            .find(|(_, finding_id)| finding_id.as_str() == needle)
+        {
+            let mut event = (*event).clone();
+            event.event_id = (*finding_id).clone();
+            return Ok(event);
+        }
+        match finding_matches.len() {
+            0 => bail!("no discussion event matches {needle:?}"),
+            1 => {
+                let (event, finding_id) = finding_matches[0];
+                let mut event = event.clone();
+                event.event_id = finding_id.clone();
+                Ok(event)
+            }
+            _ => bail!(
+                "ambiguous discussion event {needle:?}: matches {}",
+                finding_matches
+                    .iter()
+                    .map(|(_, finding_id)| finding_id.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
