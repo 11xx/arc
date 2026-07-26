@@ -1905,11 +1905,11 @@ fn journal_list_enumerates_all_kinds_newest_first() {
     assert!(conclusions.contains("beta"), "{conclusions}");
 
     // A kind with no matches lists nothing, successfully.
-    let specs = stdout(
+    let reviews = stdout(
         repo.arc(&repo.root)
-            .args(["journal", "list", "--kind", "spec"]),
+            .args(["journal", "list", "--kind", "review"]),
     );
-    assert!(specs.contains("(none)"), "{specs}");
+    assert!(reviews.contains("(none)"), "{reviews}");
 
     // JSON form parses and carries the full field set.
     let json = stdout(repo.arc(&repo.root).args(["journal", "list", "--json"]));
