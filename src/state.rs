@@ -364,8 +364,13 @@ impl ChangeState {
 }
 
 pub fn reduce(events: &[Event]) -> Result<ChangeState> {
-    let mut iter = events.iter();
-    let mut replies = Vec::new();
+    let replies = events
+        .iter()
+        .filter(|event| matches!(event.payload, Payload::ReplyAdded { .. }))
+        .collect::<Vec<_>>();
+    let mut iter = events
+        .iter()
+        .filter(|event| !matches!(event.payload, Payload::ReplyAdded { .. }));
     let first = iter.next();
     let (mut state, first_event) = match first {
         Some(ev) => match &ev.payload {
@@ -713,7 +718,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             Payload::ReplyAdded {
                 parent_event_id: _,
                 body: _,
-            } => replies.push(ev),
+            } => unreachable!("reply events are replayed in the second pass"),
             Payload::DispositionRecorded {
                 finding_id,
                 status,

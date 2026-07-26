@@ -177,8 +177,8 @@ fn reply_replays_when_its_event_id_sorts_before_its_parent() {
         let mut event: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         let (event_id, parent_event_id) = match event["event_type"].as_str().unwrap() {
-            "change-opened" => ("event-1", None),
-            "reply-added" => ("event-2", Some("event-3")),
+            "reply-added" => ("event-1", Some("event-3")),
+            "change-opened" => ("event-2", None),
             "finding-added" => ("event-3", None),
             other => panic!("unexpected event type {other}"),
         };
