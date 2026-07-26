@@ -359,6 +359,40 @@ fn journal_list_parses_historical_spec_artifact() {
     assert_eq!(artifact["file"], filename);
     assert_eq!(artifact["topic"], "historical-api");
     assert_eq!(artifact["kind"], "spec");
+
+    let filtered = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "list", "--kind", "spec", "--json"]),
+    );
+    assert_eq!(filtered["artifacts"][0]["file"], filename);
+}
+
+#[test]
+fn journal_open_filters_historical_unconsumed_inbox_artifact() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    let filename = "20260101T000000Z-historical-task-inbox.md";
+    fs::write(dir.join(filename), "# Historical task\n").unwrap();
+
+    let filtered = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "open", "--kind", "inbox", "--json"]),
+    );
+    assert_eq!(filtered["open"][0]["file"], filename);
+}
+
+#[test]
+fn journal_read_kind_filter_rejects_unknown_value_helpfully() {
+    let repo = Repo::new();
+
+    repo.arc(&repo.root)
+        .args(["journal", "list", "--kind", "never-existed"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("unknown journal kind"))
+        .stderr(predicates::str::contains("accepted values"))
+        .stderr(predicates::str::contains("spec"));
 }
 
 #[test]
@@ -2917,6 +2951,7 @@ fn journal_discussion_summarizes_stances_participants_and_resolution() {
             repo.arc(&repo.root)
                 .args(["journal", "discussion", &file, "--json"]),
         );
+    assert_eq!(summary["schema"], "journal-discussion/1");
     assert_eq!(summary["positions"], 3);
     assert_eq!(summary["stances"]["for"], 2);
     assert_eq!(summary["stances"]["against"], 1);
@@ -2956,6 +2991,74 @@ fn discussion_fixture(repo: &Repo, topic: &str) -> String {
         .unwrap()
         .to_string_lossy()
         .to_string()
+}
+
+#[test]
+fn journal_discussion_ignores_unknown_schema_positions() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "future-position");
+    let dir = journal_dir(&repo);
+    let event = serde_json::json!({
+        "schema": "journal-events/2",
+        "ts": "2026-01-01T00:00:01Z",
+        "harness": "future",
+        "session": "future",
+        "topic": "future-position",
+        "event": "position",
+        "file": file,
+        "position_id": "pos-future"
+    });
+    use std::io::Write;
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("events.jsonl"))
+            .unwrap(),
+        "{event}"
+    )
+    .unwrap();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert!(summary["participants"].as_array().unwrap().is_empty());
+    assert!(summary["rounds"].as_array().unwrap().is_empty());
+    assert!(summary["unanswered"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn journal_discussion_ignores_consumed_events_with_invalid_outcomes() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "invalid-resolution");
+    let dir = journal_dir(&repo);
+    let event = serde_json::json!({
+        "schema": "journal-events/1",
+        "ts": "2026-01-01T00:00:01Z",
+        "harness": "test",
+        "session": "test",
+        "topic": "invalid-resolution",
+        "event": "consumed",
+        "file": file,
+        "outcome": "maybe"
+    });
+    use std::io::Write;
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("events.jsonl"))
+            .unwrap(),
+        "{event}"
+    )
+    .unwrap();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert!(summary["resolution"].is_null(), "{summary}");
 }
 
 fn append_discussion_position(
@@ -3133,6 +3236,52 @@ fn journal_discussion_bounds_ref_cycles() {
         summary["rounds"][1]["positions"],
         serde_json::json!([third])
     );
+}
+
+#[test]
+fn journal_discussion_caps_deep_chains_without_inventing_roots() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    let file = "20260101T000000Z-very-deep-discussion.md";
+    fs::write(dir.join(file), "# Very deep\n").unwrap();
+    let events = (0..257)
+        .map(|index| {
+            let mut event = serde_json::json!({
+                "schema": "journal-events/1",
+                "ts": format!("2026-01-01T00:{:02}:{:02}Z", index / 60, index % 60),
+                "harness": "test",
+                "session": "test",
+                "topic": "very-deep",
+                "event": "position",
+                "file": file,
+                "position_id": format!("pos-{index}")
+            });
+            if index > 0 {
+                event["ref"] = serde_json::json!(format!("pos-{}", index - 1));
+            }
+            event.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(dir.join("events.jsonl"), format!("{events}\n")).unwrap();
+
+    let summary = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "discussion", file, "--json"]),
+    );
+    let deepest_round = summary["rounds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|round| {
+            round["positions"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("pos-256"))
+        })
+        .unwrap();
+    assert_eq!(deepest_round["depth"], 256);
 }
 
 #[test]
