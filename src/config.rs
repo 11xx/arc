@@ -16,9 +16,8 @@ pub struct ConfigFile {
     /// of inside each repository's Git common dir.
     #[serde(default)]
     pub data_root: Option<String>,
-    /// Per-project overrides for the project-journal directory. Keyed by
-    /// the absolute repository-root path (the main checkout, shared by all
-    /// its worktrees); values may use a leading `~`.
+    /// Stable absolute path scopes for project-journal directories. The
+    /// longest matching component prefix wins; values may use a leading `~`.
     #[serde(default)]
     pub journals: JournalsConfig,
     /// Journal behavior toggles (distinct from the per-project `[journals]`
@@ -68,7 +67,7 @@ pub enum GitIdentityMode {
     Shared,
 }
 
-/// The `[journals]` table: a `dirs` map from repository-root path to journal
+/// The `[journals]` table: a `dirs` map from stable path prefix to journal
 /// directory. A dedicated table (rather than a general `[project."…"]`
 /// namespace) keeps the override self-documenting and matches config.rs's
 /// flat, single-purpose key idiom.
@@ -84,7 +83,7 @@ pub struct Config {
     pub config_path: PathBuf,
     pub worktrees_dir: PathBuf,
     pub data_root: Option<PathBuf>,
-    /// Raw `[journals] dirs` map (repository-root path -> archive dir),
+    /// Raw `[journals] dirs` map (stable path prefix -> journal directory),
     /// values not yet tilde-expanded (the consumer expands on lookup).
     pub journal_dirs: BTreeMap<String, String>,
     /// Whether lifecycle transitions append advisory journal log events.

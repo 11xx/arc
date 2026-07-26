@@ -180,6 +180,9 @@ pub enum JournalCmd {
         /// Print the cold sibling archive directory
         #[arg(long)]
         archive: bool,
+        /// Explain the resolution source and stable anchor
+        #[arg(long)]
+        explain: bool,
     },
     /// Check the journal for malformed or stale state (read-only)
     Doctor {
@@ -319,12 +322,27 @@ pub enum JournalCmd {
 
 pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
     match cmd {
-        JournalCmd::Dir { archive } => {
-            let hot = resolve_dir(&ctx.cwd)?;
-            println!(
-                "{}",
-                if archive { archive_dir(&hot) } else { hot }.display()
-            );
+        JournalCmd::Dir { archive, explain } => {
+            let resolution = resolve(&ctx.cwd)?;
+            let directory = if archive {
+                archive_dir(&resolution.directory)
+            } else {
+                resolution.directory
+            };
+            if explain {
+                println!("source: {}", resolution.source.as_str());
+                println!(
+                    "anchor: {}",
+                    resolution
+                        .anchor
+                        .as_deref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "none".into())
+                );
+                println!("directory: {}", directory.display());
+            } else {
+                println!("{}", directory.display());
+            }
             Ok(0)
         }
         JournalCmd::Doctor { json } => doctor(ctx, json),
@@ -583,28 +601,94 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     Ok(exit)
 }
 
-/// Resolve the journal directory, override precedence: `ARC_JOURNAL_DIR`
-/// env, then a `[journals] dirs` config entry keyed by the repository-root
-/// path, then the default `<ai_home>/journals/<repo-root-slug>`.
+#[derive(Debug, Clone, Copy)]
+enum ResolutionSource {
+    Env,
+    ConfigPrefix,
+    Git,
+}
+
+impl ResolutionSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            ResolutionSource::Env => "env",
+            ResolutionSource::ConfigPrefix => "config-prefix",
+            ResolutionSource::Git => "git",
+        }
+    }
+}
+
+struct JournalResolution {
+    directory: PathBuf,
+    source: ResolutionSource,
+    anchor: Option<PathBuf>,
+}
+
+/// Resolve the journal directory from an explicit directory, a configured
+/// stable path scope, or Git repository identity.
 pub fn resolve_dir(cwd: &Path) -> Result<PathBuf> {
+    Ok(resolve(cwd)?.directory)
+}
+
+fn resolve(cwd: &Path) -> Result<JournalResolution> {
     if let Some(dir) = std::env::var_os("ARC_JOURNAL_DIR") {
-        return Ok(PathBuf::from(dir));
+        return Ok(JournalResolution {
+            directory: PathBuf::from(dir),
+            source: ResolutionSource::Env,
+            anchor: None,
+        });
     }
     let cfg = config::load()?;
-    let root = repo_root(cwd)?;
-    let key = root.to_string_lossy();
-    if let Some(dir) = cfg.journal_dirs.get(key.as_ref()) {
-        return config::expand_tilde(dir);
+    let canonical_cwd = std::fs::canonicalize(cwd)
+        .with_context(|| format!("cannot canonicalize journal cwd {}", cwd.display()))?;
+    let mut configured = None;
+    for (raw_anchor, raw_directory) in &cfg.journal_dirs {
+        let anchor_path = config::expand_tilde(raw_anchor)?;
+        if !anchor_path.is_absolute() {
+            bail!("journal path scope must be absolute: {raw_anchor:?}");
+        }
+        let Ok(anchor) = std::fs::canonicalize(&anchor_path) else {
+            continue;
+        };
+        if !canonical_cwd.starts_with(&anchor) {
+            continue;
+        }
+        let depth = anchor.components().count();
+        if configured
+            .as_ref()
+            .is_none_or(|(best_depth, _, _)| depth > *best_depth)
+        {
+            configured = Some((depth, anchor, config::expand_tilde(raw_directory)?));
+        }
     }
-    Ok(cfg.ai_home.join("journals").join(config::path_slug(&root)))
+    if let Some((_, anchor, directory)) = configured {
+        return Ok(JournalResolution {
+            directory,
+            source: ResolutionSource::ConfigPrefix,
+            anchor: Some(anchor),
+        });
+    }
+    let root = repo_root(&canonical_cwd).with_context(|| {
+        format!(
+            "cannot resolve a stable journal anchor from {}: Git discovery failed and no \
+             [journals.dirs] path scope matched; set ARC_JOURNAL_DIR or add an absolute \
+             path-prefix entry to {}",
+            canonical_cwd.display(),
+            cfg.config_path.display()
+        )
+    })?;
+    Ok(JournalResolution {
+        directory: cfg.ai_home.join("journals").join(config::path_slug(&root)),
+        source: ResolutionSource::Git,
+        anchor: Some(root),
+    })
 }
 
 /// The main repository root, shared by every worktree. Keying the archive
 /// off this (never a worktree path) means two worktrees of one repo always
 /// resolve to the same directory.
 fn repo_root(cwd: &Path) -> Result<PathBuf> {
-    let common = gitio::common_dir(cwd)
-        .context("not inside a Git repository (set ARC_JOURNAL_DIR to override)")?;
+    let common = gitio::common_dir(cwd)?;
     let root = if common.file_name().is_some_and(|n| n == ".git") {
         common.parent().unwrap_or(&common).to_path_buf()
     } else {

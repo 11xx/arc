@@ -42,6 +42,11 @@ fn doctor_reports_closed_registered_worktrees_without_removing_them() {
 }
 
 #[test]
+fn journal_dir_longest_prefix_and_git_identity_preserve_existing_slugs() {
+    journal::journal_dir_longest_prefix_and_git_identity_preserve_existing_slugs();
+}
+
+#[test]
 fn nested_leaf_at_top_level_suggests_its_command_path() {
     let repo = Repo::new();
     repo.arc(&repo.root)
