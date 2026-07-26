@@ -22,7 +22,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use clap::{Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Closed set of artifact kinds. Malformed kinds are rejected by clap at
@@ -2247,8 +2247,17 @@ struct DiscussionSummary {
     participants: Vec<String>,
     /// Typed `position` events that named a `--ref`.
     reply_refs: usize,
+    rounds: Vec<DiscussionRound>,
+    unanswered: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resolution: Option<Resolution>,
+}
+
+#[derive(Serialize)]
+struct DiscussionRound {
+    depth: usize,
+    positions: Vec<String>,
+    participants: Vec<String>,
 }
 
 /// The identity label a position or resolution carries: `<model> via <harness>`
@@ -2258,6 +2267,88 @@ fn event_identity_label(event: &JournalEvent) -> String {
         Some(model) => format!("{model} via {}", event.harness),
         None => event.harness.clone(),
     }
+}
+
+const MAX_DISCUSSION_DEPTH: usize = 256;
+
+fn position_depth(
+    start: usize,
+    positions: &[&JournalEvent],
+    positions_by_id: &HashMap<&str, usize>,
+) -> usize {
+    let mut current = start;
+    let mut depth = 1;
+    let mut visited = HashMap::new();
+
+    loop {
+        if let Some(entry_depth) = visited.insert(current, depth) {
+            return entry_depth;
+        }
+        let Some(parent) = positions[current]
+            .reference
+            .as_deref()
+            .and_then(|reference| positions_by_id.get(reference))
+            .copied()
+        else {
+            return depth;
+        };
+        if depth >= MAX_DISCUSSION_DEPTH {
+            return 1;
+        }
+        depth += 1;
+        current = parent;
+    }
+}
+
+fn discussion_rounds(positions: &[&JournalEvent]) -> (Vec<DiscussionRound>, Vec<String>) {
+    let positions_by_id: HashMap<&str, usize> = positions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| event.position_id.as_deref().map(|id| (id, index)))
+        .collect();
+    let mut rounds: Vec<DiscussionRound> = Vec::new();
+
+    for (index, event) in positions.iter().enumerate() {
+        let Some(position_id) = event.position_id.as_ref() else {
+            continue;
+        };
+        let depth = position_depth(index, positions, &positions_by_id);
+        if !rounds.iter().any(|round| round.depth == depth) {
+            rounds.push(DiscussionRound {
+                depth,
+                positions: Vec::new(),
+                participants: Vec::new(),
+            });
+            rounds.sort_by_key(|round| round.depth);
+        }
+        let round = rounds
+            .iter_mut()
+            .find(|round| round.depth == depth)
+            .expect("round was inserted");
+        round.positions.push(position_id.clone());
+        let participant = event_identity_label(event);
+        if !round.participants.contains(&participant) {
+            round.participants.push(participant);
+        }
+    }
+
+    let answered: HashSet<&str> = positions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            let reference = event.reference.as_deref()?;
+            let target = positions_by_id.get(reference)?;
+            (*target != index).then_some(reference)
+        })
+        .collect();
+    let unanswered = positions
+        .iter()
+        .filter_map(|event| event.position_id.as_ref())
+        .filter(|position_id| !answered.contains(position_id.as_str()))
+        .cloned()
+        .collect();
+
+    (rounds, unanswered)
 }
 
 fn is_position_heading(line: &str) -> bool {
@@ -2342,6 +2433,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         .iter()
         .filter(|event| event.reference.is_some())
         .count();
+    let (rounds, unanswered) = discussion_rounds(&position_events);
 
     // Resolution: the newest consumed event for this file, if any. The resolver
     // participated when a position event shares its harness-native session.
@@ -2366,6 +2458,8 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         stances,
         participants,
         reply_refs,
+        rounds,
+        unanswered,
         resolution,
     };
 
@@ -2395,6 +2489,23 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         "participants: {participants} ({} reply-ref{})",
         summary.reply_refs,
         if summary.reply_refs == 1 { "" } else { "s" }
+    );
+    println!("rounds (same-depth positions could not have read each other):");
+    for round in &summary.rounds {
+        println!(
+            "  round {}: {} — {}",
+            round.depth,
+            round.positions.join(", "),
+            round.participants.join(", ")
+        );
+    }
+    println!(
+        "unanswered: {}",
+        if summary.unanswered.is_empty() {
+            "(none)".to_string()
+        } else {
+            summary.unanswered.join(", ")
+        }
     );
     match &summary.resolution {
         Some(resolution) => {
