@@ -60,6 +60,12 @@ fn brief_scaffold_sol_low_records_the_fences() {
     assert!(brief.contains("danger-full-access"), "{brief}");
     assert!(brief.contains("staged, no SHA"), "{brief}");
     assert!(brief.contains("heartbeat"), "{brief}");
+    assert!(brief.contains("Acceptance probes"), "{brief}");
+    assert!(brief.contains("arc verify --command"), "{brief}");
+    assert!(
+        brief.contains("never edit a probe to make it pass"),
+        "{brief}"
+    );
 }
 
 #[test]

@@ -12,6 +12,18 @@
 ## Tests
 <the exact tests to add — none beyond these>
 
+## Acceptance probes
+<name each probe as a runnable command whose outcome distinguishes the intended
+behavior from a plausible wrong implementation; a brief whose material risk
+has no such command is not ready to delegate>
+
+- Run each probe at the final commit and record it with
+  `arc verify --command '<the probe>'` before `arc done`. If the sandbox
+  prevents running a probe, record it with
+  `arc verify --attest --result pass` instead.
+- Probe evidence is recorded beside gate results but never gates integration;
+  reviewers enforce it.
+
 ## Execution contract (clear-spec delegated slice)
 
 - Work only in this change's worktree. `git rebase master` first — earlier
@@ -24,6 +36,9 @@
   symbol, or assumption is missing or wrong, run
   `arc stage <change> blocked-on --note "<what>"`, `arc release-claim`, and
   stop — do not work around it.
+- If a probe cannot be run, or fails for what looks like a defect in the probe
+  rather than the implementation, stop and request a new brief —
+  never edit a probe to make it pass.
 - Never run `review`, `integrate`, or `close`; those are the lead's.
 
 ## Sandbox facts (arc-driving executors)
