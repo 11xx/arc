@@ -755,3 +755,89 @@ fn export_import_roundtrips_message_events() {
     assert_eq!(messages[0]["summary"], "portable announcement");
     assert_eq!(messages[0]["metadata"]["k"], "v");
 }
+
+#[test]
+fn export_import_preserves_plan_links_on_every_brief_version() {
+    let source = Repo::new();
+    stdout(
+        source
+            .arc(&source.root)
+            .args(["begin", "brief-bundle", "--no-worktree"]),
+    );
+    let mut plans = Vec::new();
+    for topic in ["portable-first", "portable-second"] {
+        let path = stdout(
+            source
+                .arc(&source.root)
+                .args([
+                    "journal",
+                    "note",
+                    topic,
+                    "--kind",
+                    "plan",
+                    "--body-file",
+                    "-",
+                ])
+                .write_stdin("# Plan\n"),
+        );
+        plans.push(
+            Path::new(path.trim())
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    for (plan_ref, plan_slice, body) in [
+        (&plans[0], "first-slice", "first contract\n"),
+        (&plans[1], "second-slice", "second contract\n"),
+    ] {
+        source
+            .arc(&source.root)
+            .args([
+                "brief",
+                "brief-bundle",
+                "--body-file",
+                "-",
+                "--plan-ref",
+                plan_ref,
+                "--plan-slice",
+                plan_slice,
+            ])
+            .write_stdin(body)
+            .assert()
+            .success();
+    }
+
+    let bundle = source.home.join("brief-bundle.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            "brief-bundle",
+            "--output",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    for (version, plan_ref, plan_slice, body) in [
+        (1, &plans[0], "first-slice", "first contract\n"),
+        (2, &plans[1], "second-slice", "second contract\n"),
+    ] {
+        destination
+            .arc(&destination.root)
+            .args(["brief", "brief-bundle", "--version", &version.to_string()])
+            .assert()
+            .success()
+            .stdout(format!(
+                "plan-ref: {plan_ref}\nplan-slice: {plan_slice}\n\n{body}"
+            ));
+    }
+}

@@ -158,6 +158,8 @@ pub fn begin(
                     Payload::BriefRecorded {
                         title: Some(format!("Seeded from {filename}")),
                         body: seeded,
+                        plan_ref: None,
+                        plan_slice: None,
                     },
                 );
                 if let Err(error) = store.append_event(&event) {
@@ -304,6 +306,7 @@ pub fn show_selection(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn brief(
     ctx: &Ctx,
     role: ExecutionRole,
@@ -312,7 +315,12 @@ pub fn brief(
     title: Option<String>,
     version: Option<usize>,
     scaffold: Option<String>,
+    plan_ref: Option<String>,
+    plan_slice: Option<String>,
 ) -> Result<i32> {
+    if plan_ref.is_some() != plan_slice.is_some() {
+        bail!("--plan-ref and --plan-slice must be provided together");
+    }
     if body_file.is_some() || scaffold.is_some() {
         if role != ExecutionRole::Lead {
             eprintln!(
@@ -323,6 +331,10 @@ pub fn brief(
         }
         if version.is_some() {
             bail!("--version cannot be used when recording a brief");
+        }
+        if let (Some(plan_ref), Some(plan_slice)) = (&plan_ref, &plan_slice) {
+            crate::journal::validate_plan_artifact(ctx, plan_ref)?;
+            crate::ids::validate_slug(plan_slice)?;
         }
         // A scaffold template is prepended to the body being recorded;
         // --scaffold with no --body-file records the template alone.
@@ -341,7 +353,16 @@ pub fn brief(
             bail!("change {change_id} is closed");
         }
         let next_version = state.briefs.len() + 1;
-        let event = ctx.event(&store, &change_id, Payload::BriefRecorded { title, body });
+        let event = ctx.event(
+            &store,
+            &change_id,
+            Payload::BriefRecorded {
+                title,
+                body,
+                plan_ref,
+                plan_slice,
+            },
+        );
         store.append_event(&event)?;
         println!("brief: v{next_version}");
         println!("event: {}", event.event_id);
@@ -350,6 +371,9 @@ pub fn brief(
 
     if title.is_some() {
         bail!("--title requires --body-file or --scaffold");
+    }
+    if plan_ref.is_some() {
+        bail!("--plan-ref and --plan-slice require --body-file or --scaffold");
     }
     let store = ctx.store()?;
     let (_, state) = ctx.load_state(&store, reference)?;
@@ -362,6 +386,11 @@ pub fn brief(
         Some(version) => anyhow::anyhow!("brief version {version} not found"),
         None => anyhow::anyhow!("no brief recorded for change {}", state.change_id),
     })?;
+    if let (Some(plan_ref), Some(plan_slice)) = (&selected.plan_ref, &selected.plan_slice) {
+        println!("plan-ref: {plan_ref}");
+        println!("plan-slice: {plan_slice}");
+        println!();
+    }
     print!("{}", selected.body);
     Ok(0)
 }

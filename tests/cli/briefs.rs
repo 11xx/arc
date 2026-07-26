@@ -17,10 +17,33 @@ fn record(repo: &Repo, slug: &str, body: &str, title: Option<&str>) {
     command.write_stdin(body).assert().success();
 }
 
+fn plan(repo: &Repo, topic: &str) -> String {
+    let path = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                topic,
+                "--kind",
+                "plan",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Plan\n"),
+    );
+    Path::new(path.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[test]
 fn brief_record_and_read_round_trip() {
     let repo = Repo::new();
     begin(&repo, "brief-roundtrip");
+    let first_plan = plan(&repo, "first-plan");
+    let second_plan = plan(&repo, "second-plan");
     let v1 = "# First\n\nKeep this exact.\n";
     let v2 = "# Second\n\nReplace the latest.\n";
 
@@ -33,6 +56,10 @@ fn brief_record_and_read_round_trip() {
             "-",
             "--title",
             "Contract",
+            "--plan-ref",
+            &first_plan,
+            "--plan-slice",
+            "first-slice",
         ])
         .write_stdin(v1)
         .assert()
@@ -47,30 +74,132 @@ fn brief_record_and_read_round_trip() {
         .args(["brief", "brief-roundtrip"])
         .assert()
         .success()
-        .stdout(v1);
+        .stdout(format!(
+            "plan-ref: {first_plan}\nplan-slice: first-slice\n\n{v1}"
+        ));
 
-    record(&repo, "brief-roundtrip", v2, None);
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "brief-roundtrip",
+            "--body-file",
+            "-",
+            "--plan-ref",
+            &second_plan,
+            "--plan-slice",
+            "second-slice",
+        ])
+        .write_stdin(v2)
+        .assert()
+        .success();
     repo.arc(&repo.root)
         .args(["brief", "brief-roundtrip"])
         .assert()
         .success()
-        .stdout(v2);
+        .stdout(format!(
+            "plan-ref: {second_plan}\nplan-slice: second-slice\n\n{v2}"
+        ));
     repo.arc(&repo.root)
         .args(["brief", "brief-roundtrip", "--version", "1"])
         .assert()
         .success()
-        .stdout(v1);
+        .stdout(format!(
+            "plan-ref: {first_plan}\nplan-slice: first-slice\n\n{v1}"
+        ));
     repo.arc(&repo.root)
         .args(["brief", "brief-roundtrip", "--version", "3"])
         .assert()
         .failure()
         .stderr(predicates::str::contains("brief version 3 not found"));
+
+    begin(&repo, "brief-unlinked");
+    record(&repo, "brief-unlinked", "ordinary brief\n", None);
+    repo.arc(&repo.root)
+        .args(["brief", "brief-unlinked"])
+        .assert()
+        .success()
+        .stdout("ordinary brief\n");
 }
 
 #[test]
 fn brief_requires_body_flag_semantics() {
     let repo = Repo::new();
     let change_id = begin(&repo, "brief-flags");
+    let plan_ref = plan(&repo, "flag-plan");
+    for args in [
+        vec!["--plan-ref", plan_ref.as_str()],
+        vec!["--plan-slice", "only-slice"],
+    ] {
+        repo.arc(&repo.root)
+            .args(["brief", "brief-flags", "--body-file", "-"])
+            .args(args)
+            .write_stdin("invalid\n")
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("must be provided together"));
+    }
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "brief-flags",
+            "--body-file",
+            "-",
+            "--plan-ref",
+            "20990101T000000Z-missing-plan.md",
+            "--plan-slice",
+            "missing",
+        ])
+        .write_stdin("invalid\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no such artifact"));
+    let note_path = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "not-plan",
+                "--kind",
+                "note",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("note\n"),
+    );
+    let note_ref = Path::new(note_path.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy();
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "brief-flags",
+            "--body-file",
+            "-",
+            "--plan-ref",
+            &note_ref,
+            "--plan-slice",
+            "wrong-kind",
+        ])
+        .write_stdin("invalid\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a plan"));
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "brief-flags",
+            "--body-file",
+            "-",
+            "--plan-ref",
+            "../plan.md",
+            "--plan-slice",
+            "path-shaped",
+        ])
+        .write_stdin("invalid\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a path"));
     repo.arc(&repo.root)
         .args(["brief", "brief-flags", "--title", "No body"])
         .assert()
@@ -122,18 +251,38 @@ fn brief_write_is_lead_only() {
 fn brief_shows_in_show_and_status() {
     let repo = Repo::new();
     begin(&repo, "brief-show");
+    let plan_ref = plan(&repo, "show-plan");
     record(&repo, "brief-show", "old body\n", None);
-    record(&repo, "brief-show", "current body\n", Some("Current"));
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "brief-show",
+            "--body-file",
+            "-",
+            "--title",
+            "Current",
+            "--plan-ref",
+            &plan_ref,
+            "--plan-slice",
+            "status-link",
+        ])
+        .write_stdin("current body\n")
+        .assert()
+        .success();
     repo.arc(&repo.root)
         .args(["show", "brief-show"])
         .assert()
         .success()
         .stdout(predicates::str::contains("## Brief (v2)"))
+        .stdout(predicates::str::contains(format!("- Plan: `{plan_ref}`")))
+        .stdout(predicates::str::contains("- Slice: `status-link`"))
         .stdout(predicates::str::contains("current body"));
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "brief-show"]))).unwrap();
     assert_eq!(status["brief"]["version"], 2);
     assert_eq!(status["brief"]["title"], "Current");
+    assert_eq!(status["brief"]["plan_ref"], plan_ref);
+    assert_eq!(status["brief"]["plan_slice"], "status-link");
     assert!(status["brief"]["recorded_at"].is_string());
 
     begin(&repo, "brief-none");
@@ -167,41 +316,4 @@ fn brief_closed_change_refuses_new_versions() {
         .assert()
         .success()
         .stdout("still readable\n");
-}
-
-#[test]
-fn brief_survives_export_import() {
-    let source = Repo::new();
-    begin(&source, "brief-bundle");
-    record(
-        &source,
-        "brief-bundle",
-        "portable contract\n",
-        Some("Portable"),
-    );
-    let bundle = source.home.join("brief-bundle.json");
-    source
-        .arc(&source.root)
-        .args([
-            "export",
-            "brief-bundle",
-            "--output",
-            bundle.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-
-    let destination = Repo::new();
-    destination
-        .arc(&destination.root)
-        .args(["import", bundle.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("unknown event type").not());
-    destination
-        .arc(&destination.root)
-        .args(["brief", "brief-bundle"])
-        .assert()
-        .success()
-        .stdout("portable contract\n");
 }
