@@ -164,10 +164,17 @@ fn ensure_append_allowed(state: &ChangeState, payload: &Payload) -> Result<()> {
                 state.change_id
             )
         }
-        AppendPermission::OpenOrIntegratedFact => bail!(
-            "change {} is {outcome}; event requires an open or integrated change",
-            state.change_id
-        ),
+        AppendPermission::OpenOrIntegratedFact => {
+            let (subject, verb) = if matches!(payload, Payload::ChangelogRecorded { .. }) {
+                ("changelog entries", "require")
+            } else {
+                ("event", "requires")
+            };
+            bail!(
+                "change {} is {outcome}; {subject} {verb} an open or integrated change",
+                state.change_id
+            )
+        }
         AppendPermission::IntegratedOnlyFact => bail!(
             "change {} is {outcome}; event requires an integrated change",
             state.change_id
