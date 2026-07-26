@@ -361,6 +361,14 @@ arc metadata radio-refill-fix --remove-blocked-by radio-storage --remove-tag '#r
 arc metadata radio-refill-fix --priority 20
 ```
 
+Read the current derived metadata without appending an event. The default is a
+concise text projection; `--json` emits the versioned `arc-metadata/1` shape:
+
+```sh
+arc metadata radio-refill-fix
+arc metadata radio-refill-fix --json
+```
+
 Fleet executors can atomically select and claim work instead of racing a
 separate query and claim:
 
