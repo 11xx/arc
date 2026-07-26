@@ -51,3 +51,70 @@ fn doctor_reports_orphaned_tmp_as_advice_without_failing() {
         .stdout(predicates::str::contains("orphaned-temporary-file"));
     assert!(temporary.is_file(), "doctor must be read-only");
 }
+
+#[test]
+fn doctor_groups_advice_and_ignores_closed_claims() {
+    let repo = Repo::new();
+    let expired_claim = |slug: &str| {
+        let opened = stdout(repo.arc(&repo.root).args(["begin", slug, "--no-worktree"]));
+        let change_id = opened_change_id(&opened);
+        repo.arc(&repo.root)
+            .args(["claim", slug, "--ttl", "1s"])
+            .assert()
+            .success();
+        age_event(&repo, &change_id, "claim-set", 5);
+        change_id
+    };
+    let first = expired_claim("doctor-open-one");
+    let second = expired_claim("doctor-open-two");
+    let closed = expired_claim("doctor-closed");
+    repo.arc(&repo.root)
+        .args(["close", "doctor-closed", "--abandoned"])
+        .assert()
+        .success();
+
+    let default = stdout(repo.arc(&repo.root).arg("doctor"));
+    assert_eq!(
+        default.matches("long-expired-claim").count(),
+        1,
+        "{default}"
+    );
+    assert!(
+        default.contains(
+            "long-expired-claim: 2 open changes have claims expired for more than one TTL; \
+             run arc doctor --verbose to identify them"
+        ),
+        "{default}"
+    );
+    assert!(!default.contains(&first), "{default}");
+    assert!(!default.contains(&second), "{default}");
+    assert!(!default.contains(&closed), "{default}");
+
+    let verbose = stdout(repo.arc(&repo.root).args(["doctor", "--verbose"]));
+    assert_eq!(
+        verbose.matches("long-expired-claim").count(),
+        2,
+        "{verbose}"
+    );
+    assert!(verbose.contains(&first), "{verbose}");
+    assert!(verbose.contains(&second), "{verbose}");
+    assert!(!verbose.contains(&closed), "{verbose}");
+
+    let json = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
+    let claims = json["advice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["code"] == "long-expired-claim")
+        .collect::<Vec<_>>();
+    assert_eq!(claims.len(), 2);
+    assert!(claims
+        .iter()
+        .all(|finding| !finding["detail"].as_str().unwrap().contains(&closed)));
+
+    repo.arc(&repo.root)
+        .args(["doctor", "--verbose", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+}

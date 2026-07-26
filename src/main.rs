@@ -711,6 +711,9 @@ enum Cmd {
     Doctor {
         #[arg(long)]
         json: bool,
+        /// Show every item behind grouped advice
+        #[arg(long, conflicts_with = "json")]
+        verbose: bool,
     },
     /// Manage the opt-in Git hook pack (never installed automatically)
     Hooks {
@@ -1584,7 +1587,7 @@ fn run(cli: Cli) -> Result<i32> {
             );
             Ok(0)
         }
-        Cmd::Doctor { json } => commands::run_doctor(&ctx, json),
+        Cmd::Doctor { json, verbose } => commands::run_doctor(&ctx, json, verbose),
         Cmd::Hooks { cmd } => match cmd {
             HooksCmd::Install { force } => {
                 commands::hooks_install(&ctx, force)?;
