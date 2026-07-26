@@ -344,6 +344,9 @@ enum Cmd {
         tag: String,
         #[arg(long)]
         json: bool,
+        /// Include final-patchset review provenance
+        #[arg(long)]
+        review: bool,
     },
     /// Atomically claim the highest-priority ready change
     Take {
@@ -1143,8 +1146,8 @@ fn run(cli: Cli) -> Result<i32> {
             commands::inbox(&ctx, assigned_to, json)?;
             Ok(0)
         }
-        Cmd::Chain { tag, json } => {
-            commands::chain(&ctx, tag, json)?;
+        Cmd::Chain { tag, json, review } => {
+            commands::chain(&ctx, tag, json, review)?;
             Ok(0)
         }
         Cmd::Take { tag, ttl, json } => commands::take(&ctx, tag, ttl, json),
