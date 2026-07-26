@@ -219,9 +219,11 @@ Two limits, stated rather than glossed:
 - **A probe is only as good as the premise behind it.** Verify every path,
   symbol, and claim a brief makes against the source *before* delegating. On
   the rescue chain, three of six first attempts blocked on unverified brief
-  claims, and all four blocking findings were faithful implementations of
-  incomplete briefs rather than execution errors; brief quality, not executor
-  tier, was the binding constraint.
+  claims, and all four review-stopping findings were faithful implementations
+  of incomplete briefs rather than execution errors; brief quality, not
+  executor tier, was the binding constraint. Those findings were major ones
+  riding `changes-requested` verdicts — their structured `blocking` field was
+  false, so what stopped the work was the verdict, not the finding.
 
 If the floor fails anyway — a low-authored semantic defect passing its named
 probe and first review, or two of *the next six* low changes needing extra
