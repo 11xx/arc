@@ -201,6 +201,7 @@ pub fn snapshot_with_verify(
     ctx: &Ctx,
     reference: &str,
     base: Option<String>,
+    brief_version: Option<usize>,
     verify_requested: bool,
     gates: Vec<String>,
     all: bool,
@@ -211,7 +212,7 @@ pub fn snapshot_with_verify(
     if all && !gates.is_empty() {
         bail!("--all cannot be combined with --gate");
     }
-    super::review::snapshot(ctx, reference, base)?;
+    super::review::snapshot(ctx, reference, base, brief_version)?;
     if !verify_requested {
         return Ok(0);
     }
@@ -263,7 +264,7 @@ pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
             return Ok(code);
         }
     }
-    super::review::snapshot(ctx, reference, None)?;
+    super::review::snapshot(ctx, reference, None, None)?;
     let _ = verify(
         ctx,
         reference,

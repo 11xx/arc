@@ -40,8 +40,10 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   slug that survive across revisions, tied to one branch and one
   integration target.
 - A **patchset** is an immutable base/head snapshot of that branch,
-  recorded with `arc snapshot`. Reviews and approvals bind to patchsets,
-  never to moving branch names.
+  recorded with `arc snapshot`. It binds to the latest brief unless
+  `--brief-version <n>` selects another recorded contract; changing that
+  contract records a new patchset even at an unchanged Git head. Reviews and
+  approvals bind to patchsets, never to moving branch names.
 - A **brief** is a change-scoped implementation contract stored in the ledger;
   goal-scoped analysis briefs stay in the project journal, and briefs never
   gate checking or integration.

@@ -500,6 +500,9 @@ enum Cmd {
         /// Override the recorded base revision
         #[arg(long)]
         base: Option<String>,
+        /// Brief version this patchset implements (defaults to latest)
+        #[arg(long)]
+        brief_version: Option<usize>,
         /// Run verification after recording the patchset
         #[arg(long)]
         verify: bool,
@@ -1300,12 +1303,13 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Snapshot {
             change,
             base,
+            brief_version,
             verify,
             gate,
             all,
         } => {
             let change = infer(change.as_deref())?;
-            commands::snapshot_with_verify(&ctx, &change, base, verify, gate, all)
+            commands::snapshot_with_verify(&ctx, &change, base, brief_version, verify, gate, all)
         }
         Cmd::Comment {
             change,

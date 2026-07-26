@@ -489,6 +489,7 @@ mod tests {
                 base: "base".into(),
                 head: "head".into(),
                 merge_base: None,
+                brief_ref: None,
                 author_name: None,
                 author_email: None,
                 committer_name: None,

@@ -126,6 +126,91 @@ fn snapshot_verify_records_patchset_and_selected_or_all_evidence_at_the_same_hea
 }
 
 #[test]
+fn snapshot_records_brief_and_resnapshots_same_head_after_renegotiation() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "brief-bound-patchset"]));
+    let worktree = repo.home.join(".worktrees/repo-brief-bound-patchset");
+    repo.commit(
+        &worktree,
+        "implementation.txt",
+        "implemented\n",
+        "feat: implement contract",
+    );
+
+    let first = stdout(
+        repo.arc(&worktree)
+            .args(["brief", "brief-bound-patchset", "--body-file", "-"])
+            .write_stdin("contract v1\n"),
+    );
+    let first_brief = first
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+    repo.arc(&worktree)
+        .args(["snapshot", "brief-bound-patchset"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("patchset: ps-01"));
+    repo.arc(&worktree)
+        .args(["review", "brief-bound-patchset", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let second = stdout(
+        repo.arc(&worktree)
+            .args(["brief", "brief-bound-patchset", "--body-file", "-"])
+            .write_stdin("contract v2\n"),
+    );
+    let second_brief = second
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+    let unchanged_head = repo.head(&worktree);
+    repo.arc(&worktree)
+        .args(["snapshot", "brief-bound-patchset"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("patchset: ps-02"))
+        .stdout(predicates::str::contains("(unchanged)").not());
+
+    let show = json_stdout(
+        repo.arc(&worktree)
+            .args(["show", "brief-bound-patchset", "--json"]),
+    );
+    assert_eq!(show["patchsets"][0]["head"], unchanged_head);
+    assert_eq!(show["patchsets"][1]["head"], unchanged_head);
+    assert_eq!(show["patchsets"][0]["brief_ref"]["event_id"], first_brief);
+    assert_eq!(show["patchsets"][0]["brief_version"], 1);
+    assert_eq!(show["patchsets"][1]["brief_ref"]["event_id"], second_brief);
+    assert_eq!(show["patchsets"][1]["brief_version"], 2);
+    let status = json_stdout(repo.arc(&worktree).args(["status", "brief-bound-patchset"]));
+    assert_eq!(status["latest_patchset"]["brief_version"], 2);
+    assert!(!status["verdict"]["valid_for_current_head"]
+        .as_bool()
+        .unwrap());
+
+    let human = stdout(repo.arc(&worktree).args(["show", "brief-bound-patchset"]));
+    assert!(
+        human.contains(&format!("brief: v1 (`{first_brief}`)")),
+        "{human}"
+    );
+    assert!(
+        human.contains(&format!("brief: v2 (`{second_brief}`)")),
+        "{human}"
+    );
+
+    repo.arc(&worktree)
+        .args(["snapshot", "brief-bound-patchset", "--brief-version", "1"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("patchset: ps-03"));
+    let status = json_stdout(repo.arc(&worktree).args(["status", "brief-bound-patchset"]));
+    assert_eq!(status["latest_patchset"]["brief_version"], 1);
+}
+
+#[test]
 fn review_snapshot_approval_is_immediately_valid_for_the_fresh_patchset() {
     let repo = Repo::new();
     stdout(repo.arc(&repo.root).args(["begin", "review-snapshot"]));

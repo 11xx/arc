@@ -501,6 +501,7 @@ mod tests {
                     base: "b".into(),
                     head: "h".into(),
                     merge_base: None,
+                    brief_ref: None,
                     author_name: None,
                     author_email: None,
                     committer_name: None,
