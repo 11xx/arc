@@ -211,8 +211,8 @@ pub enum JournalCmd {
         /// Free-text journal message
         message: String,
     },
-    /// Append a position block to an artifact and emit a typed `position` event
-    Append {
+    /// Add a position block to an artifact and emit a typed `position` event
+    Position {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
         /// Position or item this answers: a position ID, legacy timestamp, or item slug
@@ -343,11 +343,11 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             scaffold.as_deref(),
         ),
         JournalCmd::Log { topic, message } => log_line(ctx, &topic, &message),
-        JournalCmd::Append {
+        JournalCmd::Position {
             filename,
             reference,
             body_file,
-        } => append(ctx, &filename, reference.as_deref(), &body_file),
+        } => position(ctx, &filename, reference.as_deref(), &body_file),
         JournalCmd::Events { limit } => events(ctx, limit),
         JournalCmd::Catchup {
             limit,
@@ -746,15 +746,15 @@ fn log_line(ctx: &Ctx, topic: &str, message: &str) -> Result<i32> {
     Ok(0)
 }
 
-/// Append a position to a live artifact and emit a typed `position` event.
+/// Add a position to a live artifact and emit a typed `position` event.
 /// The Markdown block and the event are the two halves of the design: the
 /// block is for people and structural stance parsing; the event supplies the
 /// stable position ID, activity time, identity, and reply edge. Advisory and
 /// fail-open like every journal write — the block is appended even if the
 /// identity is only partially known, and the file stays hand-writable.
-fn append(ctx: &Ctx, filename: &str, reference: Option<&str>, body_file: &str) -> Result<i32> {
+fn position(ctx: &Ctx, filename: &str, reference: Option<&str>, body_file: &str) -> Result<i32> {
     if filename.contains(['/', '\\']) {
-        bail!("journal append takes an artifact filename inside the journal dir, not a path");
+        bail!("journal position takes an artifact filename inside the journal dir, not a path");
     }
     let Some((_, topic, _)) = parse_artifact_name(filename) else {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
@@ -2269,7 +2269,7 @@ struct DiscussionSummary {
     positions: usize,
     stances: StanceTally,
     /// Distinct `<model via harness>` identities from typed `position` events.
-    /// Hand-written positions that never ran `journal append` are not counted
+    /// Hand-written positions that never ran `journal position` are not counted
     /// here (they still count toward `positions` and `stances`).
     participants: Vec<String>,
     /// Typed `position` events that named a `--ref`.
@@ -2513,7 +2513,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         summary.stances.other
     );
     let participants = if summary.participants.is_empty() {
-        "(none via journal append)".to_string()
+        "(none via journal position)".to_string()
     } else {
         summary.participants.join(", ")
     };
