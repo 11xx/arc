@@ -60,6 +60,9 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   `<git-common-dir>/arc/`, one file per event, created exclusively so
   concurrent writers never clobber each other. The ledger is
   authoritative; everything else is a view.
+- Replies to findings appear beside their dispositions in findings JSON and
+  beneath the finding in `arc show`; replies to comments render beneath their
+  parent comment.
 - **Approval staleness is structural:** a verdict is valid only while
   the branch head equals the approved patchset head. Any new commit
   makes it stale.
