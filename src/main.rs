@@ -22,8 +22,7 @@ use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use commands::{AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{
-    ChangelogSection, DispositionStatus, MessageSeverity, MessageType, Severity, Side, Verdict,
-    VerifyResult,
+    DispositionStatus, MessageSeverity, MessageType, Severity, Side, Verdict, VerifyResult,
 };
 
 /// Change, review, and integration state over plain Git for agentic
@@ -282,9 +281,9 @@ enum Cmd {
     /// Record, read, or project changelog entries
     Changelog {
         change: Option<String>,
-        /// Keep a Changelog section for a newly recorded entry
-        #[arg(long, value_enum)]
-        section: Option<ChangelogSection>,
+        /// Free-form category for a newly recorded changelog entry
+        #[arg(long)]
+        category: Option<String>,
         /// Read a new entry body from a file ('-' for stdin)
         #[arg(long)]
         body_file: Option<String>,
@@ -1112,7 +1111,7 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Changelog {
             change,
-            section,
+            category,
             body_file,
             json,
             provenance,
@@ -1122,7 +1121,7 @@ fn run(cli: Cli) -> Result<i32> {
             &ctx,
             role,
             change.as_deref(),
-            section,
+            category,
             body_file,
             json,
             provenance,

@@ -5,9 +5,16 @@ fn begin(repo: &Repo, slug: &str) -> String {
     opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", slug])))
 }
 
-fn record(repo: &Repo, cwd: &Path, slug: &str, section: &str, body: &str) {
+fn record(repo: &Repo, cwd: &Path, slug: &str, category: &str, body: &str) {
     repo.arc(cwd)
-        .args(["changelog", slug, "--section", section, "--body-file", "-"])
+        .args([
+            "changelog",
+            slug,
+            "--category",
+            category,
+            "--body-file",
+            "-",
+        ])
         .write_stdin(body)
         .assert()
         .success();
@@ -47,7 +54,7 @@ fn recording_then_reading_round_trips_section_and_body() {
         "--json",
     ])))
     .unwrap();
-    assert_eq!(value["entries"][0]["category"], "Fixed");
+    assert_eq!(value["entries"][0]["category"], "fixed");
     assert_eq!(value["entries"][0]["body"], "- fixed it\n");
 }
 
@@ -64,7 +71,7 @@ fn rerecording_replaces_the_derived_entry_and_keeps_both_events() {
         "--json",
     ])))
     .unwrap();
-    assert_eq!(value["entries"][0]["category"], "Changed");
+    assert_eq!(value["entries"][0]["category"], "changed");
     assert_eq!(value["entries"][0]["body"], "- second\n");
     let count = fs::read_dir(event_dir(&repo, &change_id))
         .unwrap()
@@ -115,7 +122,7 @@ fn recording_after_integration_updates_the_projection() {
         .iter()
         .find(|entry| entry["change"] == "late-entry")
         .unwrap();
-    assert_eq!(entry["category"], "Fixed");
+    assert_eq!(entry["category"], "fixed");
     assert_eq!(entry["body"], "- documented after integration\n");
 
     begin(&repo, "abandoned-entry");
@@ -127,7 +134,7 @@ fn recording_after_integration_updates_the_projection() {
         .args([
             "changelog",
             "abandoned-entry",
-            "--section",
+            "--category",
             "fixed",
             "--body-file",
             "-",
@@ -155,7 +162,7 @@ fn recording_after_integration_updates_the_projection() {
         .args([
             "changelog",
             "superseded-entry",
-            "--section",
+            "--category",
             "fixed",
             "--body-file",
             "-",
@@ -184,7 +191,7 @@ fn json_projection_always_carries_full_event_provenance() {
                 "Release Executor",
                 "changelog",
                 "provenance-entry",
-                "--section",
+                "--category",
                 "fixed",
                 "--body-file",
                 "-",
@@ -208,7 +215,7 @@ fn json_projection_always_carries_full_event_provenance() {
         .iter()
         .find(|entry| entry["change"] == "provenance-entry")
         .unwrap();
-    assert_eq!(entry["category"], "Fixed");
+    assert_eq!(entry["category"], "fixed");
     assert_eq!(entry["body"], "- provenance survives projection\n");
     assert!(entry["integrated_commit"].is_string());
     assert!(entry["integrated_at"].is_string());
@@ -293,6 +300,105 @@ fn projection_groups_sections_in_keep_a_changelog_order() {
 }
 
 #[test]
+fn free_form_categories_render_after_canonical_categories() {
+    let repo = Repo::new();
+    for (slug, category, body) in [
+        ("fixed-category", "fIxEd", "- fixed\n"),
+        ("highlights-category", "  Highlights  ", "- highlighted\n"),
+        ("api-category", "API Notes", "- api\n"),
+        ("added-category", "added", "- added\n"),
+    ] {
+        begin(&repo, slug);
+        let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+        repo.arc(&worktree)
+            .args([
+                "changelog",
+                slug,
+                "--category",
+                category,
+                "--body-file",
+                "-",
+            ])
+            .write_stdin(body)
+            .assert()
+            .success();
+        integrate(&repo, slug);
+    }
+
+    let output = stdout(repo.arc(&repo.root).args(["changelog"]));
+    for heading in ["### Added", "### Fixed", "### API Notes", "### Highlights"] {
+        assert!(output.contains(heading), "{output}");
+    }
+    assert!(output.find("### Added").unwrap() < output.find("### Fixed").unwrap());
+    assert!(output.find("### Fixed").unwrap() < output.find("### API Notes").unwrap());
+    assert!(output.find("### API Notes").unwrap() < output.find("### Highlights").unwrap());
+    assert!(!output.contains("### fIxEd"), "{output}");
+
+    let entry =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["changelog", "highlights-category", "--json"]),
+        );
+    assert_eq!(entry["entries"][0]["category"], "Highlights");
+
+    let change_id = opened_change_id(&stdout(
+        repo.arc(&repo.root).args(["begin", "legacy-category"]),
+    ));
+    let worktree = repo.home.join(".worktrees/repo-legacy-category");
+    repo.arc(&worktree)
+        .args([
+            "changelog",
+            "legacy-category",
+            "--category",
+            "Legacy",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("- legacy\n")
+        .assert()
+        .success();
+    let event_path = fs::read_dir(event_dir(&repo, &change_id))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            let event: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            event["event_type"] == "changelog-recorded"
+        })
+        .unwrap();
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&fs::read(&event_path).unwrap()).unwrap();
+    legacy["section"] = legacy.as_object_mut().unwrap().remove("category").unwrap();
+    fs::write(&event_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+    let replayed =
+        json_stdout(
+            repo.arc(&worktree)
+                .args(["changelog", "legacy-category", "--json"]),
+        );
+    assert_eq!(replayed["entries"][0]["category"], "Legacy");
+
+    repo.arc(&repo.root)
+        .args(["changelog", "legacy-category", "--section", "fixed"])
+        .assert()
+        .failure()
+        .code(2);
+    for malformed in ["   ", "Line One\nLine Two"] {
+        repo.arc(&worktree)
+            .args([
+                "changelog",
+                "legacy-category",
+                "--category",
+                malformed,
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("- invalid\n")
+            .assert()
+            .failure();
+    }
+}
+
+#[test]
 fn write_splices_only_unreleased_and_is_idempotent() {
     let repo = Repo::new();
     repo.commit(
@@ -329,7 +435,7 @@ fn reviewer_role_is_refused_when_recording() {
         .args([
             "changelog",
             "roles",
-            "--section",
+            "--category",
             "added",
             "--body-file",
             "-",
