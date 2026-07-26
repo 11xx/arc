@@ -1,6 +1,6 @@
 use crate::gates::GatesFile;
 use crate::gitio;
-use crate::model::{MessageSeverity, MessageType, Verdict};
+use crate::model::{MessageSeverity, MessageType, ProbePhase, Verdict, VerifyResult};
 use crate::policy::PolicyFile;
 use crate::state::{self, ChangeState, ClaimIdentity, GitIdentity};
 use anyhow::Result;
@@ -24,6 +24,7 @@ pub enum Blocker {
     BlockingFindings,
     NoValidApproval,
     GatesNotGreen,
+    AcceptanceProbesNotGreen,
     HoldActive,
 }
 
@@ -36,6 +37,7 @@ impl Blocker {
             Blocker::BlockingFindings => 2,
             Blocker::NoValidApproval => 3,
             Blocker::GatesNotGreen => 5,
+            Blocker::AcceptanceProbesNotGreen => 8,
             Blocker::HoldActive => 4,
         }
     }
@@ -49,6 +51,7 @@ impl Blocker {
             Blocker::BlockingFindings => "blocking-findings",
             Blocker::NoValidApproval => "no-valid-approval",
             Blocker::GatesNotGreen => "gates-not-green",
+            Blocker::AcceptanceProbesNotGreen => "acceptance-probes-not-green",
             Blocker::HoldActive => "hold-active",
         }
     }
@@ -94,6 +97,20 @@ pub struct GateStatus {
     pub output_tail: Option<String>,
     #[serde(skip_serializing_if = "is_false")]
     pub timed_out: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProbeStatus {
+    pub name: String,
+    pub command: String,
+    pub brief_version: usize,
+    pub baseline_revision: String,
+    pub baseline_result: String,
+    pub baseline_attested: bool,
+    pub final_revision: String,
+    pub final_result: String,
+    pub final_attested: bool,
+    pub discriminating_at_head: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -216,6 +233,7 @@ pub struct StatusReport {
     pub open_blocking_findings: Vec<String>,
     pub hold: Option<String>,
     pub gates: Vec<GateStatus>,
+    pub probes: Vec<ProbeStatus>,
     pub blocker_summary: BlockerSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_rejection_reason: Option<String>,
@@ -476,6 +494,57 @@ fn build_report(
             }
         })
         .collect();
+    let probe_statuses = latest_patchset
+        .as_ref()
+        .and_then(|patchset| {
+            let brief_ref = patchset.brief_ref.as_ref()?;
+            let brief_version = patchset.brief_version?;
+            let brief = state
+                .briefs
+                .iter()
+                .find(|brief| brief.event_id == brief_ref.event_id)?;
+            let baseline_revision = brief.base_revision.as_deref().unwrap_or("");
+            Some(
+                brief
+                    .acceptance_probes
+                    .iter()
+                    .map(|probe| {
+                        let evidence = |phase, revision: &str| {
+                            state.verifications.iter().rev().find(|entry| {
+                                entry.revision == revision
+                                    && entry.probe.as_ref().is_some_and(|evidence| {
+                                        evidence.brief_event_id == brief.event_id
+                                            && evidence.name == probe.name
+                                            && evidence.phase == phase
+                                    })
+                            })
+                        };
+                        let baseline = evidence(ProbePhase::Baseline, baseline_revision);
+                        let final_evidence = evidence(ProbePhase::Final, &patchset.head);
+                        ProbeStatus {
+                            name: probe.name.clone(),
+                            command: probe.command.clone(),
+                            brief_version,
+                            baseline_revision: baseline_revision.to_owned(),
+                            baseline_result: verification_result_label(
+                                baseline.map(|entry| entry.result),
+                            ),
+                            baseline_attested: baseline.is_some_and(|entry| entry.attested),
+                            final_revision: patchset.head.clone(),
+                            final_result: verification_result_label(
+                                final_evidence.map(|entry| entry.result),
+                            ),
+                            final_attested: final_evidence.is_some_and(|entry| entry.attested),
+                            discriminating_at_head: baseline
+                                .is_some_and(|entry| entry.result == VerifyResult::Fail)
+                                && final_evidence
+                                    .is_some_and(|entry| entry.result == VerifyResult::Pass),
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .unwrap_or_default();
 
     let mut blockers = Vec::new();
     if state.is_closed() {
@@ -502,6 +571,12 @@ fn build_report(
     }
     if gate_statuses.iter().any(|g| !g.green_at_head) {
         blockers.push(Blocker::GatesNotGreen);
+    }
+    if probe_statuses
+        .iter()
+        .any(|probe| !probe.discriminating_at_head)
+    {
+        blockers.push(Blocker::AcceptanceProbesNotGreen);
     }
     if state.hold.is_some() {
         blockers.push(Blocker::HoldActive);
@@ -553,6 +628,11 @@ fn build_report(
         "release_hold".into()
     } else if let Some(gate) = gate_statuses.iter().find(|gate| !gate.green_at_head) {
         format!("run_gate:{}", gate.name)
+    } else if let Some(probe) = probe_statuses
+        .iter()
+        .find(|probe| !probe.discriminating_at_head)
+    {
+        format!("run_probe:{}", probe.name)
     } else if let Some(reason) = approval_rejection_reason.as_ref() {
         reason.clone()
     } else if !verdict
@@ -629,6 +709,7 @@ fn build_report(
         open_blocking_findings: open_blocking,
         hold: state.hold.clone(),
         gates: gate_statuses,
+        probes: probe_statuses,
         blocker_summary,
         approval_rejection_reason,
         next_action,
@@ -700,6 +781,7 @@ pub fn check_exit_code(report: &StatusReport) -> i32 {
         Blocker::BlockingFindings,
         Blocker::NoValidApproval,
         Blocker::GatesNotGreen,
+        Blocker::AcceptanceProbesNotGreen,
         Blocker::HoldActive,
     ] {
         if report.blockers.contains(&blocker) {
@@ -707,4 +789,13 @@ pub fn check_exit_code(report: &StatusReport) -> i32 {
         }
     }
     6
+}
+
+fn verification_result_label(result: Option<VerifyResult>) -> String {
+    match result {
+        Some(VerifyResult::Pass) => "pass",
+        Some(VerifyResult::Fail) => "fail",
+        None => "pending",
+    }
+    .into()
 }

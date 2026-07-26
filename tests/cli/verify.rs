@@ -622,6 +622,169 @@ fn probe_records_expected_baseline_fail_and_final_pass_against_one_brief() {
     );
 }
 
+#[test]
+fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.test]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gate"]);
+    stdout(repo.arc(&repo.root).args(["begin", "probe-readiness"]));
+    let worktree = repo.home.join(".worktrees/repo-probe-readiness");
+    let base_revision = repo.head(&worktree);
+    let probes = worktree.join("readiness-probes.json");
+    fs::write(
+        &probes,
+        r#"[{"name":"marker-exists","command":"test -f readiness-marker.txt"}]"#,
+    )
+    .unwrap();
+    repo.arc(&worktree)
+        .args([
+            "brief",
+            "probe-readiness",
+            "--body-file",
+            "-",
+            "--probes-json",
+            probes.to_str().unwrap(),
+        ])
+        .write_stdin("readiness contract v1\n")
+        .assert()
+        .success();
+    repo.commit(
+        &worktree,
+        "readiness-marker.txt",
+        "present\n",
+        "feat: satisfy readiness probe",
+    );
+    repo.arc(&worktree)
+        .args(["snapshot", "probe-readiness"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["verify", "probe-readiness", "--all"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["review", "probe-readiness", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let output = repo
+        .arc(&worktree)
+        .args(["check", "probe-readiness", "--json"])
+        .assert()
+        .code(8)
+        .get_output()
+        .stdout
+        .clone();
+    let check: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(check["schema"], "arc-check/1");
+    assert!(check["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(
+            |blocker| blocker["blocker"] == "acceptance-probes-not-green"
+                && blocker["exit_code"] == 8
+        ));
+
+    repo.arc(&worktree)
+        .args(["verify", "probe-readiness", "--probe", "marker-exists"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["check", "probe-readiness"])
+        .assert()
+        .code(8);
+
+    git(&worktree, &["switch", "--detach", &base_revision]);
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "probe-readiness",
+            "--probe",
+            "marker-exists",
+            "--probe-phase",
+            "baseline",
+        ])
+        .assert()
+        .success();
+    git(&worktree, &["switch", "arc/probe-readiness"]);
+    repo.arc(&worktree)
+        .args(["check", "probe-readiness"])
+        .assert()
+        .success();
+
+    repo.commit(
+        &worktree,
+        "second-head.txt",
+        "new head\n",
+        "feat: move patchset head",
+    );
+    repo.arc(&worktree)
+        .args(["snapshot", "probe-readiness"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["verify", "probe-readiness", "--all"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["review", "probe-readiness", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["check", "probe-readiness"])
+        .assert()
+        .code(8);
+    repo.arc(&worktree)
+        .args(["verify", "probe-readiness", "--probe", "marker-exists"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["check", "probe-readiness"])
+        .assert()
+        .success();
+
+    repo.arc(&worktree)
+        .args([
+            "brief",
+            "probe-readiness",
+            "--body-file",
+            "-",
+            "--probes-json",
+            probes.to_str().unwrap(),
+        ])
+        .write_stdin("readiness contract v2\n")
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["snapshot", "probe-readiness"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["review", "probe-readiness", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["check", "probe-readiness"])
+        .assert()
+        .code(8);
+
+    let status = json_stdout(repo.arc(&worktree).args(["status", "probe-readiness"]));
+    assert_eq!(status["schema"], "arc-status/5");
+    assert_eq!(status["probes"][0]["name"], "marker-exists");
+    assert_eq!(status["probes"][0]["brief_version"], 2);
+    assert_eq!(status["probes"][0]["discriminating_at_head"], false);
+    let human = stdout(repo.arc(&worktree).args(["show", "probe-readiness"]));
+    assert!(human.contains("proves behavioral discrimination, not semantic relevance"));
+    assert!(human.contains("reviewer must inspect the baseline output"));
+}
+
 /// --attest requires --result; --result without --attest is a usage error; and
 /// a failing attestation reports exit 1 while still recording evidence.
 #[test]
