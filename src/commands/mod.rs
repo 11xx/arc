@@ -1,5 +1,6 @@
 use crate::bundle::{Bundle, ValidatedBundle};
 mod bundle_io;
+mod chain;
 mod changelog;
 mod claims;
 mod config_cmd;
@@ -29,6 +30,7 @@ use crate::status::{self, StatusReport};
 use crate::store::{Store, TransitionLock};
 use anyhow::{bail, Context, Result};
 pub use bundle_io::{export_bundle, import_bundle};
+pub use chain::chain;
 pub use changelog::changelog;
 pub use claims::{claim, release_claim, stage, take};
 use clap::ValueEnum;

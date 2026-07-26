@@ -4,6 +4,32 @@
 use super::*;
 use crate::state::ClaimIdentity;
 
+pub(crate) fn ready_candidate<'a>(
+    states: &'a BTreeMap<String, ChangeState>,
+    tags: &[String],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<&'a ChangeState> {
+    let mut candidates = states
+        .values()
+        .filter(|candidate| {
+            !candidate.is_closed()
+                && candidate.hold.is_none()
+                && tags.iter().all(|tag| candidate.tags.contains(tag))
+                && !dependency_status(candidate, states).blocked
+                && candidate.claim.as_ref().is_none_or(|claim| {
+                    let timing = state::claim_timing_at(claim, now);
+                    !timing.active || timing.stale
+                })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| a.opened_at.cmp(&b.opened_at))
+    });
+    candidates.first().copied()
+}
+
 /// Select and claim one ready change while holding the repository graph lock.
 /// Competing `take` calls therefore cannot observe and claim the same winner.
 pub fn take(ctx: &Ctx, tags: Vec<String>, ttl: Option<String>, json: bool) -> Result<i32> {
@@ -18,25 +44,7 @@ pub fn take(ctx: &Ctx, tags: Vec<String>, ttl: Option<String>, json: bool) -> Re
     let _graph = store.lock_graph()?;
     let states = ctx.load_all_states(&store)?;
     let now = chrono::Utc::now();
-    let mut candidates = states
-        .values()
-        .filter(|candidate| {
-            !candidate.is_closed()
-                && candidate.hold.is_none()
-                && tags.iter().all(|tag| candidate.tags.contains(tag))
-                && !dependency_status(candidate, &states).blocked
-                && candidate.claim.as_ref().is_none_or(|claim| {
-                    let timing = state::claim_timing_at(claim, now);
-                    !timing.active || timing.stale
-                })
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by(|a, b| {
-        b.priority
-            .cmp(&a.priority)
-            .then_with(|| a.opened_at.cmp(&b.opened_at))
-    });
-    let Some(candidate) = candidates.first() else {
+    let Some(candidate) = ready_candidate(&states, &tags, now) else {
         return Ok(2);
     };
     let mut previous_event_id = store

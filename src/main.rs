@@ -1,4 +1,5 @@
 mod bundle;
+mod chain;
 mod commands;
 mod config;
 mod context;
@@ -335,6 +336,12 @@ enum Cmd {
         /// Restrict to changes assigned to this harness
         #[arg(long = "assigned-to")]
         assigned_to: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a tagged program in dependency order (arc-chain/1 schema)
+    Chain {
+        tag: String,
         #[arg(long)]
         json: bool,
     },
@@ -1134,6 +1141,10 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Inbox { assigned_to, json } => {
             commands::inbox(&ctx, assigned_to, json)?;
+            Ok(0)
+        }
+        Cmd::Chain { tag, json } => {
+            commands::chain(&ctx, tag, json)?;
             Ok(0)
         }
         Cmd::Take { tag, ttl, json } => commands::take(&ctx, tag, ttl, json),
