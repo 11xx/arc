@@ -540,6 +540,7 @@ mod tests {
                 timed_out: false,
                 hostname: "host".into(),
                 attested: false,
+                runner: None,
                 note: None,
             },
         );
@@ -557,6 +558,7 @@ mod tests {
                 timed_out: false,
                 hostname: "host".into(),
                 attested: true,
+                runner: Some("external".into()),
                 note: None,
             },
         );

@@ -258,6 +258,7 @@ pub struct VerificationEntry {
     pub output_tail: Option<String>,
     pub timed_out: bool,
     pub hostname: String,
+    pub runner: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -828,6 +829,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 result,
                 hostname,
                 attested,
+                runner,
                 output_tail,
                 timed_out,
                 ..
@@ -841,6 +843,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 output_tail: output_tail.clone(),
                 timed_out: *timed_out,
                 hostname: hostname.clone(),
+                runner: runner.clone(),
                 created_at: ev.created_at,
             }),
             Payload::HoldSet { reason } => state.hold = Some(reason.clone()),

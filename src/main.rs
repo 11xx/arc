@@ -606,6 +606,15 @@ enum Cmd {
         /// The attested result; required with --attest, rejected without it
         #[arg(long, value_enum)]
         result: Option<VerifyResult>,
+        /// Revision actually tested; required with --attest
+        #[arg(long)]
+        tested_revision: Option<String>,
+        /// Host or environment that executed the attested command
+        #[arg(long)]
+        execution_host: Option<String>,
+        /// Stable identity of the external runner or job
+        #[arg(long)]
+        runner: Option<String>,
         /// Optional note recorded alongside the evidence
         #[arg(long)]
         note: Option<String>,
@@ -1415,6 +1424,9 @@ fn run(cli: Cli) -> Result<i32> {
             command,
             attest,
             result,
+            tested_revision,
+            execution_host,
+            runner,
             note,
         } => {
             let change = infer(change.as_deref())?;
@@ -1429,6 +1441,9 @@ fn run(cli: Cli) -> Result<i32> {
                     command,
                     attest,
                     result,
+                    tested_revision,
+                    execution_host,
+                    runner,
                     note,
                 },
             )

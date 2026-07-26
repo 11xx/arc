@@ -553,6 +553,7 @@ mod tests {
                 timed_out: false,
                 hostname: "host".into(),
                 attested: false,
+                runner: None,
                 note: None,
             },
             Payload::HoldSet {

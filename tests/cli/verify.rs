@@ -267,6 +267,7 @@ fn verify_attest_records_gate_evidence_without_running() {
     let wt = repo.home.join(".worktrees").join("repo-feat-att");
     repo.commit(&wt, "att.txt", "att\n", "feat: add att");
     stdout(repo.arc(&wt).args(["snapshot", "feat-att"]));
+    let tested_revision = repo.head(&wt);
 
     repo.arc(&wt)
         .args([
@@ -277,6 +278,12 @@ fn verify_attest_records_gate_evidence_without_running() {
             "--attest",
             "--result",
             "pass",
+            "--tested-revision",
+            &tested_revision,
+            "--execution-host",
+            "sandbox",
+            "--runner",
+            "test-runner",
             "--note",
             "ran in sandbox",
         ])
@@ -337,6 +344,120 @@ fn verify_attest_records_gate_evidence_without_running() {
         .stdout(predicates::str::contains("Pass (attested)"));
 }
 
+#[test]
+fn attested_verification_uses_declared_execution_context() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.smoke]\ncommand = \"false\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc"]);
+    git(&repo.root, &["commit", "-m", "test: add smoke gate"]);
+    stdout(repo.arc(&repo.root).args(["begin", "external-evidence"]));
+    let worktree = repo.home.join(".worktrees/repo-external-evidence");
+    repo.commit(
+        &worktree,
+        "implementation.txt",
+        "implementation\n",
+        "feat: implementation",
+    );
+    let tested_revision = repo.head(&worktree);
+    repo.arc(&worktree)
+        .args(["snapshot", "external-evidence"])
+        .assert()
+        .success();
+
+    repo.commit(
+        &repo.root,
+        "recorder.txt",
+        "recorder revision\n",
+        "test: advance recorder",
+    );
+    let recorder_revision = repo.head(&repo.root);
+    assert_ne!(tested_revision, recorder_revision);
+    let recorded = repo
+        .arc(&repo.root)
+        .args([
+            "verify",
+            "external-evidence",
+            "--gate",
+            "smoke",
+            "--attest",
+            "--result",
+            "pass",
+            "--tested-revision",
+            &tested_revision,
+            "--execution-host",
+            "sandbox-host",
+            "--runner",
+            "ci/job-42",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recorded = String::from_utf8(recorded).unwrap();
+    let evidence_event = recorded
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap();
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "external-evidence",
+        "--type",
+        "verification-recorded",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.lines().next().unwrap()).unwrap();
+    assert_eq!(event["revision"], tested_revision);
+    assert_ne!(event["revision"], recorder_revision);
+    assert_eq!(event["hostname"], "sandbox-host");
+    assert_eq!(event["runner"], "ci/job-42");
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "external-evidence"]));
+    let gate = &status["gates"][0];
+    assert_eq!(gate["green_at_head"], true);
+    assert_eq!(gate["revision"], tested_revision);
+    assert_eq!(gate["hostname"], "sandbox-host");
+    assert_eq!(gate["runner"], "ci/job-42");
+    assert_eq!(gate["evidence_event_id"], evidence_event);
+    let human = stdout(repo.arc(&repo.root).args(["show", "external-evidence"]));
+    assert!(
+        human.contains("attested by ci/job-42 on sandbox-host"),
+        "{human}"
+    );
+
+    let context_change = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "context-without-attest",
+        "--no-worktree",
+    ])));
+    let before = event_count(&repo, &context_change);
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "context-without-attest",
+            "--command",
+            "true",
+            "--tested-revision",
+            "HEAD",
+            "--execution-host",
+            "host",
+            "--runner",
+            "runner",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--tested-revision, --execution-host, and --runner are only valid with --attest",
+        ));
+    assert_eq!(event_count(&repo, &context_change), before);
+}
+
 /// --attest requires --result; --result without --attest is a usage error; and
 /// a failing attestation reports exit 1 while still recording evidence.
 #[test]
@@ -369,6 +490,7 @@ fn verify_attest_result_flag_pairing_is_enforced() {
         ));
 
     // A failing attestation is recorded and reports failure to the caller.
+    let tested_revision = repo.head(&repo.root);
     repo.arc(&repo.root)
         .args([
             "verify",
@@ -378,6 +500,12 @@ fn verify_attest_result_flag_pairing_is_enforced() {
             "--attest",
             "--result",
             "fail",
+            "--tested-revision",
+            &tested_revision,
+            "--execution-host",
+            "sandbox",
+            "--runner",
+            "test-runner",
         ])
         .assert()
         .code(1)

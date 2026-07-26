@@ -215,6 +215,9 @@ pub enum Payload {
         /// ledgers and bundles serialize and replay byte-identically.
         #[serde(default, skip_serializing_if = "is_false")]
         attested: bool,
+        /// Stable external runner identity for attested evidence.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runner: Option<String>,
         /// Optional free-form note recorded alongside the evidence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
