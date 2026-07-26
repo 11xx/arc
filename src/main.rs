@@ -291,6 +291,9 @@ enum Cmd {
         /// Emit a read result as JSON
         #[arg(long)]
         json: bool,
+        /// Include recording identity in human-readable output
+        #[arg(long, conflicts_with = "json")]
+        provenance: bool,
         /// Override the latest-tag release boundary
         #[arg(long)]
         since: Option<String>,
@@ -1112,6 +1115,7 @@ fn run(cli: Cli) -> Result<i32> {
             section,
             body_file,
             json,
+            provenance,
             since,
             write,
         } => commands::changelog(
@@ -1121,6 +1125,7 @@ fn run(cli: Cli) -> Result<i32> {
             section,
             body_file,
             json,
+            provenance,
             since,
             write,
         ),
