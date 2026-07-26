@@ -417,6 +417,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     }
 
     let mut hot_files = Vec::new();
+    let mut retired_kind_counts = HashMap::new();
     if dir.is_dir() {
         let mut names = Vec::new();
         for entry in
@@ -440,10 +441,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
                     detail: name,
                 }),
                 Some((_, _, kind)) if RETIRED_JOURNAL_KINDS.contains(&kind.as_str()) => {
-                    advice.push(DoctorFinding {
-                        code: "retired-artifact-kind",
-                        detail: format!("{name}: {kind}"),
-                    });
+                    *retired_kind_counts.entry(kind).or_insert(0) += 1;
                     hot_files.push(name);
                 }
                 Some((_, _, kind)) if !known_kind(&kind) => {
@@ -454,6 +452,14 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
                 }
                 Some(_) => hot_files.push(name),
             }
+        }
+    }
+    for kind in RETIRED_JOURNAL_KINDS {
+        if let Some(count) = retired_kind_counts.get(kind) {
+            advice.push(DoctorFinding {
+                code: "retired-artifact-kind",
+                detail: format!("{kind}: {count} hot artifacts"),
+            });
         }
     }
 

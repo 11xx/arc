@@ -371,13 +371,24 @@ fn journal_doctor_reports_retired_kind_as_advice() {
         "# Historical API\n",
     )
     .unwrap();
+    fs::write(
+        dir.join("20260102T000000Z-historical-cli-spec.md"),
+        "# Historical CLI\n",
+    )
+    .unwrap();
 
     let value: serde_json::Value = serde_json::from_str(&stdout(
         repo.arc(&repo.root).args(["journal", "doctor", "--json"]),
     ))
     .unwrap();
     assert!(value["problems"].as_array().unwrap().is_empty());
-    assert_eq!(value["advice"][0]["code"], "retired-artifact-kind");
+    assert_eq!(
+        value["advice"],
+        serde_json::json!([{
+            "code": "retired-artifact-kind",
+            "detail": "spec: 2 hot artifacts",
+        }])
+    );
 }
 
 #[test]
