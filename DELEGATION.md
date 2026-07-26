@@ -217,17 +217,22 @@ Two limits, stated rather than glossed:
   gate green. The convention holds because a reviewer checks for it. A
   reviewer who assumes the tool is checking will stop checking.
 - **A probe is only as good as the premise behind it.** Verify every path,
-  symbol, and claim a brief makes against the source *before* delegating.
-  Measured across two chains here, the defects that stopped review were
-  faithful implementations of incomplete briefs; brief quality, not executor
+  symbol, and claim a brief makes against the source *before* delegating. On
+  the rescue chain, three of six first attempts blocked on unverified brief
+  claims, and all four blocking findings were faithful implementations of
+  incomplete briefs rather than execution errors; brief quality, not executor
   tier, was the binding constraint.
 
 If the floor fails anyway — a low-authored semantic defect passing its named
-probe and first review, or two of six consecutive low changes needing extra
+probe and first review, or two of *the next six* low changes needing extra
 verdict rounds for executor-caused defects — the response is to make probes
 declarable so they gate, not to buy a higher tier. An absent or
 non-discriminating probe is a gap in the machinery, and escalation only
-answers it if declarable probes exist and the defect recurs regardless.
+answers it if declarable probes exist and the defect recurs regardless. The
+cohort is fixed at adoption rather than rolling, and evaluating it needs the
+data recorded: which tier implemented each change, and whether each review
+round was brief-caused, executor-caused, or integration-staleness. Only
+executor-caused rounds count against the floor.
 
 The strongest known pattern is programmatic orchestration: generate a
 dedicated one-off script that spawns each agent with an explicit prompt,
