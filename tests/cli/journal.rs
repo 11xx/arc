@@ -1470,7 +1470,7 @@ fn journal_stray_legacy_file_is_inert() {
 }
 
 #[test]
-fn begin_from_journal_consumes_item_and_stamps_ref() {
+fn begin_from_journal_todo_consumes_and_seeds_brief() {
     let repo = Repo::new();
     let out = stdout(
         repo.arc(&repo.root)
@@ -1499,6 +1499,12 @@ fn begin_from_journal_consumes_item_and_stamps_ref() {
     // The change records where it came from.
     let show = json_stdout(repo.arc(&repo.root).args(["show", "widget", "--json"]));
     assert_eq!(show["journal_ref"], file);
+    repo.arc(&repo.root)
+        .args(["brief", "widget"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Seeded from journal artifact"))
+        .stdout(predicates::str::contains("do the widget"));
 
     // The source item is consumed as superseded and leaves the open queue.
     let events = journal_events(&journal_dir(&repo));
@@ -1510,6 +1516,132 @@ fn begin_from_journal_consumes_item_and_stamps_ref() {
     );
     let open = stdout(repo.arc(&repo.root).args(["journal", "open"]));
     assert!(!open.contains(&file), "consumed item still open:\n{open}");
+}
+
+#[test]
+fn begin_from_journal_plan_opens_multiple_changes_with_ref() {
+    let repo = Repo::new();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "roadmap",
+                "--kind",
+                "plan",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("split this plan\n"),
+    );
+    let file = PathBuf::from(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    for slug in ["roadmap-one", "roadmap-two"] {
+        repo.arc(&repo.root)
+            .args(["begin", slug, "--no-worktree", "--from-journal", &file])
+            .assert()
+            .success();
+        let show = json_stdout(repo.arc(&repo.root).args(["show", slug, "--json"]));
+        assert_eq!(show["journal_ref"], file);
+    }
+}
+
+#[test]
+fn begin_from_journal_plan_leaves_item_unconsumed() {
+    let repo = Repo::new();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "roadmap",
+                "--kind",
+                "plan",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("keep this plan open\n"),
+    );
+    let file = PathBuf::from(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    repo.arc(&repo.root)
+        .args([
+            "begin",
+            "roadmap-member",
+            "--no-worktree",
+            "--from-journal",
+            &file,
+        ])
+        .assert()
+        .success();
+
+    let events = journal_events(&journal_dir(&repo));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["event"] == "consumed" && event["file"] == file),
+        "{events:?}"
+    );
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert!(
+        open["open"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["file"] == file),
+        "{open}"
+    );
+}
+
+#[test]
+fn begin_from_journal_rejects_explicitly_consumed_plan() {
+    let repo = Repo::new();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "roadmap",
+                "--kind",
+                "plan",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("finished plan\n"),
+    );
+    let file = PathBuf::from(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args([
+            "begin",
+            "roadmap-member",
+            "--no-worktree",
+            "--from-journal",
+            &file,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already consumed"));
+    repo.arc(&repo.root)
+        .args(["show", "roadmap-member"])
+        .assert()
+        .failure();
 }
 
 #[test]
@@ -2504,20 +2636,20 @@ fn journal_discussion_rejects_non_discussion_kinds() {
 }
 
 #[test]
-fn begin_from_journal_seeds_an_initial_brief() {
+fn begin_from_journal_plan_seeds_no_brief() {
     let repo = Repo::new();
     let seed = stdout(
         repo.arc(&repo.root)
             .args([
                 "journal",
                 "note",
-                "naming",
+                "roadmap",
                 "--kind",
-                "discussion",
+                "plan",
                 "--body-file",
                 "-",
             ])
-            .write_stdin("# Naming\n\nWe will call it a chain.\n"),
+            .write_stdin("# Roadmap\n\nBuild two changes.\n"),
     );
     let file = PathBuf::from(seed.trim())
         .file_name()
@@ -2526,15 +2658,19 @@ fn begin_from_journal_seeds_an_initial_brief() {
         .to_string();
 
     repo.arc(&repo.root)
-        .args(["begin", "naming", "--no-worktree", "--from-journal", &file])
+        .args([
+            "begin",
+            "roadmap-member",
+            "--no-worktree",
+            "--from-journal",
+            &file,
+        ])
         .assert()
         .success();
 
-    // The change opens with a v1 brief threaded from the source artifact.
     repo.arc(&repo.root)
-        .args(["brief", "naming"])
+        .args(["brief", "roadmap-member"])
         .assert()
-        .success()
-        .stdout(predicates::str::contains("Seeded from journal artifact"))
-        .stdout(predicates::str::contains("We will call it a chain."));
+        .failure()
+        .stderr(predicates::str::contains("no brief recorded"));
 }

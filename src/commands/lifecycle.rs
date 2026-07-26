@@ -21,9 +21,10 @@ pub fn begin(
     ids::validate_slug(slug)?;
     // Validate the journal source before writing anything: a bad
     // --from-journal must fail cleanly with no branch, worktree, or event.
-    if let Some(filename) = &from_journal {
-        crate::journal::require_open_actionable(ctx, filename)?;
-    }
+    let journal_kind = from_journal
+        .as_deref()
+        .map(|filename| crate::journal::require_open_actionable(ctx, filename))
+        .transpose()?;
     let store = ctx.store()?;
     let blocked_by = blocked_by
         .iter()
@@ -133,7 +134,10 @@ pub fn begin(
     // Advisory bridge to the journal, both best-effort: mark the source item
     // consumed, and narrate the opening if auto-log is enabled. Neither can
     // fail the authoritative change that already exists.
-    if let Some(filename) = &from_journal {
+    if let Some(filename) = from_journal
+        .as_ref()
+        .filter(|_| journal_kind.as_deref() != Some("plan"))
+    {
         if let Err(error) = crate::journal::consume_superseded_by_change(ctx, filename, &change_id)
         {
             eprintln!("warning: could not mark {filename} consumed: {error:#}");

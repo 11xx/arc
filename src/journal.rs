@@ -2524,7 +2524,7 @@ fn journal_tail(dir: &Path, limit: usize) -> Result<Vec<String>> {
 
 /// Verify a journal artifact exists and is an open, unconsumed actionable
 /// item suitable to open a change from. Errors otherwise.
-pub fn require_open_actionable(ctx: &Ctx, filename: &str) -> Result<()> {
+pub fn require_open_actionable(ctx: &Ctx, filename: &str) -> Result<String> {
     if filename.contains(['/', '\\']) {
         bail!("--from-journal takes an artifact filename inside the journal dir, not a path");
     }
@@ -2545,7 +2545,7 @@ pub fn require_open_actionable(ctx: &Ctx, filename: &str) -> Result<()> {
     if is_consumed(&read_events(&dir)?, filename) {
         bail!("{filename} is already consumed (see the journal)");
     }
-    Ok(())
+    Ok(kind)
 }
 
 /// Append a journal `consumed` event marking an artifact superseded by the

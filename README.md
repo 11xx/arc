@@ -728,12 +728,14 @@ resolver who also argued a side under the same harness-native session identity.
 
 The journal and the ledger bridge in three advisory ways, none of which can
 gate the authoritative ledger. `arc begin --from-journal <artifact>` opens a
-change from an open actionable item: it records the artifact filename as the
-change's `journal_ref`, appends a `consumed` event with outcome `superseded`
-and note `change <id>` (leaving the artifact file untouched), seeds an initial
-brief threaded from the source body so the change starts with the resolution,
-and refuses a missing, non-actionable, or already-consumed source before writing
-anything.
+change from an open actionable item and records the artifact filename as the
+change's `journal_ref`. A plan reference leaves the plan open and seeds no
+brief, so the same plan can father multiple changes until an explicit
+`journal consume`. Every other actionable kind appends a `consumed` event with
+outcome `superseded` and note `change <id>` (leaving the artifact file
+untouched), then seeds an initial brief threaded from the source body so the
+change starts with the resolution. A missing, non-actionable, or already
+consumed source is refused before anything is written.
 With `[journal] auto_log = true` in the config file, `begin`, `integrate`, and
 `close` append a narrating `log` event (`opened change <id>`,
 `integrated <id> at <sha>`, `closed change <id>`); a failure to write the
