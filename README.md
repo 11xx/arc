@@ -690,7 +690,7 @@ take the house timestamp from `journal stamp` — RFC 3339 seconds in UTC, the
 same spelling as the event log's `ts`, so prose and log cross-grep — never
 an agent-authored date.
 Work waiting for a future session uses the primary actionable kinds — `todo`,
-`handoff`, `inbox`, `plan`, `discussion` — plus lower-priority `later` and
+`handoff`, `plan`, `discussion` — plus lower-priority `later` and
 `feature-request`. A feature request describes a wanted capability without
 assigning execution priority. `journal open` lists the primary queue first,
 then separate later and feature-request sections, annotating each item with how
@@ -767,10 +767,13 @@ Long free text can come from a file (or stdin with `-`) instead of shell
 quoting: `journal lane open|renew --status-file`, `stage --note-file`, and
 `hold --reason-file` are mutually exclusive with their inline counterparts.
 
-`journal doctor [--json]` performs a read-only health check. It reports
-malformed journal lines, artifact names and kinds, and dangling references as
-problems with a failing exit status, while stale lanes and archive housekeeping
-remain non-failing advice; it never creates the journal directory.
+The artifact kinds `done`, `inbox`, and `spec` are permanently retired:
+`journal note --kind` refuses them, while historical artifacts keep parsing and
+listing. `journal doctor [--json]` performs a read-only health check. It reports
+retired kinds as non-failing `retired-artifact-kind` advice; malformed journal
+lines, artifact names, unknown kinds, and dangling references remain problems
+with a failing exit status, while stale lanes and archive housekeeping remain
+non-failing advice. It never creates the journal directory.
 
 `arc doctor [--json]` performs the same read-only split for the authoritative
 change ledger. Malformed events, store configuration, IDs, and missing open

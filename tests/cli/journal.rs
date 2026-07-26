@@ -284,6 +284,135 @@ fn journal_note_rejects_invalid_kind_and_topic_without_writing() {
 }
 
 #[test]
+fn journal_note_refuses_retired_kinds() {
+    let repo = Repo::new();
+    let body_path = repo.home.join("body.md");
+    fs::write(&body_path, "body\n").unwrap();
+
+    for kind in ["done", "inbox", "spec"] {
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "retired-kind",
+                "--kind",
+                kind,
+                "--body-file",
+                body_path.to_str().unwrap(),
+            ])
+            .assert()
+            .code(2);
+    }
+
+    assert!(!journal_dir(&repo).exists());
+}
+
+#[test]
+fn journal_note_records_each_active_kind() {
+    let repo = Repo::new();
+    let body_path = repo.home.join("body.md");
+    fs::write(&body_path, "body\n").unwrap();
+    let kinds = [
+        "note",
+        "memory",
+        "plan",
+        "handoff",
+        "review",
+        "conclusion",
+        "todo",
+        "later",
+        "discussion",
+        "feature-request",
+    ];
+
+    for kind in kinds {
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                &format!("active-{kind}"),
+                "--kind",
+                kind,
+                "--body-file",
+                body_path.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+    }
+
+    assert_eq!(journal_events(&journal_dir(&repo)).len(), kinds.len());
+}
+
+#[test]
+fn journal_list_parses_historical_spec_artifact() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    let filename = "20260101T000000Z-historical-api-spec.md";
+    fs::write(dir.join(filename), "# Historical API\n").unwrap();
+
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["journal", "list", "--json"]),
+    ))
+    .unwrap();
+    let artifact = &value["artifacts"][0];
+    assert_eq!(artifact["file"], filename);
+    assert_eq!(artifact["topic"], "historical-api");
+    assert_eq!(artifact["kind"], "spec");
+}
+
+#[test]
+fn journal_doctor_reports_retired_kind_as_advice() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("20260101T000000Z-historical-api-spec.md"),
+        "# Historical API\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("20260102T000000Z-historical-cli-spec.md"),
+        "# Historical CLI\n",
+    )
+    .unwrap();
+
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["journal", "doctor", "--json"]),
+    ))
+    .unwrap();
+    assert!(value["problems"].as_array().unwrap().is_empty());
+    assert_eq!(
+        value["advice"],
+        serde_json::json!([{
+            "code": "retired-artifact-kind",
+            "detail": "spec: 2 hot artifacts",
+        }])
+    );
+}
+
+#[test]
+fn journal_doctor_keeps_unknown_kind_as_problem() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("20260101T000000Z-mystery-future-kind.md"),
+        "# Mystery\n",
+    )
+    .unwrap();
+
+    let assert = repo
+        .arc(&repo.root)
+        .args(["journal", "doctor", "--json"])
+        .assert()
+        .code(1);
+    let value: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(value["problems"][0]["code"], "unknown-artifact-kind");
+    assert!(value["advice"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn journal_log_appends_without_creating_artifact_file() {
     let repo = Repo::new();
     repo.arc(&repo.root)
@@ -1787,11 +1916,11 @@ fn journal_list_enumerates_all_kinds_newest_first() {
     assert!(conclusions.contains("beta"), "{conclusions}");
 
     // A kind with no matches lists nothing, successfully.
-    let specs = stdout(
+    let reviews = stdout(
         repo.arc(&repo.root)
-            .args(["journal", "list", "--kind", "spec"]),
+            .args(["journal", "list", "--kind", "review"]),
     );
-    assert!(specs.contains("(none)"), "{specs}");
+    assert!(reviews.contains("(none)"), "{reviews}");
 
     // JSON form parses and carries the full field set.
     let json = stdout(repo.arc(&repo.root).args(["journal", "list", "--json"]));
