@@ -12,6 +12,7 @@ mod hooks;
 mod journal;
 mod lifecycle;
 mod messaging;
+mod metadata;
 mod observe;
 mod orchestrate;
 mod paths;

@@ -47,7 +47,8 @@ pub use hooks::{
     uninstall as hooks_uninstall,
 };
 pub use lifecycle::{
-    begin, blocker_status_cmd, brief, is_blocked, list, metadata, query, show_selection, status_cmd,
+    begin, blocker_status_cmd, brief, is_blocked, list, metadata, query, read_metadata,
+    show_selection, status_cmd,
 };
 pub(crate) use lifecycle::{print_projected, status_output};
 pub use messaging::{inbox, message, messages};

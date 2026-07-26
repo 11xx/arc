@@ -361,6 +361,9 @@ enum Cmd {
         /// Scheduling priority (higher values are taken first; default 0)
         #[arg(long)]
         priority: Option<i32>,
+        /// Print the current metadata as arc-metadata/1 JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Machine-readable status report (the versioned arc-status/5 schema)
     Status {
@@ -1132,17 +1135,31 @@ fn run(cli: Cli) -> Result<i32> {
             remove_tag,
             assign,
             priority,
+            json,
         } => {
-            commands::metadata(
-                &ctx,
-                &change,
-                blocked_by,
-                remove_blocked_by,
-                tag,
-                remove_tag,
-                assign,
-                priority,
-            )?;
+            let has_mutation = !blocked_by.is_empty()
+                || !remove_blocked_by.is_empty()
+                || !tag.is_empty()
+                || !remove_tag.is_empty()
+                || assign.is_some()
+                || priority.is_some();
+            if json && has_mutation {
+                anyhow::bail!("--json cannot be combined with metadata mutation flags");
+            }
+            if has_mutation {
+                commands::metadata(
+                    &ctx,
+                    &change,
+                    blocked_by,
+                    remove_blocked_by,
+                    tag,
+                    remove_tag,
+                    assign,
+                    priority,
+                )?;
+            } else {
+                commands::read_metadata(&ctx, &change, json)?;
+            }
             Ok(0)
         }
         Cmd::Status {

@@ -441,6 +441,44 @@ pub fn metadata(
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct MetadataOutput<'a> {
+    schema: &'static str,
+    change_id: &'a str,
+    blocked_by: &'a [String],
+    tags: &'a [String],
+    assigned_to: Option<&'a str>,
+    priority: i32,
+}
+
+pub fn read_metadata(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
+    let store = ctx.store()?;
+    let (change_id, state) = ctx.load_state(&store, reference)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&MetadataOutput {
+                schema: "arc-metadata/1",
+                change_id: &change_id,
+                blocked_by: &state.blocked_by,
+                tags: &state.tags,
+                assigned_to: state.assigned_to.as_deref(),
+                priority: state.priority,
+            })?
+        );
+    } else {
+        println!("change: {change_id}");
+        println!("blocked-by: {}", state.blocked_by.join(", "));
+        println!("tags: {}", state.tags.join(", "));
+        println!(
+            "assigned-to: {}",
+            state.assigned_to.as_deref().unwrap_or("")
+        );
+        println!("priority: {}", state.priority);
+    }
+    Ok(())
+}
+
 pub fn status_cmd(
     ctx: &Ctx,
     reference: &str,
