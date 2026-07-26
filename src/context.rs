@@ -335,6 +335,13 @@ pub fn resume(
         if let Some(base_revision) = &brief.base_revision {
             println!("- Base revision: `{base_revision}`\n");
         }
+        if !brief.acceptance_probes.is_empty() {
+            println!("- Acceptance probes:");
+            for probe in &brief.acceptance_probes {
+                println!("  - `{}`: `{}`", probe.name, probe.command);
+            }
+            println!();
+        }
         print!("{}", brief.body);
         if !brief.body.ends_with('\n') {
             println!();

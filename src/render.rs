@@ -196,6 +196,13 @@ pub fn markdown(
             let _ = writeln!(w, "- Plan: `{plan_ref}`");
             let _ = writeln!(w, "- Slice: `{plan_slice}`\n");
         }
+        if !brief.acceptance_probes.is_empty() {
+            let _ = writeln!(w, "- Acceptance probes:");
+            for probe in &brief.acceptance_probes {
+                let _ = writeln!(w, "  - `{}`: `{}`", probe.name, probe.command);
+            }
+            let _ = writeln!(w);
+        }
         let _ = write!(w, "{}", brief.body);
         if !brief.body.ends_with('\n') {
             let _ = writeln!(w);
@@ -371,10 +378,18 @@ pub fn markdown(
     if !state.verifications.is_empty() {
         let _ = writeln!(w, "\n## Verifications\n");
         for v in &state.verifications {
+            let label = match (&v.probe, &v.gate) {
+                (Some(probe), _) => format!(
+                    "probe {} {:?} (brief {})",
+                    probe.name, probe.phase, probe.brief_event_id
+                ),
+                (None, Some(gate)) => gate.clone(),
+                (None, None) => "(ad hoc)".into(),
+            };
             let _ = writeln!(
                 w,
                 "- {} `{}` at `{}` → {:?}{} (on {})",
-                v.gate.as_deref().unwrap_or("(ad hoc)"),
+                label,
                 v.command,
                 v.revision,
                 v.result,
@@ -735,11 +750,20 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             "verification-run-started",
             format!("{mode:?} {} gate(s), skip-green={skip_green}", gates.len()),
         ),
-        Payload::VerificationRecorded { gate, result, .. } => (
+        Payload::VerificationRecorded {
+            gate,
+            probe,
+            result,
+            ..
+        } => (
             "verification-recorded",
             format!(
                 "{} {}",
-                gate.as_deref().unwrap_or("-"),
+                probe
+                    .as_ref()
+                    .map(|probe| format!("probe:{}:{:?}", probe.name, probe.phase))
+                    .or_else(|| gate.clone())
+                    .unwrap_or_else(|| "-".into()),
                 format!("{result:?}").to_lowercase()
             ),
         ),

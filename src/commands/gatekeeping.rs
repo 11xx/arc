@@ -53,6 +53,9 @@ pub struct VerifyArgs {
     pub skip_green: bool,
     pub gate: Option<String>,
     pub command: Option<String>,
+    pub probe: Option<String>,
+    pub brief_version: Option<usize>,
+    pub probe_phase: Option<ProbePhase>,
     pub attest: bool,
     pub result: Option<VerifyResult>,
     pub tested_revision: Option<String>,
@@ -63,6 +66,7 @@ pub struct VerifyArgs {
 
 struct VerificationInput {
     run_id: Option<String>,
+    probe: Option<ProbeEvidenceRef>,
     gate: Option<String>,
     command: String,
     timeout_seconds: Option<u64>,
@@ -75,6 +79,7 @@ struct VerificationInput {
 
 struct CompletedVerification {
     run_id: Option<String>,
+    probe: Option<ProbeEvidenceRef>,
     gate: Option<String>,
     command: String,
     revision: String,
@@ -96,6 +101,9 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         skip_green,
         gate,
         command,
+        probe,
+        brief_version,
+        probe_phase,
         attest,
         result,
         tested_revision,
@@ -106,6 +114,9 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     if all
         && (gate.is_some()
             || command.is_some()
+            || probe.is_some()
+            || brief_version.is_some()
+            || probe_phase.is_some()
             || attest
             || result.is_some()
             || tested_revision.is_some()
@@ -113,8 +124,8 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             || runner.is_some())
     {
         bail!(
-            "--all cannot be combined with --gate, --command, --attest, --result, \
-             --tested-revision, --execution-host, or --runner"
+            "--all cannot be combined with --gate, --command, --probe, --brief-version, \
+             --probe-phase, --attest, --result, --tested-revision, --execution-host, or --runner"
         );
     }
     if parallel && !all {
@@ -122,6 +133,12 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     }
     if skip_green && !all {
         bail!("--skip-green requires --all");
+    }
+    if probe.is_some() && (gate.is_some() || command.is_some()) {
+        bail!("--probe is mutually exclusive with --gate and --command");
+    }
+    if probe.is_none() && (brief_version.is_some() || probe_phase.is_some()) {
+        bail!("--brief-version and --probe-phase require --probe");
     }
     // --attest records evidence arc did not observe (so it needs the caller's
     // --result); without it arc runs the command and observing --result is a bug.
@@ -153,6 +170,78 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         bail!("change {change_id} is closed");
     }
     let toplevel = gitio::toplevel(&ctx.cwd)?;
+    if let Some(probe_name) = probe {
+        let (version, brief) = match brief_version {
+            Some(0) => bail!("brief version 0 not found"),
+            Some(version) => (
+                version,
+                st.briefs
+                    .get(version - 1)
+                    .with_context(|| format!("brief version {version} not found"))?,
+            ),
+            None => (
+                st.briefs.len(),
+                st.latest_brief()
+                    .context("no brief recorded for acceptance probe")?,
+            ),
+        };
+        let declaration = brief
+            .acceptance_probes
+            .iter()
+            .find(|declared| declared.name == probe_name)
+            .with_context(|| {
+                format!("brief v{version} does not declare acceptance probe {probe_name:?}")
+            })?;
+        let phase = probe_phase.unwrap_or(ProbePhase::Final);
+        if phase == ProbePhase::Baseline {
+            let base = brief
+                .base_revision
+                .as_deref()
+                .context("legacy brief has no base revision for baseline probe evidence")?;
+            let head = gitio::head(&ctx.cwd)?;
+            if head != base {
+                bail!("baseline probe requires HEAD {base}; current HEAD is {head}");
+            }
+            if let Some(tested_revision) = &tested_revision {
+                if tested_revision != base {
+                    bail!(
+                        "attested baseline probe requires --tested-revision {base}, got {tested_revision}"
+                    );
+                }
+            }
+        }
+        let expected = match phase {
+            ProbePhase::Baseline => VerifyResult::Fail,
+            ProbePhase::Final => VerifyResult::Pass,
+        };
+        let code = record_verification(
+            ctx,
+            &store,
+            &change_id,
+            VerificationInput {
+                run_id: None,
+                probe: Some(ProbeEvidenceRef {
+                    brief_event_id: brief.event_id.clone(),
+                    name: declaration.name.clone(),
+                    phase,
+                }),
+                gate: None,
+                command: declaration.command.clone(),
+                timeout_seconds: None,
+                attested_result,
+                tested_revision,
+                execution_host,
+                runner,
+                note,
+            },
+        )?;
+        let observed = if code == 0 {
+            VerifyResult::Pass
+        } else {
+            VerifyResult::Fail
+        };
+        return Ok(if observed == expected { 0 } else { 1 });
+    }
     if all {
         let gates = gates::load(&toplevel)?;
         let required = gates.required_for(&st.profile);
@@ -204,6 +293,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 &change_id,
                 VerificationInput {
                     run_id: Some(run_id.clone()),
+                    probe: None,
                     gate: Some(name.clone()),
                     command: gate.command.clone(),
                     timeout_seconds: gate.timeout,
@@ -240,6 +330,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         &change_id,
         VerificationInput {
             run_id: None,
+            probe: None,
             gate,
             command: cmd,
             timeout_seconds: timeout,
@@ -357,6 +448,9 @@ pub fn snapshot_with_verify(
                 skip_green: false,
                 gate: None,
                 command: None,
+                probe: None,
+                brief_version: None,
+                probe_phase: None,
                 attest: false,
                 result: None,
                 tested_revision: None,
@@ -403,6 +497,7 @@ pub fn snapshot_with_verify(
                 &change_id,
                 VerificationInput {
                     run_id: Some(run_id.clone()),
+                    probe: None,
                     gate: Some(name.clone()),
                     command: gate.command.clone(),
                     timeout_seconds: gate.timeout,
@@ -432,6 +527,9 @@ pub fn snapshot_with_verify(
                 skip_green: false,
                 gate: Some(gate),
                 command: None,
+                probe: None,
+                brief_version: None,
+                probe_phase: None,
                 attest: false,
                 result: None,
                 tested_revision: None,
@@ -465,6 +563,9 @@ pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
             skip_green: false,
             gate: None,
             command: None,
+            probe: None,
+            brief_version: None,
+            probe_phase: None,
             attest: false,
             result: None,
             tested_revision: None,
@@ -496,6 +597,7 @@ fn verify_all_parallel(
         .into_iter()
         .map(|(name, gate)| VerificationInput {
             run_id: Some(run_id.to_owned()),
+            probe: None,
             gate: Some(name.clone()),
             command: gate.command.clone(),
             timeout_seconds: gate.timeout,
@@ -596,6 +698,7 @@ fn execute_verification(
 ) -> Result<CompletedVerification> {
     let VerificationInput {
         run_id,
+        probe,
         gate,
         command,
         timeout_seconds,
@@ -631,6 +734,7 @@ fn execute_verification(
     };
     Ok(CompletedVerification {
         run_id,
+        probe,
         gate,
         command,
         revision,
@@ -675,6 +779,7 @@ fn append_verifications(
             change_id,
             Payload::VerificationRecorded {
                 run_id: item.run_id,
+                probe: item.probe,
                 gate: item.gate,
                 command: item.command,
                 revision: item.revision,
