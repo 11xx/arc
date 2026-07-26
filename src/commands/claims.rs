@@ -47,30 +47,16 @@ pub fn take(ctx: &Ctx, tags: Vec<String>, ttl: Option<String>, json: bool) -> Re
     let Some(candidate) = ready_candidate(&states, &tags, now) else {
         return Ok(2);
     };
-    let mut previous_event_id = store
+    let previous_event_id = store
         .load_events(&candidate.change_id)?
         .last()
         .context("change has no opening event")?
         .event_id
         .clone();
-    if let Some(claim) = candidate.claim.as_ref().filter(|claim| {
+    let displaced = candidate.claim.as_ref().map(|claim| {
         let timing = state::claim_timing_at(claim, now);
-        timing.active && timing.stale
-    }) {
-        let mut release = identity_event_at(
-            ctx,
-            &store,
-            &candidate.change_id,
-            now,
-            &owner,
-            Payload::ClaimReleased {
-                claim_id: claim.claim_id.clone(),
-            },
-        );
-        release.event_id = event_id_after(&previous_event_id)?;
-        store.append_event(&release)?;
-        previous_event_id = release.event_id;
-    }
+        displaced_claim(claim, &timing)
+    });
     let mut event = identity_event_at(
         ctx,
         &store,
@@ -81,7 +67,7 @@ pub fn take(ctx: &Ctx, tags: Vec<String>, ttl: Option<String>, json: bool) -> Re
             claim_id: ids::new_event_id(),
             ttl_seconds,
             stage_budgets: default_stage_budgets(),
-            displaced: None,
+            displaced,
         },
     );
     event.event_id = event_id_after(&previous_event_id)?;
@@ -181,12 +167,11 @@ fn claim_inner(
                 session: existing.owner.session.clone(),
                 stage: timing.stage,
             })
-        } else if matches!(mode, ClaimMode::RequireAbandoned)
-            && existing.owner != owner
-            && timing.expired
+        } else if timing.expired
+            && (matches!(mode, ClaimMode::Standard { .. }) || existing.owner != owner)
         {
             previous_owner = Some(existing.owner.clone());
-            None
+            Some(displaced_claim(existing, &timing))
         } else if matches!(mode, ClaimMode::RequireAbandoned) {
             eprintln!(
                 "rescue --take requires a claim owned by another identity that is stale or expired"
@@ -307,13 +292,16 @@ pub fn stage(
         .as_ref()
         .is_some_and(|claim| claim.owner == owner && state::claim_timing_at(claim, now).active);
     if claim_if_needed && !has_owned_live_claim {
-        if let Some(existing) = &state.claim {
+        let displaced = if let Some(existing) = &state.claim {
             let timing = state::claim_timing_at(existing, now);
             if timing.active && existing.owner != owner {
                 print_claim_conflict("claim is already held", existing, &timing);
                 return Ok(8);
             }
-        }
+            Some(displaced_claim(existing, &timing))
+        } else {
+            None
+        };
         let claim_id = ids::new_event_id();
         let mut claim_event = identity_event_at(
             ctx,
@@ -325,7 +313,7 @@ pub fn stage(
                 claim_id,
                 ttl_seconds: 2 * 60 * 60,
                 stage_budgets: default_stage_budgets(),
-                displaced: None,
+                displaced,
             },
         );
         claim_event.event_id = event_id_after(&previous_event_id)?;
@@ -378,6 +366,16 @@ pub(super) fn owns_live_claim(ctx: &Ctx, reference: &str) -> Result<bool> {
     Ok(state.claim.as_ref().is_some_and(|claim| {
         claim.owner == owner && state::claim_timing_at(claim, chrono::Utc::now()).active
     }))
+}
+
+fn displaced_claim(existing: &state::ClaimState, timing: &state::ClaimTiming) -> DisplacedClaim {
+    DisplacedClaim {
+        claim_id: existing.claim_id.clone(),
+        actor: existing.owner.actor.clone(),
+        harness: existing.owner.harness.clone(),
+        session: existing.owner.session.clone(),
+        stage: timing.stage.clone(),
+    }
 }
 
 fn command_identity(ctx: &Ctx) -> Result<state::ClaimIdentity> {

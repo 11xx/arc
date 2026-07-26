@@ -609,7 +609,17 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             "patchset-added",
             format!("{patchset_id} {}", short_sha(head)),
         ),
-        Payload::ClaimSet { claim_id, .. } => ("claim-set", claim_id.clone()),
+        Payload::ClaimSet {
+            claim_id,
+            displaced,
+            ..
+        } => (
+            "claim-set",
+            match displaced {
+                Some(displaced) => format!("{claim_id} displaced {}", displaced.claim_id),
+                None => claim_id.clone(),
+            },
+        ),
         Payload::ClaimReleased { claim_id } => ("claim-released", claim_id.clone()),
         Payload::StageSet { stage, note, .. } => {
             let stage = format!("{stage:?}").to_lowercase();

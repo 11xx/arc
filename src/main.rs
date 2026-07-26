@@ -640,7 +640,7 @@ enum Cmd {
         /// Maximum transcript turns to include
         #[arg(long, default_value_t = 5, requires = "transcript")]
         tail: usize,
-        /// Take over an active stale claim
+        /// Take over another session's stale or expired claim
         #[arg(long)]
         take: bool,
     },

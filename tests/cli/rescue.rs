@@ -115,7 +115,7 @@ fn take_transfers_a_stale_claim_and_records_displaced_owner() {
 }
 
 #[test]
-fn take_claims_an_expired_foreign_claim_without_recording_displacement() {
+fn take_claims_an_expired_foreign_claim_and_records_displacement() {
     let repo = Repo::new();
     let (change_id, worktree) = begin(&repo, "expired-rescue");
     repo.arc(&repo.root)
@@ -142,7 +142,11 @@ fn take_claims_an_expired_foreign_claim_without_recording_displacement() {
         "claim-set",
     ]));
     let takeover: serde_json::Value = serde_json::from_str(claims.lines().last().unwrap()).unwrap();
-    assert!(takeover.get("displaced").is_none());
+    assert_eq!(takeover["displaced"]["actor"], "dead actor");
+    assert_eq!(takeover["displaced"]["harness"], "dead-harness");
+    assert_eq!(takeover["displaced"]["session"], "dead-session");
+    assert_eq!(takeover["displaced"]["stage"], "launch");
+    assert!(takeover["displaced"]["claim_id"].is_string());
 }
 
 #[test]
