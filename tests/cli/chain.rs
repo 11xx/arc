@@ -10,6 +10,29 @@ fn chain_json(repo: &Repo, tag: &str) -> serde_json::Value {
     serde_json::from_str(&stdout(repo.arc(&repo.root).args(["chain", tag, "--json"]))).unwrap()
 }
 
+fn chain_review_json(repo: &Repo, tag: &str) -> serde_json::Value {
+    serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["chain", tag, "--review", "--json"]),
+    ))
+    .unwrap()
+}
+
+fn tagged_patchset(repo: &Repo, slug: &str) -> PathBuf {
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", slug, "--tag", "program"]),
+    );
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(
+        &worktree,
+        &format!("{slug}.txt"),
+        "reviewed\n",
+        &format!("test: add {slug}"),
+    );
+    worktree
+}
+
 fn plan(repo: &Repo, topic: &str) -> String {
     let path = stdout(
         repo.arc(&repo.root)
@@ -137,4 +160,152 @@ fn chain_unknown_tag_is_an_empty_view() {
     let output = chain_json(&repo, "unknown");
     assert_eq!(output["members"].as_array().unwrap().len(), 0);
     assert!(output["next_ready"].is_null());
+}
+
+#[test]
+fn chain_review_is_opt_in_and_keeps_the_existing_schema() {
+    let repo = Repo::new();
+    begin(&repo, "review-opt-in", &["--tag", "program"]);
+
+    let without = chain_json(&repo, "program");
+    let with = chain_review_json(&repo, "program");
+    assert!(without["members"][0].get("review").is_none());
+    assert!(with["members"][0].get("review").is_some());
+}
+
+#[test]
+fn chain_review_distinguishes_self_and_non_self_verdicts() {
+    let repo = Repo::new();
+    let self_worktree = tagged_patchset(&repo, "review-self");
+    stdout(
+        repo.arc(&self_worktree)
+            .env("ARC_ACTOR", "Alice")
+            .args(["snapshot", "review-self"]),
+    );
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Alice").args([
+        "review",
+        "review-self",
+        "--verdict",
+        "approved",
+    ]));
+
+    let other_worktree = tagged_patchset(&repo, "review-other");
+    stdout(
+        repo.arc(&other_worktree)
+            .env("ARC_ACTOR", "Bob")
+            .args(["snapshot", "review-other"]),
+    );
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Carol").args([
+        "review",
+        "review-other",
+        "--verdict",
+        "approved",
+    ]));
+
+    let output = chain_review_json(&repo, "program");
+    let self_review = output["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["slug"] == "review-self")
+        .unwrap();
+    let other_review = output["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["slug"] == "review-other")
+        .unwrap();
+    assert_eq!(self_review["review"]["subject"], "Alice");
+    assert_eq!(
+        self_review["review"]["identities"],
+        serde_json::json!(["Alice"])
+    );
+    assert_eq!(self_review["review"]["non_self_verdict"], false);
+    assert_eq!(other_review["review"]["subject"], "Bob");
+    assert_eq!(
+        other_review["review"]["identities"],
+        serde_json::json!(["Carol"])
+    );
+    assert_eq!(other_review["review"]["non_self_verdict"], true);
+}
+
+#[test]
+fn chain_review_counts_recorded_final_patchset_evidence_exactly() {
+    let repo = Repo::new();
+    let worktree = tagged_patchset(&repo, "review-counts");
+    stdout(repo.arc(&worktree).args(["snapshot", "review-counts"]));
+    stdout(repo.arc(&repo.root).args([
+        "finding",
+        "review-counts",
+        "--summary",
+        "recorded problem",
+    ]));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["review", "review-counts", "--verdict", "comment-only"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["review", "review-counts", "--verdict", "approved"]),
+    );
+    stdout(
+        repo.arc(&worktree)
+            .args(["verify", "review-counts", "--command", "true"]),
+    );
+    begin(&repo, "review-zero", &["--tag", "program"]);
+
+    let output = chain_review_json(&repo, "program");
+    let counted = output["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["slug"] == "review-counts")
+        .unwrap();
+    let zero = output["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["slug"] == "review-zero")
+        .unwrap();
+    assert_eq!(counted["review"]["verdicts"], 2);
+    assert_eq!(counted["review"]["findings"], 1);
+    assert_eq!(counted["review"]["ad_hoc_verifications"], 1);
+    assert_eq!(zero["review"]["verdicts"], 0);
+    assert_eq!(zero["review"]["findings"], 0);
+    assert_eq!(zero["review"]["ad_hoc_verifications"], 0);
+}
+
+#[test]
+fn chain_review_ignores_superseded_patchsets() {
+    let repo = Repo::new();
+    let worktree = tagged_patchset(&repo, "review-stale");
+    stdout(repo.arc(&worktree).args(["snapshot", "review-stale"]));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["review", "review-stale", "--verdict", "approved"]),
+    );
+    repo.commit(
+        &worktree,
+        "review-stale.txt",
+        "reviewed again\n",
+        "test: update review-stale",
+    );
+    stdout(repo.arc(&worktree).args(["snapshot", "review-stale"]));
+
+    let output = chain_review_json(&repo, "program");
+    assert_eq!(output["members"][0]["review"]["verdicts"], 0);
+    assert_eq!(
+        output["members"][0]["review"]["identities"],
+        serde_json::json!([])
+    );
+    assert_eq!(output["members"][0]["review"]["non_self_verdict"], false);
+}
+
+#[test]
+fn chain_review_json_keeps_arc_chain_v1() {
+    let repo = Repo::new();
+    begin(&repo, "review-schema", &["--tag", "program"]);
+
+    let output = chain_review_json(&repo, "program");
+    assert_eq!(output["schema"], "arc-chain/1");
 }

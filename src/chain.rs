@@ -12,6 +12,18 @@ pub struct ChainMember {
     pub plan_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_slice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review: Option<ChainReview>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainReview {
+    pub subject: Option<String>,
+    pub verdicts: usize,
+    pub identities: Vec<String>,
+    pub non_self_verdict: bool,
+    pub findings: usize,
+    pub ad_hoc_verifications: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]

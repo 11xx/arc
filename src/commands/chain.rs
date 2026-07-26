@@ -1,7 +1,7 @@
 use super::*;
-use crate::chain::{Chain, ChainMember, ChainPlan, CHAIN_SCHEMA};
+use crate::chain::{Chain, ChainMember, ChainPlan, ChainReview, CHAIN_SCHEMA};
 
-pub fn chain(ctx: &Ctx, tag: String, json: bool) -> Result<()> {
+pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
     let tags = normalize_tags(vec![tag])?;
     let tag = tags
         .first()
@@ -22,6 +22,56 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool) -> Result<()> {
         .map(|change_id| {
             let state = &selected[change_id];
             let brief = state.latest_brief();
+            let review = review.then(|| {
+                let Some(patchset) = state.latest_patchset() else {
+                    return ChainReview {
+                        subject: None,
+                        verdicts: 0,
+                        identities: Vec::new(),
+                        non_self_verdict: false,
+                        findings: 0,
+                        ad_hoc_verifications: 0,
+                    };
+                };
+                let subject = patchset
+                    .on_behalf_of
+                    .as_deref()
+                    .unwrap_or(&patchset.actor)
+                    .to_string();
+                let verdicts = state
+                    .verdicts
+                    .iter()
+                    .filter(|verdict| verdict.patchset_id == patchset.id)
+                    .collect::<Vec<_>>();
+                let identities = verdicts
+                    .iter()
+                    .map(|verdict| {
+                        verdict
+                            .on_behalf_of
+                            .as_deref()
+                            .unwrap_or(&verdict.actor)
+                            .to_string()
+                    })
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                ChainReview {
+                    non_self_verdict: identities.iter().any(|identity| identity != &subject),
+                    subject: Some(subject),
+                    verdicts: verdicts.len(),
+                    identities,
+                    findings: state
+                        .findings
+                        .values()
+                        .filter(|finding| finding.patchset_id.as_deref() == Some(&patchset.id))
+                        .count(),
+                    ad_hoc_verifications: state
+                        .verifications
+                        .iter()
+                        .filter(|entry| entry.revision == patchset.head && entry.gate.is_none())
+                        .count(),
+                }
+            });
             ChainMember {
                 change_id: state.change_id.clone(),
                 slug: state.slug.clone(),
@@ -33,6 +83,7 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool) -> Result<()> {
                 },
                 plan_ref: brief.and_then(|brief| brief.plan_ref.clone()),
                 plan_slice: brief.and_then(|brief| brief.plan_slice.clone()),
+                review,
             }
         })
         .collect::<Vec<_>>();
@@ -93,6 +144,15 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool) -> Result<()> {
                 );
                 if let (Some(plan_ref), Some(plan_slice)) = (&member.plan_ref, &member.plan_slice) {
                     println!("  plan: {plan_ref} ({plan_slice})");
+                }
+                if let Some(review) = &member.review {
+                    println!(
+                        "  review: {} verdicts, {} identities, {} findings, {} ad hoc verifications",
+                        review.verdicts,
+                        review.identities.len(),
+                        review.findings,
+                        review.ad_hoc_verifications
+                    );
                 }
             }
         }
