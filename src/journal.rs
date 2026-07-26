@@ -33,11 +33,8 @@ pub enum JournalKind {
     Memory,
     Plan,
     Handoff,
-    Done,
     Review,
     Conclusion,
-    Inbox,
-    Spec,
     Todo,
     Later,
     Discussion,
@@ -51,17 +48,26 @@ impl JournalKind {
             JournalKind::Memory => "memory",
             JournalKind::Plan => "plan",
             JournalKind::Handoff => "handoff",
-            JournalKind::Done => "done",
             JournalKind::Review => "review",
             JournalKind::Conclusion => "conclusion",
-            JournalKind::Inbox => "inbox",
-            JournalKind::Spec => "spec",
             JournalKind::Todo => "todo",
             JournalKind::Later => "later",
             JournalKind::Discussion => "discussion",
             JournalKind::FeatureRequest => "feature-request",
         }
     }
+}
+
+// Retirement is permanent: these compatibility tombstones never return to
+// the active set. Removing one would make historical artifacts unknown again;
+// new semantics get a new name.
+const RETIRED_JOURNAL_KINDS: [&str; 3] = ["done", "inbox", "spec"];
+
+fn recognized_journal_kinds() -> impl Iterator<Item = &'static str> {
+    JournalKind::value_variants()
+        .iter()
+        .map(|kind| kind.as_str())
+        .chain(RETIRED_JOURNAL_KINDS)
 }
 
 /// Primary kinds that represent work waiting for a future session: they stay
@@ -382,11 +388,7 @@ struct DoctorReport {
 }
 
 fn known_kind(kind: &str) -> bool {
-    // Derived from the kind enum itself so a newly added kind (e.g. discussion)
-    // is recognized by doctor without a second list to keep in sync.
-    JournalKind::value_variants()
-        .iter()
-        .any(|value| value.as_str() == kind)
+    recognized_journal_kinds().any(|value| value == kind)
 }
 
 fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
@@ -437,10 +439,19 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
                     code: "malformed-artifact-name",
                     detail: name,
                 }),
-                Some((_, _, kind)) if !known_kind(&kind) => problems.push(DoctorFinding {
-                    code: "unknown-artifact-kind",
-                    detail: format!("{name}: {kind}"),
-                }),
+                Some((_, _, kind)) if RETIRED_JOURNAL_KINDS.contains(&kind.as_str()) => {
+                    advice.push(DoctorFinding {
+                        code: "retired-artifact-kind",
+                        detail: format!("{name}: {kind}"),
+                    });
+                    hot_files.push(name);
+                }
+                Some((_, _, kind)) if !known_kind(&kind) => {
+                    problems.push(DoctorFinding {
+                        code: "unknown-artifact-kind",
+                        detail: format!("{name}: {kind}"),
+                    });
+                }
                 Some(_) => hot_files.push(name),
             }
         }
@@ -1655,9 +1666,7 @@ fn parse_artifact_name(name: &str) -> Option<(String, String, String)> {
     let first = stem.find('-')?;
     let ts = &stem[..first];
     let remainder = &stem[first + 1..];
-    let known = JournalKind::value_variants()
-        .iter()
-        .map(|kind| kind.as_str())
+    let known = recognized_journal_kinds()
         .filter_map(|kind| {
             remainder
                 .strip_suffix(kind)
