@@ -702,7 +702,10 @@ artifact; `catchup` lists newest-first.
 `list [--kind <k>] [--json]` enumerates every live artifact in the hot
 directory newest-first —
 including the non-actionable kinds `open` and `memories` do not show —
-marking each consumed item with its outcome; `show <filename>` prints one
+marking each consumed item with its outcome. Read-side `--kind` filters on
+`list` and `open` accept retired kinds so historical artifacts remain
+discoverable, while `journal note --kind` accepts only active kinds.
+`show <filename>` prints one
 artifact's raw Markdown body, resolving the hot directory first and then the
 cold archive. Dated inline headings (positions, conclusions, review stamps)
 take the house timestamp from `journal stamp` — RFC 3339 seconds in UTC, the

@@ -72,6 +72,16 @@ fn recognized_journal_kinds() -> impl Iterator<Item = &'static str> {
         .chain(RETIRED_JOURNAL_KINDS)
 }
 
+fn parse_journal_kind_filter(value: &str) -> Result<String, String> {
+    if known_kind(value) {
+        return Ok(value.to_string());
+    }
+    Err(format!(
+        "unknown journal kind {value:?}; accepted values: {}",
+        recognized_journal_kinds().collect::<Vec<_>>().join(", ")
+    ))
+}
+
 /// Primary kinds that represent work waiting for a future session: they stay
 /// in the main `journal open` queue until an explicit `journal consume`.
 /// `discussion` is the actionable answer-owed kind: an open debate rides the
@@ -240,8 +250,8 @@ pub enum JournalCmd {
     /// List actionable artifacts in primary, later, and feature-request tiers
     Open {
         /// Restrict to one actionable kind; lower-priority tiers stay separate
-        #[arg(long, value_enum)]
-        kind: Option<JournalKind>,
+        #[arg(long, value_parser = parse_journal_kind_filter)]
+        kind: Option<String>,
         /// Emit structured JSON instead of text
         #[arg(long)]
         json: bool,
@@ -249,8 +259,8 @@ pub enum JournalCmd {
     /// List live artifacts (hot journal dir) newest first, optionally filtered by kind (read-only)
     List {
         /// Restrict to one kind
-        #[arg(long, value_enum)]
-        kind: Option<JournalKind>,
+        #[arg(long, value_parser = parse_journal_kind_filter)]
+        kind: Option<String>,
         /// Emit structured JSON instead of text
         #[arg(long)]
         json: bool,
@@ -1915,12 +1925,12 @@ struct OpenItems {
     feature_requests: Vec<ArtifactEntry>,
 }
 
-fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
-    if let Some(kind) = kind {
-        if !is_actionable_kind(kind.as_str()) {
+fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
+    if let Some(kind) = kind.as_deref() {
+        if !is_actionable_kind(kind) {
             bail!(
                 "--kind {} is not actionable; the open queue tracks {}",
-                kind.as_str(),
+                kind,
                 PRIMARY_ACTIONABLE_KINDS
                     .iter()
                     .copied()
@@ -1948,8 +1958,8 @@ fn open(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
             let Some((_, _, file_kind)) = parse_artifact_name(&name) else {
                 continue;
             };
-            let wanted = match kind {
-                Some(kind) => file_kind == kind.as_str(),
+            let wanted = match kind.as_deref() {
+                Some(kind) => file_kind == kind,
                 None => is_actionable_kind(&file_kind),
             };
             if wanted && !is_consumed(&journal, &name) {
@@ -2126,7 +2136,7 @@ struct ListItems {
 /// are special cases of: every artifact in the hot journal dir, newest first,
 /// with its consumption state. Read-only; derives everything from filenames
 /// and the event log.
-fn list(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
+fn list(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
     let events = read_events(&dir)?;
     let mut artifacts: Vec<ListEntry> = Vec::new();
@@ -2134,8 +2144,8 @@ fn list(ctx: &Ctx, kind: Option<JournalKind>, json: bool) -> Result<i32> {
         let Some((ts, topic, file_kind)) = parse_artifact_name(&name) else {
             continue;
         };
-        if let Some(kind) = kind {
-            if file_kind != kind.as_str() {
+        if let Some(kind) = kind.as_deref() {
+            if file_kind != kind {
                 continue;
             }
         }
@@ -2250,6 +2260,7 @@ struct Resolution {
 
 #[derive(Serialize)]
 struct DiscussionSummary {
+    schema: &'static str,
     file: String,
     topic: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2309,7 +2320,7 @@ fn position_depth(
             return depth;
         };
         if depth >= MAX_DISCUSSION_DEPTH {
-            return 1;
+            return MAX_DISCUSSION_DEPTH;
         }
         depth += 1;
         current = parent;
@@ -2436,7 +2447,9 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     // Typed position events for this file, in ledger order.
     let position_events: Vec<&JournalEvent> = events
         .iter()
-        .filter(|event| event.event == "position" && event.file.as_deref() == Some(filename))
+        .filter(|event| {
+            event.known() && event.event == "position" && event.file.as_deref() == Some(filename)
+        })
         .collect();
     let mut participants: Vec<String> = Vec::new();
     for event in &position_events {
@@ -2456,7 +2469,9 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     let resolution = events
         .iter()
         .rev()
-        .find(|event| event.event == "consumed" && event.file.as_deref() == Some(filename))
+        .find(|event| {
+            event.known() && event.event == "consumed" && event.file.as_deref() == Some(filename)
+        })
         .map(|event| Resolution {
             outcome: event.outcome.clone().unwrap_or_default(),
             resolver: event_identity_label(event),
@@ -2467,6 +2482,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         });
 
     let summary = DiscussionSummary {
+        schema: "journal-discussion/1",
         age_seconds: discussion_age_seconds(Utc::now(), &ts, filename, &events),
         file: filename.to_string(),
         topic,
