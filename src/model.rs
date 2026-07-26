@@ -266,6 +266,48 @@ pub enum Payload {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendPermission {
+    OpenOnly,
+    AnyPhaseFact,
+    OpenOrIntegratedFact,
+    #[allow(dead_code)]
+    IntegratedOnlyFact,
+    LifecycleOwned,
+    OpaqueImported,
+}
+
+/// Classify every ledger payload by the lifecycle phases in which commands
+/// may append it. New payload variants must make an explicit lifecycle choice.
+pub fn append_permission(payload: &Payload) -> AppendPermission {
+    match payload {
+        Payload::MetadataUpdated { .. }
+        | Payload::BriefRecorded { .. }
+        | Payload::PatchsetAdded { .. }
+        | Payload::ClaimSet { .. }
+        | Payload::StageSet { .. }
+        | Payload::FindingAdded { .. }
+        | Payload::DispositionRecorded { .. }
+        | Payload::VerdictRecorded { .. }
+        | Payload::VerificationRecorded { .. }
+        | Payload::HoldSet { .. }
+        | Payload::ForgeProjection { .. } => AppendPermission::OpenOnly,
+        Payload::Message { .. }
+        | Payload::ClaimReleased { .. }
+        | Payload::CommentAdded { .. }
+        | Payload::ReplyAdded { .. }
+        | Payload::HoldReleased { .. }
+        | Payload::ForgeLink { .. }
+        | Payload::ForgeChecks { .. }
+        | Payload::ForgePrState { .. } => AppendPermission::AnyPhaseFact,
+        Payload::ChangelogRecorded { .. } => AppendPermission::OpenOrIntegratedFact,
+        Payload::ChangeOpened { .. } | Payload::ChangeClosed { .. } => {
+            AppendPermission::LifecycleOwned
+        }
+        Payload::Unknown => AppendPermission::OpaqueImported,
+    }
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
