@@ -188,6 +188,47 @@ it must not substitute another target or improvise a workaround. Sol's literal
 persistence is the reason it works well as the clear-spec executor and the
 reason these fences are mandatory.
 
+## Acceptance probes
+
+Effort is priced by residual risk after the gate, which only works if the
+risk is observable. Declared gates catch compile, regression, and lint
+failures, and reading the diff catches overbuild — but neither sees a
+plausible implementation of the *wrong semantics*, and that failure stays
+green. Buying a more expensive executor does not reliably catch it either,
+because the executor was faithful to what it was told.
+
+So the brief names acceptance probes: runnable commands whose outcome
+distinguishes the intended behavior from the plausible substitute. The
+executor runs each at its final head and records it with
+
+    arc verify --command '<the probe>'
+
+which puts the evidence in the ledger beside the gate results, bound to the
+revision a reviewer is looking at. Naming such a command requires knowing the
+required behavior — which is the lead's job regardless — not predicting the
+executor's mistake, which nobody can do at any tier. A brief whose material
+risk has no such command is not ready to delegate: resolve the risk, or
+escalate the tier.
+
+Two limits, stated rather than glossed:
+
+- **Probes are recorded, not enforcing.** Integration readiness consults
+  declared gates only, so ad hoc probe evidence never gates and never turns a
+  gate green. The convention holds because a reviewer checks for it. A
+  reviewer who assumes the tool is checking will stop checking.
+- **A probe is only as good as the premise behind it.** Verify every path,
+  symbol, and claim a brief makes against the source *before* delegating.
+  Measured across two chains here, the defects that stopped review were
+  faithful implementations of incomplete briefs; brief quality, not executor
+  tier, was the binding constraint.
+
+If the floor fails anyway — a low-authored semantic defect passing its named
+probe and first review, or two of six consecutive low changes needing extra
+verdict rounds for executor-caused defects — the response is to make probes
+declarable so they gate, not to buy a higher tier. An absent or
+non-discriminating probe is a gap in the machinery, and escalation only
+answers it if declarable probes exist and the defect recurs regardless.
+
 The strongest known pattern is programmatic orchestration: generate a
 dedicated one-off script that spawns each agent with an explicit prompt,
 model, effort, and input set, and encodes the control flow (fan-out,
