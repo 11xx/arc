@@ -736,10 +736,13 @@ on any `journal note`: the template is prepended to `--body-file` content, or
 recorded alone. `journal discussion <filename> [--json]` renders the derived
 view of one debate: its age, the stance tally (`for`/`against`/`amend` parsed
 once per actual position block, so hand-written positions count too), the
-distinct participants and reply-refs from the typed `position` events, and —
-once resolved — the outcome, optional decision artifact, and a
-resolver-participation flag that surfaces a resolver who also argued a side
-under the same harness-native session identity.
+distinct participants and reply-refs from the typed `position` events, rounds
+grouped by reply depth, and the position IDs still unanswered. Positions in
+the same round could not have read one another, so rounds express reply
+structure rather than turn-taking. Once resolved, the view also includes the
+outcome, optional decision artifact, and a resolver-participation flag that
+surfaces a resolver who also argued a side under the same harness-native
+session identity.
 
 The journal and the ledger bridge in three advisory ways, none of which can
 gate the authoritative ledger. `arc begin --from-journal <artifact>` opens a

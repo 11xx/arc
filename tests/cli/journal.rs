@@ -2937,6 +2937,194 @@ fn journal_discussion_summarizes_stances_participants_and_resolution() {
         ));
 }
 
+fn discussion_fixture(repo: &Repo, topic: &str) -> String {
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                topic,
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Discussion\n\n## Positions\n"),
+    );
+    PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string()
+}
+
+fn append_discussion_position(
+    repo: &Repo,
+    file: &str,
+    reference: Option<&str>,
+    harness: &str,
+) -> String {
+    let mut args = vec!["journal", "append", file];
+    if let Some(reference) = reference {
+        args.extend(["--ref", reference]);
+    }
+    args.extend(["--body-file", "-"]);
+    repo.arc(&repo.root)
+        .args(args)
+        .env("ARC_HARNESS", harness)
+        .write_stdin("Position: for\n")
+        .assert()
+        .success();
+    journal_events(&journal_dir(repo))
+        .into_iter()
+        .rev()
+        .find(|event| event["event"] == "position")
+        .unwrap()["position_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn journal_discussion_groups_three_deep_chain_into_rounds() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "deep-rounds");
+    let first = append_discussion_position(&repo, &file, None, "claude");
+    let second = append_discussion_position(&repo, &file, Some(&first), "codex");
+    let third = append_discussion_position(&repo, &file, Some(&second), "opencode");
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["rounds"][0]["depth"], 1);
+    assert_eq!(
+        summary["rounds"][0]["positions"],
+        serde_json::json!([first])
+    );
+    assert_eq!(summary["rounds"][1]["depth"], 2);
+    assert_eq!(
+        summary["rounds"][1]["positions"],
+        serde_json::json!([second])
+    );
+    assert_eq!(summary["rounds"][2]["depth"], 3);
+    assert_eq!(
+        summary["rounds"][2]["positions"],
+        serde_json::json!([third])
+    );
+}
+
+#[test]
+fn journal_discussion_groups_sibling_replies_into_one_round() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "sibling-round");
+    let parent = append_discussion_position(&repo, &file, None, "claude");
+    let first = append_discussion_position(&repo, &file, Some(&parent), "codex");
+    let second = append_discussion_position(&repo, &file, Some(&parent), "opencode");
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(
+        summary["rounds"][1]["positions"],
+        serde_json::json!([first, second])
+    );
+}
+
+#[test]
+fn journal_discussion_reports_participants_per_round() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "round-participants");
+    let parent = append_discussion_position(&repo, &file, None, "claude");
+    append_discussion_position(&repo, &file, Some(&parent), "codex");
+    append_discussion_position(&repo, &file, Some(&parent), "opencode");
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(
+        summary["rounds"][0]["participants"],
+        serde_json::json!(["claude"])
+    );
+    assert_eq!(
+        summary["rounds"][1]["participants"],
+        serde_json::json!(["codex", "opencode"])
+    );
+}
+
+#[test]
+fn journal_discussion_lists_exactly_unanswered_leaf_positions() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "unanswered-leaves");
+    let parent = append_discussion_position(&repo, &file, None, "claude");
+    let first_leaf = append_discussion_position(&repo, &file, Some(&parent), "codex");
+    let second_leaf = append_discussion_position(&repo, &file, Some(&parent), "opencode");
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(
+        summary["unanswered"],
+        serde_json::json!([first_leaf, second_leaf])
+    );
+}
+
+#[test]
+fn journal_discussion_places_positions_without_refs_in_round_one() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "root-positions");
+    let first = append_discussion_position(&repo, &file, None, "claude");
+    let second = append_discussion_position(&repo, &file, None, "codex");
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["rounds"].as_array().unwrap().len(), 1);
+    assert_eq!(summary["rounds"][0]["depth"], 1);
+    assert_eq!(
+        summary["rounds"][0]["positions"],
+        serde_json::json!([first, second])
+    );
+}
+
+#[test]
+fn journal_discussion_bounds_ref_cycles() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "cyclic-replies");
+    let first = append_discussion_position(&repo, &file, None, "claude");
+    let second = append_discussion_position(&repo, &file, Some(&first), "codex");
+    let dir = journal_dir(&repo);
+    let events_path = dir.join("events.jsonl");
+    let mut events = journal_events(&dir);
+    events
+        .iter_mut()
+        .find(|event| event["position_id"] == first)
+        .unwrap()["ref"] = serde_json::json!(second);
+    let contents = events
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(events_path, format!("{contents}\n")).unwrap();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["rounds"].as_array().unwrap().len(), 1);
+    assert_eq!(summary["rounds"][0]["depth"], 1);
+}
+
 #[test]
 fn journal_discussion_scopes_stances_to_position_blocks() {
     let repo = Repo::new();
