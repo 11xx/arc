@@ -2278,11 +2278,11 @@ fn position_depth(
 ) -> usize {
     let mut current = start;
     let mut depth = 1;
-    let mut visited = HashSet::new();
+    let mut visited = HashMap::new();
 
     loop {
-        if !visited.insert(current) {
-            return 1;
+        if let Some(entry_depth) = visited.insert(current, depth) {
+            return entry_depth;
         }
         let Some(parent) = positions[current]
             .reference

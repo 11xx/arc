@@ -3102,6 +3102,7 @@ fn journal_discussion_bounds_ref_cycles() {
     let file = discussion_fixture(&repo, "cyclic-replies");
     let first = append_discussion_position(&repo, &file, None, "claude");
     let second = append_discussion_position(&repo, &file, Some(&first), "codex");
+    let third = append_discussion_position(&repo, &file, Some(&first), "opencode");
     let dir = journal_dir(&repo);
     let events_path = dir.join("events.jsonl");
     let mut events = journal_events(&dir);
@@ -3121,8 +3122,17 @@ fn journal_discussion_bounds_ref_cycles() {
             repo.arc(&repo.root)
                 .args(["journal", "discussion", &file, "--json"]),
         );
-    assert_eq!(summary["rounds"].as_array().unwrap().len(), 1);
+    assert_eq!(summary["rounds"].as_array().unwrap().len(), 2);
     assert_eq!(summary["rounds"][0]["depth"], 1);
+    assert_eq!(
+        summary["rounds"][0]["positions"],
+        serde_json::json!([first, second])
+    );
+    assert_eq!(summary["rounds"][1]["depth"], 2);
+    assert_eq!(
+        summary["rounds"][1]["positions"],
+        serde_json::json!([third])
+    );
 }
 
 #[test]
