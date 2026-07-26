@@ -290,21 +290,42 @@ impl Store {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        let resolved_finding = |event: &Event, finding_id: &str| {
+            let mut resolved = event.clone();
+            if let Payload::VerdictRecorded {
+                patchset_id,
+                findings,
+                ..
+            } = &event.payload
+            {
+                let finding = findings
+                    .iter()
+                    .find(|finding| finding.finding_id == finding_id)
+                    .expect("matched inline finding remains present");
+                resolved.payload = Payload::FindingAdded {
+                    finding_id: finding.finding_id.clone(),
+                    blocking: finding.blocking,
+                    severity: finding.severity,
+                    summary: finding.summary.clone(),
+                    body: finding.body.clone(),
+                    patchset_id: Some(patchset_id.clone()),
+                    anchor: finding.anchor.clone(),
+                };
+            }
+            resolved.event_id = finding_id.to_string();
+            resolved
+        };
         if let Some((event, finding_id)) = finding_matches
             .iter()
             .find(|(_, finding_id)| finding_id.as_str() == needle)
         {
-            let mut event = (*event).clone();
-            event.event_id = (*finding_id).clone();
-            return Ok(event);
+            return Ok(resolved_finding(event, finding_id));
         }
         match finding_matches.len() {
             0 => bail!("no discussion event matches {needle:?}"),
             1 => {
                 let (event, finding_id) = finding_matches[0];
-                let mut event = event.clone();
-                event.event_id = finding_id.clone();
-                Ok(event)
+                Ok(resolved_finding(event, finding_id))
             }
             _ => bail!(
                 "ambiguous discussion event {needle:?}: matches {}",
