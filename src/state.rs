@@ -44,7 +44,7 @@ pub struct Brief {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChangelogEntry {
     pub event_id: String,
-    pub section: ChangelogSection,
+    pub category: String,
     pub body: String,
     pub actor: String,
     pub on_behalf_of: Option<String>,
@@ -516,10 +516,10 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 plan_ref: plan_ref.clone(),
                 plan_slice: plan_slice.clone(),
             }),
-            Payload::ChangelogRecorded { section, body } => {
+            Payload::ChangelogRecorded { category, body } => {
                 state.changelog = Some(ChangelogEntry {
                     event_id: ev.event_id.clone(),
-                    section: *section,
+                    category: category.clone(),
                     body: body.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),

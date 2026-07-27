@@ -422,7 +422,7 @@ fn import_rejects_malformed_changelog_before_writing() {
         .args([
             "changelog",
             "move-changelog",
-            "--section",
+            "--category",
             "fixed",
             "--body-file",
             changelog_body.to_str().unwrap(),

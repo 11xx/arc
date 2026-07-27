@@ -101,7 +101,7 @@ arc brief radio-refill-fix --body-file executor-spec.md
 arc brief radio-refill-fix --body-file executor-spec.md \
   --plan-ref 20260726T120000Z-radio-reliability-plan.md \
   --plan-slice refill-worker
-arc changelog radio-refill-fix --section fixed --body-file changelog-entry.md
+arc changelog radio-refill-fix --category fixed --body-file changelog-entry.md
 arc show                                  # includes the latest contract
 # ... read the executor spec from arc show ...
 arc stage implementing --claim            # default claim + stage
@@ -148,12 +148,14 @@ explicit change. Ambiguous or absent context fails with the candidate list and
 asks for `CHANGE`.
 
 `arc changelog <change>` reads the latest entry for one change; adding
-`--section <added|changed|deprecated|removed|fixed|security> --body-file <file>`
-records replacement release copy as a new append-only event. `arc changelog`
-projects entries from integrated changes newer than the latest reachable tag,
-grouped in Keep a Changelog order; `--since <revision>` overrides that
-boundary, `--json` emits the derived entries, and `--write` replaces only the
-generated `[Unreleased]` block in `CHANGELOG.md`.
+`--category <category> --body-file <file>` records replacement release copy as
+a new append-only event. Categories are non-empty single-line strings; their
+case and spelling are preserved. `arc changelog` projects entries from
+integrated changes newer than the latest reachable tag. The built-in renderer
+groups conventional categories in Keep a Changelog order, case-insensitively,
+then emits other categories verbatim in bytewise order. `--since <revision>`
+overrides the boundary, `--json` emits the versioned derived projection, and
+`--write` replaces only the generated `[Unreleased]` block in `CHANGELOG.md`.
 
 `arc env` is the explicit identity bootstrap. It prints eval-able
 `ARC_HARNESS` and `ARC_SESSION` exports from the first available variable in

@@ -95,7 +95,8 @@ pub enum Payload {
         plan_slice: Option<String>,
     },
     ChangelogRecorded {
-        section: ChangelogSection,
+        #[serde(alias = "section")]
+        category: String,
         body: String,
     },
     PatchsetAdded {
@@ -310,41 +311,6 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
 
 fn is_false(value: &bool) -> bool {
     !*value
-}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
-)]
-#[serde(rename_all = "kebab-case")]
-pub enum ChangelogSection {
-    Added,
-    Changed,
-    Deprecated,
-    Removed,
-    Fixed,
-    Security,
-}
-
-impl ChangelogSection {
-    pub const ALL: [Self; 6] = [
-        Self::Added,
-        Self::Changed,
-        Self::Deprecated,
-        Self::Removed,
-        Self::Fixed,
-        Self::Security,
-    ];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Added => "Added",
-            Self::Changed => "Changed",
-            Self::Deprecated => "Deprecated",
-            Self::Removed => "Removed",
-            Self::Fixed => "Fixed",
-            Self::Security => "Security",
-        }
-    }
 }
 
 /// The announcement class of a `message` event. Deliberately excludes

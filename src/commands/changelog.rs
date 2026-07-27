@@ -1,10 +1,11 @@
 use super::{ensure_append_allowed, locked_state, Ctx};
 use crate::gitio;
-use crate::model::{ChangelogSection, Closure, Payload};
+use crate::model::{Closure, Payload};
 use crate::state::{ChangeState, ChangelogEntry};
 use crate::ExecutionRole;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -16,7 +17,7 @@ const CHANGELOG_RENDERER: &str = "keep-a-changelog";
 struct ProjectedEntry<'a> {
     change_id: &'a str,
     change: &'a str,
-    category: &'static str,
+    category: &'a str,
     body: &'a str,
     integrated_commit: Option<&'a str>,
     integrated_at: Option<&'a chrono::DateTime<chrono::Utc>>,
@@ -48,17 +49,17 @@ pub fn changelog(
     ctx: &Ctx,
     role: ExecutionRole,
     reference: Option<&str>,
-    section: Option<ChangelogSection>,
+    category: Option<String>,
     body_file: Option<String>,
     json: bool,
     provenance: bool,
     since: Option<String>,
     write: bool,
 ) -> Result<i32> {
-    if section.is_some() || body_file.is_some() {
+    if category.is_some() || body_file.is_some() {
         let reference = reference.context("recording a changelog entry requires CHANGE")?;
-        let section = section.context("--body-file requires --section")?;
-        let body_file = body_file.context("--section requires --body-file")?;
+        let category = category.context("--body-file requires --category")?;
+        let body_file = body_file.context("--category requires --body-file")?;
         if json || provenance || since.is_some() || write {
             bail!(
                 "--json, --provenance, --since, and --write cannot be used when recording an entry"
@@ -69,13 +70,17 @@ pub fn changelog(
             return Ok(9);
         }
         let body = super::read_body_file_verbatim(&body_file)?;
+        let category = validate_category(&category)?;
         let store = ctx.store()?;
         let (change_id, _transition, state) = locked_state(&store, reference)?;
-        let payload = Payload::ChangelogRecorded { section, body };
+        let payload = Payload::ChangelogRecorded {
+            category: category.clone(),
+            body,
+        };
         ensure_append_allowed(&state, &payload)?;
         let event = ctx.event(&store, &change_id, payload);
         store.append_event(&event)?;
-        println!("changelog: {}", section.as_str());
+        println!("changelog: {category}");
         println!("event: {}", event.event_id);
         return Ok(0);
     }
@@ -185,7 +190,7 @@ fn projected_state_entry<'a>(
     ProjectedEntry {
         change_id: &state.change_id,
         change: &state.slug,
-        category: entry.section.as_str(),
+        category: &entry.category,
         body: &entry.body,
         integrated_commit: integrated.and_then(|closure| closure.integrated_commit.as_deref()),
         integrated_at: integrated.map(|closure| &closure.created_at),
@@ -203,31 +208,74 @@ fn projected_state_entry<'a>(
 
 fn render_unreleased(entries: &[ProjectedEntry<'_>], provenance: bool) -> String {
     let mut rendered = String::from("## [Unreleased]\n");
-    for section in ChangelogSection::ALL {
-        let section_entries = entries
+    for (comparison, heading) in CANONICAL_CATEGORIES {
+        let category_entries = entries
             .iter()
-            .filter(|entry| entry.category == section.as_str())
-            .collect::<Vec<_>>();
-        if section_entries.is_empty() {
-            continue;
+            .filter(|entry| entry.category.eq_ignore_ascii_case(comparison));
+        render_category(&mut rendered, heading, category_entries, provenance);
+    }
+
+    let mut custom = BTreeMap::<&str, Vec<&ProjectedEntry<'_>>>::new();
+    for entry in entries {
+        if canonical_category(entry.category).is_none() {
+            custom.entry(entry.category).or_default().push(entry);
         }
-        rendered.push_str("\n### ");
-        rendered.push_str(section.as_str());
-        rendered.push_str("\n\n");
-        for entry in section_entries {
-            rendered.push_str(entry.body.trim_end());
-            rendered.push('\n');
-            if provenance {
-                rendered.push_str(&provenance_line(entry));
-                rendered.push('\n');
-            }
-        }
+    }
+    for (heading, category_entries) in custom {
+        render_category(
+            &mut rendered,
+            heading,
+            category_entries.into_iter(),
+            provenance,
+        );
     }
     rendered
 }
 
+const CANONICAL_CATEGORIES: [(&str, &str); 6] = [
+    ("added", "Added"),
+    ("changed", "Changed"),
+    ("deprecated", "Deprecated"),
+    ("removed", "Removed"),
+    ("fixed", "Fixed"),
+    ("security", "Security"),
+];
+
+fn canonical_category(category: &str) -> Option<&'static str> {
+    CANONICAL_CATEGORIES
+        .iter()
+        .find_map(|(comparison, heading)| {
+            category
+                .eq_ignore_ascii_case(comparison)
+                .then_some(*heading)
+        })
+}
+
+fn render_category<'a>(
+    rendered: &mut String,
+    heading: &str,
+    entries: impl Iterator<Item = &'a ProjectedEntry<'a>>,
+    provenance: bool,
+) {
+    let entries = entries.collect::<Vec<_>>();
+    if entries.is_empty() {
+        return;
+    }
+    rendered.push_str("\n### ");
+    rendered.push_str(heading);
+    rendered.push_str("\n\n");
+    for entry in entries {
+        rendered.push_str(entry.body.trim_end());
+        rendered.push('\n');
+        if provenance {
+            rendered.push_str(&provenance_line(entry));
+            rendered.push('\n');
+        }
+    }
+}
+
 fn print_entry(change: &str, entry: &ChangelogEntry, provenance: bool) {
-    println!("### {}\n", entry.section.as_str());
+    println!("### {}\n", entry.category);
     print!("{}", entry.body);
     if provenance {
         if !entry.body.ends_with('\n') {
@@ -244,6 +292,17 @@ fn print_entry(change: &str, entry: &ChangelogEntry, provenance: bool) {
             entry.created_at,
         );
     }
+}
+
+fn validate_category(category: &str) -> Result<String> {
+    let category = category.trim();
+    if category.is_empty() {
+        bail!("changelog category must not be empty");
+    }
+    if category.contains(['\n', '\r']) {
+        bail!("changelog category must be a single line");
+    }
+    Ok(category.to_owned())
 }
 
 fn provenance_line(entry: &ProjectedEntry<'_>) -> String {

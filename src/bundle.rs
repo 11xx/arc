@@ -411,8 +411,7 @@ mod tests {
     use super::*;
     use crate::forge::{ForgeCheckState, ForgePolicy, ForgePrState};
     use crate::model::{
-        ChangelogSection, Closure, DispositionStatus, MessageSeverity, MessageType, Severity,
-        Verdict, VerifyResult,
+        Closure, DispositionStatus, MessageSeverity, MessageType, Severity, Verdict, VerifyResult,
     };
     use serde_json::json;
 
@@ -481,7 +480,7 @@ mod tests {
                 plan_slice: None,
             },
             Payload::ChangelogRecorded {
-                section: ChangelogSection::Fixed,
+                category: "Fixed".into(),
                 body: "body".into(),
             },
             Payload::PatchsetAdded {
