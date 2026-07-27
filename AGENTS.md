@@ -29,14 +29,7 @@ daemon, no database, no network, no multi-machine ref sync.
 
 ## Working here
 
-- The repo dogfoods itself: run non-trivial changes through arc
-  (`begin` → implement → `snapshot` → `review` → `verify --all` →
-  `integrate`) with `ARC_HARNESS`/`ARC_SESSION` set. Gates live in
-  `.arc/gates.toml`: build, test, and lint (clippy `-D warnings` +
-  `fmt --check`) must all pass.
-- Integration tests live in `tests/cli/<area>.rs` (assert_cmd against the
-  real binary); parser/derivation logic gets in-module unit tests. Keep
-  that split.
+- The repo dogfoods itself: run non-trivial changes through /arc.
 - After integrating a CLI change, refresh the installed binary:
   `cargo install --path . --locked`.
 - Record behavior changes on their arc change via `arc changelog`; the
