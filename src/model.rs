@@ -13,6 +13,11 @@ pub struct DisplacedClaim {
     pub stage: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BriefRef {
+    pub event_id: String,
+}
+
 /// One append-only ledger entry. The envelope is common to every event;
 /// the payload is internally tagged by `event_type`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +112,8 @@ pub enum Payload {
         head: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         merge_base: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        brief_ref: Option<BriefRef>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         author_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

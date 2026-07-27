@@ -138,6 +138,9 @@ pub fn markdown(
         let _ = writeln!(w, "\n## Patchsets\n");
         for p in &state.patchsets {
             let _ = writeln!(w, "- `{}`: `{}` → `{}`", p.id, p.base, p.head);
+            if let (Some(brief_ref), Some(version)) = (&p.brief_ref, p.brief_version) {
+                let _ = writeln!(w, "  - brief: v{version} (`{}`)", brief_ref.event_id);
+            }
             if let Some(subject) = &p.on_behalf_of {
                 let _ = writeln!(w, "  - snapshot by: {} (for {subject})", p.actor);
             }

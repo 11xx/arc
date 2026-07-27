@@ -13,6 +13,10 @@ pub struct Patchset {
     pub base: String,
     pub head: String,
     pub merge_base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brief_ref: Option<BriefRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brief_version: Option<usize>,
     pub author: Option<GitIdentity>,
     pub committer: Option<GitIdentity>,
     pub claim_id: Option<String>,
@@ -536,6 +540,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 base,
                 head,
                 merge_base,
+                brief_ref,
                 author_name,
                 author_email,
                 committer_name,
@@ -560,6 +565,22 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 }
                 let author = git_identity(author_name, author_email);
                 let committer = git_identity(committer_name, committer_email);
+                let brief_version = brief_ref
+                    .as_ref()
+                    .map(|brief_ref| {
+                        state
+                            .briefs
+                            .iter()
+                            .position(|brief| brief.event_id == brief_ref.event_id)
+                            .map(|index| index + 1)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "patchset {patchset_id} references unknown or later brief {}",
+                                    brief_ref.event_id
+                                )
+                            })
+                    })
+                    .transpose()?;
                 let provenance_mismatch = provenance_mismatch(
                     crate::config::GitIdentityMode::PerActor,
                     claim_actor.as_deref(),
@@ -573,6 +594,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     base: base.clone(),
                     head: head.clone(),
                     merge_base: merge_base.clone(),
+                    brief_ref: brief_ref.clone(),
+                    brief_version,
                     author,
                     committer,
                     claim_id: claim_id.clone(),

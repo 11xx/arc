@@ -28,6 +28,10 @@ struct ReviewVerdict<'a> {
     valid_for_current_head: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    brief_ref: Option<&'a BriefRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    brief_version: Option<usize>,
     findings: Vec<&'a FindingState>,
 }
 
@@ -86,6 +90,9 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
         if let Some(body) = verdict.body {
             println!("  {body}");
         }
+        if let (Some(brief_ref), Some(version)) = (verdict.brief_ref, verdict.brief_version) {
+            println!("  - brief: v{version} (`{}`)", brief_ref.event_id);
+        }
         for finding in &verdict.findings {
             println!(
                 "  - `{}` [{}{:?}] {}",
@@ -132,6 +139,10 @@ fn review_verdict<'a>(
                 .as_ref()
                 .is_some_and(|current| current.valid_for_current_head)
     });
+    let patchset = state
+        .patchsets
+        .iter()
+        .find(|patchset| patchset.id == verdict.patchset_id);
     ReviewVerdict {
         verdict: verdict.verdict,
         patchset_id: &verdict.patchset_id,
@@ -140,6 +151,8 @@ fn review_verdict<'a>(
         created_at: verdict.created_at,
         valid_for_current_head,
         body: verdict.body.as_deref(),
+        brief_ref: patchset.and_then(|patchset| patchset.brief_ref.as_ref()),
+        brief_version: patchset.and_then(|patchset| patchset.brief_version),
         findings: state
             .findings
             .values()
@@ -148,7 +161,12 @@ fn review_verdict<'a>(
     }
 }
 
-pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> {
+pub fn snapshot(
+    ctx: &Ctx,
+    reference: &str,
+    base: Option<String>,
+    brief_version: Option<usize>,
+) -> Result<()> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
@@ -165,8 +183,20 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
         Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
         None => merge_base.clone().unwrap_or_else(|| st.base.clone()),
     };
+    let brief_ref = match brief_version {
+        Some(0) => bail!("brief version 0 not found"),
+        Some(version) => Some(
+            st.briefs
+                .get(version - 1)
+                .with_context(|| format!("brief version {version} not found"))?,
+        ),
+        None => st.latest_brief(),
+    }
+    .map(|brief| BriefRef {
+        event_id: brief.event_id.clone(),
+    });
     if let Some(p) = st.latest_patchset() {
-        if p.head == head && p.base == base_rev {
+        if p.head == head && p.base == base_rev && p.brief_ref == brief_ref {
             println!("patchset: {} (unchanged)", p.id);
             return Ok(());
         }
@@ -187,6 +217,7 @@ pub fn snapshot(ctx: &Ctx, reference: &str, base: Option<String>) -> Result<()> 
             base: base_rev,
             head: head.clone(),
             merge_base,
+            brief_ref,
             author_name: Some(identity.author_name),
             author_email: Some(identity.author_email),
             committer_name: Some(identity.committer_name),
@@ -367,7 +398,7 @@ pub fn review(
         {
             bail!("review --snapshot requires the change branch checked out in a clean worktree");
         }
-        snapshot(ctx, reference, None)?;
+        snapshot(ctx, reference, None, None)?;
     }
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
