@@ -42,6 +42,7 @@ pub fn check_writable(ctx: &Ctx, json: bool) -> Result<i32> {
         ("lock", probe_lock(&store)),
         ("events", probe_events(&store)),
         ("git-ref", probe_ref(ctx)),
+        ("commit", probe_commit(ctx)),
     ] {
         match result {
             Ok(detail) => checks.push(WritabilityCheck {
@@ -92,11 +93,66 @@ fn probe_ref(ctx: &Ctx) -> Result<String> {
     Ok(name)
 }
 
+/// Committing is the other capability the ceremony needs, and the one a
+/// sandboxed executor otherwise discovers only once a slice is ready to land.
+/// Probe it in a throwaway repository so the target repository gains no commit,
+/// and exercise signing only where the project asks for it.
+fn probe_commit(ctx: &Ctx) -> Result<String> {
+    let signed = signing_required(ctx);
+    let dir = std::env::temp_dir().join(format!("arc-commit-probe-{}", ids::new_event_id()));
+    fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let result = probe_commit_in(&dir, ctx, signed);
+    let _ = fs::remove_dir_all(&dir);
+    result?;
+    Ok(if signed {
+        "signed commit".into()
+    } else {
+        "unsigned commit (commit.gpgsign is not set)".into()
+    })
+}
+
+fn probe_commit_in(dir: &Path, ctx: &Ctx, signed: bool) -> Result<()> {
+    gitio::git(dir, &["init", "--quiet"])?;
+    // A probe repository has no user, and inheriting an unset global identity
+    // would fail for a reason unrelated to what is being probed.
+    gitio::git(dir, &["config", "user.name", "arc probe"])?;
+    gitio::git(dir, &["config", "user.email", "probe@arc.invalid"])?;
+    let mut args = vec!["commit", "--allow-empty", "--quiet", "-m", "arc probe"];
+    if signed {
+        // Carry the project's signing key so the probe exercises the same
+        // credential the real commit will use.
+        if let Some(key) = git_config(ctx, "user.signingkey") {
+            gitio::git(dir, &["config", "user.signingkey", &key])?;
+        }
+        if let Some(format) = git_config(ctx, "gpg.format") {
+            gitio::git(dir, &["config", "gpg.format", &format])?;
+        }
+        args.push("-S");
+    }
+    gitio::git(dir, &args).context("cannot create a commit")?;
+    Ok(())
+}
+
+fn signing_required(ctx: &Ctx) -> bool {
+    git_config(ctx, "commit.gpgsign").is_some_and(|value| value == "true")
+}
+
+fn git_config(ctx: &Ctx, key: &str) -> Option<String> {
+    gitio::git(&ctx.cwd, &["config", "--get", key])
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn failed(name: &'static str, error: anyhow::Error) -> WritabilityCheck {
     WritabilityCheck {
         name,
         ok: false,
-        detail: error.to_string(),
+        // Render the whole cause chain: the outermost context names which
+        // capability failed, and only the innermost says why. A probe that
+        // reports "cannot create a commit" without "gpg-agent unreachable"
+        // costs the reader the diagnosis the probe exists to deliver.
+        detail: format!("{error:#}"),
     }
 }
 

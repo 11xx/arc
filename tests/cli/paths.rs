@@ -106,3 +106,68 @@ fn config_check_writable_reports_store_failure_and_json_schema() {
         .iter()
         .all(|check| check["ok"] == true));
 }
+
+#[test]
+fn config_check_writable_probes_commit_without_touching_the_repository() {
+    let repo = Repo::new();
+    let before = git_out(&repo.root, &["rev-parse", "HEAD"]);
+    // Give the probe a private temp dir so leak detection observes only this
+    // invocation. Scanning the shared temp dir races sibling tests running
+    // their own probes, and fails for a reason unrelated to cleanup.
+    let tmp = repo.root.join("probe-tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .env("TMPDIR", &tmp)
+            .args(["config", "--check-writable"]),
+    );
+    assert!(
+        out.contains("ok: commit"),
+        "expected a commit check, got {out:?}"
+    );
+    // The probe repository is disposable; the target must gain no commit and
+    // keep a clean tree.
+    assert_eq!(git_out(&repo.root, &["rev-parse", "HEAD"]), before);
+    assert!(git_out(&repo.root, &["status", "--porcelain"]).is_empty());
+    assert_eq!(
+        fs::read_dir(&tmp).unwrap().count(),
+        0,
+        "probe repository was left behind"
+    );
+}
+
+#[test]
+fn config_check_writable_commit_probe_follows_repository_signing_policy() {
+    let repo = Repo::new();
+    // Unset: the probe proves committing works and says signing was not tried.
+    let unsigned = stdout(
+        repo.arc(&repo.root)
+            .args(["config", "--check-writable", "--json"]),
+    );
+    let value: serde_json::Value = serde_json::from_str(&unsigned).unwrap();
+    let commit = value["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "commit")
+        .expect("commit check present");
+    assert_eq!(commit["ok"], true);
+    assert!(
+        commit["detail"].as_str().unwrap().contains("unsigned"),
+        "detail should say signing was not exercised: {commit:?}"
+    );
+
+    // Required but unsatisfiable: an unusable key must fail the check and the
+    // detail must carry gpg's own reason, not just the outer context.
+    git_out(&repo.root, &["config", "commit.gpgsign", "true"]);
+    git_out(
+        &repo.root,
+        &["config", "user.signingkey", "0000000000000000"],
+    );
+    repo.arc(&repo.root)
+        .args(["config", "--check-writable"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("fail: commit"))
+        .stdout(predicates::str::contains("gpg"));
+}
