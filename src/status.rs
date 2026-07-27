@@ -83,6 +83,14 @@ pub struct GateStatus {
     /// lead can apply stricter judgment even though it counts for green-ness.
     pub attested: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tail: Option<String>,
     #[serde(skip_serializing_if = "is_false")]
     pub timed_out: bool,
@@ -454,6 +462,10 @@ fn build_report(
                 .into(),
                 green_at_head: result == Some(crate::model::VerifyResult::Pass),
                 attested: evidence.is_some_and(|e| e.attested),
+                evidence_event_id: evidence.map(|e| e.event_id.clone()),
+                revision: evidence.map(|e| e.revision.clone()),
+                hostname: evidence.map(|e| e.hostname.clone()),
+                runner: evidence.and_then(|e| e.runner.clone()),
                 output_tail: evidence
                     .filter(|e| e.result == crate::model::VerifyResult::Fail)
                     .and_then(|e| e.output_tail.clone()),

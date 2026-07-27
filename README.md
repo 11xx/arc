@@ -520,14 +520,17 @@ the gate ran elsewhere — inside a sandbox, or on another host — record that
 external evidence with `--attest --result pass|fail` (optionally `--note`):
 
 ```sh
-arc verify <change> --gate test --attest --result pass --note "ran in CI sandbox"
+arc verify <change> --gate test --attest --result pass \
+  --tested-revision <commit> --execution-host ci.example \
+  --runner build/test-42 --note "ran in CI sandbox"
 ```
 
 Attested evidence is recorded without executing the command and still counts
 toward gate green-ness, but `arc show` and `arc status` mark it `(attested)`
-so a lead can apply stricter judgment. It has no exit code or duration because
-arc did not run a process. `--attest` requires `--result`, and `--result`
-without `--attest` is a usage error (arc observes its own result).
+and name the external runner and host so a lead can apply stricter judgment. It
+has no exit code or duration because arc did not run a process. Attestation
+requires the result, tested revision, execution host, and runner together;
+those context flags are invalid for locally executed verification.
 
 Executed gates capture combined stdout and stderr, retaining only the final
 4096 bytes. Failed-gate tails appear in `arc show` and `arc status`; successful

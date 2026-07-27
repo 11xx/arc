@@ -55,6 +55,9 @@ pub struct VerifyArgs {
     pub command: Option<String>,
     pub attest: bool,
     pub result: Option<VerifyResult>,
+    pub tested_revision: Option<String>,
+    pub execution_host: Option<String>,
+    pub runner: Option<String>,
     pub note: Option<String>,
 }
 
@@ -63,6 +66,9 @@ struct VerificationInput {
     command: String,
     timeout_seconds: Option<u64>,
     attested_result: Option<VerifyResult>,
+    tested_revision: Option<String>,
+    execution_host: Option<String>,
+    runner: Option<String>,
     note: Option<String>,
 }
 
@@ -77,6 +83,7 @@ struct CompletedVerification {
     timed_out: bool,
     hostname: String,
     attested: bool,
+    runner: Option<String>,
     note: Option<String>,
 }
 
@@ -89,10 +96,24 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         command,
         attest,
         result,
+        tested_revision,
+        execution_host,
+        runner,
         note,
     } = args;
-    if all && (gate.is_some() || command.is_some() || attest || result.is_some()) {
-        bail!("--all cannot be combined with --gate, --command, --attest, or --result");
+    if all
+        && (gate.is_some()
+            || command.is_some()
+            || attest
+            || result.is_some()
+            || tested_revision.is_some()
+            || execution_host.is_some()
+            || runner.is_some())
+    {
+        bail!(
+            "--all cannot be combined with --gate, --command, --attest, --result, \
+             --tested-revision, --execution-host, or --runner"
+        );
     }
     if parallel && !all {
         bail!("--parallel requires --all");
@@ -107,6 +128,22 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         (true, None) => bail!("--attest requires --result pass|fail"),
         (false, Some(_)) => bail!("--result is only valid with --attest"),
         (false, None) => None,
+    };
+    let (tested_revision, execution_host, runner) = if attest {
+        let tested_revision =
+            tested_revision.context("--attest requires --tested-revision <REV>")?;
+        let execution_host = nonempty_attestation_value(execution_host, "--execution-host")?;
+        let runner = nonempty_attestation_value(runner, "--runner")?;
+        (
+            Some(gitio::rev_parse(&ctx.cwd, &tested_revision)?),
+            Some(execution_host),
+            Some(runner),
+        )
+    } else {
+        if tested_revision.is_some() || execution_host.is_some() || runner.is_some() {
+            bail!("--tested-revision, --execution-host, and --runner are only valid with --attest");
+        }
+        (None, None, None)
     };
     let store = ctx.store()?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
@@ -160,6 +197,9 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                     command: gate.command.clone(),
                     timeout_seconds: gate.timeout,
                     attested_result: None,
+                    tested_revision: None,
+                    execution_host: None,
+                    runner: None,
                     note: note.clone(),
                 },
             )?;
@@ -192,6 +232,9 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             command: cmd,
             timeout_seconds: timeout,
             attested_result,
+            tested_revision,
+            execution_host,
+            runner,
             note,
         },
     )
@@ -228,6 +271,9 @@ pub fn snapshot_with_verify(
                 command: None,
                 attest: false,
                 result: None,
+                tested_revision: None,
+                execution_host: None,
+                runner: None,
                 note: None,
             },
         );
@@ -246,6 +292,9 @@ pub fn snapshot_with_verify(
                 command: None,
                 attest: false,
                 result: None,
+                tested_revision: None,
+                execution_host: None,
+                runner: None,
                 note: None,
             },
         )?;
@@ -276,6 +325,9 @@ pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
             command: None,
             attest: false,
             result: None,
+            tested_revision: None,
+            execution_host: None,
+            runner: None,
             note: None,
         },
     )?;
@@ -305,6 +357,9 @@ fn verify_all_parallel(
             command: gate.command.clone(),
             timeout_seconds: gate.timeout,
             attested_result: None,
+            tested_revision: None,
+            execution_host: None,
+            runner: None,
             note: note.clone(),
         })
         .collect::<Vec<_>>();
@@ -362,10 +417,16 @@ fn record_verification(
     change_id: &str,
     input: VerificationInput,
 ) -> Result<i32> {
-    let revision = gitio::head(&ctx.cwd)?;
-    let hostname = hostname::get()
-        .map(|h| h.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "unknown".into());
+    let revision = match &input.tested_revision {
+        Some(revision) => revision.clone(),
+        None => gitio::head(&ctx.cwd)?,
+    };
+    let hostname = match &input.execution_host {
+        Some(hostname) => hostname.clone(),
+        None => hostname::get()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "unknown".into()),
+    };
     if input.attested_result.is_none() {
         eprintln!("running: {}", input.command);
     }
@@ -395,6 +456,9 @@ fn execute_verification(
         command,
         timeout_seconds,
         attested_result,
+        tested_revision: _,
+        execution_host: _,
+        runner,
         note,
     } = input;
     let attested = attested_result.is_some();
@@ -432,6 +496,7 @@ fn execute_verification(
         timed_out,
         hostname,
         attested,
+        runner,
         note,
     })
 }
@@ -474,6 +539,7 @@ fn append_verifications(
                 timed_out: item.timed_out,
                 hostname: item.hostname,
                 attested: item.attested,
+                runner: item.runner,
                 note: item.note,
             },
         );
@@ -488,6 +554,15 @@ fn append_verifications(
         println!("event: {}", ev.event_id);
     }
     Ok(())
+}
+
+fn nonempty_attestation_value(value: Option<String>, flag: &str) -> Result<String> {
+    let value = value.with_context(|| format!("--attest requires {flag} <VALUE>"))?;
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("{flag} must not be empty");
+    }
+    Ok(value.to_owned())
 }
 
 struct GateRun {

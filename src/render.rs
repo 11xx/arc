@@ -300,6 +300,14 @@ pub fn markdown(
                     ""
                 }
             );
+            if g.attested {
+                let _ = writeln!(
+                    w,
+                    "  - attested by {} on {}",
+                    g.runner.as_deref().unwrap_or("unknown runner"),
+                    g.hostname.as_deref().unwrap_or("unknown host")
+                );
+            }
             if let Some(output_tail) = &g.output_tail {
                 let marker = if output_tail.len() >= 4096 {
                     "[output truncated to final 4096 bytes]"
@@ -333,6 +341,14 @@ pub fn markdown(
                 },
                 v.hostname
             );
+            if v.attested {
+                let _ = writeln!(
+                    w,
+                    "  - attested by {} on {}",
+                    v.runner.as_deref().unwrap_or("unknown runner"),
+                    v.hostname
+                );
+            }
         }
     }
 
