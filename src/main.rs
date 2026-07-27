@@ -590,7 +590,7 @@ enum Cmd {
         /// Run all declared gates concurrently and append evidence in name order
         #[arg(long)]
         parallel: bool,
-        /// With --all, skip gates already green at the current head
+        /// With --all, record reuse of passing evidence already green at the current head
         #[arg(long = "skip-green")]
         skip_green: bool,
         /// Gate name from .arc/gates.toml

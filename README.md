@@ -532,6 +532,13 @@ has no exit code or duration because arc did not run a process. Attestation
 requires the result, tested revision, execution host, and runner together;
 those context flags are invalid for locally executed verification.
 
+Every multi-gate invocation records its intended gate manifest before execution
+and correlates each observed result to that run. `--skip-green` records a reuse
+edge to the earlier passing evidence instead of silently omitting work. A run
+is complete when every declared gate has an observed or reused terminal edge;
+an interrupted run remains visibly incomplete without a mutable completion
+record.
+
 Executed gates capture combined stdout and stderr, retaining only the final
 4096 bytes. Failed-gate tails appear in `arc show` and `arc status`; successful
 gates stay compact. A declared timeout terminates and reaps the gate's entire

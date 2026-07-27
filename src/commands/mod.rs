@@ -639,6 +639,7 @@ mod tests {
             findings: BTreeMap::new(),
             verdicts: Vec::new(),
             verifications: Vec::new(),
+            verification_runs: Vec::new(),
             claim: None,
             retired_claim_ids: BTreeSet::new(),
             hold: None,
