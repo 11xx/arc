@@ -43,8 +43,20 @@ pub struct Brief {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChangelogEntry {
+    pub event_id: String,
     pub section: ChangelogSection,
     pub body: String,
+    pub actor: String,
+    pub on_behalf_of: Option<String>,
+    pub harness: Option<String>,
+    pub session: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl ChangelogEntry {
+    pub fn effective_author(&self) -> &str {
+        self.on_behalf_of.as_deref().unwrap_or(&self.actor)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -274,6 +286,8 @@ pub struct ClosureState {
     pub integrated_commit: Option<String>,
     pub superseded_by: Option<String>,
     pub event_id: String,
+    #[serde(skip)]
+    pub created_at: DateTime<Utc>,
 }
 
 /// The current state of one change, derived by replaying its events in
@@ -504,8 +518,14 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             }),
             Payload::ChangelogRecorded { section, body } => {
                 state.changelog = Some(ChangelogEntry {
+                    event_id: ev.event_id.clone(),
                     section: *section,
                     body: body.clone(),
+                    actor: ev.actor.clone(),
+                    on_behalf_of: ev.on_behalf_of.clone(),
+                    harness: ev.harness.clone(),
+                    session: ev.session.clone(),
+                    created_at: ev.created_at,
                 });
             }
             Payload::PatchsetAdded {
@@ -809,6 +829,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     integrated_commit: integrated_commit.clone(),
                     superseded_by: superseded_by.clone(),
                     event_id: ev.event_id.clone(),
+                    created_at: ev.created_at,
                 });
             }
             Payload::ForgeProjection {

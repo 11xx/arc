@@ -47,8 +47,8 @@ fn recording_then_reading_round_trips_section_and_body() {
         "--json",
     ])))
     .unwrap();
-    assert_eq!(value["section"], "fixed");
-    assert_eq!(value["body"], "- fixed it\n");
+    assert_eq!(value["entries"][0]["category"], "Fixed");
+    assert_eq!(value["entries"][0]["body"], "- fixed it\n");
 }
 
 #[test]
@@ -64,8 +64,8 @@ fn rerecording_replaces_the_derived_entry_and_keeps_both_events() {
         "--json",
     ])))
     .unwrap();
-    assert_eq!(value["section"], "changed");
-    assert_eq!(value["body"], "- second\n");
+    assert_eq!(value["entries"][0]["category"], "Changed");
+    assert_eq!(value["entries"][0]["body"], "- second\n");
     let count = fs::read_dir(event_dir(&repo, &change_id))
         .unwrap()
         .filter(|entry| {
@@ -109,13 +109,13 @@ fn recording_after_integration_updates_the_projection() {
     );
     assert_eq!(event_count(&repo, &change_id), before + 1);
     let projection = json_stdout(repo.arc(&repo.root).args(["changelog", "--json"]));
-    let entry = projection
+    let entry = projection["entries"]
         .as_array()
         .unwrap()
         .iter()
         .find(|entry| entry["change"] == "late-entry")
         .unwrap();
-    assert_eq!(entry["section"], "fixed");
+    assert_eq!(entry["category"], "Fixed");
     assert_eq!(entry["body"], "- documented after integration\n");
 
     begin(&repo, "abandoned-entry");
@@ -167,6 +167,91 @@ fn recording_after_integration_updates_the_projection() {
         .stderr(predicate::str::contains(
             "changelog entries require an open or integrated change",
         ));
+}
+
+#[test]
+fn json_projection_always_carries_full_event_provenance() {
+    let repo = Repo::new();
+    begin(&repo, "provenance-entry");
+    let worktree = repo.home.join(".worktrees/repo-provenance-entry");
+    let recorded = stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "Changelog Lead")
+            .env("ARC_HARNESS", "claude")
+            .env("ARC_SESSION", "session-provenance")
+            .args([
+                "--on-behalf-of",
+                "Release Executor",
+                "changelog",
+                "provenance-entry",
+                "--section",
+                "fixed",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("- provenance survives projection\n"),
+    );
+    let event_id = recorded
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap();
+    integrate(&repo, "provenance-entry");
+
+    let project = json_stdout(repo.arc(&repo.root).args(["changelog", "--json"]));
+    assert_eq!(project["schema"], "arc-changelog/1");
+    assert!(project["boundary"].is_null());
+    assert_eq!(project["target"], "CHANGELOG.md");
+    assert_eq!(project["renderer"], "keep-a-changelog");
+    let entry = project["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["change"] == "provenance-entry")
+        .unwrap();
+    assert_eq!(entry["category"], "Fixed");
+    assert_eq!(entry["body"], "- provenance survives projection\n");
+    assert!(entry["integrated_commit"].is_string());
+    assert!(entry["integrated_at"].is_string());
+    assert_eq!(entry["recorded"]["event_id"], event_id);
+    assert_eq!(entry["recorded"]["actor"], "Changelog Lead");
+    assert_eq!(entry["recorded"]["on_behalf_of"], "Release Executor");
+    assert_eq!(entry["recorded"]["effective_author"], "Release Executor");
+    assert_eq!(entry["recorded"]["harness"], "claude");
+    assert_eq!(entry["recorded"]["session"], "session-provenance");
+    assert!(entry["recorded"]["created_at"].is_string());
+
+    let single =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["changelog", "provenance-entry", "--json"]),
+        );
+    assert_eq!(single["schema"], "arc-changelog/1");
+    assert!(single["boundary"].is_null());
+    assert_eq!(single["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(single["entries"][0]["recorded"], entry["recorded"]);
+
+    let clean = stdout(repo.arc(&repo.root).args(["changelog", "provenance-entry"]));
+    assert!(!clean.contains("arc provenance:"), "{clean}");
+    let annotated =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["changelog", "provenance-entry", "--provenance"]),
+        );
+    for expected in [
+        "arc provenance: change=provenance-entry",
+        &format!("event={event_id}"),
+        "actor=Changelog Lead",
+        "on_behalf_of=Release Executor",
+        "harness=claude",
+        "session=session-provenance",
+    ] {
+        assert!(annotated.contains(expected), "{annotated}");
+    }
+    repo.arc(&repo.root)
+        .args(["changelog", "provenance-entry", "--json", "--provenance"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]

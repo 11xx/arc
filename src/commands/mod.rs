@@ -648,6 +648,7 @@ mod tests {
                 integrated_commit: None,
                 superseded_by: None,
                 event_id: "event".into(),
+                created_at: Utc::now(),
             }),
         }
     }
