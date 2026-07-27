@@ -36,6 +36,10 @@ struct ChangeStats {
     gate_seconds: BTreeMap<String, u64>,
     findings_by_severity: BTreeMap<String, usize>,
     review_rounds_by_cause: BTreeMap<String, usize>,
+    changes_requested_rounds: usize,
+    completed_rework_rounds: usize,
+    reworked: bool,
+    first_pass_approval: bool,
     patchset_count: usize,
 }
 
@@ -48,6 +52,9 @@ struct Aggregate {
     /// `stage-budget` tuning, never applied automatically.
     suggested_stage_budgets: BTreeMap<String, u64>,
     review_rounds_by_cause: BTreeMap<String, usize>,
+    changes_reworked: usize,
+    first_pass_approvals: usize,
+    completed_rework_rounds: usize,
 }
 
 #[derive(Serialize)]
@@ -113,6 +120,7 @@ fn change_stats(events: &[Event], state: &ChangeState) -> ChangeStats {
         *gate_seconds.entry(gate).or_default() += seconds;
     }
 
+    let rework = derive_rework(events);
     ChangeStats {
         change_id: state.change_id.clone(),
         slug: state.slug.clone(),
@@ -123,6 +131,10 @@ fn change_stats(events: &[Event], state: &ChangeState) -> ChangeStats {
         gate_seconds,
         findings_by_severity,
         review_rounds_by_cause: review_rounds_by_cause(events),
+        changes_requested_rounds: rework.changes_requested_rounds,
+        completed_rework_rounds: rework.completed_rework_rounds,
+        reworked: rework.completed_rework_rounds > 0,
+        first_pass_approval: rework.first_pass_approval,
         patchset_count: state.patchsets.len(),
     }
 }
@@ -253,6 +265,15 @@ fn aggregate_stats(changes: &[ChangeStats], gate_runs: &BTreeMap<String, Vec<u64
             *review_rounds_by_cause.entry(cause.clone()).or_default() += count;
         }
     }
+    let changes_reworked = changes.iter().filter(|change| change.reworked).count();
+    let first_pass_approvals = changes
+        .iter()
+        .filter(|change| change.first_pass_approval)
+        .count();
+    let completed_rework_rounds = changes
+        .iter()
+        .map(|change| change.completed_rework_rounds)
+        .sum();
 
     Aggregate {
         changes: changes.len(),
@@ -260,6 +281,81 @@ fn aggregate_stats(changes: &[ChangeStats], gate_runs: &BTreeMap<String, Vec<u64
         gate,
         suggested_stage_budgets,
         review_rounds_by_cause,
+        changes_reworked,
+        first_pass_approvals,
+        completed_rework_rounds,
+    }
+}
+
+struct ReworkStats {
+    changes_requested_rounds: usize,
+    completed_rework_rounds: usize,
+    first_pass_approval: bool,
+}
+
+fn derive_rework(events: &[Event]) -> ReworkStats {
+    let patchsets: BTreeMap<&str, usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match &event.payload {
+            Payload::PatchsetAdded { patchset_id, .. } => Some((patchset_id.as_str(), index)),
+            _ => None,
+        })
+        .collect();
+    let requested: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event.payload {
+            Payload::VerdictRecorded {
+                verdict: Verdict::ChangesRequested,
+                ..
+            } => Some(index),
+            _ => None,
+        })
+        .collect();
+    let approvals: Vec<(usize, &str)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match &event.payload {
+            Payload::VerdictRecorded {
+                patchset_id,
+                verdict: Verdict::Approved,
+                ..
+            } => Some((index, patchset_id.as_str())),
+            _ => None,
+        })
+        .collect();
+
+    let completed_rework_rounds = requested
+        .iter()
+        .filter(|request_index| {
+            approvals.iter().any(|(approval_index, patchset_id)| {
+                approval_index > *request_index
+                    && patchsets
+                        .get(patchset_id)
+                        .is_some_and(|patchset_index| patchset_index > *request_index)
+            })
+        })
+        .count();
+    let first_patchset = patchsets
+        .iter()
+        .min_by_key(|(_, index)| *index)
+        .map(|(id, _)| *id);
+    let first_pass_approval = first_patchset.is_some_and(|first_patchset| {
+        approvals
+            .iter()
+            .find(|(_, patchset_id)| *patchset_id == first_patchset)
+            .is_some_and(|(approval_index, _)| {
+                requested
+                    .iter()
+                    .all(|request_index| request_index > approval_index)
+            })
+    });
+
+    ReworkStats {
+        changes_requested_rounds: requested.len(),
+        completed_rework_rounds,
+        first_pass_approval,
     }
 }
 
@@ -370,8 +466,8 @@ fn format_duration(seconds: u64) -> String {
 
 fn print_table(changes: &[ChangeStats], aggregate: &Aggregate) {
     println!(
-        "{:<28} {:<10} {:>8} {:>8} {:>4} {:>8}",
-        "change", "state", "wall", "review", "ps", "findings"
+        "{:<28} {:<10} {:>8} {:>8} {:>4} {:>4} {:>10} {:>8}",
+        "change", "state", "wall", "review", "ps", "rw", "first-pass", "findings"
     );
     for change in changes {
         let wall = change
@@ -384,12 +480,18 @@ fn print_table(changes: &[ChangeStats], aggregate: &Aggregate) {
             .unwrap_or_else(|| "—".into());
         let findings: usize = change.findings_by_severity.values().sum();
         println!(
-            "{:<28} {:<10} {:>8} {:>8} {:>4} {:>8}",
+            "{:<28} {:<10} {:>8} {:>8} {:>4} {:>4} {:>10} {:>8}",
             truncate(&change.slug, 28),
             change.state,
             wall,
             review,
             change.patchset_count,
+            change.completed_rework_rounds,
+            if change.first_pass_approval {
+                "yes"
+            } else {
+                "no"
+            },
             findings
         );
     }

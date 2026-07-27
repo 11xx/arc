@@ -27,3 +27,111 @@ fn stats_json_carries_schema_and_reports_selected_change() {
     assert_eq!(feat["patchset_count"], 1);
     assert!(report["aggregate"]["changes"].as_u64().unwrap() >= 1);
 }
+
+#[test]
+fn rework_requires_changes_requested_then_new_patchset_then_approval() {
+    let repo = Repo::new();
+
+    let (_, first_pass, _) = change_with_patchset(&repo, "first-pass");
+    repo.arc(&first_pass)
+        .args(["review", "first-pass", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let (_, reversal, _) = change_with_patchset(&repo, "same-patchset-reversal");
+    repo.arc(&reversal)
+        .args([
+            "review",
+            "same-patchset-reversal",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+        ])
+        .assert()
+        .success();
+    repo.arc(&reversal)
+        .args(["review", "same-patchset-reversal", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let (_, reworked, _) = change_with_patchset(&repo, "two-rounds");
+    repo.arc(&reworked)
+        .args([
+            "review",
+            "two-rounds",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "brief",
+        ])
+        .assert()
+        .success();
+    repo.commit(&reworked, "round-2.txt", "two\n", "fix: address round one");
+    repo.arc(&reworked)
+        .args(["snapshot", "two-rounds"])
+        .assert()
+        .success();
+    repo.arc(&reworked)
+        .args([
+            "review",
+            "two-rounds",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+        ])
+        .assert()
+        .success();
+    repo.commit(
+        &reworked,
+        "round-3.txt",
+        "three\n",
+        "fix: address round two",
+    );
+    repo.arc(&reworked)
+        .args(["snapshot", "two-rounds"])
+        .assert()
+        .success();
+    repo.arc(&reworked)
+        .args(["review", "two-rounds", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let report = json_stdout(repo.arc(&repo.root).args(["stats", "--all", "--json"]));
+    let changes = report["changes"].as_array().unwrap();
+    let by_slug = |slug| {
+        changes
+            .iter()
+            .find(|change| change["slug"] == slug)
+            .unwrap()
+    };
+
+    assert_eq!(by_slug("first-pass")["changes_requested_rounds"], 0);
+    assert_eq!(by_slug("first-pass")["completed_rework_rounds"], 0);
+    assert_eq!(by_slug("first-pass")["reworked"], false);
+    assert_eq!(by_slug("first-pass")["first_pass_approval"], true);
+
+    assert_eq!(
+        by_slug("same-patchset-reversal")["changes_requested_rounds"],
+        1
+    );
+    assert_eq!(
+        by_slug("same-patchset-reversal")["completed_rework_rounds"],
+        0
+    );
+    assert_eq!(by_slug("same-patchset-reversal")["reworked"], false);
+    assert_eq!(
+        by_slug("same-patchset-reversal")["first_pass_approval"],
+        false
+    );
+
+    assert_eq!(by_slug("two-rounds")["changes_requested_rounds"], 2);
+    assert_eq!(by_slug("two-rounds")["completed_rework_rounds"], 2);
+    assert_eq!(by_slug("two-rounds")["reworked"], true);
+    assert_eq!(by_slug("two-rounds")["first_pass_approval"], false);
+
+    assert_eq!(report["aggregate"]["changes_reworked"], 1);
+    assert_eq!(report["aggregate"]["first_pass_approvals"], 1);
+    assert_eq!(report["aggregate"]["completed_rework_rounds"], 2);
+}
