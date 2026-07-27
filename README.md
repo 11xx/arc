@@ -156,6 +156,17 @@ groups conventional categories in Keep a Changelog order, case-insensitively,
 then emits other categories verbatim in bytewise order. `--since <revision>`
 overrides the boundary, `--json` emits the versioned derived projection, and
 `--write` replaces only the generated `[Unreleased]` block in `CHANGELOG.md`.
+Projects can commit `.arc/changelog.toml` to select another repository-relative
+target while retaining the built-in renderer:
+
+```toml
+target = "NEWS.md"
+renderer = "keep-a-changelog"
+```
+
+Both keys default to the values above with `CHANGELOG.md` as the target. If the
+configured file does not have a Keep a Changelog release shape, `--write`
+leaves it untouched and prints the generated block to stdout.
 
 `arc env` is the explicit identity bootstrap. It prints eval-able
 `ARC_HARNESS` and `ARC_SESSION` exports from the first available variable in
