@@ -133,6 +133,51 @@ fn locked_state(store: &Store, reference: &str) -> Result<(String, TransitionLoc
     Ok((change_id, transition, state))
 }
 
+fn ensure_append_allowed(state: &ChangeState, payload: &Payload) -> Result<()> {
+    let permission = append_permission(payload);
+    let Some(closure) = &state.closure else {
+        return match permission {
+            AppendPermission::OpenOnly
+            | AppendPermission::AnyPhaseFact
+            | AppendPermission::OpenOrIntegratedFact => Ok(()),
+            AppendPermission::IntegratedOnlyFact => {
+                bail!("event may be recorded only after integration")
+            }
+            AppendPermission::LifecycleOwned | AppendPermission::OpaqueImported => {
+                bail!("event lifecycle is owned internally")
+            }
+        };
+    };
+
+    let outcome = match closure.outcome {
+        Closure::Integrated => "integrated",
+        Closure::Abandoned => "abandoned",
+        Closure::Superseded => "superseded",
+    };
+    match permission {
+        AppendPermission::AnyPhaseFact => Ok(()),
+        AppendPermission::OpenOrIntegratedFact if closure.outcome == Closure::Integrated => Ok(()),
+        AppendPermission::IntegratedOnlyFact if closure.outcome == Closure::Integrated => Ok(()),
+        AppendPermission::OpenOnly => {
+            bail!(
+                "change {} is {outcome}; event is open-only",
+                state.change_id
+            )
+        }
+        AppendPermission::OpenOrIntegratedFact => bail!(
+            "change {} is {outcome}; event requires an open or integrated change",
+            state.change_id
+        ),
+        AppendPermission::IntegratedOnlyFact => bail!(
+            "change {} is {outcome}; event requires an integrated change",
+            state.change_id
+        ),
+        AppendPermission::LifecycleOwned | AppendPermission::OpaqueImported => {
+            bail!("event lifecycle is owned internally")
+        }
+    }
+}
+
 fn event_id_after(previous: &str) -> Result<String> {
     let previous = previous
         .parse::<ulid::Ulid>()

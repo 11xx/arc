@@ -1014,6 +1014,155 @@ fn close_abandoned_and_refuse_further_work() {
 }
 
 #[test]
+fn closed_change_append_policy_matches_command_families() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "closed-policy", "--no-worktree"]),
+    );
+    repo.arc(&repo.root)
+        .args(["claim", "closed-policy"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["hold", "closed-policy", "--reason", "operator pause"])
+        .assert()
+        .success();
+    let comment = stdout(repo.arc(&repo.root).args([
+        "comment",
+        "closed-policy",
+        "--body",
+        "historical discussion",
+    ]));
+    let comment_event = comment
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "declare",
+            "closed-policy",
+            "--host",
+            "example.invalid",
+            "--base-repo",
+            "owner/repo",
+            "--base-ref",
+            "master",
+            "--head-repo",
+            "owner/repo",
+            "--head-ref",
+            "arc/closed-policy",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["close", "closed-policy", "--abandoned"])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args([
+            "message",
+            "closed-policy",
+            "--type",
+            "status",
+            "--summary",
+            "closure observed",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["comment", "closed-policy", "--body", "after closure"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "reply",
+            "closed-policy",
+            comment_event,
+            "--body",
+            "after closure",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["release-claim", "closed-policy"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "release-hold",
+            "closed-policy",
+            "--reason",
+            "closure ended liveness",
+        ])
+        .assert()
+        .success();
+
+    let head = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "link",
+            "closed-policy",
+            "--pr",
+            "1",
+            "--url",
+            "https://example.invalid/owner/repo/pulls/1",
+            "--base-repo",
+            "owner/repo",
+            "--base-ref",
+            "master",
+            "--head-repo",
+            "owner/repo",
+            "--head-ref",
+            "arc/closed-policy",
+            "--head-sha",
+            &head,
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "checks",
+            "closed-policy",
+            "--pr-head",
+            &head,
+            "--state",
+            "passed",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["forge", "pr-state", "closed-policy", "--state", "open"])
+        .assert()
+        .success();
+
+    for args in [
+        vec!["hold", "closed-policy", "--reason", "new work"],
+        vec![
+            "forge",
+            "declare",
+            "closed-policy",
+            "--host",
+            "example.invalid",
+            "--base-repo",
+            "owner/repo",
+            "--base-ref",
+            "master",
+            "--head-repo",
+            "owner/repo",
+            "--head-ref",
+            "arc/closed-policy",
+        ],
+    ] {
+        repo.arc(&repo.root).args(args).assert().failure();
+    }
+}
+
+#[test]
 fn show_renders_messages_section_chronologically() {
     let repo = Repo::new();
     begin_change(&repo, "msg-show", None);
