@@ -152,6 +152,107 @@ fn journal_dir_precedence_env_over_config_over_default() {
     assert!(!override_dir.exists());
 }
 
+pub(crate) fn journal_dir_longest_prefix_and_git_identity_preserve_existing_slugs() {
+    let repo = Repo::new();
+    let scope_root = repo.home.join("non-git");
+    let project = scope_root.join("project");
+    let nested = project.join("nested/deeper");
+    let sibling = project.join("other");
+    let unmanaged = repo.home.join("unmanaged");
+    for path in [&scope_root, &project, &nested, &sibling, &unmanaged] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let scope_root = fs::canonicalize(scope_root).unwrap();
+    let project = fs::canonicalize(project).unwrap();
+    let nested = fs::canonicalize(nested).unwrap();
+    let sibling = fs::canonicalize(sibling).unwrap();
+    let unmanaged = fs::canonicalize(unmanaged).unwrap();
+    let broad_journal = repo.home.join("journals/broad");
+    let project_journal = repo.home.join("journals/project");
+    let cfg_dir = repo.home.join(".local/ai/arc");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    let config_path = cfg_dir.join("config.toml");
+    fs::write(
+        &config_path,
+        format!(
+            "[journals.dirs]\n\"{}\" = \"{}\"\n\"{}\" = \"{}\"\n",
+            scope_root.display(),
+            broad_journal.display(),
+            project.display(),
+            project_journal.display()
+        ),
+    )
+    .unwrap();
+
+    for cwd in [&nested, &sibling] {
+        let output = stdout(repo.arc(cwd).args(["journal", "dir"]));
+        assert_eq!(PathBuf::from(output.trim()), project_journal);
+    }
+    let explain = stdout(repo.arc(&nested).args(["journal", "dir", "--explain"]));
+    assert_eq!(
+        explain,
+        format!(
+            "source: config-prefix\nanchor: {}\ndirectory: {}\n",
+            project.display(),
+            project_journal.display()
+        )
+    );
+
+    repo.arc(&unmanaged)
+        .args(["journal", "dir"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(format!(
+            "cannot resolve a stable journal anchor from {}",
+            unmanaged.display()
+        )))
+        .stderr(predicates::str::contains("set ARC_JOURNAL_DIR"))
+        .stderr(predicates::str::contains(config_path.display().to_string()));
+
+    let main_root = fs::canonicalize(&repo.root).unwrap();
+    let expected_git_journal = repo
+        .home
+        .join(".local/ai/journals")
+        .join(journal_slug(&main_root));
+    assert_eq!(journal_dir(&repo), expected_git_journal);
+    let linked = repo.home.join("linked-journal-worktree");
+    git(&repo.root, &["branch", "linked-journal"]);
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            linked.to_str().unwrap(),
+            "linked-journal",
+        ],
+    );
+    let linked_output = stdout(repo.arc(&linked).args(["journal", "dir"]));
+    assert_eq!(PathBuf::from(linked_output.trim()), expected_git_journal);
+    let git_explain = stdout(repo.arc(&linked).args(["journal", "dir", "--explain"]));
+    assert_eq!(
+        git_explain,
+        format!(
+            "source: git\nanchor: {}\ndirectory: {}\n",
+            main_root.display(),
+            expected_git_journal.display()
+        )
+    );
+
+    let env_journal = repo.home.join("journals/env");
+    let env_explain = stdout(
+        repo.arc(&unmanaged)
+            .env("ARC_JOURNAL_DIR", &env_journal)
+            .args(["journal", "dir", "--explain"]),
+    );
+    assert_eq!(
+        env_explain,
+        format!(
+            "source: env\nanchor: none\ndirectory: {}\n",
+            env_journal.display()
+        )
+    );
+}
+
 #[test]
 fn journal_dir_archive_prints_cold_sibling_and_respects_env() {
     let repo = Repo::new();
