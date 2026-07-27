@@ -302,17 +302,20 @@ fn derive_rework(events: &[Event]) -> ReworkStats {
             _ => None,
         })
         .collect();
-    let requested: Vec<usize> = events
-        .iter()
-        .enumerate()
-        .filter_map(|(index, event)| match event.payload {
-            Payload::VerdictRecorded {
-                verdict: Verdict::ChangesRequested,
-                ..
-            } => Some(index),
-            _ => None,
-        })
-        .collect();
+    // A round is a revision cycle, not a verdict event. Several
+    // changes-requested verdicts on one patchset are answered by one revision,
+    // so they open one round, dated from the first of them.
+    let mut requested: BTreeMap<&str, usize> = BTreeMap::new();
+    for (index, event) in events.iter().enumerate() {
+        if let Payload::VerdictRecorded {
+            patchset_id,
+            verdict: Verdict::ChangesRequested,
+            ..
+        } = &event.payload
+        {
+            requested.entry(patchset_id.as_str()).or_insert(index);
+        }
+    }
     let approvals: Vec<(usize, &str)> = events
         .iter()
         .enumerate()
@@ -327,7 +330,7 @@ fn derive_rework(events: &[Event]) -> ReworkStats {
         .collect();
 
     let completed_rework_rounds = requested
-        .iter()
+        .values()
         .filter(|request_index| {
             approvals.iter().any(|(approval_index, patchset_id)| {
                 approval_index > *request_index
@@ -347,7 +350,7 @@ fn derive_rework(events: &[Event]) -> ReworkStats {
             .find(|(_, patchset_id)| *patchset_id == first_patchset)
             .is_some_and(|(approval_index, _)| {
                 requested
-                    .iter()
+                    .values()
                     .all(|request_index| request_index > approval_index)
             })
     });

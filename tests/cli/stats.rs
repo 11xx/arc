@@ -135,3 +135,48 @@ fn rework_requires_changes_requested_then_new_patchset_then_approval() {
     assert_eq!(report["aggregate"]["first_pass_approvals"], 1);
     assert_eq!(report["aggregate"]["completed_rework_rounds"], 2);
 }
+
+/// Reviewers add feedback in more than one sitting, so a patchset can collect
+/// several changes-requested verdicts before the author answers. One revision
+/// answers them all, so they are one round — counting verdict events instead
+/// would inflate every rework figure a lead reads to judge delegation.
+#[test]
+fn several_changes_requested_on_one_patchset_are_one_round() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "piled-up");
+    for cause in ["brief", "executor"] {
+        repo.arc(&worktree)
+            .args([
+                "review",
+                "piled-up",
+                "--verdict",
+                "changes-requested",
+                "--cause",
+                cause,
+            ])
+            .assert()
+            .success();
+    }
+    repo.commit(&worktree, "answer.txt", "one\n", "fix: answer both rounds");
+    repo.arc(&worktree)
+        .args(["snapshot", "piled-up"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["review", "piled-up", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let report = json_stdout(repo.arc(&repo.root).args(["stats", "--all", "--json"]));
+    let change = report["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|change| change["slug"] == "piled-up")
+        .unwrap();
+    assert_eq!(change["changes_requested_rounds"], 1);
+    assert_eq!(change["completed_rework_rounds"], 1);
+    assert_eq!(change["reworked"], true);
+    assert_eq!(change["first_pass_approval"], false);
+    assert_eq!(report["aggregate"]["completed_rework_rounds"], 1);
+}

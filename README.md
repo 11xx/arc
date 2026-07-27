@@ -290,7 +290,9 @@ open→integrated wall time, seconds in each typed stage, snapshot→first-verdi
 review latency, observed gate wall times, findings by severity, patchset count,
 review causes, and structurally completed rework rounds. A rework round needs a
 new patchset after `changes-requested` and a later approval of that patchset;
-reversing the verdict on the same patchset is not rework. First-pass approval
+reversing the verdict on the same patchset is not rework. A round is a revision
+cycle rather than a verdict event, so several `changes-requested` verdicts on
+one patchset count once — one revision answers them all. First-pass approval
 means the first patchset was approved before any requested-rework verdict. The
 aggregate block adds median and p90 per stage and per gate, reworked-change and
 first-pass totals, completed rework rounds, plus
