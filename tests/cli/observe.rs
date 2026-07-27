@@ -384,3 +384,123 @@ fn watch_closed_accepts_abandoned_and_superseded_but_integrated_does_not() {
         .code(2)
         .stdout("timeout: integrated\n");
 }
+
+#[test]
+fn watch_tag_any_names_the_first_member_to_reach_a_condition() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "quiet-one", "--tag", "series"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "stalls-fast", "--tag", "series"]),
+    );
+    // Only the second member gets a claim that can outlive its stage budget, so
+    // a passing `--any` must have selected it rather than reported the set.
+    repo.arc(&repo.root)
+        .args(["claim", "stalls-fast", "--stage-budget", "launch=1s"])
+        .assert()
+        .success();
+    let out = stdout(repo.arc(&repo.root).args([
+        "watch",
+        "--tag",
+        "series",
+        "--until",
+        "stalled",
+        "--any",
+        "--timeout",
+        "6",
+    ]));
+    assert!(
+        out.starts_with("reached: stalled (stalls-fast-"),
+        "expected the stalled member to be named, got {out:?}"
+    );
+}
+
+#[test]
+fn watch_tag_all_waits_for_every_member() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "first", "--tag", "both"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "second", "--tag", "both"]),
+    );
+    repo.arc(&repo.root)
+        .args(["claim", "first", "--stage-budget", "launch=1s"])
+        .assert()
+        .success();
+    // One stalled member must not satisfy `--all`; the watch times out at 2.
+    repo.arc(&repo.root)
+        .args([
+            "watch",
+            "--tag",
+            "both",
+            "--until",
+            "stalled",
+            "--all",
+            "--timeout",
+            "3",
+        ])
+        .assert()
+        .code(2)
+        .stdout("timeout: stalled\n");
+    repo.arc(&repo.root)
+        .args(["claim", "second", "--stage-budget", "launch=1s"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "watch",
+            "--tag",
+            "both",
+            "--until",
+            "stalled",
+            "--all",
+            "--timeout",
+            "6",
+        ])
+        .assert()
+        .success()
+        .stdout("reached: stalled (2 changes)\n");
+}
+
+#[test]
+fn watch_scope_and_quorum_misuse_is_refused() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "scoped", "--tag", "series"]),
+    );
+    for (args, expected) in [
+        (
+            vec!["watch", "--until", "stalled"],
+            "requires <CHANGE> or --tag",
+        ),
+        (
+            vec!["watch", "scoped", "--tag", "series", "--until", "stalled"],
+            "select different scopes",
+        ),
+        (
+            vec!["watch", "--tag", "series", "--until", "stalled"],
+            "--tag requires --any or --all",
+        ),
+        (
+            vec!["watch", "scoped", "--any", "--until", "stalled"],
+            "apply to --tag, not a single change",
+        ),
+        (
+            vec!["watch", "--tag", "absent", "--any", "--until", "stalled"],
+            "no changes match tags absent",
+        ),
+    ] {
+        repo.arc(&repo.root)
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(expected));
+    }
+}
