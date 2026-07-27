@@ -513,6 +513,8 @@ fn blocking_finding_blocks_until_resolved_and_reapproved() {
             "fix-y",
             "--verdict",
             "changes-requested",
+            "--cause",
+            "executor",
             "--findings-json",
             "-",
         ])

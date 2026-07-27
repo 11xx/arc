@@ -36,6 +36,8 @@ fn inline_findings(repo: &Repo, slug: &str) -> (std::path::PathBuf, String, Vec<
             slug,
             "--verdict",
             "changes-requested",
+            "--cause",
+            "executor",
             "--findings-json",
             "-",
         ])

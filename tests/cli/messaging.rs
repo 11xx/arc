@@ -286,7 +286,14 @@ fn inbox_buckets_classify_open_changes() {
 
     let (cr_id, ..) = change_with_patchset(&repo, "inbox-cr");
     repo.arc(&repo.root)
-        .args(["review", "inbox-cr", "--verdict", "changes-requested"])
+        .args([
+            "review",
+            "inbox-cr",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+        ])
         .assert()
         .success();
 
