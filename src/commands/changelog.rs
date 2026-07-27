@@ -1,4 +1,4 @@
-use super::{locked_state, Ctx};
+use super::{ensure_append_allowed, locked_state, Ctx};
 use crate::gitio;
 use crate::model::{ChangelogSection, Closure, Payload};
 use crate::state::{ChangeState, ChangelogEntry};
@@ -40,14 +40,9 @@ pub fn changelog(
         let body = super::read_body_file_verbatim(&body_file)?;
         let store = ctx.store()?;
         let (change_id, _transition, state) = locked_state(&store, reference)?;
-        if state.is_closed() {
-            bail!("change {change_id} is closed");
-        }
-        let event = ctx.event(
-            &store,
-            &change_id,
-            Payload::ChangelogRecorded { section, body },
-        );
+        let payload = Payload::ChangelogRecorded { section, body };
+        ensure_append_allowed(&state, &payload)?;
+        let event = ctx.event(&store, &change_id, payload);
         store.append_event(&event)?;
         println!("changelog: {}", section.as_str());
         println!("event: {}", event.event_id);

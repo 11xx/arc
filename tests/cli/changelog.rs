@@ -95,6 +95,81 @@ fn projection_includes_integrated_and_excludes_open_changes() {
 }
 
 #[test]
+fn recording_after_integration_updates_the_projection() {
+    let repo = Repo::new();
+    let change_id = begin(&repo, "late-entry");
+    integrate(&repo, "late-entry");
+    let before = event_count(&repo, &change_id);
+    record(
+        &repo,
+        &repo.root,
+        "late-entry",
+        "fixed",
+        "- documented after integration\n",
+    );
+    assert_eq!(event_count(&repo, &change_id), before + 1);
+    let projection = json_stdout(repo.arc(&repo.root).args(["changelog", "--json"]));
+    let entry = projection
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["change"] == "late-entry")
+        .unwrap();
+    assert_eq!(entry["section"], "fixed");
+    assert_eq!(entry["body"], "- documented after integration\n");
+
+    begin(&repo, "abandoned-entry");
+    repo.arc(&repo.root)
+        .args(["close", "abandoned-entry", "--abandoned"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "changelog",
+            "abandoned-entry",
+            "--section",
+            "fixed",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("- not shipped\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is abandoned"))
+        .stderr(predicate::str::contains(
+            "changelog entries require an open or integrated change",
+        ));
+
+    begin(&repo, "replacement-entry");
+    begin(&repo, "superseded-entry");
+    repo.arc(&repo.root)
+        .args([
+            "close",
+            "superseded-entry",
+            "--superseded",
+            "replacement-entry",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "changelog",
+            "superseded-entry",
+            "--section",
+            "fixed",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("- superseded\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is superseded"))
+        .stderr(predicate::str::contains(
+            "changelog entries require an open or integrated change",
+        ));
+}
+
+#[test]
 fn projection_honors_the_release_boundary() {
     let repo = Repo::new();
     begin(&repo, "released");
