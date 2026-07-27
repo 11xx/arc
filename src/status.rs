@@ -37,7 +37,7 @@ impl Blocker {
             Blocker::BlockingFindings => 2,
             Blocker::NoValidApproval => 3,
             Blocker::GatesNotGreen => 5,
-            Blocker::AcceptanceProbesNotGreen => 8,
+            Blocker::AcceptanceProbesNotGreen => 12,
             Blocker::HoldActive => 4,
         }
     }
@@ -798,4 +798,56 @@ fn verification_result_label(result: Option<VerifyResult>) -> String {
         None => "pending",
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Codes 8, 9 and 10 are refusals that any command can raise — claim or
+    /// stage conflict, execution-role refusal, and forge-link refusal — so a
+    /// caller reads them the same way whichever verb produced them. Blocker
+    /// codes are `check`/`integrate` verdicts and must not shadow those, or a
+    /// caller branching on `check` misreads a documented meaning. Codes that
+    /// are genuinely per-command, such as `watch`'s timeout, are outside this
+    /// rule and deliberately not listed.
+    const CROSS_COMMAND_REFUSALS: [i32; 3] = [8, 9, 10];
+
+    #[test]
+    fn blocker_exit_codes_are_distinct_and_avoid_cross_command_refusals() {
+        let blockers = [
+            Blocker::Closed,
+            Blocker::BranchMissing,
+            Blocker::BlockedByChanges,
+            Blocker::NeedsRebase,
+            Blocker::BlockingFindings,
+            Blocker::NoValidApproval,
+            Blocker::GatesNotGreen,
+            Blocker::AcceptanceProbesNotGreen,
+            Blocker::HoldActive,
+        ];
+        let mut seen: BTreeMap<i32, Vec<&'static str>> = BTreeMap::new();
+        for blocker in blockers {
+            seen.entry(blocker.exit_code())
+                .or_default()
+                .push(blocker.as_str());
+        }
+        // Closed and BranchMissing deliberately share 6: both mean the change
+        // is not in a workable state and a caller acts identically on them.
+        for (code, names) in &seen {
+            assert!(
+                names.len() == 1 || *code == 6,
+                "exit {code} is shared by {names:?}; only 6 may be shared"
+            );
+            assert!(
+                !CROSS_COMMAND_REFUSALS.contains(code),
+                "blocker {names:?} took exit {code}, which is a cross-command refusal"
+            );
+        }
+        assert_eq!(
+            Blocker::AcceptanceProbesNotGreen.exit_code(),
+            12,
+            "the probe blocker must keep its own code"
+        );
+    }
 }
