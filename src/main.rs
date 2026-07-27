@@ -435,9 +435,18 @@ enum Cmd {
         #[arg(long = "exec")]
         exec_command: Option<String>,
     },
-    /// Wait for a change to reach a selected ledger-derived condition
+    /// Wait for a change, or a tagged series, to reach a ledger-derived condition
     Watch {
-        change: String,
+        change: Option<String>,
+        /// Watch every change carrying all supplied tags (repeatable)
+        #[arg(long)]
+        tag: Vec<String>,
+        /// With --tag: return when any one member reaches a condition
+        #[arg(long, conflicts_with = "all")]
+        any: bool,
+        /// With --tag: return when every member has reached a condition
+        #[arg(long)]
+        all: bool,
         #[arg(long, value_enum, value_delimiter = ',', required = true)]
         until: Vec<commands::WatchUntil>,
         /// Fail with exit 2 after this many seconds
@@ -1300,10 +1309,28 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Watch {
             change,
+            tag,
+            any,
+            all,
             until,
             timeout,
             exec_command,
-        } => commands::watch(&ctx, &change, &until, timeout, exec_command.as_deref()),
+        } => {
+            let quorum = match (any, all) {
+                (true, false) => Some(commands::WatchQuorum::Any),
+                (false, true) => Some(commands::WatchQuorum::All),
+                _ => None,
+            };
+            commands::watch(
+                &ctx,
+                change.as_deref(),
+                &tag,
+                quorum,
+                &until,
+                timeout,
+                exec_command.as_deref(),
+            )
+        }
         Cmd::Export { change, output } => {
             commands::export_bundle(&ctx, &change, &output)?;
             Ok(0)

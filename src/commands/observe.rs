@@ -62,27 +62,57 @@ pub fn events(
     }
 }
 
+/// Which members of a watched set must reach a condition before `watch` returns.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WatchQuorum {
+    /// Return as soon as one member reaches a condition, naming that member.
+    Any,
+    /// Return once every member has reached at least one condition.
+    All,
+}
+
+/// One member that satisfied the watch, with the condition it reached.
+struct WatchHit {
+    change_id: String,
+    condition: WatchUntil,
+}
+
 pub fn watch(
     ctx: &Ctx,
-    reference: &str,
+    reference: Option<&str>,
+    tags: &[String],
+    quorum: Option<WatchQuorum>,
     until: &[WatchUntil],
     timeout_secs: Option<u64>,
     exec_command: Option<&str>,
 ) -> Result<i32> {
+    // A single change and a tagged set are different questions, and a quorum is
+    // meaningless for one change. Refuse rather than guess, because both wrong
+    // guesses — returning early or waiting forever — are silent.
+    let selection = match (reference, tags.is_empty()) {
+        (Some(_), false) => bail!("<CHANGE> and --tag select different scopes; supply one"),
+        (None, true) => bail!("watch requires <CHANGE> or --tag"),
+        (Some(reference), true) => {
+            if quorum.is_some() {
+                bail!("--any and --all apply to --tag, not a single change");
+            }
+            WatchSelection::Single(ctx.store()?.resolve_change(reference)?)
+        }
+        (None, false) => {
+            let quorum = quorum.context("--tag requires --any or --all")?;
+            let tags = normalize_tags(tags.to_vec())?;
+            WatchSelection::Tagged(resolve_tagged(ctx, &tags)?, quorum)
+        }
+    };
     let deadline = timeout_secs.map(|timeout| Instant::now() + Duration::from_secs(timeout));
     let result = gitio::with_deadline(deadline, || {
-        watch_until_reached(ctx, reference, until, deadline)
+        watch_until_reached(ctx, &selection, until, deadline)
     });
     match result {
-        Ok(Some(condition)) => {
-            println!("reached: {}", condition.label());
+        Ok(Some(hits)) => {
+            report_reached(&selection, &hits, until);
             if let Some(command) = exec_command {
-                let value = serde_json::json!({
-                    "change_id": ctx.store()?.resolve_change(reference)?,
-                    "condition": condition.label(),
-                    "event_id": "",
-                    "event_type": "watch-reached",
-                });
+                let value = watch_hook_payload(&selection, &hits, until);
                 let mut diagnostic = serde_json::to_vec(&value)?;
                 diagnostic.push(b'\n');
                 run_hook(command, &diagnostic, &value);
@@ -101,20 +131,111 @@ pub fn watch(
     }
 }
 
+enum WatchSelection {
+    Single(String),
+    Tagged(Vec<String>, WatchQuorum),
+}
+
+impl WatchSelection {
+    fn change_ids(&self) -> &[String] {
+        match self {
+            WatchSelection::Single(change_id) => std::slice::from_ref(change_id),
+            WatchSelection::Tagged(change_ids, _) => change_ids,
+        }
+    }
+}
+
+fn resolve_tagged(ctx: &Ctx, tags: &[String]) -> Result<Vec<String>> {
+    let store = ctx.store()?;
+    let states = ctx.load_all_states(&store)?;
+    let selected = states
+        .values()
+        .filter(|state| tags.iter().all(|tag| state.tags.contains(tag)))
+        .map(|state| state.change_id.clone())
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        bail!("no changes match tags {}", tags.join(", "));
+    }
+    Ok(selected)
+}
+
+/// Single-change output stays byte-identical; only tagged watches name members.
+fn report_reached(selection: &WatchSelection, hits: &[WatchHit], until: &[WatchUntil]) {
+    match selection {
+        WatchSelection::Single(_) => println!("reached: {}", hits[0].condition.label()),
+        WatchSelection::Tagged(_, WatchQuorum::Any) => {
+            println!(
+                "reached: {} ({})",
+                hits[0].condition.label(),
+                hits[0].change_id
+            )
+        }
+        WatchSelection::Tagged(change_ids, WatchQuorum::All) => println!(
+            "reached: {} ({} changes)",
+            until_labels(until),
+            change_ids.len()
+        ),
+    }
+}
+
+fn watch_hook_payload(
+    selection: &WatchSelection,
+    hits: &[WatchHit],
+    until: &[WatchUntil],
+) -> serde_json::Value {
+    match selection {
+        WatchSelection::Tagged(_, WatchQuorum::All) => serde_json::json!({
+            "change_id": "",
+            "changes": hits.iter().map(|hit| serde_json::json!({
+                "change_id": hit.change_id,
+                "condition": hit.condition.label(),
+            })).collect::<Vec<_>>(),
+            "condition": until_labels(until),
+            "event_id": "",
+            "event_type": "watch-reached",
+        }),
+        _ => serde_json::json!({
+            "change_id": hits[0].change_id,
+            "condition": hits[0].condition.label(),
+            "event_id": "",
+            "event_type": "watch-reached",
+        }),
+    }
+}
+
 fn watch_until_reached(
     ctx: &Ctx,
-    reference: &str,
+    selection: &WatchSelection,
     until: &[WatchUntil],
     deadline: Option<Instant>,
-) -> Result<Option<WatchUntil>> {
+) -> Result<Option<Vec<WatchHit>>> {
     let store = ctx.store()?;
-    let change_id = store.resolve_change(reference)?;
+    let change_ids = selection.change_ids();
+    let quorum = match selection {
+        WatchSelection::Single(_) => WatchQuorum::Any,
+        WatchSelection::Tagged(_, quorum) => *quorum,
+    };
     let mut poll_interval = POLL_MIN;
     loop {
-        for condition in until {
-            if watch_reached(ctx, &store, &change_id, *condition)? {
-                return Ok(Some(*condition));
+        let mut hits = Vec::new();
+        for change_id in change_ids {
+            for condition in until {
+                if watch_reached(ctx, &store, change_id, *condition)? {
+                    hits.push(WatchHit {
+                        change_id: change_id.clone(),
+                        condition: *condition,
+                    });
+                    break;
+                }
             }
+            // One satisfied member is the whole answer under `any`, so stop
+            // reducing the rest rather than replaying every member's ledger.
+            if quorum == WatchQuorum::Any && !hits.is_empty() {
+                return Ok(Some(hits));
+            }
+        }
+        if quorum == WatchQuorum::All && hits.len() == change_ids.len() {
+            return Ok(Some(hits));
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(None);
