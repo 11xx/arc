@@ -287,8 +287,15 @@ moving a ref, or touching a worktree.
 `arc stats [--change <c> | --tag <t> | --all] [--json]` (default `--all`)
 projects the durations and counts the ledger already holds: per change the
 open→integrated wall time, seconds in each typed stage, snapshot→first-verdict
-review latency, observed gate wall times, findings by severity, and patchset
-count. The aggregate block adds median and p90 per stage and per gate, plus
+review latency, observed gate wall times, findings by severity, patchset count,
+review causes, and structurally completed rework rounds. A rework round needs a
+new patchset after `changes-requested` and a later approval of that patchset;
+reversing the verdict on the same patchset is not rework. A round is a revision
+cycle rather than a verdict event, so several `changes-requested` verdicts on
+one patchset count once — one revision answers them all. First-pass approval
+means the first patchset was approved before any requested-rework verdict. The
+aggregate block adds median and p90 per stage and per gate, reworked-change and
+first-pass totals, completed rework rounds, plus
 `suggested_stage_budgets` — each stage's p90 rounded up to a clean duration,
 offered for `--stage-budget` tuning and never applied automatically. Attested
 gate evidence carries no observed duration and is excluded from gate timing.
