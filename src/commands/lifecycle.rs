@@ -158,6 +158,7 @@ pub fn begin(
                     Payload::BriefRecorded {
                         title: Some(format!("Seeded from {filename}")),
                         body: seeded,
+                        caused_by: Vec::new(),
                         base_revision: Some(base_rev.clone()),
                         acceptance_probes: Vec::new(),
                         plan_ref: None,
@@ -309,6 +310,79 @@ pub fn show_selection(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Resolve `kind:ref` cause arguments against this change's own history.
+/// References are stored canonically so a later reader never re-resolves a
+/// prefix, and each is validated against the kind it claims to be — a
+/// reference that merely exists is not evidence of the relationship asserted.
+fn resolve_brief_causes(
+    state: &ChangeState,
+    caused_by: &[String],
+    cause_note: Option<&str>,
+) -> Result<Vec<BriefCause>> {
+    let mut causes = Vec::new();
+    for raw in caused_by {
+        let (kind, reference) = raw
+            .split_once(':')
+            .with_context(|| format!("--caused-by {raw} must be <kind>:<reference>"))?;
+        let reference = reference.trim();
+        if reference.is_empty() {
+            bail!("--caused-by {raw} has an empty reference");
+        }
+        causes.push(match kind {
+            "finding" => {
+                let id = state
+                    .findings
+                    .keys()
+                    .find(|id| id.starts_with(reference))
+                    .with_context(|| format!("no finding in this change matches {reference}"))?
+                    .clone();
+                BriefCause::Finding { finding_id: id }
+            }
+            "verdict" => {
+                let verdict = state
+                    .verdicts
+                    .iter()
+                    .find(|verdict| verdict.event_id.starts_with(reference))
+                    .with_context(|| {
+                        format!(
+                            "event {reference} is not a changes-requested verdict in this change"
+                        )
+                    })?;
+                if verdict.verdict != Verdict::ChangesRequested {
+                    bail!("event {reference} is not a changes-requested verdict");
+                }
+                BriefCause::Verdict {
+                    event_id: verdict.event_id.clone(),
+                }
+            }
+            "blocked-on" => {
+                let stage = state
+                    .blocked_on_stages
+                    .iter()
+                    .find(|event_id| event_id.starts_with(reference))
+                    .with_context(|| format!("event {reference} is not a blocked-on stage"))?;
+                BriefCause::BlockedOnStage {
+                    event_id: stage.clone(),
+                }
+            }
+            other => bail!("unknown cause kind {other}; expected finding, verdict, or blocked-on"),
+        });
+    }
+    if let Some(summary) = cause_note {
+        let summary = summary.trim();
+        if summary.is_empty() {
+            bail!("--cause-note cannot be empty");
+        }
+        causes.push(BriefCause::External {
+            summary: summary.to_string(),
+        });
+    }
+    Ok(causes)
+}
+
+// The brief verb is a wide CLI surface: body, title, base, version, scaffold,
+// plan link, probes, and causes are all independent options on one command.
+#[allow(clippy::too_many_arguments)]
 pub fn brief(
     ctx: &Ctx,
     role: ExecutionRole,
@@ -321,6 +395,8 @@ pub fn brief(
     plan_ref: Option<String>,
     plan_slice: Option<String>,
     probes_json: Option<String>,
+    caused_by: Vec<String>,
+    cause_note: Option<String>,
 ) -> Result<i32> {
     if plan_ref.is_some() != plan_slice.is_some() {
         bail!("--plan-ref and --plan-slice must be provided together");
@@ -369,12 +445,22 @@ pub fn brief(
             bail!("change {change_id} is closed");
         }
         let next_version = state.briefs.len() + 1;
+        let causes = resolve_brief_causes(&state, &caused_by, cause_note.as_deref())?;
+        // A first brief has nothing to be caused by. Every later version is a
+        // renegotiation, and the reason is the fact worth keeping.
+        if next_version > 1 && causes.is_empty() {
+            bail!("brief v{next_version} requires at least one cause: pass --caused-by or --cause-note");
+        }
+        if next_version == 1 && !causes.is_empty() {
+            bail!("brief v1 cannot have a cause");
+        }
         let event = ctx.event(
             &store,
             &change_id,
             Payload::BriefRecorded {
                 title,
                 body,
+                caused_by: causes,
                 base_revision,
                 acceptance_probes,
                 plan_ref,

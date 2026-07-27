@@ -41,6 +41,7 @@ pub struct Brief {
     pub actor: String,
     pub title: Option<String>,
     pub body: String,
+    pub caused_by: Vec<BriefCause>,
     pub base_revision: Option<String>,
     pub acceptance_probes: Vec<AcceptanceProbe>,
     pub plan_ref: Option<String>,
@@ -365,6 +366,9 @@ pub struct ChangeState {
     pub comments: Vec<CommentEntry>,
     pub findings: BTreeMap<String, FindingState>,
     pub verdicts: Vec<VerdictEntry>,
+    /// Event IDs of every `blocked-on` stage, so a later brief can name the
+    /// block that caused it without rescanning the event log.
+    pub blocked_on_stages: Vec<String>,
     pub verifications: Vec<VerificationEntry>,
     pub verification_runs: Vec<VerificationRunEntry>,
     pub claim: Option<ClaimState>,
@@ -472,6 +476,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     comments: Vec::new(),
                     findings: BTreeMap::new(),
                     verdicts: Vec::new(),
+                    blocked_on_stages: Vec::new(),
                     verifications: Vec::new(),
                     verification_runs: Vec::new(),
                     claim: None,
@@ -554,6 +559,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             Payload::BriefRecorded {
                 title,
                 body,
+                caused_by,
                 base_revision,
                 acceptance_probes,
                 plan_ref,
@@ -564,6 +570,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 actor: ev.actor.clone(),
                 title: title.clone(),
                 body: body.clone(),
+                caused_by: caused_by.clone(),
                 base_revision: base_revision.clone(),
                 acceptance_probes: acceptance_probes.clone(),
                 plan_ref: plan_ref.clone(),
@@ -743,6 +750,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 blocker,
             } => {
                 crate::ids::validate_id_component(claim_id)?;
+                if *stage == ClaimStage::BlockedOn {
+                    state.blocked_on_stages.push(ev.event_id.clone());
+                }
                 if *stage != ClaimStage::BlockedOn && blocker.is_some() {
                     bail!("non-blocked stage {} carries a blocker", ev.event_id);
                 }

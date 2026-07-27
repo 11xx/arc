@@ -638,6 +638,7 @@ mod tests {
             comments: Vec::new(),
             findings: BTreeMap::new(),
             verdicts: Vec::new(),
+            blocked_on_stages: Vec::new(),
             verifications: Vec::new(),
             verification_runs: Vec::new(),
             claim: None,

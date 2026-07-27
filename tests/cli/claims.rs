@@ -45,7 +45,14 @@ fn blocked_on_requires_a_typed_blocker_and_stats_preserve_its_kind() {
         .success();
     let second = stdout(
         repo.arc(&repo.root)
-            .args(["brief", "typed-blocker", "--body-file", "-"])
+            .args([
+                "brief",
+                "typed-blocker",
+                "--body-file",
+                "-",
+                "--cause-note",
+                "fixture revision",
+            ])
             .write_stdin("second contract\n"),
     );
     let brief_event = second

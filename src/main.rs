@@ -284,6 +284,13 @@ enum Cmd {
         /// JSON array of named acceptance probes bound to this brief ('-' for stdin)
         #[arg(long)]
         probes_json: Option<String>,
+        /// Earlier ledger fact that caused this version: finding:<id>,
+        /// verdict:<event>, or blocked-on:<event> (repeatable)
+        #[arg(long)]
+        caused_by: Vec<String>,
+        /// External cause, when no earlier ledger object represents the reason
+        #[arg(long)]
+        cause_note: Option<String>,
     },
     /// Record, read, or project changelog entries
     Changelog {
@@ -1139,6 +1146,8 @@ fn run(cli: Cli) -> Result<i32> {
             plan_ref,
             plan_slice,
             probes_json,
+            caused_by,
+            cause_note,
         } => {
             let change = infer(change.as_deref())?;
             commands::brief(
@@ -1153,6 +1162,8 @@ fn run(cli: Cli) -> Result<i32> {
                 plan_ref,
                 plan_slice,
                 probes_json,
+                caused_by,
+                cause_note,
             )
         }
         Cmd::Changelog {

@@ -756,6 +756,8 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
             "probe-readiness",
             "--body-file",
             "-",
+            "--cause-note",
+            "fixture revision",
             "--probes-json",
             probes.to_str().unwrap(),
         ])

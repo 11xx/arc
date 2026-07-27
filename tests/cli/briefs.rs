@@ -9,8 +9,18 @@ fn begin(repo: &Repo, slug: &str) -> String {
 }
 
 fn record(repo: &Repo, slug: &str, body: &str, title: Option<&str>) {
+    record_versioned(repo, slug, body, title, false)
+}
+
+/// Versions after the first require a recorded cause. Fixtures that only need
+/// a second version supply an external one, so the requirement stays exercised
+/// rather than bypassed.
+fn record_versioned(repo: &Repo, slug: &str, body: &str, title: Option<&str>, revision: bool) {
     let mut command = repo.arc(&repo.root);
     command.args(["brief", slug, "--body-file", "-"]);
+    if revision {
+        command.args(["--cause-note", "fixture revision"]);
+    }
     if let Some(title) = title {
         command.args(["--title", title]);
     }
@@ -85,6 +95,8 @@ fn brief_record_and_read_round_trip() {
             "brief-roundtrip",
             "--body-file",
             "-",
+            "--cause-note",
+            "fixture revision",
             "--plan-ref",
             &second_plan,
             "--plan-slice",
@@ -243,10 +255,117 @@ fn brief_write_is_lead_only() {
     }
     repo.arc(&repo.root)
         .env("ARC_ROLE", "lead")
-        .args(["brief", "brief-roles", "--body-file", "-"])
+        .args([
+            "brief",
+            "brief-roles",
+            "--body-file",
+            "-",
+            "--cause-note",
+            "fixture revision",
+        ])
         .write_stdin("lead update\n")
         .assert()
         .success();
+}
+
+#[test]
+fn brief_cause_is_canonical_validated_and_required_after_v1() {
+    let source = Repo::new();
+    let change_id = begin(&source, "brief-causes");
+    record(&source, "brief-causes", "initial contract\n", None);
+    let finding = stdout(source.arc(&source.root).args([
+        "finding",
+        "brief-causes",
+        "--summary",
+        "contract premise is false",
+    ]));
+    let finding_id = finding
+        .lines()
+        .find_map(|line| line.strip_prefix("finding: "))
+        .unwrap();
+    let finding_event = finding
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap();
+    let before = event_count(&source, &change_id);
+
+    source
+        .arc(&source.root)
+        .args(["brief", "brief-causes", "--body-file", "-"])
+        .write_stdin("uncausally revised\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "brief v2 requires at least one cause",
+        ));
+    source
+        .arc(&source.root)
+        .args([
+            "brief",
+            "brief-causes",
+            "--body-file",
+            "-",
+            "--caused-by",
+            &format!("verdict:{}", &finding_event[..12]),
+        ])
+        .write_stdin("wrong event type\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "is not a changes-requested verdict",
+        ));
+    assert_eq!(event_count(&source, &change_id), before);
+
+    source
+        .arc(&source.root)
+        .args([
+            "brief",
+            "brief-causes",
+            "--body-file",
+            "-",
+            "--caused-by",
+            &format!("finding:{}", &finding_id[..12]),
+        ])
+        .write_stdin("corrected contract\n")
+        .assert()
+        .success();
+
+    let state = json_stdout(
+        source
+            .arc(&source.root)
+            .args(["show", "brief-causes", "--json"]),
+    );
+    assert_eq!(
+        state["briefs"][1]["caused_by"],
+        serde_json::json!([{"kind": "finding", "finding_id": finding_id}])
+    );
+
+    let bundle = source.home.join("brief-causes.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            "brief-causes",
+            "--output",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let imported = json_stdout(
+        destination
+            .arc(&destination.root)
+            .args(["show", &change_id, "--json"]),
+    );
+    assert_eq!(
+        imported["briefs"][1]["caused_by"],
+        state["briefs"][1]["caused_by"]
+    );
 }
 
 #[test]
@@ -261,6 +380,8 @@ fn brief_shows_in_show_and_status() {
             "brief-show",
             "--body-file",
             "-",
+            "--cause-note",
+            "fixture revision",
             "--title",
             "Current",
             "--plan-ref",
@@ -317,7 +438,14 @@ fn brief_base_is_resolved_at_write_time_and_does_not_follow_head() {
     );
     let revision_b = repo.head(&repo.root);
     repo.arc(&repo.root)
-        .args(["brief", "anchored-brief", "--body-file", "-"])
+        .args([
+            "brief",
+            "anchored-brief",
+            "--body-file",
+            "-",
+            "--cause-note",
+            "fixture revision",
+        ])
         .write_stdin("contract at B\n")
         .assert()
         .success();
@@ -351,6 +479,8 @@ fn brief_base_is_resolved_at_write_time_and_does_not_follow_head() {
             "anchored-brief",
             "--body-file",
             "-",
+            "--cause-note",
+            "fixture revision",
             "--base",
             "HEAD~2",
         ])
