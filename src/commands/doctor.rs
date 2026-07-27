@@ -13,7 +13,7 @@ use crate::store::Store;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -30,7 +30,7 @@ struct Report {
     advice: Vec<Finding>,
 }
 
-pub fn run(ctx: &Ctx, json: bool) -> Result<i32> {
+pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     let root = Store::resolve_root(&ctx.cwd)?;
     let mut problems = Vec::new();
     let mut advice = Vec::new();
@@ -75,7 +75,7 @@ pub fn run(ctx: &Ctx, json: bool) -> Result<i32> {
         println!("{}", serde_json::to_string(&report)?);
     } else {
         render("problems", &report.problems);
-        render("advice", &report.advice);
+        render_advice(&report.advice, verbose);
     }
     Ok(exit)
 }
@@ -216,16 +216,18 @@ fn inspect_change(
             detail: format!("{}: refs/heads/{}", change_dir.display(), state.branch),
         });
     }
-    if let Some(claim) = &state.claim {
-        let timing = claim_timing_at(claim, Utc::now());
-        let overdue = Utc::now()
-            .signed_duration_since(timing.expires_at)
-            .num_seconds();
-        if timing.expired && overdue > claim.ttl_seconds as i64 {
-            advice.push(Finding {
-                code: "long-expired-claim",
-                detail: format!("{}: claim {}", change_dir.display(), claim.claim_id),
-            });
+    if state.closure.is_none() {
+        if let Some(claim) = &state.claim {
+            let timing = claim_timing_at(claim, Utc::now());
+            let overdue = Utc::now()
+                .signed_duration_since(timing.expires_at)
+                .num_seconds();
+            if timing.expired && overdue > claim.ttl_seconds as i64 {
+                advice.push(Finding {
+                    code: "long-expired-claim",
+                    detail: format!("{}: claim {}", change_dir.display(), claim.claim_id),
+                });
+            }
         }
     }
     patchsets.insert(
@@ -274,4 +276,64 @@ fn render(label: &str, findings: &[Finding]) {
     for finding in findings {
         println!("  {}: {}", finding.code, finding.detail);
     }
+}
+
+fn render_advice(findings: &[Finding], verbose: bool) {
+    println!("advice:");
+    if findings.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    if verbose {
+        for finding in findings {
+            println!("  {}: {}", finding.code, finding.detail);
+        }
+        return;
+    }
+
+    let mut counts = BTreeMap::new();
+    for finding in findings {
+        *counts.entry(finding.code).or_insert(0usize) += 1;
+    }
+    let mut rendered_groups = BTreeSet::new();
+    for finding in findings {
+        let count = counts[finding.code];
+        if count >= 2 {
+            if rendered_groups.insert(finding.code) {
+                if let Some(summary) = grouped_summary(finding.code, count) {
+                    println!("  {}: {summary}", finding.code);
+                    continue;
+                }
+            } else if grouped_summary(finding.code, count).is_some() {
+                continue;
+            }
+        }
+        println!("  {}: {}", finding.code, finding.detail);
+    }
+}
+
+fn grouped_summary(code: &str, count: usize) -> Option<String> {
+    let summary = match code {
+        "long-expired-claim" => format!(
+            "{count} open changes have claims expired for more than one TTL; \
+             run arc doctor --verbose to identify them"
+        ),
+        "orphaned-temporary-file" => format!(
+            "{count} orphaned temporary event files; run arc doctor --verbose to list paths"
+        ),
+        "unknown-event-type" => {
+            format!(
+                "{count} unknown event files were skipped; run arc doctor --verbose to list paths"
+            )
+        }
+        "missing-open-branch" => format!(
+            "{count} open changes have missing branches; run arc doctor --verbose to identify them"
+        ),
+        "orphaned-retention-ref" => format!(
+            "{count} retention refs do not identify a known patchset; \
+             run arc doctor --verbose to list refs"
+        ),
+        _ => return None,
+    };
+    Some(summary)
 }
