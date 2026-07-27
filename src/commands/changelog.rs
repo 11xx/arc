@@ -272,6 +272,34 @@ fn canonical_category(category: &str) -> Option<&'static str> {
         })
 }
 
+/// Recorded bodies are free text and predate any convention about list
+/// markers, so a release block would otherwise mix bulleted and bare entries.
+/// Normalise at render time rather than at write time: the event keeps exactly
+/// what its author recorded, and the projection decides how a release reads.
+/// A body that already leads with a marker, or that spans multiple blocks, is
+/// left alone — the author formatted it deliberately.
+fn as_list_item(body: &str) -> String {
+    let body = body.trim_end();
+    let Some(first) = body.lines().next() else {
+        return String::new();
+    };
+    let leading = first.trim_start();
+    if leading.starts_with("- ") || leading.starts_with("* ") || leading.starts_with("+ ") {
+        return body.to_string();
+    }
+    // Indent continuation lines so the entry stays one list item.
+    let mut out = format!("- {}", first.trim());
+    for line in body.lines().skip(1) {
+        out.push('\n');
+        if line.trim().is_empty() {
+            continue;
+        }
+        out.push_str("  ");
+        out.push_str(line.trim_end());
+    }
+    out
+}
+
 fn render_category<'a>(
     rendered: &mut String,
     heading: &str,
@@ -286,7 +314,7 @@ fn render_category<'a>(
     rendered.push_str(heading);
     rendered.push_str("\n\n");
     for entry in entries {
-        rendered.push_str(entry.body.trim_end());
+        rendered.push_str(&as_list_item(entry.body));
         rendered.push('\n');
         if provenance {
             rendered.push_str(&provenance_line(entry));
@@ -443,4 +471,23 @@ fn write_changelog(ctx: &Ctx, config: &ChangelogConfig, rendered: &str) -> Resul
     updated.push_str(&original[next_release..]);
     fs::write(&path, updated).with_context(|| format!("write {}", path.display()))?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::as_list_item;
+
+    #[test]
+    fn bare_bodies_become_list_items_and_authored_markers_survive() {
+        assert_eq!(as_list_item("Did a thing.\n"), "- Did a thing.");
+        // An author who already formatted a list keeps their exact markers.
+        assert_eq!(as_list_item("- Did a thing.\n"), "- Did a thing.");
+        assert_eq!(as_list_item("* Did a thing."), "* Did a thing.");
+        // A wrapped entry stays one item: continuations indent, blanks stay blank.
+        assert_eq!(
+            as_list_item("Did a thing,\nacross lines.\n"),
+            "- Did a thing,\n  across lines."
+        );
+        assert_eq!(as_list_item("   "), "");
+    }
 }
