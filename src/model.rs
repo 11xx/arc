@@ -18,6 +18,12 @@ pub struct BriefRef {
     pub event_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AcceptanceProbe {
+    pub name: String,
+    pub command: String,
+}
+
 /// One append-only ledger entry. The envelope is common to every event;
 /// the payload is internally tagged by `event_type`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +102,8 @@ pub enum Payload {
         body: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_revision: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        acceptance_probes: Vec<AcceptanceProbe>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_ref: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -223,6 +231,8 @@ pub enum Payload {
         attested: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        probe: Option<ProbeEvidenceRef>,
         /// Stable external runner identity for attested evidence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         runner: Option<String>,
@@ -576,4 +586,18 @@ pub struct VerificationRunGate {
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProbePhase {
+    Baseline,
+    Final,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProbeEvidenceRef {
+    pub brief_event_id: String,
+    pub name: String,
+    pub phase: ProbePhase,
 }

@@ -159,6 +159,7 @@ pub fn begin(
                         title: Some(format!("Seeded from {filename}")),
                         body: seeded,
                         base_revision: Some(base_rev.clone()),
+                        acceptance_probes: Vec::new(),
                         plan_ref: None,
                         plan_slice: None,
                     },
@@ -319,11 +320,15 @@ pub fn brief(
     scaffold: Option<String>,
     plan_ref: Option<String>,
     plan_slice: Option<String>,
+    probes_json: Option<String>,
 ) -> Result<i32> {
     if plan_ref.is_some() != plan_slice.is_some() {
         bail!("--plan-ref and --plan-slice must be provided together");
     }
-    if body_file.is_some() || scaffold.is_some() {
+    if body_file.as_deref() == Some("-") && probes_json.as_deref() == Some("-") {
+        bail!("--body-file - and --probes-json - cannot both read stdin");
+    }
+    if body_file.is_some() || scaffold.is_some() || probes_json.is_some() {
         if role != ExecutionRole::Lead {
             eprintln!(
                 "role refusal: {} may not brief (requires lead)",
@@ -349,6 +354,11 @@ pub fn brief(
             None => String::new(),
         };
         let body = super::scaffold::prepended(&template, &content);
+        let acceptance_probes = probes_json
+            .as_deref()
+            .map(read_acceptance_probes)
+            .transpose()?
+            .unwrap_or_default();
         let base_revision = Some(gitio::rev_parse(
             &ctx.cwd,
             base.as_deref().unwrap_or("HEAD"),
@@ -366,6 +376,7 @@ pub fn brief(
                 title,
                 body,
                 base_revision,
+                acceptance_probes,
                 plan_ref,
                 plan_slice,
             },
@@ -404,8 +415,32 @@ pub fn brief(
         println!("plan-slice: {plan_slice}");
         println!();
     }
+    for probe in &selected.acceptance_probes {
+        println!("acceptance-probe: {} = {}", probe.name, probe.command);
+    }
+    if !selected.acceptance_probes.is_empty() {
+        println!();
+    }
     print!("{}", selected.body);
     Ok(0)
+}
+
+fn read_acceptance_probes(path: &str) -> Result<Vec<AcceptanceProbe>> {
+    let raw = read_body_file_verbatim(path)?;
+    let probes = serde_json::from_str::<Vec<AcceptanceProbe>>(&raw)
+        .with_context(|| format!("invalid acceptance probe JSON from {path:?}"))?;
+    let mut names = BTreeSet::new();
+    for probe in &probes {
+        crate::ids::validate_slug(&probe.name)
+            .with_context(|| format!("invalid acceptance probe name {:?}", probe.name))?;
+        if !names.insert(probe.name.clone()) {
+            bail!("duplicate acceptance probe name {:?}", probe.name);
+        }
+        if probe.command.trim().is_empty() {
+            bail!("acceptance probe {:?} has an empty command", probe.name);
+        }
+    }
+    Ok(probes)
 }
 
 #[allow(clippy::too_many_arguments)]

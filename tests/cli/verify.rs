@@ -458,6 +458,170 @@ fn attested_verification_uses_declared_execution_context() {
     assert_eq!(event_count(&repo, &context_change), before);
 }
 
+#[test]
+fn probe_records_expected_baseline_fail_and_final_pass_against_one_brief() {
+    let repo = Repo::new();
+    let change_id = opened_change_id(&stdout(
+        repo.arc(&repo.root).args(["begin", "declared-probe"]),
+    ));
+    let worktree = repo.home.join(".worktrees/repo-declared-probe");
+    let brief_base = repo.head(&worktree);
+    let before_invalid = event_count(&repo, &change_id);
+    repo.arc(&worktree)
+        .args([
+            "brief",
+            "declared-probe",
+            "--body-file",
+            "-",
+            "--probes-json",
+            "-",
+        ])
+        .write_stdin("ambiguous stdin\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--body-file - and --probes-json - cannot both read stdin",
+        ));
+    assert_eq!(event_count(&repo, &change_id), before_invalid);
+    let probes = worktree.join("probes.json");
+    fs::write(
+        &probes,
+        r#"[
+  {"name":"marker-exists","command":"test -f probe-marker.txt"},
+  {"name":"unexpected-pass","command":"true"}
+]"#,
+    )
+    .unwrap();
+    let brief_output = repo
+        .arc(&worktree)
+        .args([
+            "brief",
+            "declared-probe",
+            "--body-file",
+            "-",
+            "--probes-json",
+            probes.to_str().unwrap(),
+        ])
+        .write_stdin("probe contract\n")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let brief_output = String::from_utf8(brief_output).unwrap();
+    let brief_event = brief_output
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "declared-probe",
+            "--probe",
+            "unexpected-pass",
+            "--probe-phase",
+            "baseline",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicates::str::contains("Pass"));
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "declared-probe",
+            "--probe",
+            "marker-exists",
+            "--probe-phase",
+            "baseline",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Fail"));
+
+    repo.commit(
+        &worktree,
+        "probe-marker.txt",
+        "present\n",
+        "feat: satisfy probe",
+    );
+    let final_revision = repo.head(&worktree);
+    repo.arc(&worktree)
+        .args(["snapshot", "declared-probe"])
+        .assert()
+        .success();
+    let before_wrong_revision = event_count(&repo, &change_id);
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "declared-probe",
+            "--probe",
+            "marker-exists",
+            "--probe-phase",
+            "baseline",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(format!(
+            "baseline probe requires HEAD {brief_base}"
+        )));
+    assert_eq!(event_count(&repo, &change_id), before_wrong_revision);
+    repo.arc(&worktree)
+        .args(["verify", "declared-probe", "--probe", "marker-exists"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Pass"));
+
+    let events = stdout(repo.arc(&worktree).args([
+        "events",
+        "--change",
+        "declared-probe",
+        "--type",
+        "verification-recorded",
+    ]));
+    let evidence = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let marker = evidence
+        .iter()
+        .filter(|event| event["probe"]["name"] == "marker-exists")
+        .collect::<Vec<_>>();
+    assert_eq!(marker.len(), 2);
+    assert_eq!(marker[0]["probe"]["brief_event_id"], brief_event);
+    assert_eq!(marker[0]["probe"]["phase"], "baseline");
+    assert_eq!(marker[0]["revision"], brief_base);
+    assert_eq!(marker[0]["result"], "fail");
+    assert_eq!(marker[1]["probe"]["brief_event_id"], brief_event);
+    assert_eq!(marker[1]["probe"]["phase"], "final");
+    assert_eq!(marker[1]["revision"], final_revision);
+    assert_eq!(marker[1]["result"], "pass");
+    assert!(marker.iter().all(|event| event.get("gate").is_none()));
+    let unexpected = evidence
+        .iter()
+        .find(|event| event["probe"]["name"] == "unexpected-pass")
+        .unwrap();
+    assert_eq!(unexpected["result"], "pass");
+    assert_eq!(unexpected["probe"]["phase"], "baseline");
+
+    let show = json_stdout(
+        repo.arc(&worktree)
+            .args(["show", "declared-probe", "--json"]),
+    );
+    assert_eq!(
+        show["briefs"][0]["acceptance_probes"][0]["name"],
+        "marker-exists"
+    );
+    assert_eq!(
+        show["briefs"][0]["acceptance_probes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
 /// --attest requires --result; --result without --attest is a usage error; and
 /// a failing attestation reports exit 1 while still recording evidence.
 #[test]

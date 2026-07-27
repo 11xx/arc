@@ -22,7 +22,8 @@ use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use commands::{AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{
-    DispositionStatus, MessageSeverity, MessageType, Severity, Side, Verdict, VerifyResult,
+    DispositionStatus, MessageSeverity, MessageType, ProbePhase, Severity, Side, Verdict,
+    VerifyResult,
 };
 
 /// Change, review, and integration state over plain Git for agentic
@@ -280,6 +281,9 @@ enum Cmd {
         /// Opaque plan slice slug implemented by this brief
         #[arg(long)]
         plan_slice: Option<String>,
+        /// JSON array of named acceptance probes bound to this brief ('-' for stdin)
+        #[arg(long)]
+        probes_json: Option<String>,
     },
     /// Record, read, or project changelog entries
     Changelog {
@@ -599,6 +603,15 @@ enum Cmd {
         /// Ad hoc command (recorded, but not a declared gate)
         #[arg(long)]
         command: Option<String>,
+        /// Named acceptance probe declared by a brief
+        #[arg(long)]
+        probe: Option<String>,
+        /// Brief version containing --probe (defaults to latest)
+        #[arg(long)]
+        brief_version: Option<usize>,
+        /// Acceptance-probe evidence phase (defaults to final)
+        #[arg(long, value_enum)]
+        probe_phase: Option<ProbePhase>,
         /// Record externally observed evidence without running the command
         /// (e.g. a sandboxed executor or another host ran the gate)
         #[arg(long)]
@@ -1119,11 +1132,21 @@ fn run(cli: Cli) -> Result<i32> {
             scaffold,
             plan_ref,
             plan_slice,
+            probes_json,
         } => {
             let change = infer(change.as_deref())?;
             commands::brief(
-                &ctx, role, &change, body_file, title, base, version, scaffold, plan_ref,
+                &ctx,
+                role,
+                &change,
+                body_file,
+                title,
+                base,
+                version,
+                scaffold,
+                plan_ref,
                 plan_slice,
+                probes_json,
             )
         }
         Cmd::Changelog {
@@ -1422,6 +1445,9 @@ fn run(cli: Cli) -> Result<i32> {
             skip_green,
             gate,
             command,
+            probe,
+            brief_version,
+            probe_phase,
             attest,
             result,
             tested_revision,
@@ -1439,6 +1465,9 @@ fn run(cli: Cli) -> Result<i32> {
                     skip_green,
                     gate,
                     command,
+                    probe,
+                    brief_version,
+                    probe_phase,
                     attest,
                     result,
                     tested_revision,

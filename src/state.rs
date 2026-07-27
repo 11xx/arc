@@ -42,6 +42,7 @@ pub struct Brief {
     pub title: Option<String>,
     pub body: String,
     pub base_revision: Option<String>,
+    pub acceptance_probes: Vec<AcceptanceProbe>,
     pub plan_ref: Option<String>,
     pub plan_slice: Option<String>,
 }
@@ -251,6 +252,7 @@ impl VerdictEntry {
 pub struct VerificationEntry {
     pub event_id: String,
     pub run_id: Option<String>,
+    pub probe: Option<ProbeEvidenceRef>,
     pub gate: Option<String>,
     pub command: String,
     pub revision: String,
@@ -551,6 +553,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 title,
                 body,
                 base_revision,
+                acceptance_probes,
                 plan_ref,
                 plan_slice,
             } => state.briefs.push(Brief {
@@ -560,6 +563,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 title: title.clone(),
                 body: body.clone(),
                 base_revision: base_revision.clone(),
+                acceptance_probes: acceptance_probes.clone(),
                 plan_ref: plan_ref.clone(),
                 plan_slice: plan_slice.clone(),
             }),
@@ -897,11 +901,49 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 hostname,
                 attested,
                 run_id,
+                probe,
                 runner,
                 output_tail,
                 timed_out,
                 ..
             } => {
+                if gate.is_some() && probe.is_some() {
+                    bail!(
+                        "verification {} cannot be both a gate and an acceptance probe",
+                        ev.event_id
+                    );
+                }
+                if let Some(probe) = probe {
+                    let brief = state
+                        .briefs
+                        .iter()
+                        .find(|brief| brief.event_id == probe.brief_event_id)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "verification {} references unknown or later brief {}",
+                                ev.event_id,
+                                probe.brief_event_id
+                            )
+                        })?;
+                    let declaration = brief
+                        .acceptance_probes
+                        .iter()
+                        .find(|declared| declared.name == probe.name)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "verification {} references undeclared probe {}",
+                                ev.event_id,
+                                probe.name
+                            )
+                        })?;
+                    if declaration.command != *command {
+                        bail!(
+                            "verification {} command does not match declared probe {}",
+                            ev.event_id,
+                            probe.name
+                        );
+                    }
+                }
                 if let Some(run_id) = run_id {
                     let gate = gate.as_deref().ok_or_else(|| {
                         anyhow::anyhow!(
@@ -923,6 +965,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 state.verifications.push(VerificationEntry {
                     event_id: ev.event_id.clone(),
                     run_id: run_id.clone(),
+                    probe: probe.clone(),
                     gate: gate.clone(),
                     command: command.clone(),
                     revision: revision.clone(),

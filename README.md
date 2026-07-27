@@ -598,6 +598,15 @@ Every newly written brief also records the full current `HEAD` as its immutable
 base revision. `--base <revision>` selects another revision and resolves it at
 write time; legacy briefs alone may have no base revision.
 
+`--probes-json <file>` binds named acceptance commands to one brief version.
+Probe names are unique kebab-case slugs. Run a declaration explicitly with
+`arc verify <change> --probe <name> --probe-phase baseline|final`; the phase
+defaults to `final`, and `--brief-version <n>` selects a historical contract.
+A baseline run is valid only at that brief's base revision and treats command
+failure as its expected result. Final evidence treats command success as
+expected. Both phases retain the canonical brief and probe reference; `done`
+does not execute arbitrary acceptance probes.
+
 `arc restack <change> --advise` prints, for each open dependent of a change,
 the exact `git rebase --onto <target> <base>` command to run in that
 dependent's worktree once the change integrates. It only prints — arc never
