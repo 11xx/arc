@@ -127,6 +127,21 @@ pub fn markdown(
                 .map(|budget| format!(" / budget {budget}s"))
                 .unwrap_or_default()
         );
+        if let Some(blocker) = &claim.blocker {
+            let blocker = match blocker {
+                crate::model::BlockerRef::Brief { brief_event_id } => {
+                    format!("brief `{brief_event_id}`")
+                }
+                crate::model::BlockerRef::Finding { finding_id } => {
+                    format!("finding `{finding_id}`")
+                }
+                crate::model::BlockerRef::Change { change_id } => {
+                    format!("change `{change_id}`")
+                }
+                crate::model::BlockerRef::External => "external".to_string(),
+            };
+            let _ = writeln!(w, "- Blocker: {blocker}");
+        }
         let _ = writeln!(
             w,
             "- Activity: claimed {}, last {}, expires {} (TTL {}s)",

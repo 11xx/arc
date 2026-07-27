@@ -35,6 +35,118 @@ fn stage_claim_acquires_default_claim_and_stamps_its_generation() {
 }
 
 #[test]
+fn blocked_on_requires_a_typed_blocker_and_stats_preserve_its_kind() {
+    let repo = Repo::new();
+    let change_id = begin_change(&repo, "typed-blocker", None);
+    repo.arc(&repo.root)
+        .args(["brief", "typed-blocker", "--body-file", "-"])
+        .write_stdin("first contract\n")
+        .assert()
+        .success();
+    let second = stdout(
+        repo.arc(&repo.root)
+            .args(["brief", "typed-blocker", "--body-file", "-"])
+            .write_stdin("second contract\n"),
+    );
+    let brief_event = second
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap();
+    repo.arc(&repo.root)
+        .args(["claim", "typed-blocker"])
+        .assert()
+        .success();
+    let before = event_count(&repo, &change_id);
+
+    repo.arc(&repo.root)
+        .args([
+            "stage",
+            "typed-blocker",
+            "blocked-on",
+            "--note",
+            "missing named symbol",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("requires --blocker"));
+    repo.arc(&repo.root)
+        .args([
+            "stage",
+            "typed-blocker",
+            "blocked-on",
+            "--note",
+            "wrong object kind",
+            "--blocker",
+            &format!("finding:{brief_event}"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no finding matches"));
+    repo.arc(&repo.root)
+        .args([
+            "stage",
+            "typed-blocker",
+            "implementing",
+            "--blocker",
+            "external",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--blocker is only valid with blocked-on",
+        ));
+    assert_eq!(event_count(&repo, &change_id), before);
+
+    repo.arc(&repo.root)
+        .args([
+            "stage",
+            "typed-blocker",
+            "blocked-on",
+            "--note",
+            "missing named symbol",
+            "--blocker",
+            "brief:v2",
+        ])
+        .assert()
+        .success();
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "typed-blocker"]),
+    ))
+    .unwrap();
+    assert_eq!(status["claim"]["note"], "missing named symbol");
+    assert_eq!(status["claim"]["blocker"]["kind"], "brief");
+    assert_eq!(status["claim"]["blocker"]["brief_event_id"], brief_event);
+
+    let stats =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["stats", "--change", "typed-blocker", "--json"]),
+        );
+    assert_eq!(
+        stats["changes"][0]["blocks_by_kind"],
+        serde_json::json!({"brief": 1})
+    );
+    assert_eq!(
+        stats["aggregate"]["blocks_by_kind"],
+        serde_json::json!({"brief": 1})
+    );
+
+    rewrite_event(&repo, &change_id, "stage-set", |event| {
+        event.as_object_mut().unwrap().remove("blocker");
+    });
+    let legacy =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["stats", "--change", "typed-blocker", "--json"]),
+        );
+    assert_eq!(
+        legacy["changes"][0]["blocks_by_kind"],
+        serde_json::json!({"unclassified": 1})
+    );
+}
+
+#[test]
 fn claim_lifecycle_reports_defaults_renewal_conflict_release_and_expiry() {
     let repo = Repo::new();
     let opened = stdout(repo.arc(&repo.root).args(["begin", "claim-life"]));
@@ -376,6 +488,8 @@ fn stage_requires_owned_live_claim_and_tracks_heartbeats_advisory_order_and_snap
             "blocked-on",
             "--note",
             "waiting for input",
+            "--blocker",
+            "external",
         ])
         .assert()
         .success();
@@ -489,7 +603,15 @@ fn stale_claims_are_time_derived_and_watch_until_stalled_reaches() {
     );
 
     repo.arc(&repo.root)
-        .args(["stage", "stale-impl", "blocked-on", "--note", "distress"])
+        .args([
+            "stage",
+            "stale-impl",
+            "blocked-on",
+            "--note",
+            "distress",
+            "--blocker",
+            "external",
+        ])
         .assert()
         .success();
     age_event(&repo, &implementing_id, "stage-set", 60);
@@ -664,6 +786,8 @@ fn takeover_displaces_a_stale_blocked_on_claim() {
             "blocked-on",
             "--note",
             "waiting",
+            "--blocker",
+            "external",
         ])
         .assert()
         .success();

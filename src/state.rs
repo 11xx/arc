@@ -82,6 +82,7 @@ pub struct ClaimIdentity {
 pub struct StageProgress {
     pub stage: ClaimStage,
     pub note: Option<String>,
+    pub blocker: Option<BlockerRef>,
     pub changed_at: DateTime<Utc>,
 }
 
@@ -605,6 +606,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     claim.progress = Some(StageProgress {
                         stage: ClaimStage::Snapshotted,
                         note: None,
+                        blocker: None,
                         changed_at: ev.created_at,
                     });
                 }
@@ -738,8 +740,40 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 claim_id,
                 stage,
                 note,
+                blocker,
             } => {
                 crate::ids::validate_id_component(claim_id)?;
+                if *stage != ClaimStage::BlockedOn && blocker.is_some() {
+                    bail!("non-blocked stage {} carries a blocker", ev.event_id);
+                }
+                match blocker {
+                    Some(BlockerRef::Brief { brief_event_id }) => {
+                        crate::ids::validate_id_component(brief_event_id)?;
+                        if !state
+                            .briefs
+                            .iter()
+                            .any(|brief| brief.event_id == *brief_event_id)
+                        {
+                            bail!(
+                                "blocked-on stage {} references unknown or later brief {brief_event_id}",
+                                ev.event_id
+                            );
+                        }
+                    }
+                    Some(BlockerRef::Finding { finding_id }) => {
+                        crate::ids::validate_id_component(finding_id)?;
+                        if !state.findings.contains_key(finding_id) {
+                            bail!(
+                                "blocked-on stage {} references unknown or later finding {finding_id}",
+                                ev.event_id
+                            );
+                        }
+                    }
+                    Some(BlockerRef::Change { change_id }) => {
+                        crate::ids::validate_id_component(change_id)?;
+                    }
+                    Some(BlockerRef::External) | None => {}
+                }
                 if state.retired_claim_ids.contains(claim_id) {
                     continue;
                 }
@@ -765,6 +799,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 claim.progress = Some(StageProgress {
                     stage: *stage,
                     note: note.clone(),
+                    blocker: blocker.clone(),
                     changed_at: ev.created_at,
                 });
             }
@@ -1387,6 +1422,7 @@ mod tests {
         claim.progress = Some(StageProgress {
             stage: ClaimStage::Implementing,
             note: None,
+            blocker: None,
             changed_at: claimed_at + TimeDelta::seconds(10),
         });
         claim.last_activity_at = claimed_at + TimeDelta::seconds(1_000);
@@ -1398,6 +1434,7 @@ mod tests {
         claim.progress = Some(StageProgress {
             stage: ClaimStage::BlockedOn,
             note: Some("waiting".into()),
+            blocker: None,
             changed_at: claimed_at,
         });
         let blocked = claim_timing_at(&claim, claimed_at + TimeDelta::seconds(5_000));
