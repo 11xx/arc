@@ -100,7 +100,8 @@ pub fn watch(
         }
         (None, false) => {
             let quorum = quorum.context("--tag requires --any or --all")?;
-            WatchSelection::Tagged(resolve_tagged(ctx, tags)?, quorum)
+            let tags = normalize_tags(tags.to_vec())?;
+            WatchSelection::Tagged(resolve_tagged(ctx, &tags)?, quorum)
         }
     };
     let deadline = timeout_secs.map(|timeout| Instant::now() + Duration::from_secs(timeout));

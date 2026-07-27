@@ -272,6 +272,37 @@ fn watch_multiple_conditions_reports_the_winner() {
         .stdout("reached: stalled\n");
 }
 
+/// Every tag reader normalises before matching, so a padded tag that selects a
+/// member for one verb must select it for all of them. Timing out proves the
+/// member was selected; "no changes match" would prove it was skipped.
+#[test]
+fn watch_normalises_tags_like_every_other_tag_reader() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "padded", "--tag", "series"]),
+    );
+    repo.arc(&repo.root)
+        .args(["query", "--tag", " series"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("padded"));
+    repo.arc(&repo.root)
+        .args([
+            "watch",
+            "--tag",
+            " series",
+            "--any",
+            "--until",
+            "ready",
+            "--timeout",
+            "1",
+        ])
+        .assert()
+        .code(2)
+        .stdout("timeout: ready\n");
+}
+
 #[test]
 fn watch_ready_times_out_when_check_is_not_green() {
     let repo = Repo::new();
