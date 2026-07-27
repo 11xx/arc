@@ -106,3 +106,121 @@ fn config_check_writable_reports_store_failure_and_json_schema() {
         .iter()
         .all(|check| check["ok"] == true));
 }
+
+#[test]
+fn config_check_writable_probes_commit_without_touching_the_repository() {
+    let repo = Repo::new();
+    let before = git_out(&repo.root, &["rev-parse", "HEAD"]);
+    // Give the probe a private temp dir so leak detection observes only this
+    // invocation. Scanning the shared temp dir races sibling tests running
+    // their own probes, and fails for a reason unrelated to cleanup.
+    let tmp = repo.root.join("probe-tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .env("TMPDIR", &tmp)
+            .args(["config", "--check-writable"]),
+    );
+    assert!(
+        out.contains("ok: commit"),
+        "expected a commit check, got {out:?}"
+    );
+    // The probe repository is disposable; the target must gain no commit and
+    // keep a clean tree.
+    assert_eq!(git_out(&repo.root, &["rev-parse", "HEAD"]), before);
+    assert!(git_out(&repo.root, &["status", "--porcelain"]).is_empty());
+    assert_eq!(
+        fs::read_dir(&tmp).unwrap().count(),
+        0,
+        "probe repository was left behind"
+    );
+}
+
+#[test]
+fn config_check_writable_commit_probe_follows_repository_signing_policy() {
+    let repo = Repo::new();
+    // Unset: the probe proves committing works and says signing was not tried.
+    let unsigned = stdout(
+        repo.arc(&repo.root)
+            .args(["config", "--check-writable", "--json"]),
+    );
+    let value: serde_json::Value = serde_json::from_str(&unsigned).unwrap();
+    let commit = value["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "commit")
+        .expect("commit check present");
+    assert_eq!(commit["ok"], true);
+    assert!(
+        commit["detail"].as_str().unwrap().contains("unsigned"),
+        "detail should say signing was not exercised: {commit:?}"
+    );
+
+    // Required but unsatisfiable: an unusable key must fail the check and the
+    // detail must carry gpg's own reason, not just the outer context.
+    git_out(&repo.root, &["config", "commit.gpgsign", "true"]);
+    git_out(
+        &repo.root,
+        &["config", "user.signingkey", "0000000000000000"],
+    );
+    repo.arc(&repo.root)
+        .args(["config", "--check-writable"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("fail: commit"))
+        .stdout(predicates::str::contains("gpg"));
+}
+
+/// Git resolves every boolean spelling, so reading the raw string would report
+/// a signing repository as unsigned — the one case this probe exists to catch.
+#[test]
+fn config_check_writable_honours_every_git_boolean_spelling_for_signing() {
+    for spelling in ["yes", "on", "1", "True"] {
+        let repo = Repo::new();
+        git_out(&repo.root, &["config", "commit.gpgsign", spelling]);
+        git_out(
+            &repo.root,
+            &["config", "user.signingkey", "0000000000000000"],
+        );
+        repo.arc(&repo.root)
+            .args(["config", "--check-writable"])
+            .assert()
+            .failure()
+            .stdout(predicates::str::contains("fail: commit"))
+            .stdout(predicates::str::contains("gpg"));
+    }
+}
+
+/// The probe repository is created fresh and would otherwise inherit a global
+/// signing policy, failing on a credential the target repository never uses.
+#[test]
+fn config_check_writable_probe_ignores_global_signing_the_repository_overrides() {
+    let repo = Repo::new();
+    fs::write(
+        repo.home.join(".gitconfig"),
+        "[commit]\n\tgpgsign = true\n[user]\n\tsigningkey = 0000000000000000\n",
+    )
+    .unwrap();
+    // Repo::new pins commit.gpgsign false locally, so the repository resolves to
+    // unsigned and the probe must too.
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["config", "--check-writable", "--json"]),
+    );
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let commit = value["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "commit")
+        .expect("commit check present");
+    assert_eq!(
+        commit["ok"], true,
+        "probe should follow the repository, not the global config: {commit:?}"
+    );
+    assert!(
+        commit["detail"].as_str().unwrap().contains("unsigned"),
+        "probe should not have exercised the global signing key: {commit:?}"
+    );
+}
