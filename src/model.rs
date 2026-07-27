@@ -24,6 +24,15 @@ pub struct AcceptanceProbe {
     pub command: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum BlockerRef {
+    Brief { brief_event_id: String },
+    Finding { finding_id: String },
+    Change { change_id: String },
+    External,
+}
+
 /// One append-only ledger entry. The envelope is common to every event;
 /// the payload is internally tagged by `event_type`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +159,8 @@ pub enum Payload {
         stage: ClaimStage,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocker: Option<BlockerRef>,
     },
     CommentAdded {
         body: String,

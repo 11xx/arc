@@ -261,6 +261,7 @@ pub fn stage(
     reference: &str,
     stage: StageArg,
     note: Option<String>,
+    blocker: Option<String>,
     claim_if_needed: bool,
 ) -> Result<i32> {
     let owner = command_identity(ctx)?;
@@ -271,6 +272,12 @@ pub fn stage(
     });
     if stage == ClaimStage::BlockedOn && note.is_none() {
         bail!("blocked-on requires a nonempty --note");
+    }
+    if stage == ClaimStage::BlockedOn && blocker.is_none() {
+        bail!("blocked-on requires --blocker");
+    }
+    if stage != ClaimStage::BlockedOn && blocker.is_some() {
+        bail!("--blocker is only valid with blocked-on");
     }
 
     let store = ctx.store()?;
@@ -286,6 +293,10 @@ pub fn stage(
     if state.is_closed() {
         bail!("change {change_id} is closed");
     }
+    let blocker = blocker
+        .as_deref()
+        .map(|raw| resolve_blocker(&store, &state, raw))
+        .transpose()?;
     let now = chrono::Utc::now();
     let has_owned_live_claim = state
         .claim
@@ -350,6 +361,7 @@ pub fn stage(
             claim_id: existing.claim_id.clone(),
             stage,
             note,
+            blocker,
         },
     );
     event.event_id = event_id_after(&previous_event_id)?;
@@ -357,6 +369,44 @@ pub fn stage(
     println!("stage: {}", stage.as_str());
     println!("event: {}", event.event_id);
     Ok(0)
+}
+
+fn resolve_blocker(store: &Store, state: &ChangeState, raw: &str) -> Result<BlockerRef> {
+    if raw == "external" {
+        return Ok(BlockerRef::External);
+    }
+    let (kind, reference) = raw
+        .split_once(':')
+        .context("invalid --blocker; expected brief:vN, finding:ID, change:ID, or external")?;
+    if reference.is_empty() {
+        bail!("blocker reference cannot be empty");
+    }
+    match kind {
+        "brief" => {
+            let version = reference
+                .strip_prefix('v')
+                .context("brief blocker must use brief:vN")?
+                .parse::<usize>()
+                .context("brief blocker version must be a positive integer")?;
+            if version == 0 {
+                bail!("brief blocker version must be a positive integer");
+            }
+            let brief = state
+                .briefs
+                .get(version - 1)
+                .with_context(|| format!("brief v{version} does not exist"))?;
+            Ok(BlockerRef::Brief {
+                brief_event_id: brief.event_id.clone(),
+            })
+        }
+        "finding" => Ok(BlockerRef::Finding {
+            finding_id: state.resolve_finding_id(reference)?,
+        }),
+        "change" => Ok(BlockerRef::Change {
+            change_id: store.resolve_change(reference)?,
+        }),
+        _ => bail!("unknown blocker kind {kind:?}; expected brief, finding, change, or external"),
+    }
 }
 
 pub(super) fn owns_live_claim(ctx: &Ctx, reference: &str) -> Result<bool> {

@@ -288,11 +288,13 @@ moving a ref, or touching a worktree.
 projects the durations and counts the ledger already holds: per change the
 open→integrated wall time, seconds in each typed stage, snapshot→first-verdict
 review latency, observed gate wall times, findings by severity, patchset count,
-review causes, and structurally completed rework rounds. A rework round needs a
-new patchset after `changes-requested` and a later approval of that patchset;
-reversing the verdict on the same patchset is not rework. A round is a revision
-cycle rather than a verdict event, so several `changes-requested` verdicts on
-one patchset count once — one revision answers them all. First-pass approval
+review causes, typed executor blocks, and structurally completed rework rounds.
+Legacy blocked-on events without a referent are counted as `unclassified`. A
+rework round needs a new patchset after `changes-requested` and a later
+approval of that patchset; reversing the verdict on the same patchset is not
+rework. A round is a revision cycle rather than a verdict event, so several
+`changes-requested` verdicts on one patchset count once — one revision answers
+them all. First-pass approval
 means the first patchset was approved before any requested-rework verdict. The
 aggregate block adds median and p90 per stage and per gate, reworked-change and
 first-pass totals, completed rework rounds, plus
@@ -307,7 +309,8 @@ Claims are advisory rather than merge locks:
 arc claim radio-refill-fix \
   --stage-budget launch=60s --stage-budget implementing=30m
 arc claim radio-refill-fix --takeover
-arc stage radio-refill-fix blocked-on --note "waiting for test fixture"
+arc stage radio-refill-fix blocked-on \
+  --blocker external --note "waiting for test fixture"
 arc release-claim radio-refill-fix
 ```
 
@@ -320,7 +323,9 @@ Durations are positive integers ending in `s`, `m`, or `h`; the default claim
 TTL is `2h`. The resolved defaults are `launch=60s`, `started=5m`,
 `spec-read=2m`, `implementing=30m`, and `verifying=15m`. Repeating the current
 stage is a heartbeat: it refreshes claim activity and age-in-stage. `blocked-on`
-requires a note and is distress rather than stale;
+requires both a structured `--blocker` (`brief:vN`, `finding:ID`, `change:ID`,
+or `external`) and a note naming the precise missing symbol, file, command, or
+premise. It is distress rather than stale;
 claim TTL still applies. `snapshotted` comes only from a real `arc snapshot`
 event and cannot be supplied to `arc stage`. An identified caller may release
 any live claim so a lead can recover stale foreign work. `claim --takeover`

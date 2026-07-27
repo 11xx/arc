@@ -548,7 +548,7 @@ pub fn snapshot_with_verify(
 
 pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
     if super::claims::owns_live_claim(ctx, reference)? {
-        let code = super::claims::stage(ctx, reference, StageArg::Verifying, None, false)?;
+        let code = super::claims::stage(ctx, reference, StageArg::Verifying, None, None, false)?;
         if code != 0 {
             return Ok(code);
         }

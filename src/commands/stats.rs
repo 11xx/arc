@@ -3,7 +3,7 @@
 //! derivation — no writes, no new events.
 
 use super::*;
-use crate::model::{ClaimStage, Event, Payload, ReviewCause, Severity};
+use crate::model::{BlockerRef, ClaimStage, Event, Payload, ReviewCause, Severity};
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
@@ -36,6 +36,7 @@ struct ChangeStats {
     gate_seconds: BTreeMap<String, u64>,
     findings_by_severity: BTreeMap<String, usize>,
     review_rounds_by_cause: BTreeMap<String, usize>,
+    blocks_by_kind: BTreeMap<String, usize>,
     changes_requested_rounds: usize,
     completed_rework_rounds: usize,
     reworked: bool,
@@ -52,6 +53,7 @@ struct Aggregate {
     /// `stage-budget` tuning, never applied automatically.
     suggested_stage_budgets: BTreeMap<String, u64>,
     review_rounds_by_cause: BTreeMap<String, usize>,
+    blocks_by_kind: BTreeMap<String, usize>,
     changes_reworked: usize,
     first_pass_approvals: usize,
     completed_rework_rounds: usize,
@@ -131,6 +133,7 @@ fn change_stats(events: &[Event], state: &ChangeState) -> ChangeStats {
         gate_seconds,
         findings_by_severity,
         review_rounds_by_cause: review_rounds_by_cause(events),
+        blocks_by_kind: blocks_by_kind(events),
         changes_requested_rounds: rework.changes_requested_rounds,
         completed_rework_rounds: rework.completed_rework_rounds,
         reworked: rework.completed_rework_rounds > 0,
@@ -260,9 +263,13 @@ fn aggregate_stats(changes: &[ChangeStats], gate_runs: &BTreeMap<String, Vec<u64
         .map(|(name, p)| (name.clone(), round_up_clean(p.p90_seconds)))
         .collect();
     let mut review_rounds_by_cause = BTreeMap::new();
+    let mut blocks_by_kind = BTreeMap::new();
     for change in changes {
         for (cause, count) in &change.review_rounds_by_cause {
             *review_rounds_by_cause.entry(cause.clone()).or_default() += count;
+        }
+        for (kind, count) in &change.blocks_by_kind {
+            *blocks_by_kind.entry(kind.clone()).or_default() += count;
         }
     }
     let changes_reworked = changes.iter().filter(|change| change.reworked).count();
@@ -281,10 +288,33 @@ fn aggregate_stats(changes: &[ChangeStats], gate_runs: &BTreeMap<String, Vec<u64
         gate,
         suggested_stage_budgets,
         review_rounds_by_cause,
+        blocks_by_kind,
         changes_reworked,
         first_pass_approvals,
         completed_rework_rounds,
     }
+}
+
+fn blocks_by_kind(events: &[Event]) -> BTreeMap<String, usize> {
+    let mut blocks = BTreeMap::new();
+    for event in events {
+        if let Payload::StageSet {
+            stage: ClaimStage::BlockedOn,
+            blocker,
+            ..
+        } = &event.payload
+        {
+            let kind = match blocker {
+                Some(BlockerRef::Brief { .. }) => "brief",
+                Some(BlockerRef::Finding { .. }) => "finding",
+                Some(BlockerRef::Change { .. }) => "change",
+                Some(BlockerRef::External) => "external",
+                None => "unclassified",
+            };
+            *blocks.entry(kind.to_string()).or_default() += 1;
+        }
+    }
+    blocks
 }
 
 struct ReworkStats {
@@ -589,6 +619,7 @@ mod tests {
                     claim_id: "cl".into(),
                     stage: ClaimStage::Implementing,
                     note: None,
+                    blocker: None,
                 },
             ),
             event(
@@ -598,6 +629,7 @@ mod tests {
                     claim_id: "cl".into(),
                     stage: ClaimStage::Verifying,
                     note: None,
+                    blocker: None,
                 },
             ),
             event(
@@ -633,6 +665,7 @@ mod tests {
                     claim_id: "cl".into(),
                     stage: ClaimStage::Implementing,
                     note: None,
+                    blocker: None,
                 },
             ),
         ];

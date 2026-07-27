@@ -331,6 +331,7 @@ pub fn parse_known_event(value: &Value) -> Result<Option<Event>> {
             claim_id,
             stage,
             note,
+            ..
         } => {
             validate_claim_identity(&event)?;
             ids::validate_id_component(claim_id)?;
@@ -516,6 +517,7 @@ mod tests {
                 claim_id: "claim".into(),
                 stage: ClaimStage::Started,
                 note: None,
+                blocker: None,
             },
             Payload::CommentAdded {
                 body: "body".into(),

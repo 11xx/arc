@@ -156,6 +156,8 @@ pub struct ClaimStatus {
     pub expires_at: DateTime<Utc>,
     pub stage: String,
     pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<crate::model::BlockerRef>,
     pub stage_started_at: DateTime<Utc>,
     pub age_seconds: u64,
     pub budget_seconds: Option<u64>,
@@ -749,6 +751,10 @@ pub fn claim_status_at(
             .progress
             .as_ref()
             .and_then(|progress| progress.note.clone()),
+        blocker: claim
+            .progress
+            .as_ref()
+            .and_then(|progress| progress.blocker.clone()),
         stage_started_at: timing.stage_started_at,
         age_seconds: timing.age_seconds,
         budget_seconds: timing.budget_seconds,

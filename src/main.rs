@@ -497,6 +497,9 @@ enum Cmd {
         /// Read the stage note from a file ('-' for stdin)
         #[arg(long, conflicts_with = "note")]
         note_file: Option<String>,
+        /// Structured blocked-on referent: brief:vN, finding:ID, change:ID, or external
+        #[arg(long)]
+        blocker: Option<String>,
     },
     /// Record the current branch head as a new patchset
     Snapshot {
@@ -1327,13 +1330,14 @@ fn run(cli: Cli) -> Result<i32> {
             claim,
             note,
             note_file,
+            blocker,
         } => {
             let change = infer(change.as_deref())?;
             let note = match (note, note_file) {
                 (None, None) => None,
                 (note, note_file) => Some(commands::read_body(note, note_file)?),
             };
-            commands::stage(&ctx, &change, stage, note, claim)
+            commands::stage(&ctx, &change, stage, note, blocker, claim)
         }
         Cmd::Snapshot {
             change,
