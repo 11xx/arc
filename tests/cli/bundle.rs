@@ -412,6 +412,59 @@ fn import_rejects_malformed_known_events_before_writing() {
 }
 
 #[test]
+fn import_rejects_malformed_changelog_before_writing() {
+    let source = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&source, "move-changelog");
+    let changelog_body = source.home.join("changelog-body.txt");
+    fs::write(&changelog_body, "Reject malformed changelog events.\n").unwrap();
+    source
+        .arc(&worktree)
+        .args([
+            "changelog",
+            "move-changelog",
+            "--section",
+            "fixed",
+            "--body-file",
+            changelog_body.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let bundle_path = source.home.join("malformed-changelog.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            "move-changelog",
+            "--output",
+            bundle_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let mut bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
+    let changelog = bundle["events"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|event| event["event_type"] == "changelog-recorded")
+        .unwrap();
+    assert!(changelog.as_object_mut().unwrap().remove("body").is_some());
+    refresh_bundle_checksum(&mut bundle);
+    fs::write(&bundle_path, json_file_bytes(&bundle)).unwrap();
+
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle_path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("known event"))
+        .stderr(predicates::str::contains("malformed"));
+    assert!(!destination.root.join(".git/arc").exists());
+}
+
+#[test]
 fn import_replays_combined_history_before_writing() {
     let source = Repo::new();
     let opened = stdout(

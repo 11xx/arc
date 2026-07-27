@@ -260,6 +260,7 @@ fn known_event_type(event_type: &str) -> bool {
             | "metadata-updated"
             | "message"
             | "brief-recorded"
+            | "changelog-recorded"
             | "patchset-added"
             | "claim-set"
             | "claim-released"
@@ -403,4 +404,202 @@ fn event_file_bytes(event: &Value) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(event)?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::forge::{ForgeCheckState, ForgePolicy, ForgePrState};
+    use crate::model::{
+        ChangelogSection, Closure, DispositionStatus, MessageSeverity, MessageType, Severity,
+        Verdict, VerifyResult,
+    };
+    use serde_json::json;
+
+    fn is_known_payload(payload: &Payload) -> bool {
+        match payload {
+            Payload::ChangeOpened { .. }
+            | Payload::MetadataUpdated { .. }
+            | Payload::Message { .. }
+            | Payload::BriefRecorded { .. }
+            | Payload::ChangelogRecorded { .. }
+            | Payload::PatchsetAdded { .. }
+            | Payload::ClaimSet { .. }
+            | Payload::ClaimReleased { .. }
+            | Payload::StageSet { .. }
+            | Payload::CommentAdded { .. }
+            | Payload::FindingAdded { .. }
+            | Payload::ReplyAdded { .. }
+            | Payload::DispositionRecorded { .. }
+            | Payload::VerdictRecorded { .. }
+            | Payload::VerificationRecorded { .. }
+            | Payload::HoldSet { .. }
+            | Payload::HoldReleased { .. }
+            | Payload::ChangeClosed { .. }
+            | Payload::ForgeProjection { .. }
+            | Payload::ForgeLink { .. }
+            | Payload::ForgeChecks { .. }
+            | Payload::ForgePrState { .. } => true,
+            Payload::Unknown => false,
+        }
+    }
+
+    #[test]
+    fn all_serialized_payload_tags_are_known() {
+        let payloads = vec![
+            Payload::ChangeOpened {
+                slug: "change".into(),
+                title: "Change".into(),
+                profile: "local".into(),
+                target_branch: "master".into(),
+                branch: "arc/change".into(),
+                base: "base".into(),
+                worktree: None,
+                blocked_by: Vec::new(),
+                tags: Vec::new(),
+                journal_ref: None,
+            },
+            Payload::MetadataUpdated {
+                add_blocked_by: Vec::new(),
+                remove_blocked_by: Vec::new(),
+                add_tags: Vec::new(),
+                remove_tags: Vec::new(),
+                assign: None,
+                priority: None,
+            },
+            Payload::Message {
+                message_type: MessageType::Status,
+                severity: MessageSeverity::Info,
+                summary: "summary".into(),
+                detail: None,
+                metadata: None,
+            },
+            Payload::BriefRecorded {
+                title: None,
+                body: "body".into(),
+                plan_ref: None,
+                plan_slice: None,
+            },
+            Payload::ChangelogRecorded {
+                section: ChangelogSection::Fixed,
+                body: "body".into(),
+            },
+            Payload::PatchsetAdded {
+                patchset_id: "ps-01".into(),
+                base: "base".into(),
+                head: "head".into(),
+                merge_base: None,
+                author_name: None,
+                author_email: None,
+                committer_name: None,
+                committer_email: None,
+                claim_id: None,
+                claim_actor: None,
+            },
+            Payload::ClaimSet {
+                claim_id: "claim".into(),
+                ttl_seconds: 1,
+                stage_budgets: std::collections::BTreeMap::new(),
+                displaced: None,
+            },
+            Payload::ClaimReleased {
+                claim_id: "claim".into(),
+            },
+            Payload::StageSet {
+                claim_id: "claim".into(),
+                stage: ClaimStage::Started,
+                note: None,
+            },
+            Payload::CommentAdded {
+                body: "body".into(),
+                patchset_id: None,
+                anchor: None,
+            },
+            Payload::FindingAdded {
+                finding_id: "finding".into(),
+                blocking: false,
+                severity: Severity::Note,
+                summary: "summary".into(),
+                body: None,
+                patchset_id: None,
+                anchor: None,
+            },
+            Payload::ReplyAdded {
+                parent_event_id: "event".into(),
+                body: "body".into(),
+            },
+            Payload::DispositionRecorded {
+                finding_id: "finding".into(),
+                status: DispositionStatus::Resolved,
+                commit: None,
+                evidence: None,
+                supersedes: Vec::new(),
+            },
+            Payload::VerdictRecorded {
+                patchset_id: "ps-01".into(),
+                verdict: Verdict::Approved,
+                body: None,
+                findings: Vec::new(),
+            },
+            Payload::VerificationRecorded {
+                gate: None,
+                command: "true".into(),
+                revision: "head".into(),
+                result: VerifyResult::Pass,
+                exit_code: Some(0),
+                duration_ms: Some(0),
+                output_tail: None,
+                timed_out: false,
+                hostname: "host".into(),
+                attested: false,
+                note: None,
+            },
+            Payload::HoldSet {
+                reason: "reason".into(),
+            },
+            Payload::HoldReleased { reason: None },
+            Payload::ChangeClosed {
+                outcome: Closure::Abandoned,
+                integrated_commit: None,
+                superseded_by: None,
+            },
+            Payload::ForgeProjection {
+                host: "forge.example".into(),
+                base_repo: "owner/repo".into(),
+                base_ref: "master".into(),
+                head_repo: "owner/repo".into(),
+                head_ref: "change".into(),
+                policy: ForgePolicy::SameRepositoryOnly,
+            },
+            Payload::ForgeLink {
+                pr_number: 1,
+                url: "https://forge.example/owner/repo/pulls/1".into(),
+                base_repo: "owner/repo".into(),
+                base_ref: "master".into(),
+                head_repo: "owner/repo".into(),
+                head_ref: "change".into(),
+                head_sha: "head".into(),
+            },
+            Payload::ForgeChecks {
+                pr_head: "head".into(),
+                state: ForgeCheckState::Passed,
+                detail: None,
+            },
+            Payload::ForgePrState {
+                state: ForgePrState::Open,
+                merge_sha: None,
+            },
+        ];
+
+        for payload in payloads {
+            assert!(is_known_payload(&payload));
+            let serialized = serde_json::to_value(&payload).unwrap();
+            let tag = serialized["event_type"].as_str().unwrap();
+            assert!(
+                known_event_type(tag),
+                "serialized Payload tag {tag:?} is not recognized by bundle import: {}",
+                json!(serialized)
+            );
+        }
+    }
 }
