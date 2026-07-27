@@ -121,6 +121,7 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                 },
                 plan_ref: brief.and_then(|brief| brief.plan_ref.clone()),
                 plan_slice: brief.and_then(|brief| brief.plan_slice.clone()),
+                base_revision: brief.and_then(|brief| brief.base_revision.clone()),
                 review,
             }
         })

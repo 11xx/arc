@@ -41,6 +41,7 @@ fn plan(repo: &Repo, topic: &str) -> String {
 #[test]
 fn brief_record_and_read_round_trip() {
     let repo = Repo::new();
+    let base_revision = repo.head(&repo.root);
     begin(&repo, "brief-roundtrip");
     let first_plan = plan(&repo, "first-plan");
     let second_plan = plan(&repo, "second-plan");
@@ -75,7 +76,7 @@ fn brief_record_and_read_round_trip() {
         .assert()
         .success()
         .stdout(format!(
-            "plan-ref: {first_plan}\nplan-slice: first-slice\n\n{v1}"
+            "base-revision: {base_revision}\nplan-ref: {first_plan}\nplan-slice: first-slice\n\n{v1}"
         ));
 
     repo.arc(&repo.root)
@@ -97,14 +98,14 @@ fn brief_record_and_read_round_trip() {
         .assert()
         .success()
         .stdout(format!(
-            "plan-ref: {second_plan}\nplan-slice: second-slice\n\n{v2}"
+            "base-revision: {base_revision}\nplan-ref: {second_plan}\nplan-slice: second-slice\n\n{v2}"
         ));
     repo.arc(&repo.root)
         .args(["brief", "brief-roundtrip", "--version", "1"])
         .assert()
         .success()
         .stdout(format!(
-            "plan-ref: {first_plan}\nplan-slice: first-slice\n\n{v1}"
+            "base-revision: {base_revision}\nplan-ref: {first_plan}\nplan-slice: first-slice\n\n{v1}"
         ));
     repo.arc(&repo.root)
         .args(["brief", "brief-roundtrip", "--version", "3"])
@@ -118,7 +119,7 @@ fn brief_record_and_read_round_trip() {
         .args(["brief", "brief-unlinked"])
         .assert()
         .success()
-        .stdout("ordinary brief\n");
+        .stdout(format!("base-revision: {base_revision}\nordinary brief\n"));
 }
 
 #[test]
@@ -222,6 +223,7 @@ fn brief_requires_body_flag_semantics() {
 #[test]
 fn brief_write_is_lead_only() {
     let repo = Repo::new();
+    let base_revision = repo.head(&repo.root);
     begin(&repo, "brief-roles");
     record(&repo, "brief-roles", "lead contract\n", None);
     for role in ["implementer", "reviewer"] {
@@ -237,7 +239,7 @@ fn brief_write_is_lead_only() {
             .args(["brief", "brief-roles"])
             .assert()
             .success()
-            .stdout("lead contract\n");
+            .stdout(format!("base-revision: {base_revision}\nlead contract\n"));
     }
     repo.arc(&repo.root)
         .env("ARC_ROLE", "lead")
@@ -297,8 +299,112 @@ fn brief_shows_in_show_and_status() {
 }
 
 #[test]
+fn brief_base_is_resolved_at_write_time_and_does_not_follow_head() {
+    let repo = Repo::new();
+    let revision_a = repo.head(&repo.root);
+    begin(&repo, "anchored-brief");
+    repo.arc(&repo.root)
+        .args(["brief", "anchored-brief", "--body-file", "-"])
+        .write_stdin("contract at A\n")
+        .assert()
+        .success();
+
+    repo.commit(
+        &repo.root,
+        "revision-b.txt",
+        "revision B\n",
+        "test: advance to B",
+    );
+    let revision_b = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args(["brief", "anchored-brief", "--body-file", "-"])
+        .write_stdin("contract at B\n")
+        .assert()
+        .success();
+
+    repo.commit(
+        &repo.root,
+        "revision-c.txt",
+        "revision C\n",
+        "test: advance to C",
+    );
+    repo.arc(&repo.root)
+        .args(["brief", "anchored-brief", "--version", "1"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "base-revision: {revision_a}"
+        )))
+        .stdout(predicates::str::contains("contract at A"));
+    repo.arc(&repo.root)
+        .args(["brief", "anchored-brief", "--version", "2"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "base-revision: {revision_b}"
+        )))
+        .stdout(predicates::str::contains("contract at B"));
+
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "anchored-brief",
+            "--body-file",
+            "-",
+            "--base",
+            "HEAD~2",
+        ])
+        .write_stdin("explicitly anchored\n")
+        .assert()
+        .success();
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "anchored-brief", "--json"]),
+    );
+    assert_eq!(status["brief"]["base_revision"], revision_a);
+
+    let artifact = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "seed-anchor",
+                "--kind",
+                "todo",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("seeded contract\n"),
+    );
+    let artifact = Path::new(artifact.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    repo.arc(&repo.root)
+        .args([
+            "begin",
+            "seed-anchor",
+            "--no-worktree",
+            "--base",
+            "HEAD~2",
+            "--from-journal",
+            &artifact,
+        ])
+        .assert()
+        .success();
+    let seeded = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "seed-anchor", "--json"]),
+    );
+    assert_eq!(seeded["base"], revision_a);
+    assert_eq!(seeded["brief"]["base_revision"], revision_a);
+}
+
+#[test]
 fn brief_closed_change_refuses_new_versions() {
     let repo = Repo::new();
+    let base_revision = repo.head(&repo.root);
     begin(&repo, "brief-closed");
     record(&repo, "brief-closed", "still readable\n", None);
     repo.arc(&repo.root)
@@ -315,5 +421,5 @@ fn brief_closed_change_refuses_new_versions() {
         .args(["brief", "brief-closed"])
         .assert()
         .success()
-        .stdout("still readable\n");
+        .stdout(format!("base-revision: {base_revision}\nstill readable\n"));
 }

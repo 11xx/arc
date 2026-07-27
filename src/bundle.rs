@@ -476,6 +476,7 @@ mod tests {
             Payload::BriefRecorded {
                 title: None,
                 body: "body".into(),
+                base_revision: None,
                 plan_ref: None,
                 plan_slice: None,
             },

@@ -231,6 +231,8 @@ pub struct BriefStatus {
     pub version: usize,
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_slice: Option<String>,
@@ -600,6 +602,7 @@ fn build_report(
         brief: state.latest_brief().map(|brief| BriefStatus {
             version: state.briefs.len(),
             title: brief.title.clone(),
+            base_revision: brief.base_revision.clone(),
             plan_ref: brief.plan_ref.clone(),
             plan_slice: brief.plan_slice.clone(),
             recorded_at: brief.ts,

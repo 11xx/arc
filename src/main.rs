@@ -264,6 +264,9 @@ enum Cmd {
         /// Optional title for a newly recorded brief
         #[arg(long)]
         title: Option<String>,
+        /// Revision whose source and premises this brief was checked against
+        #[arg(long)]
+        base: Option<String>,
         /// Read one derived brief version instead of the latest
         #[arg(long)]
         version: Option<usize>,
@@ -1099,6 +1102,7 @@ fn run(cli: Cli) -> Result<i32> {
             change,
             body_file,
             title,
+            base,
             version,
             scaffold,
             plan_ref,
@@ -1106,7 +1110,8 @@ fn run(cli: Cli) -> Result<i32> {
         } => {
             let change = infer(change.as_deref())?;
             commands::brief(
-                &ctx, role, &change, body_file, title, version, scaffold, plan_ref, plan_slice,
+                &ctx, role, &change, body_file, title, base, version, scaffold, plan_ref,
+                plan_slice,
             )
         }
         Cmd::Changelog {
