@@ -677,7 +677,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
         .arc(&worktree)
         .args(["check", "probe-readiness", "--json"])
         .assert()
-        .code(8)
+        .code(12)
         .get_output()
         .stdout
         .clone();
@@ -689,7 +689,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
         .iter()
         .any(
             |blocker| blocker["blocker"] == "acceptance-probes-not-green"
-                && blocker["exit_code"] == 8
+                && blocker["exit_code"] == 12
         ));
 
     repo.arc(&worktree)
@@ -699,7 +699,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
     repo.arc(&worktree)
         .args(["check", "probe-readiness"])
         .assert()
-        .code(8);
+        .code(12);
 
     git(&worktree, &["switch", "--detach", &base_revision]);
     repo.arc(&worktree)
@@ -740,7 +740,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
     repo.arc(&worktree)
         .args(["check", "probe-readiness"])
         .assert()
-        .code(8);
+        .code(12);
     repo.arc(&worktree)
         .args(["verify", "probe-readiness", "--probe", "marker-exists"])
         .assert()
@@ -773,7 +773,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
     repo.arc(&worktree)
         .args(["check", "probe-readiness"])
         .assert()
-        .code(8);
+        .code(12);
 
     let status = json_stdout(repo.arc(&worktree).args(["status", "probe-readiness"]));
     assert_eq!(status["schema"], "arc-status/5");
