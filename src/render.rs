@@ -329,6 +329,32 @@ pub fn markdown(
         }
     }
 
+    if !report.probes.is_empty() {
+        let _ = writeln!(w, "\n## Acceptance probes\n");
+        for probe in &report.probes {
+            let _ = writeln!(
+                w,
+                "- `{}` (brief v{}): baseline {} at `{}`; final {} at `{}` — {}",
+                probe.name,
+                probe.brief_version,
+                probe.baseline_result,
+                probe.baseline_revision,
+                probe.final_result,
+                probe.final_revision,
+                if probe.discriminating_at_head {
+                    "discriminating at head"
+                } else {
+                    "NOT discriminating at head"
+                }
+            );
+        }
+        let _ = writeln!(
+            w,
+            "\nBase-fail/head-pass proves behavioral discrimination, not semantic relevance; \
+             the reviewer must inspect the baseline output and confirm it failed for the intended reason."
+        );
+    }
+
     if !state.verification_runs.is_empty() {
         let _ = writeln!(w, "\n## Verification runs\n");
         for run in &state.verification_runs {
@@ -594,6 +620,19 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                     let _ = writeln!(out, "  - Gate `{}` is not green at head", gate.name);
                 }
             }
+            Blocker::AcceptanceProbesNotGreen => {
+                for probe in report
+                    .probes
+                    .iter()
+                    .filter(|probe| !probe.discriminating_at_head)
+                {
+                    let _ = writeln!(
+                        out,
+                        "  - Probe `{}` needs Fail at `{}` and Pass at `{}`",
+                        probe.name, probe.baseline_revision, probe.final_revision
+                    );
+                }
+            }
             Blocker::HoldActive => {
                 let _ = writeln!(
                     out,
@@ -617,6 +656,7 @@ fn blocker_title(blocker: Blocker) -> &'static str {
         Blocker::BlockingFindings => "open blocking findings",
         Blocker::NoValidApproval => "missing or stale approval",
         Blocker::GatesNotGreen => "required gates not green",
+        Blocker::AcceptanceProbesNotGreen => "acceptance probes not discriminating",
         Blocker::HoldActive => "hold active",
     }
 }
@@ -900,6 +940,23 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .iter()
             .filter(|gate| !gate.green_at_head)
             .map(|gate| format!("gate `{}` is not green at head", gate.name))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    condition(
+        &mut out,
+        Blocker::AcceptanceProbesNotGreen,
+        "declared acceptance probes discriminate",
+        report
+            .probes
+            .iter()
+            .filter(|probe| !probe.discriminating_at_head)
+            .map(|probe| {
+                format!(
+                    "probe `{}` needs fail at `{}` and pass at `{}`",
+                    probe.name, probe.baseline_revision, probe.final_revision
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n"),
     );

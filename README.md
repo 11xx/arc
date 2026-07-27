@@ -605,7 +605,11 @@ defaults to `final`, and `--brief-version <n>` selects a historical contract.
 A baseline run is valid only at that brief's base revision and treats command
 failure as its expected result. Final evidence treats command success as
 expected. Both phases retain the canonical brief and probe reference; `done`
-does not execute arbitrary acceptance probes.
+does not execute arbitrary acceptance probes. Once declared, every probe blocks
+readiness until evidence bound to the patchset brief fails at the brief base and
+passes at the patchset head. That pair proves behavioral discrimination, not
+semantic relevance: reviewers still inspect the baseline output to confirm the
+intended failure.
 
 `arc restack <change> --advise` prints, for each open dependent of a change,
 the exact `git rebase --onto <target> <base>` command to run in that
