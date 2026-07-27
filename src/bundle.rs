@@ -482,6 +482,7 @@ mod tests {
             Payload::BriefRecorded {
                 title: None,
                 body: "body".into(),
+                caused_by: Vec::new(),
                 base_revision: None,
                 acceptance_probes: Vec::new(),
                 plan_ref: None,

@@ -18,6 +18,18 @@ pub struct BriefRef {
     pub event_id: String,
 }
 
+/// The earlier ledger fact that caused a brief version. Each variant names a
+/// specific object rather than a generic edge, so replay can validate the
+/// reference against the kind it claims to be.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum BriefCause {
+    Finding { finding_id: String },
+    Verdict { event_id: String },
+    BlockedOnStage { event_id: String },
+    External { summary: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AcceptanceProbe {
     pub name: String,
@@ -109,6 +121,11 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         title: Option<String>,
         body: String,
+        /// Why this version exists. Empty on v1; required from v2, because a
+        /// renegotiated contract without a recorded cause is indistinguishable
+        /// from a proactive rewrite.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        caused_by: Vec<BriefCause>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_revision: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

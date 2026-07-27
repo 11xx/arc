@@ -842,10 +842,14 @@ fn export_import_preserves_plan_links_on_every_brief_version() {
                 .into_owned(),
         );
     }
-    for (plan_ref, plan_slice, body) in [
+    for (index, (plan_ref, plan_slice, body)) in [
         (&plans[0], "first-slice", "first contract\n"),
         (&plans[1], "second-slice", "second contract\n"),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let first = index == 0;
         source
             .arc(&source.root)
             .args([
@@ -858,6 +862,11 @@ fn export_import_preserves_plan_links_on_every_brief_version() {
                 "--plan-slice",
                 plan_slice,
             ])
+            .args(if first {
+                vec![]
+            } else {
+                vec!["--cause-note", "fixture revision"]
+            })
             .write_stdin(body)
             .assert()
             .success();

@@ -159,7 +159,14 @@ fn snapshot_records_brief_and_resnapshots_same_head_after_renegotiation() {
 
     let second = stdout(
         repo.arc(&worktree)
-            .args(["brief", "brief-bound-patchset", "--body-file", "-"])
+            .args([
+                "brief",
+                "brief-bound-patchset",
+                "--body-file",
+                "-",
+                "--cause-note",
+                "fixture revision",
+            ])
             .write_stdin("contract v2\n"),
     );
     let second_brief = second

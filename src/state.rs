@@ -41,6 +41,7 @@ pub struct Brief {
     pub actor: String,
     pub title: Option<String>,
     pub body: String,
+    pub caused_by: Vec<BriefCause>,
     pub base_revision: Option<String>,
     pub acceptance_probes: Vec<AcceptanceProbe>,
     pub plan_ref: Option<String>,
@@ -365,6 +366,9 @@ pub struct ChangeState {
     pub comments: Vec<CommentEntry>,
     pub findings: BTreeMap<String, FindingState>,
     pub verdicts: Vec<VerdictEntry>,
+    /// Event IDs of every `blocked-on` stage, so a later brief can name the
+    /// block that caused it without rescanning the event log.
+    pub blocked_on_stages: Vec<String>,
     pub verifications: Vec<VerificationEntry>,
     pub verification_runs: Vec<VerificationRunEntry>,
     pub claim: Option<ClaimState>,
@@ -409,19 +413,32 @@ impl ChangeState {
     }
 
     pub fn resolve_finding_id(&self, needle: &str) -> Result<String> {
-        if self.findings.contains_key(needle) {
-            return Ok(needle.to_string());
+        resolve_unique_id(self.findings.keys().map(String::as_str), needle, "finding")
+    }
+}
+
+/// Resolve a prefix to exactly one identifier, preferring an exact match.
+/// An ambiguous prefix refuses rather than picking the first candidate: the
+/// resolved id is written canonically into an append-only event, so guessing
+/// wrong is both permanent and silent.
+pub fn resolve_unique_id<'a>(
+    candidates: impl Iterator<Item = &'a str>,
+    needle: &str,
+    noun: &str,
+) -> Result<String> {
+    let mut prefixed = Vec::new();
+    for candidate in candidates {
+        if candidate == needle {
+            return Ok(candidate.to_string());
         }
-        let matches: Vec<&String> = self
-            .findings
-            .keys()
-            .filter(|k| k.starts_with(needle))
-            .collect();
-        match matches.len() {
-            0 => bail!("no finding matches {needle:?}"),
-            1 => Ok(matches[0].clone()),
-            _ => bail!("ambiguous finding {needle:?}"),
+        if candidate.starts_with(needle) {
+            prefixed.push(candidate);
         }
+    }
+    match prefixed.len() {
+        0 => bail!("no {noun} matches {needle:?}"),
+        1 => Ok(prefixed[0].to_string()),
+        _ => bail!("ambiguous {noun} {needle:?}"),
     }
 }
 
@@ -472,6 +489,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     comments: Vec::new(),
                     findings: BTreeMap::new(),
                     verdicts: Vec::new(),
+                    blocked_on_stages: Vec::new(),
                     verifications: Vec::new(),
                     verification_runs: Vec::new(),
                     claim: None,
@@ -554,6 +572,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             Payload::BriefRecorded {
                 title,
                 body,
+                caused_by,
                 base_revision,
                 acceptance_probes,
                 plan_ref,
@@ -564,6 +583,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 actor: ev.actor.clone(),
                 title: title.clone(),
                 body: body.clone(),
+                caused_by: caused_by.clone(),
                 base_revision: base_revision.clone(),
                 acceptance_probes: acceptance_probes.clone(),
                 plan_ref: plan_ref.clone(),
@@ -743,6 +763,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 blocker,
             } => {
                 crate::ids::validate_id_component(claim_id)?;
+                if *stage == ClaimStage::BlockedOn {
+                    state.blocked_on_stages.push(ev.event_id.clone());
+                }
                 if *stage != ClaimStage::BlockedOn && blocker.is_some() {
                     bail!("non-blocked stage {} carries a blocker", ev.event_id);
                 }

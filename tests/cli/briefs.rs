@@ -9,8 +9,18 @@ fn begin(repo: &Repo, slug: &str) -> String {
 }
 
 fn record(repo: &Repo, slug: &str, body: &str, title: Option<&str>) {
+    record_versioned(repo, slug, body, title, false)
+}
+
+/// Versions after the first require a recorded cause. Fixtures that only need
+/// a second version supply an external one, so the requirement stays exercised
+/// rather than bypassed.
+fn record_versioned(repo: &Repo, slug: &str, body: &str, title: Option<&str>, revision: bool) {
     let mut command = repo.arc(&repo.root);
     command.args(["brief", slug, "--body-file", "-"]);
+    if revision {
+        command.args(["--cause-note", "fixture revision"]);
+    }
     if let Some(title) = title {
         command.args(["--title", title]);
     }
@@ -85,6 +95,8 @@ fn brief_record_and_read_round_trip() {
             "brief-roundtrip",
             "--body-file",
             "-",
+            "--cause-note",
+            "fixture revision",
             "--plan-ref",
             &second_plan,
             "--plan-slice",
@@ -243,10 +255,203 @@ fn brief_write_is_lead_only() {
     }
     repo.arc(&repo.root)
         .env("ARC_ROLE", "lead")
-        .args(["brief", "brief-roles", "--body-file", "-"])
+        .args([
+            "brief",
+            "brief-roles",
+            "--body-file",
+            "-",
+            "--cause-note",
+            "fixture revision",
+        ])
         .write_stdin("lead update\n")
         .assert()
         .success();
+}
+
+#[test]
+fn brief_cause_is_canonical_validated_and_required_after_v1() {
+    let source = Repo::new();
+    let change_id = begin(&source, "brief-causes");
+    record(&source, "brief-causes", "initial contract\n", None);
+    let finding = stdout(source.arc(&source.root).args([
+        "finding",
+        "brief-causes",
+        "--summary",
+        "contract premise is false",
+    ]));
+    let finding_id = finding
+        .lines()
+        .find_map(|line| line.strip_prefix("finding: "))
+        .unwrap();
+    let finding_event = finding
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap();
+    let before = event_count(&source, &change_id);
+
+    source
+        .arc(&source.root)
+        .args(["brief", "brief-causes", "--body-file", "-"])
+        .write_stdin("uncausally revised\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "brief v2 requires at least one cause",
+        ));
+    source
+        .arc(&source.root)
+        .args([
+            "brief",
+            "brief-causes",
+            "--body-file",
+            "-",
+            "--caused-by",
+            &format!("verdict:{}", &finding_event[..12]),
+        ])
+        .write_stdin("wrong event type\n")
+        .assert()
+        .failure()
+        // A finding event is not a verdict at all, and saying so beats claiming
+        // it is a verdict of the wrong kind.
+        .stderr(predicates::str::contains("no verdict matches"));
+    assert_eq!(event_count(&source, &change_id), before);
+
+    source
+        .arc(&source.root)
+        .args([
+            "brief",
+            "brief-causes",
+            "--body-file",
+            "-",
+            "--caused-by",
+            &format!("finding:{}", &finding_id[..12]),
+        ])
+        .write_stdin("corrected contract\n")
+        .assert()
+        .success();
+
+    let state = json_stdout(
+        source
+            .arc(&source.root)
+            .args(["show", "brief-causes", "--json"]),
+    );
+    assert_eq!(
+        state["briefs"][1]["caused_by"],
+        serde_json::json!([{"kind": "finding", "finding_id": finding_id}])
+    );
+
+    let bundle = source.home.join("brief-causes.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            "brief-causes",
+            "--output",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let imported = json_stdout(
+        destination
+            .arc(&destination.root)
+            .args(["show", &change_id, "--json"]),
+    );
+    assert_eq!(
+        imported["briefs"][1]["caused_by"],
+        state["briefs"][1]["caused_by"]
+    );
+}
+
+/// A cause is resolved once and stored canonically in an append-only event, so
+/// an ambiguous prefix has to refuse. Picking the first candidate would record
+/// the wrong relationship permanently, and nothing downstream could tell.
+#[test]
+fn an_ambiguous_cause_prefix_refuses_rather_than_picking_one() {
+    let repo = Repo::new();
+    let change_id = begin(&repo, "ambiguous-cause");
+    record(&repo, "ambiguous-cause", "initial contract\n", None);
+    let mut finding_ids = Vec::new();
+    for summary in ["first premise is false", "second premise is false"] {
+        let out =
+            stdout(
+                repo.arc(&repo.root)
+                    .args(["finding", "ambiguous-cause", "--summary", summary]),
+            );
+        finding_ids.push(
+            out.lines()
+                .find_map(|line| line.strip_prefix("finding: "))
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let shared = finding_ids[0]
+        .chars()
+        .zip(finding_ids[1].chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    assert!(
+        shared > 0,
+        "identifiers share no prefix, so the case is untested: {finding_ids:?}"
+    );
+    let before = event_count(&repo, &change_id);
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "ambiguous-cause",
+            "--body-file",
+            "-",
+            "--caused-by",
+            &format!("finding:{}", &finding_ids[0][..shared]),
+        ])
+        .write_stdin("revised\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous finding"));
+    assert_eq!(event_count(&repo, &change_id), before);
+
+    // The full identifier still resolves, so the refusal is about ambiguity
+    // rather than a resolver that stopped working.
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "ambiguous-cause",
+            "--body-file",
+            "-",
+            "--caused-by",
+            &format!("finding:{}", finding_ids[1]),
+        ])
+        .write_stdin("revised\n")
+        .assert()
+        .success();
+}
+
+/// Every other write-only brief option refuses on the read path. Accepting a
+/// cause there would let an author believe a revision was justified on the
+/// record when the command only printed the existing brief.
+#[test]
+fn causes_require_a_write_like_every_other_write_only_brief_option() {
+    let repo = Repo::new();
+    begin(&repo, "read-path-causes");
+    record(&repo, "read-path-causes", "initial contract\n", None);
+    for args in [
+        vec!["--caused-by", "external:whatever"],
+        vec!["--cause-note", "a reason"],
+    ] {
+        repo.arc(&repo.root)
+            .args(["brief", "read-path-causes"])
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "--caused-by and --cause-note require --body-file or --scaffold",
+            ));
+    }
 }
 
 #[test]
@@ -261,6 +466,8 @@ fn brief_shows_in_show_and_status() {
             "brief-show",
             "--body-file",
             "-",
+            "--cause-note",
+            "fixture revision",
             "--title",
             "Current",
             "--plan-ref",
@@ -317,7 +524,14 @@ fn brief_base_is_resolved_at_write_time_and_does_not_follow_head() {
     );
     let revision_b = repo.head(&repo.root);
     repo.arc(&repo.root)
-        .args(["brief", "anchored-brief", "--body-file", "-"])
+        .args([
+            "brief",
+            "anchored-brief",
+            "--body-file",
+            "-",
+            "--cause-note",
+            "fixture revision",
+        ])
         .write_stdin("contract at B\n")
         .assert()
         .success();
@@ -351,6 +565,8 @@ fn brief_base_is_resolved_at_write_time_and_does_not_follow_head() {
             "anchored-brief",
             "--body-file",
             "-",
+            "--cause-note",
+            "fixture revision",
             "--base",
             "HEAD~2",
         ])
