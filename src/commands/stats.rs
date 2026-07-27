@@ -362,20 +362,28 @@ fn derive_rework(events: &[Event]) -> ReworkStats {
     }
 }
 
+/// A cause explains the round it belongs to, not each verdict that mentions it,
+/// so a cause repeated across several verdicts on one patchset counts once. A
+/// round citing two causes counts under both, so this tally sums above the
+/// round count by design.
 fn review_rounds_by_cause(events: &[Event]) -> BTreeMap<String, usize> {
-    let mut rounds = BTreeMap::new();
+    let mut by_round: BTreeMap<&str, BTreeSet<&'static str>> = BTreeMap::new();
     for event in events {
         if let Payload::VerdictRecorded {
+            patchset_id,
             verdict: Verdict::ChangesRequested,
             causes,
             ..
         } = &event.payload
         {
-            for cause in causes {
-                *rounds
-                    .entry(review_cause_name(*cause).to_string())
-                    .or_default() += 1;
-            }
+            let round = by_round.entry(patchset_id.as_str()).or_default();
+            round.extend(causes.iter().map(|cause| review_cause_name(*cause)));
+        }
+    }
+    let mut rounds = BTreeMap::new();
+    for causes in by_round.values() {
+        for cause in causes {
+            *rounds.entry((*cause).to_string()).or_default() += 1;
         }
     }
     rounds

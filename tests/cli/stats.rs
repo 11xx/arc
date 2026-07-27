@@ -144,19 +144,33 @@ fn rework_requires_changes_requested_then_new_patchset_then_approval() {
 fn several_changes_requested_on_one_patchset_are_one_round() {
     let repo = Repo::new();
     let (_, worktree, _) = change_with_patchset(&repo, "piled-up");
-    for cause in ["brief", "executor"] {
-        repo.arc(&worktree)
-            .args([
-                "review",
-                "piled-up",
-                "--verdict",
-                "changes-requested",
-                "--cause",
-                cause,
-            ])
-            .assert()
-            .success();
-    }
+    // The same cause twice, plus a second cause on the later verdict: the
+    // repeated one must collapse to its single round while the other still
+    // registers, so a per-verdict tally cannot pass this.
+    repo.arc(&worktree)
+        .args([
+            "review",
+            "piled-up",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args([
+            "review",
+            "piled-up",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+            "--cause",
+            "brief",
+        ])
+        .assert()
+        .success();
     repo.commit(&worktree, "answer.txt", "one\n", "fix: answer both rounds");
     repo.arc(&worktree)
         .args(["snapshot", "piled-up"])
@@ -178,5 +192,10 @@ fn several_changes_requested_on_one_patchset_are_one_round() {
     assert_eq!(change["completed_rework_rounds"], 1);
     assert_eq!(change["reworked"], true);
     assert_eq!(change["first_pass_approval"], false);
+    // Causes are attributed to the round, so the repeated one counts once and
+    // no cause tally can exceed the round count it explains.
+    assert_eq!(change["review_rounds_by_cause"]["executor"], 1);
+    assert_eq!(change["review_rounds_by_cause"]["brief"], 1);
     assert_eq!(report["aggregate"]["completed_rework_rounds"], 1);
+    assert_eq!(report["aggregate"]["review_rounds_by_cause"]["executor"], 1);
 }
