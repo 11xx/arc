@@ -23,9 +23,10 @@ daemon, no database, no network, no multi-machine ref sync.
 - The project journal lives outside the repo (`arc journal dir`) so
   worktrees stay clean; cross-session context goes there, not into
   tracked files.
-- DELEGATION.md is the canon for mechanism-routing prose and is referenced
-  by global agent config — edit deliberately, keep it in sync with the
-  `agent-routing` manifests.
+- arc holds no routing opinion. It records whatever `--model`, `--actor` and
+  `--harness` it is given and never selects among them, so any model in any
+  harness can drive it. Delegation doctrine belongs to whoever is delegating,
+  not to the ledger.
 
 ## Working here
 
