@@ -117,3 +117,56 @@ pub(crate) fn doctor_groups_advice_and_ignores_closed_claims() {
         .failure()
         .code(2);
 }
+
+pub(crate) fn doctor_reports_closed_registered_worktrees_without_removing_them() {
+    let repo = Repo::new();
+    let close_with_worktree = |slug: &str| {
+        let opened = stdout(repo.arc(&repo.root).args(["begin", slug]));
+        let change_id = opened_change_id(&opened);
+        let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+        repo.arc(&repo.root)
+            .args(["close", slug, "--abandoned"])
+            .assert()
+            .success();
+        (change_id, worktree)
+    };
+    let (first_id, first_path) = close_with_worktree("doctor-closed-one");
+    let (second_id, second_path) = close_with_worktree("doctor-closed-two");
+    let (removed_id, removed_path) = close_with_worktree("doctor-closed-removed");
+    git(
+        &repo.root,
+        &["worktree", "remove", removed_path.to_str().unwrap()],
+    );
+
+    let registrations_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+    let default = stdout(repo.arc(&repo.root).arg("doctor"));
+    assert!(
+        default.contains(
+            "closed-change-worktree: 2 registered worktrees belong to closed changes; \
+             run arc doctor --verbose to list change/path pairs; remove only with \
+             git worktree remove <path>"
+        ),
+        "{default}"
+    );
+    assert!(!default.contains(&first_id), "{default}");
+    assert!(!default.contains(&second_id), "{default}");
+    assert!(!default.contains(&removed_id), "{default}");
+
+    let verbose = stdout(repo.arc(&repo.root).args(["doctor", "--verbose"]));
+    for (change_id, path) in [(&first_id, &first_path), (&second_id, &second_path)] {
+        assert!(
+            verbose.contains(&format!(
+                "closed-change-worktree: {change_id} [abandoned]: {}",
+                path.display()
+            )),
+            "{verbose}"
+        );
+    }
+    assert!(!verbose.contains(&removed_id), "{verbose}");
+    assert!(first_path.is_dir());
+    assert!(second_path.is_dir());
+    assert_eq!(
+        git_out(&repo.root, &["worktree", "list", "--porcelain"]),
+        registrations_before
+    );
+}

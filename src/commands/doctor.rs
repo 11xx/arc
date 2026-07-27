@@ -7,7 +7,7 @@
 use crate::commands::{self, Ctx};
 use crate::gitio;
 use crate::ids;
-use crate::model::{Event, Payload};
+use crate::model::{Closure, Event, Payload};
 use crate::state::{self, claim_timing_at, ChangeState};
 use crate::store::Store;
 use anyhow::{Context, Result};
@@ -52,6 +52,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         &mut known_patchsets,
     )?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
+    inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
 
     let open_states = states
         .iter()
@@ -268,6 +269,35 @@ fn inspect_refs(
     Ok(())
 }
 
+fn inspect_closed_worktrees(
+    cwd: &Path,
+    states: &BTreeMap<String, ChangeState>,
+    advice: &mut Vec<Finding>,
+) -> Result<()> {
+    let registered = gitio::git(cwd, &["worktree", "list", "--porcelain"])?
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    for (change_id, state) in states {
+        let (Some(closure), Some(worktree)) = (&state.closure, &state.worktree) else {
+            continue;
+        };
+        if registered.contains(worktree) {
+            let outcome = match closure.outcome {
+                Closure::Integrated => "integrated",
+                Closure::Abandoned => "abandoned",
+                Closure::Superseded => "superseded",
+            };
+            advice.push(Finding {
+                code: "closed-change-worktree",
+                detail: format!("{change_id} [{outcome}]: {worktree}"),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn render(label: &str, findings: &[Finding]) {
     println!("{label}:");
     if findings.is_empty() {
@@ -332,6 +362,11 @@ fn grouped_summary(code: &str, count: usize) -> Option<String> {
         "orphaned-retention-ref" => format!(
             "{count} retention refs do not identify a known patchset; \
              run arc doctor --verbose to list refs"
+        ),
+        "closed-change-worktree" => format!(
+            "{count} registered worktrees belong to closed changes; \
+             run arc doctor --verbose to list change/path pairs; remove only with \
+             git worktree remove <path>"
         ),
         _ => return None,
     };
