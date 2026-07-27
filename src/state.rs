@@ -413,19 +413,32 @@ impl ChangeState {
     }
 
     pub fn resolve_finding_id(&self, needle: &str) -> Result<String> {
-        if self.findings.contains_key(needle) {
-            return Ok(needle.to_string());
+        resolve_unique_id(self.findings.keys().map(String::as_str), needle, "finding")
+    }
+}
+
+/// Resolve a prefix to exactly one identifier, preferring an exact match.
+/// An ambiguous prefix refuses rather than picking the first candidate: the
+/// resolved id is written canonically into an append-only event, so guessing
+/// wrong is both permanent and silent.
+pub fn resolve_unique_id<'a>(
+    candidates: impl Iterator<Item = &'a str>,
+    needle: &str,
+    noun: &str,
+) -> Result<String> {
+    let mut prefixed = Vec::new();
+    for candidate in candidates {
+        if candidate == needle {
+            return Ok(candidate.to_string());
         }
-        let matches: Vec<&String> = self
-            .findings
-            .keys()
-            .filter(|k| k.starts_with(needle))
-            .collect();
-        match matches.len() {
-            0 => bail!("no finding matches {needle:?}"),
-            1 => Ok(matches[0].clone()),
-            _ => bail!("ambiguous finding {needle:?}"),
+        if candidate.starts_with(needle) {
+            prefixed.push(candidate);
         }
+    }
+    match prefixed.len() {
+        0 => bail!("no {noun} matches {needle:?}"),
+        1 => Ok(prefixed[0].to_string()),
+        _ => bail!("ambiguous {noun} {needle:?}"),
     }
 }
 

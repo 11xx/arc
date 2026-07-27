@@ -329,42 +329,35 @@ fn resolve_brief_causes(
             bail!("--caused-by {raw} has an empty reference");
         }
         causes.push(match kind {
-            "finding" => {
-                let id = state
-                    .findings
-                    .keys()
-                    .find(|id| id.starts_with(reference))
-                    .with_context(|| format!("no finding in this change matches {reference}"))?
-                    .clone();
-                BriefCause::Finding { finding_id: id }
-            }
+            "finding" => BriefCause::Finding {
+                finding_id: state.resolve_finding_id(reference)?,
+            },
             "verdict" => {
+                let event_id = crate::state::resolve_unique_id(
+                    state
+                        .verdicts
+                        .iter()
+                        .map(|verdict| verdict.event_id.as_str()),
+                    reference,
+                    "verdict",
+                )?;
                 let verdict = state
                     .verdicts
                     .iter()
-                    .find(|verdict| verdict.event_id.starts_with(reference))
-                    .with_context(|| {
-                        format!(
-                            "event {reference} is not a changes-requested verdict in this change"
-                        )
-                    })?;
+                    .find(|verdict| verdict.event_id == event_id)
+                    .expect("resolved id came from this collection");
                 if verdict.verdict != Verdict::ChangesRequested {
                     bail!("event {reference} is not a changes-requested verdict");
                 }
-                BriefCause::Verdict {
-                    event_id: verdict.event_id.clone(),
-                }
+                BriefCause::Verdict { event_id }
             }
-            "blocked-on" => {
-                let stage = state
-                    .blocked_on_stages
-                    .iter()
-                    .find(|event_id| event_id.starts_with(reference))
-                    .with_context(|| format!("event {reference} is not a blocked-on stage"))?;
-                BriefCause::BlockedOnStage {
-                    event_id: stage.clone(),
-                }
-            }
+            "blocked-on" => BriefCause::BlockedOnStage {
+                event_id: crate::state::resolve_unique_id(
+                    state.blocked_on_stages.iter().map(String::as_str),
+                    reference,
+                    "blocked-on stage",
+                )?,
+            },
             other => bail!("unknown cause kind {other}; expected finding, verdict, or blocked-on"),
         });
     }
@@ -481,6 +474,9 @@ pub fn brief(
     }
     if plan_ref.is_some() {
         bail!("--plan-ref and --plan-slice require --body-file or --scaffold");
+    }
+    if !caused_by.is_empty() || cause_note.is_some() {
+        bail!("--caused-by and --cause-note require --body-file or --scaffold");
     }
     let store = ctx.store()?;
     let (_, state) = ctx.load_state(&store, reference)?;

@@ -311,9 +311,9 @@ fn brief_cause_is_canonical_validated_and_required_after_v1() {
         .write_stdin("wrong event type\n")
         .assert()
         .failure()
-        .stderr(predicates::str::contains(
-            "is not a changes-requested verdict",
-        ));
+        // A finding event is not a verdict at all, and saying so beats claiming
+        // it is a verdict of the wrong kind.
+        .stderr(predicates::str::contains("no verdict matches"));
     assert_eq!(event_count(&source, &change_id), before);
 
     source
@@ -366,6 +366,92 @@ fn brief_cause_is_canonical_validated_and_required_after_v1() {
         imported["briefs"][1]["caused_by"],
         state["briefs"][1]["caused_by"]
     );
+}
+
+/// A cause is resolved once and stored canonically in an append-only event, so
+/// an ambiguous prefix has to refuse. Picking the first candidate would record
+/// the wrong relationship permanently, and nothing downstream could tell.
+#[test]
+fn an_ambiguous_cause_prefix_refuses_rather_than_picking_one() {
+    let repo = Repo::new();
+    let change_id = begin(&repo, "ambiguous-cause");
+    record(&repo, "ambiguous-cause", "initial contract\n", None);
+    let mut finding_ids = Vec::new();
+    for summary in ["first premise is false", "second premise is false"] {
+        let out =
+            stdout(
+                repo.arc(&repo.root)
+                    .args(["finding", "ambiguous-cause", "--summary", summary]),
+            );
+        finding_ids.push(
+            out.lines()
+                .find_map(|line| line.strip_prefix("finding: "))
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let shared = finding_ids[0]
+        .chars()
+        .zip(finding_ids[1].chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    assert!(
+        shared > 0,
+        "identifiers share no prefix, so the case is untested: {finding_ids:?}"
+    );
+    let before = event_count(&repo, &change_id);
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "ambiguous-cause",
+            "--body-file",
+            "-",
+            "--caused-by",
+            &format!("finding:{}", &finding_ids[0][..shared]),
+        ])
+        .write_stdin("revised\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ambiguous finding"));
+    assert_eq!(event_count(&repo, &change_id), before);
+
+    // The full identifier still resolves, so the refusal is about ambiguity
+    // rather than a resolver that stopped working.
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "ambiguous-cause",
+            "--body-file",
+            "-",
+            "--caused-by",
+            &format!("finding:{}", finding_ids[1]),
+        ])
+        .write_stdin("revised\n")
+        .assert()
+        .success();
+}
+
+/// Every other write-only brief option refuses on the read path. Accepting a
+/// cause there would let an author believe a revision was justified on the
+/// record when the command only printed the existing brief.
+#[test]
+fn causes_require_a_write_like_every_other_write_only_brief_option() {
+    let repo = Repo::new();
+    begin(&repo, "read-path-causes");
+    record(&repo, "read-path-causes", "initial contract\n", None);
+    for args in [
+        vec!["--caused-by", "external:whatever"],
+        vec!["--cause-note", "a reason"],
+    ] {
+        repo.arc(&repo.root)
+            .args(["brief", "read-path-causes"])
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "--caused-by and --cause-note require --body-file or --scaffold",
+            ));
+    }
 }
 
 #[test]

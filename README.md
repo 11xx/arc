@@ -619,6 +619,16 @@ Every newly written brief also records the full current `HEAD` as its immutable
 base revision. `--base <revision>` selects another revision and resolves it at
 write time; legacy briefs alone may have no base revision.
 
+Every brief after the first records why it exists. `--caused-by
+finding:<id>`, `verdict:<event>` or `blocked-on:<event>` cites a prior event
+in the same change; `--cause-note <summary>` states an external reason in
+prose. Both may be repeated and combined, both require `--body-file` or
+`--scaffold`, and v1 refuses them — a first contract has no prior version to
+justify. A `verdict:` reference must name a `changes-requested` verdict,
+because the other verdicts do not ask for a revision. References resolve by
+unique prefix and are stored canonically, so an ambiguous prefix refuses
+rather than picking a candidate: the resolved identifier is permanent.
+
 `--probes-json <file>` binds named acceptance commands to one brief version.
 Probe names are unique kebab-case slugs. Run a declaration explicitly with
 `arc verify <change> --probe <name> --probe-phase baseline|final`; the phase
