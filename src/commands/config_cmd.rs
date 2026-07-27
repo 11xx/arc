@@ -107,7 +107,7 @@ fn probe_commit(ctx: &Ctx) -> Result<String> {
     Ok(if signed {
         "signed commit".into()
     } else {
-        "unsigned commit (commit.gpgsign is not set)".into()
+        "unsigned commit (commit.gpgsign is off)".into()
     })
 }
 
@@ -117,7 +117,18 @@ fn probe_commit_in(dir: &Path, ctx: &Ctx, signed: bool) -> Result<()> {
     // would fail for a reason unrelated to what is being probed.
     gitio::git(dir, &["config", "user.name", "arc probe"])?;
     gitio::git(dir, &["config", "user.email", "probe@arc.invalid"])?;
-    let mut args = vec!["commit", "--allow-empty", "--quiet", "-m", "arc probe"];
+    // The probe repository inherits global config, so pin signing to what the
+    // target repository resolves to. A global `commit.gpgsign` would otherwise
+    // make the probe sign a commit the real ceremony never signs, and fail on a
+    // credential that never applies.
+    gitio::git(
+        dir,
+        &[
+            "config",
+            "commit.gpgsign",
+            if signed { "true" } else { "false" },
+        ],
+    )?;
     if signed {
         // Carry the project's signing key so the probe exercises the same
         // credential the real commit will use.
@@ -127,14 +138,25 @@ fn probe_commit_in(dir: &Path, ctx: &Ctx, signed: bool) -> Result<()> {
         if let Some(format) = git_config(ctx, "gpg.format") {
             gitio::git(dir, &["config", "gpg.format", &format])?;
         }
-        args.push("-S");
     }
-    gitio::git(dir, &args).context("cannot create a commit")?;
+    gitio::git(
+        dir,
+        &["commit", "--allow-empty", "--quiet", "-m", "arc probe"],
+    )
+    .context("cannot create a commit")?;
     Ok(())
 }
 
+/// Git accepts every boolean spelling for `commit.gpgsign` — `yes`, `on`, `1`,
+/// `True` — so ask Git to resolve it rather than matching one of them. Reading
+/// the raw string would report a signing repository as unsigned, which is the
+/// case this probe exists to catch.
 fn signing_required(ctx: &Ctx) -> bool {
-    git_config(ctx, "commit.gpgsign").is_some_and(|value| value == "true")
+    gitio::git(
+        &ctx.cwd,
+        &["config", "--get", "--type=bool", "commit.gpgsign"],
+    )
+    .is_ok_and(|value| value.trim() == "true")
 }
 
 fn git_config(ctx: &Ctx, key: &str) -> Option<String> {

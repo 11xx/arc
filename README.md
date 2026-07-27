@@ -653,7 +653,12 @@ not apply. A delegated snapshot can instead declare its subject with
 Before starting an executor in a sandbox, run `arc config --check-writable`.
 It probes the ledger root, lock, event-path, and Git-ref writes without adding
 an event; `--json` emits `arc-writability/1` for automation and stops at the
-first blocked path.
+first blocked path. It also probes committing, in a throwaway repository so the
+target gains no commit, because a sandbox that cannot reach the signing agent
+otherwise discovers it only once a slice is ready to land. The probe follows
+the repository's resolved `commit.gpgsign` and carries its signing key, so it
+exercises the credential the real commit will use and ignores a global signing
+policy the repository overrides.
 
 Change derivation: `begin` targets the branch checked out in the
 **primary worktree** (the main checkout — normally master/main), not
