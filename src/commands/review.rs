@@ -174,9 +174,6 @@ pub fn snapshot(
     let _transition = store.lock_transition(&change_id)?;
     let events = store.load_events(&change_id)?;
     let st = state::reduce(&events)?;
-    if st.is_closed() {
-        bail!("change {change_id} is closed");
-    }
     let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
     let merge_base = gitio::branch_head(&ctx.cwd, &st.target_branch)
         .ok()
@@ -197,12 +194,10 @@ pub fn snapshot(
     .map(|brief| BriefRef {
         event_id: brief.event_id.clone(),
     });
-    if let Some(p) = st.latest_patchset() {
-        if p.head == head && p.base == base_rev && p.brief_ref == brief_ref {
-            println!("patchset: {} (unchanged)", p.id);
-            return Ok(());
-        }
-    }
+    let unchanged_patchset = st
+        .latest_patchset()
+        .filter(|p| p.head == head && p.base == base_rev && p.brief_ref == brief_ref)
+        .map(|p| p.id.clone());
     let identity = gitio::commit_identity(&ctx.cwd, &head)?;
     let now = chrono::Utc::now();
     let snapshot_claim = st
@@ -210,24 +205,25 @@ pub fn snapshot(
         .as_ref()
         .filter(|claim| state::claim_timing_at(claim, now).active);
     let patchset_id = format!("ps-{:02}", st.patchsets.len() + 1);
-    let mut ev = ctx.event_at(
-        &store,
-        &change_id,
-        now,
-        Payload::PatchsetAdded {
-            patchset_id: patchset_id.clone(),
-            base: base_rev,
-            head: head.clone(),
-            merge_base,
-            brief_ref,
-            author_name: Some(identity.author_name),
-            author_email: Some(identity.author_email),
-            committer_name: Some(identity.committer_name),
-            committer_email: Some(identity.committer_email),
-            claim_id: snapshot_claim.map(|claim| claim.claim_id.clone()),
-            claim_actor: snapshot_claim.map(|claim| claim.owner.actor.clone()),
-        },
-    );
+    let payload = Payload::PatchsetAdded {
+        patchset_id: patchset_id.clone(),
+        base: base_rev,
+        head: head.clone(),
+        merge_base,
+        brief_ref,
+        author_name: Some(identity.author_name),
+        author_email: Some(identity.author_email),
+        committer_name: Some(identity.committer_name),
+        committer_email: Some(identity.committer_email),
+        claim_id: snapshot_claim.map(|claim| claim.claim_id.clone()),
+        claim_actor: snapshot_claim.map(|claim| claim.owner.actor.clone()),
+    };
+    ensure_append_allowed(&st, &payload)?;
+    if let Some(patchset_id) = unchanged_patchset {
+        println!("patchset: {patchset_id} (unchanged)");
+        return Ok(());
+    }
+    let mut ev = ctx.event_at(&store, &change_id, now, payload);
     ev.event_id = event_id_after(
         &events
             .last()
@@ -286,25 +282,20 @@ pub fn finding(
 ) -> Result<()> {
     let store = ctx.store()?;
     let (change_id, _transition, st) = locked_state(&store, reference)?;
-    if st.is_closed() {
-        bail!("change {change_id} is closed");
-    }
     let patchset_id = resolve_patchset_id(&st, patchset)?;
     let anchor = build_anchor(ctx, &st, patchset_id.as_deref(), anchor_args)?;
     let finding_id = ids::new_finding_id();
-    let ev = ctx.event(
-        &store,
-        &change_id,
-        Payload::FindingAdded {
-            finding_id: finding_id.clone(),
-            blocking,
-            severity,
-            summary,
-            body,
-            patchset_id,
-            anchor,
-        },
-    );
+    let payload = Payload::FindingAdded {
+        finding_id: finding_id.clone(),
+        blocking,
+        severity,
+        summary,
+        body,
+        patchset_id,
+        anchor,
+    };
+    ensure_append_allowed(&st, &payload)?;
+    let ev = ctx.event(&store, &change_id, payload);
     store.append_event(&ev)?;
     println!("finding: {finding_id}");
     println!("event: {}", ev.event_id);
@@ -340,9 +331,6 @@ pub fn resolve(
 ) -> Result<()> {
     let store = ctx.store()?;
     let (change_id, _transition, st) = locked_state(&store, reference)?;
-    if st.is_closed() {
-        bail!("change {change_id} is closed");
-    }
     let finding_id = match store.resolve_discussion_event(&change_id, &finding) {
         Ok(event) => match event.payload {
             Payload::FindingAdded { finding_id, .. } => finding_id,
@@ -363,17 +351,15 @@ pub fn resolve(
         .iter()
         .map(|t| t.event_id.clone())
         .collect();
-    let ev = ctx.event(
-        &store,
-        &change_id,
-        Payload::DispositionRecorded {
-            finding_id: finding_id.clone(),
-            status: disposition,
-            commit,
-            evidence,
-            supersedes,
-        },
-    );
+    let payload = Payload::DispositionRecorded {
+        finding_id: finding_id.clone(),
+        status: disposition,
+        commit,
+        evidence,
+        supersedes,
+    };
+    ensure_append_allowed(&st, &payload)?;
+    let ev = ctx.event(&store, &change_id, payload);
     store.append_event(&ev)?;
     println!("finding: {finding_id} → {disposition:?}");
     println!("event: {}", ev.event_id);
@@ -427,9 +413,6 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     let _transition = store.lock_transition(&change_id)?;
     let events = store.load_events(&change_id)?;
     let st = state::reduce(&events)?;
-    if st.is_closed() {
-        bail!("change {change_id} is closed");
-    }
     let patchset_id = resolve_patchset_id(&st, patchset)?
         .context("no patchset to review; run `arc snapshot` first")?;
 
@@ -479,17 +462,15 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     }
 
     let finding_ids: Vec<String> = inline.iter().map(|f| f.finding_id.clone()).collect();
-    let mut ev = ctx.event(
-        &store,
-        &change_id,
-        Payload::VerdictRecorded {
-            patchset_id: patchset_id.clone(),
-            verdict,
-            causes,
-            body,
-            findings: inline,
-        },
-    );
+    let payload = Payload::VerdictRecorded {
+        patchset_id: patchset_id.clone(),
+        verdict,
+        causes,
+        body,
+        findings: inline,
+    };
+    ensure_append_allowed(&st, &payload)?;
+    let mut ev = ctx.event(&store, &change_id, payload);
     ev.event_id = event_id_after(
         &events
             .last()

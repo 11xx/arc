@@ -1257,6 +1257,117 @@ fn closed_change_append_policy_matches_command_families() {
 }
 
 #[test]
+fn append_policy_has_a_single_authority() {
+    let commands = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
+    let allowed = [
+        "chain.rs::chain::state:ifstate.is_closed(){",
+        "claims.rs::ready_candidate::!candidate.is_closed()",
+        "gatekeeping.rs::check_tagged::ifstate.is_closed(){",
+        "gatekeeping.rs::close::ifst.is_closed(){",
+        "gatekeeping.rs::integrate_one::ifst.is_closed()&&matches!(closed_behavior,ClosedBehavior::SkipTagged){",
+        "hooks.rs::change_for_branch::ifstate.is_closed(){",
+        "hooks.rs::post_commit::ifstate.is_closed(){",
+        "hooks.rs::prepare_commit_msg::ifstate.is_closed(){",
+        "lifecycle.rs::begin::ifst.is_closed(){",
+        "lifecycle.rs::list::.filter(|state|!open_only||!state.is_closed())",
+        "lifecycle.rs::list_row::\"state\":ifstate.is_closed(){\"closed\"}else{\"open\"},",
+        "lifecycle.rs::status_matches::\"closed\"=>state.is_closed(),",
+        "messaging.rs::inbox::ifstate.is_closed(){",
+        "mod.rs::find_unblocked_changes::&&!candidate.is_closed()",
+        "observe.rs::watch_reached::WatchUntil::Closed=>state.is_closed(),",
+        "stats.rs::change_stats::state:ifstate.is_closed(){\"closed\"}else{\"open\"},",
+        "workspace.rs::restack::.filter(|candidate|!candidate.is_closed()&&candidate.blocked_by.contains(&change_id))",
+        "workspace.rs::restack::if!state.is_closed(){",
+        "workspace.rs::workspace_inbox::ifstate.is_closed(){",
+        "workspace.rs::workspace_list::.filter(|state|!state.is_closed())",
+    ];
+    let mut found = Vec::new();
+    let mut bailing = Vec::new();
+
+    for entry in fs::read_dir(commands).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+            continue;
+        }
+        let source = fs::read_to_string(&path).unwrap();
+        let file = path.file_name().unwrap().to_string_lossy();
+        for (offset, _) in source.match_indices("is_closed()") {
+            let function = source[..offset]
+                .lines()
+                .rev()
+                .find_map(|line| {
+                    let marker = line.find("fn ")?;
+                    let name = &line[marker + 3..];
+                    Some(name.split(['(', '<']).next().unwrap().trim().to_owned())
+                })
+                .unwrap();
+            let line_start = source[..offset].rfind('\n').map_or(0, |index| index + 1);
+            let line_end = source[offset..]
+                .find('\n')
+                .map_or(source.len(), |index| offset + index);
+            let compact_line = source[line_start..line_end]
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            let site = format!("{file}::{function}::{compact_line}");
+            found.push(site.clone());
+
+            let before_check = &source[line_start..offset];
+            if before_check.split_whitespace().any(|word| word == "if")
+                || before_check.trim_end().ends_with("if")
+            {
+                let tail = &source[offset..];
+                if let Some(open) = tail.find('{') {
+                    let mut depth = 0usize;
+                    let mut close = None;
+                    for (index, character) in tail[open..].char_indices() {
+                        match character {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    close = Some(open + index + 1);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let block = &tail[open..close.unwrap()];
+                    let compact_block = block
+                        .chars()
+                        .filter(|character| !character.is_whitespace())
+                        .collect::<String>();
+                    let lifecycle_close = site == "gatekeeping.rs::close::ifst.is_closed(){"
+                        && compact_block.contains(r#"bail!("change{change_id}isalreadyclosed");"#);
+                    if compact_block.contains("bail!(") && !lifecycle_close {
+                        bailing.push(site);
+                    }
+                }
+            }
+        }
+    }
+
+    found.sort();
+    let mut allowed = allowed.into_iter().map(str::to_owned).collect::<Vec<_>>();
+    allowed.sort();
+    let unexpected = found
+        .iter()
+        .filter(|site| !allowed.contains(site))
+        .collect::<Vec<_>>();
+    let missing = allowed
+        .iter()
+        .filter(|site| !found.contains(site))
+        .collect::<Vec<_>>();
+    assert!(
+        unexpected.is_empty() && missing.is_empty() && bailing.is_empty(),
+        "closed-change append guards must use ensure_append_allowed; \
+         unexpected sites: {unexpected:?}; missing allowlisted sites: {missing:?}; \
+         bailing sites: {bailing:?}"
+    );
+}
+
+#[test]
 fn show_renders_messages_section_chronologically() {
     let repo = Repo::new();
     begin_change(&repo, "msg-show", None);

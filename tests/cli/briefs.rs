@@ -632,7 +632,9 @@ fn brief_closed_change_refuses_new_versions() {
         .write_stdin("too late\n")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("is closed"));
+        .stderr(predicates::str::contains(
+            "is abandoned; event is open-only",
+        ));
     repo.arc(&repo.root)
         .args(["brief", "brief-closed"])
         .assert()

@@ -325,7 +325,9 @@ fn batch_check_treats_all_closed_outcomes_as_terminal() {
         .args(["metadata", "batch-abandoned", "--tag", "#too-late"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("is closed"));
+        .stderr(predicates::str::contains(
+            "is abandoned; event is open-only",
+        ));
     complete_change(&repo, "batch-live");
 
     repo.arc(&repo.root)
