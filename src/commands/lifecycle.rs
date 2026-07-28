@@ -434,32 +434,28 @@ pub fn brief(
         )?);
         let store = ctx.store()?;
         let (change_id, _transition, state) = locked_state(&store, reference)?;
-        if state.is_closed() {
-            bail!("change {change_id} is closed");
-        }
         let next_version = state.briefs.len() + 1;
         let causes = resolve_brief_causes(&state, &caused_by, cause_note.as_deref())?;
+        let has_causes = !causes.is_empty();
+        let payload = Payload::BriefRecorded {
+            title,
+            body,
+            caused_by: causes,
+            base_revision,
+            acceptance_probes,
+            plan_ref,
+            plan_slice,
+        };
+        ensure_append_allowed(&state, &payload)?;
         // A first brief has nothing to be caused by. Every later version is a
         // renegotiation, and the reason is the fact worth keeping.
-        if next_version > 1 && causes.is_empty() {
+        if next_version > 1 && !has_causes {
             bail!("brief v{next_version} requires at least one cause: pass --caused-by or --cause-note");
         }
-        if next_version == 1 && !causes.is_empty() {
+        if next_version == 1 && has_causes {
             bail!("brief v1 cannot have a cause");
         }
-        let event = ctx.event(
-            &store,
-            &change_id,
-            Payload::BriefRecorded {
-                title,
-                body,
-                caused_by: causes,
-                base_revision,
-                acceptance_probes,
-                plan_ref,
-                plan_slice,
-            },
-        );
+        let event = ctx.event(&store, &change_id, payload);
         store.append_event(&event)?;
         println!("brief: v{next_version}");
         println!("event: {}", event.event_id);
@@ -539,9 +535,6 @@ pub fn metadata(
     let store = ctx.store()?;
     let _graph = store.lock_graph()?;
     let (change_id, _transition, state) = locked_state(&store, reference)?;
-    if state.is_closed() {
-        bail!("change {change_id} is closed");
-    }
     let states = ctx.load_all_states(&store)?;
     let add_blocked_by = blocked_by
         .iter()
@@ -583,18 +576,16 @@ pub fn metadata(
     {
         bail!("provide at least one metadata change");
     }
-    let event = ctx.event(
-        &store,
-        &change_id,
-        Payload::MetadataUpdated {
-            add_blocked_by,
-            remove_blocked_by,
-            add_tags,
-            remove_tags,
-            assign,
-            priority,
-        },
-    );
+    let payload = Payload::MetadataUpdated {
+        add_blocked_by,
+        remove_blocked_by,
+        add_tags,
+        remove_tags,
+        assign,
+        priority,
+    };
+    ensure_append_allowed(&state, &payload)?;
+    let event = ctx.event(&store, &change_id, payload);
     store.append_event(&event)?;
     println!("event: {}", event.event_id);
     Ok(())

@@ -166,9 +166,6 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     };
     let store = ctx.store()?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
-    if st.is_closed() {
-        bail!("change {change_id} is closed");
-    }
     let toplevel = gitio::toplevel(&ctx.cwd)?;
     if let Some(probe_name) = probe {
         let (version, brief) = match brief_version {
@@ -354,26 +351,21 @@ fn start_verification_run(
 ) -> Result<String> {
     let _transition = store.lock_transition(change_id)?;
     let state = state::reduce(&store.load_events(change_id)?)?;
-    if state.is_closed() {
-        bail!("change {change_id} is closed");
-    }
-    let event = ctx.event(
-        store,
-        change_id,
-        Payload::VerificationRunStarted {
-            revision: revision.to_owned(),
-            mode,
-            skip_green,
-            gates: gates
-                .iter()
-                .map(|(name, gate)| VerificationRunGate {
-                    name: (*name).clone(),
-                    command: gate.command.clone(),
-                    timeout_seconds: gate.timeout,
-                })
-                .collect(),
-        },
-    );
+    let payload = Payload::VerificationRunStarted {
+        revision: revision.to_owned(),
+        mode,
+        skip_green,
+        gates: gates
+            .iter()
+            .map(|(name, gate)| VerificationRunGate {
+                name: (*name).clone(),
+                command: gate.command.clone(),
+                timeout_seconds: gate.timeout,
+            })
+            .collect(),
+    };
+    ensure_append_allowed(&state, &payload)?;
+    let event = ctx.event(store, change_id, payload);
     let run_id = event.event_id.clone();
     store.append_event(&event)?;
     Ok(run_id)
@@ -393,25 +385,20 @@ fn append_reuses(
     let _transition = store.lock_transition(change_id)?;
     let events = store.load_events(change_id)?;
     let state = state::reduce(&events)?;
-    if state.is_closed() {
-        bail!("change {change_id} closed while verification was running");
-    }
     let mut previous_id = events
         .last()
         .context("change has no opening event")?
         .event_id
         .clone();
     for (gate, evidence_event_id) in reused {
-        let mut event = ctx.event(
-            store,
-            change_id,
-            Payload::VerificationReused {
-                run_id: run_id.to_owned(),
-                gate: gate.clone(),
-                revision: revision.to_owned(),
-                evidence_event_id: evidence_event_id.clone(),
-            },
-        );
+        let payload = Payload::VerificationReused {
+            run_id: run_id.to_owned(),
+            gate: gate.clone(),
+            revision: revision.to_owned(),
+            evidence_event_id: evidence_event_id.clone(),
+        };
+        ensure_append_allowed(&state, &payload)?;
+        let mut event = ctx.event(store, change_id, payload);
         previous_id = event_id_after(&previous_id)?;
         event.event_id = previous_id.clone();
         store.append_event(&event)?;
@@ -761,9 +748,6 @@ fn append_verifications(
     let _transition = store.lock_transition(change_id)?;
     let events = store.load_events(change_id)?;
     let st = state::reduce(&events)?;
-    if st.is_closed() {
-        bail!("change {change_id} closed while verification was running");
-    }
     let mut previous_id = events
         .last()
         .context("change has no opening event")?
@@ -774,26 +758,24 @@ fn append_verifications(
         let result = item.result;
         let revision = item.revision.clone();
         let attested = item.attested;
-        let mut ev = ctx.event(
-            store,
-            change_id,
-            Payload::VerificationRecorded {
-                run_id: item.run_id,
-                probe: item.probe,
-                gate: item.gate,
-                command: item.command,
-                revision: item.revision,
-                result: item.result,
-                exit_code: item.exit_code,
-                duration_ms: item.duration_ms,
-                output_tail: item.output_tail,
-                timed_out: item.timed_out,
-                hostname: item.hostname,
-                attested: item.attested,
-                runner: item.runner,
-                note: item.note,
-            },
-        );
+        let payload = Payload::VerificationRecorded {
+            run_id: item.run_id,
+            probe: item.probe,
+            gate: item.gate,
+            command: item.command,
+            revision: item.revision,
+            result: item.result,
+            exit_code: item.exit_code,
+            duration_ms: item.duration_ms,
+            output_tail: item.output_tail,
+            timed_out: item.timed_out,
+            hostname: item.hostname,
+            attested: item.attested,
+            runner: item.runner,
+            note: item.note,
+        };
+        ensure_append_allowed(&st, &payload)?;
+        let mut ev = ctx.event(store, change_id, payload);
         previous_id = event_id_after(&previous_id)?;
         ev.event_id = previous_id.clone();
         store.append_event(&ev)?;
@@ -940,10 +922,9 @@ fn kill_process_group(pid: u32) -> io::Result<()> {
 pub fn hold(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {
     let store = ctx.store()?;
     let (change_id, _transition, st) = locked_state(&store, reference)?;
-    if st.is_closed() {
-        bail!("change {change_id} is closed");
-    }
-    let ev = ctx.event(&store, &change_id, Payload::HoldSet { reason });
+    let payload = Payload::HoldSet { reason };
+    ensure_append_allowed(&st, &payload)?;
+    let ev = ctx.event(&store, &change_id, payload);
     store.append_event(&ev)?;
     println!("hold set on {change_id}");
     Ok(())

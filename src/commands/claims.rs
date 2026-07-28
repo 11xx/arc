@@ -142,9 +142,6 @@ fn claim_inner(
     let _transition = store.lock_transition(&change_id)?;
     let state = state::reduce(&store.load_events(&change_id)?)?;
     let now = chrono::Utc::now();
-    if state.is_closed() {
-        bail!("change {change_id} is closed");
-    }
     let mut previous_owner = None;
     let displaced = if let Some(existing) = &state.claim {
         let timing = state::claim_timing_at(existing, now);
@@ -197,19 +194,14 @@ fn claim_inner(
         .map(|claim| claim.claim_id.clone())
         .unwrap_or_else(ids::new_event_id);
 
-    let event = identity_event_at(
-        ctx,
-        &store,
-        &change_id,
-        now,
-        &owner,
-        Payload::ClaimSet {
-            claim_id,
-            ttl_seconds,
-            stage_budgets: budgets,
-            displaced: displaced.clone(),
-        },
-    );
+    let payload = Payload::ClaimSet {
+        claim_id,
+        ttl_seconds,
+        stage_budgets: budgets,
+        displaced: displaced.clone(),
+    };
+    ensure_append_allowed(&state, &payload)?;
+    let event = identity_event_at(ctx, &store, &change_id, now, &owner, payload);
     store.append_event(&event)?;
     if matches!(mode, ClaimMode::Standard { .. }) {
         if let Some(displaced) = &displaced {
@@ -290,9 +282,6 @@ pub fn stage(
         .context("change has no opening event")?
         .event_id
         .clone();
-    if state.is_closed() {
-        bail!("change {change_id} is closed");
-    }
     let blocker = blocker
         .as_deref()
         .map(|raw| resolve_blocker(&store, &state, raw))
@@ -314,19 +303,14 @@ pub fn stage(
             None
         };
         let claim_id = ids::new_event_id();
-        let mut claim_event = identity_event_at(
-            ctx,
-            &store,
-            &change_id,
-            now,
-            &owner,
-            Payload::ClaimSet {
-                claim_id,
-                ttl_seconds: 2 * 60 * 60,
-                stage_budgets: default_stage_budgets(),
-                displaced,
-            },
-        );
+        let payload = Payload::ClaimSet {
+            claim_id,
+            ttl_seconds: 2 * 60 * 60,
+            stage_budgets: default_stage_budgets(),
+            displaced,
+        };
+        ensure_append_allowed(&state, &payload)?;
+        let mut claim_event = identity_event_at(ctx, &store, &change_id, now, &owner, payload);
         claim_event.event_id = event_id_after(&previous_event_id)?;
         store.append_event(&claim_event)?;
         previous_event_id = claim_event.event_id.clone();
@@ -351,19 +335,14 @@ pub fn stage(
         return Ok(8);
     }
 
-    let mut event = identity_event_at(
-        ctx,
-        &store,
-        &change_id,
-        now,
-        &owner,
-        Payload::StageSet {
-            claim_id: existing.claim_id.clone(),
-            stage,
-            note,
-            blocker,
-        },
-    );
+    let payload = Payload::StageSet {
+        claim_id: existing.claim_id.clone(),
+        stage,
+        note,
+        blocker,
+    };
+    ensure_append_allowed(&state, &payload)?;
+    let mut event = identity_event_at(ctx, &store, &change_id, now, &owner, payload);
     event.event_id = event_id_after(&previous_event_id)?;
     store.append_event(&event)?;
     println!("stage: {}", stage.as_str());
