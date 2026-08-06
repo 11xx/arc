@@ -36,6 +36,7 @@ RUN A CHANGE
   arc resolve                        Dispose of a finding.
   arc check                          Integration preflight; exit code names the blocker.
   arc integrate [--tag <t>]          Guarded --no-ff merge once the gates are green.
+  arc audit <change> --verdict <v>   Review an already-integrated revision.
   arc close                          Terminal outcome arc did not merge itself.
 
 PROFILES (--profile, default local)
@@ -52,6 +53,21 @@ PROFILES (--profile, default local)
 
   Promote when the work reveals more scope, risk, or concurrency; record why.
   Never keep an undersized profile just because the change started there.
+
+WHEN NO INDEPENDENT REVIEWER IS REACHABLE
+  Review coverage is measured against the final patchset, not participation:
+  `arc check` warns when a reviewer's last look predates what is about to ship,
+  or when nobody distinguishable from the author covers it. Warnings, never
+  blockers — one reviewer is a legitimate way to ship.
+
+  If the repository forbids self-approval and no second actor is available,
+  integrate with `arc integrate <change> --audit-debt "<why>"`. That records
+  what review is owed rather than waiving it; the obligation survives closure,
+  `arc query --audit-debt` lists everything still owing one, and
+  `arc audit <change> --verdict <v>` discharges it against the integrated
+  revision once a reviewer is free. An audit is a separate event from the
+  verdict that shipped, so attaching one never rewrites what shipped with what
+  review.
 
 RULES THAT CHANGE WHAT YOU DO
   - A verdict binds to the exact approved patchset head. Any new commit makes

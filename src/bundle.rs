@@ -435,6 +435,9 @@ mod tests {
             | Payload::ReplyAdded { .. }
             | Payload::DispositionRecorded { .. }
             | Payload::VerdictRecorded { .. }
+            | Payload::AuditDebtDeclared { .. }
+            | Payload::AuditVerdictRecorded { .. }
+            | Payload::AuditFindingAdded { .. }
             | Payload::VerificationRunStarted { .. }
             | Payload::VerificationRecorded { .. }
             | Payload::VerificationReused { .. }

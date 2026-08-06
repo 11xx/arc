@@ -39,6 +39,10 @@ struct CheckOutput<'a> {
     ready: bool,
     exit_code: i32,
     blockers: Vec<CheckBlocker>,
+    /// Advisory review-coverage warnings. Never affect `ready` or the exit
+    /// code; a change may legitimately ship with one reviewer.
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    coverage_warnings: &'a [String],
 }
 
 #[derive(serde::Serialize)]
@@ -1309,15 +1313,19 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
                     exit_code: blocker.exit_code(),
                 })
                 .collect(),
+            coverage_warnings: &report.coverage_warnings,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
-    } else if explain {
+        return Ok(code);
+    }
+    if explain {
         print!("{}", render::check_explanation(&st, &report));
     } else if report.integrate_ready {
         println!("ready: all integration gates pass");
     } else {
         print!("{}", render::blocker_explanation(&st, &report));
     }
+    render::coverage_warnings(&report);
     Ok(code)
 }
 

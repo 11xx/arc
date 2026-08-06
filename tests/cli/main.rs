@@ -1,3 +1,4 @@
+mod audit;
 mod briefs;
 mod bundle;
 mod chain;

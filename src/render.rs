@@ -551,6 +551,66 @@ pub fn markdown(
         }
     }
 
+    if !report.review_map.is_empty() {
+        let _ = writeln!(w, "\n## Review coverage\n");
+        for row in &report.review_map {
+            let attribution = if row.attribution_unknown {
+                " — attribution unknown, no `--on-behalf-of` recorded"
+            } else if row.is_author {
+                " — same identity as the patchset author"
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                w,
+                "- {} last saw `{}`{}{}{}",
+                row.reviewer,
+                row.last_patchset,
+                if row.covers_final {
+                    " (covers the final patchset)"
+                } else {
+                    " (**stale**)"
+                },
+                attribution,
+                format_args!(" [{} verdicts, {} findings]", row.verdicts, row.findings),
+            );
+        }
+        for warning in &report.coverage_warnings {
+            let _ = writeln!(w, "- warning: {warning}");
+        }
+    }
+
+    if report.audit_debt.is_some() || !report.audit_verdicts.is_empty() {
+        let _ = writeln!(w, "\n## Post-integration audit\n");
+        if let Some(debt) = &report.audit_debt {
+            let _ = writeln!(
+                w,
+                "- Owed{}: {} (declared by {})",
+                if report.audit_debt_outstanding {
+                    ""
+                } else {
+                    " (discharged)"
+                },
+                debt.reason,
+                debt.actor
+            );
+        }
+        for audit in &report.audit_verdicts {
+            let _ = writeln!(
+                w,
+                "- {:?} at `{}` by {}{}",
+                audit.verdict,
+                &audit.revision[..audit.revision.len().min(8)],
+                audit.effective_author(),
+                audit
+                    .body
+                    .as_deref()
+                    .map(|body| format!(" — {}", body.lines().next().unwrap_or_default()))
+                    .unwrap_or_default()
+            );
+        }
+    }
+
     let _ = writeln!(w, "\n## Integration\n");
     if report.integrate_ready {
         let _ = writeln!(w, "- ready to integrate");
@@ -561,6 +621,21 @@ pub fn markdown(
     }
 
     out
+}
+
+/// Advisory review-coverage lines, printed after the ready/blocked verdict.
+///
+/// These are warnings by design. Blocking on thin coverage would refuse the
+/// single-reviewer changes that make up most of the work; the point is that
+/// nobody integrates without having been told.
+pub fn coverage_warnings(report: &StatusReport) {
+    if report.coverage_warnings.is_empty() {
+        return;
+    }
+    println!("\nReview coverage:");
+    for warning in &report.coverage_warnings {
+        println!("  warning: {warning}");
+    }
 }
 
 /// Detailed refusal text for `check` and `integrate`. Exit codes remain the
@@ -782,6 +857,33 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
         } => (
             "disposition-recorded",
             format!("{finding_id} {}", format!("{status:?}").to_lowercase()),
+        ),
+        Payload::AuditDebtDeclared { reason } => ("audit-debt-declared", reason.clone()),
+        Payload::AuditVerdictRecorded {
+            revision,
+            verdict,
+            body,
+            ..
+        } => {
+            let mut summary = format!(
+                "{} at {}",
+                format!("{verdict:?}").to_lowercase(),
+                &revision[..revision.len().min(8)]
+            );
+            if let Some(body) = body {
+                summary.push_str(" — ");
+                summary.push_str(body.lines().next().unwrap_or_default());
+            }
+            ("audit-verdict-recorded", summary)
+        }
+        Payload::AuditFindingAdded {
+            finding_id,
+            severity,
+            summary,
+            ..
+        } => (
+            "audit-finding-added",
+            format!("{finding_id} [{severity:?}] {summary}"),
         ),
         Payload::VerdictRecorded {
             patchset_id,

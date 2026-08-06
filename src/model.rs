@@ -226,6 +226,42 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         findings: Vec<InlineFinding>,
     },
+    /// A review obligation this change carries but has not discharged.
+    ///
+    /// Declaring it is what lets a change integrate without an independent
+    /// verdict: the requirement is not waived, it is recorded as debt that
+    /// `arc query --audit-debt` can find after the reviewer becomes available.
+    AuditDebtDeclared {
+        reason: String,
+    },
+    /// A review performed after integration.
+    ///
+    /// Deliberately not a late `VerdictRecorded`. Sharing the event would make
+    /// every consumer filter by closure timestamp to answer "what shipped with
+    /// what review", and one that forgot would silently credit a change with
+    /// review it did not have. The separation lives in the event model, where
+    /// it cannot be forgotten.
+    AuditVerdictRecorded {
+        /// The integrated revision audited, not a patchset.
+        revision: String,
+        verdict: Verdict,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        findings: Vec<InlineFinding>,
+    },
+    /// A finding raised by a post-integration audit. An audit that could only
+    /// say approved-or-not would be a rubber stamp.
+    AuditFindingAdded {
+        finding_id: String,
+        blocking: bool,
+        severity: Severity,
+        summary: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        anchor: Option<Anchor>,
+    },
     VerificationRunStarted {
         revision: String,
         mode: VerificationRunMode,
@@ -338,7 +374,6 @@ pub enum AppendPermission {
     OpenOnly,
     AnyPhaseFact,
     OpenOrIntegratedFact,
-    #[allow(dead_code)]
     IntegratedOnlyFact,
     LifecycleOwned,
     OpaqueImported,
@@ -369,7 +404,12 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::ForgeLink { .. }
         | Payload::ForgeChecks { .. }
         | Payload::ForgePrState { .. } => AppendPermission::AnyPhaseFact,
-        Payload::ChangelogRecorded { .. } => AppendPermission::OpenOrIntegratedFact,
+        Payload::ChangelogRecorded { .. } | Payload::AuditDebtDeclared { .. } => {
+            AppendPermission::OpenOrIntegratedFact
+        }
+        Payload::AuditVerdictRecorded { .. } | Payload::AuditFindingAdded { .. } => {
+            AppendPermission::IntegratedOnlyFact
+        }
         Payload::ChangeOpened { .. } | Payload::ChangeClosed { .. } => {
             AppendPermission::LifecycleOwned
         }

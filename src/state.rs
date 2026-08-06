@@ -251,6 +251,33 @@ impl VerdictEntry {
     }
 }
 
+/// A declared, not-yet-discharged review obligation.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditDebt {
+    pub event_id: String,
+    pub reason: String,
+    pub actor: String,
+    pub declared_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuditVerdictEntry {
+    pub event_id: String,
+    /// The integrated revision reviewed.
+    pub revision: String,
+    pub verdict: Verdict,
+    pub body: Option<String>,
+    pub actor: String,
+    pub on_behalf_of: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl AuditVerdictEntry {
+    pub fn effective_author(&self) -> &str {
+        self.on_behalf_of.as_deref().unwrap_or(&self.actor)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct VerificationEntry {
     pub event_id: String,
@@ -366,6 +393,15 @@ pub struct ChangeState {
     pub comments: Vec<CommentEntry>,
     pub findings: BTreeMap<String, FindingState>,
     pub verdicts: Vec<VerdictEntry>,
+    /// Post-integration audits, deliberately separate from `verdicts` so that
+    /// "what shipped with what review" cannot be rewritten after the fact.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audit_verdicts: Vec<AuditVerdictEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub audit_findings: BTreeMap<String, FindingState>,
+    /// The latest declared review obligation, if one was ever declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_debt: Option<AuditDebt>,
     /// Event IDs of every `blocked-on` stage, so a later brief can name the
     /// block that caused it without rescanning the event log.
     pub blocked_on_stages: Vec<String>,
@@ -489,6 +525,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     comments: Vec::new(),
                     findings: BTreeMap::new(),
                     verdicts: Vec::new(),
+                    audit_verdicts: Vec::new(),
+                    audit_findings: BTreeMap::new(),
+                    audit_debt: None,
                     blocked_on_stages: Vec::new(),
                     verifications: Vec::new(),
                     verification_runs: Vec::new(),
@@ -926,6 +965,73 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     created_at: ev.created_at,
                 });
             }
+            Payload::AuditDebtDeclared { reason } => {
+                state.audit_debt = Some(AuditDebt {
+                    event_id: ev.event_id.clone(),
+                    reason: reason.clone(),
+                    actor: ev.actor.clone(),
+                    declared_at: ev.created_at,
+                });
+            }
+            Payload::AuditVerdictRecorded {
+                revision,
+                verdict,
+                body,
+                findings,
+            } => {
+                for inline in findings {
+                    state.audit_findings.insert(
+                        inline.finding_id.clone(),
+                        FindingState {
+                            id: inline.finding_id.clone(),
+                            blocking: inline.blocking,
+                            severity: inline.severity,
+                            summary: inline.summary.clone(),
+                            body: inline.body.clone(),
+                            patchset_id: None,
+                            anchor: inline.anchor.clone(),
+                            origin_event: ev.event_id.clone(),
+                            reported_by: ev.actor.clone(),
+                            dispositions: Vec::new(),
+                            replies: Vec::new(),
+                        },
+                    );
+                }
+                state.audit_verdicts.push(AuditVerdictEntry {
+                    event_id: ev.event_id.clone(),
+                    revision: revision.clone(),
+                    verdict: *verdict,
+                    body: body.clone(),
+                    actor: ev.actor.clone(),
+                    on_behalf_of: ev.on_behalf_of.clone(),
+                    created_at: ev.created_at,
+                });
+            }
+            Payload::AuditFindingAdded {
+                finding_id,
+                blocking,
+                severity,
+                summary,
+                body,
+                anchor,
+            } => {
+                state.audit_findings.insert(
+                    finding_id.clone(),
+                    FindingState {
+                        id: finding_id.clone(),
+                        blocking: *blocking,
+                        severity: *severity,
+                        summary: summary.clone(),
+                        body: body.clone(),
+                        patchset_id: None,
+                        anchor: anchor.clone(),
+                        origin_event: ev.event_id.clone(),
+                        reported_by: ev.actor.clone(),
+                        dispositions: Vec::new(),
+                        replies: Vec::new(),
+                    },
+                );
+            }
             Payload::VerificationRunStarted {
                 revision,
                 mode,
@@ -1270,6 +1376,23 @@ pub(crate) fn provenance_mismatch(
         !(identity_matches(author, actor)
             || committer.is_some_and(|committer| identity_matches(committer, actor)))
     })
+}
+
+impl ChangeState {
+    /// A declared review obligation with no audit answering it yet.
+    ///
+    /// The debt is what makes integration without an independent verdict
+    /// honest rather than silent: it survives closure, and
+    /// `arc query --audit-debt` finds it once a reviewer is available again.
+    pub fn audit_debt_outstanding(&self) -> bool {
+        match &self.audit_debt {
+            None => false,
+            Some(debt) => !self
+                .audit_verdicts
+                .iter()
+                .any(|audit| audit.created_at >= debt.declared_at),
+        }
+    }
 }
 
 #[cfg(test)]

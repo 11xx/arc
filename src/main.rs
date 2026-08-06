@@ -201,6 +201,9 @@ enum Cmd {
         /// matches this revision (unique prefix accepted)
         #[arg(long)]
         commit: Option<String>,
+        /// Only changes that integrated owing a review nobody has recorded yet
+        #[arg(long = "audit-debt")]
+        audit_debt: bool,
         #[arg(long)]
         json: bool,
     },
@@ -406,7 +409,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/5 schema)
+    /// Machine-readable status report (the versioned arc-status/6 schema)
     Status {
         change: Option<String>,
         /// Accepted for compatibility; status output is always JSON
@@ -741,6 +744,33 @@ enum Cmd {
         /// Report what would happen without merging, closing, or writing
         #[arg(long)]
         dry_run: bool,
+        /// Integrate without an independent verdict, recording the review this
+        /// change still owes. The obligation survives closure and
+        /// `arc query --audit-debt` finds it; discharge it with `arc audit`.
+        #[arg(long = "audit-debt", value_name = "REASON")]
+        audit_debt: Option<String>,
+    },
+    /// Record a review obligation this change carries but has not discharged
+    AuditDebt {
+        change: String,
+        /// What review is owed, and why it could not run
+        #[arg(long)]
+        reason: String,
+    },
+    /// Record a review performed after integration (never a late verdict)
+    Audit {
+        change: String,
+        #[arg(long, value_enum)]
+        verdict: Verdict,
+        /// Inline body text
+        #[arg(long)]
+        body: Option<String>,
+        /// Read body from file ('-' for stdin)
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<String>,
+        /// Findings batch as JSON ('-' for stdin)
+        #[arg(long = "findings-json")]
+        findings_json: Option<String>,
     },
     /// Close a change without arc performing the merge
     Close {
@@ -933,7 +963,6 @@ fn nested_subcommand_path(typed: Option<&str>) -> Option<&'static str> {
         Some("dir") => Some("journal dir"),
         Some("note") => Some("journal note"),
         Some("append") => Some("journal position"),
-        Some("catchup") => Some("journal catchup"),
         Some("memories") => Some("journal memories"),
         Some("open") => Some("journal open"),
         Some("consume") => Some("journal consume"),
@@ -1087,6 +1116,7 @@ fn run(cli: Cli) -> Result<i32> {
             actor,
             harness,
             commit,
+            audit_debt,
             json,
         } => {
             if let Some(commit) = commit {
@@ -1101,6 +1131,7 @@ fn run(cli: Cli) -> Result<i32> {
                         verdict,
                         actor,
                         harness,
+                        audit_debt,
                         json,
                     },
                 )?;
@@ -1620,15 +1651,54 @@ fn run(cli: Cli) -> Result<i32> {
             message,
             cleanup,
             dry_run,
-        } => commands::integrate(
-            &ctx,
-            change.as_deref(),
-            tag,
-            into,
-            message,
-            cleanup,
-            dry_run,
-        ),
+            audit_debt,
+        } => {
+            // Declared before the merge so the obligation is on the ledger
+            // even if integration then fails for an unrelated reason — but
+            // never under --dry-run, which promises to write nothing.
+            if let Some(reason) = audit_debt.filter(|_| !dry_run) {
+                let change = change
+                    .as_deref()
+                    .context("--audit-debt names one change; it cannot apply to a --tag series")?;
+                commands::declare_audit_debt(&ctx, change, reason)?;
+            }
+            commands::integrate(
+                &ctx,
+                change.as_deref(),
+                tag,
+                into,
+                message,
+                cleanup,
+                dry_run,
+            )
+        }
+        Cmd::AuditDebt { change, reason } => {
+            commands::declare_audit_debt(&ctx, &change, reason)?;
+            Ok(0)
+        }
+        Cmd::Audit {
+            change,
+            verdict,
+            body,
+            body_file,
+            findings_json,
+        } => {
+            // An audit body is optional; read_body refuses an absent one.
+            let body = match (&body, &body_file) {
+                (None, None) => None,
+                _ => Some(commands::read_body(body, body_file)?),
+            };
+            commands::audit(
+                &ctx,
+                &change,
+                commands::AuditArgs {
+                    verdict,
+                    body,
+                    findings_json,
+                },
+            )?;
+            Ok(0)
+        }
         Cmd::Close {
             change,
             integrated,

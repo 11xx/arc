@@ -1,4 +1,5 @@
 use crate::bundle::{Bundle, ValidatedBundle};
+mod audit;
 mod bundle_io;
 mod chain;
 mod changelog;
@@ -14,7 +15,7 @@ mod lifecycle;
 mod messaging;
 mod observe;
 mod rescue;
-mod review;
+pub(crate) mod review;
 pub(crate) mod scaffold;
 mod stats;
 mod timeline;
@@ -29,6 +30,7 @@ use crate::state::{self, ChangeState};
 use crate::status::{self, StatusReport};
 use crate::store::{Store, TransitionLock};
 use anyhow::{bail, Context, Result};
+pub use audit::{audit, declare_audit_debt, AuditArgs};
 pub use bundle_io::{export_bundle, import_bundle};
 pub use chain::chain;
 pub use changelog::changelog;
@@ -539,6 +541,8 @@ pub struct QueryArgs {
     pub verdict: Option<Verdict>,
     pub actor: Option<String>,
     pub harness: Option<String>,
+    /// Only changes carrying an undischarged review obligation.
+    pub audit_debt: bool,
     pub json: bool,
 }
 
@@ -638,6 +642,9 @@ mod tests {
             comments: Vec::new(),
             findings: BTreeMap::new(),
             verdicts: Vec::new(),
+            audit_verdicts: Vec::new(),
+            audit_findings: Default::default(),
+            audit_debt: None,
             blocked_on_stages: Vec::new(),
             verifications: Vec::new(),
             verification_runs: Vec::new(),
