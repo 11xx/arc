@@ -6,6 +6,7 @@ mod context;
 mod forge;
 mod gates;
 mod gitio;
+mod guide;
 mod ids;
 mod inbox;
 mod journal;
@@ -31,7 +32,12 @@ use model::{
 /// objects Git lacks: changes, patchsets, findings, verdicts, gates,
 /// holds, and a guarded merge.
 #[derive(Parser)]
-#[command(name = "arc", version, about)]
+#[command(
+    name = "arc",
+    version,
+    about,
+    after_help = "Run `arc` with no arguments for the workflow guide, or `arc catchup` for live project state."
+)]
 struct Cli {
     /// Acting identity (defaults to git user.name)
     #[arg(long, global = true, env = "ARC_ACTOR")]
@@ -51,8 +57,11 @@ struct Cli {
     /// Execution boundary: implementer | reviewer | lead
     #[arg(long, global = true, env = "ARC_ROLE")]
     role: Option<String>,
+    /// Absent prints the workflow guide: what arc owns, the command
+    /// lifecycle, profile selection, and the rules that change what a
+    /// session should do.
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -347,7 +356,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Lead-facing queue rollup across open changes, including active claim work (arc-inbox/1 schema)
+    /// Lead-facing queue rollup across open changes, including active claim work (arc-inbox/2 schema)
     Inbox {
         /// Restrict to changes assigned to this harness
         #[arg(long = "assigned-to")]
@@ -793,6 +802,14 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Orient a session: the ledger queue, the journal backlog, and live lanes
+    Catchup {
+        /// Journal artifacts and journal-tail lines to show
+        #[arg(long, default_value = "10")]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
     /// Cross-harness project journal mechanics (plain Markdown stays the contract)
     Journal {
         #[command(subcommand)]
@@ -969,7 +986,12 @@ fn main() {
 
 fn run(cli: Cli) -> Result<i32> {
     let role = ExecutionRole::parse(cli.role.as_deref())?;
-    if let Some((command, required)) = role_refusal(role, &cli.cmd) {
+    // No subcommand is not an error: it is the request to be oriented.
+    let Some(cmd) = cli.cmd else {
+        guide::print();
+        return Ok(0);
+    };
+    if let Some((command, required)) = role_refusal(role, &cmd) {
         eprintln!(
             "role refusal: {} may not {command} (requires {required})",
             role.as_str()
@@ -1020,7 +1042,7 @@ fn run(cli: Cli) -> Result<i32> {
         context::resolve_change_or_infer(&store, &ctx.cwd, change)
     };
 
-    match cli.cmd {
+    match cmd {
         Cmd::Begin {
             slug,
             title,
@@ -1723,6 +1745,7 @@ fn run(cli: Cli) -> Result<i32> {
             commands::restack(&ctx, &change, advise)?;
             Ok(0)
         }
+        Cmd::Catchup { limit, json } => commands::catchup(&ctx, limit, json),
         Cmd::Journal { cmd } => journal::run(&ctx, cmd),
     }
 }

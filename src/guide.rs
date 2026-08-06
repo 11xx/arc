@@ -1,0 +1,78 @@
+//! The bare-`arc` guide: what an agent needs to drive a change end to end
+//! without reading anything else first.
+//!
+//! `--help` is the reference — every command, every flag. This is the
+//! orientation: what arc owns, which commands matter in what order, and the
+//! handful of rules that change what a session should do. Anything that
+//! belongs to one command's contract stays in that command's `--help`.
+
+pub const GUIDE: &str = r#"arc — change, review, and integration state over plain Git.
+
+Git owns content, branches, and history. arc owns what Git lacks: changes,
+patchsets, findings, verdicts, verification evidence, claims, holds, and a
+guarded merge — one append-only JSON event per fact, under the repo's Git
+common dir. Every list, status, and inbox is derived; nothing is rewritten.
+
+ORIENT (start here, in this order)
+  arc catchup            Live state: ledger queue, journal backlog, lanes.
+  arc journal open       The actionable backlog — work waiting for a session.
+  arc resume <change>    One change's brief, live state, and journal context.
+  arc inbox              Lead-facing queue across open changes.
+
+  Work waiting for this project lives in two places. The ledger holds changes
+  already open; the journal holds everything not yet opened as one. An empty
+  inbox does not mean an empty queue — check both, which is what `catchup` does.
+
+RUN A CHANGE
+  arc begin <slug> --profile <p>     Open a change: branch + worktree + record.
+    --from-journal <file>            Open it from a journal item, consuming it.
+    --blocked-by <change> --tag <t>  Declare a chain up front, at planning time.
+  arc claim / stage / release-claim  Advisory liveness while implementing.
+  arc snapshot                       Record the current head as a patchset.
+  arc verify --gate <name>           Run a declared gate; record the evidence.
+  arc verify --command <cmd>         Same, for an ad hoc probe.
+  arc done                           Snapshot, run every gate, print check state.
+  arc review --verdict <v>           Record a verdict (+ --findings-json -).
+  arc resolve                        Dispose of a finding.
+  arc check                          Integration preflight; exit code names the blocker.
+  arc integrate [--tag <t>]          Guarded --no-ff merge once the gates are green.
+  arc close                          Terminal outcome arc did not merge itself.
+
+PROFILES (--profile, default local)
+  direct   Bounded, reversible, one session and checkout. Implement, verify,
+           review the diff, commit. No worktree or journal topic for uniformity.
+  local    Spans sessions or roles, or needs host-local evidence CI cannot
+           reproduce. Dedicated branch/worktree, fresh review where possible,
+           --no-ff merge.
+  forge    A hosted PR adds a remote record, inline discussion, clean runner
+           evidence, or branch protection. local underneath; project only public
+           integration facts into the PR.
+  release  Deployment, publishing, irreversible migration, security-sensitive
+           work. forge plus explicit release and rollback gates.
+
+  Promote when the work reveals more scope, risk, or concurrency; record why.
+  Never keep an undersized profile just because the change started there.
+
+RULES THAT CHANGE WHAT YOU DO
+  - A verdict binds to the exact approved patchset head. Any new commit makes
+    the approval stale until a fresh verdict on a new snapshot.
+  - The ledger gates; claims, stages, and lanes are advisory signals, never locks.
+  - Give every concurrent writer its own branch and worktree. Integration and
+    shared refs belong to the lead alone.
+  - An executor's first act is `arc config --check-writable`; a nonzero exit
+    means stop, not work around. It releases its claim whenever it stops, for
+    any reason, so a live claim always means live work.
+  - An executor that hangs never reaches its own release. Before leaving a
+    delegated run unattended, arm `arc watch <change> --until stalled`; silence
+    is unknown, not healthy. `arc rescue <change> --take` recovers it.
+  - The journal lives outside the repo, so worktrees stay clean. Cross-session
+    context goes there, never into tracked files.
+  - arc holds no routing opinion. It records the --actor, --harness, and --model
+    it is given; who to delegate to is the caller's policy, not arc's.
+
+  arc <command> --help for any command's full contract. arc --help for all of them.
+"#;
+
+pub fn print() {
+    print!("{GUIDE}");
+}

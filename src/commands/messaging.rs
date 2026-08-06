@@ -133,13 +133,12 @@ pub fn messages(
     Ok(())
 }
 
-pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
+/// Classify every open change into its queue buckets. Shared by `inbox` and
+/// `catchup` so the queue has one derivation.
+fn collect_inbox(ctx: &Ctx, assigned_to: Option<&str>) -> Result<crate::inbox::Inbox> {
     let store = ctx.store()?;
     let states = ctx.load_all_states(&store)?;
-    let filter = assigned_to
-        .as_deref()
-        .map(str::trim)
-        .filter(|f| !f.is_empty());
+    let filter = assigned_to.map(str::trim).filter(|f| !f.is_empty());
     let mut inbox = crate::inbox::Inbox::new(filter.map(str::to_string));
     for state in states.values() {
         if state.is_closed() {
@@ -154,6 +153,12 @@ pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
         inbox.absorb(state, &report);
     }
     inbox.sort_by_priority();
+    Ok(inbox)
+}
+
+pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
+    let mut inbox = collect_inbox(ctx, assigned_to.as_deref())?;
+    inbox.journal = journal_backlog(ctx);
 
     if json {
         println!("{}", serde_json::to_string_pretty(&inbox)?);
@@ -189,6 +194,91 @@ pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
                 );
             }
         }
+        render_journal_backlog(inbox.journal.as_ref());
     }
     Ok(())
+}
+
+/// The journal's actionable queue, summarized for the inbox. A journal that
+/// cannot be resolved is not an error here: the inbox reports ledger state
+/// either way.
+pub(crate) fn journal_backlog(ctx: &Ctx) -> Option<crate::inbox::JournalBacklog> {
+    let items = crate::journal::collect_open(ctx, None).ok()?;
+    let (open, later, feature_requests) = items.tier_counts();
+    Some(crate::inbox::JournalBacklog {
+        dir: items.dir().to_string(),
+        open,
+        later,
+        feature_requests,
+        preview: items
+            .primary_preview(3)
+            .into_iter()
+            .map(|(file, kind, heading)| crate::inbox::JournalBacklogRow {
+                file,
+                kind,
+                heading,
+            })
+            .collect(),
+    })
+}
+
+pub(crate) fn render_journal_backlog(backlog: Option<&crate::inbox::JournalBacklog>) {
+    let Some(backlog) = backlog else {
+        return;
+    };
+    println!("## journal backlog");
+    if backlog.open == 0 && backlog.later == 0 && backlog.feature_requests == 0 {
+        println!("  (none)  {}", backlog.dir);
+        return;
+    }
+    println!(
+        "  {} open, {} later, {} feature-request  {}",
+        backlog.open, backlog.later, backlog.feature_requests, backlog.dir
+    );
+    for row in &backlog.preview {
+        println!("  {}  {}  {}", row.file, row.kind, row.heading);
+    }
+    println!("  full queue: arc journal open");
+}
+
+/// Orient a session in one call: the ledger's actionable buckets, then the
+/// journal's lanes, memories, and backlog. `inbox` answers what is already
+/// open; this answers what is waiting, which is the larger question and the
+/// one a session starting cold actually has.
+pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
+    let inbox = collect_inbox(ctx, None)?;
+    let journal = crate::journal::orientation(ctx);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": "arc-catchup/1",
+                "ledger": inbox,
+                "journal": journal.as_ref().ok(),
+            }))?
+        );
+        return Ok(0);
+    }
+
+    println!("ledger: {}", ctx.store()?.root.display());
+    let mut any = false;
+    for (name, rows) in inbox.sections() {
+        if rows.is_empty() {
+            continue;
+        }
+        any = true;
+        println!("{name} ({}):", rows.len());
+        for row in rows.iter().take(limit) {
+            println!("  {}  {} → {}", row.change_id, row.title, row.next_actor);
+        }
+    }
+    if !any {
+        println!("  no open changes");
+    }
+    match journal {
+        Ok(journal) => journal.render(),
+        Err(error) => println!("journal: unavailable ({error:#})"),
+    }
+    Ok(0)
 }

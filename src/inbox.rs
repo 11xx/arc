@@ -3,7 +3,31 @@ use crate::state::{ChangeState, ClaimIdentity};
 use crate::status::{ClaimStatus, StatusReport};
 use serde::Serialize;
 
-pub const INBOX_SCHEMA: &str = "arc-inbox/1";
+pub const INBOX_SCHEMA: &str = "arc-inbox/2";
+
+/// The journal's actionable backlog, carried beside the ledger buckets.
+///
+/// An inbox reporting only ledger state answers "what is in flight" and
+/// silently implies nothing else is waiting, when the queue a session should
+/// actually pull from may live entirely in the journal. The rollup names the
+/// tiers and previews the primary one; `arc journal open` renders it in full.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct JournalBacklog {
+    pub dir: String,
+    pub open: usize,
+    pub later: usize,
+    #[serde(rename = "feature-requests")]
+    pub feature_requests: usize,
+    /// Newest primary-tier items, as `(file, kind, heading)`.
+    pub preview: Vec<JournalBacklogRow>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct JournalBacklogRow {
+    pub file: String,
+    pub kind: String,
+    pub heading: String,
+}
 
 /// One change's line within an inbox bucket.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -26,7 +50,7 @@ pub struct InboxRow {
     pub age_seconds: Option<u64>,
 }
 
-/// The `arc-inbox/1` rollup: a lead-facing queue derived entirely from
+/// The `arc-inbox/2` rollup: a lead-facing queue derived entirely from
 /// existing ledger + Git state. A change may appear in more than one bucket
 /// when it is genuinely in more than one actionable state (e.g. blocked and
 /// awaiting review); each bucket is computed independently.
@@ -47,6 +71,9 @@ pub struct Inbox {
     #[serde(rename = "in-progress")]
     pub in_progress: Vec<InboxRow>,
     pub stalled: Vec<InboxRow>,
+    /// Absent when the journal directory could not be resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal: Option<JournalBacklog>,
 }
 
 impl Inbox {
@@ -54,6 +81,7 @@ impl Inbox {
         Inbox {
             schema: INBOX_SCHEMA,
             assigned_to,
+            journal: None,
             needs_review: Vec::new(),
             changes_requested: Vec::new(),
             ready_to_integrate: Vec::new(),
