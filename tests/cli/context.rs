@@ -457,3 +457,17 @@ fn help_points_at_the_guide_and_at_live_state() {
     );
     assert!(help.contains("arc catchup"), "{help}");
 }
+
+/// Making the subcommand optional must not turn a mistyped invocation into a
+/// silent success: only the genuinely empty argument list is a guide request.
+#[test]
+fn optional_subcommand_still_rejects_usage_errors() {
+    let repo = Repo::new();
+    repo.arc(&repo.root).assert().code(0);
+    repo.arc(&repo.root).arg("nosuchcommand").assert().code(2);
+    repo.arc(&repo.root).arg("--nosuchflag").assert().code(2);
+    repo.arc(&repo.root)
+        .args(["inbox", "--nosuchflag"])
+        .assert()
+        .code(2);
+}

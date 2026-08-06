@@ -3080,7 +3080,6 @@ mod tests {
 /// answers "what is waiting on this project" from both stores at once.
 #[derive(Serialize)]
 pub(crate) struct Orientation {
-    dir: String,
     lanes: Vec<LaneEntry>,
     memories: Vec<ArtifactEntry>,
     #[serde(flatten)]
@@ -3094,7 +3093,6 @@ pub(crate) fn orientation(ctx: &Ctx) -> Result<Orientation> {
         lanes: lanes_from_journal(&read_events(&dir)?, now),
         memories: live_memories(&dir)?,
         queue: collect_open(ctx, None)?,
-        dir: dir.display().to_string(),
     })
 }
 
@@ -3102,7 +3100,7 @@ impl Orientation {
     pub(crate) fn render(&self) {
         render_lanes(&self.lanes, Utc::now());
         render_memories(&self.memories);
-        println!("journal: {}", self.dir);
+        println!("journal: {}", self.queue.dir());
         println!("  {OPEN_TIER_LEGEND}");
         for (label, entries) in [
             ("open", &self.queue.open),
