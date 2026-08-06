@@ -804,7 +804,8 @@ enum Cmd {
     },
     /// Orient a session: the ledger queue, the journal backlog, and live lanes
     Catchup {
-        /// Journal artifacts and journal-tail lines to show
+        /// Cap the changes listed per ledger bucket; the journal queue is
+        /// always rendered in full, since finding it is the point
         #[arg(long, default_value = "10")]
         limit: usize,
         #[arg(long)]

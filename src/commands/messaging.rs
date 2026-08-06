@@ -135,9 +135,12 @@ pub fn messages(
 
 /// Classify every open change into its queue buckets. Shared by `inbox` and
 /// `catchup` so the queue has one derivation.
-fn collect_inbox(ctx: &Ctx, assigned_to: Option<&str>) -> Result<crate::inbox::Inbox> {
-    let store = ctx.store()?;
-    let states = ctx.load_all_states(&store)?;
+fn collect_inbox(
+    ctx: &Ctx,
+    store: &crate::store::Store,
+    assigned_to: Option<&str>,
+) -> Result<crate::inbox::Inbox> {
+    let states = ctx.load_all_states(store)?;
     let filter = assigned_to.map(str::trim).filter(|f| !f.is_empty());
     let mut inbox = crate::inbox::Inbox::new(filter.map(str::to_string));
     for state in states.values() {
@@ -149,7 +152,7 @@ fn collect_inbox(ctx: &Ctx, assigned_to: Option<&str>) -> Result<crate::inbox::I
                 continue;
             }
         }
-        let report = ctx.report(&store, state)?;
+        let report = ctx.report(store, state)?;
         inbox.absorb(state, &report);
     }
     inbox.sort_by_priority();
@@ -157,7 +160,7 @@ fn collect_inbox(ctx: &Ctx, assigned_to: Option<&str>) -> Result<crate::inbox::I
 }
 
 pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
-    let mut inbox = collect_inbox(ctx, assigned_to.as_deref())?;
+    let mut inbox = collect_inbox(ctx, &ctx.store()?, assigned_to.as_deref())?;
     inbox.journal = journal_backlog(ctx);
 
     if json {
@@ -246,7 +249,8 @@ pub(crate) fn render_journal_backlog(backlog: Option<&crate::inbox::JournalBackl
 /// open; this answers what is waiting, which is the larger question and the
 /// one a session starting cold actually has.
 pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
-    let inbox = collect_inbox(ctx, None)?;
+    let store = ctx.store()?;
+    let inbox = collect_inbox(ctx, &store, None)?;
     let journal = crate::journal::orientation(ctx);
 
     if json {
@@ -261,7 +265,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         return Ok(0);
     }
 
-    println!("ledger: {}", ctx.store()?.root.display());
+    println!("ledger: {}", store.root.display());
     let mut any = false;
     for (name, rows) in inbox.sections() {
         if rows.is_empty() {
