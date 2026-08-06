@@ -12,7 +12,7 @@ daemon, no database, no network, no multi-machine ref sync.
 - The ledger is authoritative and append-only. Events are created
   exclusively, never rewritten; every status, inbox, or list output is a
   derived view. Output and bundle schemas are versioned (`arc-status/6`,
-  `arc-inbox/2`); a breaking shape change bumps the version.
+  `arc-inbox/3`); a breaking shape change bumps the version.
 - Approval staleness is structural: a verdict binds to the exact approved
   patchset head, and any new commit invalidates it. Never weaken this.
 - The ledger is authoritative and gating; the journal is advisory and

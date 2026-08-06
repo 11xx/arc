@@ -146,7 +146,7 @@ fn chain_json_has_versioned_schema_member_state_and_no_stored_aggregate_state() 
     begin(&repo, "chain-shape", &["--tag", "program"]);
 
     let output = chain_json(&repo, "program");
-    assert_eq!(output["schema"], "arc-chain/1");
+    assert_eq!(output["schema"], "arc-chain/2");
     assert_eq!(output["members"][0]["state"], "open");
     assert!(output.get("complete").is_none());
     assert!(output.get("paused").is_none());
@@ -324,5 +324,5 @@ fn chain_review_json_keeps_arc_chain_v1() {
     begin(&repo, "review-schema", &["--tag", "program"]);
 
     let output = chain_review_json(&repo, "program");
-    assert_eq!(output["schema"], "arc-chain/1");
+    assert_eq!(output["schema"], "arc-chain/2");
 }

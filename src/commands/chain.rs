@@ -39,6 +39,9 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                             findings: 0,
                             ad_hoc_verifications: 0,
                         },
+                        coverage: Vec::new(),
+                        stale_reviewers: 0,
+                        audit_debt_outstanding: state.audit_debt_outstanding(),
                     };
                 };
                 let subject = patchset
@@ -100,6 +103,7 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                     .collect::<BTreeSet<_>>();
                 let at_final = window(&final_patchset_ids, &final_heads);
                 let lifetime = window(&lifetime_patchset_ids, &lifetime_heads);
+                let coverage = crate::status::reviewer_coverage(state);
                 ChainReview {
                     non_self_verdict: lifetime
                         .identities
@@ -108,6 +112,9 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                     subject: Some(subject),
                     at_final,
                     lifetime,
+                    stale_reviewers: coverage.iter().filter(|row| !row.covers_final).count(),
+                    audit_debt_outstanding: state.audit_debt_outstanding(),
+                    coverage,
                 }
             });
             ChainMember {
@@ -193,6 +200,17 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                         review.lifetime.findings,
                         review.lifetime.ad_hoc_verifications
                     );
+                    for row in &review.coverage {
+                        if !row.covers_final {
+                            println!(
+                                "  coverage: {} last saw {} (stale)",
+                                row.reviewer, row.last_patchset
+                            );
+                        }
+                    }
+                    if review.audit_debt_outstanding {
+                        println!("  audit: owed, not yet discharged");
+                    }
                 }
             }
         }

@@ -62,12 +62,24 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
 
   If the repository forbids self-approval and no second actor is available,
   integrate with `arc integrate <change> --audit-debt "<why>"`. That records
-  what review is owed rather than waiving it; the obligation survives closure,
-  `arc query --audit-debt` lists everything still owing one, and
-  `arc audit <change> --verdict <v>` discharges it against the integrated
-  revision once a reviewer is free. An audit is a separate event from the
-  verdict that shipped, so attaching one never rewrites what shipped with what
-  review.
+  what review is owed rather than waiving it. The waiver binds to the patchset
+  it was declared for, so new work needs a new declaration — it does not
+  excuse the rest of the change's life.
+
+  Coming back to owed work:
+
+    arc inbox                       audit-owed bucket, including closed changes
+    arc catchup                     the same, with each reason
+    arc query --audit-debt          change IDs alone, for scripting
+    arc diff <change>               what to review; works after closure
+    arc audit <change> --verdict <v>          discharge it
+    arc findings <change> --audit             what an audit raised
+
+  An audit is a separate event from the verdict that shipped, so attaching one
+  never rewrites what shipped with what review. An approving audit must come
+  from an identity other than the author — otherwise the obligation would
+  discharge itself — though anyone may audit into `changes-requested`, since
+  raising problems needs no independence.
 
 RULES THAT CHANGE WHAT YOU DO
   - A verdict binds to the exact approved patchset head. Any new commit makes

@@ -256,6 +256,8 @@ impl VerdictEntry {
 pub struct AuditDebt {
     pub event_id: String,
     pub reason: String,
+    /// The patchset this waiver was declared against, if it waived anything.
+    pub patchset_id: Option<String>,
     pub actor: String,
     pub declared_at: chrono::DateTime<chrono::Utc>,
 }
@@ -965,10 +967,14 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     created_at: ev.created_at,
                 });
             }
-            Payload::AuditDebtDeclared { reason } => {
+            Payload::AuditDebtDeclared {
+                reason,
+                patchset_id,
+            } => {
                 state.audit_debt = Some(AuditDebt {
                     event_id: ev.event_id.clone(),
                     reason: reason.clone(),
+                    patchset_id: patchset_id.clone(),
                     actor: ev.actor.clone(),
                     declared_at: ev.created_at,
                 });
@@ -1384,14 +1390,44 @@ impl ChangeState {
     /// The debt is what makes integration without an independent verdict
     /// honest rather than silent: it survives closure, and
     /// `arc query --audit-debt` finds it once a reviewer is available again.
+    /// Whether the declared debt still excuses a self-approval.
+    ///
+    /// Only while it names the patchset that is about to ship. Any newer
+    /// snapshot leaves the waiver behind exactly as it leaves an approval
+    /// behind, so re-declaring is a deliberate act rather than a thing that
+    /// happened once and never expired.
+    pub fn audit_debt_waives_current_head(&self) -> bool {
+        let Some(debt) = &self.audit_debt else {
+            return false;
+        };
+        let Some(declared_for) = debt.patchset_id.as_deref() else {
+            return false;
+        };
+        self.latest_patchset()
+            .is_some_and(|patchset| patchset.id == declared_for)
+    }
+
+    /// A review this change owes and nobody has recorded.
+    ///
+    /// Scoped to integrated changes because that is when the obligation is
+    /// actionable: an audit reviews a revision that shipped, so a debt on an
+    /// open change is a pending waiver rather than owed work. Queueing it
+    /// earlier would offer a reviewer an item `arc audit` then refuses.
     pub fn audit_debt_outstanding(&self) -> bool {
-        match &self.audit_debt {
-            None => false,
-            Some(debt) => !self
-                .audit_verdicts
-                .iter()
-                .any(|audit| audit.created_at >= debt.declared_at),
+        let Some(debt) = &self.audit_debt else {
+            return false;
+        };
+        if !self
+            .closure
+            .as_ref()
+            .is_some_and(|closure| closure.outcome == Closure::Integrated)
+        {
+            return false;
         }
+        !self
+            .audit_verdicts
+            .iter()
+            .any(|audit| audit.created_at >= debt.declared_at)
     }
 }
 

@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-pub const CHAIN_SCHEMA: &str = "arc-chain/1";
+pub const CHAIN_SCHEMA: &str = "arc-chain/2";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChainMember {
@@ -24,6 +24,15 @@ pub struct ChainReview {
     pub non_self_verdict: bool,
     pub at_final: ChainReviewWindow,
     pub lifetime: ChainReviewWindow,
+    /// Per reviewer, the newest patchset it saw. `non_self_verdict` answers
+    /// whether somebody independent ever looked; this answers whether anybody
+    /// looked at what shipped, which is the question that catches a panel
+    /// running correctly right up to the corrections nobody re-reviewed.
+    pub coverage: Vec<crate::status::ReviewerCoverage>,
+    /// Reviewers whose last look predates the final patchset.
+    pub stale_reviewers: usize,
+    /// A review obligation recorded at integration and not yet discharged.
+    pub audit_debt_outstanding: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

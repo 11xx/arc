@@ -452,7 +452,7 @@ arc chain '#radio' --review
 `arc chain` includes open and closed members exactly once in dependency order,
 reports their current brief plan bindings and the referenced plan history, and
 names the same next ready change that `arc take --tag` would select. The JSON
-form uses the `arc-chain/1` schema. The view is entirely derived and does not
+form uses the `arc-chain/2` schema. The view is entirely derived and does not
 infer aggregate completion, pauses, unopened slices, duplicate slices, or a
 progress percentage.
 
@@ -707,15 +707,35 @@ without waiving anything:
 
 ```sh
 arc integrate <change> --audit-debt "no independent reviewer reachable"
-arc query --audit-debt              # everything still owing a review
-arc audit <change> --verdict approved --body-file -   # discharge it later
+
+# later, when a reviewer is available
+arc inbox                                    # audit-owed bucket
+arc catchup                                  # the same, with reasons
+arc query --audit-debt                       # IDs alone, for scripting
+arc diff <change>                            # what to review
+arc audit <change> --verdict approved --body-file -
+arc findings <change> --audit                # what the audit raised
 ```
 
 The obligation is a ledger fact that survives closure, so the owed review is
-findable instead of living in prose. An audit is a distinct event anchored to
-the integrated revision, never a late verdict: attaching one can never rewrite
-the answer to "what shipped with what review". Audits may carry findings of
-their own, and are refused while the change is still open.
+findable instead of living in prose. `arc inbox` carries it in the one bucket
+that includes integrated changes, `arc doctor` reports it as
+`audit-debt-outstanding`, and `arc chain` shows it beside reviewer coverage.
+
+Three rules keep the escape hatch from becoming a hole:
+
+- **The waiver binds to a patchset.** A debt declared for `ps-01` stops
+  excusing self-approval the moment `ps-02` is snapshotted, exactly as an
+  approval goes stale. Re-declaring is deliberate. A debt declared after
+  integration carries no patchset and waives nothing.
+- **An approving audit must come from another identity.** Otherwise the change
+  ships on a self-approval and then clears its own record. Auditing into
+  `changes-requested` is open to anyone — raising problems needs no
+  independence.
+- **An audit is a distinct event**, anchored to the integrated revision and
+  refused while the change is still open. Attaching one can never rewrite the
+  answer to "what shipped with what review", and audit findings stay out of the
+  shipped set — `arc findings --audit` reads them.
 
 ## Identity
 
