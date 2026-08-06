@@ -470,3 +470,62 @@ fn audit_findings_are_listed_separately_and_pointed_at() {
     assert_eq!(json["audit"], true);
     assert_eq!(json["findings"].as_array().unwrap().len(), 1);
 }
+
+/// Without this the mechanism is decorative: a change ships on a
+/// self-approval and then clears its own obligation.
+#[test]
+fn an_author_cannot_discharge_its_own_audit_debt_by_approving() {
+    let repo = repo_forbidding_self_approval();
+    self_approved_change(&repo, "selfaudit");
+    repo.arc(&repo.root)
+        .args(["integrate", "selfaudit", "--audit-debt", "quota"])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Solo")
+        .args(["audit", "selfaudit", "--verdict", "approved"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("another identity"));
+
+    // The obligation survives the refusal.
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "selfaudit", "--json"]));
+    assert_eq!(status["audit_debt_outstanding"], true);
+
+    // Raising problems needs no independence.
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Solo")
+        .args(["audit", "selfaudit", "--verdict", "changes-requested"])
+        .assert()
+        .success();
+
+    // And an independent identity can approve.
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["audit", "selfaudit", "--verdict", "approved"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "selfaudit", "--json"]));
+    assert_eq!(status["audit_debt_outstanding"], false);
+}
+
+/// Audit events must survive an export/import round trip like every other
+/// ledger fact, or the obligation vanishes when a change moves machines.
+#[test]
+fn audit_events_survive_a_bundle_round_trip() {
+    let repo = repo_forbidding_self_approval();
+    self_approved_change(&repo, "roundtrip");
+    repo.arc(&repo.root)
+        .args(["integrate", "roundtrip", "--audit-debt", "quota"])
+        .assert()
+        .success();
+    let bundle = repo.home.join("bundle.json");
+    repo.arc(&repo.root)
+        .args(["export", "roundtrip", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let text = fs::read_to_string(&bundle).unwrap();
+    assert!(text.contains("audit-debt-declared"), "{text}");
+}

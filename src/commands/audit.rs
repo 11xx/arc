@@ -56,6 +56,7 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
     let st = state::reduce(&store.load_events(&change_id)?)?;
 
     let revision = integrated_revision(&st)?;
+    refuse_self_audit(ctx, &st, args.verdict)?;
     let inline = super::review::parse_inline_findings(args.findings_json.as_deref())?;
     if args.verdict == Verdict::Approved && inline.iter().any(|f| f.blocking) {
         bail!("cannot approve while recording blocking findings in the same audit");
@@ -78,6 +79,40 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
     println!("event: {}", event.event_id);
     if st.audit_debt.is_some() {
         println!("audit debt discharged");
+    }
+    Ok(())
+}
+
+/// Refuse an approving audit from the identity that wrote the work.
+///
+/// The debt exists because an independent verdict was unavailable. If the
+/// author can discharge it, the obligation is decorative: the change ships on
+/// a self-approval and then clears its own record. A repository that does not
+/// forbid self-approval has already opted out of this and is left alone.
+///
+/// Only approval is restricted. Raising problems needs no independence, so an
+/// author auditing its own work into `changes-requested` is useful and allowed.
+fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result<()> {
+    if verdict != Verdict::Approved {
+        return Ok(());
+    }
+    let policy = crate::policy::load(&gitio::toplevel(&ctx.cwd)?)?;
+    if !policy.policy.forbid_self_approval {
+        return Ok(());
+    }
+    let Some(author) = state
+        .latest_patchset()
+        .map(|patchset| patchset.effective_author().to_string())
+    else {
+        return Ok(());
+    };
+    let auditor = ctx.on_behalf_of.as_deref().unwrap_or(&ctx.actor);
+    if auditor == author {
+        bail!(
+            "{auditor} authored the audited work; an approving audit must come from \
+another identity, or the obligation discharges itself. Record findings with \
+--verdict changes-requested instead, or audit as the reviewer with --actor."
+        );
     }
     Ok(())
 }
