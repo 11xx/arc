@@ -30,7 +30,13 @@ daemon, no database, no network, no multi-machine ref sync.
 
 ## Working here
 
-- The repo dogfoods itself: run non-trivial changes through /arc.
+- The repo dogfoods itself: run non-trivial changes through the ledger,
+  `arc begin` to `arc integrate`. Run `arc catchup` first — the actionable
+  backlog lives in the journal, not in the ledger.
+- The CLI is the only workflow surface an agent needs: bare `arc` teaches the
+  lifecycle and profiles, and `--help` carries each command's contract. Keep
+  them accurate when behavior changes; there is no external skill to fall
+  back on.
 - After integrating a CLI change, refresh the installed binary:
   `cargo install --path . --locked`.
 - Record behavior changes on their arc change via `arc changelog`; the
