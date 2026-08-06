@@ -285,9 +285,11 @@ fn unattributed_reviewer_is_reported_as_unknown_not_as_independence() {
 fn dry_run_integrate_declares_no_debt() {
     let repo = repo_forbidding_self_approval();
     self_approved_change(&repo, "dry");
+    // Blocked, because the debt that would have unblocked it was not written.
     repo.arc(&repo.root)
         .args(["integrate", "dry", "--dry-run", "--audit-debt", "quota"])
-        .assert();
+        .assert()
+        .code(3);
     let status = json_stdout(repo.arc(&repo.root).args(["status", "dry", "--json"]));
     assert_eq!(status["audit_debt_outstanding"], false);
     assert!(status["audit_debt"].is_null(), "{}", status["audit_debt"]);
