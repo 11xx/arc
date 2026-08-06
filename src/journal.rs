@@ -2002,15 +2002,48 @@ fn is_consumed(events: &[JournalEvent], filename: &str) -> bool {
 }
 
 #[derive(Serialize)]
-struct OpenItems {
+pub(crate) struct OpenItems {
     dir: String,
     open: Vec<ArtifactEntry>,
     later: Vec<ArtifactEntry>,
     feature_requests: Vec<ArtifactEntry>,
 }
 
-fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
-    if let Some(kind) = kind.as_deref() {
+impl OpenItems {
+    pub(crate) fn dir(&self) -> &str {
+        &self.dir
+    }
+
+    pub(crate) fn tier_counts(&self) -> (usize, usize, usize) {
+        (
+            self.open.len(),
+            self.later.len(),
+            self.feature_requests.len(),
+        )
+    }
+
+    /// The primary tier's newest entries as `(file, kind, heading-or-topic)`,
+    /// for callers that surface a pointer rather than the whole queue.
+    pub(crate) fn primary_preview(&self, limit: usize) -> Vec<(String, String, String)> {
+        self.open
+            .iter()
+            .take(limit)
+            .map(|entry| {
+                (
+                    entry.file.clone(),
+                    entry.kind.clone().unwrap_or_default(),
+                    entry.heading.clone().unwrap_or_else(|| entry.topic.clone()),
+                )
+            })
+            .collect()
+    }
+}
+
+/// The actionable journal queue, split into its three tiers. Shared by
+/// `journal open` and by every view that surfaces the backlog beside
+/// ledger state.
+pub(crate) fn collect_open(ctx: &Ctx, kind: Option<&str>) -> Result<OpenItems> {
+    if let Some(kind) = kind {
         if !is_actionable_kind(kind) {
             bail!(
                 "--kind {} is not actionable; the open queue tracks {}",
@@ -2042,7 +2075,7 @@ fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
             let Some((_, _, file_kind)) = parse_artifact_name(&name) else {
                 continue;
             };
-            let wanted = match kind.as_deref() {
+            let wanted = match kind {
                 Some(kind) => file_kind == kind,
                 None => is_actionable_kind(&file_kind),
             };
@@ -2110,40 +2143,54 @@ fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
         }
     }
 
+    Ok(OpenItems {
+        dir: dir.display().to_string(),
+        open,
+        later,
+        feature_requests,
+    })
+}
+
+fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
+    let items = collect_open(ctx, kind.as_deref())?;
     if json {
-        let out = OpenItems {
-            dir: dir.display().to_string(),
-            open,
-            later,
-            feature_requests,
-        };
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", serde_json::to_string_pretty(&items)?);
     } else {
-        println!("dir: {}", dir.display());
+        println!("dir: {}", items.dir);
+        println!("{OPEN_TIER_LEGEND}");
         println!("open items (newest first):");
-        if open.is_empty() {
+        if items.open.is_empty() {
             println!("  (none)");
         }
-        for f in &open {
+        for f in &items.open {
             render_open_entry(f);
         }
         println!("later items (newest first):");
-        if later.is_empty() {
+        if items.later.is_empty() {
             println!("  (none)");
         }
-        for f in &later {
+        for f in &items.later {
             render_open_entry(f);
         }
         println!("feature requests (newest first):");
-        if feature_requests.is_empty() {
+        if items.feature_requests.is_empty() {
             println!("  (none)");
         }
-        for f in &feature_requests {
+        for f in &items.feature_requests {
             render_open_entry(f);
         }
     }
     Ok(0)
 }
+
+/// What the three tiers mean, printed above the queue so a reader who has
+/// never seen the kind vocabulary can act on it. `open` carries work a future
+/// session is expected to pick up; `later` and `feature-request` are parked
+/// until someone chooses to spend on them.
+const OPEN_TIER_LEGEND: &str =
+    "tiers: open = todo|handoff|inbox|plan|discussion (work awaiting a session); \
+later = parked; feature-request = unbuilt proposals. \
+Take one up with `arc begin <slug> --from-journal <file>`.";
 
 /// One `journal open` line: the creation stamp and its age, then topic, kind,
 /// heading, and any change/lane annotations.
@@ -3025,5 +3072,48 @@ mod tests {
         assert_eq!(parse_lane_marker("lane opened [0s]"), None);
         assert_eq!(parse_lane_marker("lane opened [2d]"), None);
         assert_eq!(parse_lane_marker("lane opened scope=Bad_Topic"), None);
+    }
+}
+
+/// The journal half of `arc catchup`: live lanes, shared memories, and the
+/// actionable queue in full. Rendered beside ledger state so one command
+/// answers "what is waiting on this project" from both stores at once.
+#[derive(Serialize)]
+pub(crate) struct Orientation {
+    lanes: Vec<LaneEntry>,
+    memories: Vec<ArtifactEntry>,
+    #[serde(flatten)]
+    queue: OpenItems,
+}
+
+pub(crate) fn orientation(ctx: &Ctx) -> Result<Orientation> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    let now = Utc::now();
+    Ok(Orientation {
+        lanes: lanes_from_journal(&read_events(&dir)?, now),
+        memories: live_memories(&dir)?,
+        queue: collect_open(ctx, None)?,
+    })
+}
+
+impl Orientation {
+    pub(crate) fn render(&self) {
+        render_lanes(&self.lanes, Utc::now());
+        render_memories(&self.memories);
+        println!("journal: {}", self.queue.dir());
+        println!("  {OPEN_TIER_LEGEND}");
+        for (label, entries) in [
+            ("open", &self.queue.open),
+            ("later", &self.queue.later),
+            ("feature-request", &self.queue.feature_requests),
+        ] {
+            println!("{label} ({}):", entries.len());
+            if entries.is_empty() {
+                println!("  (none)");
+            }
+            for entry in entries {
+                render_open_entry(entry);
+            }
+        }
     }
 }

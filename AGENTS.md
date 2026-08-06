@@ -12,7 +12,7 @@ daemon, no database, no network, no multi-machine ref sync.
 - The ledger is authoritative and append-only. Events are created
   exclusively, never rewritten; every status, inbox, or list output is a
   derived view. Output and bundle schemas are versioned (`arc-status/5`,
-  `arc-inbox/1`); a breaking shape change bumps the version.
+  `arc-inbox/2`); a breaking shape change bumps the version.
 - Approval staleness is structural: a verdict binds to the exact approved
   patchset head, and any new commit invalidates it. Never weaken this.
 - The ledger is authoritative and gating; the journal is advisory and
@@ -30,7 +30,13 @@ daemon, no database, no network, no multi-machine ref sync.
 
 ## Working here
 
-- The repo dogfoods itself: run non-trivial changes through /arc.
+- The repo dogfoods itself: run non-trivial changes through the ledger,
+  `arc begin` to `arc integrate`. Run `arc catchup` first — the actionable
+  backlog lives in the journal, not in the ledger.
+- The CLI is the only workflow surface an agent needs: bare `arc` teaches the
+  lifecycle and profiles, and `--help` carries each command's contract. Keep
+  them accurate when behavior changes; there is no external skill to fall
+  back on.
 - After integrating a CLI change, refresh the installed binary:
   `cargo install --path . --locked`.
 - Record behavior changes on their arc change via `arc changelog`; the

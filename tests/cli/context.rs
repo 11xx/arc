@@ -420,3 +420,54 @@ fn differing_explicit_harness_suppresses_detected_session() {
     assert_eq!(event["harness"], "explicit");
     assert!(event["session"].is_null());
 }
+
+/// Bare `arc` is the orientation surface: it replaces a separate workflow
+/// document, so the guide must carry the lifecycle, the profiles, and the
+/// rules that change what a session does — not just a command list.
+#[test]
+fn bare_arc_prints_the_workflow_guide() {
+    let repo = Repo::new();
+    let guide = stdout(&mut repo.arc(&repo.root));
+    for expected in [
+        "arc catchup",
+        "arc journal open",
+        "RUN A CHANGE",
+        "PROFILES",
+        "direct",
+        "release",
+        "binds to the exact approved patchset head",
+        "arc config --check-writable",
+        "arc watch <change> --until stalled",
+        "arc holds no routing opinion",
+    ] {
+        assert!(
+            guide.contains(expected),
+            "guide missing {expected:?}:\n{guide}"
+        );
+    }
+}
+
+#[test]
+fn help_points_at_the_guide_and_at_live_state() {
+    let repo = Repo::new();
+    let help = stdout(repo.arc(&repo.root).arg("--help"));
+    assert!(
+        help.contains("no arguments for the workflow guide"),
+        "{help}"
+    );
+    assert!(help.contains("arc catchup"), "{help}");
+}
+
+/// Making the subcommand optional must not turn a mistyped invocation into a
+/// silent success: only the genuinely empty argument list is a guide request.
+#[test]
+fn optional_subcommand_still_rejects_usage_errors() {
+    let repo = Repo::new();
+    repo.arc(&repo.root).assert().code(0);
+    repo.arc(&repo.root).arg("nosuchcommand").assert().code(2);
+    repo.arc(&repo.root).arg("--nosuchflag").assert().code(2);
+    repo.arc(&repo.root)
+        .args(["inbox", "--nosuchflag"])
+        .assert()
+        .code(2);
+}

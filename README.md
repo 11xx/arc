@@ -87,9 +87,32 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   in dependency order, stopping at the first refusal. Refusals carry typed
   exit codes.
 
+## Orientation
+
+`arc` with no arguments prints the workflow guide: what the ledger owns, the
+command lifecycle in order, how to pick a profile, and the invariants that
+change what a session should do. It is the whole briefing an agent needs
+before its first command, so no separate workflow document has to be loaded
+first; `arc --help` remains the per-command reference.
+
+`arc catchup` answers the other half — not how arc works, but what is waiting
+right now. It renders the ledger's actionable buckets, live journal lanes,
+shared project memories, and the full actionable journal queue in one call. A
+session starting cold runs it first.
+
+The two stores answer different questions and an empty one does not imply an
+empty queue: the ledger holds changes already open, while the journal holds
+everything not yet opened as a change. `arc inbox` therefore reports the
+journal's tier counts and newest primary items beside its own buckets, and
+`arc begin <slug> --from-journal <file>` turns a queued artifact into a change,
+consuming it.
+
 ## Quick tour
 
 ```sh
+arc                                    # workflow guide
+arc catchup                            # what is waiting: ledger + journal
+
 arc begin radio-refill-fix --title "Keep radio refill from restarting playback" \
   --tag '#radio' --blocked-by radio-foundation
 # → branch arc/radio-refill-fix + worktree ~/.worktrees/<repo>-radio-refill-fix
@@ -917,7 +940,7 @@ ledger and 1 when problems are present.
 ## Roadmap
 
 Shipped: local core +
-policy engine (M1–M2), `/arc` skill wiring (M3), deterministic export/import
+policy engine (M1–M2), agent-facing orientation surfaces (M3), deterministic export/import
 bundles (M4), local orchestration foundations (dependencies, tags,
 actionable status, query, and batch views), claims/stages and execution
 roles, messaging and the inbox rollup, project-journal mechanics, and the

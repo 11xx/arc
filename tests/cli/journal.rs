@@ -3547,3 +3547,18 @@ fn begin_from_journal_plan_seeds_no_brief() {
         .failure()
         .stderr(predicates::str::contains("no brief recorded"));
 }
+
+/// The tier vocabulary is a closed set that a reader has no other way to
+/// learn, so the queue explains itself and names the command that takes an
+/// item up.
+#[test]
+fn journal_open_explains_its_tiers() {
+    let repo = Repo::new();
+    let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(
+        text.contains("tiers: open = todo|handoff|inbox|plan|discussion"),
+        "{text}"
+    );
+    assert!(text.contains("later = parked"), "{text}");
+    assert!(text.contains("--from-journal"), "{text}");
+}

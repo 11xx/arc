@@ -320,7 +320,7 @@ fn inbox_buckets_classify_open_changes() {
     age_event(&repo, &stalled_id, "claim-set", 120);
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/1");
+    assert_eq!(inbox["schema"], "arc-inbox/2");
     assert!(bucket_has(&inbox, "needs-review", &review_id));
     assert!(bucket_has(&inbox, "changes-requested", &cr_id));
     assert!(bucket_has(&inbox, "ready-to-integrate", &ready_id));
@@ -501,4 +501,68 @@ fn implementer_role_may_announce_and_assign() {
         .args(["inbox", "--json"])
         .assert()
         .success();
+}
+
+#[test]
+fn inbox_names_the_journal_backlog_even_when_the_ledger_is_empty() {
+    let repo = Repo::new();
+    let body = repo.home.join("body.md");
+    fs::write(&body, "unstarted work\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "waiting",
+            "--kind",
+            "plan",
+            "--body-file",
+            body.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    assert_eq!(inbox["journal"]["open"], 1);
+    assert_eq!(inbox["journal"]["later"], 0);
+    assert_eq!(inbox["journal"]["feature-requests"], 0);
+    assert_eq!(inbox["journal"]["preview"][0]["kind"], "plan");
+
+    // The text rendering is the surface a session actually reads: an empty
+    // ledger must still point at the queue that is not empty.
+    let text = stdout(repo.arc(&repo.root).args(["inbox"]));
+    assert!(text.contains("## journal backlog"), "{text}");
+    assert!(
+        text.contains("1 open, 0 later, 0 feature-request"),
+        "{text}"
+    );
+    assert!(text.contains("arc journal open"), "{text}");
+}
+
+#[test]
+fn catchup_reports_ledger_and_journal_together() {
+    let repo = Repo::new();
+    let body = repo.home.join("body.md");
+    fs::write(&body, "parked\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "parked",
+            "--kind",
+            "later",
+            "--body-file",
+            body.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let change_id = begin_change(&repo, "catchup-change", None);
+
+    let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    assert_eq!(catchup["schema"], "arc-catchup/1");
+    assert!(bucket_has(&catchup["ledger"], "needs-review", &change_id));
+    assert_eq!(catchup["journal"]["later"][0]["kind"], "later");
+
+    let text = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(text.contains(&change_id), "{text}");
+    assert!(text.contains("later (1):"), "{text}");
 }

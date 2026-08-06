@@ -19,6 +19,11 @@ arc mangen ~/.local/share/man/man1            # writes arc.1
 
 arc is Unix-only by design (see the README portability note).
 
+Then run `arc` with no arguments once. It prints the workflow guide — the
+lifecycle, profile selection, and the invariants that change how a session
+works — and `arc catchup` shows what is already waiting in this repository's
+ledger and journal.
+
 ## 2. Declare gates
 
 Gates are repo-committed commands arc runs as verification evidence. Create
