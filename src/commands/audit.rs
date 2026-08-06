@@ -22,10 +22,11 @@ pub fn declare_audit_debt(ctx: &Ctx, reference: &str, reason: String) -> Result<
     // An open change waives its self-approval only for the patchset that is
     // about to ship; a closed one has no gate left to waive, so the debt is
     // recorded as a bare obligation.
-    let patchset_id = st
-        .is_closed()
-        .then_some(None)
-        .unwrap_or_else(|| st.latest_patchset().map(|patchset| patchset.id.clone()));
+    let patchset_id = if st.is_closed() {
+        None
+    } else {
+        st.latest_patchset().map(|patchset| patchset.id.clone())
+    };
     let payload = Payload::AuditDebtDeclared {
         reason: reason.to_string(),
         patchset_id: patchset_id.clone(),
