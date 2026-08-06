@@ -452,7 +452,7 @@ arc chain '#radio' --review
 `arc chain` includes open and closed members exactly once in dependency order,
 reports their current brief plan bindings and the referenced plan history, and
 names the same next ready change that `arc take --tag` would select. The JSON
-form uses the `arc-chain/1` schema. The view is entirely derived and does not
+form uses the `arc-chain/2` schema. The view is entirely derived and does not
 infer aggregate completion, pauses, unopened slices, duplicate slices, or a
 progress percentage.
 

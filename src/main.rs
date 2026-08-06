@@ -264,6 +264,9 @@ enum Cmd {
     },
     /// List findings in text, JSON, or SARIF 2.1.0 form
     Findings {
+        /// List post-integration audit findings instead of the shipped ones
+        #[arg(long)]
+        audit: bool,
         change: Option<String>,
         #[arg(long, value_enum, default_value = "text")]
         format: commands::FindingsFormat,
@@ -359,7 +362,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Lead-facing queue rollup across open changes, including active claim work (arc-inbox/2 schema)
+    /// Lead-facing queue rollup: open changes, active claims, and outstanding audit debt (arc-inbox/3 schema)
     Inbox {
         /// Restrict to changes assigned to this harness
         #[arg(long = "assigned-to")]
@@ -367,7 +370,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Show a tagged program in dependency order (arc-chain/1 schema)
+    /// Show a tagged program in dependency order (arc-chain/2 schema)
     Chain {
         tag: String,
         #[arg(long)]
@@ -1194,9 +1197,13 @@ fn run(cli: Cli) -> Result<i32> {
             )?;
             Ok(0)
         }
-        Cmd::Findings { change, format } => {
+        Cmd::Findings {
+            change,
+            format,
+            audit,
+        } => {
             let change = infer(change.as_deref())?;
-            commands::findings(&ctx, &change, format)?;
+            commands::findings(&ctx, &change, format, audit)?;
             Ok(0)
         }
         Cmd::Brief {

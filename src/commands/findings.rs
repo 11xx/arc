@@ -13,12 +13,22 @@ pub enum FindingsFormat {
 }
 
 /// Render a change's findings without changing their ledger state.
-pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat) -> Result<()> {
+///
+/// Audit findings are listed apart from the ones raised before integration.
+/// Merging them would answer "what was found reviewing this change" with a
+/// set that includes what nobody knew when it shipped; omitting them would
+/// leave an audit's findings write-only. So both are shown, labelled.
+pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool) -> Result<()> {
     let store = ctx.store()?;
     let (_, state) = ctx.load_state(&store, reference)?;
+    let selected = if audit {
+        &state.audit_findings
+    } else {
+        &state.findings
+    };
     match format {
         FindingsFormat::Text => {
-            for finding in state.findings.values() {
+            for finding in selected.values() {
                 let disposition = finding
                     .effective_status()
                     .map(|status| format!("{status:?}").to_lowercase())
@@ -28,6 +38,12 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat) -> Result<()
                     finding.id, finding.severity, finding.summary
                 );
             }
+            if !audit && !state.audit_findings.is_empty() {
+                println!(
+                    "({} audit finding(s) raised after integration; arc findings {reference} --audit)",
+                    state.audit_findings.len()
+                );
+            }
         }
         FindingsFormat::Json => {
             println!(
@@ -35,13 +51,13 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat) -> Result<()
                 serde_json::to_string_pretty(&FindingsJson {
                     schema: "arc-findings/1",
                     change_id: &state.change_id,
-                    findings: state.findings.values().collect(),
+                    audit,
+                    findings: selected.values().collect(),
                 })?
             );
         }
         FindingsFormat::Sarif => {
-            let results = state
-                .findings
+            let results = selected
                 .values()
                 .filter(|finding| finding.effective_status().is_none())
                 .map(|finding| {
@@ -81,6 +97,8 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat) -> Result<()
 struct FindingsJson<'a> {
     schema: &'static str,
     change_id: &'a str,
+    /// These are post-integration audit findings, not what shipped.
+    audit: bool,
     findings: Vec<&'a FindingState>,
 }
 

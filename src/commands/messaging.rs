@@ -144,6 +144,8 @@ fn collect_inbox(
     let filter = assigned_to.map(str::trim).filter(|f| !f.is_empty());
     let mut inbox = crate::inbox::Inbox::new(filter.map(str::to_string));
     for state in states.values() {
+        // An audit obligation is the one queue item that survives closure.
+        inbox.absorb_audit_debt(state);
         if state.is_closed() {
             continue;
         }
@@ -199,6 +201,34 @@ pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
         }
         render_journal_backlog(inbox.journal.as_ref());
     }
+    Ok(())
+}
+
+/// Outstanding review obligations, with the reason each was taken on.
+///
+/// `inbox` lists them as rows; here they carry their reasons, because the
+/// question when picking one up is what review is owed, not merely that one is.
+fn render_audit_debts(ctx: &Ctx, store: &crate::store::Store) -> Result<()> {
+    let states = ctx.load_all_states(store)?;
+    let mut owed: Vec<_> = states
+        .values()
+        .filter(|state| state.audit_debt_outstanding())
+        .collect();
+    if owed.is_empty() {
+        return Ok(());
+    }
+    owed.sort_by(|a, b| a.change_id.cmp(&b.change_id));
+    println!("audit-owed ({}):", owed.len());
+    for state in owed {
+        let reason = state
+            .audit_debt
+            .as_ref()
+            .map(|debt| debt.reason.as_str())
+            .unwrap_or_default();
+        println!("  {}  {}", state.change_id, state.title);
+        println!("    owed: {reason}");
+    }
+    println!("  discharge with: arc audit <change> --verdict <v>");
     Ok(())
 }
 
@@ -280,6 +310,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     if !any {
         println!("  no open changes");
     }
+    render_audit_debts(ctx, &store)?;
     match journal {
         Ok(journal) => journal.render(),
         Err(error) => println!("journal: unavailable ({error:#})"),

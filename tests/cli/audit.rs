@@ -366,3 +366,107 @@ fn debt_declared_after_integration_carries_no_patchset() {
         status["audit_debt"]
     );
 }
+
+/// The queue a session returns to when a reviewer becomes available. The
+/// obligation belongs to an integrated change, so it must survive the closure
+/// filter every other bucket applies.
+#[test]
+fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
+    let repo = repo_forbidding_self_approval();
+    self_approved_change(&repo, "queued");
+    repo.arc(&repo.root)
+        .args(["integrate", "queued", "--audit-debt", "quota exhausted"])
+        .assert()
+        .success();
+
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    assert_eq!(inbox["schema"], "arc-inbox/3");
+    let owed = inbox["audit-owed"].as_array().unwrap();
+    assert_eq!(owed.len(), 1, "{owed:?}");
+    assert_eq!(owed[0]["next_actor"], "reviewer");
+
+    let text = stdout(repo.arc(&repo.root).args(["inbox"]));
+    assert!(text.contains("## audit-owed"), "{text}");
+
+    let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(catchup.contains("audit-owed (1):"), "{catchup}");
+    assert!(catchup.contains("quota exhausted"), "{catchup}");
+    assert!(catchup.contains("arc audit"), "{catchup}");
+
+    // Discharging it empties the queue.
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["audit", "queued", "--verdict", "approved"])
+        .assert()
+        .success();
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    assert!(inbox["audit-owed"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn doctor_reports_an_undischarged_obligation() {
+    let repo = repo_forbidding_self_approval();
+    self_approved_change(&repo, "unaudited");
+    repo.arc(&repo.root)
+        .args(["integrate", "unaudited", "--audit-debt", "no reviewer"])
+        .assert()
+        .success();
+    let report = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
+    let codes: Vec<&str> = report["advice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.contains(&"audit-debt-outstanding"), "{codes:?}");
+}
+
+/// Audit findings must be readable, or an audit that raises them is
+/// write-only. They stay out of the shipped set and are reachable by name.
+#[test]
+fn audit_findings_are_listed_separately_and_pointed_at() {
+    let repo = repo_forbidding_self_approval();
+    self_approved_change(&repo, "readable");
+    repo.arc(&repo.root)
+        .args(["integrate", "readable", "--audit-debt", "quota"])
+        .assert()
+        .success();
+    let path = repo.home.join("f.json");
+    fs::write(
+        &path,
+        json_file_bytes(&serde_json::json!([{
+            "blocking": true, "severity": "major", "summary": "missed edge case"
+        }])),
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args([
+            "audit",
+            "readable",
+            "--verdict",
+            "changes-requested",
+            "--findings-json",
+            path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // The shipped list stays clean but says where the others are.
+    let shipped = stdout(repo.arc(&repo.root).args(["findings", "readable"]));
+    assert!(!shipped.contains("missed edge case"), "{shipped}");
+    assert!(shipped.contains("--audit"), "{shipped}");
+
+    let audit = stdout(
+        repo.arc(&repo.root)
+            .args(["findings", "readable", "--audit"]),
+    );
+    assert!(audit.contains("missed edge case"), "{audit}");
+
+    let json = json_stdout(
+        repo.arc(&repo.root)
+            .args(["findings", "readable", "--audit", "--format", "json"]),
+    );
+    assert_eq!(json["audit"], true);
+    assert_eq!(json["findings"].as_array().unwrap().len(), 1);
+}

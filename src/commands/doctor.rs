@@ -53,6 +53,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     )?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
+    inspect_audit_debt(&states, &mut advice);
 
     let open_states = states
         .iter()
@@ -267,6 +268,26 @@ fn inspect_refs(
         }
     }
     Ok(())
+}
+
+/// An undischarged review obligation is stale state in the sense doctor
+/// reports: nothing is malformed, but work the ledger knows about is waiting
+/// on someone, and it is invisible unless asked for by name.
+fn inspect_audit_debt(states: &BTreeMap<String, ChangeState>, advice: &mut Vec<Finding>) {
+    for (change_id, state) in states {
+        if !state.audit_debt_outstanding() {
+            continue;
+        }
+        let reason = state
+            .audit_debt
+            .as_ref()
+            .map(|debt| debt.reason.as_str())
+            .unwrap_or_default();
+        advice.push(Finding {
+            code: "audit-debt-outstanding",
+            detail: format!("{change_id}: {reason}"),
+        });
+    }
 }
 
 fn inspect_closed_worktrees(

@@ -3,7 +3,7 @@ use crate::state::{ChangeState, ClaimIdentity};
 use crate::status::{ClaimStatus, StatusReport};
 use serde::Serialize;
 
-pub const INBOX_SCHEMA: &str = "arc-inbox/2";
+pub const INBOX_SCHEMA: &str = "arc-inbox/3";
 
 /// The journal's actionable backlog, carried beside the ledger buckets.
 ///
@@ -50,7 +50,7 @@ pub struct InboxRow {
     pub age_seconds: Option<u64>,
 }
 
-/// The `arc-inbox/2` rollup: a lead-facing queue derived entirely from
+/// The `arc-inbox/3` rollup: a lead-facing queue derived entirely from
 /// existing ledger + Git state. A change may appear in more than one bucket
 /// when it is genuinely in more than one actionable state (e.g. blocked and
 /// awaiting review); each bucket is computed independently.
@@ -71,6 +71,12 @@ pub struct Inbox {
     #[serde(rename = "in-progress")]
     pub in_progress: Vec<InboxRow>,
     pub stalled: Vec<InboxRow>,
+    /// Changes owing a review nobody has recorded. The only bucket holding
+    /// integrated changes: the obligation outlives the change, and a queue
+    /// that dropped it at closure would lose exactly the work it exists to
+    /// track.
+    #[serde(rename = "audit-owed")]
+    pub audit_owed: Vec<InboxRow>,
     /// Absent when the journal directory could not be resolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub journal: Option<JournalBacklog>,
@@ -89,11 +95,12 @@ impl Inbox {
             held: Vec::new(),
             in_progress: Vec::new(),
             stalled: Vec::new(),
+            audit_owed: Vec::new(),
         }
     }
 
     /// Bucket names paired with their rows, in rendering order.
-    pub fn sections(&self) -> [(&'static str, &Vec<InboxRow>); 7] {
+    pub fn sections(&self) -> [(&'static str, &Vec<InboxRow>); 8] {
         [
             ("needs-review", &self.needs_review),
             ("changes-requested", &self.changes_requested),
@@ -102,6 +109,7 @@ impl Inbox {
             ("held", &self.held),
             ("in-progress", &self.in_progress),
             ("stalled", &self.stalled),
+            ("audit-owed", &self.audit_owed),
         ]
     }
 
@@ -181,6 +189,26 @@ impl Inbox {
             .sort_by_key(|row| std::cmp::Reverse(row.priority));
         self.stalled
             .sort_by_key(|row| std::cmp::Reverse(row.priority));
+        self.audit_owed
+            .sort_by_key(|row| std::cmp::Reverse(row.priority));
+    }
+
+    /// Record a change that owes a review. Called for closed changes too, so
+    /// it stands apart from `absorb`, which only sees open work.
+    pub fn absorb_audit_debt(&mut self, state: &ChangeState) {
+        if !state.audit_debt_outstanding() {
+            return;
+        }
+        self.audit_owed.push(InboxRow {
+            change_id: state.change_id.clone(),
+            title: state.title.clone(),
+            priority: state.priority,
+            next_actor: "reviewer".to_string(),
+            assigned_to: state.assigned_to.clone(),
+            owner: None,
+            stage: None,
+            age_seconds: None,
+        });
     }
 }
 
