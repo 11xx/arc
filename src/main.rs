@@ -1654,8 +1654,9 @@ fn run(cli: Cli) -> Result<i32> {
             audit_debt,
         } => {
             // Declared before the merge so the obligation is on the ledger
-            // even if integration then fails for an unrelated reason.
-            if let Some(reason) = audit_debt {
+            // even if integration then fails for an unrelated reason — but
+            // never under --dry-run, which promises to write nothing.
+            if let Some(reason) = audit_debt.filter(|_| !dry_run) {
                 let change = change
                     .as_deref()
                     .context("--audit-debt names one change; it cannot apply to a --tag series")?;
