@@ -298,7 +298,9 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     println!("ledger: {}", store.root.display());
     let mut any = false;
     for (name, rows) in inbox.sections() {
-        if rows.is_empty() {
+        // Owed audits are rendered below with their reasons, which is the
+        // detail that matters when picking one up.
+        if rows.is_empty() || name == "audit-owed" {
             continue;
         }
         any = true;

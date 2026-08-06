@@ -109,9 +109,13 @@ fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result
     let auditor = ctx.on_behalf_of.as_deref().unwrap_or(&ctx.actor);
     if auditor == author {
         bail!(
-            "{auditor} authored the audited work; an approving audit must come from \
-another identity, or the obligation discharges itself. Record findings with \
---verdict changes-requested instead, or audit as the reviewer with --actor."
+            "{auditor} authored the audited work, so this audit would discharge its \
+own obligation.\n\
+  If another reviewer did the pass, record it as theirs:\n\
+    arc audit {} --verdict approved --actor '<reviewer>' --harness '<harness>' --model '<model>'\n\
+  If you are reporting problems rather than clearing the change, \
+--verdict changes-requested is open to anyone.",
+            state.change_id
         );
     }
     Ok(())

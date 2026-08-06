@@ -487,7 +487,10 @@ fn an_author_cannot_discharge_its_own_audit_debt_by_approving() {
         .args(["audit", "selfaudit", "--verdict", "approved"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("another identity"));
+        .stderr(predicates::str::contains("discharge its own obligation"))
+        // The refusal is also where identity gets taught, so it must name the
+        // exact command that records the reviewer who actually looked.
+        .stderr(predicates::str::contains("--actor"));
 
     // The obligation survives the refusal.
     let status = json_stdout(repo.arc(&repo.root).args(["status", "selfaudit", "--json"]));
@@ -528,4 +531,43 @@ fn audit_events_survive_a_bundle_round_trip() {
 
     let text = fs::read_to_string(&bundle).unwrap();
     assert!(text.contains("audit-debt-declared"), "{text}");
+}
+
+/// A debt on an open change is a pending waiver, not owed work: `arc audit`
+/// refuses an open change, so queueing one would offer an item that cannot be
+/// actioned.
+#[test]
+fn an_open_change_with_a_debt_is_not_yet_owed_work() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "pending");
+    repo.arc(&worktree)
+        .args(["audit-debt", "pending", "--reason", "no reviewer"])
+        .assert()
+        .success();
+
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    assert!(
+        inbox["audit-owed"].as_array().unwrap().is_empty(),
+        "{}",
+        inbox["audit-owed"]
+    );
+    assert!(stdout(repo.arc(&repo.root).args(["query", "--audit-debt"]))
+        .trim()
+        .is_empty());
+
+    // The waiver is still visible where it matters: it is why check passes.
+    let status = json_stdout(repo.arc(&worktree).args(["status", "pending", "--json"]));
+    assert_eq!(status["audit_debt"]["patchset_id"], "ps-01");
+    repo.arc(&worktree)
+        .args(["check", "pending"])
+        .assert()
+        .code(0);
+
+    // Once it ships, the obligation becomes actionable.
+    repo.arc(&repo.root)
+        .args(["integrate", "pending"])
+        .assert()
+        .success();
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    assert_eq!(inbox["audit-owed"].as_array().unwrap().len(), 1);
 }

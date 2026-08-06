@@ -1407,14 +1407,27 @@ impl ChangeState {
             .is_some_and(|patchset| patchset.id == declared_for)
     }
 
+    /// A review this change owes and nobody has recorded.
+    ///
+    /// Scoped to integrated changes because that is when the obligation is
+    /// actionable: an audit reviews a revision that shipped, so a debt on an
+    /// open change is a pending waiver rather than owed work. Queueing it
+    /// earlier would offer a reviewer an item `arc audit` then refuses.
     pub fn audit_debt_outstanding(&self) -> bool {
-        match &self.audit_debt {
-            None => false,
-            Some(debt) => !self
-                .audit_verdicts
-                .iter()
-                .any(|audit| audit.created_at >= debt.declared_at),
+        let Some(debt) = &self.audit_debt else {
+            return false;
+        };
+        if !self
+            .closure
+            .as_ref()
+            .is_some_and(|closure| closure.outcome == Closure::Integrated)
+        {
+            return false;
         }
+        !self
+            .audit_verdicts
+            .iter()
+            .any(|audit| audit.created_at >= debt.declared_at)
     }
 }
 
