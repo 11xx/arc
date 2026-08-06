@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/5";
+pub const STATUS_SCHEMA: &str = "arc-status/6";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 
@@ -200,8 +200,34 @@ impl From<&crate::state::MessageEntry> for MessageStatus {
     }
 }
 
-/// The versioned machine-readable contract the /arc skill programs
-/// against. Everything here is derivable from the ledger plus Git.
+/// One reviewer identity's coverage of the change.
+///
+/// "Somebody reviewed this change" and "somebody reviewed what is about to
+/// ship" are different claims, and only the second one is worth anything at
+/// integration time. A panel can run correctly for ten rounds and still let
+/// the final corrections ship unseen, which is why coverage is measured
+/// against the final patchset rather than against participation.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewerCoverage {
+    /// The effective author of this reviewer's verdicts and findings.
+    pub reviewer: String,
+    /// The newest patchset this reviewer filed a verdict or finding against.
+    pub last_patchset: String,
+    pub verdicts: usize,
+    pub findings: usize,
+    /// This reviewer saw the patchset that is about to ship.
+    pub covers_final: bool,
+    /// This reviewer is also the final patchset's effective author, so its
+    /// verdict carries no independence.
+    pub is_author: bool,
+    /// The reviewer is indistinguishable from the snapshot actor because no
+    /// `--on-behalf-of` was recorded on either side. Reported as unknown
+    /// rather than as self-review, which it may or may not be.
+    pub attribution_unknown: bool,
+}
+
+/// The versioned machine-readable contract agent harnesses program against.
+/// Everything here is derivable from the ledger plus Git.
 #[derive(Debug, Serialize)]
 pub struct StatusReport {
     pub schema: &'static str,
@@ -231,6 +257,12 @@ pub struct StatusReport {
     pub head_matches_latest_patchset: bool,
     pub worktree_dirty: Option<bool>,
     pub verdict: Option<VerdictStatus>,
+    /// Who reviewed what, newest coverage first. Additive in arc-status/6.
+    pub review_map: Vec<ReviewerCoverage>,
+    /// Warnings about review coverage of the final patchset. Advisory: plenty
+    /// of changes legitimately ship with one reviewer, so these never block.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub coverage_warnings: Vec<String>,
     pub findings: Vec<FindingSummary>,
     pub open_blocking_findings: Vec<String>,
     pub hold: Option<String>,
@@ -246,6 +278,14 @@ pub struct StatusReport {
     pub integrate_ready: bool,
     pub blockers: Vec<Blocker>,
     pub closure: Option<crate::state::ClosureState>,
+    /// A declared review obligation with no audit answering it. Additive in
+    /// arc-status/6.
+    pub audit_debt_outstanding: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_debt: Option<crate::state::AuditDebt>,
+    /// Reviews recorded after integration, never mixed into `verdict`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub audit_verdicts: Vec<crate::state::AuditVerdictEntry>,
     /// Observed forge (hosted-PR) facts. Absent for changes with no forge
     /// events that are not on the `forge` profile. Additive in arc-status/5.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -403,7 +443,13 @@ fn build_report(
         // Self-approval compares effective authors, so a lead snapshotting for
         // an executor and then approving as itself is not self-approval, while
         // approving --on-behalf-of that executor is.
+        // A declared audit debt converts the self-approval refusal into a
+        // recorded obligation. The requirement is not waived — it is carried
+        // forward where a query can find it — which is the only way a
+        // single-operator change can ship at all when no independent reviewer
+        // is reachable.
         let rejected_self_approval = policy.policy.forbid_self_approval
+            && state.audit_debt.is_none()
             && approved_patchset
                 .is_some_and(|patchset| patchset.effective_author() == v.effective_author());
         let valid = v.verdict == Verdict::Approved
@@ -431,11 +477,15 @@ fn build_report(
                     .as_deref()
                     .unwrap_or(verdict.actor.as_str());
                 policy.policy.forbid_self_approval
+                    && state.audit_debt.is_none()
                     && patchset.id == verdict.patchset_id
                     && patchset.effective_author() == verdict_author
             }))
         .then(|| SELF_APPROVAL_REASON.to_string())
     });
+
+    let review_map = reviewer_coverage(state);
+    let coverage_warnings = coverage_warnings(&review_map, latest_patchset.as_ref());
 
     let findings: Vec<FindingSummary> = state
         .findings
@@ -707,6 +757,8 @@ fn build_report(
         head_matches_latest_patchset: head_matches,
         worktree_dirty,
         verdict,
+        review_map,
+        coverage_warnings,
         findings,
         open_blocking_findings: open_blocking,
         hold: state.hold.clone(),
@@ -720,6 +772,9 @@ fn build_report(
         integrate_ready: ready,
         blockers,
         closure: state.closure.clone(),
+        audit_debt_outstanding: state.audit_debt_outstanding(),
+        audit_debt: state.audit_debt.clone(),
+        audit_verdicts: state.audit_verdicts.clone(),
         forge,
         provenance_check_enabled,
     })
@@ -804,6 +859,135 @@ fn verification_result_label(result: Option<VerifyResult>) -> String {
         None => "pending",
     }
     .into()
+}
+
+/// Walk every verdict and finding, grouping by the identity policy attributes
+/// them to, and record the newest patchset each one saw.
+///
+/// Ordering is by patchset position in the change's own snapshot sequence, not
+/// by timestamp: a verdict filed late against an old patchset reviewed the old
+/// patchset. Reviewers with no patchset attribution at all are omitted rather
+/// than credited with covering something.
+pub fn reviewer_coverage(state: &ChangeState) -> Vec<ReviewerCoverage> {
+    let position = |patchset_id: &str| {
+        state
+            .patchsets
+            .iter()
+            .position(|patchset| patchset.id == patchset_id)
+    };
+    let final_patchset = state.latest_patchset();
+
+    struct Tally {
+        best: usize,
+        best_id: String,
+        verdicts: usize,
+        findings: usize,
+        attributed: bool,
+    }
+    let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
+    let mut record = |reviewer: &str, patchset_id: &str, attributed: bool, is_verdict: bool| {
+        let Some(index) = position(patchset_id) else {
+            return;
+        };
+        let entry = tallies.entry(reviewer.to_string()).or_insert(Tally {
+            best: index,
+            best_id: patchset_id.to_string(),
+            verdicts: 0,
+            findings: 0,
+            attributed,
+        });
+        if index >= entry.best {
+            entry.best = index;
+            entry.best_id = patchset_id.to_string();
+        }
+        // Any explicit attribution anywhere makes this identity legible.
+        entry.attributed |= attributed;
+        if is_verdict {
+            entry.verdicts += 1;
+        } else {
+            entry.findings += 1;
+        }
+    };
+
+    for verdict in &state.verdicts {
+        record(
+            verdict.effective_author(),
+            &verdict.patchset_id,
+            verdict.on_behalf_of.is_some(),
+            true,
+        );
+    }
+    for finding in state.findings.values() {
+        if let Some(patchset_id) = finding.patchset_id.as_deref() {
+            record(&finding.reported_by, patchset_id, false, false);
+        }
+    }
+
+    let mut rows: Vec<ReviewerCoverage> = tallies
+        .into_iter()
+        .map(|(reviewer, tally)| {
+            let is_author =
+                final_patchset.is_some_and(|patchset| patchset.effective_author() == reviewer);
+            ReviewerCoverage {
+                covers_final: final_patchset.is_some_and(|patchset| patchset.id == tally.best_id),
+                // Indistinguishable rather than independent: the identity
+                // matches the snapshot's and neither side declared a subject.
+                attribution_unknown: is_author
+                    && !tally.attributed
+                    && final_patchset.is_some_and(|patchset| patchset.on_behalf_of.is_none()),
+                is_author,
+                reviewer,
+                last_patchset: tally.best_id,
+                verdicts: tally.verdicts,
+                findings: tally.findings,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        b.covers_final
+            .cmp(&a.covers_final)
+            .then_with(|| a.reviewer.cmp(&b.reviewer))
+    });
+    rows
+}
+
+/// Advisory coverage warnings for `arc check`. Never blockers: a change with
+/// one reviewer is normal, and refusing it would make the tool unusable for
+/// the single-operator case it is most often run in.
+pub fn coverage_warnings(
+    review_map: &[ReviewerCoverage],
+    final_patchset: Option<&crate::state::Patchset>,
+) -> Vec<String> {
+    let Some(final_patchset) = final_patchset else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+    for row in review_map {
+        if !row.covers_final {
+            warnings.push(format!(
+                "{} last saw {}; integrating {}",
+                row.reviewer, row.last_patchset, final_patchset.id
+            ));
+        }
+    }
+    let independent = review_map
+        .iter()
+        .any(|row| row.covers_final && !row.is_author && !row.attribution_unknown);
+    if !independent {
+        let unknown = review_map
+            .iter()
+            .any(|row| row.covers_final && row.attribution_unknown);
+        warnings.push(if unknown {
+            format!(
+                "no reviewer of {} is distinguishable from its author; \
+                 record --on-behalf-of to make attribution legible",
+                final_patchset.id
+            )
+        } else {
+            format!("no independent reviewer covers {}", final_patchset.id)
+        });
+    }
+    warnings
 }
 
 #[cfg(test)]

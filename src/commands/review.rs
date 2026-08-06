@@ -418,43 +418,31 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
 
     let inline: Vec<InlineFinding> = match findings_json {
         None => Vec::new(),
-        Some(src) => {
-            let text = if src == "-" {
-                let mut buf = String::new();
-                std::io::stdin().read_to_string(&mut buf)?;
-                buf
-            } else {
-                std::fs::read_to_string(&src)
-                    .with_context(|| format!("cannot read findings file {src}"))?
-            };
-            let inputs: Vec<FindingInput> =
-                serde_json::from_str(&text).context("malformed findings JSON")?;
-            inputs
-                .into_iter()
-                .map(|f| {
-                    let anchor = f.anchor.map(|a| {
-                        let anchor_args = AnchorArgs {
-                            path: Some(a.path),
-                            side: a.side,
-                            line_start: a.line_start,
-                            line_end: a.line_end,
-                            context: a.context,
-                        };
-                        build_anchor(ctx, &st, Some(&patchset_id), &anchor_args)
-                            .ok()
-                            .flatten()
-                    });
-                    InlineFinding {
-                        finding_id: ids::new_finding_id(),
-                        blocking: f.blocking,
-                        severity: f.severity,
-                        summary: f.summary,
-                        body: f.body,
-                        anchor: anchor.flatten(),
-                    }
-                })
-                .collect()
-        }
+        Some(src) => read_finding_inputs(&src)?
+            .into_iter()
+            .map(|f| {
+                let anchor = f.anchor.map(|a| {
+                    let anchor_args = AnchorArgs {
+                        path: Some(a.path),
+                        side: a.side,
+                        line_start: a.line_start,
+                        line_end: a.line_end,
+                        context: a.context,
+                    };
+                    build_anchor(ctx, &st, Some(&patchset_id), &anchor_args)
+                        .ok()
+                        .flatten()
+                });
+                InlineFinding {
+                    finding_id: ids::new_finding_id(),
+                    blocking: f.blocking,
+                    severity: f.severity,
+                    summary: f.summary,
+                    body: f.body,
+                    anchor: anchor.flatten(),
+                }
+            })
+            .collect(),
     };
 
     if verdict == Verdict::Approved && inline.iter().any(|f| f.blocking) {
@@ -483,6 +471,28 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         println!("finding: {id}");
     }
     println!("event: {}", ev.event_id);
+    report_inert_approval(ctx, &store, &change_id)?;
+    Ok(())
+}
+
+/// Say so when the approval just recorded cannot gate.
+///
+/// Appending it is correct — a verdict is a fact about what someone concluded,
+/// not a request for permission. Reporting success for an act with no effect
+/// is what teaches an operator the guard is absent, so the write path
+/// evaluates the same policy `check` does and names the outcome on the spot.
+fn report_inert_approval(ctx: &Ctx, store: &Store, change_id: &str) -> Result<()> {
+    let st = state::reduce(&store.load_events(change_id)?)?;
+    let report = ctx.report(store, &st)?;
+    let Some(reason) = report.approval_rejection_reason.as_deref() else {
+        return Ok(());
+    };
+    println!("note: this approval does not gate — {reason}.");
+    println!(
+        "      integration will still refuse. Record the review this change owes with \
+`arc integrate {change_id} --audit-debt <reason>`, or obtain a verdict from a \
+different actor."
+    );
     Ok(())
 }
 
@@ -529,4 +539,41 @@ fn resolve_patchset_id(st: &ChangeState, patchset: Option<String>) -> Result<Opt
         }
         None => Ok(st.latest_patchset().map(|p| p.id.clone())),
     }
+}
+
+/// Read a findings batch from a file or stdin.
+fn read_finding_inputs(src: &str) -> Result<Vec<FindingInput>> {
+    let text = if src == "-" {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        buf
+    } else {
+        std::fs::read_to_string(src).with_context(|| format!("cannot read findings file {src}"))?
+    };
+    serde_json::from_str(&text).context("malformed findings JSON")
+}
+
+/// The findings batch for an event that has no patchset to anchor against.
+/// Audits review an integrated revision, so line anchors — which resolve
+/// through a patchset diff — are not offered rather than silently dropped.
+pub(crate) fn parse_inline_findings(src: Option<&str>) -> Result<Vec<InlineFinding>> {
+    let Some(src) = src else {
+        return Ok(Vec::new());
+    };
+    read_finding_inputs(src)?
+        .into_iter()
+        .map(|f| {
+            if f.anchor.is_some() {
+                bail!("audit findings cannot carry a line anchor; anchors resolve through a patchset diff");
+            }
+            Ok(InlineFinding {
+                finding_id: ids::new_finding_id(),
+                blocking: f.blocking,
+                severity: f.severity,
+                summary: f.summary,
+                body: f.body,
+                anchor: None,
+            })
+        })
+        .collect()
 }

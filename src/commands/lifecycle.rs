@@ -276,6 +276,7 @@ pub fn query(ctx: &Ctx, args: QueryArgs) -> Result<()> {
                     .harness
                     .as_deref()
                     .is_none_or(|harness| state.opened_harness.as_deref() == Some(harness))
+                && (!args.audit_debt || state.audit_debt_outstanding())
         })
         .collect::<Vec<_>>();
 

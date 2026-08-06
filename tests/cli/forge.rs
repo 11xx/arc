@@ -34,7 +34,7 @@ fn forge_profile_without_declaration_is_undeclared_then_declared() {
     let (change_id, _wt, _head) = forge_change(&repo, "proj-declare");
 
     let status = status_json(&repo, "proj-declare");
-    assert_eq!(status["schema"], "arc-status/5");
+    assert_eq!(status["schema"], "arc-status/6");
     assert_eq!(status["forge"]["projection"], "undeclared");
 
     let before = event_count(&repo, &change_id);
@@ -76,7 +76,7 @@ fn non_forge_change_without_forge_events_omits_the_block() {
     let repo = Repo::new();
     let (_id, _wt, _head) = change_with_patchset(&repo, "plain");
     let status = status_json(&repo, "plain");
-    assert_eq!(status["schema"], "arc-status/5");
+    assert_eq!(status["schema"], "arc-status/6");
     assert!(status.get("forge").is_none() || status["forge"].is_null());
 }
 

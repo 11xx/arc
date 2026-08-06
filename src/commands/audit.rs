@@ -1,0 +1,83 @@
+//! Post-integration audit: declaring a review obligation, and discharging it.
+//!
+//! A change that cannot reach an independent reviewer has two honest options
+//! and one dishonest one. It can wait, it can ship carrying recorded debt, or
+//! it can quietly approve itself. This module exists so the middle option is
+//! available, which is what keeps the third one from being chosen.
+
+use super::*;
+use crate::state::ChangeState;
+
+/// Record the obligation. Allowed while open (declared at integration time)
+/// and after integration (discovered later).
+pub fn declare_audit_debt(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        bail!("--reason must say what review is owed and why it could not run");
+    }
+    let store = ctx.store()?;
+    let change_id = store.resolve_change(reference)?;
+    let _transition = store.lock_transition(&change_id)?;
+    let st = state::reduce(&store.load_events(&change_id)?)?;
+    let payload = Payload::AuditDebtDeclared {
+        reason: reason.to_string(),
+    };
+    ensure_append_allowed(&st, &payload)?;
+    let event = ctx.event(&store, &change_id, payload);
+    store.append_event(&event)?;
+    println!("audit debt declared: {reason}");
+    println!("event: {}", event.event_id);
+    Ok(())
+}
+
+pub struct AuditArgs {
+    pub verdict: Verdict,
+    pub body: Option<String>,
+    pub findings_json: Option<String>,
+}
+
+/// Record a review performed after integration, discharging any debt.
+pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
+    let store = ctx.store()?;
+    let change_id = store.resolve_change(reference)?;
+    let _transition = store.lock_transition(&change_id)?;
+    let st = state::reduce(&store.load_events(&change_id)?)?;
+
+    let revision = integrated_revision(&st)?;
+    let inline = super::review::parse_inline_findings(args.findings_json.as_deref())?;
+    if args.verdict == Verdict::Approved && inline.iter().any(|f| f.blocking) {
+        bail!("cannot approve while recording blocking findings in the same audit");
+    }
+    let finding_ids: Vec<String> = inline.iter().map(|f| f.finding_id.clone()).collect();
+
+    let payload = Payload::AuditVerdictRecorded {
+        revision: revision.clone(),
+        verdict: args.verdict,
+        body: args.body,
+        findings: inline,
+    };
+    ensure_append_allowed(&st, &payload)?;
+    let event = ctx.event(&store, &change_id, payload);
+    store.append_event(&event)?;
+    println!("audit: {:?} at {revision}", args.verdict);
+    for id in finding_ids {
+        println!("finding: {id}");
+    }
+    println!("event: {}", event.event_id);
+    if st.audit_debt.is_some() {
+        println!("audit debt discharged");
+    }
+    Ok(())
+}
+
+/// The revision an audit reviews: what actually integrated.
+fn integrated_revision(state: &ChangeState) -> Result<String> {
+    let closure = state
+        .closure
+        .as_ref()
+        .context("change is not closed; audits review an integrated revision")?;
+    closure
+        .integrated_commit
+        .clone()
+        .context("change closed without an integration commit; nothing to audit")
+}
