@@ -294,3 +294,75 @@ fn dry_run_integrate_declares_no_debt() {
     assert_eq!(status["audit_debt_outstanding"], false);
     assert!(status["audit_debt"].is_null(), "{}", status["audit_debt"]);
 }
+
+/// The waiver expires the way an approval expires.
+///
+/// A debt declared for one patchset must not excuse a self-approval on the
+/// next one; otherwise a single declaration disables the policy for the rest
+/// of the change's life, and nothing about the second integration looks wrong.
+#[test]
+fn audit_debt_stops_waiving_once_a_new_patchset_lands() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "expiring");
+    repo.arc(&worktree)
+        .args(["audit-debt", "expiring", "--reason", "no reviewer"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("declared for ps-01"));
+    repo.arc(&worktree)
+        .args(["check", "expiring"])
+        .assert()
+        .code(0);
+
+    // New work lands and is self-approved again. The old waiver is spent.
+    repo.commit(&worktree, "more.txt", "more\n", "feat: more");
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "Solo")
+            .args(["snapshot", "expiring"]),
+    );
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Solo")
+        .args(["review", "expiring", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["check", "expiring"])
+        .assert()
+        .code(3)
+        .stdout(predicates::str::contains("self-approval"));
+
+    // Re-declaring against the new patchset is a deliberate act, and works.
+    repo.arc(&worktree)
+        .args(["audit-debt", "expiring", "--reason", "still no reviewer"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("declared for ps-02"));
+    repo.arc(&worktree)
+        .args(["check", "expiring"])
+        .assert()
+        .code(0);
+}
+
+/// A debt discovered after integration records the obligation without
+/// retroactively waiving anything.
+#[test]
+fn debt_declared_after_integration_carries_no_patchset() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "afterwards"]));
+    complete_change(&repo, "afterwards");
+    repo.arc(&repo.root)
+        .args(["audit-debt", "afterwards", "--reason", "found later"])
+        .assert()
+        .success();
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "afterwards", "--json"]),
+    );
+    assert_eq!(status["audit_debt_outstanding"], true);
+    assert!(
+        status["audit_debt"]["patchset_id"].is_null(),
+        "{}",
+        status["audit_debt"]
+    );
+}

@@ -19,13 +19,24 @@ pub fn declare_audit_debt(ctx: &Ctx, reference: &str, reason: String) -> Result<
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let st = state::reduce(&store.load_events(&change_id)?)?;
+    // An open change waives its self-approval only for the patchset that is
+    // about to ship; a closed one has no gate left to waive, so the debt is
+    // recorded as a bare obligation.
+    let patchset_id = st
+        .is_closed()
+        .then_some(None)
+        .unwrap_or_else(|| st.latest_patchset().map(|patchset| patchset.id.clone()));
     let payload = Payload::AuditDebtDeclared {
         reason: reason.to_string(),
+        patchset_id: patchset_id.clone(),
     };
     ensure_append_allowed(&st, &payload)?;
     let event = ctx.event(&store, &change_id, payload);
     store.append_event(&event)?;
-    println!("audit debt declared: {reason}");
+    match &patchset_id {
+        Some(id) => println!("audit debt declared for {id}: {reason}"),
+        None => println!("audit debt declared: {reason}"),
+    }
     println!("event: {}", event.event_id);
     Ok(())
 }

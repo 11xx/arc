@@ -233,6 +233,13 @@ pub enum Payload {
     /// `arc query --audit-debt` can find after the reviewer becomes available.
     AuditDebtDeclared {
         reason: String,
+        /// The patchset the waiver applies to. A waiver that stands in for an
+        /// approval binds the way an approval binds: to one patchset, so a
+        /// later commit invalidates it instead of excusing everything that
+        /// follows. Absent when the debt is discovered after integration,
+        /// where there is no gate left to waive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        patchset_id: Option<String>,
     },
     /// A review performed after integration.
     ///

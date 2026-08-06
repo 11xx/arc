@@ -449,7 +449,7 @@ fn build_report(
         // single-operator change can ship at all when no independent reviewer
         // is reachable.
         let rejected_self_approval = policy.policy.forbid_self_approval
-            && state.audit_debt.is_none()
+            && !state.audit_debt_waives_current_head()
             && approved_patchset
                 .is_some_and(|patchset| patchset.effective_author() == v.effective_author());
         let valid = v.verdict == Verdict::Approved
@@ -477,7 +477,7 @@ fn build_report(
                     .as_deref()
                     .unwrap_or(verdict.actor.as_str());
                 policy.policy.forbid_self_approval
-                    && state.audit_debt.is_none()
+                    && !state.audit_debt_waives_current_head()
                     && patchset.id == verdict.patchset_id
                     && patchset.effective_author() == verdict_author
             }))

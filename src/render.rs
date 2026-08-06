@@ -858,7 +858,16 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             "disposition-recorded",
             format!("{finding_id} {}", format!("{status:?}").to_lowercase()),
         ),
-        Payload::AuditDebtDeclared { reason } => ("audit-debt-declared", reason.clone()),
+        Payload::AuditDebtDeclared {
+            reason,
+            patchset_id,
+        } => (
+            "audit-debt-declared",
+            match patchset_id {
+                Some(id) => format!("{id}: {reason}"),
+                None => reason.clone(),
+            },
+        ),
         Payload::AuditVerdictRecorded {
             revision,
             verdict,
