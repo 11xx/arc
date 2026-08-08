@@ -744,8 +744,33 @@ fn audit_events_survive_a_bundle_round_trip() {
         .assert()
         .success();
 
-    let text = fs::read_to_string(&bundle).unwrap();
-    assert!(text.contains("audit-debt-declared"), "{text}");
+    // Asserting the exported text is what let the import defect ship: the
+    // string was present in the file while `known_event_type` dropped the
+    // event on the way back in. Only replay into a second store proves it.
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("unknown event type").not());
+
+    let status =
+        json_stdout(
+            destination
+                .arc(&destination.root)
+                .args(["status", "roundtrip", "--json"]),
+        );
+    assert_eq!(status["audit_debt_outstanding"], true);
+    assert_eq!(status["audit_debt"]["reason"], "quota");
+    assert_eq!(status["audit_debt"]["patchset_id"], "ps-01");
+
+    let log = stdout(
+        destination
+            .arc(&destination.root)
+            .args(["log", "roundtrip"]),
+    );
+    assert!(log.contains("audit-debt-declared"), "{log}");
 }
 
 /// A debt on an open change is a pending waiver, not owed work: `arc audit`
