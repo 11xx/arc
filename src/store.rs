@@ -252,7 +252,9 @@ impl Store {
             .filter(|event| {
                 matches!(
                     event.payload,
-                    Payload::CommentAdded { .. } | Payload::FindingAdded { .. }
+                    Payload::CommentAdded { .. }
+                        | Payload::FindingAdded { .. }
+                        | Payload::AuditFindingAdded { .. }
                 )
             })
             .filter(|event| event.event_id == needle || event.event_id.starts_with(needle))
@@ -277,11 +279,19 @@ impl Store {
             .iter()
             .flat_map(|event| match &event.payload {
                 Payload::FindingAdded { finding_id, .. }
+                | Payload::AuditFindingAdded { finding_id, .. }
                     if finding_id == needle || finding_id.starts_with(needle) =>
                 {
                     vec![(event, finding_id)]
                 }
                 Payload::VerdictRecorded { findings, .. } => findings
+                    .iter()
+                    .filter(|finding| {
+                        finding.finding_id == needle || finding.finding_id.starts_with(needle)
+                    })
+                    .map(|finding| (event, &finding.finding_id))
+                    .collect(),
+                Payload::AuditVerdictRecorded { findings, .. } => findings
                     .iter()
                     .filter(|finding| {
                         finding.finding_id == needle || finding.finding_id.starts_with(needle)
@@ -310,6 +320,19 @@ impl Store {
                     summary: finding.summary.clone(),
                     body: finding.body.clone(),
                     patchset_id: Some(patchset_id.clone()),
+                    anchor: finding.anchor.clone(),
+                };
+            } else if let Payload::AuditVerdictRecorded { findings, .. } = &event.payload {
+                let finding = findings
+                    .iter()
+                    .find(|finding| finding.finding_id == finding_id)
+                    .expect("matched inline audit finding remains present");
+                resolved.payload = Payload::AuditFindingAdded {
+                    finding_id: finding.finding_id.clone(),
+                    blocking: finding.blocking,
+                    severity: finding.severity,
+                    summary: finding.summary.clone(),
+                    body: finding.body.clone(),
                     anchor: finding.anchor.clone(),
                 };
             }

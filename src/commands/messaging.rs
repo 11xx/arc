@@ -144,15 +144,15 @@ fn collect_inbox(
     let filter = assigned_to.map(str::trim).filter(|f| !f.is_empty());
     let mut inbox = crate::inbox::Inbox::new(filter.map(str::to_string));
     for state in states.values() {
-        // An audit obligation is the one queue item that survives closure.
-        inbox.absorb_audit_debt(state);
-        if state.is_closed() {
-            continue;
-        }
         if let Some(wanted) = filter {
             if state.assigned_to.as_deref() != Some(wanted) {
                 continue;
             }
+        }
+        // An audit obligation is the one queue item that survives closure.
+        inbox.absorb_audit_debt(state);
+        if state.is_closed() {
+            continue;
         }
         let report = ctx.report(store, state)?;
         inbox.absorb(state, &report);

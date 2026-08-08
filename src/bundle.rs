@@ -270,6 +270,10 @@ fn known_event_type(event_type: &str) -> bool {
             | "reply-added"
             | "disposition-recorded"
             | "verdict-recorded"
+            | "audit-debt-declared"
+            | "audit-verdict-recorded"
+            | "audit-finding-added"
+            | "audit-disposition-recorded"
             | "verification-run-started"
             | "verification-recorded"
             | "verification-reused"
@@ -438,6 +442,7 @@ mod tests {
             | Payload::AuditDebtDeclared { .. }
             | Payload::AuditVerdictRecorded { .. }
             | Payload::AuditFindingAdded { .. }
+            | Payload::AuditDispositionRecorded { .. }
             | Payload::VerificationRunStarted { .. }
             | Payload::VerificationRecorded { .. }
             | Payload::VerificationReused { .. }
@@ -554,6 +559,31 @@ mod tests {
                 causes: Vec::new(),
                 body: None,
                 findings: Vec::new(),
+            },
+            Payload::AuditDebtDeclared {
+                reason: "review unavailable".into(),
+                patchset_id: Some("ps-01".into()),
+            },
+            Payload::AuditVerdictRecorded {
+                revision: "merge".into(),
+                verdict: Verdict::ChangesRequested,
+                body: None,
+                findings: Vec::new(),
+            },
+            Payload::AuditFindingAdded {
+                finding_id: "audit-finding".into(),
+                blocking: true,
+                severity: Severity::Major,
+                summary: "summary".into(),
+                body: None,
+                anchor: None,
+            },
+            Payload::AuditDispositionRecorded {
+                finding_id: "audit-finding".into(),
+                status: DispositionStatus::Resolved,
+                commit: Some("fix".into()),
+                evidence: None,
+                supersedes: Vec::new(),
             },
             Payload::VerificationRunStarted {
                 revision: "head".into(),

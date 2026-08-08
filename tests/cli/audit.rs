@@ -95,6 +95,77 @@ fn integrate_declares_the_debt_in_one_step() {
     assert!(ids.contains("onestep"), "{ids}");
 }
 
+/// Selection errors must be found before a policy-bearing waiver is written.
+/// A refused command that leaves the self-approval gate open is worse than a
+/// partial merge because its side effect is easy to miss.
+#[test]
+fn invalid_integrate_selection_does_not_declare_audit_debt() {
+    let repo = repo_forbidding_self_approval();
+    self_approved_change(&repo, "bad-selection");
+
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "bad-selection",
+            "--tag",
+            "#bad-selection",
+            "--audit-debt",
+            "must not persist",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("provide a change or --tag"));
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "bad-selection", "--json"]),
+    );
+    assert!(status["audit_debt"].is_null(), "{}", status["audit_debt"]);
+    repo.arc(&repo.root)
+        .args(["check", "bad-selection"])
+        .assert()
+        .code(3);
+}
+
+#[test]
+fn execution_roles_protect_audit_waivers_and_verdicts() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "role-boundary");
+
+    repo.arc(&worktree)
+        .env("ARC_ROLE", "implementer")
+        .args([
+            "audit-debt",
+            "role-boundary",
+            "--reason",
+            "implementer waiver",
+        ])
+        .assert()
+        .code(9);
+    repo.arc(&worktree)
+        .env("ARC_ROLE", "reviewer")
+        .args(["audit-debt", "role-boundary", "--reason", "reviewer waiver"])
+        .assert()
+        .code(9);
+
+    repo.arc(&repo.root)
+        .args(["integrate", "role-boundary", "--audit-debt", "lead waiver"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_ROLE", "implementer")
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["audit", "role-boundary", "--verdict", "approved"])
+        .assert()
+        .code(9);
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "role-boundary", "--json"]),
+    );
+    assert_eq!(status["audit_debt_outstanding"], true);
+}
+
 /// An audit is a distinct event, so it never rewrites what shipped with what
 /// review: the pre-closure verdict and the post-integration audit stay apart.
 #[test]
@@ -246,6 +317,71 @@ fn review_map_names_the_reviewer_that_never_saw_the_final_patchset() {
     assert!(text.contains("Review coverage:"), "{text}");
 }
 
+#[test]
+fn review_map_attributes_findings_to_their_recorded_subject() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "attributed-findings"]));
+    let worktree = repo
+        .home
+        .join(".worktrees")
+        .join("repo-attributed-findings");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "Author")
+            .args(["snapshot", "attributed-findings"]),
+    );
+    let path = repo.home.join("attributed-findings.json");
+    fs::write(
+        &path,
+        json_file_bytes(&serde_json::json!([{
+            "blocking": false,
+            "severity": "minor",
+            "summary": "inline observation"
+        }])),
+    )
+    .unwrap();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Lead")
+        .args([
+            "review",
+            "attributed-findings",
+            "--on-behalf-of",
+            "Reviewer",
+            "--verdict",
+            "approved",
+            "--findings-json",
+            path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Lead")
+        .args([
+            "finding",
+            "attributed-findings",
+            "--on-behalf-of",
+            "Reviewer",
+            "--summary",
+            "standalone observation",
+            "--severity",
+            "minor",
+        ])
+        .assert()
+        .success();
+
+    let status =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["status", "attributed-findings", "--json"]),
+        );
+    let rows = status["review_map"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["reviewer"], "Reviewer");
+    assert_eq!(rows[0]["verdicts"], 1);
+    assert_eq!(rows[0]["findings"], 2);
+}
+
 /// A reviewer indistinguishable from the author is reported as unknown
 /// attribution, not silently counted as either independent or self-review.
 #[test]
@@ -388,6 +524,18 @@ fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
     let text = stdout(repo.arc(&repo.root).args(["inbox"]));
     assert!(text.contains("## audit-owed"), "{text}");
 
+    let filtered = json_stdout(repo.arc(&repo.root).args([
+        "inbox",
+        "--assigned-to",
+        "somebody-else",
+        "--json",
+    ]));
+    assert!(
+        filtered["audit-owed"].as_array().unwrap().is_empty(),
+        "{}",
+        filtered["audit-owed"]
+    );
+
     let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
     assert!(catchup.contains("audit-owed (1):"), "{catchup}");
     assert!(catchup.contains("quota exhausted"), "{catchup}");
@@ -469,6 +617,73 @@ fn audit_findings_are_listed_separately_and_pointed_at() {
     );
     assert_eq!(json["audit"], true);
     assert_eq!(json["findings"].as_array().unwrap().len(), 1);
+
+    let finding_id = json["findings"][0]["id"].as_str().unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "reply",
+            "readable",
+            finding_id,
+            "--body",
+            "tracked in the repair change",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "resolve", "readable", finding_id, "--status", "resolved", "--commit", "HEAD",
+        ])
+        .assert()
+        .success();
+
+    let resolved = json_stdout(
+        repo.arc(&repo.root)
+            .args(["findings", "readable", "--audit", "--format", "json"]),
+    );
+    assert_eq!(
+        resolved["findings"][0]["replies"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        resolved["findings"][0]["dispositions"][0]["status"],
+        "resolved"
+    );
+    let log = stdout(repo.arc(&repo.root).args(["log", "readable"]));
+    assert!(log.contains("audit-disposition-recorded"), "{log}");
+}
+
+#[test]
+fn audit_dispositions_do_not_reopen_shipped_findings_after_integration() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "shipped-finding");
+    let output = stdout(repo.arc(&worktree).args([
+        "finding",
+        "shipped-finding",
+        "--summary",
+        "known before integration",
+        "--severity",
+        "minor",
+    ]));
+    let finding_id = output
+        .lines()
+        .find_map(|line| line.strip_prefix("finding: "))
+        .unwrap();
+    repo.arc(&repo.root)
+        .args(["integrate", "shipped-finding", "--audit-debt", "quota"])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args([
+            "resolve",
+            "shipped-finding",
+            finding_id,
+            "--status",
+            "resolved",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("event is open-only"));
 }
 
 /// Without this the mechanism is decorative: a change ships on a

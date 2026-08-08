@@ -586,7 +586,7 @@ enum Cmd {
         #[command(flatten)]
         body: BodyOpts,
     },
-    /// Record a finding disposition (supersedes current tips automatically)
+    /// Record a shipped or audit finding disposition (supersedes current tips automatically)
     #[command(allow_missing_positional = true)]
     Resolve {
         change: Option<String>,
@@ -944,6 +944,7 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
         ExecutionRole::Lead => None,
         ExecutionRole::Reviewer => match command {
             Cmd::Integrate { .. } => Some(("integrate", "lead")),
+            Cmd::AuditDebt { .. } => Some(("audit-debt", "lead")),
             Cmd::Close { .. } => Some(("close", "lead")),
             _ => None,
         },
@@ -954,6 +955,8 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
             Cmd::Resolve { .. } => Some(("resolve", "reviewer or lead")),
             Cmd::Hold { .. } => Some(("hold", "reviewer or lead")),
             Cmd::ReleaseHold { .. } => Some(("release-hold", "reviewer or lead")),
+            Cmd::Audit { .. } => Some(("audit", "reviewer or lead")),
+            Cmd::AuditDebt { .. } => Some(("audit-debt", "lead")),
             Cmd::Close { .. } => Some(("close", "lead")),
             Cmd::Integrate { .. } => Some(("integrate", "lead")),
             _ => None,
@@ -1660,13 +1663,22 @@ fn run(cli: Cli) -> Result<i32> {
             dry_run,
             audit_debt,
         } => {
+            if audit_debt.is_some() && !tag.is_empty() {
+                if change.is_some() {
+                    bail!("provide a change or --tag, not both");
+                }
+                bail!("--audit-debt names one change; it cannot apply to a --tag series");
+            }
+            if audit_debt.is_some() && change.is_none() {
+                bail!("--audit-debt requires a change");
+            }
             // Declared before the merge so the obligation is on the ledger
             // even if integration then fails for an unrelated reason — but
             // never under --dry-run, which promises to write nothing.
             if let Some(reason) = audit_debt.filter(|_| !dry_run) {
                 let change = change
                     .as_deref()
-                    .context("--audit-debt names one change; it cannot apply to a --tag series")?;
+                    .expect("audit-debt selection was validated above");
                 commands::declare_audit_debt(&ctx, change, reason)?;
             }
             commands::integrate(

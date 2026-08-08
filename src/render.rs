@@ -894,6 +894,12 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             "audit-finding-added",
             format!("{finding_id} [{severity:?}] {summary}"),
         ),
+        Payload::AuditDispositionRecorded {
+            finding_id, status, ..
+        } => (
+            "audit-disposition-recorded",
+            format!("{finding_id} {}", format!("{status:?}").to_lowercase()),
+        ),
         Payload::VerdictRecorded {
             patchset_id,
             verdict,

@@ -269,6 +269,21 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         anchor: Option<Anchor>,
     },
+    /// A disposition recorded against a post-integration audit finding.
+    ///
+    /// This stays distinct from `DispositionRecorded`: allowing that
+    /// open-change event after integration would also let later ceremony
+    /// rewrite the finding state that existed when the change shipped.
+    AuditDispositionRecorded {
+        finding_id: String,
+        status: DispositionStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        evidence: Option<String>,
+        #[serde(default)]
+        supersedes: Vec<String>,
+    },
     VerificationRunStarted {
         revision: String,
         mode: VerificationRunMode,
@@ -414,9 +429,9 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         Payload::ChangelogRecorded { .. } | Payload::AuditDebtDeclared { .. } => {
             AppendPermission::OpenOrIntegratedFact
         }
-        Payload::AuditVerdictRecorded { .. } | Payload::AuditFindingAdded { .. } => {
-            AppendPermission::IntegratedOnlyFact
-        }
+        Payload::AuditVerdictRecorded { .. }
+        | Payload::AuditFindingAdded { .. }
+        | Payload::AuditDispositionRecorded { .. } => AppendPermission::IntegratedOnlyFact,
         Payload::ChangeOpened { .. } | Payload::ChangeClosed { .. } => {
             AppendPermission::LifecycleOwned
         }
