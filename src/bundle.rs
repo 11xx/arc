@@ -132,7 +132,7 @@ impl Bundle {
             }
             prior_event_id = Some(envelope.event_id.to_string());
 
-            let typed = parse_known_event(value)?;
+            let typed = parse_typed_event(value)?;
 
             if envelope.event_type == "patchset-added" {
                 let object = value.as_object().expect("validated event object");
@@ -155,7 +155,7 @@ impl Bundle {
                     base: base.to_string(),
                     head: head.to_string(),
                 });
-            } else if !known_event_type(envelope.event_type) {
+            } else if typed.is_none() {
                 unknown_event_types.push((
                     envelope.event_id.to_string(),
                     envelope.event_type.to_string(),
@@ -253,49 +253,17 @@ fn string_field<'a>(
         .with_context(|| format!("event {event_id} must contain a string {field}"))
 }
 
-fn known_event_type(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "change-opened"
-            | "metadata-updated"
-            | "message"
-            | "brief-recorded"
-            | "changelog-recorded"
-            | "patchset-added"
-            | "claim-set"
-            | "claim-released"
-            | "stage-set"
-            | "comment-added"
-            | "finding-added"
-            | "reply-added"
-            | "disposition-recorded"
-            | "verdict-recorded"
-            | "audit-debt-declared"
-            | "audit-verdict-recorded"
-            | "audit-finding-added"
-            | "audit-disposition-recorded"
-            | "verification-run-started"
-            | "verification-recorded"
-            | "verification-reused"
-            | "hold-set"
-            | "hold-released"
-            | "change-closed"
-            | "forge-projection"
-            | "forge-link"
-            | "forge-checks"
-            | "forge-pr-state"
-    )
-}
-
-/// Decode a known event completely while leaving future event types opaque.
-/// Import uses the same helper for bundled and already-local raw history.
-pub fn parse_known_event(value: &Value) -> Result<Option<Event>> {
+/// Decode a complete event envelope while leaving future payload tags opaque.
+/// Every imported event must satisfy this build's envelope; only the payload
+/// tag may be unknown. Import uses the same helper for bundled and already-local
+/// raw history.
+pub fn parse_typed_event(value: &Value) -> Result<Option<Event>> {
     let envelope = event_envelope(value)?;
-    if !known_event_type(envelope.event_type) {
+    let event: Event = serde_json::from_value(value.clone())
+        .with_context(|| format!("event {} is malformed", envelope.event_id))?;
+    if matches!(&event.payload, Payload::Unknown) {
         return Ok(None);
     }
-    let event: Event = serde_json::from_value(value.clone())
-        .with_context(|| format!("known event {} is malformed", envelope.event_id))?;
     match &event.payload {
         Payload::ClaimSet {
             claim_id,
@@ -411,258 +379,4 @@ fn event_file_bytes(event: &Value) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(event)?;
     bytes.push(b'\n');
     Ok(bytes)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::forge::{ForgeCheckState, ForgePolicy, ForgePrState};
-    use crate::model::{
-        Closure, DispositionStatus, MessageSeverity, MessageType, Severity, Verdict,
-        VerificationRunGate, VerificationRunMode, VerifyResult,
-    };
-    use serde_json::json;
-
-    fn is_known_payload(payload: &Payload) -> bool {
-        match payload {
-            Payload::ChangeOpened { .. }
-            | Payload::MetadataUpdated { .. }
-            | Payload::Message { .. }
-            | Payload::BriefRecorded { .. }
-            | Payload::ChangelogRecorded { .. }
-            | Payload::PatchsetAdded { .. }
-            | Payload::ClaimSet { .. }
-            | Payload::ClaimReleased { .. }
-            | Payload::StageSet { .. }
-            | Payload::CommentAdded { .. }
-            | Payload::FindingAdded { .. }
-            | Payload::ReplyAdded { .. }
-            | Payload::DispositionRecorded { .. }
-            | Payload::VerdictRecorded { .. }
-            | Payload::AuditDebtDeclared { .. }
-            | Payload::AuditVerdictRecorded { .. }
-            | Payload::AuditFindingAdded { .. }
-            | Payload::AuditDispositionRecorded { .. }
-            | Payload::VerificationRunStarted { .. }
-            | Payload::VerificationRecorded { .. }
-            | Payload::VerificationReused { .. }
-            | Payload::HoldSet { .. }
-            | Payload::HoldReleased { .. }
-            | Payload::ChangeClosed { .. }
-            | Payload::ForgeProjection { .. }
-            | Payload::ForgeLink { .. }
-            | Payload::ForgeChecks { .. }
-            | Payload::ForgePrState { .. } => true,
-            Payload::Unknown => false,
-        }
-    }
-
-    #[test]
-    fn all_serialized_payload_tags_are_known() {
-        let payloads = vec![
-            Payload::ChangeOpened {
-                slug: "change".into(),
-                title: "Change".into(),
-                profile: "local".into(),
-                target_branch: "master".into(),
-                branch: "arc/change".into(),
-                base: "base".into(),
-                worktree: None,
-                blocked_by: Vec::new(),
-                tags: Vec::new(),
-                journal_ref: None,
-            },
-            Payload::MetadataUpdated {
-                add_blocked_by: Vec::new(),
-                remove_blocked_by: Vec::new(),
-                add_tags: Vec::new(),
-                remove_tags: Vec::new(),
-                assign: None,
-                priority: None,
-            },
-            Payload::Message {
-                message_type: MessageType::Status,
-                severity: MessageSeverity::Info,
-                summary: "summary".into(),
-                detail: None,
-                metadata: None,
-            },
-            Payload::BriefRecorded {
-                title: None,
-                body: "body".into(),
-                caused_by: Vec::new(),
-                base_revision: None,
-                acceptance_probes: Vec::new(),
-                plan_ref: None,
-                plan_slice: None,
-            },
-            Payload::ChangelogRecorded {
-                category: "Fixed".into(),
-                body: "body".into(),
-            },
-            Payload::PatchsetAdded {
-                patchset_id: "ps-01".into(),
-                base: "base".into(),
-                head: "head".into(),
-                merge_base: None,
-                brief_ref: None,
-                author_name: None,
-                author_email: None,
-                committer_name: None,
-                committer_email: None,
-                claim_id: None,
-                claim_actor: None,
-            },
-            Payload::ClaimSet {
-                claim_id: "claim".into(),
-                ttl_seconds: 1,
-                stage_budgets: std::collections::BTreeMap::new(),
-                displaced: None,
-            },
-            Payload::ClaimReleased {
-                claim_id: "claim".into(),
-            },
-            Payload::StageSet {
-                claim_id: "claim".into(),
-                stage: ClaimStage::Started,
-                note: None,
-                blocker: None,
-            },
-            Payload::CommentAdded {
-                body: "body".into(),
-                patchset_id: None,
-                anchor: None,
-            },
-            Payload::FindingAdded {
-                finding_id: "finding".into(),
-                blocking: false,
-                severity: Severity::Note,
-                summary: "summary".into(),
-                body: None,
-                patchset_id: None,
-                anchor: None,
-            },
-            Payload::ReplyAdded {
-                parent_event_id: "event".into(),
-                body: "body".into(),
-            },
-            Payload::DispositionRecorded {
-                finding_id: "finding".into(),
-                status: DispositionStatus::Resolved,
-                commit: None,
-                evidence: None,
-                supersedes: Vec::new(),
-            },
-            Payload::VerdictRecorded {
-                patchset_id: "ps-01".into(),
-                verdict: Verdict::Approved,
-                causes: Vec::new(),
-                body: None,
-                findings: Vec::new(),
-            },
-            Payload::AuditDebtDeclared {
-                reason: "review unavailable".into(),
-                patchset_id: Some("ps-01".into()),
-            },
-            Payload::AuditVerdictRecorded {
-                revision: "merge".into(),
-                verdict: Verdict::ChangesRequested,
-                body: None,
-                findings: Vec::new(),
-            },
-            Payload::AuditFindingAdded {
-                finding_id: "audit-finding".into(),
-                blocking: true,
-                severity: Severity::Major,
-                summary: "summary".into(),
-                body: None,
-                anchor: None,
-            },
-            Payload::AuditDispositionRecorded {
-                finding_id: "audit-finding".into(),
-                status: DispositionStatus::Resolved,
-                commit: Some("fix".into()),
-                evidence: None,
-                supersedes: Vec::new(),
-            },
-            Payload::VerificationRunStarted {
-                revision: "head".into(),
-                mode: VerificationRunMode::Sequential,
-                skip_green: false,
-                gates: vec![VerificationRunGate {
-                    name: "test".into(),
-                    command: "true".into(),
-                    timeout_seconds: None,
-                }],
-            },
-            Payload::VerificationRecorded {
-                gate: None,
-                command: "true".into(),
-                revision: "head".into(),
-                result: VerifyResult::Pass,
-                exit_code: Some(0),
-                duration_ms: Some(0),
-                output_tail: None,
-                timed_out: false,
-                hostname: "host".into(),
-                attested: false,
-                run_id: None,
-                probe: None,
-                runner: None,
-                note: None,
-            },
-            Payload::VerificationReused {
-                run_id: "run".into(),
-                gate: "test".into(),
-                revision: "head".into(),
-                evidence_event_id: "evidence".into(),
-            },
-            Payload::HoldSet {
-                reason: "reason".into(),
-            },
-            Payload::HoldReleased { reason: None },
-            Payload::ChangeClosed {
-                outcome: Closure::Abandoned,
-                integrated_commit: None,
-                superseded_by: None,
-            },
-            Payload::ForgeProjection {
-                host: "forge.example".into(),
-                base_repo: "owner/repo".into(),
-                base_ref: "master".into(),
-                head_repo: "owner/repo".into(),
-                head_ref: "change".into(),
-                policy: ForgePolicy::SameRepositoryOnly,
-            },
-            Payload::ForgeLink {
-                pr_number: 1,
-                url: "https://forge.example/owner/repo/pulls/1".into(),
-                base_repo: "owner/repo".into(),
-                base_ref: "master".into(),
-                head_repo: "owner/repo".into(),
-                head_ref: "change".into(),
-                head_sha: "head".into(),
-            },
-            Payload::ForgeChecks {
-                pr_head: "head".into(),
-                state: ForgeCheckState::Passed,
-                detail: None,
-            },
-            Payload::ForgePrState {
-                state: ForgePrState::Open,
-                merge_sha: None,
-            },
-        ];
-
-        for payload in payloads {
-            assert!(is_known_payload(&payload));
-            let serialized = serde_json::to_value(&payload).unwrap();
-            let tag = serialized["event_type"].as_str().unwrap();
-            assert!(
-                known_event_type(tag),
-                "serialized Payload tag {tag:?} is not recognized by bundle import: {}",
-                json!(serialized)
-            );
-        }
-    }
 }
