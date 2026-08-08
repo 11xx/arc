@@ -744,8 +744,40 @@ fn audit_events_survive_a_bundle_round_trip() {
         .assert()
         .success();
 
-    let text = fs::read_to_string(&bundle).unwrap();
-    assert!(text.contains("audit-debt-declared"), "{text}");
+    // Two different properties, and only one of them guards `known_event_type`.
+    //
+    // Classification is observable exactly once, in the import report: an
+    // unclassified event is written to disk verbatim and reported as unknown,
+    // and it is excluded from the import-time replayability check. It is *not*
+    // lost — a destination running this same build still deserializes the
+    // payload by its serde tag — so the derived-state assertions below pass
+    // with or without the audit arms and cannot be the regression guard. The
+    // original text-only assertion missed the defect for the same reason:
+    // presence in the file was never the property in question.
+    let destination = Repo::new();
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("unknown event type").not());
+
+    // And the obligation itself survives the transfer into derived state.
+    let status =
+        json_stdout(
+            destination
+                .arc(&destination.root)
+                .args(["status", "roundtrip", "--json"]),
+        );
+    assert_eq!(status["audit_debt_outstanding"], true);
+    assert_eq!(status["audit_debt"]["reason"], "quota");
+    assert_eq!(status["audit_debt"]["patchset_id"], "ps-01");
+    assert!(stdout(
+        destination
+            .arc(&destination.root)
+            .args(["log", "roundtrip"])
+    )
+    .contains("audit-debt-declared"));
 }
 
 /// A debt on an open change is a pending waiver, not owed work: `arc audit`
