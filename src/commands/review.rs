@@ -331,32 +331,54 @@ pub fn resolve(
 ) -> Result<()> {
     let store = ctx.store()?;
     let (change_id, _transition, st) = locked_state(&store, reference)?;
-    let finding_id = match store.resolve_discussion_event(&change_id, &finding) {
+    let (finding_id, audit) = match store.resolve_discussion_event(&change_id, &finding) {
         Ok(event) => match event.payload {
-            Payload::FindingAdded { finding_id, .. } => finding_id,
+            Payload::FindingAdded { finding_id, .. } => (finding_id, false),
+            Payload::AuditFindingAdded { finding_id, .. } => (finding_id, true),
             Payload::CommentAdded { .. } => {
                 bail!("discussion event {finding:?} is a comment, not a finding")
             }
             _ => unreachable!("discussion event resolution filters payloads"),
         },
-        Err(_error) if st.findings.contains_key(&finding) => st.resolve_finding_id(&finding)?,
+        Err(_error) if st.findings.contains_key(&finding) => {
+            (st.resolve_finding_id(&finding)?, false)
+        }
+        Err(_error) if st.audit_findings.contains_key(&finding) => (
+            crate::state::resolve_unique_id(
+                st.audit_findings.keys().map(String::as_str),
+                &finding,
+                "audit finding",
+            )?,
+            true,
+        ),
         Err(error) => return Err(error),
     };
     let commit = match commit {
         Some(c) => Some(gitio::rev_parse(&ctx.cwd, &c)?),
         None => None,
     };
-    let supersedes: Vec<String> = st.findings[&finding_id]
-        .tips()
-        .iter()
-        .map(|t| t.event_id.clone())
-        .collect();
-    let payload = Payload::DispositionRecorded {
-        finding_id: finding_id.clone(),
-        status: disposition,
-        commit,
-        evidence,
-        supersedes,
+    let selected = if audit {
+        &st.audit_findings[&finding_id]
+    } else {
+        &st.findings[&finding_id]
+    };
+    let supersedes: Vec<String> = selected.tips().iter().map(|t| t.event_id.clone()).collect();
+    let payload = if audit {
+        Payload::AuditDispositionRecorded {
+            finding_id: finding_id.clone(),
+            status: disposition,
+            commit,
+            evidence,
+            supersedes,
+        }
+    } else {
+        Payload::DispositionRecorded {
+            finding_id: finding_id.clone(),
+            status: disposition,
+            commit,
+            evidence,
+            supersedes,
+        }
     };
     ensure_append_allowed(&st, &payload)?;
     let ev = ctx.event(&store, &change_id, payload);

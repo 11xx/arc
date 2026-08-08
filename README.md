@@ -401,11 +401,13 @@ PR through `arc close --integrated <merge-sha>`.
 
 Delegated sessions can bind an execution boundary with
 `ARC_ROLE=implementer|reviewer|lead` or the equivalent global `--role` flag.
-Implementers may not run `review`, `resolve`, `hold`, `release-hold`, `close`,
-or `integrate`; reviewers may not run `close` or `integrate`; leads retain full
-access. Role refusals happen before the command takes a lock or writes an
-event. An unset or empty role also retains full access for backward
-compatibility, exactly like `lead`.
+Implementers may not run `review`, `audit`, `audit-debt`, `resolve`, `hold`,
+`release-hold`, `close`, or `integrate`; reviewers may not run `audit-debt`,
+`close`, or `integrate`; leads retain full access. Declaring audit debt is a
+lead decision because an open declaration changes whether a self-approval can
+gate. Role refusals happen before the command takes a lock or writes an event.
+An unset or empty role also retains full access for backward compatibility,
+exactly like `lead`.
 
 Dependencies are live ledger relationships: a blocker is satisfied when it
 closes as integrated, or when a superseding successor eventually closes as
@@ -735,7 +737,10 @@ Three rules keep the escape hatch from becoming a hole:
 - **An audit is a distinct event**, anchored to the integrated revision and
   refused while the change is still open. Attaching one can never rewrite the
   answer to "what shipped with what review", and audit findings stay out of the
-  shipped set — `arc findings --audit` reads them.
+  shipped set — `arc findings --audit` reads them. `arc reply` addresses either
+  finding kind, while `arc resolve` records an integrated-only audit
+  disposition for an audit finding. The ordinary disposition event remains
+  open-only, so later audit work cannot rewrite shipped finding state.
 
 ## Identity
 

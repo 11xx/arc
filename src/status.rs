@@ -919,7 +919,12 @@ pub fn reviewer_coverage(state: &ChangeState) -> Vec<ReviewerCoverage> {
     }
     for finding in state.findings.values() {
         if let Some(patchset_id) = finding.patchset_id.as_deref() {
-            record(&finding.reported_by, patchset_id, false, false);
+            record(
+                finding.effective_author(),
+                patchset_id,
+                finding.on_behalf_of.is_some(),
+                false,
+            );
         }
     }
 

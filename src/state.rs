@@ -179,6 +179,9 @@ pub struct FindingState {
     pub anchor: Option<Anchor>,
     pub origin_event: String,
     pub reported_by: String,
+    /// Subject the finding was filed for when a lead ran the ceremony.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<String>,
     pub dispositions: Vec<DispositionEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replies: Vec<ReplyEntry>,
@@ -192,6 +195,10 @@ pub struct ReplyEntry {
 }
 
 impl FindingState {
+    pub fn effective_author(&self) -> &str {
+        self.on_behalf_of.as_deref().unwrap_or(&self.reported_by)
+    }
+
     /// Disposition tips: dispositions not superseded by any later one.
     /// One tip = its status governs; several = contested.
     pub fn tips(&self) -> Vec<&DispositionEntry> {
@@ -900,6 +907,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                         anchor: anchor.clone(),
                         origin_event: ev.event_id.clone(),
                         reported_by: ev.actor.clone(),
+                        on_behalf_of: ev.on_behalf_of.clone(),
                         dispositions: Vec::new(),
                         replies: Vec::new(),
                     },
@@ -951,6 +959,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                             anchor: inline.anchor.clone(),
                             origin_event: ev.event_id.clone(),
                             reported_by: ev.actor.clone(),
+                            on_behalf_of: ev.on_behalf_of.clone(),
                             dispositions: Vec::new(),
                             replies: Vec::new(),
                         },
@@ -998,6 +1007,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                             anchor: inline.anchor.clone(),
                             origin_event: ev.event_id.clone(),
                             reported_by: ev.actor.clone(),
+                            on_behalf_of: ev.on_behalf_of.clone(),
                             dispositions: Vec::new(),
                             replies: Vec::new(),
                         },
@@ -1033,10 +1043,33 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                         anchor: anchor.clone(),
                         origin_event: ev.event_id.clone(),
                         reported_by: ev.actor.clone(),
+                        on_behalf_of: ev.on_behalf_of.clone(),
                         dispositions: Vec::new(),
                         replies: Vec::new(),
                     },
                 );
+            }
+            Payload::AuditDispositionRecorded {
+                finding_id,
+                status,
+                commit,
+                evidence,
+                supersedes,
+            } => {
+                let Some(finding) = state.audit_findings.get_mut(finding_id) else {
+                    bail!(
+                        "audit disposition {} references unknown audit finding {finding_id:?}",
+                        ev.event_id
+                    );
+                };
+                finding.dispositions.push(DispositionEntry {
+                    event_id: ev.event_id.clone(),
+                    status: *status,
+                    commit: commit.clone(),
+                    evidence: evidence.clone(),
+                    actor: ev.actor.clone(),
+                    supersedes: supersedes.clone(),
+                });
             }
             Payload::VerificationRunStarted {
                 revision,
@@ -1297,18 +1330,44 @@ fn attach_reply(state: &mut ChangeState, reply: &Event) {
         });
         return;
     }
+    if let Some(finding) = state.audit_findings.get_mut(parent_event_id) {
+        finding.replies.push(ReplyEntry {
+            event_id: reply.event_id.clone(),
+            actor: reply.actor.clone(),
+            body: body.clone(),
+        });
+        return;
+    }
     let mut matches = state
         .findings
         .values()
         .filter(|finding| &finding.origin_event == parent_event_id)
         .map(|finding| finding.id.clone());
-    let Some(finding_id) = matches.next() else {
-        return;
-    };
-    if matches.next().is_some() {
+    if let Some(finding_id) = matches.next() {
+        if matches.next().is_some() {
+            return;
+        }
+        if let Some(finding) = state.findings.get_mut(&finding_id) {
+            finding.replies.push(ReplyEntry {
+                event_id: reply.event_id.clone(),
+                actor: reply.actor.clone(),
+                body: body.clone(),
+            });
+        }
         return;
     }
-    if let Some(finding) = state.findings.get_mut(&finding_id) {
+    let mut audit_matches = state
+        .audit_findings
+        .values()
+        .filter(|finding| &finding.origin_event == parent_event_id)
+        .map(|finding| finding.id.clone());
+    let Some(finding_id) = audit_matches.next() else {
+        return;
+    };
+    if audit_matches.next().is_some() {
+        return;
+    }
+    if let Some(finding) = state.audit_findings.get_mut(&finding_id) {
         finding.replies.push(ReplyEntry {
             event_id: reply.event_id.clone(),
             actor: reply.actor.clone(),
