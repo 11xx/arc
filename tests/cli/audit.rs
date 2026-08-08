@@ -728,8 +728,8 @@ fn an_author_cannot_discharge_its_own_audit_debt_by_approving() {
     assert_eq!(status["audit_debt_outstanding"], false);
 }
 
-/// Audit events must survive an export/import round trip like every other
-/// ledger fact, or the obligation vanishes when a change moves machines.
+/// Bundle import must classify audit events as typed so replay validation
+/// includes them instead of reporting them as opaque future events.
 #[test]
 fn audit_events_survive_a_bundle_round_trip() {
     let repo = repo_forbidding_self_approval();
@@ -744,16 +744,9 @@ fn audit_events_survive_a_bundle_round_trip() {
         .assert()
         .success();
 
-    // Two different properties, and only one of them guards `known_event_type`.
-    //
-    // Classification is observable exactly once, in the import report: an
-    // unclassified event is written to disk verbatim and reported as unknown,
-    // and it is excluded from the import-time replayability check. It is *not*
-    // lost — a destination running this same build still deserializes the
-    // payload by its serde tag — so the derived-state assertions below pass
-    // with or without the audit arms and cannot be the regression guard. The
-    // original text-only assertion missed the defect for the same reason:
-    // presence in the file was never the property in question.
+    // Unknown tags are preserved verbatim but excluded from import-time typed
+    // replay validation. Same-build loading may still recognize the raw event,
+    // so transferred state alone does not prove that import classified it.
     let destination = Repo::new();
     destination
         .arc(&destination.root)

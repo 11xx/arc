@@ -513,8 +513,10 @@ arc import change.json
 Use `-` instead of a path for stdout or stdin. Re-exporting unchanged
 events is byte-identical, and importing the same bundle again skips
 identical events. A conflicting event makes the whole import write
-nothing and exit 1. Missing Git commits are warnings rather than data
-loss: available patchset heads are restored under
+nothing and exit 1. Every event must carry a complete envelope that this
+build can decode; an unrecognized payload tag is preserved verbatim and
+excluded from typed replay. Missing Git commits are warnings rather than
+data loss: available patchset heads are restored under
 `refs/arc/keep/<change>/<patchset>`, while unavailable objects are
 reported for separate transfer.
 

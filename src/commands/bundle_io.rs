@@ -153,7 +153,7 @@ fn validate_import_candidate(
         .any(|change_id| change_id == &validated.bundle.change_id)
     {
         for (_, value) in store.raw_events(&validated.bundle.change_id)? {
-            if let Some(event) = crate::bundle::parse_known_event(&value)? {
+            if let Some(event) = crate::bundle::parse_typed_event(&value)? {
                 candidate.push(event);
             }
         }

@@ -370,6 +370,8 @@ fn import_rejects_malformed_known_events_before_writing() {
     let mut bundle: serde_json::Value =
         serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
     let original_bundle = bundle.clone();
+    // A recognized tag must fail typed decoding when its payload is malformed;
+    // it must never degrade to the opaque future-event path.
     let claim = bundle["events"]
         .as_array_mut()
         .unwrap()
@@ -386,9 +388,29 @@ fn import_rejects_malformed_known_events_before_writing() {
         .args(["import", bundle_path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("known event"))
-        .stderr(predicates::str::contains("malformed"));
+        .stderr(predicates::str::contains(" is malformed"));
     assert!(!destination.root.join(".git/arc").exists());
+
+    let mut malformed_envelope = original_bundle.clone();
+    malformed_envelope["events"][0]["created_at"] = serde_json::Value::String("not-a-date".into());
+    refresh_bundle_checksum(&mut malformed_envelope);
+    let malformed_envelope_path = source.home.join("malformed-envelope.json");
+    fs::write(
+        &malformed_envelope_path,
+        json_file_bytes(&malformed_envelope),
+    )
+    .unwrap();
+    let malformed_envelope_destination = Repo::new();
+    malformed_envelope_destination
+        .arc(&malformed_envelope_destination.root)
+        .args(["import", malformed_envelope_path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(" is malformed"));
+    assert!(!malformed_envelope_destination
+        .root
+        .join(".git/arc")
+        .exists());
 
     let mut ownerless = original_bundle;
     let stage = ownerless["events"]
@@ -459,8 +481,7 @@ fn import_rejects_malformed_changelog_before_writing() {
         .args(["import", bundle_path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("known event"))
-        .stderr(predicates::str::contains("malformed"));
+        .stderr(predicates::str::contains(" is malformed"));
     assert!(!destination.root.join(".git/arc").exists());
 }
 
@@ -701,6 +722,8 @@ fn import_preserves_unknown_event_bytes() {
         serde_json::from_slice(&fs::read(source.root.join(".git/arc/config.json")).unwrap())
             .unwrap();
     let event_id = "ZZZZZZZZZZZZZZZZZZZZZZZZZZ";
+    // A complete envelope with an unrecognized tag pins the opaque side of the
+    // classifier partition while remaining readable by typed consumers.
     let unknown = serde_json::json!({
         "schema_version": 1,
         "event_id": event_id,
