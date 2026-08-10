@@ -719,6 +719,16 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                     .iter()
                     .filter(|probe| !probe.discriminating_at_head)
                 {
+                    if probe.undischargeable {
+                        let _ = writeln!(
+                            out,
+                            "  - Probe `{}` cannot discharge: {}. Record a brief based on the \
+                             revision the work started from",
+                            probe.name,
+                            undischargeable_reason(probe)
+                        );
+                        continue;
+                    }
                     let _ = writeln!(
                         out,
                         "  - Probe `{}` needs Fail at `{}` and Pass at `{}`",
@@ -820,6 +830,15 @@ pub fn nested_finding_lines(event: &Event) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// Why a declared probe has no revision pair that could discharge it.
+fn undischargeable_reason(probe: &crate::status::ProbeStatus) -> &'static str {
+    if probe.baseline_revision.is_empty() {
+        "its brief records no base revision, so there is nothing for it to fail at"
+    } else {
+        "its brief's base is the head under review, so no run produces both a Fail and a Pass"
+    }
 }
 
 /// Stable kebab event type plus a type-specific one-line summary.
@@ -1141,6 +1160,13 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .iter()
             .filter(|probe| !probe.discriminating_at_head)
             .map(|probe| {
+                if probe.undischargeable {
+                    return format!(
+                        "probe `{}` cannot discharge: {}",
+                        probe.name,
+                        undischargeable_reason(probe)
+                    );
+                }
                 format!(
                     "probe `{}` needs fail at `{}` and pass at `{}`",
                     probe.name, probe.baseline_revision, probe.final_revision

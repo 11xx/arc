@@ -111,6 +111,12 @@ pub struct ProbeStatus {
     pub final_result: String,
     pub final_attested: bool,
     pub discriminating_at_head: bool,
+    /// The brief's base is the head under review, so the probe would have to
+    /// fail and pass at one revision. No run can discharge it; only a brief
+    /// based on the revision the work started from can. Additive in
+    /// `arc-status/6`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub undischargeable: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -590,6 +596,12 @@ fn build_report(
                         };
                         let baseline = evidence(ProbePhase::Baseline, baseline_revision);
                         let final_evidence = evidence(ProbePhase::Final, &patchset.head);
+                        // Either the baseline and the head are one revision,
+                        // or the brief predates base revisions and there is no
+                        // revision to fail at — `verify --probe-phase baseline`
+                        // refuses that outright.
+                        let undischargeable =
+                            baseline_revision.is_empty() || baseline_revision == patchset.head;
                         ProbeStatus {
                             name: probe.name.clone(),
                             command: probe.command.clone(),
@@ -604,10 +616,14 @@ fn build_report(
                                 final_evidence.map(|entry| entry.result),
                             ),
                             final_attested: final_evidence.is_some_and(|entry| entry.attested),
-                            discriminating_at_head: baseline
-                                .is_some_and(|entry| entry.result == VerifyResult::Fail)
+                            // Fail and Pass recorded at one revision is
+                            // contradictory evidence, not a discharged probe,
+                            // so an undischargeable probe is never green.
+                            discriminating_at_head: !undischargeable
+                                && baseline.is_some_and(|entry| entry.result == VerifyResult::Fail)
                                 && final_evidence
                                     .is_some_and(|entry| entry.result == VerifyResult::Pass),
+                            undischargeable,
                         }
                     })
                     .collect::<Vec<_>>(),

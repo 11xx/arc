@@ -435,6 +435,7 @@ pub fn brief(
         )?);
         let store = ctx.store()?;
         let (change_id, _transition, state) = locked_state(&store, reference)?;
+        warn_on_gate_shaped_probes(ctx, &state.profile, &acceptance_probes)?;
         let next_version = state.briefs.len() + 1;
         let causes = resolve_brief_causes(&state, &caused_by, cause_note.as_deref())?;
         let has_causes = !causes.is_empty();
@@ -504,10 +505,54 @@ pub fn brief(
     Ok(0)
 }
 
-fn read_acceptance_probes(path: &str) -> Result<Vec<AcceptanceProbe>> {
-    let raw = read_body_file_verbatim(path)?;
+/// An acceptance probe discriminates a change: it must fail at the brief's base
+/// and pass at the head. A probe that runs one of the gates this change must
+/// pass to integrate is usually the mistake that produced this warning — a
+/// gate is expected to be green on both sides — but not always: a gate command
+/// can genuinely fail before the change and pass after. So this says what is
+/// suspicious rather than refusing what it cannot prove, at the moment of the
+/// declaration instead of rounds later as an integration blocker.
+fn warn_on_gate_shaped_probes(ctx: &Ctx, profile: &str, probes: &[AcceptanceProbe]) -> Result<()> {
+    if probes.is_empty() {
+        return Ok(());
+    }
+    let toplevel = gitio::toplevel(&ctx.cwd)?;
+    let gates = crate::gates::load(&toplevel)?;
+    for probe in probes {
+        let matched = gates
+            .required_for(profile)
+            .into_iter()
+            .find(|(_, gate)| same_command(&gate.command, &probe.command));
+        if let Some((name, _)) = matched {
+            eprintln!(
+                "warning: acceptance probe {:?} runs gate {name:?}, which this change must pass \
+                 to integrate. If it also passes at the brief's base, the probe can never \
+                 discriminate and integration will block on it.",
+                probe.name
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Whether two commands are the same command. Compared verbatim, because
+/// whitespace inside a shell command is not noise: `printf 'a b'` and
+/// `printf 'a  b'` do different things.
+fn same_command(left: &str, right: &str) -> bool {
+    left.trim() == right.trim()
+}
+
+fn read_acceptance_probes(source: &str) -> Result<Vec<AcceptanceProbe>> {
+    // Documented as a JSON array, and every caller that had one to hand passed
+    // it inline before reaching for a temporary file. A path wins the tie: a
+    // file that exists was named deliberately.
+    let raw = if !Path::new(source).exists() && source.trim_start().starts_with('[') {
+        source.to_string()
+    } else {
+        read_body_file_verbatim(source)?
+    };
     let probes = serde_json::from_str::<Vec<AcceptanceProbe>>(&raw)
-        .with_context(|| format!("invalid acceptance probe JSON from {path:?}"))?;
+        .with_context(|| format!("invalid acceptance probe JSON from {source:?}"))?;
     let mut names = BTreeSet::new();
     for probe in &probes {
         crate::ids::validate_slug(&probe.name)

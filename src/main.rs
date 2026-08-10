@@ -57,6 +57,9 @@ struct Cli {
     /// Execution boundary: implementer | reviewer | lead
     #[arg(long, global = true, env = "ARC_ROLE")]
     role: Option<String>,
+    /// Change to act on, wherever the positional is optional
+    #[arg(long = "change", id = "change_flag", global = true)]
+    change: Option<String>,
     /// Absent prints the workflow guide: what arc owns, the command
     /// lifecycle, profile selection, and the rules that change what a
     /// session should do.
@@ -229,10 +232,10 @@ enum Cmd {
     /// Derived ledger analytics: stage, review, and gate durations
     Stats {
         /// Report a single change
-        #[arg(long, conflicts_with_all = ["tag", "all"])]
+        #[arg(long, id = "change_flag", conflicts_with_all = ["tag", "all"])]
         change: Option<String>,
         /// Report every change carrying this tag
-        #[arg(long, conflicts_with_all = ["change", "all"])]
+        #[arg(long, conflicts_with_all = ["change_flag", "all"])]
         tag: Option<String>,
         /// Report all changes (the default)
         #[arg(long)]
@@ -297,7 +300,8 @@ enum Cmd {
         /// Opaque plan slice slug implemented by this brief
         #[arg(long)]
         plan_slice: Option<String>,
-        /// JSON array of named acceptance probes bound to this brief ('-' for stdin)
+        /// Named acceptance probes bound to this brief: a JSON array inline, a
+        /// path to one, or '-' for stdin
         #[arg(long)]
         probes_json: Option<String>,
         /// Earlier ledger fact that caused this version: finding:<id>,
@@ -351,7 +355,7 @@ enum Cmd {
     },
     /// Scan messages across open and closed changes (newest first)
     Messages {
-        #[arg(long)]
+        #[arg(long, id = "change_flag")]
         change: Option<String>,
         #[arg(long = "type", value_enum)]
         message_type: Option<MessageType>,
@@ -439,7 +443,7 @@ enum Cmd {
         #[arg(long)]
         follow: bool,
         /// Limit events to one exact change ID or unique prefix
-        #[arg(long)]
+        #[arg(long, id = "change_flag")]
         change: Option<String>,
         /// Limit events to one raw kebab-case event_type value
         #[arg(long = "type")]
@@ -1074,9 +1078,32 @@ fn run(cli: Cli) -> Result<i32> {
         on_behalf_of: cli.on_behalf_of.filter(|value| !value.trim().is_empty()),
     };
 
-    let infer = |change: Option<&str>| -> Result<String> {
+    // Neighbouring commands take the change as a flag, so `--change` works
+    // wherever the positional is optional rather than being guessed at against
+    // clap's nearest-option suggestion.
+    let flag_change = cli.change;
+    // The change a command was pointed at, however it was spelled. Two
+    // spellings naming different changes is a mistake, not a precedence
+    // question — but a slug, an ID, and a unique prefix of one change are one
+    // reference, so they are compared after resolution.
+    let select = |positional: Option<String>| -> Result<Option<String>> {
+        let (Some(positional), Some(flag)) = (&positional, &flag_change) else {
+            return Ok(positional.or_else(|| flag_change.clone()));
+        };
         let store = store::Store::discover(&ctx.cwd)?;
-        context::resolve_change_or_infer(&store, &ctx.cwd, change)
+        let (left, right) = (
+            store.resolve_change(positional)?,
+            store.resolve_change(flag)?,
+        );
+        if left != right {
+            bail!("change given twice and they disagree: {positional:?} as an argument, {flag:?} as --change");
+        }
+        Ok(Some(left))
+    };
+    let infer = |change: Option<&str>| -> Result<String> {
+        let selected = select(change.map(str::to_string))?;
+        let store = store::Store::discover(&ctx.cwd)?;
+        context::resolve_change_or_infer(&store, &ctx.cwd, selected.as_deref())
     };
 
     match cmd {
@@ -1154,7 +1181,9 @@ fn run(cli: Cli) -> Result<i32> {
             let change = if tag.is_empty() {
                 Some(infer(change.as_deref())?)
             } else {
-                change
+                // With --tag the command refuses a change; the flag has to
+                // reach it to be refused.
+                select(change)?
             };
             commands::show_selection(&ctx, role, change.as_deref(), tag, json, at.as_deref())?;
             Ok(0)
@@ -1174,7 +1203,9 @@ fn run(cli: Cli) -> Result<i32> {
                 (Some(change), None) => commands::StatsSelection::Change(change),
                 (None, Some(tag)) => commands::StatsSelection::Tag(tag),
                 (None, None) => commands::StatsSelection::All,
-                (Some(_), Some(_)) => unreachable!("clap rejects --change with --tag"),
+                // clap rejects the pair on the subcommand, but a global
+                // `--change` placed before it never reaches that check.
+                (Some(_), Some(_)) => bail!("--change and --tag are mutually exclusive"),
             };
             commands::stats(&ctx, selection, json)?;
             Ok(0)
@@ -1251,7 +1282,7 @@ fn run(cli: Cli) -> Result<i32> {
         } => commands::changelog(
             &ctx,
             role,
-            change.as_deref(),
+            select(change)?.as_deref(),
             category,
             body_file,
             json,
@@ -1388,7 +1419,7 @@ fn run(cli: Cli) -> Result<i32> {
             };
             commands::watch(
                 &ctx,
-                change.as_deref(),
+                select(change)?.as_deref(),
                 &tag,
                 quorum,
                 &until,
@@ -1410,7 +1441,9 @@ fn run(cli: Cli) -> Result<i32> {
             let change = if tag.is_empty() {
                 Some(infer(change.as_deref())?)
             } else {
-                change
+                // With --tag the command refuses a change; the flag has to
+                // reach it to be refused.
+                select(change)?
             };
             commands::check_selection(&ctx, change.as_deref(), tag, explain, json)
         }
@@ -1621,7 +1654,7 @@ fn run(cli: Cli) -> Result<i32> {
         } => {
             context::resume(
                 &ctx,
-                change.as_deref(),
+                select(change)?.as_deref(),
                 json,
                 get.as_deref(),
                 fields.as_deref(),
@@ -1639,7 +1672,7 @@ fn run(cli: Cli) -> Result<i32> {
             commands::rescue(&ctx, &change, json, take, transcript, tail)
         }
         Cmd::Prompt { change } => {
-            context::prompt(&ctx, change.as_deref())?;
+            context::prompt(&ctx, select(change)?.as_deref())?;
             Ok(0)
         }
         Cmd::Hold {
@@ -1664,6 +1697,7 @@ fn run(cli: Cli) -> Result<i32> {
             dry_run,
             audit_debt,
         } => {
+            let change = select(change)?;
             if audit_debt.is_some() && !tag.is_empty() {
                 if change.is_some() {
                     bail!("provide a change or --tag, not both");

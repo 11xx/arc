@@ -315,10 +315,17 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     let (cmd, timeout) = match (&gate, command) {
         (Some(name), None) => {
             let gates = gates::load(&toplevel)?;
-            let declared = gates
-                .gates
-                .get(name)
-                .with_context(|| format!("gate {name:?} not declared in .arc/gates.toml"))?;
+            let declared = match gates.gates.get(name) {
+                Some(declared) => declared,
+                // A gate and a probe are different objects run by adjacent
+                // flags. When the miss is a probe the brief already declares,
+                // the error knows the right flag and should say it.
+                None if brief_declares_probe(&st, name) => bail!(
+                    "gate {name:?} not declared in .arc/gates.toml; the current brief declares \
+                     acceptance probe {name:?} — run `arc verify --probe {name}`"
+                ),
+                None => bail!("gate {name:?} not declared in .arc/gates.toml"),
+            };
             (declared.command.clone(), declared.timeout)
         }
         (None, Some(c)) => (c, None),
@@ -342,6 +349,13 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             note,
         },
     )
+}
+
+/// Whether the change's latest brief declares an acceptance probe by this name.
+fn brief_declares_probe(state: &state::ChangeState, name: &str) -> bool {
+    state
+        .latest_brief()
+        .is_some_and(|brief| brief.acceptance_probes.iter().any(|p| p.name == name))
 }
 
 fn start_verification_run(
