@@ -99,6 +99,9 @@ struct CompletedVerification {
 }
 
 pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
+    // Verification runs an arbitrary command whose effects outlive the
+    // refusal, so the identity question is settled before anything executes.
+    ctx.ensure_declared_actor()?;
     let VerifyArgs {
         all,
         parallel,
@@ -955,7 +958,11 @@ pub fn integrate(
     cleanup: bool,
     dry_run: bool,
 ) -> Result<i32> {
-    ctx.ensure_declared_actor()?;
+    // A dry run promises to write nothing, so there is no record for the
+    // policy to be about.
+    if !dry_run {
+        ctx.ensure_declared_actor()?;
+    }
     match (reference, tags.is_empty()) {
         (Some(reference), true) => integrate_one(
             ctx,

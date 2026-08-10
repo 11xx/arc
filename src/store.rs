@@ -29,10 +29,14 @@ struct StoreConfig {
 pub struct Store {
     pub root: PathBuf,
     pub repository_id: String,
-    /// The repository this store was discovered from, where committed policy
-    /// lives. Absent for a store opened by path alone, which has no
-    /// repository to read policy from.
-    pub toplevel: Option<PathBuf>,
+    /// Whether this repository requires every writer to declare itself, read
+    /// once when the store was opened from its repository.
+    ///
+    /// Reading it per append would let a command's own merge change the rule
+    /// it is being judged by: `integrate` can bring in a commit that enables
+    /// the policy, and the closure event would then be refused by a rule that
+    /// did not exist when the merge was authorised.
+    pub require_declared_actor: bool,
 }
 
 /// A process-scoped transition guard. The lock file is intentionally
@@ -77,10 +81,15 @@ impl Store {
                 cfg.repository_id
             }
         };
+        // A store opened by path alone has no repository to read policy from.
+        let require_declared_actor = match gitio::toplevel(cwd) {
+            Ok(top) => crate::policy::load(&top)?.policy.require_declared_actor,
+            Err(_) => false,
+        };
         Ok(Store {
             root,
             repository_id,
-            toplevel: gitio::toplevel(cwd).ok(),
+            require_declared_actor,
         })
     }
 
@@ -93,7 +102,7 @@ impl Store {
             Some(repository_id) => Ok(Some(Store {
                 root: root.to_path_buf(),
                 repository_id,
-                toplevel: None,
+                require_declared_actor: false,
             })),
             None => Ok(None),
         }
@@ -404,10 +413,7 @@ impl Store {
         if delegated || declared {
             return Ok(());
         }
-        let Some(toplevel) = self.toplevel.as_deref() else {
-            return Ok(());
-        };
-        if !crate::policy::load(toplevel)?.policy.require_declared_actor {
+        if !self.require_declared_actor {
             return Ok(());
         }
         bail!(

@@ -111,32 +111,19 @@ fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result
     // obligation left behind.
     let auditor_assumed =
         ctx.on_behalf_of.is_none() && ctx.actor_source == crate::model::ActorSource::GitFallback;
-    if auditor_assumed || patchset.author_assumed() {
-        // Say which side is the problem, because the two need different
-        // answers: an auditor can declare itself, and an author cannot — that
-        // identity is already on the ledger, and the ledger is append-only.
-        let (which, remedy) = if auditor_assumed {
-            (
-                "the auditing identity",
-                format!(
-                    "Declare who is auditing: arc audit {} --verdict approved --actor '<reviewer>'",
-                    state.change_id
-                ),
-            )
-        } else {
-            (
-                "the authoring identity",
-                format!(
-                    "Patchset {} records an identity nobody declared, so no audit can show \
-independence from it. Re-snapshot under a declared actor and review that, or record this audit \
-as --verdict changes-requested, which needs no independence.",
-                    patchset.id
-                ),
-            )
-        };
+    // Only the auditor's identity is refused, because only it can be
+    // corrected: declaring yourself is a flag away. The author's identity is
+    // already on the ledger and the ledger is append-only, and an audit exists
+    // precisely to answer for work that shipped — refusing every audit of a
+    // change snapshotted under an assumed identity would leave its debt
+    // permanently undischargeable. What the audit is worth in that case is a
+    // question the recorded provenance answers for a reader.
+    if auditor_assumed {
         bail!(
-            "arc assumed {which} from git config, so this audit cannot show that anyone \
-independent looked at {}.\n  {remedy}",
+            "arc assumed the auditing identity from git config, so this audit cannot show that \
+anyone independent looked at {}.\n\
+  Declare who is auditing: arc audit {} --verdict approved --actor '<reviewer>'",
+            state.change_id,
             state.change_id
         );
     }

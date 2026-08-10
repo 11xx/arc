@@ -306,10 +306,12 @@ fn require_declared_actor_refuses_before_git_work_happens() {
         ));
 }
 
-/// An audit discharges the review obligation an integration left behind, so
-/// it answers to the same independence rule the pre-integration guard applies.
+/// An audit discharges the review obligation an integration left behind, so an
+/// auditor arc named for itself cannot give it. The authoring identity is a
+/// different case: it is already on the ledger, and refusing there would make
+/// the debt undischargeable rather than making anyone independent.
 #[test]
-fn an_audit_refuses_an_assumed_identity() {
+fn an_audit_refuses_an_assumed_auditor() {
     let repo = Repo::new();
     fs::create_dir_all(repo.root.join(".arc")).unwrap();
     fs::write(
@@ -337,8 +339,21 @@ fn an_audit_refuses_an_assumed_identity() {
         .assert()
         .success();
 
-    // A differently named auditor does not establish independence when the
-    // authoring identity was one arc invented.
+    // An auditor arc named for itself cannot show independence, and can fix
+    // that by declaring itself.
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["audit", "owed", "--verdict", "approved"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "arc assumed the auditing identity",
+        ));
+
+    // A declared auditor may discharge the debt even though the authoring
+    // identity was assumed: that identity is on the ledger and cannot be
+    // corrected, and refusing would leave the debt undischargeable forever.
+    // What the audit is worth is what its recorded provenance says.
     repo.arc(&wt)
         .args([
             "--actor",
@@ -349,26 +364,16 @@ fn an_audit_refuses_an_assumed_identity() {
             "approved",
         ])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "arc assumed the authoring identity",
-        ))
-        .stderr(predicates::str::contains(
-            "Re-snapshot under a declared actor",
-        ));
-
-    // Raising problems needs no independence.
-    repo.arc(&wt)
-        .args([
-            "--actor",
-            "auditor",
-            "audit",
-            "owed",
-            "--verdict",
-            "changes-requested",
-        ])
-        .assert()
         .success();
+    let events = stdout(repo.arc(&wt).args([
+        "events",
+        "--change",
+        "owed",
+        "--type",
+        "audit-verdict-recorded",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+    assert_eq!(event["actor_source"], "flag", "{event}");
 }
 
 /// A ledger written before arc recorded provenance says nothing about who
