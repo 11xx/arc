@@ -1163,13 +1163,32 @@ fn change_flag_works_where_the_positional_does() {
     assert!(!positional.trim().is_empty());
 
     // Two spellings naming different changes is a mistake, not a precedence
-    // question.
+    // question — but a slug and a full ID for one change are one reference.
     stdout(repo.arc(&repo.root).args(["begin", "other"]));
     repo.arc(&worktree)
         .args(["log", "flagged", "--change", "other"])
         .assert()
         .failure()
         .stderr(predicates::str::contains("they disagree"));
+    let id = stdout(repo.arc(&worktree).args(["query", "--json"]));
+    let id = serde_json::from_str::<serde_json::Value>(&id).unwrap();
+    let full = id
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["change_id"].as_str().unwrap().to_string())
+        .find(|row| row.starts_with("flagged-"))
+        .unwrap();
+    repo.arc(&worktree)
+        .args(["log", "flagged", "--change", &full])
+        .assert()
+        .success();
+
+    // Commands that resolve the change themselves take the flag too.
+    repo.arc(&worktree)
+        .args(["--change", "flagged", "prompt"])
+        .assert()
+        .success();
 
     // A command with its own --change still binds it locally, and the pair it
     // refuses stays refused when the flag is given before the subcommand.

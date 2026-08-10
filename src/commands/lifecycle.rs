@@ -535,10 +535,11 @@ fn warn_on_gate_shaped_probes(ctx: &Ctx, profile: &str, probes: &[AcceptanceProb
     Ok(())
 }
 
-/// Two shell commands are the same command when they differ only in
-/// whitespace, which is the difference between a copied gate and a retyped one.
+/// Whether two commands are the same command. Compared verbatim, because
+/// whitespace inside a shell command is not noise: `printf 'a b'` and
+/// `printf 'a  b'` do different things.
 fn same_command(left: &str, right: &str) -> bool {
-    left.split_whitespace().eq(right.split_whitespace())
+    left.trim() == right.trim()
 }
 
 fn read_acceptance_probes(source: &str) -> Result<Vec<AcceptanceProbe>> {

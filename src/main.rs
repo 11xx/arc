@@ -1082,18 +1082,25 @@ fn run(cli: Cli) -> Result<i32> {
     // wherever the positional is optional rather than being guessed at against
     // clap's nearest-option suggestion.
     let flag_change = cli.change;
+    // Commands that resolve the change themselves take the flag as the value
+    // the positional would have supplied.
+    let or_flag = |change: Option<String>| change.or_else(|| flag_change.clone());
     let infer = |change: Option<&str>| -> Result<String> {
         let store = store::Store::discover(&ctx.cwd)?;
-        // Two spellings naming different changes is a mistake, not a
-        // precedence question.
-        let change = match (change, flag_change.as_deref()) {
-            (Some(positional), Some(flag)) if positional != flag => bail!(
-                "change given twice and they disagree: {positional:?} as an argument,                  {flag:?} as --change"
-            ),
-            (Some(positional), _) => Some(positional),
-            (None, flag) => flag,
-        };
-        context::resolve_change_or_infer(&store, &ctx.cwd, change)
+        // Two spellings naming different changes is a mistake, not a precedence
+        // question — but a slug, an ID, and a unique prefix of one change are
+        // one reference, so they are compared resolved.
+        if let (Some(positional), Some(flag)) = (change, flag_change.as_deref()) {
+            let (left, right) = (
+                store.resolve_change(positional)?,
+                store.resolve_change(flag)?,
+            );
+            if left != right {
+                bail!("change given twice and they disagree: {positional:?} as an argument, {flag:?} as --change");
+            }
+            return Ok(left);
+        }
+        context::resolve_change_or_infer(&store, &ctx.cwd, change.or(flag_change.as_deref()))
     };
 
     match cmd {
@@ -1270,7 +1277,7 @@ fn run(cli: Cli) -> Result<i32> {
         } => commands::changelog(
             &ctx,
             role,
-            change.as_deref(),
+            or_flag(change).as_deref(),
             category,
             body_file,
             json,
@@ -1407,7 +1414,7 @@ fn run(cli: Cli) -> Result<i32> {
             };
             commands::watch(
                 &ctx,
-                change.as_deref(),
+                or_flag(change).as_deref(),
                 &tag,
                 quorum,
                 &until,
@@ -1640,7 +1647,7 @@ fn run(cli: Cli) -> Result<i32> {
         } => {
             context::resume(
                 &ctx,
-                change.as_deref(),
+                or_flag(change).as_deref(),
                 json,
                 get.as_deref(),
                 fields.as_deref(),
@@ -1658,7 +1665,7 @@ fn run(cli: Cli) -> Result<i32> {
             commands::rescue(&ctx, &change, json, take, transcript, tail)
         }
         Cmd::Prompt { change } => {
-            context::prompt(&ctx, change.as_deref())?;
+            context::prompt(&ctx, or_flag(change).as_deref())?;
             Ok(0)
         }
         Cmd::Hold {

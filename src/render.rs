@@ -722,10 +722,10 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                     if probe.undischargeable {
                         let _ = writeln!(
                             out,
-                            "  - Probe `{}` cannot discharge: its brief's base is the head \
-                             under review, so no run produces both a Fail and a Pass. Record \
-                             a brief based on the revision the work started from",
-                            probe.name
+                            "  - Probe `{}` cannot discharge: {}. Record a brief based on the \
+                             revision the work started from",
+                            probe.name,
+                            undischargeable_reason(probe)
                         );
                         continue;
                     }
@@ -830,6 +830,15 @@ pub fn nested_finding_lines(event: &Event) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// Why a declared probe has no revision pair that could discharge it.
+fn undischargeable_reason(probe: &crate::status::ProbeStatus) -> &'static str {
+    if probe.baseline_revision.is_empty() {
+        "its brief records no base revision, so there is nothing for it to fail at"
+    } else {
+        "its brief's base is the head under review, so no run produces both a Fail and a Pass"
+    }
 }
 
 /// Stable kebab event type plus a type-specific one-line summary.
@@ -1153,8 +1162,9 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .map(|probe| {
                 if probe.undischargeable {
                     return format!(
-                        "probe `{}` cannot discharge: its brief's base is the head under review",
-                        probe.name
+                        "probe `{}` cannot discharge: {}",
+                        probe.name,
+                        undischargeable_reason(probe)
                     );
                 }
                 format!(
