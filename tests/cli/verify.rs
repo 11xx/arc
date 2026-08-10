@@ -173,6 +173,25 @@ fn verify_all_parallel_marks_a_changed_worktree_and_keeps_it_from_green() {
             .all(|gate| gate["green_at_head"] == false),
         "{status}"
     );
+
+    // A passing result from a moved tree is not reusable: --skip-green must
+    // rerun the gates that produced the non-reproducible evidence.
+    let rerun = stdout(repo.arc(&repo.root).args([
+        "verify",
+        "parallel-mutates",
+        "--all",
+        "--parallel",
+        "--skip-green",
+    ]));
+    assert!(!rerun.contains("skipped"), "{rerun}");
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "parallel-mutates",
+        "--type",
+        "verification-reused",
+    ]));
+    assert!(events.trim().is_empty(), "{events}");
 }
 
 #[test]

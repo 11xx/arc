@@ -346,6 +346,17 @@ pub struct VerificationEntry {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+impl VerificationEntry {
+    /// Whether this evidence can satisfy a gate at its recorded revision.
+    /// Passing output is not reproducible when the worktree was dirty or
+    /// changed while the command ran.
+    pub fn green_at_head(&self) -> bool {
+        self.result == VerifyResult::Pass
+            && !self.worktree_dirty.unwrap_or(false)
+            && !self.tree_moved
+    }
+}
+
 fn is_false_ref(value: &bool) -> bool {
     !*value
 }
@@ -1258,10 +1269,10 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     })?;
                 if evidence.gate.as_deref() != Some(gate)
                     || evidence.revision != *revision
-                    || evidence.result != VerifyResult::Pass
+                    || !evidence.green_at_head()
                 {
                     bail!(
-                        "verification reuse {} does not match passing {gate} evidence at {revision}",
+                        "verification reuse {} does not match green passing {gate} evidence at {revision}",
                         ev.event_id
                     );
                 }

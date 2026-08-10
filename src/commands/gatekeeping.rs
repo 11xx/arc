@@ -270,7 +270,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             let reusable = skip_green
                 .then(|| st.gate_evidence_at(name, &head))
                 .flatten()
-                .filter(|evidence| evidence.result == VerifyResult::Pass);
+                .filter(|evidence| evidence.green_at_head());
             if let Some(evidence) = reusable {
                 println!("gate {name}: skipped (green at head)");
                 reused.push((name.clone(), evidence.event_id.clone()));

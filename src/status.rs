@@ -618,8 +618,7 @@ fn build_report(
                 // are displayed and neither counts as green — throwing them
                 // away would push loops toward not recording at all, which is
                 // worse than recording them honestly.
-                green_at_head: result == Some(crate::model::VerifyResult::Pass)
-                    && !evidence.is_some_and(|e| e.worktree_dirty.unwrap_or(false) || e.tree_moved),
+                green_at_head: evidence.is_some_and(|e| e.green_at_head()),
                 attested: evidence.is_some_and(|e| e.attested),
                 tested_tree: evidence.and_then(|e| e.tested_tree.clone()),
                 worktree_dirty: evidence.and_then(|e| e.worktree_dirty),
