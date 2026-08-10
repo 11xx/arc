@@ -805,24 +805,10 @@ fn append_verifications(
         let result = item.result;
         let revision = item.revision.clone();
         let attested = item.attested;
-        // Pin the tree before the event that names it exists, and drop the
-        // claim if the pin fails: a recorded `tested_tree` promises the tree
-        // is still there, so evidence that cannot keep that promise records
-        // the run without it rather than pointing at something collectable.
         previous_id = event_id_after(&previous_id)?;
         let event_id = previous_id.clone();
-        let mut tested_tree = item.tested_tree.clone();
-        if let Some(tree) = &tested_tree {
-            let name = gitio::tree_retention_ref(change_id, &event_id);
-            if let Err(error) = gitio::update_ref(&ctx.cwd, &name, tree) {
-                eprintln!(
-                    "warning: could not keep tree {tree} reachable ({error:#}); recording this \
-                     run without it"
-                );
-                tested_tree = None;
-            }
-        }
-        let payload = Payload::VerificationRecorded {
+        let captured_tree = item.tested_tree.clone();
+        let mut payload = Payload::VerificationRecorded {
             run_id: item.run_id,
             probe: item.probe,
             gate: item.gate,
@@ -837,11 +823,33 @@ fn append_verifications(
             attested: item.attested,
             runner: item.runner,
             note: item.note,
-            tested_tree,
+            // Set below, once the tree is pinned.
+            tested_tree: None,
             worktree_dirty: item.worktree_dirty,
             tree_moved: item.tree_moved,
         };
+        // Whether this event may be appended at all is settled before any ref
+        // is written, so a refusal — the gate closed the change while it ran —
+        // leaves no pin behind for an event that never existed.
         ensure_append_allowed(&st, &payload)?;
+        // A recorded `tested_tree` promises the tree is still there, so the
+        // claim is made only once the pin holding it exists. A run whose tree
+        // cannot be pinned is recorded without one rather than pointing at
+        // something collectable.
+        if let Some(tree) = &captured_tree {
+            let name = gitio::tree_retention_ref(change_id, &event_id);
+            match gitio::update_ref(&ctx.cwd, &name, tree) {
+                Ok(()) => {
+                    if let Payload::VerificationRecorded { tested_tree, .. } = &mut payload {
+                        *tested_tree = Some(tree.clone());
+                    }
+                }
+                Err(error) => eprintln!(
+                    "warning: could not keep tree {tree} reachable ({error:#}); recording this \
+                     run without it"
+                ),
+            }
+        }
         let mut ev = ctx.event(store, change_id, payload);
         ev.event_id = event_id;
         store.append_event(&ev)?;
@@ -1443,17 +1451,20 @@ fn release_retention_refs(ctx: &Ctx, change_id: &str, integrated: Option<&str>) 
         }
     }
     // A tree pinned by verification is evidence about a change that is now
-    // closed, and the patchsets it belongs to are decided. Keeping every one
-    // forever would grow a ref per verification run without bound; what
-    // survives is the same thing that survives for heads — whatever is not
-    // already reachable from what shipped.
-    for (name, oid) in gitio::list_refs(&ctx.cwd, &gitio::tree_retention_prefix(change_id))? {
+    // closed. Keeping every one forever would grow a ref per verification run
+    // without bound; what survives is the same thing that survives for heads —
+    // whatever is not already reachable from what shipped. One object walk
+    // answers for every pin, and only when there is a pin to answer for.
+    let tree_refs = gitio::list_refs(&ctx.cwd, &gitio::tree_retention_prefix(change_id))?;
+    if !tree_refs.is_empty() {
         let reachable = match integrated {
-            Some(rev) => gitio::commit_tree(&ctx.cwd, rev).is_ok_and(|tree| tree == oid),
-            None => false,
+            Some(rev) => gitio::reachable_objects(&ctx.cwd, rev)?,
+            None => Default::default(),
         };
-        if reachable {
-            let _ = gitio::delete_ref(&ctx.cwd, &name);
+        for (name, oid) in tree_refs {
+            if reachable.contains(&oid) {
+                let _ = gitio::delete_ref(&ctx.cwd, &name);
+            }
         }
     }
     Ok(())

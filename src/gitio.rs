@@ -343,6 +343,21 @@ pub fn tree_retention_prefix(change_id: &str) -> String {
     format!("refs/arc/tree/{change_id}/")
 }
 
+/// Every object reachable from a revision.
+///
+/// One walk answers for every pin at once. A tree recorded as evidence may be
+/// any commit's tree in the integrated history, not only the tip's, so
+/// comparing against the tip alone would keep pins for trees Git is already
+/// holding.
+pub fn reachable_objects(cwd: &Path, rev: &str) -> Result<std::collections::HashSet<String>> {
+    let listing = git(cwd, &["rev-list", "--objects", rev])?;
+    Ok(listing
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_string)
+        .collect())
+}
+
 /// All refs under a prefix as (refname, object id) pairs.
 pub fn list_refs(cwd: &Path, prefix: &str) -> Result<Vec<(String, String)>> {
     let out = git(
