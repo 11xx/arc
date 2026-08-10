@@ -188,6 +188,45 @@ fn skip_green_requires_known_clean_local_provenance_but_allows_attested() {
 }
 
 #[test]
+fn skip_green_reruns_when_the_tested_tree_cannot_be_retained() {
+    let repo = repo_with_trivial_gates();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "retention-conflict");
+
+    // A ref at the parent path makes every per-event tree pin fail without
+    // affecting the gate command itself.
+    git(
+        &repo.root,
+        &[
+            "update-ref",
+            &format!("refs/arc/tree/{change_id}"),
+            &git_out(&worktree, &["rev-parse", "HEAD"]),
+        ],
+    );
+    repo.arc(&worktree)
+        .args(["verify", "retention-conflict", "--gate", "build"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("without local provenance"));
+
+    let status = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "retention-conflict", "--json"]),
+    );
+    let gate = &status["gates"][0];
+    assert_eq!(gate["result"], "pass", "{status}");
+    assert_eq!(gate["green_at_head"], false, "{status}");
+    assert_eq!(gate["tested_tree"], serde_json::Value::Null, "{status}");
+    assert_eq!(gate["worktree_dirty"], serde_json::Value::Null, "{status}");
+
+    let rerun =
+        stdout(
+            repo.arc(&worktree)
+                .args(["verify", "retention-conflict", "--all", "--skip-green"]),
+        );
+    assert!(!rerun.contains("build: skipped"), "{rerun}");
+}
+
+#[test]
 fn skip_green_requires_all() {
     let repo = repo_with_trivial_gates();
     change_with_patchset(&repo, "feat-x");

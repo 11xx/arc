@@ -870,10 +870,23 @@ fn append_verifications(
                         *tested_tree = Some(tree.clone());
                     }
                 }
-                Err(error) => eprintln!(
-                    "warning: could not keep tree {tree} reachable ({error:#}); recording this \
-                     run without it"
-                ),
+                Err(error) => {
+                    if let Payload::VerificationRecorded {
+                        tested_tree,
+                        worktree_dirty,
+                        ..
+                    } = &mut payload
+                    {
+                        // Without the pin, the local tree is unknown even if
+                        // the boundary comparison found it clean.
+                        *tested_tree = None;
+                        *worktree_dirty = None;
+                    }
+                    eprintln!(
+                        "warning: could not keep tree {tree} reachable ({error:#}); recording this \
+                         run without local provenance"
+                    )
+                }
             }
         }
         let mut ev = ctx.event(store, change_id, payload);
