@@ -309,6 +309,43 @@ fn stats_by_model_attributes_patchsets_and_rework_to_the_subject() {
     assert!(text.contains("sol#high"), "{text}");
     assert!(text.contains("(unattributed)"), "{text}");
 
+    // An audit is a review that happened, and counts as one.
+    repo.arc(&wt)
+        .args([
+            "review",
+            "delegated",
+            "--verdict",
+            "approved",
+            "--on-behalf-of",
+            "reviewer-model",
+        ])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["integrate", "delegated", "--audit-debt", "nobody reachable"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "audit",
+            "delegated",
+            "--verdict",
+            "approved",
+            "--actor",
+            "auditor",
+            "--on-behalf-of",
+            "auditor-model",
+        ])
+        .assert()
+        .success();
+    let report = json_stdout(repo.arc(&wt).args(["stats", "--by-model", "--json"]));
+    let rows = report["models"].as_array().unwrap();
+    let auditor = rows
+        .iter()
+        .find(|row| row["identity"] == "auditor-model")
+        .unwrap_or_else(|| panic!("no row for auditor-model: {report}"));
+    assert_eq!(auditor["verdicts"], 1, "{report}");
+
     // A selection and --all cannot both be asked for, however --change is
     // spelled.
     repo.arc(&wt)

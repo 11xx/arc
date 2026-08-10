@@ -88,7 +88,9 @@ struct ModelStats {
     /// several changes-requested verdicts on one patchset count once, exactly
     /// as they do per change.
     rework_rounds_caused: usize,
-    /// Verdicts issued as reviewer.
+    /// Verdicts issued as reviewer, before integration and after it. An audit
+    /// is a review that happened; leaving it out would understate exactly the
+    /// reviewers a debt-carrying change depended on.
     verdicts: usize,
 }
 
@@ -138,7 +140,9 @@ fn by_model(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
                     patchset_subject.insert(patchset_id.as_str(), subject(event));
                     row.patchsets += 1;
                 }
-                Payload::VerdictRecorded { .. } => row.verdicts += 1,
+                Payload::VerdictRecorded { .. } | Payload::AuditVerdictRecorded { .. } => {
+                    row.verdicts += 1
+                }
                 _ => {}
             }
         }

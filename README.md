@@ -329,7 +329,8 @@ JSON is versioned `arc-stats/1`.
 `arc stats --by-model` answers a different question from the same events: one
 row per delegated identity rather than per change, with changes touched,
 patchsets contributed, rework rounds those patchsets caused, and verdicts
-issued as reviewer. Rows are keyed on the `--on-behalf-of` subject, never the
+issued as reviewer — before integration and after it, since an audit is a
+review that happened. Rows are keyed on the `--on-behalf-of` subject, never the
 actor — a lead runs the ceremony on an executor's behalf, so attributing by
 actor would credit the lead for every line the executor wrote. A round is
 charged to the patchset that was sent back rather than to the revision that
