@@ -2665,6 +2665,48 @@ fn journal_discussion_handles_mixed_fences_and_spaced_rules() {
     assert_eq!(json["stances"]["unstated"], 2, "{json}");
 }
 
+/// A block that opens with a quotation has not opened with a stance, and a
+/// fence closes only on a run at least as long as the one that opened it.
+#[test]
+fn journal_discussion_does_not_read_a_stance_out_of_a_quotation() {
+    let repo = Repo::new();
+    let src = repo.home.join("open.md");
+    fs::write(
+        &src,
+        "### Position pos-a\n\n```text\nquoted\n```\nPosition: for\n\n         ````markdown\n```\n### Position fake\n\nPosition: against\n````\n",
+    )
+    .unwrap();
+    let file = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "quotation",
+        "--kind",
+        "discussion",
+        "--no-scaffold",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    let name = PathBuf::from(file.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let json: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "journal",
+        "discussion",
+        &name,
+        "--json",
+    ])))
+    .unwrap();
+    // One real block, which opened with a quotation; the heading inside the
+    // longer fence is not a position at all.
+    assert_eq!(json["positions"], 1, "{json}");
+    assert_eq!(json["stances"]["for"], 0, "{json}");
+    assert_eq!(json["stances"]["against"], 0, "{json}");
+    assert_eq!(json["stances"]["unstated"], 1, "{json}");
+}
+
 /// A repo-local template may be empty, and the default scaffold must not turn
 /// that into a silently recorded empty artifact.
 #[test]
