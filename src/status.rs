@@ -111,6 +111,12 @@ pub struct ProbeStatus {
     pub final_result: String,
     pub final_attested: bool,
     pub discriminating_at_head: bool,
+    /// The brief's base is the head under review, so the probe would have to
+    /// fail and pass at one revision. No run can discharge it; only a brief
+    /// based on the revision the work started from can. Additive in
+    /// `arc-status/6`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub undischargeable: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -608,6 +614,7 @@ fn build_report(
                                 .is_some_and(|entry| entry.result == VerifyResult::Fail)
                                 && final_evidence
                                     .is_some_and(|entry| entry.result == VerifyResult::Pass),
+                            undischargeable: baseline_revision == patchset.head,
                         }
                     })
                     .collect::<Vec<_>>(),

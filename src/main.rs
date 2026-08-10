@@ -57,6 +57,9 @@ struct Cli {
     /// Execution boundary: implementer | reviewer | lead
     #[arg(long, global = true, env = "ARC_ROLE")]
     role: Option<String>,
+    /// Change to act on, for the commands that take one as a positional
+    #[arg(long = "change", id = "change_flag", global = true)]
+    change: Option<String>,
     /// Absent prints the workflow guide: what arc owns, the command
     /// lifecycle, profile selection, and the rules that change what a
     /// session should do.
@@ -229,10 +232,10 @@ enum Cmd {
     /// Derived ledger analytics: stage, review, and gate durations
     Stats {
         /// Report a single change
-        #[arg(long, conflicts_with_all = ["tag", "all"])]
+        #[arg(long, id = "change_flag", conflicts_with_all = ["tag", "all"])]
         change: Option<String>,
         /// Report every change carrying this tag
-        #[arg(long, conflicts_with_all = ["change", "all"])]
+        #[arg(long, conflicts_with_all = ["change_flag", "all"])]
         tag: Option<String>,
         /// Report all changes (the default)
         #[arg(long)]
@@ -351,7 +354,7 @@ enum Cmd {
     },
     /// Scan messages across open and closed changes (newest first)
     Messages {
-        #[arg(long)]
+        #[arg(long, id = "change_flag")]
         change: Option<String>,
         #[arg(long = "type", value_enum)]
         message_type: Option<MessageType>,
@@ -439,7 +442,7 @@ enum Cmd {
         #[arg(long)]
         follow: bool,
         /// Limit events to one exact change ID or unique prefix
-        #[arg(long)]
+        #[arg(long, id = "change_flag")]
         change: Option<String>,
         /// Limit events to one raw kebab-case event_type value
         #[arg(long = "type")]
@@ -1074,8 +1077,13 @@ fn run(cli: Cli) -> Result<i32> {
         on_behalf_of: cli.on_behalf_of.filter(|value| !value.trim().is_empty()),
     };
 
+    // Neighbouring commands take the change as a flag, so `--change` works
+    // everywhere the positional does rather than being guessed at against
+    // clap's nearest-option suggestion.
+    let flag_change = cli.change;
     let infer = |change: Option<&str>| -> Result<String> {
         let store = store::Store::discover(&ctx.cwd)?;
+        let change = change.or(flag_change.as_deref());
         context::resolve_change_or_infer(&store, &ctx.cwd, change)
     };
 

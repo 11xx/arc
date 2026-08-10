@@ -917,3 +917,164 @@ fn provenance_email_match_suppresses_name_only_false_positive() {
         .success()
         .stdout(predicates::str::contains("PROVENANCE MISMATCH").not());
 }
+
+/// A repository gate passes at every revision, so declaring one as an
+/// acceptance probe demands a baseline Fail nobody can honestly produce. The
+/// mistake is one word wide and surfaced rounds later as an integration
+/// blocker that read as unfixable, so it is refused where it is made.
+#[test]
+fn brief_refuses_a_probe_that_runs_a_declared_gate() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.test]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gate"]);
+    stdout(repo.arc(&repo.root).args(["begin", "gate-as-probe"]));
+    let worktree = repo.home.join(".worktrees/repo-gate-as-probe");
+
+    repo.arc(&worktree)
+        .args([
+            "brief",
+            "gate-as-probe",
+            "--body-file",
+            "-",
+            "--probes-json",
+            r#"[{"name":"test","command":"true"}]"#,
+        ])
+        .write_stdin("contract v1\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("runs declared gate \"test\""));
+
+    // Nothing was recorded: the refusal is at declaration time.
+    repo.arc(&worktree)
+        .args(["brief", "gate-as-probe"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no brief recorded"));
+
+    // A probe that only the change makes pass records normally, inline.
+    repo.arc(&worktree)
+        .args([
+            "brief",
+            "gate-as-probe",
+            "--body-file",
+            "-",
+            "--probes-json",
+            r#"[{"name":"marker","command":"test -f marker.txt"}]"#,
+        ])
+        .write_stdin("contract v1\n")
+        .assert()
+        .success();
+    let show = json_stdout(
+        repo.arc(&worktree)
+            .args(["show", "gate-as-probe", "--json"]),
+    );
+    assert_eq!(show["briefs"][0]["acceptance_probes"][0]["name"], "marker");
+}
+
+/// A brief based on the head under review asks for a Fail and a Pass at one
+/// revision. Nothing at declaration time can tell that apart from the
+/// legitimate rebind — re-recording a brief and re-snapshotting to correct a
+/// probe declaration — so the impossibility is named where it is provable: at
+/// the blocker, where the base is the head that shipped.
+#[test]
+fn check_names_a_probe_that_cannot_discharge() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "base-is-head"]));
+    let worktree = repo.home.join(".worktrees/repo-base-is-head");
+    repo.commit(&worktree, "marker.txt", "present\n", "feat: work");
+    let head = repo.head(&worktree);
+    repo.arc(&worktree)
+        .args([
+            "brief",
+            "base-is-head",
+            "--body-file",
+            "-",
+            "--base",
+            &head,
+            "--probes-json",
+            r#"[{"name":"marker","command":"test -f marker.txt"}]"#,
+        ])
+        .write_stdin("contract v1\n")
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["snapshot", "base-is-head"])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "base-is-head", "--json"]),
+    );
+    assert_eq!(status["probes"][0]["undischargeable"], true, "{status}");
+    let check = json_stdout(
+        repo.arc(&worktree)
+            .args(["check", "base-is-head", "--json"]),
+    );
+    assert!(
+        check["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["blocker"] == "acceptance-probes-not-green"),
+        "{check}"
+    );
+
+    let text = stdout(repo.arc(&worktree).args(["check", "base-is-head"]));
+    assert!(text.contains("cannot discharge"), "{text}");
+}
+
+/// A gate and a probe are different objects reached by adjacent flags, so a
+/// gate lookup that misses a name the brief declares names the right flag
+/// instead of only the file it searched.
+#[test]
+fn verify_gate_miss_points_at_a_declared_probe() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "gate-miss"]));
+    let worktree = repo.home.join(".worktrees/repo-gate-miss");
+    repo.arc(&worktree)
+        .args([
+            "brief",
+            "gate-miss",
+            "--body-file",
+            "-",
+            "--probes-json",
+            r#"[{"name":"marker","command":"test -f marker.txt"}]"#,
+        ])
+        .write_stdin("contract v1\n")
+        .assert()
+        .success();
+
+    repo.arc(&worktree)
+        .args(["verify", "gate-miss", "--gate", "marker"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("arc verify --probe marker"));
+
+    // A name that is neither still reports only what it searched.
+    repo.arc(&worktree)
+        .args(["verify", "gate-miss", "--gate", "nowhere"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("arc verify --probe").not());
+}
+
+/// Commands that take the change as a positional accept `--change` too, so a
+/// caller moving between them does not have to guess which spelling this one
+/// wanted.
+#[test]
+fn change_flag_works_where_the_positional_does() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "flagged"]));
+    let worktree = repo.home.join(".worktrees/repo-flagged");
+    let positional = stdout(repo.arc(&worktree).args(["log", "flagged"]));
+    let flagged = stdout(repo.arc(&worktree).args(["log", "--change", "flagged"]));
+    assert_eq!(positional, flagged);
+    assert!(!positional.trim().is_empty());
+}

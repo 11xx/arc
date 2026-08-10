@@ -719,6 +719,16 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                     .iter()
                     .filter(|probe| !probe.discriminating_at_head)
                 {
+                    if probe.undischargeable {
+                        let _ = writeln!(
+                            out,
+                            "  - Probe `{}` cannot discharge: its brief's base is the head \
+                             under review, so no run produces both a Fail and a Pass. Record \
+                             a brief based on the revision the work started from",
+                            probe.name
+                        );
+                        continue;
+                    }
                     let _ = writeln!(
                         out,
                         "  - Probe `{}` needs Fail at `{}` and Pass at `{}`",
@@ -1141,6 +1151,12 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .iter()
             .filter(|probe| !probe.discriminating_at_head)
             .map(|probe| {
+                if probe.undischargeable {
+                    return format!(
+                        "probe `{}` cannot discharge: its brief's base is the head under review",
+                        probe.name
+                    );
+                }
                 format!(
                     "probe `{}` needs fail at `{}` and pass at `{}`",
                     probe.name, probe.baseline_revision, probe.final_revision

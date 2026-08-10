@@ -435,6 +435,7 @@ pub fn brief(
         )?);
         let store = ctx.store()?;
         let (change_id, _transition, state) = locked_state(&store, reference)?;
+        refuse_undischargeable_probes(ctx, &acceptance_probes)?;
         let next_version = state.briefs.len() + 1;
         let causes = resolve_brief_causes(&state, &caused_by, cause_note.as_deref())?;
         let has_causes = !causes.is_empty();
@@ -504,10 +505,46 @@ pub fn brief(
     Ok(0)
 }
 
-fn read_acceptance_probes(path: &str) -> Result<Vec<AcceptanceProbe>> {
-    let raw = read_body_file_verbatim(path)?;
+/// An acceptance probe discriminates a change: it must fail at the brief's base
+/// and pass at the head. A probe that runs a repository gate cannot, and the
+/// mistake otherwise surfaces rounds later as an integration blocker that reads
+/// as unfixable.
+fn refuse_undischargeable_probes(ctx: &Ctx, probes: &[AcceptanceProbe]) -> Result<()> {
+    if probes.is_empty() {
+        return Ok(());
+    }
+    // A repository gate passes at every revision, so it can never produce the
+    // baseline Fail a probe requires.
+    if let Ok(toplevel) = gitio::toplevel(&ctx.cwd) {
+        let gates = crate::gates::load(&toplevel)?;
+        for probe in probes {
+            if let Some((name, _)) = gates
+                .gates
+                .iter()
+                .find(|(_, gate)| gate.command.trim() == probe.command.trim())
+            {
+                bail!(
+                    "acceptance probe {:?} runs declared gate {name:?}, which passes at every \
+                     revision and can never fail at the base; declare a probe that only the \
+                     change makes pass",
+                    probe.name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_acceptance_probes(source: &str) -> Result<Vec<AcceptanceProbe>> {
+    // Documented as a JSON array, and every caller that had one to hand passed
+    // it inline before reaching for a temporary file.
+    let raw = if source.trim_start().starts_with('[') {
+        source.to_string()
+    } else {
+        read_body_file_verbatim(source)?
+    };
     let probes = serde_json::from_str::<Vec<AcceptanceProbe>>(&raw)
-        .with_context(|| format!("invalid acceptance probe JSON from {path:?}"))?;
+        .with_context(|| format!("invalid acceptance probe JSON from {source:?}"))?;
     let mut names = BTreeSet::new();
     for probe in &probes {
         crate::ids::validate_slug(&probe.name)
