@@ -339,6 +339,10 @@ pub fn tree_retention_ref(change_id: &str, event_id: &str) -> String {
     format!("refs/arc/tree/{change_id}/{event_id}")
 }
 
+pub fn tree_retention_prefix(change_id: &str) -> String {
+    format!("refs/arc/tree/{change_id}/")
+}
+
 /// All refs under a prefix as (refname, object id) pairs.
 pub fn list_refs(cwd: &Path, prefix: &str) -> Result<Vec<(String, String)>> {
     let out = git(

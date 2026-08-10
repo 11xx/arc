@@ -1425,4 +1425,48 @@ fn a_recorded_tree_survives_garbage_collection() {
             .success(),
         "{tree} was collected"
     );
+
+    // A pin that outlives the change forever would grow a ref per run. What
+    // survives integration is what is not already reachable from what shipped.
+    let refs_before = stdout_lines(&repo.root, "refs/arc/tree/");
+    assert!(!refs_before.is_empty(), "{refs_before:?}");
+    fs::remove_file(wt.join("scratch.rs")).unwrap();
+    stdout(repo.arc(&wt).args(["snapshot", "durable"]));
+    repo.arc(&wt)
+        .args(["verify", "durable", "--gate", "unit"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["review", "durable", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["integrate", "durable"])
+        .assert()
+        .success();
+    let kept = stdout_lines(&repo.root, "refs/arc/tree/");
+    // The clean tree is now reachable from the integration commit and is
+    // released; the dirty one never was, so it stays pinned.
+    assert!(kept.len() < refs_before.len() + 1, "{kept:?}");
+    assert!(
+        std::process::Command::new("git")
+            .args(["cat-file", "-e", &tree])
+            .current_dir(&repo.root)
+            .status()
+            .unwrap()
+            .success(),
+        "the dirty tree {tree} must stay pinned"
+    );
+}
+
+fn stdout_lines(cwd: &std::path::Path, prefix: &str) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .args(["for-each-ref", "--format=%(refname)", prefix])
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
