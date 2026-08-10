@@ -604,6 +604,11 @@ fn verify_all_parallel(
         .map(|h| h.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "unknown".into());
     let cwd = ctx.cwd.clone();
+    // Every gate shares this worktree, so capture the batch boundary once on
+    // each side. A gate that changes the worktree makes every result in the
+    // batch describe no single tree; recording that conservatively is better
+    // than allowing one passing result to look reproducible.
+    let before = gitio::worktree_tree(&ctx.cwd)?;
     let inputs = required
         .into_iter()
         .map(|(name, gate)| VerificationInput {
@@ -651,11 +656,24 @@ fn verify_all_parallel(
     if let Some(error) = first_error {
         return Err(error);
     }
+    let after = gitio::worktree_tree(&ctx.cwd)?;
     let post = gitio::head(&ctx.cwd)?;
     if post != revision {
         eprintln!(
             "warning: head moved during parallel verification ({revision} -> {post}); evidence recorded at {revision}"
         );
+    }
+    let commit_tree = gitio::commit_tree(&ctx.cwd, revision).ok();
+    let tree_moved = after != before;
+    if tree_moved {
+        eprintln!(
+            "warning: the worktree changed while parallel gates ran, so this evidence describes no single tree"
+        );
+    }
+    for item in &mut completed {
+        item.tested_tree = Some(before.clone());
+        item.worktree_dirty = commit_tree.as_ref().map(|tree| tree != &before);
+        item.tree_moved = tree_moved;
     }
     let ran_passed = completed
         .iter()

@@ -73,6 +73,8 @@ fn verify_all_continues_after_a_failure() {
 fn verify_all_parallel_completes_sleep_gates_and_appends_evidence_in_name_order() {
     let repo = Repo::new();
     write_two_gates(&repo, "sleep 1", "sleep 1");
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add parallel gates"]);
     stdout(
         repo.arc(&repo.root)
             .args(["begin", "parallel-gates", "--no-worktree"]),
@@ -96,12 +98,81 @@ fn verify_all_parallel_completes_sleep_gates_and_appends_evidence_in_name_order(
         "--type",
         "verification-recorded",
     ]));
-    let gates = events
+    let values = events
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let gates = values
+        .iter()
         .map(|event| event["gate"].as_str().unwrap().to_string())
         .collect::<Vec<_>>();
     assert_eq!(gates, ["alpha", "beta"]);
+    for event in &values {
+        assert!(
+            event["tested_tree"]
+                .as_str()
+                .is_some_and(|tree| tree.len() == 40),
+            "{event}"
+        );
+        assert_eq!(event["worktree_dirty"], false, "{event}");
+        assert!(!event["tree_moved"].as_bool().unwrap_or(false), "{event}");
+    }
+}
+
+#[test]
+fn verify_all_parallel_marks_a_changed_worktree_and_keeps_it_from_green() {
+    let repo = Repo::new();
+    write_two_gates(&repo, "touch parallel-side-effect", "true");
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: add mutating parallel gates"],
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "parallel-mutates", "--no-worktree"]),
+    );
+
+    repo.arc(&repo.root)
+        .args(["verify", "parallel-mutates", "--all", "--parallel"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("gates: 2/2 pass"));
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "parallel-mutates",
+        "--type",
+        "verification-recorded",
+    ]));
+    let values = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 2);
+    for event in &values {
+        assert!(
+            event["tested_tree"]
+                .as_str()
+                .is_some_and(|tree| tree.len() == 40),
+            "{event}"
+        );
+        assert_eq!(event["worktree_dirty"], false, "{event}");
+        assert_eq!(event["tree_moved"], true, "{event}");
+    }
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "parallel-mutates", "--json"]),
+    );
+    assert!(
+        status["gates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|gate| gate["green_at_head"] == false),
+        "{status}"
+    );
 }
 
 #[test]
