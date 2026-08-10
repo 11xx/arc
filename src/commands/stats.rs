@@ -66,7 +66,134 @@ struct Percentiles {
     p90_seconds: u64,
 }
 
-pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool) -> Result<()> {
+/// One executor identity's contribution across the selection.
+///
+/// The interesting number is not a ranking. It is the pair "this identity
+/// produced N patchsets and caused M rework rounds", because that ratio is
+/// what an executor tier actually costs — and the cost is billed to whichever
+/// pool the reviewers run on.
+#[derive(Serialize)]
+struct ModelStats {
+    /// The delegated subject recorded on the event, verbatim. Model identity
+    /// is a convention rather than a schema: leads write it into
+    /// `--on-behalf-of`, and nothing enforces its shape.
+    identity: String,
+    changes: usize,
+    /// Patchsets contributed as implementer.
+    patchsets: usize,
+    /// Rework rounds opened against a patchset this identity contributed —
+    /// what its work cost, not what it cleaned up. The revision that answers a
+    /// round belongs to whoever wrote it, and crediting the round there would
+    /// charge the fixer for the defect. A round is a revision cycle, so
+    /// several changes-requested verdicts on one patchset count once, exactly
+    /// as they do per change.
+    rework_rounds_caused: usize,
+    /// Verdicts issued as reviewer, before integration and after it. An audit
+    /// is a review that happened; leaving it out would understate exactly the
+    /// reviewers a debt-carrying change depended on.
+    verdicts: usize,
+}
+
+#[derive(Serialize)]
+struct ByModelOutput {
+    schema: &'static str,
+    models: Vec<ModelStats>,
+}
+
+/// The subject an event is attributed to. A lead runs the snapshot ceremony on
+/// an executor's behalf, so attributing by actor would credit the lead for
+/// every line the executor wrote. Where no subject was recorded the row is
+/// unknown rather than the lead's, and is counted in its own row rather than
+/// distributed silently.
+const UNATTRIBUTED: &str = "(unattributed)";
+
+fn subject(event: &Event) -> &str {
+    event
+        .on_behalf_of
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(UNATTRIBUTED)
+}
+
+fn by_model(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
+    #[derive(Default)]
+    struct Row {
+        changes: BTreeSet<String>,
+        patchsets: usize,
+        rework_rounds: usize,
+        verdicts: usize,
+    }
+    let mut rows: BTreeMap<String, Row> = BTreeMap::new();
+    for change_id in change_ids {
+        let events = store.load_events(change_id)?;
+        // Who contributed each patchset, so a rework round lands on the
+        // identity whose work opened it rather than on the reviewer.
+        let mut patchset_subject: BTreeMap<&str, &str> = BTreeMap::new();
+        for event in &events {
+            // Touching a change is any recorded contribution to it, so an
+            // identity that only filed findings or ran gates has a row rather
+            // than vanishing.
+            let row = rows.entry(subject(event).to_string()).or_default();
+            row.changes.insert(change_id.clone());
+            match &event.payload {
+                Payload::PatchsetAdded { patchset_id, .. } => {
+                    patchset_subject.insert(patchset_id.as_str(), subject(event));
+                    row.patchsets += 1;
+                }
+                Payload::VerdictRecorded { .. } | Payload::AuditVerdictRecorded { .. } => {
+                    row.verdicts += 1
+                }
+                _ => {}
+            }
+        }
+        for patchset_id in derive_rework(&events).reworked_patchsets {
+            let subject = patchset_subject
+                .get(patchset_id.as_str())
+                .copied()
+                .unwrap_or(UNATTRIBUTED);
+            rows.entry(subject.to_string()).or_default().rework_rounds += 1;
+        }
+    }
+
+    let models: Vec<ModelStats> = rows
+        .into_iter()
+        .map(|(identity, row)| ModelStats {
+            identity,
+            changes: row.changes.len(),
+            patchsets: row.patchsets,
+            rework_rounds_caused: row.rework_rounds,
+            verdicts: row.verdicts,
+        })
+        .collect();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ByModelOutput {
+                schema: "arc-stats-by-model/1",
+                models,
+            })?
+        );
+        return Ok(());
+    }
+    println!(
+        "{:<40} {:>8} {:>10} {:>8} {:>9}",
+        "identity", "changes", "patchsets", "caused-rw", "verdicts"
+    );
+    for model in &models {
+        println!(
+            "{:<40} {:>8} {:>10} {:>8} {:>9}",
+            truncate(&model.identity, 40),
+            model.changes,
+            model.patchsets,
+            model.rework_rounds_caused,
+            model.verdicts
+        );
+    }
+    Ok(())
+}
+
+pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, by_model_view: bool) -> Result<()> {
     let store = ctx.store()?;
     let change_ids = match &selection {
         StatsSelection::Change(reference) => vec![store.resolve_change(reference)?],
@@ -83,6 +210,10 @@ pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool) -> Result<()> {
             selected
         }
     };
+
+    if by_model_view {
+        return by_model(&store, &change_ids, json);
+    }
 
     let mut changes = Vec::new();
     // Per-gate run durations across the selection, for aggregate percentiles.
@@ -321,6 +452,9 @@ struct ReworkStats {
     changes_requested_rounds: usize,
     completed_rework_rounds: usize,
     first_pass_approval: bool,
+    /// The patchsets whose rounds completed, so a round can be attributed to
+    /// whoever contributed the work it asked to be revised.
+    reworked_patchsets: Vec<String>,
 }
 
 fn derive_rework(events: &[Event]) -> ReworkStats {
@@ -359,9 +493,9 @@ fn derive_rework(events: &[Event]) -> ReworkStats {
         })
         .collect();
 
-    let completed_rework_rounds = requested
-        .values()
-        .filter(|request_index| {
+    let reworked_patchsets: Vec<String> = requested
+        .iter()
+        .filter(|(_, request_index)| {
             approvals.iter().any(|(approval_index, patchset_id)| {
                 approval_index > *request_index
                     && patchsets
@@ -369,7 +503,9 @@ fn derive_rework(events: &[Event]) -> ReworkStats {
                         .is_some_and(|patchset_index| patchset_index > *request_index)
             })
         })
-        .count();
+        .map(|(patchset_id, _)| (*patchset_id).to_string())
+        .collect();
+    let completed_rework_rounds = reworked_patchsets.len();
     let first_patchset = patchsets
         .iter()
         .min_by_key(|(_, index)| *index)
@@ -389,6 +525,7 @@ fn derive_rework(events: &[Event]) -> ReworkStats {
         changes_requested_rounds: requested.len(),
         completed_rework_rounds,
         first_pass_approval,
+        reworked_patchsets,
     }
 }
 

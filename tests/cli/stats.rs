@@ -199,3 +199,158 @@ fn several_changes_requested_on_one_patchset_are_one_round() {
     assert_eq!(report["aggregate"]["completed_rework_rounds"], 1);
     assert_eq!(report["aggregate"]["review_rounds_by_cause"]["executor"], 1);
 }
+
+/// `arc stats` knows a change took six rework rounds and not who caused them.
+/// The identity is already on the ledger — a lead runs the ceremony on an
+/// executor's behalf — so the rows are keyed on the subject, never the actor.
+#[test]
+fn stats_by_model_attributes_patchsets_and_rework_to_the_subject() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "delegated"]));
+    let wt = repo.home.join(".worktrees/repo-delegated");
+
+    // Round one: the executor's work is sent back.
+    repo.commit(&wt, "one.rs", "first\n", "feat: first");
+    repo.arc(&wt)
+        .args(["snapshot", "delegated", "--on-behalf-of", "sol#high"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "review",
+            "delegated",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+            "--on-behalf-of",
+            "reviewer-model",
+        ])
+        .assert()
+        .success();
+
+    // Round two: a different identity writes the revision that answers it.
+    repo.commit(&wt, "two.rs", "second\n", "feat: second");
+    repo.arc(&wt)
+        .args(["snapshot", "delegated", "--on-behalf-of", "terra#high"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "review",
+            "delegated",
+            "--verdict",
+            "approved",
+            "--on-behalf-of",
+            "reviewer-model",
+        ])
+        .assert()
+        .success();
+
+    // A patchset nobody delegated for: counted apart, not credited to the lead.
+    repo.commit(&wt, "three.rs", "third\n", "feat: third");
+    repo.arc(&wt)
+        .args(["snapshot", "delegated"])
+        .assert()
+        .success();
+
+    let report = json_stdout(repo.arc(&wt).args(["stats", "--by-model", "--json"]));
+    assert_eq!(report["schema"], "arc-stats-by-model/1");
+    let rows = report["models"].as_array().unwrap();
+    let row = |identity: &str| {
+        rows.iter()
+            .find(|row| row["identity"] == identity)
+            .unwrap_or_else(|| panic!("no row for {identity}: {report}"))
+            .clone()
+    };
+
+    // The round is charged to the work that was sent back, not to the
+    // revision that answered it.
+    let executor = row("sol#high");
+    assert_eq!(executor["patchsets"], 1, "{report}");
+    assert_eq!(executor["rework_rounds_caused"], 1, "{report}");
+    assert_eq!(executor["verdicts"], 0, "{report}");
+    assert_eq!(executor["changes"], 1, "{report}");
+
+    let fixer = row("terra#high");
+    assert_eq!(fixer["patchsets"], 1, "{report}");
+    assert_eq!(fixer["rework_rounds_caused"], 0, "{report}");
+
+    let reviewer = row("reviewer-model");
+    assert_eq!(reviewer["verdicts"], 2, "{report}");
+    assert_eq!(reviewer["patchsets"], 0, "{report}");
+    assert_eq!(reviewer["rework_rounds_caused"], 0, "{report}");
+
+    let unknown = row("(unattributed)");
+    assert_eq!(unknown["patchsets"], 1, "{report}");
+
+    // An identity that only filed a finding still has a row.
+    repo.arc(&wt)
+        .args([
+            "finding",
+            "delegated",
+            "--summary",
+            "spotted",
+            "--on-behalf-of",
+            "finder-model",
+        ])
+        .assert()
+        .success();
+    let report = json_stdout(repo.arc(&wt).args(["stats", "--by-model", "--json"]));
+    let rows = report["models"].as_array().unwrap();
+    let finder = rows
+        .iter()
+        .find(|row| row["identity"] == "finder-model")
+        .unwrap_or_else(|| panic!("no row for finder-model: {report}"));
+    assert_eq!(finder["changes"], 1, "{report}");
+    assert_eq!(finder["patchsets"], 0, "{report}");
+
+    let text = stdout(repo.arc(&wt).args(["stats", "--by-model"]));
+    assert!(text.contains("sol#high"), "{text}");
+    assert!(text.contains("(unattributed)"), "{text}");
+
+    // An audit is a review that happened, and counts as one.
+    repo.arc(&wt)
+        .args([
+            "review",
+            "delegated",
+            "--verdict",
+            "approved",
+            "--on-behalf-of",
+            "reviewer-model",
+        ])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["integrate", "delegated", "--audit-debt", "nobody reachable"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "audit",
+            "delegated",
+            "--verdict",
+            "approved",
+            "--actor",
+            "auditor",
+            "--on-behalf-of",
+            "auditor-model",
+        ])
+        .assert()
+        .success();
+    let report = json_stdout(repo.arc(&wt).args(["stats", "--by-model", "--json"]));
+    let rows = report["models"].as_array().unwrap();
+    let auditor = rows
+        .iter()
+        .find(|row| row["identity"] == "auditor-model")
+        .unwrap_or_else(|| panic!("no row for auditor-model: {report}"));
+    assert_eq!(auditor["verdicts"], 1, "{report}");
+
+    // A selection and --all cannot both be asked for, however --change is
+    // spelled.
+    repo.arc(&wt)
+        .args(["--change", "delegated", "stats", "--by-model", "--all"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be combined"));
+}
