@@ -169,6 +169,9 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         (None, None, None)
     };
     let store = ctx.store()?;
+    // Verification runs an arbitrary command whose effects outlive the
+    // refusal, so the identity question is settled before anything executes.
+    ctx.ensure_declared_actor(&store)?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
     let toplevel = gitio::toplevel(&ctx.cwd)?;
     if let Some(probe_name) = probe {
@@ -1020,8 +1023,13 @@ fn integrate_one(
     let initial = state::reduce(&store.load_events(&change_id)?)?;
     let target = into.unwrap_or_else(|| initial.target_branch.clone());
     if dry_run {
+        // A dry run promises to write nothing, so there is no record for the
+        // policy to be about.
         return integrate_dry_run(ctx, &store, &initial, &target, message.as_deref());
     }
+    // The same store the merge's closure event will be appended to, so the
+    // merge and the record are judged by one reading of the policy.
+    ctx.ensure_declared_actor(&store)?;
     // Cross-change order is always target, then change. This serializes the
     // target worktree without allowing an integration/metadata lock cycle.
     let target_lock = store.lock_target(&target)?;
@@ -1186,6 +1194,8 @@ fn integrate_tagged(ctx: &Ctx, tags: Vec<String>, cleanup: bool) -> Result<i32> 
     let batch_ctx = Ctx {
         cwd: gitio::primary_worktree(&ctx.cwd)?,
         actor: ctx.actor.clone(),
+        actor_source: ctx.actor_source,
+        fallback_announced: ctx.fallback_announced.clone(),
         harness: ctx.harness.clone(),
         session: ctx.session.clone(),
         model: ctx.model.clone(),

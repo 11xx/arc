@@ -694,11 +694,35 @@ exits 0.
 
 Repository integration policy is declared in `.arc/policy.toml`. Policies are
 disabled when the file or setting is absent. Set
-`[policy] forbid_self_approval = true` to reject an approval when its actor
-string exactly matches the actor recorded by `arc snapshot` for that patchset.
-Actor identity remains advisory; this comparison does not redesign or verify
-identity. Rejected self-approval follows the existing no-valid-approval path
-and exits 3.
+`[policy] forbid_self_approval = true` to reject an approval when its effective
+author matches the one recorded by `arc snapshot` for that patchset, or when
+arc assumed either identity rather than someone declaring it — two invented
+names that happen to differ do not show that two people acted. Actor identity
+remains advisory; this comparison does not redesign or verify identity.
+Rejected self-approval follows the existing no-valid-approval path and exits 3.
+
+Every event records `actor_source`: `flag`, `env`, or `git-fallback`. The last
+means nobody declared an identity and arc took `git config user.name`, which
+names whoever configured the checkout rather than whoever acted. The
+substitution is announced on stderr the first time a command would record it,
+because the ledger is append-only and that is the last moment to correct it.
+Events written before arc recorded provenance carry no source; that is
+*unknown* rather than assumed, and is compared by name as it always was.
+
+Set `[policy] require_declared_actor = true` to refuse an event whose effective
+author nobody claimed. `begin`, `verify`, and `integrate` check before they
+create a branch, run a command, or merge, so a refusal never lands after the
+work; every other append is guarded at the store. Reading is unaffected, as is
+a bundle import, whose events are another repository's history being
+transferred rather than this session's claim about who acted. A lead acting for
+a declared `--on-behalf-of` subject satisfies the policy.
+
+After integration the rule narrows: `arc audit` refuses an approving audit from
+an identity arc assumed, which the auditor can fix by declaring itself, but not
+one whose *authoring* identity was assumed — that is already on the ledger and
+cannot be corrected, and refusing would leave the debt undischargeable rather
+than making anyone independent. Such an audit warns that it shows a review
+happened and not that it was independent.
 
 Optional reviewer reminders live in the same file under `[review]`, for
 example `checklist = ["exercise the failure path"]`. `arc show` renders these
@@ -785,7 +809,8 @@ invoker who ran it. The **effective author** of an event is
 `on_behalf_of.unwrap_or(actor)`. `forbid_self_approval` compares effective
 authors, so a lead snapshotting on behalf of an executor and then approving as
 itself is not self-approval, whereas approving `--on-behalf-of` that same
-executor is. Claim ownership is unaffected: it still matches on the invoker's
+executor is. A declared subject is always somebody's claim, so it satisfies
+`require_declared_actor` however the invoker was identified. Claim ownership is unaffected: it still matches on the invoker's
 actor + harness + session tuple, and `on_behalf_of` is recorded and rendered
 but never changes who owns or may release a claim. The field is additive and
 serialized only when set, so existing events and bundles round-trip unchanged.

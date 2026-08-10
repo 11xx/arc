@@ -23,8 +23,8 @@ use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use commands::{AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{
-    DispositionStatus, MessageSeverity, MessageType, ProbePhase, ReviewCause, Severity, Side,
-    Verdict, VerifyResult,
+    ActorSource, DispositionStatus, MessageSeverity, MessageType, ProbePhase, ReviewCause,
+    Severity, Side, Verdict, VerifyResult,
 };
 
 /// Change, review, and integration state over plain Git for agentic
@@ -39,8 +39,9 @@ use model::{
     after_help = "Run `arc` with no arguments for the workflow guide, or `arc catchup` for live project state."
 )]
 struct Cli {
-    /// Acting identity (defaults to git user.name)
-    #[arg(long, global = true, env = "ARC_ACTOR")]
+    /// Acting identity, from ARC_ACTOR when the flag is absent. Falls back to
+    /// git user.name, which arc records as an identity nobody declared
+    #[arg(long, global = true)]
     actor: Option<String>,
     /// Harness label, e.g. claude, codex, opencode
     #[arg(long, global = true, env = "ARC_HARNESS")]
@@ -1045,11 +1046,22 @@ fn run(cli: Cli) -> Result<i32> {
     }
 
     let cwd = std::env::current_dir()?;
-    let actor = match cli.actor {
-        Some(a) => a,
-        None => gitio::git(&cwd, &["config", "user.name"])
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "unknown".into()),
+    // The environment is read here rather than through clap's `env`, so that
+    // the flag and the variable stay distinguishable even when they carry the
+    // same value.
+    let from_env = std::env::var("ARC_ACTOR")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let (actor, actor_source) = match (cli.actor.filter(|value| !value.trim().is_empty()), from_env)
+    {
+        (Some(declared), _) => (declared, ActorSource::Flag),
+        (None, Some(declared)) => (declared, ActorSource::Env),
+        (None, None) => (
+            gitio::git(&cwd, &["config", "user.name"])
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "unknown".into()),
+            ActorSource::GitFallback,
+        ),
     };
     let mut harness = cli.harness;
     let mut session = cli.session;
@@ -1075,6 +1087,8 @@ fn run(cli: Cli) -> Result<i32> {
     let ctx = Ctx {
         cwd,
         actor,
+        actor_source,
+        fallback_announced: std::cell::Cell::new(false),
         harness,
         session,
         model,

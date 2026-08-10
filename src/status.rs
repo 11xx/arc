@@ -12,6 +12,12 @@ use std::path::Path;
 pub const STATUS_SCHEMA: &str = "arc-status/6";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
+/// Two identities arc assumed cannot establish that two people acted. The
+/// self-approval guard compares effective authors, so an assumed identity on
+/// both sides makes the comparison meaningless rather than passing.
+pub const UNDECLARED_APPROVAL_REASON: &str =
+    "approval rejected by policy: arc assumed the reviewing or the authoring identity from \
+     git config, so independence is unproven (pass --actor or set ARC_ACTOR)";
 
 /// Typed integration blockers, ordered by exit-code precedence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -337,7 +343,29 @@ pub struct VerdictStatus {
     pub actor: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_behalf_of: Option<String>,
+    /// Whether arc invented the identity this verdict is attributed to rather
+    /// than someone declaring it. Additive in `arc-status/6`.
+    pub author_assumed: bool,
     pub valid_for_current_head: bool,
+}
+
+/// Whether an approval fails the self-approval guard: the same effective
+/// author on both sides, or an identity arc assumed rather than one somebody
+/// declared.
+///
+/// An assumed identity is one arc invented from `git config user.name`. Two of
+/// those, or one of those beside a declared name, do not establish that two
+/// people acted. Provenance recorded before arc kept it is *unknown*, not
+/// assumed, and is compared by name as it always was — otherwise upgrading arc
+/// would strand every existing ledger that uses this policy.
+fn undeclared_or_self(
+    patchset: &crate::state::Patchset,
+    verdict_author: &str,
+    verdict: &crate::state::VerdictEntry,
+) -> bool {
+    patchset.effective_author() == verdict_author
+        || patchset.author_assumed()
+        || verdict.author_assumed()
 }
 
 /// Build the status report: replayed ledger state joined with live Git
@@ -470,7 +498,7 @@ fn build_report(
         let rejected_self_approval = policy.policy.forbid_self_approval
             && !state.audit_debt_waives_current_head()
             && approved_patchset
-                .is_some_and(|patchset| patchset.effective_author() == v.effective_author());
+                .is_some_and(|patchset| undeclared_or_self(patchset, v.effective_author(), v));
         let valid = v.verdict == Verdict::Approved
             && latest_patchset
                 .as_ref()
@@ -484,6 +512,7 @@ fn build_report(
             body: v.body.clone(),
             actor: v.actor.clone(),
             on_behalf_of: v.on_behalf_of.clone(),
+            author_assumed: v.author_assumed(),
             valid_for_current_head: valid,
         }
     });
@@ -498,9 +527,26 @@ fn build_report(
                 policy.policy.forbid_self_approval
                     && !state.audit_debt_waives_current_head()
                     && patchset.id == verdict.patchset_id
-                    && patchset.effective_author() == verdict_author
+                    && (patchset.effective_author() == verdict_author
+                        || patchset.author_assumed()
+                        || verdict.author_assumed)
             }))
-        .then(|| SELF_APPROVAL_REASON.to_string())
+        .then(|| {
+            // Naming the same author is the more specific fact, so it is the
+            // one reported when both are true.
+            let same_author = latest_patchset.as_ref().is_some_and(|patchset| {
+                patchset.effective_author()
+                    == verdict
+                        .on_behalf_of
+                        .as_deref()
+                        .unwrap_or(verdict.actor.as_str())
+            });
+            if same_author {
+                SELF_APPROVAL_REASON.to_string()
+            } else {
+                UNDECLARED_APPROVAL_REASON.to_string()
+            }
+        })
     });
 
     let review_map = reviewer_coverage(state);

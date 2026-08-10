@@ -57,6 +57,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
                 let store = Store {
                     root: root.clone(),
                     repository_id: repository_id.clone(),
+                    require_declared_actor: false,
                 };
                 validate_import_candidate(&store, &validated, &plan.new_events)?;
             }

@@ -77,6 +77,18 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         println!("finding: {id}");
     }
     println!("event: {}", event.event_id);
+    // Said once the audit exists, and only then: an assumed authoring identity
+    // is not refused, because it cannot be corrected after integration and
+    // refusing would leave the debt undischargeable. But it is said out loud,
+    // or audit debt would look like a way around the independence rule rather
+    // than a way of carrying it.
+    if args.verdict == Verdict::Approved && st.latest_patchset().is_some_and(|p| p.author_assumed())
+    {
+        eprintln!(
+            "warning: arc assumed the authoring identity of the audited work, so this audit \
+             shows that a review happened and not that it was independent of whoever wrote it."
+        );
+    }
     if st.audit_debt.is_some() {
         println!("audit debt discharged");
     }
@@ -100,13 +112,33 @@ fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result
     if !policy.policy.forbid_self_approval {
         return Ok(());
     }
-    let Some(author) = state
-        .latest_patchset()
-        .map(|patchset| patchset.effective_author().to_string())
-    else {
+    let Some(patchset) = state.latest_patchset() else {
         return Ok(());
     };
+    let author = patchset.effective_author().to_string();
     let auditor = ctx.on_behalf_of.as_deref().unwrap_or(&ctx.actor);
+    // An identity arc invented names nobody in particular, so two of them that
+    // happen to differ do not show that two people acted. The same rule the
+    // pre-integration guard applies, applied to the review that discharges the
+    // obligation left behind.
+    let auditor_assumed =
+        ctx.on_behalf_of.is_none() && ctx.actor_source == crate::model::ActorSource::GitFallback;
+    // Only the auditor's identity is refused, because only it can be
+    // corrected: declaring yourself is a flag away. The author's identity is
+    // already on the ledger and the ledger is append-only, and an audit exists
+    // precisely to answer for work that shipped — refusing every audit of a
+    // change snapshotted under an assumed identity would leave its debt
+    // permanently undischargeable. What the audit is worth in that case is a
+    // question the recorded provenance answers for a reader.
+    if auditor_assumed {
+        bail!(
+            "arc assumed the auditing identity from git config, so this audit cannot show that \
+anyone independent looked at {}.\n\
+  Declare who is auditing: arc audit {} --verdict approved --actor '<reviewer>'",
+            state.change_id,
+            state.change_id
+        );
+    }
     if auditor == author {
         bail!(
             "{auditor} authored the audited work, so this audit would discharge its \

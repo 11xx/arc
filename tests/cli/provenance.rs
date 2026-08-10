@@ -115,3 +115,401 @@ fn claims_match_ownership_by_invoker_not_subject() {
         .assert()
         .success();
 }
+
+/// An identity nobody claimed is not evidence of who acted, and the ledger is
+/// append-only, so the substitution is announced when it happens and recorded
+/// as what it is.
+#[test]
+fn an_assumed_actor_is_announced_and_recorded_as_assumed() {
+    let repo = Repo::new();
+    let opened = repo
+        .arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args(["begin", "assumed", "--no-worktree"])
+        .output()
+        .unwrap();
+    assert!(opened.status.success());
+    let stderr = String::from_utf8_lossy(&opened.stderr);
+    assert!(stderr.contains("nobody declared one"), "{stderr}");
+    assert!(stderr.contains("--actor"), "{stderr}");
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "assumed",
+        "--type",
+        "change-opened",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+    assert_eq!(event["actor_source"], "git-fallback", "{event}");
+
+    // A declared identity records as declared and says nothing.
+    let declared = repo
+        .arc(&repo.root)
+        .args(["begin", "declared", "--no-worktree"])
+        .output()
+        .unwrap();
+    assert!(declared.status.success());
+    assert!(
+        !String::from_utf8_lossy(&declared.stderr).contains("nobody declared one"),
+        "{:?}",
+        declared.stderr
+    );
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "declared",
+        "--type",
+        "change-opened",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+    assert_eq!(event["actor_source"], "env", "{event}");
+}
+
+/// A repository may require every writer to declare itself. Reading is
+/// unaffected: it records nothing that could be mistaken for evidence.
+#[test]
+fn require_declared_actor_refuses_the_git_fallback() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nrequire_declared_actor = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: require a declared actor"],
+    );
+
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args(["begin", "refused", "--no-worktree"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "policy requires a declared actor",
+        ));
+    let listed = stdout(repo.arc(&repo.root).args(["list"]));
+    assert!(!listed.contains("refused"), "{listed}");
+
+    // Reading still works, and declaring an identity is all it takes to write.
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args(["list"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args(["journal", "list"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args(["--actor", "someone", "begin", "allowed", "--no-worktree"])
+        .assert()
+        .success();
+    // A delegated subject is somebody's claim, so a lead running ceremony for
+    // one satisfies the policy.
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args([
+            "--on-behalf-of",
+            "executor",
+            "begin",
+            "delegated",
+            "--no-worktree",
+        ])
+        .assert()
+        .success();
+}
+
+/// A refusal after the Git work has happened is worse than either answer on
+/// its own, so the commands that act before they record check first.
+#[test]
+fn require_declared_actor_refuses_before_git_work_happens() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nrequire_declared_actor = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: require a declared actor"],
+    );
+
+    // begin creates a branch and a worktree before it records anything.
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args(["begin", "unnamed"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "policy requires a declared actor",
+        ));
+    let branches = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["branch", "--list", "arc/unnamed"])
+            .current_dir(&repo.root)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(branches.trim().is_empty(), "{branches}");
+
+    // integrate merges before it records the integration.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["--actor", "author", "begin", "named"]),
+    );
+    let wt = repo.home.join(".worktrees/repo-named");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    repo.arc(&wt)
+        .args(["--actor", "author", "snapshot", "named"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "reviewer",
+            "review",
+            "named",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+    let before = repo.head(&repo.root);
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["integrate", "named"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "policy requires a declared actor",
+        ));
+    assert_eq!(repo.head(&repo.root), before);
+
+    // An empty identity is no identity.
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args(["--actor", "", "begin", "blank", "--no-worktree"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "policy requires a declared actor",
+        ));
+}
+
+/// An audit discharges the review obligation an integration left behind, so an
+/// auditor arc named for itself cannot give it. The authoring identity is a
+/// different case: it is already on the ledger, and refusing there would make
+/// the debt undischargeable rather than making anyone independent.
+#[test]
+fn an_audit_refuses_an_assumed_auditor() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "test: forbid self approval"]);
+    stdout(repo.arc(&repo.root).args(["begin", "owed"]));
+    let wt = repo.home.join(".worktrees/repo-owed");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["snapshot", "owed"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["review", "owed", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["integrate", "owed", "--audit-debt", "no reviewer reachable"])
+        .assert()
+        .success();
+
+    // An auditor arc named for itself cannot show independence, and can fix
+    // that by declaring itself.
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["audit", "owed", "--verdict", "approved"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "arc assumed the auditing identity",
+        ));
+
+    // A declared auditor may discharge the debt even though the authoring
+    // identity was assumed: that identity is on the ledger and cannot be
+    // corrected, and refusing would leave the debt undischargeable forever.
+    // What the audit is worth is what its recorded provenance says.
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "auditor",
+            "audit",
+            "owed",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success()
+        // Said out loud, or audit debt would look like a way around the rule
+        // rather than a way of carrying it.
+        .stderr(predicates::str::contains(
+            "shows that a review happened and not that it was independent",
+        ));
+    let events = stdout(repo.arc(&wt).args([
+        "events",
+        "--change",
+        "owed",
+        "--type",
+        "audit-verdict-recorded",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+    assert_eq!(event["actor_source"], "flag", "{event}");
+}
+
+/// A ledger written before arc recorded provenance says nothing about who
+/// declared what. Reading that silence as an invention would strand every
+/// existing repository that uses the self-approval policy.
+#[test]
+fn a_ledger_without_provenance_keeps_comparing_names() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "test: forbid self approval"]);
+    stdout(repo.arc(&repo.root).args(["begin", "legacy"]));
+    let wt = repo.home.join(".worktrees/repo-legacy");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    repo.arc(&wt)
+        .args(["--actor", "author", "snapshot", "legacy"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "reviewer",
+            "review",
+            "legacy",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+
+    // Strip the provenance arc now records, leaving events shaped like the
+    // ones written before it did.
+    let changes = repo.root.join(".git/arc/changes");
+    for change in fs::read_dir(&changes).unwrap() {
+        let events = change.unwrap().path().join("events");
+        let Ok(entries) = fs::read_dir(&events) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            let mut event: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            event.as_object_mut().unwrap().remove("actor_source");
+            fs::write(&path, serde_json::to_string_pretty(&event).unwrap()).unwrap();
+        }
+    }
+
+    let status = json_stdout(repo.arc(&wt).args(["status", "legacy", "--json"]));
+    assert_eq!(status["verdict"]["author_assumed"], false, "{status}");
+    assert_eq!(
+        status["verdict"]["valid_for_current_head"], true,
+        "{status}"
+    );
+}
+
+/// Two identities nobody declared cannot show that two people acted, so the
+/// self-approval guard treats an assumed identity as unproven rather than as a
+/// name that happens to differ.
+#[test]
+fn self_approval_fails_closed_on_an_assumed_identity() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "test: forbid self approval"]);
+    stdout(repo.arc(&repo.root).args(["begin", "unproven"]));
+    let wt = repo.home.join(".worktrees/repo-unproven");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+
+    // Snapshot with an assumed identity, review with a declared one that
+    // happens to differ: independence is still unproven.
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["snapshot", "unproven"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "someone-else",
+            "review",
+            "unproven",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&wt).args(["status", "unproven", "--json"]));
+    assert_eq!(
+        status["verdict"]["valid_for_current_head"], false,
+        "{status}"
+    );
+    assert!(
+        status["approval_rejection_reason"]
+            .as_str()
+            .unwrap()
+            .contains("independence is unproven"),
+        "{status}"
+    );
+
+    // Naming the same author is the more specific fact, so it is the one
+    // reported even when the identity was also assumed.
+    stdout(repo.arc(&repo.root).args(["begin", "same-author"]));
+    let wt = repo.home.join(".worktrees/repo-same-author");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["snapshot", "same-author"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["review", "same-author", "--verdict", "approved"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&wt).args(["status", "same-author", "--json"]));
+    assert!(
+        status["approval_rejection_reason"]
+            .as_str()
+            .unwrap()
+            .contains("self-approval"),
+        "{status}"
+    );
+}

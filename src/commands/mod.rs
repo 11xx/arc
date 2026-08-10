@@ -72,6 +72,13 @@ pub use workspace::{restack, workspace, WorkspaceView};
 pub struct Ctx {
     pub cwd: PathBuf,
     pub actor: String,
+    /// Where `actor` came from. A fallback identity is announced the first
+    /// time an event would carry it, because an operator cannot correct an
+    /// append-only misattribution after the fact.
+    pub actor_source: ActorSource,
+    /// Set once the fallback warning has been printed, so one command says it
+    /// once however many events it appends.
+    pub fallback_announced: std::cell::Cell<bool>,
     pub harness: Option<String>,
     pub session: Option<String>,
     /// Model identity (`--model`/`ARC_MODEL`): a model slug with optional
@@ -211,6 +218,45 @@ impl Ctx {
         self.event_at(store, change_id, chrono::Utc::now(), payload)
     }
 
+    /// Refuse now, if this repository requires a declared actor and nobody
+    /// declared one.
+    ///
+    /// The append itself is guarded, but `begin`, `verify`, and `integrate` do
+    /// irreversible work before they record anything — a branch, an arbitrary
+    /// command, a merge — and any of those landing while the ledger refuses
+    /// the event is a worse outcome than either answer on its own. The answer
+    /// comes from the store the command is about to write to, so one
+    /// invocation is judged by one reading of the policy.
+    pub(crate) fn ensure_declared_actor(&self, store: &Store) -> Result<()> {
+        if self.actor_source.declared() || self.on_behalf_of.is_some() {
+            return Ok(());
+        }
+        if !store.require_declared_actor {
+            return Ok(());
+        }
+        bail!(
+            "policy requires a declared actor: {:?} came from git config user.name, which \
+             nobody claimed. Pass --actor or set ARC_ACTOR.",
+            self.actor
+        )
+    }
+
+    /// Say what identity is about to be recorded when nobody declared one.
+    /// The value is permanent once appended, so the moment to notice is now.
+    fn announce_assumed_identity(&self) {
+        if self.actor_source.declared()
+            || self.on_behalf_of.is_some()
+            || self.fallback_announced.replace(true)
+        {
+            return;
+        }
+        eprintln!(
+            "warning: recording actor {:?} from git config user.name; nobody declared one. \
+             Pass --actor or set ARC_ACTOR.",
+            self.actor
+        );
+    }
+
     fn event_at(
         &self,
         store: &Store,
@@ -218,12 +264,14 @@ impl Ctx {
         created_at: chrono::DateTime<chrono::Utc>,
         payload: Payload,
     ) -> Event {
+        self.announce_assumed_identity();
         Event {
             schema_version: SCHEMA_VERSION,
             event_id: ids::new_event_id(),
             repository_id: store.repository_id.clone(),
             change_id: change_id.to_string(),
             actor: self.actor.clone(),
+            actor_source: Some(self.actor_source),
             on_behalf_of: self.on_behalf_of.clone(),
             harness: self.harness.clone(),
             session: self.session.clone(),

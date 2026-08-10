@@ -1,6 +1,6 @@
 use crate::gitio;
 use crate::ids;
-use crate::model::{Event, Payload};
+use crate::model::{ActorSource, Event, Payload};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,6 +29,14 @@ struct StoreConfig {
 pub struct Store {
     pub root: PathBuf,
     pub repository_id: String,
+    /// Whether this repository requires every writer to declare itself, read
+    /// once when the store was opened from its repository.
+    ///
+    /// Reading it per append would let a command's own merge change the rule
+    /// it is being judged by: `integrate` can bring in a commit that enables
+    /// the policy, and the closure event would then be refused by a rule that
+    /// did not exist when the merge was authorised.
+    pub require_declared_actor: bool,
 }
 
 /// A process-scoped transition guard. The lock file is intentionally
@@ -49,6 +57,13 @@ impl Store {
     /// subdirectory, sandbox-friendly) > the repository's Git common dir.
     pub fn discover(cwd: &Path) -> Result<Store> {
         let root = Self::resolve_root(cwd)?;
+        // Read the repository's policy before creating anything, so an
+        // unreadable one fails with the filesystem untouched.
+        let require_declared_actor = match gitio::toplevel(cwd) {
+            Ok(top) => crate::policy::load(&top)?.policy.require_declared_actor,
+            // A store opened outside a repository has no policy to honour.
+            Err(_) => false,
+        };
         create_private_dir(&root)?;
         let config_path = root.join("config.json");
         let repository_id = match fs::read(&config_path) {
@@ -76,6 +91,7 @@ impl Store {
         Ok(Store {
             root,
             repository_id,
+            require_declared_actor,
         })
     }
 
@@ -88,6 +104,7 @@ impl Store {
             Some(repository_id) => Ok(Some(Store {
                 root: root.to_path_buf(),
                 repository_id,
+                require_declared_actor: false,
             })),
             None => Ok(None),
         }
@@ -365,6 +382,7 @@ impl Store {
     /// Append one event. The file is created exclusively; a collision on
     /// a ULID event ID indicates a real bug and fails loudly.
     pub fn append_event(&self, event: &Event) -> Result<()> {
+        self.refuse_undeclared_author(event)?;
         ids::validate_id_component(&event.change_id)?;
         ids::validate_id_component(&event.event_id)?;
         let dir = self.events_dir(&event.change_id);
@@ -374,6 +392,37 @@ impl Store {
         body.push(b'\n');
         write_exclusive(&path, &body)
             .with_context(|| format!("event {} already exists", event.event_id))
+    }
+
+    /// Under `require_declared_actor`, refuse to record an event whose author
+    /// nobody claimed.
+    ///
+    /// The check lives at the append rather than at the command, because no
+    /// list of writing commands stays accurate as commands are added, and what
+    /// the policy is about is the permanence of the record.
+    ///
+    /// A bundle import is deliberately outside this. Its events are another
+    /// repository's history being transferred, not this session's claim about
+    /// who acted, and a ledger that cannot receive history is worse than one
+    /// that receives an identity it would not have written itself.
+    fn refuse_undeclared_author(&self, event: &Event) -> Result<()> {
+        let delegated = event
+            .on_behalf_of
+            .as_deref()
+            .is_some_and(|subject| !subject.trim().is_empty());
+        let declared =
+            event.actor_source.is_some_and(ActorSource::declared) && !event.actor.trim().is_empty();
+        if delegated || declared {
+            return Ok(());
+        }
+        if !self.require_declared_actor {
+            return Ok(());
+        }
+        bail!(
+            "policy requires a declared actor: {:?} on event {} was not declared by anyone.              Pass --actor or set ARC_ACTOR.",
+            event.actor,
+            event.event_id
+        )
     }
 
     /// All events of one change in ULID (i.e. chronological) order.

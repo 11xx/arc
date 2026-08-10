@@ -54,6 +54,13 @@ pub struct Event {
     pub repository_id: String,
     pub change_id: String,
     pub actor: String,
+    /// Where `actor` came from. An identity nobody claimed is not evidence of
+    /// who acted, and once appended it can never be corrected, so a derived
+    /// view has to be able to tell a declared identity from an assumed one.
+    /// Absent on events written before this was recorded, which is `unknown`
+    /// rather than declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_source: Option<ActorSource>,
     /// The subject an action is performed for when a lead runs delegated
     /// ceremony. `actor` stays the invoker who ran the command; the effective
     /// author of the event is `on_behalf_of.unwrap_or(actor)`. Additive:
@@ -67,6 +74,28 @@ pub struct Event {
     pub created_at: DateTime<Utc>,
     #[serde(flatten)]
     pub payload: Payload,
+}
+
+/// How the acting identity on an event was determined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ActorSource {
+    /// Declared on the command line.
+    Flag,
+    /// Declared through `ARC_ACTOR`.
+    Env,
+    /// Nobody declared one, so arc used `git config user.name`. This is the
+    /// Git identity of whoever configured the checkout, not a claim about who
+    /// acted.
+    GitFallback,
+}
+
+impl ActorSource {
+    /// Whether someone offered this identity, as opposed to arc inventing it. An assumed one names a person
+    /// who never said they did anything.
+    pub fn declared(self) -> bool {
+        !matches!(self, Self::GitFallback)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
