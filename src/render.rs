@@ -690,8 +690,11 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                 {
                     let _ = writeln!(
                         out,
-                        "  - `{}` [{:?}] {}",
-                        finding.id, finding.severity, finding.summary
+                        "  - `{}` [{:?}] {}{}",
+                        finding.id,
+                        finding.severity,
+                        finding.summary,
+                        finding_era(finding, report)
                     );
                 }
             }
@@ -766,6 +769,45 @@ pub fn event_line(event: &Event) -> String {
     } else {
         format!("{ts}  {who}  {kind}  {summary}")
     }
+}
+
+/// Which patchset a finding predates, when it is not the one under review.
+///
+/// A blocking-findings count saturates by the second round and gates nothing
+/// after that, so the useful distinction is between what was raised against
+/// what is about to ship and what was carried in from an earlier round.
+fn finding_era(finding: &crate::status::FindingSummary, report: &StatusReport) -> String {
+    let Some(filed_against) = finding.patchset_id.as_deref() else {
+        return String::new();
+    };
+    match report.latest_patchset.as_ref() {
+        Some(latest) if latest.id != filed_against => format!(" (against {filed_against})"),
+        _ => String::new(),
+    }
+}
+
+/// Log lines for findings carried inside another event. A review batch files
+/// findings as part of its verdict, so without these the same object renders
+/// only when it was filed standalone — and the batch is the path review loops
+/// use.
+pub fn nested_finding_lines(event: &Event) -> Vec<String> {
+    let (findings, kind) = match &event.payload {
+        Payload::VerdictRecorded { findings, .. } => (findings, "finding-added"),
+        Payload::AuditVerdictRecorded { findings, .. } => (findings, "audit-finding-added"),
+        _ => return Vec::new(),
+    };
+    findings
+        .iter()
+        .map(|finding| {
+            format!(
+                "    ↳ {kind}  {} [{}{:?}] {}",
+                finding.finding_id,
+                if finding.blocking { "blocking/" } else { "" },
+                finding.severity,
+                finding.summary
+            )
+        })
+        .collect()
 }
 
 /// Stable kebab event type plus a type-specific one-line summary.
@@ -1047,8 +1089,11 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .filter(|finding| report.open_blocking_findings.contains(&finding.id))
             .map(|finding| {
                 format!(
-                    "`{}` [{:?}] {}",
-                    finding.id, finding.severity, finding.summary
+                    "`{}` [{:?}] {}{}",
+                    finding.id,
+                    finding.severity,
+                    finding.summary,
+                    finding_era(finding, report)
                 )
             })
             .collect::<Vec<_>>()

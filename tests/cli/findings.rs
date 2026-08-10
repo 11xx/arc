@@ -451,3 +451,97 @@ fn findings_sarif_and_reviewer_checklist_are_role_scoped() {
         .success()
         .stdout(predicates::str::contains("exercise the failure path"));
 }
+
+/// A one-line summary is enough to count findings and not enough to act on
+/// one, which is the position a reader inheriting a change is in. The body and
+/// the anchor are recorded; only the read surfaces dropped them.
+#[test]
+fn read_surfaces_carry_the_finding_body_and_anchor() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "legible"]));
+    let wt = repo.home.join(".worktrees/repo-legible");
+    repo.commit(&wt, "reviewed.rs", "broken\n", "test: add reviewed file");
+    stdout(repo.arc(&wt).args(["snapshot", "legible"]));
+    stdout(repo.arc(&wt).args([
+        "finding",
+        "legible",
+        "--summary",
+        "unchecked index",
+        "--body",
+        "The slice is indexed before its length is checked.",
+        "--path",
+        "reviewed.rs",
+        "--line",
+        "1",
+    ]));
+
+    let text = stdout(repo.arc(&wt).args(["findings", "legible"]));
+    assert!(text.contains("unchecked index"), "{text}");
+    assert!(text.contains("at: reviewed.rs:1 (head)"), "{text}");
+    assert!(
+        text.contains("| The slice is indexed before its length is checked."),
+        "{text}"
+    );
+    assert!(text.contains("against: ps-01"), "{text}");
+
+    let status = json_stdout(repo.arc(&wt).args(["status", "legible", "--json"]));
+    assert_eq!(
+        status["findings"][0]["body"],
+        "The slice is indexed before its length is checked."
+    );
+    assert_eq!(status["findings"][0]["anchor"]["path"], "reviewed.rs");
+    assert_eq!(status["findings"][0]["patchset_id"], "ps-01");
+
+    // SARIF exists to carry file, line, and message; the message is the body.
+    let sarif = json_stdout(
+        repo.arc(&wt)
+            .args(["findings", "legible", "--format", "sarif"]),
+    );
+    let message = sarif["runs"][0]["results"][0]["message"]["text"]
+        .as_str()
+        .unwrap();
+    assert!(message.contains("indexed before its length"), "{message}");
+}
+
+/// A finding filed inside a review batch is the same object as one filed
+/// standalone, and the batch is the path review loops use.
+#[test]
+fn log_renders_findings_filed_inside_a_review() {
+    let repo = Repo::new();
+    let (wt, _change, finding_ids, _event) = inline_findings(&repo, "batched");
+    let log = stdout(repo.arc(&wt).args(["log", "batched"]));
+    for id in &finding_ids {
+        assert!(log.contains(id.as_str()), "{log}");
+    }
+    assert_eq!(
+        log.matches("finding-added").count(),
+        finding_ids.len(),
+        "{log}"
+    );
+}
+
+/// A findings count that mixes rounds saturates and gates nothing, so a
+/// finding carried in from an earlier patchset says which one it answers.
+#[test]
+fn blocking_findings_name_the_patchset_they_predate() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "eras"]));
+    let wt = repo.home.join(".worktrees/repo-eras");
+    repo.commit(&wt, "one.rs", "first\n", "feat: first");
+    stdout(repo.arc(&wt).args(["snapshot", "eras"]));
+    stdout(repo.arc(&wt).args([
+        "finding",
+        "eras",
+        "--summary",
+        "raised in round one",
+        "--blocking",
+    ]));
+    repo.commit(&wt, "two.rs", "second\n", "feat: second");
+    stdout(repo.arc(&wt).args(["snapshot", "eras"]));
+
+    let check = stdout(repo.arc(&wt).args(["check", "eras"]));
+    assert!(
+        check.contains("raised in round one (against ps-01)"),
+        "{check}"
+    );
+}

@@ -125,6 +125,19 @@ pub struct FindingSummary {
     pub summary: String,
     pub status: String,
     pub contested: bool,
+    /// What the finding actually says, and where. A one-line summary is enough
+    /// to count findings and not enough to act on one, which is the position a
+    /// reader inheriting a change is in. Additive in `arc-status/6`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<crate::model::Anchor>,
+    /// The patchset the finding was filed against. A finding predating the
+    /// patchset under review is a different kind of fact from one filed
+    /// against it, and the count alone cannot tell them apart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patchset_id: Option<String>,
+    pub reported_by: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -506,6 +519,10 @@ fn build_report(
                     }
                 }),
             contested: f.contested(),
+            body: f.body.clone(),
+            anchor: f.anchor.clone(),
+            patchset_id: f.patchset_id.clone(),
+            reported_by: f.reported_by.clone(),
         })
         .collect();
 

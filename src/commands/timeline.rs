@@ -13,6 +13,11 @@ pub fn log(ctx: &Ctx, reference: &str, reverse: bool) -> Result<()> {
     }
     for event in &events {
         println!("{}", render::event_line(event));
+        // A finding filed inside a review batch is the same object as one
+        // filed standalone, and the batch path is the one review loops use.
+        for line in render::nested_finding_lines(event) {
+            println!("{line}");
+        }
     }
     Ok(())
 }
