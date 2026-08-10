@@ -146,6 +146,22 @@ fn inspect_dangling_revisions(
         {
             note(commit, "integration".to_string());
         }
+        // A forge records revisions too, and a rewritten branch strands them
+        // exactly as it strands a local one.
+        if let Some(link) = state.forge.link.as_ref() {
+            note(&link.head_sha, "forge link head".to_string());
+        }
+        if let Some(checks) = state.forge.checks.as_ref() {
+            note(&checks.pr_head, "forge checks head".to_string());
+        }
+        if let Some(merge_sha) = state
+            .forge
+            .pr_state
+            .as_ref()
+            .and_then(|pr| pr.merge_sha.as_deref())
+        {
+            note(merge_sha, "forge merge".to_string());
+        }
     }
     if wanted.is_empty() {
         return Ok(());

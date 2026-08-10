@@ -263,8 +263,9 @@ fn watch_hook_payload(
     until: &[WatchUntil],
 ) -> serde_json::Value {
     match selection {
+        // Each member carries its own change, condition, and satisfying
+        // event, so there is nothing for a top-level placeholder to say.
         WatchSelection::Tagged(_, WatchQuorum::All) => serde_json::json!({
-            "change_id": "",
             "changes": hits.iter().map(watch_hit_object).collect::<Vec<_>>(),
             "condition": until_labels(until),
             "event_type": "watch-reached",
