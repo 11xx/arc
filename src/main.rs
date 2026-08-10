@@ -1082,25 +1082,28 @@ fn run(cli: Cli) -> Result<i32> {
     // wherever the positional is optional rather than being guessed at against
     // clap's nearest-option suggestion.
     let flag_change = cli.change;
-    // Commands that resolve the change themselves take the flag as the value
-    // the positional would have supplied.
-    let or_flag = |change: Option<String>| change.or_else(|| flag_change.clone());
-    let infer = |change: Option<&str>| -> Result<String> {
+    // The change a command was pointed at, however it was spelled. Two
+    // spellings naming different changes is a mistake, not a precedence
+    // question — but a slug, an ID, and a unique prefix of one change are one
+    // reference, so they are compared after resolution.
+    let select = |positional: Option<String>| -> Result<Option<String>> {
+        let (Some(positional), Some(flag)) = (&positional, &flag_change) else {
+            return Ok(positional.or_else(|| flag_change.clone()));
+        };
         let store = store::Store::discover(&ctx.cwd)?;
-        // Two spellings naming different changes is a mistake, not a precedence
-        // question — but a slug, an ID, and a unique prefix of one change are
-        // one reference, so they are compared resolved.
-        if let (Some(positional), Some(flag)) = (change, flag_change.as_deref()) {
-            let (left, right) = (
-                store.resolve_change(positional)?,
-                store.resolve_change(flag)?,
-            );
-            if left != right {
-                bail!("change given twice and they disagree: {positional:?} as an argument, {flag:?} as --change");
-            }
-            return Ok(left);
+        let (left, right) = (
+            store.resolve_change(positional)?,
+            store.resolve_change(flag)?,
+        );
+        if left != right {
+            bail!("change given twice and they disagree: {positional:?} as an argument, {flag:?} as --change");
         }
-        context::resolve_change_or_infer(&store, &ctx.cwd, change.or(flag_change.as_deref()))
+        Ok(Some(left))
+    };
+    let infer = |change: Option<&str>| -> Result<String> {
+        let selected = select(change.map(str::to_string))?;
+        let store = store::Store::discover(&ctx.cwd)?;
+        context::resolve_change_or_infer(&store, &ctx.cwd, selected.as_deref())
     };
 
     match cmd {
@@ -1178,7 +1181,9 @@ fn run(cli: Cli) -> Result<i32> {
             let change = if tag.is_empty() {
                 Some(infer(change.as_deref())?)
             } else {
-                change
+                // With --tag the command refuses a change; the flag has to
+                // reach it to be refused.
+                select(change)?
             };
             commands::show_selection(&ctx, role, change.as_deref(), tag, json, at.as_deref())?;
             Ok(0)
@@ -1277,7 +1282,7 @@ fn run(cli: Cli) -> Result<i32> {
         } => commands::changelog(
             &ctx,
             role,
-            or_flag(change).as_deref(),
+            select(change)?.as_deref(),
             category,
             body_file,
             json,
@@ -1414,7 +1419,7 @@ fn run(cli: Cli) -> Result<i32> {
             };
             commands::watch(
                 &ctx,
-                or_flag(change).as_deref(),
+                select(change)?.as_deref(),
                 &tag,
                 quorum,
                 &until,
@@ -1436,7 +1441,9 @@ fn run(cli: Cli) -> Result<i32> {
             let change = if tag.is_empty() {
                 Some(infer(change.as_deref())?)
             } else {
-                change
+                // With --tag the command refuses a change; the flag has to
+                // reach it to be refused.
+                select(change)?
             };
             commands::check_selection(&ctx, change.as_deref(), tag, explain, json)
         }
@@ -1647,7 +1654,7 @@ fn run(cli: Cli) -> Result<i32> {
         } => {
             context::resume(
                 &ctx,
-                or_flag(change).as_deref(),
+                select(change)?.as_deref(),
                 json,
                 get.as_deref(),
                 fields.as_deref(),
@@ -1665,7 +1672,7 @@ fn run(cli: Cli) -> Result<i32> {
             commands::rescue(&ctx, &change, json, take, transcript, tail)
         }
         Cmd::Prompt { change } => {
-            context::prompt(&ctx, or_flag(change).as_deref())?;
+            context::prompt(&ctx, select(change)?.as_deref())?;
             Ok(0)
         }
         Cmd::Hold {
@@ -1690,6 +1697,7 @@ fn run(cli: Cli) -> Result<i32> {
             dry_run,
             audit_debt,
         } => {
+            let change = select(change)?;
             if audit_debt.is_some() && !tag.is_empty() {
                 if change.is_some() {
                     bail!("provide a change or --tag, not both");

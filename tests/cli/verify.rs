@@ -1184,11 +1184,31 @@ fn change_flag_works_where_the_positional_does() {
         .assert()
         .success();
 
-    // Commands that resolve the change themselves take the flag too.
+    // Commands that resolve the change themselves take the flag too, and
+    // refuse a disagreeing pair on the same terms.
     repo.arc(&worktree)
         .args(["--change", "flagged", "prompt"])
         .assert()
         .success();
+    repo.arc(&worktree)
+        .args(["--change", "other", "changelog", "flagged"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("they disagree"));
+
+    // A command that refuses a change beside --tag has to see the flag in
+    // order to refuse it.
+    repo.arc(&worktree)
+        .args(["--change", "flagged", "show", "--tag", "no-such-tag"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not both"));
+
+    // An optional positional that never called infer takes it too.
+    repo.arc(&worktree)
+        .args(["--change", "flagged", "integrate", "--dry-run"])
+        .assert()
+        .stderr(predicates::str::contains("provide a change").not());
 
     // A command with its own --change still binds it locally, and the pair it
     // refuses stays refused when the flag is given before the subcommand.
