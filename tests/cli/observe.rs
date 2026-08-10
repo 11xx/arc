@@ -606,7 +606,7 @@ fn watch_json_omits_the_event_id_for_a_derived_condition() {
     ]));
     let value: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(value["condition"], "ready", "{value}");
-    assert!(value["event_id"].is_null(), "{value}");
+    assert!(value.get("event_id").is_none(), "{value}");
 }
 
 /// A tagged program is the unit an orchestrator waits on, and following each

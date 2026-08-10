@@ -36,17 +36,31 @@ pub fn events(
     let mut poll_interval = POLL_MIN;
     let since = since.map(|cursor| cursor.to_string());
 
+    // Membership is what it is when the stream is read, but deriving it means
+    // replaying every change, so it is re-derived only when an event that can
+    // change it has appeared. A steady stream of ordinary events costs
+    // nothing.
+    let mut tagged: Option<BTreeSet<String>> = if tags.is_empty() {
+        None
+    } else {
+        Some(resolve_tagged(ctx, &tags)?.into_iter().collect())
+    };
     loop {
-        let tagged: Option<BTreeSet<String>> = if tags.is_empty() {
-            None
-        } else {
-            Some(resolve_tagged(ctx, &tags)?.into_iter().collect())
-        };
         let raw_events = match &change_id {
             Some(id) => store.raw_events_unseen(id, &seen)?,
             None => store.raw_events_all_unseen(&seen)?,
         };
         let observed_events = !raw_events.is_empty();
+        if tagged.is_some()
+            && raw_events.iter().any(|(_, value)| {
+                matches!(
+                    value.get("event_type").and_then(serde_json::Value::as_str),
+                    Some("change-opened") | Some("metadata-updated")
+                )
+            })
+        {
+            tagged = Some(resolve_tagged(ctx, &tags)?.into_iter().collect());
+        }
         let mut out = std::io::stdout().lock();
         for (event_id, value) in raw_events {
             seen.insert(event_id.clone());
@@ -251,25 +265,31 @@ fn watch_hook_payload(
     match selection {
         WatchSelection::Tagged(_, WatchQuorum::All) => serde_json::json!({
             "change_id": "",
-            "changes": hits.iter().map(|hit| serde_json::json!({
-                "change_id": hit.change_id,
-                "condition": hit.condition.label(),
-                "event_id": hit.event_id,
-            })).collect::<Vec<_>>(),
+            "changes": hits.iter().map(watch_hit_object).collect::<Vec<_>>(),
             "condition": until_labels(until),
-            "event_id": "",
             "event_type": "watch-reached",
         }),
-        _ => serde_json::json!({
-            "change_id": hits[0].change_id,
-            // Absent rather than empty when the condition is derived from
-            // elapsed time or from policy: a field that always holds an event
-            // ID should not sometimes hold a placeholder.
-            "condition": hits[0].condition.label(),
-            "event_id": hits[0].event_id,
-            "event_type": "watch-reached",
-        }),
+        _ => {
+            let mut value = watch_hit_object(&hits[0]);
+            value["event_type"] = "watch-reached".into();
+            value
+        }
     }
+}
+
+/// One satisfied member. `event_id` is present only when an event satisfied
+/// the condition: a field that otherwise holds an event ID should not
+/// sometimes hold a placeholder, and a condition derived from elapsed time or
+/// from policy was satisfied by no event at all.
+fn watch_hit_object(hit: &WatchHit) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "change_id": hit.change_id,
+        "condition": hit.condition.label(),
+    });
+    if let Some(event_id) = &hit.event_id {
+        value["event_id"] = event_id.clone().into();
+    }
+    value
 }
 
 fn watch_until_reached(
