@@ -2708,6 +2708,7 @@ fn journal_discussion_does_not_read_a_stance_out_of_a_quotation() {
     // longer fence is not a position at all.
     assert_eq!(json["positions"], 1, "{json}");
     assert_eq!(json["stances"]["for"], 0, "{json}");
+    assert_eq!(json["stances"]["for"], 0, "{json}");
     assert_eq!(json["stances"]["against"], 0, "{json}");
     assert_eq!(json["stances"]["unstated"], 1, "{json}");
 }
@@ -4115,6 +4116,44 @@ fn journal_rebind_refuses_before_it_moves_anything() {
             .any(|item| item["code"] == "split-journal"),
         "{report}"
     );
+}
+
+/// An opening fence may carry an info string and a closing fence may not, so
+/// a second tagged fence line is content rather than the end of the quotation.
+#[test]
+fn journal_discussion_does_not_close_a_fence_on_a_tagged_line() {
+    let repo = Repo::new();
+    let src = repo.home.join("open.md");
+    fs::write(
+        &src,
+        "`````markdown\n`````rust\n### Position fake\n\nPosition: for\n`````\n`````\n",
+    )
+    .unwrap();
+    let file = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "tagged",
+        "--kind",
+        "discussion",
+        "--no-scaffold",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    let name = PathBuf::from(file.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let json: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "journal",
+        "discussion",
+        &name,
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(json["positions"], 0, "{json}");
+    assert_eq!(json["stances"]["for"], 0, "{json}");
 }
 
 /// An empty or unparseable bindings file is not a recorded binding, and

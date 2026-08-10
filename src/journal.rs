@@ -2928,17 +2928,21 @@ fn is_horizontal_rule(trimmed: &str) -> bool {
         && marks.iter().all(|b| *b == marks[0])
 }
 
-/// A fence marker: its character and the length of its run. A fence closes
-/// only on its own character, and only on a run at least as long as the one
-/// that opened it — so a `~~~` inside a backtick fence, and a ``` inside a
-/// ````` fence, are both content.
-fn fence_marker(trimmed: &str) -> Option<(u8, usize)> {
+/// A fence marker: its character, the length of its run, and whether anything
+/// follows it.
+///
+/// A fence closes only on its own character, only on a run at least as long as
+/// the one that opened it, and only when nothing follows the run — an opener
+/// may carry an info string, and a closer may not, so a `` ```rust `` line
+/// inside a fence is content rather than its end.
+fn fence_marker(trimmed: &str) -> Option<(u8, usize, bool)> {
     let first = trimmed.as_bytes().first().copied()?;
     if !matches!(first, b'`' | b'~') {
         return None;
     }
     let run = trimmed.bytes().take_while(|b| *b == first).count();
-    (run >= 3).then_some((first, run))
+    let bare = trimmed[run..].trim().is_empty();
+    (run >= 3).then_some((first, run, bare))
 }
 
 fn is_position_heading(line: &str) -> bool {
@@ -2974,8 +2978,8 @@ fn position_structure(body: &str) -> (usize, StanceTally) {
         // the scaffold that teaches the stance line is itself such a quote.
         let trimmed = line.trim_start();
         match (fence, fence_marker(trimmed)) {
-            (None, Some(opened)) => {
-                fence = Some(opened);
+            (None, Some((marker, run, _))) => {
+                fence = Some((marker, run));
                 // A block that opens with a quotation has not opened with a
                 // stance, whatever it says once the quotation ends.
                 if open_block && !decided {
@@ -2984,8 +2988,8 @@ fn position_structure(body: &str) -> (usize, StanceTally) {
                 }
                 continue;
             }
-            (Some((marker, opened)), Some((closing, run)))
-                if marker == closing && run >= opened =>
+            (Some((marker, opened)), Some((closing, run, bare)))
+                if marker == closing && run >= opened && bare =>
             {
                 fence = None;
                 continue;
