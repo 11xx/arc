@@ -757,18 +757,23 @@ fn blocker_title(blocker: Blocker) -> &'static str {
 /// One chronological log line for a ledger event:
 /// `<ts>  <actor>@<harness>  <event-type>  <summary>`.
 pub fn event_line(event: &Event) -> String {
+    let (kind, summary) = event_kind_summary(&event.payload);
+    if summary.is_empty() {
+        format!("{}  {kind}", event_prefix(event))
+    } else {
+        format!("{}  {kind}  {summary}", event_prefix(event))
+    }
+}
+
+/// The `<ts>  <actor>@<harness>` half of a log line, shared by events and by
+/// the facts an event carries inside it.
+fn event_prefix(event: &Event) -> String {
     let ts = event.created_at.format("%Y-%m-%dT%H:%M:%SZ");
     let actor = match &event.on_behalf_of {
         Some(subject) => format!("{} (for {subject})", event.actor),
         None => event.actor.clone(),
     };
-    let who = format!("{actor}@{}", event.harness.as_deref().unwrap_or("-"));
-    let (kind, summary) = event_kind_summary(&event.payload);
-    if summary.is_empty() {
-        format!("{ts}  {who}  {kind}")
-    } else {
-        format!("{ts}  {who}  {kind}  {summary}")
-    }
+    format!("{ts}  {actor}@{}", event.harness.as_deref().unwrap_or("-"))
 }
 
 /// Which patchset a finding predates, when it is not the one under review.
@@ -777,12 +782,15 @@ pub fn event_line(event: &Event) -> String {
 /// after that, so the useful distinction is between what was raised against
 /// what is about to ship and what was carried in from an earlier round.
 fn finding_era(finding: &crate::status::FindingSummary, report: &StatusReport) -> String {
-    let Some(filed_against) = finding.patchset_id.as_deref() else {
+    let Some(latest) = report.latest_patchset.as_ref() else {
         return String::new();
     };
-    match report.latest_patchset.as_ref() {
-        Some(latest) if latest.id != filed_against => format!(" (against {filed_against})"),
-        _ => String::new(),
+    match finding.patchset_id.as_deref() {
+        Some(filed_against) if filed_against == latest.id => String::new(),
+        Some(filed_against) => format!(" (against {filed_against})"),
+        // Filed before anything was snapshotted, so it predates every
+        // patchset rather than answering the one under review.
+        None => " (raised before the first patchset)".to_string(),
     }
 }
 
@@ -796,11 +804,15 @@ pub fn nested_finding_lines(event: &Event) -> Vec<String> {
         Payload::AuditVerdictRecorded { findings, .. } => (findings, "audit-finding-added"),
         _ => return Vec::new(),
     };
+    // Each line carries the same prefix an event line does, because these are
+    // the same facts recorded by the same actor at the same moment — only the
+    // ledger packs them into one event.
     findings
         .iter()
         .map(|finding| {
             format!(
-                "    ↳ {kind}  {} [{}{:?}] {}",
+                "{}  {kind}  {} [{}{:?}] {}",
+                event_prefix(event),
                 finding.finding_id,
                 if finding.blocking { "blocking/" } else { "" },
                 finding.severity,

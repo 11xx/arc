@@ -491,6 +491,7 @@ fn read_surfaces_carry_the_finding_body_and_anchor() {
     );
     assert_eq!(status["findings"][0]["anchor"]["path"], "reviewed.rs");
     assert_eq!(status["findings"][0]["patchset_id"], "ps-01");
+    assert_eq!(status["findings"][0]["reported_by"], "tester");
 
     // SARIF exists to carry file, line, and message; the message is the body.
     let sarif = json_stdout(
@@ -501,6 +502,44 @@ fn read_surfaces_carry_the_finding_body_and_anchor() {
         .as_str()
         .unwrap();
     assert!(message.contains("indexed before its length"), "{message}");
+    // The one-line summary stays addressable on its own.
+    assert_eq!(
+        sarif["runs"][0]["results"][0]["properties"]["summary"],
+        "unchecked index"
+    );
+}
+
+/// An anchor arc recorded may be malformed; the reader shows what is there
+/// rather than inventing a range that runs backwards.
+#[test]
+fn a_backwards_anchor_range_renders_as_its_start() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "backwards"]));
+    let wt = repo.home.join(".worktrees/repo-backwards");
+    repo.commit(&wt, "reviewed.rs", "broken\n", "test: add reviewed file");
+    stdout(repo.arc(&wt).args(["snapshot", "backwards"]));
+    stdout(repo.arc(&wt).args([
+        "finding",
+        "backwards",
+        "--summary",
+        "reversed range",
+        "--path",
+        "reviewed.rs",
+        "--line",
+        "10",
+        "--line-end",
+        "5",
+    ]));
+
+    let text = stdout(repo.arc(&wt).args(["findings", "backwards"]));
+    assert!(text.contains("at: reviewed.rs:10 (head)"), "{text}");
+    let sarif = json_stdout(
+        repo.arc(&wt)
+            .args(["findings", "backwards", "--format", "sarif"]),
+    );
+    let region = &sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"];
+    assert_eq!(region["startLine"], 10, "{region}");
+    assert_eq!(region["endLine"], 10, "{region}");
 }
 
 /// A finding filed inside a review batch is the same object as one filed
@@ -518,6 +557,14 @@ fn log_renders_findings_filed_inside_a_review() {
         finding_ids.len(),
         "{log}"
     );
+    // Every line keeps the shape a log line has, so nothing that reads this
+    // output has to learn a second one.
+    for line in log.lines() {
+        let fields: Vec<&str> = line.split("  ").filter(|f| !f.is_empty()).collect();
+        assert!(fields.len() >= 3, "{line}");
+        assert!(fields[0].ends_with('Z'), "{line}");
+        assert!(fields[1].contains('@'), "{line}");
+    }
 }
 
 /// A findings count that mixes rounds saturates and gates nothing, so a

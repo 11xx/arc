@@ -218,7 +218,8 @@ enum Cmd {
         #[arg(long, conflicts_with = "tag")]
         at: Option<String>,
     },
-    /// Print the change's ledger events one line each, in ledger order
+    /// Print the change's recorded facts one line each, in ledger order. A
+    /// review batch records several, so it renders as several lines
     Log {
         change: Option<String>,
         /// Newest event first

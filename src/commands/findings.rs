@@ -47,12 +47,14 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool)
                     println!("  at: {}", anchor_location(anchor));
                 }
                 // The body is what a reader needs to act; without it the only
-                // way to learn what a finding says is to parse raw events.
+                // way to learn what a finding says is to parse raw events. Its
+                // own indentation is content, so only surrounding blank lines
+                // are dropped.
                 if let Some(body) = finding
                     .body
                     .as_deref()
-                    .map(str::trim)
-                    .filter(|b| !b.is_empty())
+                    .map(|body| body.trim_matches('\n'))
+                    .filter(|body| !body.trim().is_empty())
                 {
                     for line in body.lines() {
                         println!("  | {line}");
@@ -94,15 +96,20 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool)
                         "ruleId": finding.id,
                         "level": sarif_level(finding),
                         "message": { "text": message },
+                        // The one-line summary stays addressable on its own,
+                        // for a consumer that wants a label rather than the
+                        // whole finding.
+                        "properties": { "summary": finding.summary },
                     });
                     if let Some(anchor) = &finding.anchor {
+                        // A region whose end precedes its start is not valid
+                        // SARIF, so a backwards range collapses to its start.
+                        let start = anchor.line_start.unwrap_or(1);
+                        let end = anchor.line_end.filter(|end| *end >= start).unwrap_or(start);
                         result["locations"] = serde_json::json!([{
                             "physicalLocation": {
                                 "artifactLocation": { "uri": anchor.path },
-                                "region": {
-                                    "startLine": anchor.line_start.unwrap_or(1),
-                                    "endLine": anchor.line_end.or(anchor.line_start).unwrap_or(1),
-                                }
+                                "region": { "startLine": start, "endLine": end }
                             }
                         }]);
                     }
@@ -132,15 +139,19 @@ struct FindingsJson<'a> {
 }
 
 /// `path:line` when the anchor has one, `path` otherwise, with the side that
-/// the lines are numbered against.
+/// the lines are numbered against. A range that runs backwards is not a range,
+/// so only the line the reviewer started from is shown.
 fn anchor_location(anchor: &crate::model::Anchor) -> String {
     let side = format!("{:?}", anchor.side).to_lowercase();
+    let path = if anchor.path.trim().is_empty() {
+        "(no path)"
+    } else {
+        anchor.path.as_str()
+    };
     match (anchor.line_start, anchor.line_end) {
-        (Some(start), Some(end)) if end != start => {
-            format!("{}:{start}-{end} ({side})", anchor.path)
-        }
-        (Some(start), _) => format!("{}:{start} ({side})", anchor.path),
-        (None, _) => format!("{} ({side})", anchor.path),
+        (Some(start), Some(end)) if end > start => format!("{path}:{start}-{end} ({side})"),
+        (Some(start), _) => format!("{path}:{start} ({side})"),
+        (None, _) => format!("{path} ({side})"),
     }
 }
 
