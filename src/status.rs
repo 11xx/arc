@@ -91,6 +91,17 @@ pub struct GateStatus {
     /// The head evidence for this gate is attested (arc did not run it), so a
     /// lead can apply stricter judgment even though it counts for green-ness.
     pub attested: bool,
+    /// The tree the command ran against, and whether it differed from the
+    /// revision's. Absent is unknown, never a claim the tree was clean.
+    /// Additive in `arc-status/6`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tested_tree: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_dirty: Option<bool>,
+    /// The worktree changed while the command ran, so this evidence describes
+    /// no single tree.
+    #[serde(skip_serializing_if = "is_false")]
+    pub tree_moved: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence_event_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -601,8 +612,18 @@ fn build_report(
                     None => "pending",
                 }
                 .into(),
-                green_at_head: result == Some(crate::model::VerifyResult::Pass),
+                // Evidence produced on a dirty tree describes something no
+                // checkout of this revision reproduces, and evidence whose
+                // tree moved mid-run describes no single tree at all. Both
+                // are displayed and neither counts as green — throwing them
+                // away would push loops toward not recording at all, which is
+                // worse than recording them honestly.
+                green_at_head: result == Some(crate::model::VerifyResult::Pass)
+                    && !evidence.is_some_and(|e| e.worktree_dirty.unwrap_or(false) || e.tree_moved),
                 attested: evidence.is_some_and(|e| e.attested),
+                tested_tree: evidence.and_then(|e| e.tested_tree.clone()),
+                worktree_dirty: evidence.and_then(|e| e.worktree_dirty),
+                tree_moved: evidence.is_some_and(|e| e.tree_moved),
                 evidence_event_id: evidence.map(|e| e.event_id.clone()),
                 revision: evidence.map(|e| e.revision.clone()),
                 hostname: evidence.map(|e| e.hostname.clone()),

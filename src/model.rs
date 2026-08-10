@@ -356,6 +356,23 @@ pub enum Payload {
         /// Optional free-form note recorded alongside the evidence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        /// The tree arc actually ran against, written into the object database
+        /// and pinned by a ref, so a recorded tree is one that is still there.
+        /// A revision alone describes a tree no checkout reproduces whenever
+        /// the worktree carried uncommitted work, which is the ordinary shape
+        /// of agent execution. Absent on attested evidence, on events written
+        /// before arc recorded it, and on a run whose tree could not be
+        /// pinned: unknown, not clean.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tested_tree: Option<String>,
+        /// Whether that tree differed from the revision's own. Absent means
+        /// unknown for the same reasons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_dirty: Option<bool>,
+        /// The worktree changed while the command ran, so the evidence
+        /// describes no single tree.
+        #[serde(default, skip_serializing_if = "is_false")]
+        tree_moved: bool,
     },
     VerificationReused {
         run_id: String,

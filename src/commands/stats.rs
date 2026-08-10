@@ -360,6 +360,9 @@ fn observed_gate_runs(events: &[Event]) -> Vec<(String, u64)> {
         .iter()
         .filter_map(|event| match &event.payload {
             Payload::VerificationRecorded {
+                tested_tree: None,
+                worktree_dirty: None,
+                tree_moved: false,
                 gate: Some(gate),
                 duration_ms: Some(duration_ms),
                 attested: false,
@@ -466,6 +469,34 @@ fn derive_rework(events: &[Event]) -> ReworkStats {
             _ => None,
         })
         .collect();
+    // Re-snapshotting at the same head is how a patchset binds to a corrected
+    // brief. Counting that as a revision cycle would inflate the rework signal
+    // for exactly the leads careful enough to correct a brief. What answers a
+    // request is the next patchset after it, so that is the one compared —
+    // not whichever patchset was eventually approved, which may be a later
+    // round's or may coincidentally share the requested head.
+    let ordered: Vec<(usize, &str, &str)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match &event.payload {
+            Payload::PatchsetAdded {
+                patchset_id, head, ..
+            } => Some((index, patchset_id.as_str(), head.as_str())),
+            _ => None,
+        })
+        .collect();
+    let head_of = |wanted: &str| {
+        ordered
+            .iter()
+            .find(|(_, id, _)| *id == wanted)
+            .map(|(_, _, head)| *head)
+    };
+    let answering_head = |after: usize| {
+        ordered
+            .iter()
+            .find(|(index, _, _)| *index > after)
+            .map(|(_, _, head)| *head)
+    };
     // A round is a revision cycle, not a verdict event. Several
     // changes-requested verdicts on one patchset are answered by one revision,
     // so they open one round, dated from the first of them.
@@ -495,13 +526,16 @@ fn derive_rework(events: &[Event]) -> ReworkStats {
 
     let reworked_patchsets: Vec<String> = requested
         .iter()
-        .filter(|(_, request_index)| {
-            approvals.iter().any(|(approval_index, patchset_id)| {
-                approval_index > *request_index
-                    && patchsets
-                        .get(patchset_id)
-                        .is_some_and(|patchset_index| patchset_index > *request_index)
-            })
+        .filter(|(requested_id, request_index)| {
+            // The revision that answers this request moved the code, and some
+            // later approval closed the round it opened.
+            answering_head(**request_index) != head_of(requested_id)
+                && approvals.iter().any(|(approval_index, patchset_id)| {
+                    approval_index > *request_index
+                        && patchsets
+                            .get(patchset_id)
+                            .is_some_and(|patchset_index| patchset_index > *request_index)
+                })
         })
         .map(|(patchset_id, _)| (*patchset_id).to_string())
         .collect();
@@ -852,6 +886,9 @@ mod tests {
             "1",
             0,
             Payload::VerificationRecorded {
+                tested_tree: None,
+                worktree_dirty: None,
+                tree_moved: false,
                 gate: Some("build".into()),
                 command: "cargo build".into(),
                 revision: "h".into(),
@@ -872,6 +909,9 @@ mod tests {
             "2",
             0,
             Payload::VerificationRecorded {
+                tested_tree: None,
+                worktree_dirty: None,
+                tree_moved: false,
                 gate: Some("test".into()),
                 command: "cargo test".into(),
                 revision: "h".into(),

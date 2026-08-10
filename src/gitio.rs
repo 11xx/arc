@@ -197,6 +197,59 @@ pub fn blob_oid(cwd: &Path, rev: &str, path: &str) -> Option<String> {
     git(cwd, &["rev-parse", "--verify", &format!("{rev}:{path}")]).ok()
 }
 
+/// The tree a commit points at, for comparing what was committed with what was
+/// actually there.
+pub fn commit_tree(cwd: &Path, rev: &str) -> Result<String> {
+    git(cwd, &["rev-parse", &format!("{rev}^{{tree}}")])
+}
+
+/// The tree a checkout would have to reproduce to match this worktree:
+/// tracked content with its staged and unstaged edits, plus files Git is not
+/// yet tracking. Ignored files and the contents of submodules are outside it,
+/// exactly as they are outside a commit.
+///
+/// Evidence recorded against a commit describes a tree no checkout of that
+/// commit reproduces whenever the worktree was dirty, which is the ordinary
+/// shape of agent execution. This writes the tree into the object database and
+/// the caller keeps a ref to it, so the evidence names something that stays
+/// resolvable; the scratch index means the real one is untouched.
+pub fn worktree_tree(cwd: &Path) -> Result<String> {
+    // Inside the Git directory rather than the system temp dir: the index has
+    // to be on the same filesystem as the object store it feeds, and this one
+    // is already private to the repository.
+    let index_path = git_path(cwd, "arc-scratch-index")?.with_extension(crate::ids::new_event_id());
+    let index = index_path.display().to_string();
+
+    // From the top of the worktree, so `add -A` means the whole worktree
+    // rather than the subtree a caller happened to run from.
+    let top = toplevel(cwd)?;
+    let run = |args: &[&str]| -> Result<String> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&top)
+            .env("GIT_INDEX_FILE", &index)
+            .output()
+            .with_context(|| format!("cannot run git {}", args.join(" ")))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let result = (|| {
+        // An unborn HEAD has no tree to read; the add below still captures
+        // everything present.
+        let _ = run(&["read-tree", "HEAD"]);
+        run(&["add", "-A"])?;
+        run(&["write-tree"])
+    })();
+    let _ = std::fs::remove_file(&index_path);
+    result
+}
+
 pub fn is_clean(cwd: &Path) -> Result<bool> {
     Ok(git(cwd, &["status", "--porcelain"])?.is_empty())
 }
@@ -277,6 +330,32 @@ pub fn retention_ref(change_id: &str, patchset_id: &str) -> String {
 
 pub fn retention_prefix(change_id: &str) -> String {
     format!("refs/arc/keep/{change_id}/")
+}
+
+/// The ref that keeps a recorded tree reachable. A tree named only in the
+/// ledger is a string; Git does not read JSON, and a garbage collection would
+/// take the evidence away while the claim to it remained.
+pub fn tree_retention_ref(change_id: &str, event_id: &str) -> String {
+    format!("refs/arc/tree/{change_id}/{event_id}")
+}
+
+pub fn tree_retention_prefix(change_id: &str) -> String {
+    format!("refs/arc/tree/{change_id}/")
+}
+
+/// Every object reachable from a revision.
+///
+/// One walk answers for every pin at once. A tree recorded as evidence may be
+/// any commit's tree in the integrated history, not only the tip's, so
+/// comparing against the tip alone would keep pins for trees Git is already
+/// holding.
+pub fn reachable_objects(cwd: &Path, rev: &str) -> Result<std::collections::HashSet<String>> {
+    let listing = git(cwd, &["rev-list", "--objects", rev])?;
+    Ok(listing
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_string)
+        .collect())
 }
 
 /// All refs under a prefix as (refname, object id) pairs.

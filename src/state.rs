@@ -334,7 +334,20 @@ pub struct VerificationEntry {
     pub timed_out: bool,
     pub hostname: String,
     pub runner: Option<String>,
+    /// The tree the command ran against, and whether it differed from the
+    /// revision's own. `None` is unknown — attested evidence, or an event
+    /// written before arc recorded it — never a claim that the tree was clean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tested_tree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_dirty: Option<bool>,
+    #[serde(default, skip_serializing_if = "is_false_ref")]
+    pub tree_moved: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn is_false_ref(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1147,6 +1160,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 runner,
                 output_tail,
                 timed_out,
+                tested_tree,
+                worktree_dirty,
+                tree_moved,
                 ..
             } => {
                 if gate.is_some() && probe.is_some() {
@@ -1206,6 +1222,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 }
                 state.verifications.push(VerificationEntry {
                     event_id: ev.event_id.clone(),
+                    tested_tree: tested_tree.clone(),
+                    worktree_dirty: *worktree_dirty,
+                    tree_moved: *tree_moved,
                     run_id: run_id.clone(),
                     probe: probe.clone(),
                     gate: gate.clone(),
