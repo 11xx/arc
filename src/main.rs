@@ -1043,7 +1043,8 @@ fn run(cli: Cli) -> Result<i32> {
     let from_env = std::env::var("ARC_ACTOR")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    let (actor, actor_source) = match (cli.actor, from_env) {
+    let (actor, actor_source) = match (cli.actor.filter(|value| !value.trim().is_empty()), from_env)
+    {
         (Some(declared), _) => (declared, ActorSource::Flag),
         (None, Some(declared)) => (declared, ActorSource::Env),
         (None, None) => (

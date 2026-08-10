@@ -395,7 +395,13 @@ impl Store {
     /// who acted, and a ledger that cannot receive history is worse than one
     /// that receives an identity it would not have written itself.
     fn refuse_undeclared_author(&self, event: &Event) -> Result<()> {
-        if event.on_behalf_of.is_some() || event.actor_source.is_some_and(ActorSource::declared) {
+        let delegated = event
+            .on_behalf_of
+            .as_deref()
+            .is_some_and(|subject| !subject.trim().is_empty());
+        let declared =
+            event.actor_source.is_some_and(ActorSource::declared) && !event.actor.trim().is_empty();
+        if delegated || declared {
             return Ok(());
         }
         let Some(toplevel) = self.toplevel.as_deref() else {

@@ -18,6 +18,7 @@ pub fn begin(
     tags: Vec<String>,
     from_journal: Option<String>,
 ) -> Result<()> {
+    ctx.ensure_declared_actor()?;
     ids::validate_slug(slug)?;
     // Validate the journal source before writing anything: a bad
     // --from-journal must fail cleanly with no branch, worktree, or event.

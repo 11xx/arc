@@ -218,6 +218,33 @@ impl Ctx {
         self.event_at(store, change_id, chrono::Utc::now(), payload)
     }
 
+    /// Refuse now, if this repository requires a declared actor and nobody
+    /// declared one.
+    ///
+    /// The append itself is guarded, but `begin` and `integrate` do
+    /// irreversible Git work before they record anything, and a merge that
+    /// lands while the ledger refuses the event is a worse outcome than either
+    /// answer on its own.
+    pub(crate) fn ensure_declared_actor(&self) -> Result<()> {
+        if self.actor_source.declared() || self.on_behalf_of.is_some() {
+            return Ok(());
+        }
+        let Ok(toplevel) = gitio::toplevel(&self.cwd) else {
+            return Ok(());
+        };
+        if !crate::policy::load(&toplevel)?
+            .policy
+            .require_declared_actor
+        {
+            return Ok(());
+        }
+        bail!(
+            "policy requires a declared actor: {:?} came from git config user.name, which \
+             nobody claimed. Pass --actor or set ARC_ACTOR.",
+            self.actor
+        )
+    }
+
     /// Say what identity is about to be recorded when nobody declared one.
     /// The value is permanent once appended, so the moment to notice is now.
     fn announce_assumed_identity(&self) {

@@ -955,6 +955,7 @@ pub fn integrate(
     cleanup: bool,
     dry_run: bool,
 ) -> Result<i32> {
+    ctx.ensure_declared_actor()?;
     match (reference, tags.is_empty()) {
         (Some(reference), true) => integrate_one(
             ctx,

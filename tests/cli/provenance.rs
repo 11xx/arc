@@ -225,6 +225,87 @@ fn require_declared_actor_refuses_the_git_fallback() {
         .success();
 }
 
+/// A refusal after the Git work has happened is worse than either answer on
+/// its own, so the commands that act before they record check first.
+#[test]
+fn require_declared_actor_refuses_before_git_work_happens() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nrequire_declared_actor = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: require a declared actor"],
+    );
+
+    // begin creates a branch and a worktree before it records anything.
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args(["begin", "unnamed"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "policy requires a declared actor",
+        ));
+    let branches = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["branch", "--list", "arc/unnamed"])
+            .current_dir(&repo.root)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(branches.trim().is_empty(), "{branches}");
+
+    // integrate merges before it records the integration.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["--actor", "author", "begin", "named"]),
+    );
+    let wt = repo.home.join(".worktrees/repo-named");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    repo.arc(&wt)
+        .args(["--actor", "author", "snapshot", "named"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "reviewer",
+            "review",
+            "named",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+    let before = repo.head(&repo.root);
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["integrate", "named"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "policy requires a declared actor",
+        ));
+    assert_eq!(repo.head(&repo.root), before);
+
+    // An empty identity is no identity.
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args(["--actor", "", "begin", "blank", "--no-worktree"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "policy requires a declared actor",
+        ));
+}
+
 /// An audit discharges the review obligation an integration left behind, so
 /// it answers to the same independence rule the pre-integration guard applies.
 #[test]
@@ -270,7 +351,10 @@ fn an_audit_refuses_an_assumed_identity() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "assumed the auditing or the authoring identity",
+            "arc assumed the authoring identity",
+        ))
+        .stderr(predicates::str::contains(
+            "Re-snapshot under a declared actor",
         ));
 
     // Raising problems needs no independence.
