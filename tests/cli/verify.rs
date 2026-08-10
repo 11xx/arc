@@ -1333,4 +1333,96 @@ fn a_rebind_is_not_a_rework_round() {
     assert_eq!(stats["changes"][0]["patchset_count"], 2, "{stats}");
     assert_eq!(stats["changes"][0]["completed_rework_rounds"], 0, "{stats}");
     assert_eq!(stats["changes"][0]["reworked"], false, "{stats}");
+
+    // A later round that does move the code does not retroactively change
+    // what the rebind was.
+    repo.commit(&wt, "work.rs", "revised\n", "fix: revise");
+    stdout(repo.arc(&wt).args(["snapshot", "rebound"]));
+    repo.arc(&wt)
+        .args(["review", "rebound", "--verdict", "approved"])
+        .assert()
+        .success();
+    let stats = json_stdout(
+        repo.arc(&wt)
+            .args(["stats", "--change", "rebound", "--json"]),
+    );
+    assert_eq!(stats["changes"][0]["patchset_count"], 3, "{stats}");
+    assert_eq!(stats["changes"][0]["completed_rework_rounds"], 0, "{stats}");
+}
+
+/// A request is answered by the patchset that follows it, so a later round
+/// approving a patchset that happens to share the requested head does not
+/// erase the revision cycle in between.
+#[test]
+fn a_rework_round_is_paired_with_the_patchset_that_answers_it() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "paired"]));
+    let wt = repo.home.join(".worktrees/repo-paired");
+    repo.commit(&wt, "work.rs", "first\n", "feat: first");
+    stdout(repo.arc(&wt).args(["snapshot", "paired"]));
+    repo.arc(&wt)
+        .args([
+            "review",
+            "paired",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+        ])
+        .assert()
+        .success();
+
+    repo.commit(&wt, "work.rs", "second\n", "fix: revise");
+    stdout(repo.arc(&wt).args(["snapshot", "paired"]));
+    repo.arc(&wt)
+        .args(["review", "paired", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let stats = json_stdout(
+        repo.arc(&wt)
+            .args(["stats", "--change", "paired", "--json"]),
+    );
+    assert_eq!(stats["changes"][0]["completed_rework_rounds"], 1, "{stats}");
+    assert_eq!(stats["changes"][0]["reworked"], true, "{stats}");
+}
+
+/// The recorded tree is kept reachable by a ref. A tree named only in the
+/// ledger is a string, and Git does not read JSON.
+#[test]
+fn a_recorded_tree_survives_garbage_collection() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gate"]);
+    stdout(repo.arc(&repo.root).args(["begin", "durable"]));
+    let wt = repo.home.join(".worktrees/repo-durable");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    fs::write(wt.join("scratch.rs"), "uncommitted\n").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "durable", "--gate", "unit"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&wt).args(["status", "durable", "--json"]));
+    let tree = status["gates"][0]["tested_tree"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    git(&repo.root, &["reflog", "expire", "--expire=now", "--all"]);
+    git(&repo.root, &["gc", "--prune=now", "--quiet"]);
+    assert!(
+        std::process::Command::new("git")
+            .args(["cat-file", "-e", &tree])
+            .current_dir(&repo.root)
+            .status()
+            .unwrap()
+            .success(),
+        "{tree} was collected"
+    );
 }

@@ -203,14 +203,16 @@ pub fn commit_tree(cwd: &Path, rev: &str) -> Result<String> {
     git(cwd, &["rev-parse", &format!("{rev}^{{tree}}")])
 }
 
-/// The tree object for the worktree exactly as it stands, including staged
-/// and unstaged edits and files Git is not yet tracking.
+/// The tree a checkout would have to reproduce to match this worktree:
+/// tracked content with its staged and unstaged edits, plus files Git is not
+/// yet tracking. Ignored files and the contents of submodules are outside it,
+/// exactly as they are outside a commit.
 ///
 /// Evidence recorded against a commit describes a tree no checkout of that
 /// commit reproduces whenever the worktree was dirty, which is the ordinary
-/// shape of agent execution. This writes the tree into the object database so
-/// the evidence names something that can still be resolved later, and uses a
-/// scratch index so the real one is untouched.
+/// shape of agent execution. This writes the tree into the object database and
+/// the caller keeps a ref to it, so the evidence names something that stays
+/// resolvable; the scratch index means the real one is untouched.
 pub fn worktree_tree(cwd: &Path) -> Result<String> {
     // Inside the Git directory rather than the system temp dir: the index has
     // to be on the same filesystem as the object store it feeds, and this one
@@ -218,10 +220,13 @@ pub fn worktree_tree(cwd: &Path) -> Result<String> {
     let index_path = git_path(cwd, "arc-scratch-index")?.with_extension(crate::ids::new_event_id());
     let index = index_path.display().to_string();
 
+    // From the top of the worktree, so `add -A` means the whole worktree
+    // rather than the subtree a caller happened to run from.
+    let top = toplevel(cwd)?;
     let run = |args: &[&str]| -> Result<String> {
         let output = std::process::Command::new("git")
             .args(args)
-            .current_dir(cwd)
+            .current_dir(&top)
             .env("GIT_INDEX_FILE", &index)
             .output()
             .with_context(|| format!("cannot run git {}", args.join(" ")))?;
@@ -238,7 +243,7 @@ pub fn worktree_tree(cwd: &Path) -> Result<String> {
         // An unborn HEAD has no tree to read; the add below still captures
         // everything present.
         let _ = run(&["read-tree", "HEAD"]);
-        run(&["add", "-A", "."])?;
+        run(&["add", "-A"])?;
         run(&["write-tree"])
     })();
     let _ = std::fs::remove_file(&index_path);
@@ -325,6 +330,13 @@ pub fn retention_ref(change_id: &str, patchset_id: &str) -> String {
 
 pub fn retention_prefix(change_id: &str) -> String {
     format!("refs/arc/keep/{change_id}/")
+}
+
+/// The ref that keeps a recorded tree reachable. A tree named only in the
+/// ledger is a string; Git does not read JSON, and a garbage collection would
+/// take the evidence away while the claim to it remained.
+pub fn tree_retention_ref(change_id: &str, event_id: &str) -> String {
+    format!("refs/arc/tree/{change_id}/{event_id}")
 }
 
 /// All refs under a prefix as (refname, object id) pairs.
