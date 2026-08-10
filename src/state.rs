@@ -37,9 +37,9 @@ impl Patchset {
         self.on_behalf_of.as_deref().unwrap_or(&self.actor)
     }
 
-    /// Whether anyone claimed the identity this patchset is attributed to.
-    pub fn author_declared(&self) -> bool {
-        author_declared(self.on_behalf_of.as_deref(), self.actor_source)
+    /// Whether arc invented the identity this patchset is attributed to.
+    pub fn author_assumed(&self) -> bool {
+        author_assumed(self.on_behalf_of.as_deref(), self.actor_source)
     }
 }
 
@@ -270,19 +270,21 @@ impl VerdictEntry {
         self.on_behalf_of.as_deref().unwrap_or(&self.actor)
     }
 
-    /// Whether anyone claimed the identity this verdict is attributed to. A
-    /// delegated subject is always claimed; an invoker is claimed only when
-    /// someone declared it.
-    pub fn author_declared(&self) -> bool {
-        author_declared(self.on_behalf_of.as_deref(), self.actor_source)
+    /// Whether arc invented the identity this verdict is attributed to. A
+    /// delegated subject is always somebody's claim; an invoker is assumed
+    /// only when arc took it from git config with nobody offering one.
+    pub fn author_assumed(&self) -> bool {
+        author_assumed(self.on_behalf_of.as_deref(), self.actor_source)
     }
 }
 
-/// An effective author is claimed when it came from a declared subject, or
-/// from an identity someone declared. An identity arc assumed, or one recorded
-/// before arc kept provenance, names nobody in particular.
-fn author_declared(on_behalf_of: Option<&str>, source: Option<ActorSource>) -> bool {
-    on_behalf_of.is_some() || source.is_some_and(ActorSource::declared)
+/// An effective author is assumed when arc took it from git config and nobody
+/// supplied a subject. Provenance recorded before arc kept it is *unknown*
+/// rather than assumed: an old event says nothing either way, and treating
+/// silence as an invention would retroactively invalidate approvals that were
+/// valid when they were made.
+fn author_assumed(on_behalf_of: Option<&str>, source: Option<ActorSource>) -> bool {
+    on_behalf_of.is_none() && source == Some(ActorSource::GitFallback)
 }
 
 /// A declared, not-yet-discharged review obligation.

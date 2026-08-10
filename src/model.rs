@@ -91,7 +91,7 @@ pub enum ActorSource {
 }
 
 impl ActorSource {
-    /// Whether someone claimed this identity. An assumed one names a person
+    /// Whether someone offered this identity, as opposed to arc inventing it. An assumed one names a person
     /// who never said they did anything.
     pub fn declared(self) -> bool {
         !matches!(self, Self::GitFallback)

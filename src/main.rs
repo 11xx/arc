@@ -39,8 +39,9 @@ use model::{
     after_help = "Run `arc` with no arguments for the workflow guide, or `arc catchup` for live project state."
 )]
 struct Cli {
-    /// Acting identity (defaults to git user.name)
-    #[arg(long, global = true, env = "ARC_ACTOR")]
+    /// Acting identity, from ARC_ACTOR when the flag is absent. Falls back to
+    /// git user.name, which arc records as an identity nobody declared
+    #[arg(long, global = true)]
     actor: Option<String>,
     /// Harness label, e.g. claude, codex, opencode
     #[arg(long, global = true, env = "ARC_HARNESS")]
@@ -937,40 +938,6 @@ enum ForgeCmd {
     },
 }
 
-/// Commands that only read. Under `require_declared_actor` these still run
-/// with an assumed identity, because reading records nothing that could later
-/// be mistaken for evidence of who acted.
-fn reads_only(command: &Cmd) -> bool {
-    matches!(
-        command,
-        Cmd::List { .. }
-            | Cmd::Query { .. }
-            | Cmd::Show { .. }
-            | Cmd::Log { .. }
-            | Cmd::Stats { .. }
-            | Cmd::Status { .. }
-            | Cmd::Check { .. }
-            | Cmd::Diff { .. }
-            | Cmd::Findings { .. }
-            | Cmd::Events { .. }
-            | Cmd::Inbox { .. }
-            | Cmd::Catchup { .. }
-            | Cmd::Resume { .. }
-            | Cmd::Prompt { .. }
-            | Cmd::Doctor { .. }
-            | Cmd::BlockerStatus { .. }
-            | Cmd::IsBlocked { .. }
-            | Cmd::Chain { .. }
-            | Cmd::Rescue { .. }
-            | Cmd::Watch { .. }
-            | Cmd::Export { .. }
-            | Cmd::Env
-            | Cmd::Completions { .. }
-            | Cmd::Mangen { .. }
-            | Cmd::Config { .. }
-    )
-}
-
 fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'static str)> {
     // Brief reads are open to every role, while writes are lead-only; the
     // handler must inspect --body-file, so Brief cannot live in this deny-list.
@@ -1070,18 +1037,16 @@ fn run(cli: Cli) -> Result<i32> {
     }
 
     let cwd = std::env::current_dir()?;
-    // Which of the two declared forms supplied the value matters less than
-    // whether anyone declared it at all, but both are cheap to tell apart:
-    // clap fills the field from ARC_ACTOR only when the flag is absent.
-    let (actor, actor_source) = match cli.actor {
-        Some(declared) => {
-            let source = match std::env::var("ARC_ACTOR") {
-                Ok(from_env) if from_env == declared => ActorSource::Env,
-                _ => ActorSource::Flag,
-            };
-            (declared, source)
-        }
-        None => (
+    // The environment is read here rather than through clap's `env`, so that
+    // the flag and the variable stay distinguishable even when they carry the
+    // same value.
+    let from_env = std::env::var("ARC_ACTOR")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let (actor, actor_source) = match (cli.actor, from_env) {
+        (Some(declared), _) => (declared, ActorSource::Flag),
+        (None, Some(declared)) => (declared, ActorSource::Env),
+        (None, None) => (
             gitio::git(&cwd, &["config", "user.name"])
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|_| "unknown".into()),
@@ -1107,22 +1072,6 @@ fn run(cli: Cli) -> Result<i32> {
                     model = detected.model;
                 }
             }
-        }
-    }
-    // A repository may require every writer to declare itself. arc cannot
-    // verify who an actor claims to be, but it can decline to invent one and
-    // then record the invention permanently.
-    if !reads_only(&cmd) && !actor_source.declared() {
-        let requires = gitio::toplevel(&cwd)
-            .ok()
-            .map(|top| policy::load(&top))
-            .transpose()?
-            .is_some_and(|policy| policy.policy.require_declared_actor);
-        if requires {
-            bail!(
-                "policy requires a declared actor: {actor:?} came from git config user.name, \
-                 which nobody claimed. Pass --actor or set ARC_ACTOR."
-            );
         }
     }
     let ctx = Ctx {

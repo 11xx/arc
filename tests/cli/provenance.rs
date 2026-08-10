@@ -202,9 +202,85 @@ fn require_declared_actor_refuses_the_git_fallback() {
         .success();
     repo.arc(&repo.root)
         .env_remove("ARC_ACTOR")
+        .args(["journal", "list"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
         .args(["--actor", "someone", "begin", "allowed", "--no-worktree"])
         .assert()
         .success();
+    // A delegated subject is somebody's claim, so a lead running ceremony for
+    // one satisfies the policy.
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args([
+            "--on-behalf-of",
+            "executor",
+            "begin",
+            "delegated",
+            "--no-worktree",
+        ])
+        .assert()
+        .success();
+}
+
+/// A ledger written before arc recorded provenance says nothing about who
+/// declared what. Reading that silence as an invention would strand every
+/// existing repository that uses the self-approval policy.
+#[test]
+fn a_ledger_without_provenance_keeps_comparing_names() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "test: forbid self approval"]);
+    stdout(repo.arc(&repo.root).args(["begin", "legacy"]));
+    let wt = repo.home.join(".worktrees/repo-legacy");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    repo.arc(&wt)
+        .args(["--actor", "author", "snapshot", "legacy"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "reviewer",
+            "review",
+            "legacy",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+
+    // Strip the provenance arc now records, leaving events shaped like the
+    // ones written before it did.
+    let changes = repo.root.join(".git/arc/changes");
+    for change in fs::read_dir(&changes).unwrap() {
+        let events = change.unwrap().path().join("events");
+        let Ok(entries) = fs::read_dir(&events) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            let mut event: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            event.as_object_mut().unwrap().remove("actor_source");
+            fs::write(&path, serde_json::to_string_pretty(&event).unwrap()).unwrap();
+        }
+    }
+
+    let status = json_stdout(repo.arc(&wt).args(["status", "legacy", "--json"]));
+    assert_eq!(status["verdict"]["author_assumed"], false, "{status}");
+    assert_eq!(
+        status["verdict"]["valid_for_current_head"], true,
+        "{status}"
+    );
 }
 
 /// Two identities nobody declared cannot show that two people acted, so the
@@ -254,6 +330,30 @@ fn self_approval_fails_closed_on_an_assumed_identity() {
             .as_str()
             .unwrap()
             .contains("independence is unproven"),
+        "{status}"
+    );
+
+    // Naming the same author is the more specific fact, so it is the one
+    // reported even when the identity was also assumed.
+    stdout(repo.arc(&repo.root).args(["begin", "same-author"]));
+    let wt = repo.home.join(".worktrees/repo-same-author");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["snapshot", "same-author"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["review", "same-author", "--verdict", "approved"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&wt).args(["status", "same-author", "--json"]));
+    assert!(
+        status["approval_rejection_reason"]
+            .as_str()
+            .unwrap()
+            .contains("self-approval"),
         "{status}"
     );
 }

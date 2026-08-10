@@ -1,6 +1,6 @@
 use crate::gitio;
 use crate::ids;
-use crate::model::{Event, Payload};
+use crate::model::{ActorSource, Event, Payload};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,6 +29,10 @@ struct StoreConfig {
 pub struct Store {
     pub root: PathBuf,
     pub repository_id: String,
+    /// The repository this store was discovered from, where committed policy
+    /// lives. Absent for a store opened by path alone, which has no
+    /// repository to read policy from.
+    pub toplevel: Option<PathBuf>,
 }
 
 /// A process-scoped transition guard. The lock file is intentionally
@@ -76,6 +80,7 @@ impl Store {
         Ok(Store {
             root,
             repository_id,
+            toplevel: gitio::toplevel(cwd).ok(),
         })
     }
 
@@ -88,6 +93,7 @@ impl Store {
             Some(repository_id) => Ok(Some(Store {
                 root: root.to_path_buf(),
                 repository_id,
+                toplevel: None,
             })),
             None => Ok(None),
         }
@@ -365,6 +371,7 @@ impl Store {
     /// Append one event. The file is created exclusively; a collision on
     /// a ULID event ID indicates a real bug and fails loudly.
     pub fn append_event(&self, event: &Event) -> Result<()> {
+        self.refuse_undeclared_author(event)?;
         ids::validate_id_component(&event.change_id)?;
         ids::validate_id_component(&event.event_id)?;
         let dir = self.events_dir(&event.change_id);
@@ -374,6 +381,30 @@ impl Store {
         body.push(b'\n');
         write_exclusive(&path, &body)
             .with_context(|| format!("event {} already exists", event.event_id))
+    }
+
+    /// Under `require_declared_actor`, refuse to record an event whose author
+    /// nobody claimed.
+    ///
+    /// The check lives at the append rather than at the command, because what
+    /// the policy is about is the permanence of the record: every path that
+    /// writes an event reaches here, including a bundle import carrying events
+    /// somebody else wrote.
+    fn refuse_undeclared_author(&self, event: &Event) -> Result<()> {
+        if event.on_behalf_of.is_some() || event.actor_source.is_some_and(ActorSource::declared) {
+            return Ok(());
+        }
+        let Some(toplevel) = self.toplevel.as_deref() else {
+            return Ok(());
+        };
+        if !crate::policy::load(toplevel)?.policy.require_declared_actor {
+            return Ok(());
+        }
+        bail!(
+            "policy requires a declared actor: {:?} on event {} was not declared by anyone.              Pass --actor or set ARC_ACTOR.",
+            event.actor,
+            event.event_id
+        )
     }
 
     /// All events of one change in ULID (i.e. chronological) order.
