@@ -307,6 +307,10 @@ pub struct AuditVerdictEntry {
     pub body: Option<String>,
     pub actor: String,
     pub on_behalf_of: Option<String>,
+    /// Where `actor` came from. `None` on audits recorded before arc kept the
+    /// provenance, which is unknown rather than declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_source: Option<ActorSource>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -1051,6 +1055,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     body: body.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
+                    actor_source: ev.actor_source,
                     created_at: ev.created_at,
                 });
             }

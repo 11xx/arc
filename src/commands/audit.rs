@@ -100,13 +100,26 @@ fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result
     if !policy.policy.forbid_self_approval {
         return Ok(());
     }
-    let Some(author) = state
-        .latest_patchset()
-        .map(|patchset| patchset.effective_author().to_string())
-    else {
+    let Some(patchset) = state.latest_patchset() else {
         return Ok(());
     };
+    let author = patchset.effective_author().to_string();
     let auditor = ctx.on_behalf_of.as_deref().unwrap_or(&ctx.actor);
+    // An identity arc invented names nobody in particular, so two of them that
+    // happen to differ do not show that two people acted. The same rule the
+    // pre-integration guard applies, applied to the review that discharges the
+    // obligation left behind.
+    let auditor_assumed =
+        ctx.on_behalf_of.is_none() && ctx.actor_source == crate::model::ActorSource::GitFallback;
+    if auditor_assumed || patchset.author_assumed() {
+        bail!(
+            "arc assumed the auditing or the authoring identity from git config, so this audit \
+cannot show that anyone independent looked at {}.\n\
+  Declare who is auditing: arc audit {} --verdict approved --actor '<reviewer>'",
+            state.change_id,
+            state.change_id
+        );
+    }
     if auditor == author {
         bail!(
             "{auditor} authored the audited work, so this audit would discharge its \

@@ -225,6 +225,68 @@ fn require_declared_actor_refuses_the_git_fallback() {
         .success();
 }
 
+/// An audit discharges the review obligation an integration left behind, so
+/// it answers to the same independence rule the pre-integration guard applies.
+#[test]
+fn an_audit_refuses_an_assumed_identity() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "test: forbid self approval"]);
+    stdout(repo.arc(&repo.root).args(["begin", "owed"]));
+    let wt = repo.home.join(".worktrees/repo-owed");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["snapshot", "owed"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["review", "owed", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["integrate", "owed", "--audit-debt", "no reviewer reachable"])
+        .assert()
+        .success();
+
+    // A differently named auditor does not establish independence when the
+    // authoring identity was one arc invented.
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "auditor",
+            "audit",
+            "owed",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "assumed the auditing or the authoring identity",
+        ));
+
+    // Raising problems needs no independence.
+    repo.arc(&wt)
+        .args([
+            "--actor",
+            "auditor",
+            "audit",
+            "owed",
+            "--verdict",
+            "changes-requested",
+        ])
+        .assert()
+        .success();
+}
+
 /// A ledger written before arc recorded provenance says nothing about who
 /// declared what. Reading that silence as an invention would strand every
 /// existing repository that uses the self-approval policy.

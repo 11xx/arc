@@ -386,10 +386,14 @@ impl Store {
     /// Under `require_declared_actor`, refuse to record an event whose author
     /// nobody claimed.
     ///
-    /// The check lives at the append rather than at the command, because what
-    /// the policy is about is the permanence of the record: every path that
-    /// writes an event reaches here, including a bundle import carrying events
-    /// somebody else wrote.
+    /// The check lives at the append rather than at the command, because no
+    /// list of writing commands stays accurate as commands are added, and what
+    /// the policy is about is the permanence of the record.
+    ///
+    /// A bundle import is deliberately outside this. Its events are another
+    /// repository's history being transferred, not this session's claim about
+    /// who acted, and a ledger that cannot receive history is worse than one
+    /// that receives an identity it would not have written itself.
     fn refuse_undeclared_author(&self, event: &Event) -> Result<()> {
         if event.on_behalf_of.is_some() || event.actor_source.is_some_and(ActorSource::declared) {
             return Ok(());
