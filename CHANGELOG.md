@@ -34,18 +34,19 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   (`journal-timestamp-stamp`).
 - `discussion` journal kind: an answer-owed actionable artifact that rides
   `journal open` until resolved and promotes via `begin --from-journal`;
-  `journal note --scaffold discussion` (or a repo-local
-  `.arc/templates/discussion.md`) seeds the position conventions at birth
+  `journal note --kind discussion` seeds the position conventions at birth by
+  default (`--no-scaffold` opts out; a repo-local
+  `.arc/templates/discussion.md` overrides the built-in)
   (`journal-discussion-kind`).
 - Model identity as first-class journal attribution: a global `--model` flag
   and `ARC_MODEL` env (`model-slug[#effort]`) stamp an optional `model` on
   journal events, and `arc env` detects and exports it from the claude and
   codex session stores (`arc-model-identity`).
-- `arc journal append <file> [--ref <target>] --body-file <src>` adds a
+- `arc journal position <file> [--ref <target>] --body-file <src>` adds a
   position to a discussion: it writes a tool-stamped
-  `### Position (<model> via <harness>, <ts>)` block and emits a typed
-  `position` journal event (the machine-readable half that stance tallies and
-  reply graphs derive from) (`journal-append`).
+  `### Position pos-<ulid> (<model> via <harness>, <ts>)` block and emits a
+  typed `position` journal event (the machine-readable half that stance tallies
+  and reply graphs derive from) (`journal-append`).
 - Discussion derived renderings: `journal open` annotates each item with its
   age; `journal discussion <file> [--json]` reports the stance tally,
   participants, reply-refs, and resolution with a resolver-participation flag;

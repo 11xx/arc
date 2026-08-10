@@ -270,7 +270,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             let reusable = skip_green
                 .then(|| st.gate_evidence_at(name, &head))
                 .flatten()
-                .filter(|evidence| evidence.result == VerifyResult::Pass);
+                .filter(|evidence| evidence.green_at_head());
             if let Some(evidence) = reusable {
                 println!("gate {name}: skipped (green at head)");
                 reused.push((name.clone(), evidence.event_id.clone()));
@@ -604,6 +604,11 @@ fn verify_all_parallel(
         .map(|h| h.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "unknown".into());
     let cwd = ctx.cwd.clone();
+    // Every gate shares this worktree, so capture the batch boundary once on
+    // each side. A gate that changes the worktree makes every result in the
+    // batch describe no single tree; recording that conservatively is better
+    // than allowing one passing result to look reproducible.
+    let before = gitio::worktree_tree(&ctx.cwd)?;
     let inputs = required
         .into_iter()
         .map(|(name, gate)| VerificationInput {
@@ -651,11 +656,29 @@ fn verify_all_parallel(
     if let Some(error) = first_error {
         return Err(error);
     }
+    let after = gitio::worktree_tree(&ctx.cwd)?;
     let post = gitio::head(&ctx.cwd)?;
     if post != revision {
         eprintln!(
             "warning: head moved during parallel verification ({revision} -> {post}); evidence recorded at {revision}"
         );
+    }
+    let tree_moved = after != before;
+    if tree_moved {
+        eprintln!(
+            "warning: the worktree changed while parallel gates ran, so this evidence describes no single tree"
+        );
+    }
+    eprintln!(
+        "warning: parallel gates share a mutable worktree; their provenance is unknown and passing evidence is not green"
+    );
+    for item in &mut completed {
+        item.tested_tree = Some(before.clone());
+        // Boundary snapshots can miss a gate that changes and restores a file
+        // while another gate is still running. Leave cleanliness unknown so
+        // the shared batch cannot make a passing result look reproducible.
+        item.worktree_dirty = None;
+        item.tree_moved = tree_moved;
     }
     let ran_passed = completed
         .iter()
@@ -847,10 +870,23 @@ fn append_verifications(
                         *tested_tree = Some(tree.clone());
                     }
                 }
-                Err(error) => eprintln!(
-                    "warning: could not keep tree {tree} reachable ({error:#}); recording this \
-                     run without it"
-                ),
+                Err(error) => {
+                    if let Payload::VerificationRecorded {
+                        tested_tree,
+                        worktree_dirty,
+                        ..
+                    } = &mut payload
+                    {
+                        // Without the pin, the local tree is unknown even if
+                        // the boundary comparison found it clean.
+                        *tested_tree = None;
+                        *worktree_dirty = None;
+                    }
+                    eprintln!(
+                        "warning: could not keep tree {tree} reachable ({error:#}); recording this \
+                         run without local provenance"
+                    )
+                }
             }
         }
         let mut ev = ctx.event(store, change_id, payload);

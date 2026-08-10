@@ -135,6 +135,98 @@ fn verification_run_records_manifest_results_and_reused_evidence() {
 }
 
 #[test]
+fn skip_green_requires_known_clean_local_provenance_but_allows_attested() {
+    let repo = repo_with_trivial_gates();
+    let (legacy_id, legacy_worktree, _) = change_with_patchset(&repo, "legacy-provenance");
+    repo.arc(&legacy_worktree)
+        .args(["verify", "legacy-provenance", "--gate", "build"])
+        .assert()
+        .success();
+    rewrite_event(&repo, &legacy_id, "verification-recorded", |event| {
+        let object = event.as_object_mut().unwrap();
+        object.remove("tested_tree");
+        object.remove("worktree_dirty");
+        object.remove("tree_moved");
+    });
+    let rerun = stdout(repo.arc(&legacy_worktree).args([
+        "verify",
+        "legacy-provenance",
+        "--all",
+        "--skip-green",
+    ]));
+    assert!(!rerun.contains("build: skipped"), "{rerun}");
+
+    let (attested_id, attested_worktree, head) = change_with_patchset(&repo, "attested-provenance");
+    repo.arc(&attested_worktree)
+        .args([
+            "verify",
+            &attested_id,
+            "--gate",
+            "build",
+            "--attest",
+            "--result",
+            "pass",
+            "--tested-revision",
+            &head,
+            "--execution-host",
+            "sandbox",
+            "--runner",
+            "test-runner",
+        ])
+        .assert()
+        .success();
+    let attested_rerun = stdout(repo.arc(&attested_worktree).args([
+        "verify",
+        &attested_id,
+        "--all",
+        "--skip-green",
+    ]));
+    assert!(
+        attested_rerun.contains("build: skipped (green at head)"),
+        "{attested_rerun}"
+    );
+}
+
+#[test]
+fn skip_green_reruns_when_the_tested_tree_cannot_be_retained() {
+    let repo = repo_with_trivial_gates();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "retention-conflict");
+
+    // A ref at the parent path makes every per-event tree pin fail without
+    // affecting the gate command itself.
+    git(
+        &repo.root,
+        &[
+            "update-ref",
+            &format!("refs/arc/tree/{change_id}"),
+            &git_out(&worktree, &["rev-parse", "HEAD"]),
+        ],
+    );
+    repo.arc(&worktree)
+        .args(["verify", "retention-conflict", "--gate", "build"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("without local provenance"));
+
+    let status = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "retention-conflict", "--json"]),
+    );
+    let gate = &status["gates"][0];
+    assert_eq!(gate["result"], "pass", "{status}");
+    assert_eq!(gate["green_at_head"], false, "{status}");
+    assert_eq!(gate["tested_tree"], serde_json::Value::Null, "{status}");
+    assert_eq!(gate["worktree_dirty"], serde_json::Value::Null, "{status}");
+
+    let rerun =
+        stdout(
+            repo.arc(&worktree)
+                .args(["verify", "retention-conflict", "--all", "--skip-green"]),
+        );
+    assert!(!rerun.contains("build: skipped"), "{rerun}");
+}
+
+#[test]
 fn skip_green_requires_all() {
     let repo = repo_with_trivial_gates();
     change_with_patchset(&repo, "feat-x");

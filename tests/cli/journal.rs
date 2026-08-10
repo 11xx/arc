@@ -1361,7 +1361,7 @@ fn journal_lane_close_owner_and_takeover_semantics() {
         .failure();
 
     repo.arc(&repo.root)
-        .args(["journal", "lane", "open", "takeover", "--ttl", "1s"])
+        .args(["journal", "lane", "open", "takeover", "--ttl", "1m"])
         .assert()
         .success();
     let live_conflict = repo
@@ -1381,8 +1381,31 @@ fn journal_lane_close_owner_and_takeover_semantics() {
     let stderr = String::from_utf8_lossy(&live_conflict.stderr);
     assert!(stderr.contains("owner test session-a"), "{stderr}");
     assert!(stderr.contains("idle"), "{stderr}");
-    assert!(stderr.contains("ttl 1s"), "{stderr}");
-    thread::sleep(Duration::from_secs(2));
+    assert!(stderr.contains("ttl 1m"), "{stderr}");
+
+    // Age the fixture directly instead of sleeping across the one-minute
+    // boundary. Parallel test execution must not decide whether this branch
+    // exercises a live or stale lane.
+    let dir = journal_dir(&repo);
+    let stale_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+    let mut events = journal_events(&dir);
+    assert!(events
+        .iter()
+        .any(|event| event["event"] == "lane-opened" && event["topic"] == "takeover"));
+    let event_count = events.len();
+    for (index, event) in events.iter_mut().enumerate() {
+        // Keep timestamps increasing so replay sees the same append order;
+        // only the age changes.
+        let offset = chrono::Duration::seconds((event_count - index) as i64);
+        event["ts"] = (stale_at - offset).to_rfc3339().into();
+    }
+    let contents = events
+        .into_iter()
+        .map(|event| event.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(dir.join("events.jsonl"), format!("{contents}\n")).unwrap();
+
     repo.arc(&repo.root)
         .env("ARC_SESSION", "session-b")
         .args([
@@ -2317,7 +2340,10 @@ fn journal_note_scaffold_records_template_and_prepends() {
     let path = PathBuf::from(out.trim());
     let body = fs::read_to_string(&path).unwrap();
     assert!(body.contains("## Positions"), "{body}");
-    assert!(body.contains("### Position (<model[#effort]"), "{body}");
+    assert!(
+        body.contains("### Position pos-<ulid> (<model[#effort]"),
+        "{body}"
+    );
 
     // With a body, the template is prepended ahead of it.
     let src = repo.home.join("position.md");

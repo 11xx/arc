@@ -346,6 +346,20 @@ pub struct VerificationEntry {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+impl VerificationEntry {
+    /// Whether this evidence can satisfy a gate at its recorded revision.
+    /// Passing output is not reproducible when local provenance is unknown,
+    /// the tested tree was not retained, the worktree was dirty, or it
+    /// changed while the command ran. Attested evidence carries an external
+    /// execution context instead of local tree provenance, so a passing
+    /// attestation remains eligible.
+    pub fn green_at_head(&self) -> bool {
+        self.result == VerifyResult::Pass
+            && !self.tree_moved
+            && (self.attested || (self.tested_tree.is_some() && self.worktree_dirty == Some(false)))
+    }
+}
+
 fn is_false_ref(value: &bool) -> bool {
     !*value
 }
@@ -1681,6 +1695,78 @@ mod tests {
         assert!(reduce(&events).unwrap().hold.is_some());
         events.push(ev(change, Payload::HoldReleased { reason: None }));
         assert!(reduce(&events).unwrap().hold.is_none());
+    }
+
+    #[test]
+    fn legacy_reuse_of_non_green_passing_evidence_still_replays() {
+        let change = "legacy-reuse";
+        let mut events = vec![opened(change)];
+        let run = ev(
+            change,
+            Payload::VerificationRunStarted {
+                revision: "head".into(),
+                mode: VerificationRunMode::Sequential,
+                skip_green: true,
+                gates: vec![VerificationRunGate {
+                    name: "unit".into(),
+                    command: "true".into(),
+                    timeout_seconds: None,
+                }],
+            },
+        );
+        let run_id = run.event_id.clone();
+        events.push(run);
+        let evidence = ev(
+            change,
+            Payload::VerificationRecorded {
+                gate: Some("unit".into()),
+                command: "true".into(),
+                revision: "head".into(),
+                result: VerifyResult::Pass,
+                exit_code: Some(0),
+                duration_ms: Some(1),
+                output_tail: None,
+                timed_out: false,
+                hostname: "test".into(),
+                attested: false,
+                run_id: Some(run_id),
+                probe: None,
+                runner: None,
+                note: None,
+                tested_tree: Some("dirty-tree".into()),
+                worktree_dirty: Some(true),
+                tree_moved: true,
+            },
+        );
+        let evidence_event_id = evidence.event_id.clone();
+        events.push(evidence);
+        let reuse_run = ev(
+            change,
+            Payload::VerificationRunStarted {
+                revision: "head".into(),
+                mode: VerificationRunMode::Sequential,
+                skip_green: true,
+                gates: vec![VerificationRunGate {
+                    name: "unit".into(),
+                    command: "true".into(),
+                    timeout_seconds: None,
+                }],
+            },
+        );
+        let reuse_run_id = reuse_run.event_id.clone();
+        events.push(reuse_run);
+        events.push(ev(
+            change,
+            Payload::VerificationReused {
+                run_id: reuse_run_id,
+                gate: "unit".into(),
+                revision: "head".into(),
+                evidence_event_id,
+            },
+        ));
+
+        let state = reduce(&events).unwrap();
+        assert!(state.verification_runs.last().unwrap().complete);
     }
 
     #[test]
