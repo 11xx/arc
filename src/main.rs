@@ -57,7 +57,7 @@ struct Cli {
     /// Execution boundary: implementer | reviewer | lead
     #[arg(long, global = true, env = "ARC_ROLE")]
     role: Option<String>,
-    /// Change to act on, for the commands that take one as a positional
+    /// Change to act on, wherever the positional is optional
     #[arg(long = "change", id = "change_flag", global = true)]
     change: Option<String>,
     /// Absent prints the workflow guide: what arc owns, the command
@@ -300,7 +300,8 @@ enum Cmd {
         /// Opaque plan slice slug implemented by this brief
         #[arg(long)]
         plan_slice: Option<String>,
-        /// JSON array of named acceptance probes bound to this brief ('-' for stdin)
+        /// Named acceptance probes bound to this brief: a JSON array inline, a
+        /// path to one, or '-' for stdin
         #[arg(long)]
         probes_json: Option<String>,
         /// Earlier ledger fact that caused this version: finding:<id>,
@@ -1078,12 +1079,20 @@ fn run(cli: Cli) -> Result<i32> {
     };
 
     // Neighbouring commands take the change as a flag, so `--change` works
-    // everywhere the positional does rather than being guessed at against
+    // wherever the positional is optional rather than being guessed at against
     // clap's nearest-option suggestion.
     let flag_change = cli.change;
     let infer = |change: Option<&str>| -> Result<String> {
         let store = store::Store::discover(&ctx.cwd)?;
-        let change = change.or(flag_change.as_deref());
+        // Two spellings naming different changes is a mistake, not a
+        // precedence question.
+        let change = match (change, flag_change.as_deref()) {
+            (Some(positional), Some(flag)) if positional != flag => bail!(
+                "change given twice and they disagree: {positional:?} as an argument,                  {flag:?} as --change"
+            ),
+            (Some(positional), _) => Some(positional),
+            (None, flag) => flag,
+        };
         context::resolve_change_or_infer(&store, &ctx.cwd, change)
     };
 
@@ -1182,7 +1191,9 @@ fn run(cli: Cli) -> Result<i32> {
                 (Some(change), None) => commands::StatsSelection::Change(change),
                 (None, Some(tag)) => commands::StatsSelection::Tag(tag),
                 (None, None) => commands::StatsSelection::All,
-                (Some(_), Some(_)) => unreachable!("clap rejects --change with --tag"),
+                // clap rejects the pair on the subcommand, but a global
+                // `--change` placed before it never reaches that check.
+                (Some(_), Some(_)) => bail!("--change and --tag are mutually exclusive"),
             };
             commands::stats(&ctx, selection, json)?;
             Ok(0)
