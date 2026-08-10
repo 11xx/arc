@@ -348,12 +348,14 @@ pub struct VerificationEntry {
 
 impl VerificationEntry {
     /// Whether this evidence can satisfy a gate at its recorded revision.
-    /// Passing output is not reproducible when the worktree was dirty or
-    /// changed while the command ran.
+    /// Passing output is not reproducible when local provenance is unknown,
+    /// the worktree was dirty, or it changed while the command ran. Attested
+    /// evidence carries an external execution context instead of local tree
+    /// provenance, so a passing attestation remains eligible.
     pub fn green_at_head(&self) -> bool {
         self.result == VerifyResult::Pass
-            && !self.worktree_dirty.unwrap_or(false)
             && !self.tree_moved
+            && (self.attested || self.worktree_dirty == Some(false))
     }
 }
 

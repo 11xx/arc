@@ -2340,7 +2340,10 @@ fn journal_note_scaffold_records_template_and_prepends() {
     let path = PathBuf::from(out.trim());
     let body = fs::read_to_string(&path).unwrap();
     assert!(body.contains("## Positions"), "{body}");
-    assert!(body.contains("### Position (<model[#effort]"), "{body}");
+    assert!(
+        body.contains("### Position pos-<ulid> (<model[#effort]"),
+        "{body}"
+    );
 
     // With a body, the template is prepended ahead of it.
     let src = repo.home.join("position.md");

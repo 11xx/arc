@@ -663,16 +663,21 @@ fn verify_all_parallel(
             "warning: head moved during parallel verification ({revision} -> {post}); evidence recorded at {revision}"
         );
     }
-    let commit_tree = gitio::commit_tree(&ctx.cwd, revision).ok();
     let tree_moved = after != before;
     if tree_moved {
         eprintln!(
             "warning: the worktree changed while parallel gates ran, so this evidence describes no single tree"
         );
     }
+    eprintln!(
+        "warning: parallel gates share a mutable worktree; their provenance is unknown and passing evidence is not green"
+    );
     for item in &mut completed {
         item.tested_tree = Some(before.clone());
-        item.worktree_dirty = commit_tree.as_ref().map(|tree| tree != &before);
+        // Boundary snapshots can miss a gate that changes and restores a file
+        // while another gate is still running. Leave cleanliness unknown so
+        // the shared batch cannot make a passing result look reproducible.
+        item.worktree_dirty = None;
         item.tree_moved = tree_moved;
     }
     let ran_passed = completed

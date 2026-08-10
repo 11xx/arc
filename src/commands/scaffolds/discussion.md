@@ -5,7 +5,7 @@
 ## How to append a position
 
 - Add a position with `arc journal position <this-file> --body-file -`: it
-  writes the `### Position (<model[#effort]> via <harness>, <utc-ts>)` heading
+  writes the `### Position pos-<ulid> (<model[#effort]> via <harness>, <utc-ts>)` heading
   for you (timestamp tool-computed, never hand-authored) and emits the typed
   `position` event. Pass your argument as the body, below the heading.
 - First line of the body states your stance: `Position: for | against | amend`.

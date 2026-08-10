@@ -624,11 +624,13 @@ is complete when every declared gate has an observed or reused terminal edge;
 an interrupted run remains visibly incomplete without a mutable completion
 record.
 
-Every locally executed gate records the worktree tree captured before it ran,
-whether that tree differed from the tested revision, and whether the worktree
-moved during execution. For `verify --all --parallel`, those observations cover
-the shared batch: a change made by any concurrent gate marks each result as
-describing no single tree, so a passing result cannot count as green.
+Every locally executed gate records the worktree tree captured before it ran.
+Sequential runs also record whether that tree differed from the tested revision
+and whether the worktree moved during execution. For `verify --all --parallel`,
+the shared worktree cannot prove that no gate made a transient change and
+restored it, so cleanliness remains unknown and passing results do not count as
+green. A boundary change is still recorded as `tree_moved` and explains the
+stronger failure.
 
 Executed gates capture combined stdout and stderr, retaining only the final
 4096 bytes. Failed-gate tails appear in `arc show` and `arc status`; successful

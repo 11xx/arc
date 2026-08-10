@@ -114,9 +114,21 @@ fn verify_all_parallel_completes_sleep_gates_and_appends_evidence_in_name_order(
                 .is_some_and(|tree| tree.len() == 40),
             "{event}"
         );
-        assert_eq!(event["worktree_dirty"], false, "{event}");
+        assert!(event["worktree_dirty"].is_null(), "{event}");
         assert!(!event["tree_moved"].as_bool().unwrap_or(false), "{event}");
     }
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "parallel-gates", "--json"]),
+    );
+    assert!(
+        status["gates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|gate| gate["green_at_head"] == false),
+        "{status}"
+    );
 }
 
 #[test]
@@ -158,7 +170,7 @@ fn verify_all_parallel_marks_a_changed_worktree_and_keeps_it_from_green() {
                 .is_some_and(|tree| tree.len() == 40),
             "{event}"
         );
-        assert_eq!(event["worktree_dirty"], false, "{event}");
+        assert!(event["worktree_dirty"].is_null(), "{event}");
         assert_eq!(event["tree_moved"], true, "{event}");
     }
     let status = json_stdout(
@@ -192,6 +204,55 @@ fn verify_all_parallel_marks_a_changed_worktree_and_keeps_it_from_green() {
         "verification-reused",
     ]));
     assert!(events.trim().is_empty(), "{events}");
+}
+
+#[test]
+fn verify_all_parallel_stays_not_green_when_a_transient_change_is_restored() {
+    let repo = Repo::new();
+    write_two_gates(
+        &repo,
+        "touch parallel-transient; sleep 0.1; rm parallel-transient",
+        "sleep 0.2",
+    );
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: add transient parallel gates"],
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "parallel-transient", "--no-worktree"]),
+    );
+
+    repo.arc(&repo.root)
+        .args(["verify", "parallel-transient", "--all", "--parallel"])
+        .assert()
+        .success();
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "parallel-transient",
+        "--type",
+        "verification-recorded",
+    ]));
+    for line in events.lines() {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(event["worktree_dirty"].is_null(), "{event}");
+        assert!(!event["tree_moved"].as_bool().unwrap_or(false), "{event}");
+    }
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "parallel-transient", "--json"]),
+    );
+    assert!(
+        status["gates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|gate| gate["green_at_head"] == false),
+        "{status}"
+    );
 }
 
 #[test]
