@@ -77,6 +77,18 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         println!("finding: {id}");
     }
     println!("event: {}", event.event_id);
+    // Said once the audit exists, and only then: an assumed authoring identity
+    // is not refused, because it cannot be corrected after integration and
+    // refusing would leave the debt undischargeable. But it is said out loud,
+    // or audit debt would look like a way around the independence rule rather
+    // than a way of carrying it.
+    if args.verdict == Verdict::Approved && st.latest_patchset().is_some_and(|p| p.author_assumed())
+    {
+        eprintln!(
+            "warning: arc assumed the authoring identity of the audited work, so this audit \
+             shows that a review happened and not that it was independent of whoever wrote it."
+        );
+    }
     if st.audit_debt.is_some() {
         println!("audit debt discharged");
     }
@@ -118,17 +130,6 @@ fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result
     // change snapshotted under an assumed identity would leave its debt
     // permanently undischargeable. What the audit is worth in that case is a
     // question the recorded provenance answers for a reader.
-    // An assumed authoring identity is not refused — it cannot be corrected
-    // after integration, and refusing would leave the debt undischargeable —
-    // but it is said out loud, because otherwise audit debt would look like a
-    // way around the independence rule rather than a way of carrying it.
-    if patchset.author_assumed() {
-        eprintln!(
-            "warning: arc assumed the authoring identity of patchset {}, so this audit shows \
-             that a review happened and not that it was independent of whoever wrote the work.",
-            patchset.id
-        );
-    }
     if auditor_assumed {
         bail!(
             "arc assumed the auditing identity from git config, so this audit cannot show that \

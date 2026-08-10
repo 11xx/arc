@@ -958,11 +958,6 @@ pub fn integrate(
     cleanup: bool,
     dry_run: bool,
 ) -> Result<i32> {
-    // A dry run promises to write nothing, so there is no record for the
-    // policy to be about.
-    if !dry_run {
-        ctx.ensure_declared_actor(&ctx.store()?)?;
-    }
     match (reference, tags.is_empty()) {
         (Some(reference), true) => integrate_one(
             ctx,
@@ -1014,8 +1009,13 @@ fn integrate_one(
     let initial = state::reduce(&store.load_events(&change_id)?)?;
     let target = into.unwrap_or_else(|| initial.target_branch.clone());
     if dry_run {
+        // A dry run promises to write nothing, so there is no record for the
+        // policy to be about.
         return integrate_dry_run(ctx, &store, &initial, &target, message.as_deref());
     }
+    // The same store the merge's closure event will be appended to, so the
+    // merge and the record are judged by one reading of the policy.
+    ctx.ensure_declared_actor(&store)?;
     // Cross-change order is always target, then change. This serializes the
     // target worktree without allowing an integration/metadata lock cycle.
     let target_lock = store.lock_target(&target)?;
