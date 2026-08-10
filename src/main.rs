@@ -445,6 +445,9 @@ enum Cmd {
         /// Limit events to one exact change ID or unique prefix
         #[arg(long, id = "change_flag")]
         change: Option<String>,
+        /// Limit events to the changes carrying all supplied tags (repeatable)
+        #[arg(long)]
+        tag: Vec<String>,
         /// Limit events to one raw kebab-case event_type value
         #[arg(long = "type")]
         event_type: Option<String>,
@@ -475,6 +478,10 @@ enum Cmd {
         /// Run a shell command once when a condition is reached
         #[arg(long = "exec")]
         exec_command: Option<String>,
+        /// Emit the outcome as one JSON object, naming the change, the
+        /// condition, and the event that satisfied it
+        #[arg(long)]
+        json: bool,
     },
     /// Export one change as a deterministic, versioned JSON bundle
     Export {
@@ -1389,6 +1396,7 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Events {
             follow,
             change,
+            tag,
             event_type,
             since,
             exec_command,
@@ -1397,6 +1405,7 @@ fn run(cli: Cli) -> Result<i32> {
                 &ctx,
                 follow,
                 change.as_deref(),
+                &tag,
                 event_type.as_deref(),
                 since,
                 exec_command.as_deref(),
@@ -1411,6 +1420,7 @@ fn run(cli: Cli) -> Result<i32> {
             until,
             timeout,
             exec_command,
+            json,
         } => {
             let quorum = match (any, all) {
                 (true, false) => Some(commands::WatchQuorum::Any),
@@ -1420,11 +1430,14 @@ fn run(cli: Cli) -> Result<i32> {
             commands::watch(
                 &ctx,
                 select(change)?.as_deref(),
-                &tag,
-                quorum,
-                &until,
-                timeout,
-                exec_command.as_deref(),
+                commands::WatchArgs {
+                    tags: &tag,
+                    quorum,
+                    until: &until,
+                    timeout_secs: timeout,
+                    exec_command: exec_command.as_deref(),
+                    json,
+                },
             )
         }
         Cmd::Export { change, output } => {

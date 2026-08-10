@@ -51,6 +51,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         &mut states,
         &mut known_patchsets,
     )?;
+    inspect_dangling_revisions(&ctx.cwd, &states, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
     inspect_audit_debt(&states, &mut advice);
@@ -80,6 +81,64 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         render_advice(&report.advice, verbose);
     }
     Ok(exit)
+}
+
+/// Recorded revisions that Git can no longer resolve.
+///
+/// A history rewrite leaves the ledger intact and its evidence unreachable:
+/// every recorded SHA still says what was verified and reviewed, and none of
+/// it can be checked out. That is advice rather than a problem — the ledger is
+/// not malformed, and the rewrite was somebody's deliberate act — but it is
+/// the difference between evidence and a claim, so it has to be visible
+/// without writing a bespoke script.
+fn inspect_dangling_revisions(
+    cwd: &Path,
+    states: &BTreeMap<String, ChangeState>,
+    advice: &mut Vec<Finding>,
+) -> Result<()> {
+    let mut wanted: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (change_id, state) in states {
+        let mut note = |revision: &str, what: String| {
+            if revision.len() >= 7 {
+                wanted
+                    .entry(revision.to_string())
+                    .or_default()
+                    .insert(format!("{change_id} {what}"));
+            }
+        };
+        note(&state.base, "base".to_string());
+        for patchset in &state.patchsets {
+            note(&patchset.head, format!("{} head", patchset.id));
+            note(&patchset.base, format!("{} base", patchset.id));
+        }
+        for verification in &state.verifications {
+            note(&verification.revision, "verification".to_string());
+        }
+        if let Some(commit) = state
+            .closure
+            .as_ref()
+            .and_then(|closure| closure.integrated_commit.as_deref())
+        {
+            note(commit, "integration".to_string());
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    // One batch rather than a process per revision: a ledger of any age holds
+    // thousands, and a doctor that costs a minute stops being run.
+    for revision in gitio::missing_objects(cwd, wanted.keys().map(String::as_str))? {
+        let short = &revision[..revision.len().min(8)];
+        let referents = wanted
+            .get(&revision)
+            .map(|set| set.iter().cloned().collect::<Vec<_>>().join(", "))
+            .unwrap_or_default();
+        advice.push(Finding {
+            code: "dangling-revision",
+            detail: format!("{short} is recorded but no longer in this repository: {referents}"),
+        });
+    }
+    Ok(())
 }
 
 fn inspect_changes(

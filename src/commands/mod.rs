@@ -56,7 +56,7 @@ pub use lifecycle::{
 };
 pub(crate) use lifecycle::{print_projected, status_output};
 pub use messaging::{catchup, inbox, message, messages};
-pub use observe::{events, watch, WatchQuorum};
+pub use observe::{events, watch, WatchArgs, WatchQuorum};
 pub use rescue::rescue;
 pub use review::{comment, finding, read_review, reply, resolve, review, ReviewArgs};
 use serde::Serialize;

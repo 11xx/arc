@@ -294,6 +294,51 @@ pub fn list_refs(cwd: &Path, prefix: &str) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// Which of these revisions this repository cannot resolve.
+///
+/// One `cat-file --batch-check` process answers for every revision at once,
+/// because a ledger of any age holds thousands and a check that costs a
+/// process each stops being run.
+pub fn missing_objects<'a>(
+    cwd: &Path,
+    revisions: impl Iterator<Item = &'a str>,
+) -> Result<Vec<String>> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let revisions: Vec<&str> = revisions.collect();
+    if revisions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut child = Command::new("git")
+        .args(["cat-file", "--batch-check=%(objectname) %(objecttype)"])
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("cannot run git cat-file")?;
+    let query = revisions.join("\n") + "\n";
+    child
+        .stdin
+        .take()
+        .context("git cat-file has no stdin")?
+        .write_all(query.as_bytes())
+        .context("cannot write to git cat-file")?;
+    let output = child.wait_with_output().context("git cat-file failed")?;
+    let answers = String::from_utf8_lossy(&output.stdout);
+
+    // One answer line per query line, in order. A resolvable revision answers
+    // with its object; a missing one answers "<name> missing".
+    let mut missing = Vec::new();
+    for (revision, answer) in revisions.iter().zip(answers.lines()) {
+        if answer.ends_with(" missing") || answer.ends_with(" ambiguous") {
+            missing.push((*revision).to_string());
+        }
+    }
+    Ok(missing)
+}
+
 pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
     let out = Command::new("git")
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
