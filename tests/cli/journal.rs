@@ -2374,13 +2374,370 @@ fn journal_note_scaffold_repo_override_wins_and_unknown_bails() {
 #[test]
 fn journal_note_requires_a_body_source() {
     let repo = Repo::new();
-    // Neither --body-file nor --scaffold: clap refuses before anything runs.
+    // A kind with no default scaffold and no body has no content to record.
     repo.arc(&repo.root)
         .args(["journal", "note", "empty", "--kind", "note"])
         .assert()
         .failure();
     let listed = stdout(repo.arc(&repo.root).args(["journal", "list"]));
     assert!(listed.contains("(none)"), "{listed}");
+}
+
+/// A discussion states its own conventions without the author having to know
+/// the scaffold exists; every other kind is unaffected, and --no-scaffold opts
+/// out.
+#[test]
+fn journal_note_discussion_carries_its_conventions_by_default() {
+    let repo = Repo::new();
+    let src = repo.home.join("body.md");
+    fs::write(&src, "my own opening take\n").unwrap();
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "defaulted",
+        "--kind",
+        "discussion",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    let body = fs::read_to_string(out.trim()).unwrap();
+    assert!(body.contains("Position: for | against | amend"), "{body}");
+    let template_at = body.find("## Positions").unwrap();
+    let take_at = body.find("my own opening take").unwrap();
+    assert!(template_at < take_at, "{body}");
+
+    // --no-scaffold records the body verbatim.
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "bare",
+        "--kind",
+        "discussion",
+        "--no-scaffold",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    assert_eq!(
+        fs::read_to_string(out.trim()).unwrap(),
+        "my own opening take\n"
+    );
+
+    // Kinds with no convention block of their own are untouched.
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "plain",
+        "--kind",
+        "note",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    assert_eq!(
+        fs::read_to_string(out.trim()).unwrap(),
+        "my own opening take\n"
+    );
+
+    // A discussion with neither body nor opt-out records the template alone.
+    let out =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "note", "template", "--kind", "discussion"]),
+        );
+    assert!(fs::read_to_string(out.trim())
+        .unwrap()
+        .contains("## Positions"));
+}
+
+/// An undercounting tally is shaped like a settled one, so a position block
+/// stating no stance has to announce itself.
+#[test]
+fn journal_discussion_flags_positions_that_state_no_stance() {
+    let repo = Repo::new();
+    let src = repo.home.join("open.md");
+    fs::write(&src, "the question\n").unwrap();
+    let file = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "tally",
+        "--kind",
+        "discussion",
+        "--no-scaffold",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    let name = PathBuf::from(file.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let stated = repo.home.join("stated.md");
+    fs::write(&stated, "Position: for\n\nbecause it is right\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &name,
+            "--body-file",
+            stated.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let silent = repo.home.join("silent.md");
+    fs::write(&silent, "I have opinions but state no stance\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &name,
+            "--body-file",
+            silent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "discussion", &name]));
+    assert!(text.contains("positions: 2 — for 1"), "{text}");
+    assert!(text.contains("unstated: 1 position block"), "{text}");
+
+    let json: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "journal",
+        "discussion",
+        &name,
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(json["stances"]["unstated"], 1);
+    assert_eq!(json["stances"]["for"], 1);
+}
+
+/// The document that teaches the stance line quotes it, and a rule below a
+/// section break belongs to that section. Neither is a vote.
+#[test]
+fn journal_discussion_tally_ignores_quoted_and_out_of_block_stances() {
+    let repo = Repo::new();
+    let src = repo.home.join("open.md");
+    fs::write(
+        &src,
+        "how to argue\n\n```markdown\n### Position\n\nPosition: for\n```\n",
+    )
+    .unwrap();
+    let file = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "quoted",
+        "--kind",
+        "discussion",
+        "--no-scaffold",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    let name = PathBuf::from(file.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let json: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "journal",
+        "discussion",
+        &name,
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(json["positions"], 0, "{json}");
+    assert_eq!(json["stances"]["for"], 0, "{json}");
+    assert_eq!(json["stances"]["unstated"], 0, "{json}");
+
+    // A stance under a section break belongs to the section, not to the
+    // position block above it.
+    let after = repo.home.join("after.md");
+    fs::write(&after, "no stance in this block\n\n---\n\nPosition: for\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &name,
+            "--body-file",
+            after.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let json: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "journal",
+        "discussion",
+        &name,
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(json["positions"], 1, "{json}");
+    assert_eq!(json["stances"]["for"], 0, "{json}");
+    assert_eq!(json["stances"]["unstated"], 1, "{json}");
+}
+
+/// The stance is the block's first line, which is what every surface
+/// documents. A block that opens by arguing has not voted, whatever it says
+/// further down.
+#[test]
+fn journal_discussion_reads_the_stance_from_the_first_line() {
+    let repo = Repo::new();
+    let src = repo.home.join("open.md");
+    fs::write(&src, "the question\n").unwrap();
+    let file = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "firstline",
+        "--kind",
+        "discussion",
+        "--no-scaffold",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    let name = PathBuf::from(file.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let buried = repo.home.join("buried.md");
+    fs::write(&buried, "I argue at length first.\nPosition: for\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &name,
+            "--body-file",
+            buried.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let json: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "journal",
+        "discussion",
+        &name,
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(json["stances"]["for"], 0, "{json}");
+    assert_eq!(json["stances"]["unstated"], 1, "{json}");
+}
+
+/// A fence closes on its own marker, so a different marker inside it is
+/// content; and Markdown allows a thematic break to be spaced.
+#[test]
+fn journal_discussion_handles_mixed_fences_and_spaced_rules() {
+    let repo = Repo::new();
+    let src = repo.home.join("open.md");
+    fs::write(
+        &src,
+        "### Position pos-a\n\n```markdown\n~~~\nPosition: for\n```\n\n         ### Position pos-b\n\nno stance here\n\n* * *\n\nPosition: against\n",
+    )
+    .unwrap();
+    let file = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "fences",
+        "--kind",
+        "discussion",
+        "--no-scaffold",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    let name = PathBuf::from(file.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let json: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "journal",
+        "discussion",
+        &name,
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(json["positions"], 2, "{json}");
+    assert_eq!(json["stances"]["for"], 0, "{json}");
+    assert_eq!(json["stances"]["against"], 0, "{json}");
+    assert_eq!(json["stances"]["unstated"], 2, "{json}");
+}
+
+/// A block that opens with a quotation has not opened with a stance, and a
+/// fence closes only on a run at least as long as the one that opened it.
+#[test]
+fn journal_discussion_does_not_read_a_stance_out_of_a_quotation() {
+    let repo = Repo::new();
+    let src = repo.home.join("open.md");
+    fs::write(
+        &src,
+        "### Position pos-a\n\n```text\nquoted\n```\nPosition: for\n\n         ````markdown\n```\n### Position fake\n\nPosition: against\n````\n",
+    )
+    .unwrap();
+    let file = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "quotation",
+        "--kind",
+        "discussion",
+        "--no-scaffold",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    let name = PathBuf::from(file.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let json: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "journal",
+        "discussion",
+        &name,
+        "--json",
+    ])))
+    .unwrap();
+    // One real block, which opened with a quotation; the heading inside the
+    // longer fence is not a position at all.
+    assert_eq!(json["positions"], 1, "{json}");
+    assert_eq!(json["stances"]["for"], 0, "{json}");
+    assert_eq!(json["stances"]["against"], 0, "{json}");
+    assert_eq!(json["stances"]["unstated"], 1, "{json}");
+}
+
+/// A repo-local template may be empty, and the default scaffold must not turn
+/// that into a silently recorded empty artifact.
+#[test]
+fn journal_note_refuses_an_empty_body_and_empty_scaffold() {
+    let repo = Repo::new();
+    let templates = repo.root.join(".arc/templates");
+    fs::create_dir_all(&templates).unwrap();
+    fs::write(templates.join("discussion.md"), "").unwrap();
+
+    repo.arc(&repo.root)
+        .args(["journal", "note", "hollow", "--kind", "discussion"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("nothing to record"));
+    let listed = stdout(repo.arc(&repo.root).args(["journal", "list"]));
+    assert!(listed.contains("(none)"), "{listed}");
+
+    // A title is content, so it is enough on its own.
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "titled",
+        "--kind",
+        "note",
+        "--title",
+        "Just a title",
+    ]));
+    assert_eq!(
+        fs::read_to_string(out.trim()).unwrap().trim(),
+        "# Just a title"
+    );
 }
 
 #[test]
@@ -3556,9 +3913,11 @@ fn journal_open_explains_its_tiers() {
     let repo = Repo::new();
     let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
     assert!(
-        text.contains("tiers: open = todo|handoff|inbox|plan|discussion"),
+        text.contains("tiers: open = todo|handoff|plan|discussion"),
         "{text}"
     );
     assert!(text.contains("later = parked"), "{text}");
+    // The distinction that decides which kind an item is filed under.
+    assert!(text.contains("A discussion argues a proposal"), "{text}");
     assert!(text.contains("--from-journal"), "{text}");
 }

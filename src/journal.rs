@@ -194,18 +194,25 @@ pub enum JournalCmd {
     Note {
         /// Kebab-case topic slug
         topic: String,
-        /// Artifact kind (closed set)
+        /// Artifact kind (closed set). `discussion` argues a proposal to a
+        /// decision and carries positions; `feature-request` is an unbuilt
+        /// proposal parked for later
         #[arg(long, value_enum)]
         kind: JournalKind,
         /// Body source: a file path, or '-' for stdin (written verbatim)
-        #[arg(long, required_unless_present = "scaffold")]
+        #[arg(long)]
         body_file: Option<String>,
         /// Optional title; when set, a `# <title>` heading is prepended
         #[arg(long)]
         title: Option<String>,
-        /// Scaffold template prepended to the body (records the template alone with no --body-file)
-        #[arg(long)]
+        /// Scaffold template prepended to the body (.arc/templates/<name>.md or
+        /// a built-in: sol-low, sol-high, reviewer, discussion). `--kind
+        /// discussion` uses the `discussion` scaffold unless told otherwise
+        #[arg(long, conflicts_with = "no_scaffold")]
         scaffold: Option<String>,
+        /// Record the body alone, without the kind's default scaffold
+        #[arg(long)]
+        no_scaffold: bool,
     },
     /// Append a log-only journal line (no artifact file is created)
     Log {
@@ -214,15 +221,19 @@ pub enum JournalCmd {
         /// Free-text journal message
         message: String,
     },
-    /// Add a position block to an artifact and emit a typed `position` event
+    /// Add a position block to an artifact and emit a typed `position` event.
+    /// The body's first line states the stance the tally counts:
+    /// `Position: for | against | amend`
     Position {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
-        /// Position or item this answers: a position ID, legacy timestamp, or item slug
+        /// Position or item this answers: a position ID, legacy timestamp, or
+        /// item slug. Quote the claim answered on the line below the stance
         #[arg(long = "ref")]
         reference: Option<String>,
         /// Body source: a file path, or '-' for stdin (the position argument,
-        /// written verbatim below a tool-computed `### Position` heading)
+        /// written verbatim below a tool-computed `### Position` heading).
+        /// Its first line states the stance: `Position: for | against | amend`
         #[arg(long)]
         body_file: String,
     },
@@ -274,7 +285,10 @@ pub enum JournalCmd {
         filename: String,
     },
     /// Derived summary of a discussion: stance tally, participants, replies,
-    /// age, and resolution with a resolver-participation flag (read-only)
+    /// age, and resolution with a resolver-participation flag (read-only).
+    /// The tally counts `Position: for | against | amend` lines inside
+    /// `### Position` blocks, and flags blocks that state no stance. Resolve a
+    /// discussion with `journal consume --outcome done --decision <file>`
     Discussion {
         /// Discussion artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -352,6 +366,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             body_file,
             title,
             scaffold,
+            no_scaffold,
         } => note(
             ctx,
             &topic,
@@ -359,6 +374,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             body_file.as_deref(),
             title.as_deref(),
             scaffold.as_deref(),
+            no_scaffold,
         ),
         JournalCmd::Log { topic, message } => log_line(ctx, &topic, &message),
         JournalCmd::Position {
@@ -750,6 +766,15 @@ fn read_body_verbatim(body_file: &str) -> Result<String> {
     }
 }
 
+/// The scaffold a kind carries by default, for kinds whose conventions live in
+/// a template rather than in the reader's head.
+fn default_scaffold(kind: JournalKind) -> Option<&'static str> {
+    match kind {
+        JournalKind::Discussion => Some("discussion"),
+        _ => None,
+    }
+}
+
 fn note(
     ctx: &Ctx,
     topic: &str,
@@ -757,13 +782,23 @@ fn note(
     body_file: Option<&str>,
     title: Option<&str>,
     scaffold: Option<&str>,
+    no_scaffold: bool,
 ) -> Result<i32> {
     if !valid_topic(topic) {
         bail!("topic {topic:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
     }
+    // A discussion carries its own conventions — the stance line the tally is
+    // parsed from, the quoting reply form, the resolution vocabulary — so the
+    // scaffold that states them is the default rather than something an author
+    // has to know exists.
+    let scaffold = match (scaffold, no_scaffold) {
+        (Some(name), _) => Some(name),
+        (None, true) => None,
+        (None, false) => default_scaffold(kind),
+    };
     // Read the body before touching the filesystem so a bad source path or
     // scaffold name leaves nothing written. A scaffold template is prepended
-    // to the body; --scaffold with no --body-file records the template alone.
+    // to the body; a scaffold with no --body-file records the template alone.
     let template = match scaffold {
         Some(name) => crate::commands::scaffold::resolve(ctx, name)?,
         None => String::new(),
@@ -773,6 +808,12 @@ fn note(
         None => String::new(),
     };
     let body = crate::commands::scaffold::prepended(&template, &content);
+    // An artifact with nothing in it is a queue entry that says nothing. A
+    // repo-local template may be empty, so the check is on what would be
+    // written rather than on which options were passed.
+    if body.trim().is_empty() && title.is_none_or(|t| t.trim().is_empty()) {
+        bail!("nothing to record: pass --body-file, --scaffold, or --title");
+    }
 
     let dir = resolve_dir(&ctx.cwd)?;
     std::fs::create_dir_all(&dir)
@@ -2188,8 +2229,11 @@ fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
 /// session is expected to pick up; `later` and `feature-request` are parked
 /// until someone chooses to spend on them.
 const OPEN_TIER_LEGEND: &str =
-    "tiers: open = todo|handoff|inbox|plan|discussion (work awaiting a session); \
-later = parked; feature-request = unbuilt proposals. \
+    "tiers: open = todo|handoff|plan|discussion, plus artifacts of the retired \
+inbox kind (work awaiting a session); later = parked; \
+feature-request = unbuilt proposals. \
+A discussion argues a proposal to a decision and collects positions; \
+a feature-request is the unbuilt proposal itself. \
 Take one up with `arc begin <slug> --from-journal <file>`.";
 
 /// One `journal open` line: the creation stamp and its age, then topic, kind,
@@ -2375,6 +2419,10 @@ struct StanceTally {
     against: usize,
     amend: usize,
     other: usize,
+    /// Position blocks stating no `Position:` line at all. They are the reason
+    /// a tally can read as settled while counting nothing: without this, an
+    /// undercount is shaped exactly like a real result.
+    unstated: usize,
 }
 
 #[derive(Serialize)]
@@ -2509,6 +2557,33 @@ fn discussion_rounds(positions: &[&JournalEvent]) -> (Vec<DiscussionRound>, Vec<
     (rounds, unanswered)
 }
 
+/// A thematic break, or the underline of a setext heading. Either one ends the
+/// block above it, so a stance below belongs to the next section. Markdown
+/// allows the marks to be spaced (`* * *`), so spacing is not what separates a
+/// rule from prose.
+fn is_horizontal_rule(trimmed: &str) -> bool {
+    let marks: Vec<u8> = trimmed
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    marks.len() >= 3
+        && matches!(marks[0], b'-' | b'=' | b'_' | b'*')
+        && marks.iter().all(|b| *b == marks[0])
+}
+
+/// A fence marker: its character and the length of its run. A fence closes
+/// only on its own character, and only on a run at least as long as the one
+/// that opened it — so a `~~~` inside a backtick fence, and a ``` inside a
+/// ````` fence, are both content.
+fn fence_marker(trimmed: &str) -> Option<(u8, usize)> {
+    let first = trimmed.as_bytes().first().copied()?;
+    if !matches!(first, b'`' | b'~') {
+        return None;
+    }
+    let run = trimmed.bytes().take_while(|b| *b == first).count();
+    (run >= 3).then_some((first, run))
+}
+
 fn is_position_heading(line: &str) -> bool {
     let Some(rest) = line.trim_start().strip_prefix("### Position") else {
         return false;
@@ -2516,31 +2591,75 @@ fn is_position_heading(line: &str) -> bool {
     rest.is_empty() || rest.starts_with(char::is_whitespace)
 }
 
-/// Count actual position blocks and at most one stated stance within each.
-/// A `Position:` example or explanation elsewhere in the document is prose,
-/// not a vote; a second stance-looking line inside one block is prose too.
+/// Count position blocks, and the stance each one states.
+///
+/// A block's stance is the first non-blank line under its heading, which is
+/// what the convention asks for and what every surface documents. A block whose
+/// first line argues instead of voting is counted as `unstated`, so a tally
+/// that undercounts says so instead of reading as a settled result — and a
+/// `Position:` line anywhere else, including inside a fenced example, is prose.
 fn position_structure(body: &str) -> (usize, StanceTally) {
     let mut positions = 0;
     let mut tally = StanceTally::default();
-    let mut in_position = false;
-    let mut saw_stance = false;
+    let mut open_block = false;
+    let mut decided = false;
+    let mut fence: Option<(u8, usize)> = None;
+    // A block ends at the next heading, at a horizontal rule, or at the end of
+    // the file.
+    let close_block = |open_block: &mut bool, decided: bool, tally: &mut StanceTally| {
+        if *open_block && !decided {
+            tally.unstated += 1;
+        }
+        *open_block = false;
+    };
     for line in body.lines() {
+        // A fenced block quotes the conventions rather than exercising them —
+        // the scaffold that teaches the stance line is itself such a quote.
+        let trimmed = line.trim_start();
+        match (fence, fence_marker(trimmed)) {
+            (None, Some(opened)) => {
+                fence = Some(opened);
+                // A block that opens with a quotation has not opened with a
+                // stance, whatever it says once the quotation ends.
+                if open_block && !decided {
+                    decided = true;
+                    tally.unstated += 1;
+                }
+                continue;
+            }
+            (Some((marker, opened)), Some((closing, run)))
+                if marker == closing && run >= opened =>
+            {
+                fence = None;
+                continue;
+            }
+            (Some(_), _) => continue,
+            (None, None) => {}
+        }
+        if is_horizontal_rule(trimmed) {
+            close_block(&mut open_block, decided, &mut tally);
+            continue;
+        }
         if is_position_heading(line) {
+            close_block(&mut open_block, decided, &mut tally);
             positions += 1;
-            in_position = true;
-            saw_stance = false;
+            open_block = true;
+            decided = false;
             continue;
         }
-        if line.trim_start().starts_with('#') {
-            in_position = false;
-        }
-        if !in_position || saw_stance {
+        if trimmed.starts_with('#') {
+            close_block(&mut open_block, decided, &mut tally);
             continue;
         }
-        let Some(rest) = line.trim().strip_prefix("Position:") else {
+        if !open_block || decided || trimmed.is_empty() {
+            continue;
+        }
+        decided = true;
+        let Some(rest) = trimmed.strip_prefix("Position:") else {
+            // The block opens by arguing rather than voting.
+            tally.unstated += 1;
             continue;
         };
-        saw_stance = true;
         match rest
             .split_whitespace()
             .next()
@@ -2551,9 +2670,11 @@ fn position_structure(body: &str) -> (usize, StanceTally) {
             Some("against") => tally.against += 1,
             Some("amend") => tally.amend += 1,
             Some(_) => tally.other += 1,
-            None => {}
+            // `Position:` with nothing after it states no stance either.
+            None => tally.unstated += 1,
         }
     }
+    close_block(&mut open_block, decided, &mut tally);
     (positions, tally)
 }
 
@@ -2643,6 +2764,18 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         summary.stances.amend,
         summary.stances.other
     );
+    if summary.stances.unstated > 0 {
+        println!(
+            "unstated: {} position block{} state no stance, so the tally undercounts \
+             (a position's first body line reads `Position: for | against | amend`)",
+            summary.stances.unstated,
+            if summary.stances.unstated == 1 {
+                ""
+            } else {
+                "s"
+            }
+        );
+    }
     let participants = if summary.participants.is_empty() {
         "(none via journal position)".to_string()
     } else {

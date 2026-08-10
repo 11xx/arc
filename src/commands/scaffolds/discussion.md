@@ -9,9 +9,11 @@
   for you (timestamp tool-computed, never hand-authored) and emits the typed
   `position` event. Pass your argument as the body, below the heading.
 - First line of the body states your stance: `Position: for | against | amend`.
-- Answer a specific claim with `--ref <position timestamp>` (the machine-
-  readable half) and a quoting first body line:
-  `> replying to <position timestamp>: <the line you answer>`.
+  It is what the `arc journal discussion` tally counts; a block that states no
+  stance is reported as unstated rather than silently uncounted.
+- Answer a specific claim with `--ref <position id>` (the machine-readable
+  half) and a quoting line directly under the stance:
+  `> replying to <position id>: <the line you answer>`.
 - Append-only: do not rewrite others' positions; add your own.
 
 ## How it resolves

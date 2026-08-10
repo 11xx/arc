@@ -286,8 +286,8 @@ enum Cmd {
         /// Read one derived brief version instead of the latest
         #[arg(long)]
         version: Option<usize>,
-        /// Prepend a scaffold template (.arc/templates/<name>.md or a built-in:
-        /// sol-low, sol-high, reviewer, discussion)
+        /// Prepend a scaffold template: .arc/templates/<name>.md, or a built-in
+        /// (sol-low, sol-high, reviewer, discussion)
         #[arg(long)]
         scaffold: Option<String>,
         /// Journal plan artifact implemented by this brief
