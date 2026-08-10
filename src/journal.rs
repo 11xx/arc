@@ -528,41 +528,15 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
     }
     let previous = recorded.unwrap_or_else(|| source.display().to_string());
 
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("cannot create {}", parent.display()))?;
-    }
-    if target.is_dir() {
-        std::fs::remove_dir(&target)
-            .with_context(|| format!("cannot replace empty {}", target.display()))?;
-    }
-    if let Err(error) = std::fs::rename(&source, &target) {
-        // A rename across filesystems cannot be atomic, and half a journal is
-        // worse than none, so the empty target goes back and the operator is
-        // told what to do instead.
-        let _ = std::fs::create_dir_all(&target);
-        bail!(
-            "cannot move {} to {}: {error}. If they are on different filesystems, copy the \
-             directory across and run this again",
-            source.display(),
-            target.display()
-        );
-    }
-    // The cold archive travels with its journal, or it becomes the next orphan.
-    if source_archive.is_dir() {
-        std::fs::rename(&source_archive, &target_archive).with_context(|| {
-            format!(
-                "moved {} to {}, but its cold archive did not follow",
-                source.display(),
-                target.display()
-            )
-        })?;
-    }
-
+    // Order matters more than atomicity here, because no filesystem offers a
+    // two-directory move that either happens or does not. So the record is
+    // written first, into the journal that is about to travel: a rebind that
+    // fails afterwards leaves a journal that states what was attempted, and
+    // one that fails here has moved nothing at all.
     let (harness, session) = identity(ctx);
     append_binding(
         ctx,
-        &target,
+        &source,
         &JournalBinding {
             schema: BINDING_SCHEMA.to_string(),
             ts: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -573,6 +547,58 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
             session: Some(session),
         },
     )?;
+
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    if target.is_dir() {
+        std::fs::remove_dir(&target)
+            .with_context(|| format!("cannot replace empty {}", target.display()))?;
+    }
+    // The cold archive moves first: it is the half nobody looks at, so a
+    // failure there is recoverable while the hot journal is still in place.
+    let mut archive_moved = false;
+    if source_archive.is_dir() {
+        std::fs::rename(&source_archive, &target_archive).with_context(|| {
+            format!(
+                "cannot move {} to {}",
+                source_archive.display(),
+                target_archive.display()
+            )
+        })?;
+        archive_moved = true;
+    }
+    if let Err(error) = std::fs::rename(&source, &target) {
+        // A rename across filesystems cannot be atomic. Put back what did
+        // move, and say precisely what is where if even that fails.
+        if archive_moved {
+            if let Err(rollback) = std::fs::rename(&target_archive, &source_archive) {
+                bail!(
+                    "cannot move {} to {}: {error}. Its cold archive is now at {} and could not \
+                     be put back: {rollback}",
+                    source.display(),
+                    target.display(),
+                    target_archive.display()
+                );
+            }
+        }
+        if let Err(restore) = std::fs::create_dir_all(&target) {
+            bail!(
+                "cannot move {} to {}: {error}. The empty target could not be recreated \
+                 either: {restore}",
+                source.display(),
+                target.display()
+            );
+        }
+        bail!(
+            "cannot move {} to {}: {error}. Nothing moved. If they are on different \
+             filesystems, copy the directory across and run this again",
+            source.display(),
+            target.display()
+        );
+    }
+
     println!("{}", target.display());
     println!("rebound: {previous} -> {anchor}");
     Ok(0)
@@ -618,6 +644,12 @@ fn split_journal_candidates(dir: &Path, anchor: Option<&Path>) -> Result<Vec<Pat
         let Some(recorded) = recorded_anchor(&candidate)? else {
             continue;
         };
+        // A journal whose project still exists belongs to that project,
+        // however its name reads. Only an orphan can be one this project left
+        // behind.
+        if Path::new(&recorded).is_dir() {
+            continue;
+        }
         if Path::new(&recorded).file_name() == Some(basename)
             && std::fs::read_dir(&candidate)?.next().is_some()
         {
@@ -1412,17 +1444,16 @@ fn recorded_anchor(dir: &Path) -> Result<Option<String>> {
 /// like the rest of the journal: a failure to record the binding never unwinds
 /// the artifact that was the point of the command.
 fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
-    // Written once per journal, so the second and later appends of a command
-    // stop at the read rather than resolving the journal again.
-    if bindings_path(dir).is_file() {
+    // The question is whether a binding was recorded, not whether a file
+    // exists: an empty or unreadable bindings file would otherwise suppress
+    // the record forever. The read is cheap and short-circuits before the
+    // journal is resolved again.
+    if recorded_anchor(dir)?.is_some() {
         return Ok(());
     }
     let Some(anchor) = resolve(&ctx.cwd)?.anchor else {
         return Ok(());
     };
-    if recorded_anchor(dir)?.is_some() {
-        return Ok(());
-    }
     let (harness, session) = identity(ctx);
     append_binding(
         ctx,

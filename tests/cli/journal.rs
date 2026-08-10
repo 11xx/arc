@@ -4104,6 +4104,48 @@ fn journal_rebind_refuses_before_it_moves_anything() {
         .stderr(predicates::str::contains("which still exists"));
     assert!(live.join("20260101T000000Z-alpha-todo.md").is_file());
     assert!(!dir.join("20260101T000000Z-alpha-todo.md").exists());
+
+    // Nor is a live project's journal offered as a candidate to adopt.
+    let report = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    assert!(
+        !report["advice"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["code"] == "split-journal"),
+        "{report}"
+    );
+}
+
+/// An empty or unparseable bindings file is not a recorded binding, and
+/// treating it as one would suppress the record forever.
+#[test]
+fn an_empty_bindings_file_does_not_count_as_a_binding() {
+    let repo = Repo::new();
+    let src = repo.home.join("body.md");
+    fs::write(&src, "something to say\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "hollow",
+            "--kind",
+            "note",
+            "--body-file",
+            src.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let dir = journal_dir(&repo);
+    fs::write(dir.join("bindings.jsonl"), "").unwrap();
+
+    repo.arc(&repo.root)
+        .args(["journal", "log", "hollow", "again"])
+        .assert()
+        .success();
+    let bindings = fs::read_to_string(dir.join("bindings.jsonl")).unwrap();
+    let binding: serde_json::Value = serde_json::from_str(bindings.trim()).unwrap();
+    assert_eq!(binding["event"], "bound", "{binding}");
 }
 
 /// A binding line that does not parse is invisible to every derived view, so
