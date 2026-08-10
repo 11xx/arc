@@ -1222,3 +1222,115 @@ fn change_flag_works_where_the_positional_does() {
         .failure()
         .stderr(predicates::str::contains("mutually exclusive"));
 }
+
+/// Evidence recorded against a commit describes a tree no checkout of that
+/// commit reproduces whenever the worktree carried uncommitted work — which is
+/// the ordinary shape of agent execution. The run is still recorded, because
+/// discarding it would push loops toward not recording at all; it just does
+/// not count as green.
+#[test]
+fn evidence_from_a_dirty_worktree_is_recorded_and_not_green() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gate"]);
+    stdout(repo.arc(&repo.root).args(["begin", "dirty"]));
+    let wt = repo.home.join(".worktrees/repo-dirty");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+
+    // Clean: the recorded tree is the commit's own, and the gate is green.
+    repo.arc(&wt)
+        .args(["verify", "dirty", "--gate", "unit"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&wt).args(["status", "dirty", "--json"]));
+    let gate = &status["gates"][0];
+    assert_eq!(gate["green_at_head"], true, "{status}");
+    assert_eq!(gate["worktree_dirty"], false, "{status}");
+    assert!(
+        gate["tested_tree"].as_str().is_some_and(|t| t.len() == 40),
+        "{status}"
+    );
+
+    // Dirty: recorded, displayed, and not green.
+    fs::write(wt.join("work.rs"), "staged but uncommitted\n").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "dirty", "--gate", "unit"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&wt).args(["status", "dirty", "--json"]));
+    let gate = &status["gates"][0];
+    assert_eq!(gate["result"], "pass", "{status}");
+    assert_eq!(gate["worktree_dirty"], true, "{status}");
+    assert_eq!(gate["green_at_head"], false, "{status}");
+
+    // An untracked file is uncommitted work too.
+    fs::write(wt.join("work.rs"), "done\n").unwrap();
+    fs::write(wt.join("scratch.rs"), "not committed\n").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "dirty", "--gate", "unit"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&wt).args(["status", "dirty", "--json"]));
+    assert_eq!(status["gates"][0]["worktree_dirty"], true, "{status}");
+}
+
+/// Re-snapshotting at the same head is how a patchset binds to a corrected
+/// brief. Counting that as a revision cycle would inflate the rework signal
+/// for exactly the leads careful enough to correct one.
+#[test]
+fn a_rebind_is_not_a_rework_round() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "rebound"]));
+    let wt = repo.home.join(".worktrees/repo-rebound");
+    repo.arc(&wt)
+        .args(["brief", "rebound", "--body-file", "-"])
+        .write_stdin("contract v1\n")
+        .assert()
+        .success();
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    stdout(repo.arc(&wt).args(["snapshot", "rebound"]));
+    repo.arc(&wt)
+        .args([
+            "review",
+            "rebound",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "brief",
+        ])
+        .assert()
+        .success();
+
+    // Correct the brief and rebind: the code has not moved.
+    repo.arc(&wt)
+        .args([
+            "brief",
+            "rebound",
+            "--body-file",
+            "-",
+            "--cause-note",
+            "the brief was wrong",
+        ])
+        .write_stdin("contract v2\n")
+        .assert()
+        .success();
+    stdout(repo.arc(&wt).args(["snapshot", "rebound"]));
+    repo.arc(&wt)
+        .args(["review", "rebound", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let stats = json_stdout(
+        repo.arc(&wt)
+            .args(["stats", "--change", "rebound", "--json"]),
+    );
+    assert_eq!(stats["changes"][0]["patchset_count"], 2, "{stats}");
+    assert_eq!(stats["changes"][0]["completed_rework_rounds"], 0, "{stats}");
+    assert_eq!(stats["changes"][0]["reworked"], false, "{stats}");
+}

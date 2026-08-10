@@ -96,6 +96,9 @@ struct CompletedVerification {
     attested: bool,
     runner: Option<String>,
     note: Option<String>,
+    tested_tree: Option<String>,
+    worktree_dirty: Option<bool>,
+    tree_moved: bool,
 }
 
 pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
@@ -680,7 +683,15 @@ fn record_verification(
     if input.attested_result.is_none() {
         eprintln!("running: {}", input.command);
     }
-    let completed = execute_verification(input, &ctx.cwd, revision.clone(), hostname)?;
+    // What the command is about to run against, captured before it runs. arc
+    // cannot know the tree a remote runner used, so attested evidence records
+    // no tree rather than the local one, which would be a guess.
+    let before = if input.attested_result.is_none() {
+        Some(gitio::worktree_tree(&ctx.cwd)?)
+    } else {
+        None
+    };
+    let mut completed = execute_verification(input, &ctx.cwd, revision.clone(), hostname)?;
     if !completed.attested {
         let post = gitio::head(&ctx.cwd)?;
         if post != revision {
@@ -688,6 +699,19 @@ fn record_verification(
                 "warning: head moved during verification ({revision} -> {post}); \
                  evidence recorded at {revision}"
             );
+        }
+        if let Some(before) = before {
+            let after = gitio::worktree_tree(&ctx.cwd)?;
+            let commit_tree = gitio::commit_tree(&ctx.cwd, &revision).ok();
+            completed.worktree_dirty = commit_tree.map(|tree| tree != before);
+            completed.tree_moved = after != before;
+            if completed.tree_moved {
+                eprintln!(
+                    "warning: the worktree changed while the command ran, so this evidence \
+                     describes no single tree"
+                );
+            }
+            completed.tested_tree = Some(before);
         }
     }
     let result = completed.result;
@@ -752,6 +776,11 @@ fn execute_verification(
         attested,
         runner,
         note,
+        // Filled in by the caller, which is what sees the worktree on both
+        // sides of the run.
+        tested_tree: None,
+        worktree_dirty: None,
+        tree_moved: false,
     })
 }
 
@@ -791,6 +820,9 @@ fn append_verifications(
             attested: item.attested,
             runner: item.runner,
             note: item.note,
+            tested_tree: item.tested_tree,
+            worktree_dirty: item.worktree_dirty,
+            tree_moved: item.tree_moved,
         };
         ensure_append_allowed(&st, &payload)?;
         let mut ev = ctx.event(store, change_id, payload);

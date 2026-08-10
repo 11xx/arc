@@ -197,6 +197,54 @@ pub fn blob_oid(cwd: &Path, rev: &str, path: &str) -> Option<String> {
     git(cwd, &["rev-parse", "--verify", &format!("{rev}:{path}")]).ok()
 }
 
+/// The tree a commit points at, for comparing what was committed with what was
+/// actually there.
+pub fn commit_tree(cwd: &Path, rev: &str) -> Result<String> {
+    git(cwd, &["rev-parse", &format!("{rev}^{{tree}}")])
+}
+
+/// The tree object for the worktree exactly as it stands, including staged
+/// and unstaged edits and files Git is not yet tracking.
+///
+/// Evidence recorded against a commit describes a tree no checkout of that
+/// commit reproduces whenever the worktree was dirty, which is the ordinary
+/// shape of agent execution. This writes the tree into the object database so
+/// the evidence names something that can still be resolved later, and uses a
+/// scratch index so the real one is untouched.
+pub fn worktree_tree(cwd: &Path) -> Result<String> {
+    // Inside the Git directory rather than the system temp dir: the index has
+    // to be on the same filesystem as the object store it feeds, and this one
+    // is already private to the repository.
+    let index_path = git_path(cwd, "arc-scratch-index")?.with_extension(crate::ids::new_event_id());
+    let index = index_path.display().to_string();
+
+    let run = |args: &[&str]| -> Result<String> {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_INDEX_FILE", &index)
+            .output()
+            .with_context(|| format!("cannot run git {}", args.join(" ")))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let result = (|| {
+        // An unborn HEAD has no tree to read; the add below still captures
+        // everything present.
+        let _ = run(&["read-tree", "HEAD"]);
+        run(&["add", "-A", "."])?;
+        run(&["write-tree"])
+    })();
+    let _ = std::fs::remove_file(&index_path);
+    result
+}
+
 pub fn is_clean(cwd: &Path) -> Result<bool> {
     Ok(git(cwd, &["status", "--porcelain"])?.is_empty())
 }
