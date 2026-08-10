@@ -8,6 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct Patchset {
     pub id: String,
     pub actor: String,
+    /// Where `actor` came from. `None` on patchsets recorded before arc kept
+    /// the provenance, which is unknown rather than declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_source: Option<ActorSource>,
     /// Subject the snapshot was taken for, when a lead ran delegated ceremony.
     pub on_behalf_of: Option<String>,
     pub base: String,
@@ -31,6 +35,11 @@ impl Patchset {
     /// behalf of one, otherwise the invoker.
     pub fn effective_author(&self) -> &str {
         self.on_behalf_of.as_deref().unwrap_or(&self.actor)
+    }
+
+    /// Whether anyone claimed the identity this patchset is attributed to.
+    pub fn author_declared(&self) -> bool {
+        author_declared(self.on_behalf_of.as_deref(), self.actor_source)
     }
 }
 
@@ -247,6 +256,10 @@ pub struct VerdictEntry {
     pub actor: String,
     /// Subject the verdict was cast for, when a lead reviewed on behalf of one.
     pub on_behalf_of: Option<String>,
+    /// Where `actor` came from. `None` on verdicts recorded before arc kept
+    /// the provenance, which is unknown rather than declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_source: Option<ActorSource>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -256,6 +269,20 @@ impl VerdictEntry {
     pub fn effective_author(&self) -> &str {
         self.on_behalf_of.as_deref().unwrap_or(&self.actor)
     }
+
+    /// Whether anyone claimed the identity this verdict is attributed to. A
+    /// delegated subject is always claimed; an invoker is claimed only when
+    /// someone declared it.
+    pub fn author_declared(&self) -> bool {
+        author_declared(self.on_behalf_of.as_deref(), self.actor_source)
+    }
+}
+
+/// An effective author is claimed when it came from a declared subject, or
+/// from an identity someone declared. An identity arc assumed, or one recorded
+/// before arc kept provenance, names nobody in particular.
+fn author_declared(on_behalf_of: Option<&str>, source: Option<ActorSource>) -> bool {
+    on_behalf_of.is_some() || source.is_some_and(ActorSource::declared)
 }
 
 /// A declared, not-yet-discharged review obligation.
@@ -705,6 +732,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 state.patchsets.push(Patchset {
                     id: patchset_id.clone(),
                     actor: ev.actor.clone(),
+                    actor_source: ev.actor_source,
                     on_behalf_of: ev.on_behalf_of.clone(),
                     base: base.clone(),
                     head: head.clone(),
@@ -973,6 +1001,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     body: body.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
+                    actor_source: ev.actor_source,
                     created_at: ev.created_at,
                 });
             }
@@ -1502,6 +1531,7 @@ mod tests {
             repository_id: "repo".into(),
             change_id: change.into(),
             actor: "tester".into(),
+            actor_source: Some(ActorSource::Flag),
             on_behalf_of: None,
             harness: None,
             session: None,

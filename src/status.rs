@@ -12,6 +12,12 @@ use std::path::Path;
 pub const STATUS_SCHEMA: &str = "arc-status/6";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
+/// Two identities nobody declared cannot establish that two people acted. The
+/// self-approval guard compares effective authors, so an assumed identity on
+/// either side makes the comparison meaningless rather than passing.
+pub const UNDECLARED_APPROVAL_REASON: &str =
+    "approval rejected by policy: nobody declared the reviewing or the authoring identity, \
+     so independence is unproven (pass --actor or set ARC_ACTOR)";
 
 /// Typed integration blockers, ordered by exit-code precedence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -318,6 +324,9 @@ pub struct VerdictStatus {
     pub actor: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_behalf_of: Option<String>,
+    /// Whether anyone declared the identity this verdict is attributed to.
+    /// Additive in `arc-status/6`.
+    pub author_declared: bool,
     pub valid_for_current_head: bool,
 }
 
@@ -450,8 +459,10 @@ fn build_report(
         // is reachable.
         let rejected_self_approval = policy.policy.forbid_self_approval
             && !state.audit_debt_waives_current_head()
-            && approved_patchset
-                .is_some_and(|patchset| patchset.effective_author() == v.effective_author());
+            && approved_patchset.is_some_and(|patchset| {
+                patchset.effective_author() == v.effective_author()
+                    || !(patchset.author_declared() && v.author_declared())
+            });
         let valid = v.verdict == Verdict::Approved
             && latest_patchset
                 .as_ref()
@@ -465,6 +476,7 @@ fn build_report(
             body: v.body.clone(),
             actor: v.actor.clone(),
             on_behalf_of: v.on_behalf_of.clone(),
+            author_declared: v.author_declared(),
             valid_for_current_head: valid,
         }
     });
@@ -479,9 +491,20 @@ fn build_report(
                 policy.policy.forbid_self_approval
                     && !state.audit_debt_waives_current_head()
                     && patchset.id == verdict.patchset_id
-                    && patchset.effective_author() == verdict_author
+                    && (patchset.effective_author() == verdict_author
+                        || !(patchset.author_declared() && verdict.author_declared))
             }))
-        .then(|| SELF_APPROVAL_REASON.to_string())
+        .then(|| {
+            let both_declared = latest_patchset
+                .as_ref()
+                .is_some_and(|patchset| patchset.author_declared())
+                && verdict.author_declared;
+            if both_declared {
+                SELF_APPROVAL_REASON.to_string()
+            } else {
+                UNDECLARED_APPROVAL_REASON.to_string()
+            }
+        })
     });
 
     let review_map = reviewer_coverage(state);

@@ -591,6 +591,7 @@ mod tests {
             repository_id: "repo".into(),
             change_id: "c".into(),
             actor: "tester".into(),
+            actor_source: Some(ActorSource::Flag),
             on_behalf_of: None,
             harness: Some("test".into()),
             session: Some("s".into()),

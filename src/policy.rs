@@ -23,6 +23,11 @@ pub struct PolicyFile {
 pub struct Policy {
     #[serde(default)]
     pub forbid_self_approval: bool,
+    /// Refuse to record an event whose effective author nobody declared.
+    /// Opt-in, like `forbid_self_approval`: a local ledger cannot verify who
+    /// an actor claims to be, but it can decline to invent one.
+    #[serde(default)]
+    pub require_declared_actor: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]

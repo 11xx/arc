@@ -1172,6 +1172,8 @@ fn integrate_tagged(ctx: &Ctx, tags: Vec<String>, cleanup: bool) -> Result<i32> 
     let batch_ctx = Ctx {
         cwd: gitio::primary_worktree(&ctx.cwd)?,
         actor: ctx.actor.clone(),
+        actor_source: ctx.actor_source,
+        fallback_announced: ctx.fallback_announced.clone(),
         harness: ctx.harness.clone(),
         session: ctx.session.clone(),
         model: ctx.model.clone(),
