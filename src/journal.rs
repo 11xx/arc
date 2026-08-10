@@ -228,7 +228,7 @@ pub enum JournalCmd {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
         /// Position or item this answers: a position ID, legacy timestamp, or
-        /// item slug. Open the body by quoting the claim being answered
+        /// item slug. Quote the claim answered on the line below the stance
         #[arg(long = "ref")]
         reference: Option<String>,
         /// Body source: a file path, or '-' for stdin (the position argument,
@@ -811,6 +811,11 @@ fn note(
         None => String::new(),
     };
     let body = crate::commands::scaffold::prepended(&template, &content);
+    // A repo-local template may be empty, and an artifact with no content at
+    // all is a queue entry that says nothing.
+    if body.trim().is_empty() {
+        bail!("nothing to record: the body and the scaffold are both empty");
+    }
 
     let dir = resolve_dir(&ctx.cwd)?;
     std::fs::create_dir_all(&dir)
@@ -2226,8 +2231,9 @@ fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
 /// session is expected to pick up; `later` and `feature-request` are parked
 /// until someone chooses to spend on them.
 const OPEN_TIER_LEGEND: &str =
-    "tiers: open = todo|handoff|plan|discussion (work awaiting a session); \
-later = parked; feature-request = unbuilt proposals. \
+    "tiers: open = todo|handoff|plan|discussion, plus artifacts of the retired \
+inbox kind (work awaiting a session); later = parked; \
+feature-request = unbuilt proposals. \
 A discussion argues a proposal to a decision and collects positions; \
 a feature-request is the unbuilt proposal itself. \
 Take one up with `arc begin <slug> --from-journal <file>`.";
@@ -2553,6 +2559,17 @@ fn discussion_rounds(positions: &[&JournalEvent]) -> (Vec<DiscussionRound>, Vec<
     (rounds, unanswered)
 }
 
+/// A thematic break, or the underline of a setext heading. Either one ends the
+/// block above it, so a stance below belongs to the next section.
+fn is_horizontal_rule(trimmed: &str) -> bool {
+    let candidate = trimmed.trim_end();
+    candidate.len() >= 3
+        && (candidate.bytes().all(|b| b == b'-')
+            || candidate.bytes().all(|b| b == b'=')
+            || candidate.bytes().all(|b| b == b'_')
+            || candidate.bytes().all(|b| b == b'*'))
+}
+
 fn is_position_heading(line: &str) -> bool {
     let Some(rest) = line.trim_start().strip_prefix("### Position") else {
         return false;
@@ -2570,7 +2587,9 @@ fn position_structure(body: &str) -> (usize, StanceTally) {
     let mut tally = StanceTally::default();
     let mut open_block = false;
     let mut saw_stance = false;
-    // A block ends at the next heading of any level, or at the end of the file.
+    let mut in_fence = false;
+    // A block ends at the next heading, at a horizontal rule, or at the end of
+    // the file.
     let close_block = |open_block: &mut bool, saw_stance: bool, tally: &mut StanceTally| {
         if *open_block && !saw_stance {
             tally.unstated += 1;
@@ -2578,6 +2597,21 @@ fn position_structure(body: &str) -> (usize, StanceTally) {
         *open_block = false;
     };
     for line in body.lines() {
+        // A fenced block quotes the conventions rather than exercising them —
+        // the scaffold that teaches the stance line is itself such a quote.
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if is_horizontal_rule(trimmed) {
+            close_block(&mut open_block, saw_stance, &mut tally);
+            saw_stance = false;
+            continue;
+        }
         if is_position_heading(line) {
             close_block(&mut open_block, saw_stance, &mut tally);
             positions += 1;

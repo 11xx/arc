@@ -2513,6 +2513,88 @@ fn journal_discussion_flags_positions_that_state_no_stance() {
     assert_eq!(json["stances"]["for"], 1);
 }
 
+/// The document that teaches the stance line quotes it, and a rule below a
+/// section break belongs to that section. Neither is a vote.
+#[test]
+fn journal_discussion_tally_ignores_quoted_and_out_of_block_stances() {
+    let repo = Repo::new();
+    let src = repo.home.join("open.md");
+    fs::write(
+        &src,
+        "how to argue\n\n```markdown\n### Position\n\nPosition: for\n```\n",
+    )
+    .unwrap();
+    let file = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "quoted",
+        "--kind",
+        "discussion",
+        "--no-scaffold",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    let name = PathBuf::from(file.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let json: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "journal",
+        "discussion",
+        &name,
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(json["positions"], 0, "{json}");
+    assert_eq!(json["stances"]["for"], 0, "{json}");
+    assert_eq!(json["stances"]["unstated"], 0, "{json}");
+
+    // A stance under a section break belongs to the section, not to the
+    // position block above it.
+    let after = repo.home.join("after.md");
+    fs::write(&after, "no stance in this block\n\n---\n\nPosition: for\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &name,
+            "--body-file",
+            after.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let json: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "journal",
+        "discussion",
+        &name,
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(json["positions"], 1, "{json}");
+    assert_eq!(json["stances"]["for"], 0, "{json}");
+    assert_eq!(json["stances"]["unstated"], 1, "{json}");
+}
+
+/// A repo-local template may be empty, and the default scaffold must not turn
+/// that into a silently recorded empty artifact.
+#[test]
+fn journal_note_refuses_an_empty_body_and_empty_scaffold() {
+    let repo = Repo::new();
+    let templates = repo.root.join(".arc/templates");
+    fs::create_dir_all(&templates).unwrap();
+    fs::write(templates.join("discussion.md"), "").unwrap();
+
+    repo.arc(&repo.root)
+        .args(["journal", "note", "hollow", "--kind", "discussion"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("nothing to record"));
+    let listed = stdout(repo.arc(&repo.root).args(["journal", "list"]));
+    assert!(listed.contains("(none)"), "{listed}");
+}
+
 #[test]
 fn decision_records_without_joining_journal_open() {
     let repo = Repo::new();
