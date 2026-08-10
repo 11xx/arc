@@ -229,10 +229,10 @@ fn stats_by_model_attributes_patchsets_and_rework_to_the_subject() {
         .assert()
         .success();
 
-    // Round two: revised and approved.
+    // Round two: a different identity writes the revision that answers it.
     repo.commit(&wt, "two.rs", "second\n", "feat: second");
     repo.arc(&wt)
-        .args(["snapshot", "delegated", "--on-behalf-of", "sol#high"])
+        .args(["snapshot", "delegated", "--on-behalf-of", "terra#high"])
         .assert()
         .success();
     repo.arc(&wt)
@@ -264,21 +264,56 @@ fn stats_by_model_attributes_patchsets_and_rework_to_the_subject() {
             .clone()
     };
 
+    // The round is charged to the work that was sent back, not to the
+    // revision that answered it.
     let executor = row("sol#high");
-    assert_eq!(executor["patchsets"], 2, "{report}");
-    assert_eq!(executor["rework_rounds"], 1, "{report}");
+    assert_eq!(executor["patchsets"], 1, "{report}");
+    assert_eq!(executor["rework_rounds_caused"], 1, "{report}");
     assert_eq!(executor["verdicts"], 0, "{report}");
     assert_eq!(executor["changes"], 1, "{report}");
+
+    let fixer = row("terra#high");
+    assert_eq!(fixer["patchsets"], 1, "{report}");
+    assert_eq!(fixer["rework_rounds_caused"], 0, "{report}");
 
     let reviewer = row("reviewer-model");
     assert_eq!(reviewer["verdicts"], 2, "{report}");
     assert_eq!(reviewer["patchsets"], 0, "{report}");
-    assert_eq!(reviewer["rework_rounds"], 0, "{report}");
+    assert_eq!(reviewer["rework_rounds_caused"], 0, "{report}");
 
     let unknown = row("(unattributed)");
     assert_eq!(unknown["patchsets"], 1, "{report}");
 
+    // An identity that only filed a finding still has a row.
+    repo.arc(&wt)
+        .args([
+            "finding",
+            "delegated",
+            "--summary",
+            "spotted",
+            "--on-behalf-of",
+            "finder-model",
+        ])
+        .assert()
+        .success();
+    let report = json_stdout(repo.arc(&wt).args(["stats", "--by-model", "--json"]));
+    let rows = report["models"].as_array().unwrap();
+    let finder = rows
+        .iter()
+        .find(|row| row["identity"] == "finder-model")
+        .unwrap_or_else(|| panic!("no row for finder-model: {report}"));
+    assert_eq!(finder["changes"], 1, "{report}");
+    assert_eq!(finder["patchsets"], 0, "{report}");
+
     let text = stdout(repo.arc(&wt).args(["stats", "--by-model"]));
     assert!(text.contains("sol#high"), "{text}");
     assert!(text.contains("(unattributed)"), "{text}");
+
+    // A selection and --all cannot both be asked for, however --change is
+    // spelled.
+    repo.arc(&wt)
+        .args(["--change", "delegated", "stats", "--by-model", "--all"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be combined"));
 }

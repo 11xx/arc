@@ -326,6 +326,20 @@ offered for `--stage-budget` tuning and never applied automatically. Attested
 gate evidence carries no observed duration and is excluded from gate timing.
 JSON is versioned `arc-stats/1`.
 
+`arc stats --by-model` answers a different question from the same events: one
+row per delegated identity rather than per change, with changes touched,
+patchsets contributed, rework rounds those patchsets caused, and verdicts
+issued as reviewer. Rows are keyed on the `--on-behalf-of` subject, never the
+actor — a lead runs the ceremony on an executor's behalf, so attributing by
+actor would credit the lead for every line the executor wrote. A round is
+charged to the patchset that was sent back rather than to the revision that
+answered it, so the number is what an identity's work cost and not what it
+cleaned up. Work with no recorded subject is counted in its own
+`(unattributed)` row rather than distributed silently; model identity is a
+convention leads write into `--on-behalf-of`, and nothing enforces its shape.
+This view is versioned `arc-stats-by-model/1`, separately from `arc-stats/1`,
+because it is a different shape rather than a wider one.
+
 Claims are advisory rather than merge locks:
 
 ```sh

@@ -1200,10 +1200,15 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Stats {
             change,
             tag,
-            all: _,
+            all,
             by_model,
             json,
         } => {
+            // clap rejects the pair on the subcommand, but a global `--change`
+            // placed before it never reaches that check.
+            if all && (change.is_some() || tag.is_some()) {
+                bail!("--all reports every change; it cannot be combined with --change or --tag");
+            }
             let selection = match (change, tag) {
                 (Some(change), None) => commands::StatsSelection::Change(change),
                 (None, Some(tag)) => commands::StatsSelection::Tag(tag),

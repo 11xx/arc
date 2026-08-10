@@ -81,10 +81,13 @@ struct ModelStats {
     changes: usize,
     /// Patchsets contributed as implementer.
     patchsets: usize,
-    /// Rework rounds opened against a patchset this identity contributed. A
-    /// round is a revision cycle, so several changes-requested verdicts on one
-    /// patchset count once, exactly as they do per change.
-    rework_rounds: usize,
+    /// Rework rounds opened against a patchset this identity contributed —
+    /// what its work cost, not what it cleaned up. The revision that answers a
+    /// round belongs to whoever wrote it, and crediting the round there would
+    /// charge the fixer for the defect. A round is a revision cycle, so
+    /// several changes-requested verdicts on one patchset count once, exactly
+    /// as they do per change.
+    rework_rounds_caused: usize,
     /// Verdicts issued as reviewer.
     verdicts: usize,
 }
@@ -125,16 +128,18 @@ fn by_model(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
         // identity whose work opened it rather than on the reviewer.
         let mut patchset_subject: BTreeMap<&str, &str> = BTreeMap::new();
         for event in &events {
-            if let Payload::PatchsetAdded { patchset_id, .. } = &event.payload {
-                patchset_subject.insert(patchset_id.as_str(), subject(event));
-                let row = rows.entry(subject(event).to_string()).or_default();
-                row.changes.insert(change_id.clone());
-                row.patchsets += 1;
-            }
-            if let Payload::VerdictRecorded { .. } = &event.payload {
-                let row = rows.entry(subject(event).to_string()).or_default();
-                row.changes.insert(change_id.clone());
-                row.verdicts += 1;
+            // Touching a change is any recorded contribution to it, so an
+            // identity that only filed findings or ran gates has a row rather
+            // than vanishing.
+            let row = rows.entry(subject(event).to_string()).or_default();
+            row.changes.insert(change_id.clone());
+            match &event.payload {
+                Payload::PatchsetAdded { patchset_id, .. } => {
+                    patchset_subject.insert(patchset_id.as_str(), subject(event));
+                    row.patchsets += 1;
+                }
+                Payload::VerdictRecorded { .. } => row.verdicts += 1,
+                _ => {}
             }
         }
         for patchset_id in derive_rework(&events).reworked_patchsets {
@@ -152,7 +157,7 @@ fn by_model(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
             identity,
             changes: row.changes.len(),
             patchsets: row.patchsets,
-            rework_rounds: row.rework_rounds,
+            rework_rounds_caused: row.rework_rounds,
             verdicts: row.verdicts,
         })
         .collect();
@@ -169,7 +174,7 @@ fn by_model(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
     }
     println!(
         "{:<40} {:>8} {:>10} {:>8} {:>9}",
-        "identity", "changes", "patchsets", "rework", "verdicts"
+        "identity", "changes", "patchsets", "caused-rw", "verdicts"
     );
     for model in &models {
         println!(
@@ -177,7 +182,7 @@ fn by_model(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
             truncate(&model.identity, 40),
             model.changes,
             model.patchsets,
-            model.rework_rounds,
+            model.rework_rounds_caused,
             model.verdicts
         );
     }
