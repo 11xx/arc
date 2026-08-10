@@ -241,10 +241,11 @@ arc events --change radio-refill-fix --type patchset-added
 arc events --since 01J00000000000000000000000
 arc events --follow                     # replay, then stream raw NDJSON events
 arc events --follow --exec './handle-event'
+arc events --follow --tag arrears         # one stream for a tagged program
 arc watch radio-refill-fix --until snapshot --timeout 30
 arc watch radio-refill-fix --until ready,stalled --exec './notify'
-arc watch radio-refill-fix --until stalled
-arc watch radio-refill-fix --until ready
+arc watch radio-refill-fix --until snapshot --json
+arc watch --tag arrears --all --until integrated --json
 ```
 
 `arc events` emits one compact raw ledger event per line. Replay output and
@@ -255,6 +256,27 @@ timeout. `snapshot` waits for a patchset, `ready` matches `arc check` success,
 `stalled` reaches only when a live claim is stale, `integrated` requires that
 closure outcome, and `closed` accepts integrated, abandoned, or superseded
 changes.
+
+`events --tag` follows a whole tagged program as one stream rather than one
+follower per member, which is what keeps the interleaving readable. Membership
+is what it is while the stream is being read: a change that acquires the tag
+joins it. `--change` and `--tag` select different scopes and cannot be combined.
+
+`watch --json` emits one object instead of prose, naming the change, the
+condition, and the event that satisfied it — `event_id` is present only when an
+event did, because `ready` and `stalled` are derived from policy and elapsed
+time rather than from something somebody recorded. A timeout emits
+`watch-timeout` and still exits 2, so a script branches on the object rather
+than on the text. Under `--tag --all` the object carries one entry per member
+and no top-level placeholders.
+
+`arc doctor` reports a `dangling-revision` for any revision the ledger records
+that Git can no longer resolve — patchset heads and bases, brief bases, merge
+bases, verification and verification-run revisions, audit revisions,
+disposition commits, the integration commit, and the forge's recorded heads. A
+history rewrite leaves the ledger intact and its evidence unreachable, which is
+advice rather than a problem: the ledger is not malformed and the rewrite was
+deliberate, but it is the difference between evidence and a claim.
 
 `--since <event-id>` treats a valid ULID as an exclusive lower bound and
 composes with replay, follow, change, and type filters. `events --exec <cmd>`

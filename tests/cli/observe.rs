@@ -535,3 +535,111 @@ fn watch_scope_and_quorum_misuse_is_refused() {
             .stderr(predicates::str::contains(expected));
     }
 }
+
+/// A watch is something a script waits on, so its outcome has to be readable
+/// without parsing prose — including which event satisfied it, when one did.
+#[test]
+fn watch_json_names_the_change_the_condition_and_the_event() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "watched"]));
+    let wt = repo.home.join(".worktrees/repo-watched");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    let snapshot = stdout(repo.arc(&wt).args(["snapshot", "watched"]));
+    let event_id = snapshot
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap();
+
+    let out = stdout(
+        repo.arc(&wt)
+            .args(["watch", "watched", "--until", "snapshot", "--json"]),
+    );
+    let value: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(value["event_type"], "watch-reached");
+    assert_eq!(value["condition"], "snapshot");
+    assert_eq!(value["event_id"], event_id, "{value}");
+    assert!(value["change_id"].as_str().unwrap().starts_with("watched-"));
+
+    // A timeout is an outcome a script branches on, so it is JSON too.
+    let out = repo
+        .arc(&wt)
+        .args([
+            "watch",
+            "watched",
+            "--until",
+            "integrated",
+            "--timeout",
+            "1",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let value: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(value["event_type"], "watch-timeout");
+}
+
+/// A condition derived from elapsed time or from policy is satisfied by no
+/// event, and a field that otherwise holds an event ID should not sometimes
+/// hold a placeholder.
+#[test]
+fn watch_json_omits_the_event_id_for_a_derived_condition() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "derived"]));
+    let wt = repo.home.join(".worktrees/repo-derived");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    stdout(repo.arc(&wt).args(["snapshot", "derived"]));
+    repo.arc(&wt)
+        .args(["review", "derived", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let out = stdout(repo.arc(&wt).args([
+        "watch",
+        "derived",
+        "--until",
+        "ready",
+        "--timeout",
+        "10",
+        "--json",
+    ]));
+    let value: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(value["condition"], "ready", "{value}");
+    assert!(value.get("event_id").is_none(), "{value}");
+}
+
+/// A tagged program is the unit an orchestrator waits on, and following each
+/// member separately loses the interleaving that makes the stream worth
+/// reading.
+#[test]
+fn events_can_follow_a_tagged_program() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "member", "--tag", "program", "--no-worktree"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "outsider", "--no-worktree"]),
+    );
+
+    let tagged = stdout(repo.arc(&repo.root).args(["events", "--tag", "program"]));
+    assert!(tagged.contains("member"), "{tagged}");
+    assert!(!tagged.contains("outsider"), "{tagged}");
+
+    // Membership is what it is when the stream is read, not when it started.
+    repo.arc(&repo.root)
+        .args(["metadata", "outsider", "--tag", "program"])
+        .assert()
+        .success();
+    let tagged = stdout(repo.arc(&repo.root).args(["events", "--tag", "program"]));
+    assert!(tagged.contains("outsider"), "{tagged}");
+
+    // A change and a tag are different scopes.
+    repo.arc(&repo.root)
+        .args(["events", "--change", "member", "--tag", "program"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("different scopes"));
+}

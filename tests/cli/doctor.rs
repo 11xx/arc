@@ -170,3 +170,46 @@ pub(crate) fn doctor_reports_closed_registered_worktrees_without_removing_them()
         registrations_before
     );
 }
+
+/// A history rewrite leaves the ledger intact and its evidence unreachable:
+/// every recorded revision still says what was verified, and none of it can be
+/// checked out. Patchset heads survive because arc keeps a retention ref for
+/// each; everything else it records — a verification revision, a brief base —
+/// has nothing holding it. The ledger is not malformed, so this is advice, but
+/// it is the difference between evidence and a claim.
+#[test]
+fn doctor_reports_a_recorded_revision_git_can_no_longer_resolve() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "rewritten"]));
+    let wt = repo.home.join(".worktrees/repo-rewritten");
+    repo.commit(&wt, "work.rs", "first\n", "feat: first");
+    let recorded = repo.head(&wt);
+    repo.arc(&wt)
+        .args(["verify", "rewritten", "--command", "true"])
+        .assert()
+        .success();
+
+    // Rewrite the branch out from under the recorded evidence, as an amend or
+    // a rebase would.
+    git(&wt, &["reset", "--hard", "HEAD~1"]);
+    git(&wt, &["reflog", "expire", "--expire=now", "--all"]);
+    git(&repo.root, &["reflog", "expire", "--expire=now", "--all"]);
+    git(&repo.root, &["gc", "--prune=now", "--quiet"]);
+
+    let report = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
+    let dangling: Vec<&serde_json::Value> = report["advice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["code"] == "dangling-revision")
+        .collect();
+    assert!(!dangling.is_empty(), "{report}");
+    assert!(
+        dangling
+            .iter()
+            .any(|item| item["detail"].as_str().unwrap().contains(&recorded[..8])),
+        "{report}"
+    );
+    // Advice never fails the command: the ledger is not malformed.
+    repo.arc(&repo.root).args(["doctor"]).assert().success();
+}

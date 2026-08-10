@@ -51,6 +51,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         &mut states,
         &mut known_patchsets,
     )?;
+    inspect_dangling_revisions(&ctx.cwd, &Store::discover(&ctx.cwd)?, &states, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
     inspect_audit_debt(&states, &mut advice);
@@ -80,6 +81,113 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         render_advice(&report.advice, verbose);
     }
     Ok(exit)
+}
+
+/// Recorded revisions that Git can no longer resolve.
+///
+/// A history rewrite leaves the ledger intact and its evidence unreachable:
+/// every recorded SHA still says what was verified and reviewed, and none of
+/// it can be checked out. That is advice rather than a problem — the ledger is
+/// not malformed, and the rewrite was somebody's deliberate act — but it is
+/// the difference between evidence and a claim, so it has to be visible
+/// without writing a bespoke script.
+fn inspect_dangling_revisions(
+    cwd: &Path,
+    store: &Store,
+    states: &BTreeMap<String, ChangeState>,
+    advice: &mut Vec<Finding>,
+) -> Result<()> {
+    let mut wanted: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (change_id, state) in states {
+        // Every revision the ledger records, because the point is that the
+        // evidence still resolves, and a hexadecimal string is what Git will
+        // be asked to resolve however short it is.
+        let mut note = |revision: &str, what: String| {
+            let revision = revision.trim();
+            if !revision.is_empty() && revision.chars().all(|c| c.is_ascii_hexdigit()) {
+                wanted
+                    .entry(revision.to_string())
+                    .or_default()
+                    .insert(format!("{change_id} {what}"));
+            }
+        };
+        note(&state.base, "base".to_string());
+        for patchset in &state.patchsets {
+            note(&patchset.head, format!("{} head", patchset.id));
+            note(&patchset.base, format!("{} base", patchset.id));
+            if let Some(merge_base) = patchset.merge_base.as_deref() {
+                note(merge_base, format!("{} merge-base", patchset.id));
+            }
+        }
+        for brief in &state.briefs {
+            if let Some(base) = brief.base_revision.as_deref() {
+                note(base, "brief base".to_string());
+            }
+        }
+        for verification in &state.verifications {
+            note(&verification.revision, "verification".to_string());
+        }
+        for run in &state.verification_runs {
+            note(&run.revision, "verification run".to_string());
+        }
+        for audit in &state.audit_verdicts {
+            note(&audit.revision, "audit".to_string());
+        }
+        for finding in state.findings.values().chain(state.audit_findings.values()) {
+            for disposition in &finding.dispositions {
+                if let Some(commit) = disposition.commit.as_deref() {
+                    note(commit, format!("{} disposition", finding.id));
+                }
+            }
+        }
+        if let Some(commit) = state
+            .closure
+            .as_ref()
+            .and_then(|closure| closure.integrated_commit.as_deref())
+        {
+            note(commit, "integration".to_string());
+        }
+        // A forge records revisions too, and a rewritten branch strands them
+        // exactly as it strands a local one. These come from the events rather
+        // than from reduced state, because forge facts are latest-wins: an
+        // earlier head is still recorded, and still names something that was
+        // supposed to exist.
+        // A malformed event file is already reported as its own problem, and
+        // a scan for unreachable revisions should not be the thing that fails
+        // because of it.
+        for event in store.load_events(change_id).unwrap_or_default() {
+            match &event.payload {
+                Payload::ForgeLink { head_sha, .. } => {
+                    note(head_sha, "forge link head".to_string())
+                }
+                Payload::ForgeChecks { pr_head, .. } => {
+                    note(pr_head, "forge checks head".to_string())
+                }
+                Payload::ForgePrState {
+                    merge_sha: Some(merge_sha),
+                    ..
+                } => note(merge_sha, "forge merge".to_string()),
+                _ => {}
+            }
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    // One batch rather than a process per revision: a ledger of any age holds
+    // thousands, and a doctor that costs a minute stops being run.
+    for revision in gitio::missing_objects(cwd, wanted.keys().map(String::as_str))? {
+        let short = &revision[..revision.len().min(8)];
+        let referents = wanted
+            .get(&revision)
+            .map(|set| set.iter().cloned().collect::<Vec<_>>().join(", "))
+            .unwrap_or_default();
+        advice.push(Finding {
+            code: "dangling-revision",
+            detail: format!("{short} is recorded but no longer in this repository: {referents}"),
+        });
+    }
+    Ok(())
 }
 
 fn inspect_changes(

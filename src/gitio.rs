@@ -294,6 +294,73 @@ pub fn list_refs(cwd: &Path, prefix: &str) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// Which of these revisions this repository cannot resolve.
+///
+/// One `cat-file --batch-check` process answers for every revision at once,
+/// because a ledger of any age holds thousands and a check that costs a
+/// process each stops being run.
+pub fn missing_objects<'a>(
+    cwd: &Path,
+    revisions: impl Iterator<Item = &'a str>,
+) -> Result<Vec<String>> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    // A revision containing a newline would become two queries and shift every
+    // later answer, so those are refused rather than silently misaligned.
+    let revisions: Vec<&str> = revisions
+        .filter(|revision| !revision.contains(['\n', '\r']))
+        .collect();
+    if revisions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut child = Command::new("git")
+        .args(["cat-file", "--batch-check=%(objectname) %(objecttype)"])
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("cannot run git cat-file")?;
+    let query = revisions.join("\n") + "\n";
+    child
+        .stdin
+        .take()
+        .context("git cat-file has no stdin")?
+        .write_all(query.as_bytes())
+        .context("cannot write to git cat-file")?;
+    let output = child.wait_with_output().context("git cat-file failed")?;
+    if !output.status.success() {
+        // Reporting nothing missing because the probe failed would turn a
+        // broken repository into a clean bill of health.
+        anyhow::bail!(
+            "git cat-file failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let answers: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    if answers.len() != revisions.len() {
+        anyhow::bail!(
+            "git cat-file answered {} of {} revisions; refusing to guess which",
+            answers.len(),
+            revisions.len()
+        );
+    }
+
+    // One answer line per query line, in order. A resolvable revision answers
+    // with its object; anything else names why it could not be resolved.
+    let mut missing = Vec::new();
+    for (revision, answer) in revisions.iter().zip(&answers) {
+        if answer.ends_with(" missing") || answer.ends_with(" ambiguous") {
+            missing.push((*revision).to_string());
+        }
+    }
+    Ok(missing)
+}
+
 pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
     let out = Command::new("git")
         .args(["merge-base", "--is-ancestor", ancestor, descendant])

@@ -10,24 +10,57 @@ pub fn events(
     ctx: &Ctx,
     follow: bool,
     change: Option<&str>,
+    tags: &[String],
     event_type: Option<&str>,
     since: Option<ulid::Ulid>,
     exec_command: Option<&str>,
 ) -> Result<()> {
+    if change.is_some() && !tags.is_empty() {
+        bail!("--change and --tag select different scopes; supply one");
+    }
     let store = ctx.store()?;
     let change_id = change
         .map(|reference| store.resolve_change(reference))
         .transpose()?;
+    // A tagged program is the unit an orchestrator waits on, and following
+    // each member separately loses the interleaving that makes the stream
+    // worth reading. Membership is re-derived each pass, so a change that
+    // acquires the tag mid-follow joins the stream — which is what "the
+    // changes carrying this tag" means while it is being followed.
+    let tags = if tags.is_empty() {
+        Vec::new()
+    } else {
+        normalize_tags(tags.to_vec())?
+    };
     let mut seen = BTreeSet::new();
     let mut poll_interval = POLL_MIN;
     let since = since.map(|cursor| cursor.to_string());
 
+    // Membership is what it is when the stream is read, but deriving it means
+    // replaying every change, so it is re-derived only when an event that can
+    // change it has appeared. A steady stream of ordinary events costs
+    // nothing.
+    let mut tagged: Option<BTreeSet<String>> = if tags.is_empty() {
+        None
+    } else {
+        Some(resolve_tagged(ctx, &tags)?.into_iter().collect())
+    };
     loop {
         let raw_events = match &change_id {
             Some(id) => store.raw_events_unseen(id, &seen)?,
             None => store.raw_events_all_unseen(&seen)?,
         };
         let observed_events = !raw_events.is_empty();
+        if tagged.is_some()
+            && raw_events.iter().any(|(_, value)| {
+                matches!(
+                    value.get("event_type").and_then(serde_json::Value::as_str),
+                    Some("change-opened") | Some("metadata-updated")
+                )
+            })
+        {
+            tagged = Some(resolve_tagged(ctx, &tags)?.into_iter().collect());
+        }
         let mut out = std::io::stdout().lock();
         for (event_id, value) in raw_events {
             seen.insert(event_id.clone());
@@ -41,6 +74,15 @@ pub fn events(
                 value.get("event_type").and_then(serde_json::Value::as_str) == Some(wanted)
             }) {
                 continue;
+            }
+            if let Some(members) = &tagged {
+                let belongs = value
+                    .get("change_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| members.contains(id));
+                if !belongs {
+                    continue;
+                }
             }
             let mut line = serde_json::to_vec(&value)?;
             line.push(b'\n');
@@ -71,21 +113,37 @@ pub enum WatchQuorum {
     All,
 }
 
-/// One member that satisfied the watch, with the condition it reached.
+/// One member that satisfied the watch, with the condition it reached and the
+/// event that made it true.
+///
+/// Some conditions are a fact somebody recorded — a snapshot, a closure — and
+/// name the event that recorded it. Others are derived from elapsed time or
+/// from policy, and no event made them true; those say so rather than naming
+/// the newest event and implying a causal link that is not there.
 struct WatchHit {
     change_id: String,
     condition: WatchUntil,
+    event_id: Option<String>,
 }
 
-pub fn watch(
-    ctx: &Ctx,
-    reference: Option<&str>,
-    tags: &[String],
-    quorum: Option<WatchQuorum>,
-    until: &[WatchUntil],
-    timeout_secs: Option<u64>,
-    exec_command: Option<&str>,
-) -> Result<i32> {
+pub struct WatchArgs<'a> {
+    pub tags: &'a [String],
+    pub quorum: Option<WatchQuorum>,
+    pub until: &'a [WatchUntil],
+    pub timeout_secs: Option<u64>,
+    pub exec_command: Option<&'a str>,
+    pub json: bool,
+}
+
+pub fn watch(ctx: &Ctx, reference: Option<&str>, args: WatchArgs) -> Result<i32> {
+    let WatchArgs {
+        tags,
+        quorum,
+        until,
+        timeout_secs,
+        exec_command,
+        json,
+    } = args;
     // A single change and a tagged set are different questions, and a quorum is
     // meaningless for one change. Refuse rather than guess, because both wrong
     // guesses — returning early or waiting forever — are silent.
@@ -110,9 +168,13 @@ pub fn watch(
     });
     match result {
         Ok(Some(hits)) => {
-            report_reached(&selection, &hits, until);
+            let value = watch_hook_payload(&selection, &hits, until);
+            if json {
+                println!("{}", serde_json::to_string(&value)?);
+            } else {
+                report_reached(&selection, &hits, until);
+            }
             if let Some(command) = exec_command {
-                let value = watch_hook_payload(&selection, &hits, until);
                 let mut diagnostic = serde_json::to_vec(&value)?;
                 diagnostic.push(b'\n');
                 run_hook(command, &diagnostic, &value);
@@ -120,11 +182,11 @@ pub fn watch(
             Ok(0)
         }
         Ok(None) => {
-            println!("timeout: {}", until_labels(until));
+            report_timeout(until, json)?;
             Ok(2)
         }
         Err(_) if deadline.is_some_and(|deadline| Instant::now() >= deadline) => {
-            println!("timeout: {}", until_labels(until));
+            report_timeout(until, json)?;
             Ok(2)
         }
         Err(error) => Err(error),
@@ -160,6 +222,23 @@ fn resolve_tagged(ctx: &Ctx, tags: &[String]) -> Result<Vec<String>> {
 }
 
 /// Single-change output stays byte-identical; only tagged watches name members.
+/// A timeout is an outcome a script has to branch on, so it is reported in
+/// whichever shape the caller asked for rather than only as prose.
+fn report_timeout(until: &[WatchUntil], json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "event_type": "watch-timeout",
+                "condition": until_labels(until),
+            }))?
+        );
+    } else {
+        println!("timeout: {}", until_labels(until));
+    }
+    Ok(())
+}
+
 fn report_reached(selection: &WatchSelection, hits: &[WatchHit], until: &[WatchUntil]) {
     match selection {
         WatchSelection::Single(_) => println!("reached: {}", hits[0].condition.label()),
@@ -184,23 +263,34 @@ fn watch_hook_payload(
     until: &[WatchUntil],
 ) -> serde_json::Value {
     match selection {
+        // Each member carries its own change, condition, and satisfying
+        // event, so there is nothing for a top-level placeholder to say.
         WatchSelection::Tagged(_, WatchQuorum::All) => serde_json::json!({
-            "change_id": "",
-            "changes": hits.iter().map(|hit| serde_json::json!({
-                "change_id": hit.change_id,
-                "condition": hit.condition.label(),
-            })).collect::<Vec<_>>(),
+            "changes": hits.iter().map(watch_hit_object).collect::<Vec<_>>(),
             "condition": until_labels(until),
-            "event_id": "",
             "event_type": "watch-reached",
         }),
-        _ => serde_json::json!({
-            "change_id": hits[0].change_id,
-            "condition": hits[0].condition.label(),
-            "event_id": "",
-            "event_type": "watch-reached",
-        }),
+        _ => {
+            let mut value = watch_hit_object(&hits[0]);
+            value["event_type"] = "watch-reached".into();
+            value
+        }
     }
+}
+
+/// One satisfied member. `event_id` is present only when an event satisfied
+/// the condition: a field that otherwise holds an event ID should not
+/// sometimes hold a placeholder, and a condition derived from elapsed time or
+/// from policy was satisfied by no event at all.
+fn watch_hit_object(hit: &WatchHit) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "change_id": hit.change_id,
+        "condition": hit.condition.label(),
+    });
+    if let Some(event_id) = &hit.event_id {
+        value["event_id"] = event_id.clone().into();
+    }
+    value
 }
 
 fn watch_until_reached(
@@ -220,10 +310,11 @@ fn watch_until_reached(
         let mut hits = Vec::new();
         for change_id in change_ids {
             for condition in until {
-                if watch_reached(ctx, &store, change_id, *condition)? {
+                if let Some(event_id) = watch_reached(ctx, &store, change_id, *condition)? {
                     hits.push(WatchHit {
                         change_id: change_id.clone(),
                         condition: *condition,
+                        event_id,
                     });
                     break;
                 }
@@ -290,20 +381,40 @@ fn run_hook(command: &str, input: &[u8], value: &serde_json::Value) {
     }
 }
 
-fn watch_reached(ctx: &Ctx, store: &Store, change_id: &str, until: WatchUntil) -> Result<bool> {
+/// Whether a condition holds, and the event that made it hold when one did.
+/// The outer `Option` is the answer; the inner one is whether an event can be
+/// named for it.
+fn watch_reached(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    until: WatchUntil,
+) -> Result<Option<Option<String>>> {
     let events = store.load_events(change_id)?;
     let state = state::reduce(&events)?;
+    let snapshot_event = || {
+        events
+            .iter()
+            .rev()
+            .find(|event| matches!(event.payload, Payload::PatchsetAdded { .. }))
+            .map(|event| event.event_id.clone())
+    };
     Ok(match until {
-        WatchUntil::Snapshot => state.latest_patchset().is_some(),
+        WatchUntil::Snapshot => state.latest_patchset().is_some().then(snapshot_event),
         WatchUntil::Stalled => state
             .claim
             .as_ref()
-            .is_some_and(|claim| state::claim_timing_at(claim, chrono::Utc::now()).stale),
-        WatchUntil::Ready => ctx.report(store, &state)?.integrate_ready,
+            .is_some_and(|claim| state::claim_timing_at(claim, chrono::Utc::now()).stale)
+            .then_some(None),
+        WatchUntil::Ready => ctx.report(store, &state)?.integrate_ready.then_some(None),
         WatchUntil::Integrated => state
             .closure
             .as_ref()
-            .is_some_and(|closure| closure.outcome == Closure::Integrated),
-        WatchUntil::Closed => state.is_closed(),
+            .filter(|closure| closure.outcome == Closure::Integrated)
+            .map(|closure| Some(closure.event_id.clone())),
+        WatchUntil::Closed => state
+            .closure
+            .as_ref()
+            .map(|closure| Some(closure.event_id.clone())),
     })
 }
