@@ -51,7 +51,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         &mut states,
         &mut known_patchsets,
     )?;
-    inspect_dangling_revisions(&ctx.cwd, &states, &mut advice)?;
+    inspect_dangling_revisions(&ctx.cwd, &Store::discover(&ctx.cwd)?, &states, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
     inspect_audit_debt(&states, &mut advice);
@@ -93,6 +93,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
 /// without writing a bespoke script.
 fn inspect_dangling_revisions(
     cwd: &Path,
+    store: &Store,
     states: &BTreeMap<String, ChangeState>,
     advice: &mut Vec<Finding>,
 ) -> Result<()> {
@@ -147,20 +148,27 @@ fn inspect_dangling_revisions(
             note(commit, "integration".to_string());
         }
         // A forge records revisions too, and a rewritten branch strands them
-        // exactly as it strands a local one.
-        if let Some(link) = state.forge.link.as_ref() {
-            note(&link.head_sha, "forge link head".to_string());
-        }
-        if let Some(checks) = state.forge.checks.as_ref() {
-            note(&checks.pr_head, "forge checks head".to_string());
-        }
-        if let Some(merge_sha) = state
-            .forge
-            .pr_state
-            .as_ref()
-            .and_then(|pr| pr.merge_sha.as_deref())
-        {
-            note(merge_sha, "forge merge".to_string());
+        // exactly as it strands a local one. These come from the events rather
+        // than from reduced state, because forge facts are latest-wins: an
+        // earlier head is still recorded, and still names something that was
+        // supposed to exist.
+        // A malformed event file is already reported as its own problem, and
+        // a scan for unreachable revisions should not be the thing that fails
+        // because of it.
+        for event in store.load_events(change_id).unwrap_or_default() {
+            match &event.payload {
+                Payload::ForgeLink { head_sha, .. } => {
+                    note(head_sha, "forge link head".to_string())
+                }
+                Payload::ForgeChecks { pr_head, .. } => {
+                    note(pr_head, "forge checks head".to_string())
+                }
+                Payload::ForgePrState {
+                    merge_sha: Some(merge_sha),
+                    ..
+                } => note(merge_sha, "forge merge".to_string()),
+                _ => {}
+            }
         }
     }
     if wanted.is_empty() {
