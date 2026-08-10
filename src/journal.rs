@@ -455,6 +455,21 @@ fn known_kind(kind: &str) -> bool {
     recognized_journal_kinds().any(|value| value == kind)
 }
 
+/// Whether a directory holds what a journal holds. A rebind moves whatever it
+/// is given, so it should not be given an arbitrary directory.
+fn looks_like_a_journal(dir: &Path) -> Result<bool> {
+    for entry in std::fs::read_dir(dir)? {
+        let name = entry?.file_name().to_string_lossy().to_string();
+        if name == "events.jsonl"
+            || name == "bindings.jsonl"
+            || parse_artifact_name(&name).is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Adopt an orphaned journal for the project standing here.
 ///
 /// The move is recorded rather than performed as an untracked `mv`, so the
@@ -476,13 +491,42 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
     if source == target {
         bail!("{} is already this project's journal", source.display());
     }
+    // Every refusal happens before anything moves, so a rebind either does the
+    // whole thing or leaves both journals exactly as they were.
+    if !looks_like_a_journal(&source)? {
+        bail!(
+            "{} does not look like a journal: no artifacts and no event log",
+            source.display()
+        );
+    }
+    let recorded = recorded_anchor(&source)?;
+    if let Some(recorded) = recorded.as_deref() {
+        if Path::new(recorded).is_dir() && Path::new(recorded) != Path::new(&anchor) {
+            bail!(
+                "{} belongs to {recorded}, which still exists. Adopting it would take a live \
+                 project's history",
+                source.display()
+            );
+        }
+    }
     if target.is_dir() && std::fs::read_dir(&target)?.next().is_some() {
         bail!(
-            "target journal {} already holds content; merging two histories is not something              a rebind can do without losing which came from where",
+            "target journal {} already holds content; merging two histories is not something \
+             a rebind can do without losing which came from where",
             target.display()
         );
     }
-    let previous = recorded_anchor(&source)?.unwrap_or_else(|| source.display().to_string());
+    let source_archive = archive_dir(&source);
+    let target_archive = archive_dir(&target);
+    if target_archive.exists() {
+        bail!(
+            "{} exists and did not come from {}; move or remove it before rebinding, so cold \
+             history stays attached to the journal it belongs to",
+            target_archive.display(),
+            source.display()
+        );
+    }
+    let previous = recorded.unwrap_or_else(|| source.display().to_string());
 
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)
@@ -492,17 +536,25 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
         std::fs::remove_dir(&target)
             .with_context(|| format!("cannot replace empty {}", target.display()))?;
     }
-    std::fs::rename(&source, &target)
-        .with_context(|| format!("cannot move {} to {}", source.display(), target.display()))?;
+    if let Err(error) = std::fs::rename(&source, &target) {
+        // A rename across filesystems cannot be atomic, and half a journal is
+        // worse than none, so the empty target goes back and the operator is
+        // told what to do instead.
+        let _ = std::fs::create_dir_all(&target);
+        bail!(
+            "cannot move {} to {}: {error}. If they are on different filesystems, copy the \
+             directory across and run this again",
+            source.display(),
+            target.display()
+        );
+    }
     // The cold archive travels with its journal, or it becomes the next orphan.
-    let source_archive = archive_dir(&source);
     if source_archive.is_dir() {
-        let target_archive = archive_dir(&target);
         std::fs::rename(&source_archive, &target_archive).with_context(|| {
             format!(
-                "cannot move {} to {}",
-                source_archive.display(),
-                target_archive.display()
+                "moved {} to {}, but its cold archive did not follow",
+                source.display(),
+                target.display()
             )
         })?;
     }
@@ -526,20 +578,24 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
     Ok(0)
 }
 
-/// Journals beside this one whose name suggests the same project, when this
-/// one is empty. A basename match is a hint and never an instruction: merging
-/// two journals that both hold history is worse than leaving one orphaned,
-/// because an orphan is at least still separable.
-fn split_journal_candidates(dir: &Path) -> Result<Vec<PathBuf>> {
+/// Journals beside this one that were written for a project of this name,
+/// when this one is empty.
+///
+/// The comparison is between recorded anchors, not between directory names:
+/// a slug is a path with its separators flattened, so the last hyphen in it
+/// may be part of the project's own name rather than a separator, and two
+/// unrelated projects ending in `-api` would otherwise look like one moved
+/// project. A journal with no recorded binding is not a candidate — the answer
+/// improves as bindings accumulate rather than being guessed at.
+///
+/// This is a hint and never an instruction: merging two journals that both
+/// hold history is worse than leaving one orphaned, because an orphan is at
+/// least still separable.
+fn split_journal_candidates(dir: &Path, anchor: Option<&Path>) -> Result<Vec<PathBuf>> {
     if dir.is_dir() && std::fs::read_dir(dir)?.next().is_some() {
         return Ok(Vec::new());
     }
-    let (Some(root), Some(name)) = (dir.parent(), dir.file_name().and_then(|n| n.to_str())) else {
-        return Ok(Vec::new());
-    };
-    // The slug is the project path with separators flattened, so the trailing
-    // segment is the project's own directory name.
-    let Some(basename) = name.rsplit('-').next().filter(|value| !value.is_empty()) else {
+    let (Some(root), Some(basename)) = (dir.parent(), anchor.and_then(|a| a.file_name())) else {
         return Ok(Vec::new());
     };
     let mut found = Vec::new();
@@ -547,16 +603,22 @@ fn split_journal_candidates(dir: &Path) -> Result<Vec<PathBuf>> {
         return Ok(found);
     };
     for entry in entries {
-        let entry = entry?;
-        let candidate = entry.path();
-        let Some(other) = candidate.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        // The cold archive of another journal is not a rename target.
-        if other == name || other.ends_with("-archive") || !candidate.is_dir() {
+        let candidate = entry?.path();
+        if candidate == dir || !candidate.is_dir() {
             continue;
         }
-        if other.rsplit('-').next() == Some(basename)
+        // The cold archive of another journal is not a rename target.
+        if candidate
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with("-archive"))
+        {
+            continue;
+        }
+        let Some(recorded) = recorded_anchor(&candidate)? else {
+            continue;
+        };
+        if Path::new(&recorded).file_name() == Some(basename)
             && std::fs::read_dir(&candidate)?.next().is_some()
         {
             found.push(candidate);
@@ -567,7 +629,8 @@ fn split_journal_candidates(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
-    let dir = resolve_dir(&ctx.cwd)?;
+    let resolution = resolve(&ctx.cwd)?;
+    let dir = resolution.directory.clone();
     let cold = archive_dir(&dir);
     let mut problems = Vec::new();
     let mut advice = Vec::new();
@@ -646,6 +709,22 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     // path stops existing the journal becomes unreachable from anywhere, and
     // nothing errors: `journal open` reports an empty queue, which looks
     // exactly like a project with no backlog.
+    let bindings = bindings_path(&dir);
+    if bindings.is_file() {
+        let text = std::fs::read_to_string(&bindings)
+            .with_context(|| format!("cannot read {}", bindings.display()))?;
+        for (index, line) in text.lines().enumerate() {
+            if serde_json::from_str::<JournalBinding>(line)
+                .is_ok_and(|binding| binding.schema == BINDING_SCHEMA)
+            {
+                continue;
+            }
+            problems.push(DoctorFinding {
+                code: "malformed-binding",
+                detail: format!("bindings.jsonl line {}", index + 1),
+            });
+        }
+    }
     match recorded_anchor(&dir)?.as_deref() {
         Some(anchor) if !Path::new(anchor).is_dir() => problems.push(DoctorFinding {
             code: "orphaned-journal",
@@ -655,7 +734,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
         // time anything is written to it, so there is nothing to report.
         _ => {}
     }
-    for candidate in split_journal_candidates(&dir)? {
+    for candidate in split_journal_candidates(&dir, resolution.anchor.as_deref())? {
         advice.push(DoctorFinding {
             code: "split-journal",
             detail: format!(
@@ -1333,6 +1412,11 @@ fn recorded_anchor(dir: &Path) -> Result<Option<String>> {
 /// like the rest of the journal: a failure to record the binding never unwinds
 /// the artifact that was the point of the command.
 fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
+    // Written once per journal, so the second and later appends of a command
+    // stop at the read rather than resolving the journal again.
+    if bindings_path(dir).is_file() {
+        return Ok(());
+    }
     let Some(anchor) = resolve(&ctx.cwd)?.anchor else {
         return Ok(());
     };

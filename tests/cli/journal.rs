@@ -4062,3 +4062,81 @@ fn journal_rebind_adopts_an_orphan_and_refuses_a_populated_target() {
         .failure()
         .stderr(predicates::str::contains("already holds content"));
 }
+
+/// A rebind moves whatever it is given, so what it refuses matters more than
+/// what it does. Every refusal lands before anything moves.
+#[test]
+fn journal_rebind_refuses_before_it_moves_anything() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    let root = dir.parent().unwrap().to_path_buf();
+
+    // Not a journal, just a directory.
+    let plain = root.join("-not-a-journal");
+    fs::create_dir_all(&plain).unwrap();
+    fs::write(plain.join("notes.txt"), "loose\n").unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "rebind", plain.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("does not look like a journal"));
+    assert!(plain.join("notes.txt").is_file());
+
+    // A journal whose project still exists belongs to that project.
+    let live = root.join("-live-project");
+    fs::create_dir_all(&live).unwrap();
+    fs::write(live.join("20260101T000000Z-alpha-todo.md"), "# Alpha\n").unwrap();
+    let elsewhere = repo.home.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(
+        live.join("bindings.jsonl"),
+        format!(
+            "{{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
+             \"event\":\"bound\",\"anchor\":\"{}\"}}\n",
+            elsewhere.display()
+        ),
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "rebind", live.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("which still exists"));
+    assert!(live.join("20260101T000000Z-alpha-todo.md").is_file());
+    assert!(!dir.join("20260101T000000Z-alpha-todo.md").exists());
+}
+
+/// A binding line that does not parse is invisible to every derived view, so
+/// the one command whose job is to notice says so.
+#[test]
+fn journal_doctor_reports_a_malformed_binding() {
+    let repo = Repo::new();
+    let src = repo.home.join("body.md");
+    fs::write(&src, "something to say\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "broken",
+            "--kind",
+            "note",
+            "--body-file",
+            src.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let dir = journal_dir(&repo);
+    let mut bindings = fs::read_to_string(dir.join("bindings.jsonl")).unwrap();
+    bindings.push_str("not json at all\n");
+    fs::write(dir.join("bindings.jsonl"), bindings).unwrap();
+
+    let report = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    assert!(
+        report["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|problem| problem["code"] == "malformed-binding"),
+        "{report}"
+    );
+}
