@@ -240,6 +240,10 @@ enum Cmd {
         /// Report all changes (the default)
         #[arg(long)]
         all: bool,
+        /// One row per delegated identity instead of per change: patchsets
+        /// contributed, rework rounds they opened, verdicts issued
+        #[arg(long = "by-model")]
+        by_model: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1197,6 +1201,7 @@ fn run(cli: Cli) -> Result<i32> {
             change,
             tag,
             all: _,
+            by_model,
             json,
         } => {
             let selection = match (change, tag) {
@@ -1207,7 +1212,7 @@ fn run(cli: Cli) -> Result<i32> {
                 // `--change` placed before it never reaches that check.
                 (Some(_), Some(_)) => bail!("--change and --tag are mutually exclusive"),
             };
-            commands::stats(&ctx, selection, json)?;
+            commands::stats(&ctx, selection, json, by_model)?;
             Ok(0)
         }
         Cmd::Diff {
