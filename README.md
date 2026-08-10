@@ -624,6 +624,12 @@ is complete when every declared gate has an observed or reused terminal edge;
 an interrupted run remains visibly incomplete without a mutable completion
 record.
 
+Every locally executed gate records the worktree tree captured before it ran,
+whether that tree differed from the tested revision, and whether the worktree
+moved during execution. For `verify --all --parallel`, those observations cover
+the shared batch: a change made by any concurrent gate marks each result as
+describing no single tree, so a passing result cannot count as green.
+
 Executed gates capture combined stdout and stderr, retaining only the final
 4096 bytes. Failed-gate tails appear in `arc show` and `arc status`; successful
 gates stay compact. A declared timeout terminates and reaps the gate's entire
@@ -943,8 +949,8 @@ in `[journals.dirs]`, then Git identity and
 stable anchor, and directory; resolution refuses to guess outside Git when no
 configured prefix matches. `note`
 writes a timestamped `<ts>-<topic>-<kind>.md` artifact and its journal event;
-`log` appends a log-only event; `append` adds a position to an existing
-artifact; `catchup` lists newest-first.
+`log` appends a log-only event; `journal position` adds a position to an
+existing artifact; `catchup` lists newest-first.
 `list [--kind <k>] [--json]` enumerates every live artifact in the hot
 directory newest-first —
 including the non-actionable kinds `open` and `memories` do not show —
@@ -984,22 +990,25 @@ reject late appends; re-litigation starts a successor discussion. The Markdown
 is for people and block-scoped stance parsing; the event supplies activity,
 identity, resolver-participation, and reply edges. The file stays hand-writable,
 and the append is advisory and fail-open like every journal write.
-`journal note --kind discussion --scaffold discussion` seeds the
-conventions at birth (the `Position: for|against|amend` stance line, reply-to
-quoting, the resolution vocabulary, and the norm that a contested discussion is
-resolved by a non-author of the winning position or by the user). A repo-local
-`.arc/templates/discussion.md` overrides the built-in, and `--scaffold` works
-on any `journal note`: the template is prepended to `--body-file` content, or
-recorded alone. `journal discussion <filename> [--json]` renders the derived
-view of one debate: its age, the stance tally (`for`/`against`/`amend` parsed
-once per actual position block, so hand-written positions count too), the
-distinct participants and reply-refs from the typed `position` events, rounds
-grouped by reply depth, and the position IDs still unanswered. Positions in
-the same round could not have read one another, so rounds express reply
-structure rather than turn-taking. Once resolved, the view also includes the
-outcome, optional decision artifact, and a resolver-participation flag that
-surfaces a resolver who also argued a side under the same harness-native
-session identity.
+`journal note --kind discussion` seeds the conventions at birth by default
+(the `Position: for|against|amend` stance line, reply-to quoting, the
+resolution vocabulary, and the norm that a contested discussion is resolved by
+a non-author of the winning position or by the user). `--scaffold discussion`
+requests that template explicitly, while `--no-scaffold` records body content
+alone. A repo-local `.arc/templates/discussion.md` overrides the built-in, and
+`--scaffold` works on any `journal note`: the template is prepended to
+`--body-file` content, or recorded alone. Existing hand-written discussions
+remain readable; `journal discussion` marks position blocks without a first
+stance line as `unstated` rather than silently counting an incomplete tally.
+`journal discussion <filename> [--json]` renders the derived view of one
+debate: its age, the stance tally (`for`/`against`/`amend` parsed once per
+actual position block, so hand-written positions count too), the distinct
+participants and reply-refs from the typed `position` events, rounds grouped
+by reply depth, and the position IDs still unanswered. Positions in the same
+round could not have read one another, so rounds express reply structure rather
+than turn-taking. Once resolved, the view also includes the outcome, optional
+decision artifact, and a resolver-participation flag that surfaces a resolver
+who also argued a side under the same harness-native session identity.
 
 The journal and the ledger bridge in three advisory ways, none of which can
 gate the authoritative ledger. `arc begin --from-journal <artifact>` opens a
