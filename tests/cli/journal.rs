@@ -555,11 +555,16 @@ fn journal_log_appends_without_creating_artifact_file() {
         .assert()
         .success();
     let dir = journal_dir(&repo);
-    let entries: Vec<String> = fs::read_dir(&dir)
+    let mut entries: Vec<String> = fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
         .collect();
-    assert_eq!(entries, vec!["events.jsonl".to_string()]);
+    entries.sort();
+    // The binding names the project this journal belongs to; no artifact.
+    assert_eq!(
+        entries,
+        vec!["bindings.jsonl".to_string(), "events.jsonl".to_string()]
+    );
     let event = &journal_events(&dir)[0];
     assert_eq!(event["event"], "log");
     assert_eq!(event["message"], "consumed inbox X");
@@ -3920,4 +3925,140 @@ fn journal_open_explains_its_tiers() {
     // The distinction that decides which kind an item is filed under.
     assert!(text.contains("A discussion argues a proposal"), "{text}");
     assert!(text.contains("--from-journal"), "{text}");
+}
+
+/// A journal is addressed by the slugged path of its project, so moving the
+/// project strands it — silently, because an empty queue looks exactly like a
+/// project with no backlog. The binding is what turns "where did this come
+/// from" into a lookup.
+#[test]
+fn a_journal_records_the_project_it_belongs_to() {
+    let repo = Repo::new();
+    let src = repo.home.join("body.md");
+    fs::write(&src, "something to say\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "bound",
+            "--kind",
+            "note",
+            "--body-file",
+            src.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let dir = journal_dir(&repo);
+    let bindings = fs::read_to_string(dir.join("bindings.jsonl")).unwrap();
+    let binding: serde_json::Value = serde_json::from_str(bindings.trim()).unwrap();
+    assert_eq!(binding["schema"], "journal-binding/1");
+    assert_eq!(binding["event"], "bound");
+    assert_eq!(
+        binding["anchor"].as_str().unwrap(),
+        fs::canonicalize(&repo.root).unwrap().to_string_lossy()
+    );
+
+    // Recorded once, however much is written afterwards.
+    repo.arc(&repo.root)
+        .args(["journal", "log", "bound", "more"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(dir.join("bindings.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+/// The failure this exists to catch is a quiet one, so the detector reports it
+/// where an operator already looks.
+#[test]
+fn journal_doctor_reports_an_orphaned_binding() {
+    let repo = Repo::new();
+    let src = repo.home.join("body.md");
+    fs::write(&src, "something to say\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "orphan",
+            "--kind",
+            "note",
+            "--body-file",
+            src.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let dir = journal_dir(&repo);
+
+    // Rewrite the binding to a path that no longer exists, as a move would.
+    fs::write(
+        dir.join("bindings.jsonl"),
+        serde_json::json!({
+            "schema": "journal-binding/1",
+            "ts": "2026-01-01T00:00:00Z",
+            "event": "bound",
+            "anchor": "/nowhere/that/exists",
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+
+    let report = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    assert!(
+        report["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|problem| problem["code"] == "orphaned-journal"),
+        "{report}"
+    );
+}
+
+/// Adopting an orphan is explicit and records the move; a target that already
+/// holds history is refused, because two event logs are separable only while
+/// they are apart.
+#[test]
+fn journal_rebind_adopts_an_orphan_and_refuses_a_populated_target() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    let orphan = dir.parent().unwrap().join("-old-path-repo");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("20260101T000000Z-alpha-todo.md"), "# Alpha\n").unwrap();
+    fs::write(
+        orphan.join("bindings.jsonl"),
+        "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
+         \"event\":\"bound\",\"anchor\":\"/old/path/repo\"}\n",
+    )
+    .unwrap();
+
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "rebind", orphan.to_str().unwrap()]),
+    );
+    assert!(out.contains("rebound: /old/path/repo -> "), "{out}");
+    assert!(!orphan.exists());
+    assert!(dir.join("20260101T000000Z-alpha-todo.md").is_file());
+    let bindings = fs::read_to_string(dir.join("bindings.jsonl")).unwrap();
+    let last: serde_json::Value = serde_json::from_str(bindings.lines().last().unwrap()).unwrap();
+    assert_eq!(last["event"], "rebound");
+    assert_eq!(last["previous_anchor"], "/old/path/repo");
+
+    // The adopted history is now this project's queue.
+    let open = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(open.contains("alpha"), "{open}");
+
+    // A second orphan cannot be merged in on top of it.
+    let other = dir.parent().unwrap().join("-another-path-repo");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("20260202T000000Z-beta-todo.md"), "# Beta\n").unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "rebind", other.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already holds content"));
 }

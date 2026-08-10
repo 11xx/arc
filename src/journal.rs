@@ -296,6 +296,13 @@ pub enum JournalCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Adopt an existing journal for this project, recording the move.
+    /// Refuses when both journals hold content: two histories are separable
+    /// only while they are apart
+    Rebind {
+        /// The journal directory to adopt, as `journal doctor` names it
+        from: String,
+    },
     /// Print the current UTC timestamp in the journal house format (read-only)
     Stamp,
     /// Manage advisory session work lanes
@@ -393,6 +400,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
         JournalCmd::List { kind, json } => list(ctx, kind, json),
         JournalCmd::Show { filename } => show(ctx, &filename),
         JournalCmd::Discussion { filename, json } => discussion_summary(ctx, &filename, json),
+        JournalCmd::Rebind { from } => rebind(ctx, &from),
         JournalCmd::Stamp => stamp(),
         JournalCmd::Lane { command } => lane(ctx, command),
         JournalCmd::Consume {
@@ -447,6 +455,117 @@ fn known_kind(kind: &str) -> bool {
     recognized_journal_kinds().any(|value| value == kind)
 }
 
+/// Adopt an orphaned journal for the project standing here.
+///
+/// The move is recorded rather than performed as an untracked `mv`, so the
+/// journal states both where it came from and where it belongs. Nothing is
+/// inferred: the operator names the source, and a target that already holds
+/// content is refused, because concatenating two event logs destroys which
+/// history came from which project.
+fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
+    let source = config::expand_tilde(from)?;
+    if !source.is_dir() {
+        bail!("no journal at {}", source.display());
+    }
+    let resolution = resolve(&ctx.cwd)?;
+    let target = resolution.directory;
+    let anchor = resolution
+        .anchor
+        .context("this project has no stable journal anchor to rebind to")?;
+    let anchor = anchor.display().to_string();
+    if source == target {
+        bail!("{} is already this project's journal", source.display());
+    }
+    if target.is_dir() && std::fs::read_dir(&target)?.next().is_some() {
+        bail!(
+            "target journal {} already holds content; merging two histories is not something              a rebind can do without losing which came from where",
+            target.display()
+        );
+    }
+    let previous = recorded_anchor(&source)?.unwrap_or_else(|| source.display().to_string());
+
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    if target.is_dir() {
+        std::fs::remove_dir(&target)
+            .with_context(|| format!("cannot replace empty {}", target.display()))?;
+    }
+    std::fs::rename(&source, &target)
+        .with_context(|| format!("cannot move {} to {}", source.display(), target.display()))?;
+    // The cold archive travels with its journal, or it becomes the next orphan.
+    let source_archive = archive_dir(&source);
+    if source_archive.is_dir() {
+        let target_archive = archive_dir(&target);
+        std::fs::rename(&source_archive, &target_archive).with_context(|| {
+            format!(
+                "cannot move {} to {}",
+                source_archive.display(),
+                target_archive.display()
+            )
+        })?;
+    }
+
+    let (harness, session) = identity(ctx);
+    append_binding(
+        ctx,
+        &target,
+        &JournalBinding {
+            schema: BINDING_SCHEMA.to_string(),
+            ts: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            event: "rebound".to_string(),
+            anchor: anchor.clone(),
+            previous_anchor: Some(previous.clone()),
+            harness: Some(harness),
+            session: Some(session),
+        },
+    )?;
+    println!("{}", target.display());
+    println!("rebound: {previous} -> {anchor}");
+    Ok(0)
+}
+
+/// Journals beside this one whose name suggests the same project, when this
+/// one is empty. A basename match is a hint and never an instruction: merging
+/// two journals that both hold history is worse than leaving one orphaned,
+/// because an orphan is at least still separable.
+fn split_journal_candidates(dir: &Path) -> Result<Vec<PathBuf>> {
+    if dir.is_dir() && std::fs::read_dir(dir)?.next().is_some() {
+        return Ok(Vec::new());
+    }
+    let (Some(root), Some(name)) = (dir.parent(), dir.file_name().and_then(|n| n.to_str())) else {
+        return Ok(Vec::new());
+    };
+    // The slug is the project path with separators flattened, so the trailing
+    // segment is the project's own directory name.
+    let Some(basename) = name.rsplit('-').next().filter(|value| !value.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Ok(found);
+    };
+    for entry in entries {
+        let entry = entry?;
+        let candidate = entry.path();
+        let Some(other) = candidate.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // The cold archive of another journal is not a rename target.
+        if other == name || other.ends_with("-archive") || !candidate.is_dir() {
+            continue;
+        }
+        if other.rsplit('-').next() == Some(basename)
+            && std::fs::read_dir(&candidate)?.next().is_some()
+        {
+            found.push(candidate);
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
 fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
     let cold = archive_dir(&dir);
@@ -484,7 +603,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if name == "events.jsonl" {
+            if name == "events.jsonl" || name == "bindings.jsonl" {
                 continue;
             }
             names.push(name);
@@ -522,6 +641,30 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     // Semantic checks run on the event stream: consumption, lane liveness,
     // and artifact references all derive from it.
     let events = read_events(&dir)?;
+
+    // A journal is addressed by the slugged path of its project. When that
+    // path stops existing the journal becomes unreachable from anywhere, and
+    // nothing errors: `journal open` reports an empty queue, which looks
+    // exactly like a project with no backlog.
+    match recorded_anchor(&dir)?.as_deref() {
+        Some(anchor) if !Path::new(anchor).is_dir() => problems.push(DoctorFinding {
+            code: "orphaned-journal",
+            detail: format!("bound to {anchor}, which no longer exists"),
+        }),
+        // A journal with no binding predates the record and gets one the next
+        // time anything is written to it, so there is nothing to report.
+        _ => {}
+    }
+    for candidate in split_journal_candidates(&dir)? {
+        advice.push(DoctorFinding {
+            code: "split-journal",
+            detail: format!(
+                "{} holds artifacts for a project of this name; if this project moved,                  `arc journal rebind {}` adopts it",
+                candidate.display(),
+                candidate.display()
+            ),
+        });
+    }
     for event in &events {
         if ["consumed", "archived"].contains(&event.event.as_str()) {
             if let Some(file) = &event.file {
@@ -849,7 +992,7 @@ fn note(
     let mut event = JournalEvent::base(ctx, now, topic, "note");
     event.file = Some(filename.clone());
     event.title = title.map(str::to_string);
-    append_event(&dir, &event)?;
+    append_event(ctx, &dir, &event)?;
     println!("{}", path.display());
     Ok(0)
 }
@@ -867,7 +1010,7 @@ fn log_line(ctx: &Ctx, topic: &str, message: &str) -> Result<i32> {
     // begin with "archived " or "consumed " cannot forge a typed event.
     let mut event = JournalEvent::base(ctx, now, topic, "log");
     event.message = Some(message.to_string());
-    append_event(&dir, &event)?;
+    append_event(ctx, &dir, &event)?;
     Ok(0)
 }
 
@@ -929,7 +1072,7 @@ fn position(ctx: &Ctx, filename: &str, reference: Option<&str>, body_file: &str)
     event.file = Some(filename.to_string());
     event.position_id = Some(position_id);
     event.reference = reference.map(str::to_string);
-    append_event(&dir, &event)?;
+    append_event(ctx, &dir, &event)?;
     println!("{}", path.display());
     Ok(0)
 }
@@ -994,6 +1137,64 @@ struct JournalEvent {
     /// events.
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
     reference: Option<String>,
+}
+
+/// Which project a journal belongs to, recorded append-only in `bindings.jsonl`
+/// beside the artifacts.
+///
+/// This is metadata about the journal rather than an entry in the project's
+/// narrative, so it lives apart from `events.jsonl`: a reader asking what
+/// happened on this project should not have to skip over bookkeeping about
+/// where the journal itself lives.
+#[derive(Debug, Serialize, Deserialize)]
+struct JournalBinding {
+    schema: String,
+    ts: String,
+    event: String,
+    anchor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_anchor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
+}
+
+const BINDING_SCHEMA: &str = "journal-binding/1";
+
+fn bindings_path(dir: &Path) -> PathBuf {
+    dir.join("bindings.jsonl")
+}
+
+fn read_bindings(dir: &Path) -> Result<Vec<JournalBinding>> {
+    let path = bindings_path(dir);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    // Fails open like the event log: one bad line is not a reason to refuse
+    // every command that touches the journal.
+    Ok(text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<JournalBinding>(line).ok())
+        .filter(|binding| binding.schema == BINDING_SCHEMA)
+        .collect())
+}
+
+fn append_binding(ctx: &Ctx, dir: &Path, binding: &JournalBinding) -> Result<()> {
+    use std::io::Write;
+    let _ = ctx;
+    let path = bindings_path(dir);
+    let mut line = serde_json::to_string(binding)?;
+    line.push('\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    file.write_all(line.as_bytes())
+        .with_context(|| format!("cannot append to {}", path.display()))
 }
 
 impl JournalEvent {
@@ -1117,10 +1318,51 @@ fn append_journal(
     } else {
         event.message = Some(message.to_string());
     }
-    append_event(dir, &event)
+    append_event(ctx, dir, &event)
 }
 
-fn append_event(dir: &Path, event: &JournalEvent) -> Result<()> {
+/// The path this journal is bound to, as last recorded.
+fn recorded_anchor(dir: &Path) -> Result<Option<String>> {
+    Ok(read_bindings(dir)?.pop().map(|binding| binding.anchor))
+}
+
+/// Record which project this journal belongs to, once, the first time anything
+/// is written to it. A journal is addressed by the slugged path of its Git
+/// anchor, so moving the project silently starts a fresh one and strands the
+/// old — and nothing in the old directory says where it came from. Advisory
+/// like the rest of the journal: a failure to record the binding never unwinds
+/// the artifact that was the point of the command.
+fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
+    let Some(anchor) = resolve(&ctx.cwd)?.anchor else {
+        return Ok(());
+    };
+    if recorded_anchor(dir)?.is_some() {
+        return Ok(());
+    }
+    let (harness, session) = identity(ctx);
+    append_binding(
+        ctx,
+        dir,
+        &JournalBinding {
+            schema: BINDING_SCHEMA.to_string(),
+            ts: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            event: "bound".to_string(),
+            anchor: anchor.display().to_string(),
+            previous_anchor: None,
+            harness: Some(harness),
+            session: Some(session),
+        },
+    )
+}
+
+fn append_event(ctx: &Ctx, dir: &Path, event: &JournalEvent) -> Result<()> {
+    if let Err(error) = ensure_bound(ctx, dir) {
+        eprintln!("warning: could not record this journal's project binding: {error:#}");
+    }
+    write_event(dir, event)
+}
+
+fn write_event(dir: &Path, event: &JournalEvent) -> Result<()> {
     use std::io::Write;
     let mut line = serde_json::to_string(event)?;
     line.push('\n');
@@ -2879,7 +3121,7 @@ fn consume(
     event.outcome = Some(outcome.as_str().to_string());
     event.note = note.map(str::to_string);
     event.decision = decision.map(str::to_string);
-    append_event(&dir, &event)?;
+    append_event(ctx, &dir, &event)?;
     println!("consumed: {filename} [{}]", outcome.as_str());
     Ok(0)
 }
