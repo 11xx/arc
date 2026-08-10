@@ -221,21 +221,17 @@ impl Ctx {
     /// Refuse now, if this repository requires a declared actor and nobody
     /// declared one.
     ///
-    /// The append itself is guarded, but `begin` and `integrate` do
-    /// irreversible Git work before they record anything, and a merge that
-    /// lands while the ledger refuses the event is a worse outcome than either
-    /// answer on its own.
-    pub(crate) fn ensure_declared_actor(&self) -> Result<()> {
+    /// The append itself is guarded, but `begin`, `verify`, and `integrate` do
+    /// irreversible work before they record anything — a branch, an arbitrary
+    /// command, a merge — and any of those landing while the ledger refuses
+    /// the event is a worse outcome than either answer on its own. The answer
+    /// comes from the store the command is about to write to, so one
+    /// invocation is judged by one reading of the policy.
+    pub(crate) fn ensure_declared_actor(&self, store: &Store) -> Result<()> {
         if self.actor_source.declared() || self.on_behalf_of.is_some() {
             return Ok(());
         }
-        let Ok(toplevel) = gitio::toplevel(&self.cwd) else {
-            return Ok(());
-        };
-        if !crate::policy::load(&toplevel)?
-            .policy
-            .require_declared_actor
-        {
+        if !store.require_declared_actor {
             return Ok(());
         }
         bail!(

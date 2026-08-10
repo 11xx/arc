@@ -18,7 +18,6 @@ pub fn begin(
     tags: Vec<String>,
     from_journal: Option<String>,
 ) -> Result<()> {
-    ctx.ensure_declared_actor()?;
     ids::validate_slug(slug)?;
     // Validate the journal source before writing anything: a bad
     // --from-journal must fail cleanly with no branch, worktree, or event.
@@ -27,6 +26,7 @@ pub fn begin(
         .map(|filename| crate::journal::require_open_actionable(ctx, filename))
         .transpose()?;
     let store = ctx.store()?;
+    ctx.ensure_declared_actor(&store)?;
     let blocked_by = blocked_by
         .iter()
         .map(|reference| store.resolve_change(reference))

@@ -364,7 +364,12 @@ fn an_audit_refuses_an_assumed_auditor() {
             "approved",
         ])
         .assert()
-        .success();
+        .success()
+        // Said out loud, or audit debt would look like a way around the rule
+        // rather than a way of carrying it.
+        .stderr(predicates::str::contains(
+            "shows that a review happened and not that it was independent",
+        ));
     let events = stdout(repo.arc(&wt).args([
         "events",
         "--change",

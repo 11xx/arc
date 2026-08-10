@@ -99,9 +99,6 @@ struct CompletedVerification {
 }
 
 pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
-    // Verification runs an arbitrary command whose effects outlive the
-    // refusal, so the identity question is settled before anything executes.
-    ctx.ensure_declared_actor()?;
     let VerifyArgs {
         all,
         parallel,
@@ -172,6 +169,9 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         (None, None, None)
     };
     let store = ctx.store()?;
+    // Verification runs an arbitrary command whose effects outlive the
+    // refusal, so the identity question is settled before anything executes.
+    ctx.ensure_declared_actor(&store)?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
     let toplevel = gitio::toplevel(&ctx.cwd)?;
     if let Some(probe_name) = probe {
@@ -961,7 +961,7 @@ pub fn integrate(
     // A dry run promises to write nothing, so there is no record for the
     // policy to be about.
     if !dry_run {
-        ctx.ensure_declared_actor()?;
+        ctx.ensure_declared_actor(&ctx.store()?)?;
     }
     match (reference, tags.is_empty()) {
         (Some(reference), true) => integrate_one(

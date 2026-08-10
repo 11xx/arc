@@ -57,6 +57,13 @@ impl Store {
     /// subdirectory, sandbox-friendly) > the repository's Git common dir.
     pub fn discover(cwd: &Path) -> Result<Store> {
         let root = Self::resolve_root(cwd)?;
+        // Read the repository's policy before creating anything, so an
+        // unreadable one fails with the filesystem untouched.
+        let require_declared_actor = match gitio::toplevel(cwd) {
+            Ok(top) => crate::policy::load(&top)?.policy.require_declared_actor,
+            // A store opened outside a repository has no policy to honour.
+            Err(_) => false,
+        };
         create_private_dir(&root)?;
         let config_path = root.join("config.json");
         let repository_id = match fs::read(&config_path) {
@@ -80,11 +87,6 @@ impl Store {
                 let cfg: StoreConfig = serde_json::from_slice(&fs::read(&config_path)?)?;
                 cfg.repository_id
             }
-        };
-        // A store opened by path alone has no repository to read policy from.
-        let require_declared_actor = match gitio::toplevel(cwd) {
-            Ok(top) => crate::policy::load(&top)?.policy.require_declared_actor,
-            Err(_) => false,
         };
         Ok(Store {
             root,
