@@ -796,9 +796,6 @@ fn note(
         (None, true) => None,
         (None, false) => default_scaffold(kind),
     };
-    if body_file.is_none() && scaffold.is_none() {
-        bail!("--body-file is required (or --scaffold, to record a template alone)");
-    }
     // Read the body before touching the filesystem so a bad source path or
     // scaffold name leaves nothing written. A scaffold template is prepended
     // to the body; a scaffold with no --body-file records the template alone.
@@ -811,10 +808,11 @@ fn note(
         None => String::new(),
     };
     let body = crate::commands::scaffold::prepended(&template, &content);
-    // A repo-local template may be empty, and an artifact with no content at
-    // all is a queue entry that says nothing.
-    if body.trim().is_empty() {
-        bail!("nothing to record: the body and the scaffold are both empty");
+    // An artifact with nothing in it is a queue entry that says nothing. A
+    // repo-local template may be empty, so the check is on what would be
+    // written rather than on which options were passed.
+    if body.trim().is_empty() && title.is_none_or(|t| t.trim().is_empty()) {
+        bail!("nothing to record: pass --body-file, --scaffold, or --title");
     }
 
     let dir = resolve_dir(&ctx.cwd)?;
@@ -2560,14 +2558,28 @@ fn discussion_rounds(positions: &[&JournalEvent]) -> (Vec<DiscussionRound>, Vec<
 }
 
 /// A thematic break, or the underline of a setext heading. Either one ends the
-/// block above it, so a stance below belongs to the next section.
+/// block above it, so a stance below belongs to the next section. Markdown
+/// allows the marks to be spaced (`* * *`), so spacing is not what separates a
+/// rule from prose.
 fn is_horizontal_rule(trimmed: &str) -> bool {
-    let candidate = trimmed.trim_end();
-    candidate.len() >= 3
-        && (candidate.bytes().all(|b| b == b'-')
-            || candidate.bytes().all(|b| b == b'=')
-            || candidate.bytes().all(|b| b == b'_')
-            || candidate.bytes().all(|b| b == b'*'))
+    let marks: Vec<u8> = trimmed
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    marks.len() >= 3
+        && matches!(marks[0], b'-' | b'=' | b'_' | b'*')
+        && marks.iter().all(|b| *b == marks[0])
+}
+
+/// The opening or closing marker of a fenced block, and the run of characters
+/// that closes it. A fence closes only on its own marker, so a `~~~` inside a
+/// backtick fence is content.
+fn fence_marker(trimmed: &str) -> Option<u8> {
+    let first = trimmed.as_bytes().first().copied()?;
+    if !matches!(first, b'`' | b'~') {
+        return None;
+    }
+    (trimmed.bytes().take_while(|b| *b == first).count() >= 3).then_some(first)
 }
 
 fn is_position_heading(line: &str) -> bool {
@@ -2577,21 +2589,23 @@ fn is_position_heading(line: &str) -> bool {
     rest.is_empty() || rest.starts_with(char::is_whitespace)
 }
 
-/// Count actual position blocks and at most one stated stance within each.
-/// A `Position:` example or explanation elsewhere in the document is prose,
-/// not a vote; a second stance-looking line inside one block is prose too.
-/// A block that states no stance is counted as `unstated`, so a tally that
-/// undercounts says so instead of reading as a settled result.
+/// Count position blocks, and the stance each one states.
+///
+/// A block's stance is the first non-blank line under its heading, which is
+/// what the convention asks for and what every surface documents. A block whose
+/// first line argues instead of voting is counted as `unstated`, so a tally
+/// that undercounts says so instead of reading as a settled result — and a
+/// `Position:` line anywhere else, including inside a fenced example, is prose.
 fn position_structure(body: &str) -> (usize, StanceTally) {
     let mut positions = 0;
     let mut tally = StanceTally::default();
     let mut open_block = false;
-    let mut saw_stance = false;
-    let mut in_fence = false;
+    let mut decided = false;
+    let mut fence: Option<u8> = None;
     // A block ends at the next heading, at a horizontal rule, or at the end of
     // the file.
-    let close_block = |open_block: &mut bool, saw_stance: bool, tally: &mut StanceTally| {
-        if *open_block && !saw_stance {
+    let close_block = |open_block: &mut bool, decided: bool, tally: &mut StanceTally| {
+        if *open_block && !decided {
             tally.unstated += 1;
         }
         *open_block = false;
@@ -2600,36 +2614,42 @@ fn position_structure(body: &str) -> (usize, StanceTally) {
         // A fenced block quotes the conventions rather than exercising them —
         // the scaffold that teaches the stance line is itself such a quote.
         let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if in_fence {
-            continue;
+        match (fence, fence_marker(trimmed)) {
+            (None, Some(opened)) => {
+                fence = Some(opened);
+                continue;
+            }
+            (Some(open), Some(closed)) if open == closed => {
+                fence = None;
+                continue;
+            }
+            (Some(_), _) => continue,
+            (None, None) => {}
         }
         if is_horizontal_rule(trimmed) {
-            close_block(&mut open_block, saw_stance, &mut tally);
-            saw_stance = false;
+            close_block(&mut open_block, decided, &mut tally);
             continue;
         }
         if is_position_heading(line) {
-            close_block(&mut open_block, saw_stance, &mut tally);
+            close_block(&mut open_block, decided, &mut tally);
             positions += 1;
             open_block = true;
-            saw_stance = false;
+            decided = false;
             continue;
         }
-        if line.trim_start().starts_with('#') {
-            close_block(&mut open_block, saw_stance, &mut tally);
-            saw_stance = false;
-        }
-        if !open_block || saw_stance {
+        if trimmed.starts_with('#') {
+            close_block(&mut open_block, decided, &mut tally);
             continue;
         }
-        let Some(rest) = line.trim().strip_prefix("Position:") else {
+        if !open_block || decided || trimmed.is_empty() {
+            continue;
+        }
+        decided = true;
+        let Some(rest) = trimmed.strip_prefix("Position:") else {
+            // The block opens by arguing rather than voting.
+            tally.unstated += 1;
             continue;
         };
-        saw_stance = true;
         match rest
             .split_whitespace()
             .next()
@@ -2644,7 +2664,7 @@ fn position_structure(body: &str) -> (usize, StanceTally) {
             None => tally.unstated += 1,
         }
     }
-    close_block(&mut open_block, saw_stance, &mut tally);
+    close_block(&mut open_block, decided, &mut tally);
     (positions, tally)
 }
 

@@ -2577,6 +2577,94 @@ fn journal_discussion_tally_ignores_quoted_and_out_of_block_stances() {
     assert_eq!(json["stances"]["unstated"], 1, "{json}");
 }
 
+/// The stance is the block's first line, which is what every surface
+/// documents. A block that opens by arguing has not voted, whatever it says
+/// further down.
+#[test]
+fn journal_discussion_reads_the_stance_from_the_first_line() {
+    let repo = Repo::new();
+    let src = repo.home.join("open.md");
+    fs::write(&src, "the question\n").unwrap();
+    let file = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "firstline",
+        "--kind",
+        "discussion",
+        "--no-scaffold",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    let name = PathBuf::from(file.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let buried = repo.home.join("buried.md");
+    fs::write(&buried, "I argue at length first.\nPosition: for\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &name,
+            "--body-file",
+            buried.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let json: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "journal",
+        "discussion",
+        &name,
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(json["stances"]["for"], 0, "{json}");
+    assert_eq!(json["stances"]["unstated"], 1, "{json}");
+}
+
+/// A fence closes on its own marker, so a different marker inside it is
+/// content; and Markdown allows a thematic break to be spaced.
+#[test]
+fn journal_discussion_handles_mixed_fences_and_spaced_rules() {
+    let repo = Repo::new();
+    let src = repo.home.join("open.md");
+    fs::write(
+        &src,
+        "### Position pos-a\n\n```markdown\n~~~\nPosition: for\n```\n\n         ### Position pos-b\n\nno stance here\n\n* * *\n\nPosition: against\n",
+    )
+    .unwrap();
+    let file = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "fences",
+        "--kind",
+        "discussion",
+        "--no-scaffold",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    let name = PathBuf::from(file.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let json: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "journal",
+        "discussion",
+        &name,
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(json["positions"], 2, "{json}");
+    assert_eq!(json["stances"]["for"], 0, "{json}");
+    assert_eq!(json["stances"]["against"], 0, "{json}");
+    assert_eq!(json["stances"]["unstated"], 2, "{json}");
+}
+
 /// A repo-local template may be empty, and the default scaffold must not turn
 /// that into a silently recorded empty artifact.
 #[test]
@@ -2593,6 +2681,21 @@ fn journal_note_refuses_an_empty_body_and_empty_scaffold() {
         .stderr(predicates::str::contains("nothing to record"));
     let listed = stdout(repo.arc(&repo.root).args(["journal", "list"]));
     assert!(listed.contains("(none)"), "{listed}");
+
+    // A title is content, so it is enough on its own.
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "titled",
+        "--kind",
+        "note",
+        "--title",
+        "Just a title",
+    ]));
+    assert_eq!(
+        fs::read_to_string(out.trim()).unwrap().trim(),
+        "# Just a title"
+    );
 }
 
 #[test]
