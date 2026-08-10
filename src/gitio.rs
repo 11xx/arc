@@ -306,7 +306,11 @@ pub fn missing_objects<'a>(
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    let revisions: Vec<&str> = revisions.collect();
+    // A revision containing a newline would become two queries and shift every
+    // later answer, so those are refused rather than silently misaligned.
+    let revisions: Vec<&str> = revisions
+        .filter(|revision| !revision.contains(['\n', '\r']))
+        .collect();
     if revisions.is_empty() {
         return Ok(Vec::new());
     }
@@ -315,7 +319,7 @@ pub fn missing_objects<'a>(
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .context("cannot run git cat-file")?;
     let query = revisions.join("\n") + "\n";
@@ -326,12 +330,30 @@ pub fn missing_objects<'a>(
         .write_all(query.as_bytes())
         .context("cannot write to git cat-file")?;
     let output = child.wait_with_output().context("git cat-file failed")?;
-    let answers = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        // Reporting nothing missing because the probe failed would turn a
+        // broken repository into a clean bill of health.
+        anyhow::bail!(
+            "git cat-file failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let answers: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    if answers.len() != revisions.len() {
+        anyhow::bail!(
+            "git cat-file answered {} of {} revisions; refusing to guess which",
+            answers.len(),
+            revisions.len()
+        );
+    }
 
     // One answer line per query line, in order. A resolvable revision answers
-    // with its object; a missing one answers "<name> missing".
+    // with its object; anything else names why it could not be resolved.
     let mut missing = Vec::new();
-    for (revision, answer) in revisions.iter().zip(answers.lines()) {
+    for (revision, answer) in revisions.iter().zip(&answers) {
         if answer.ends_with(" missing") || answer.ends_with(" ambiguous") {
             missing.push((*revision).to_string());
         }

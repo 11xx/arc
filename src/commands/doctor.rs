@@ -98,8 +98,12 @@ fn inspect_dangling_revisions(
 ) -> Result<()> {
     let mut wanted: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (change_id, state) in states {
+        // Every revision the ledger records, because the point is that the
+        // evidence still resolves, and a hexadecimal string is what Git will
+        // be asked to resolve however short it is.
         let mut note = |revision: &str, what: String| {
-            if revision.len() >= 7 {
+            let revision = revision.trim();
+            if !revision.is_empty() && revision.chars().all(|c| c.is_ascii_hexdigit()) {
                 wanted
                     .entry(revision.to_string())
                     .or_default()
@@ -110,9 +114,30 @@ fn inspect_dangling_revisions(
         for patchset in &state.patchsets {
             note(&patchset.head, format!("{} head", patchset.id));
             note(&patchset.base, format!("{} base", patchset.id));
+            if let Some(merge_base) = patchset.merge_base.as_deref() {
+                note(merge_base, format!("{} merge-base", patchset.id));
+            }
+        }
+        for brief in &state.briefs {
+            if let Some(base) = brief.base_revision.as_deref() {
+                note(base, "brief base".to_string());
+            }
         }
         for verification in &state.verifications {
             note(&verification.revision, "verification".to_string());
+        }
+        for run in &state.verification_runs {
+            note(&run.revision, "verification run".to_string());
+        }
+        for audit in &state.audit_verdicts {
+            note(&audit.revision, "audit".to_string());
+        }
+        for finding in state.findings.values().chain(state.audit_findings.values()) {
+            for disposition in &finding.dispositions {
+                if let Some(commit) = disposition.commit.as_deref() {
+                    note(commit, format!("{} disposition", finding.id));
+                }
+            }
         }
         if let Some(commit) = state
             .closure

@@ -24,22 +24,24 @@ pub fn events(
         .transpose()?;
     // A tagged program is the unit an orchestrator waits on, and following
     // each member separately loses the interleaving that makes the stream
-    // worth reading. Membership is resolved once: a change tagged mid-follow
-    // is a new program member, not a late event in this one.
-    let tagged: Option<BTreeSet<String>> = if tags.is_empty() {
-        None
+    // worth reading. Membership is re-derived each pass, so a change that
+    // acquires the tag mid-follow joins the stream — which is what "the
+    // changes carrying this tag" means while it is being followed.
+    let tags = if tags.is_empty() {
+        Vec::new()
     } else {
-        Some(
-            resolve_tagged(ctx, &normalize_tags(tags.to_vec())?)?
-                .into_iter()
-                .collect(),
-        )
+        normalize_tags(tags.to_vec())?
     };
     let mut seen = BTreeSet::new();
     let mut poll_interval = POLL_MIN;
     let since = since.map(|cursor| cursor.to_string());
 
     loop {
+        let tagged: Option<BTreeSet<String>> = if tags.is_empty() {
+            None
+        } else {
+            Some(resolve_tagged(ctx, &tags)?.into_iter().collect())
+        };
         let raw_events = match &change_id {
             Some(id) => store.raw_events_unseen(id, &seen)?,
             None => store.raw_events_all_unseen(&seen)?,
@@ -252,7 +254,7 @@ fn watch_hook_payload(
             "changes": hits.iter().map(|hit| serde_json::json!({
                 "change_id": hit.change_id,
                 "condition": hit.condition.label(),
-                "event_id": hit.event_id.clone().unwrap_or_default(),
+                "event_id": hit.event_id,
             })).collect::<Vec<_>>(),
             "condition": until_labels(until),
             "event_id": "",
@@ -260,8 +262,11 @@ fn watch_hook_payload(
         }),
         _ => serde_json::json!({
             "change_id": hits[0].change_id,
+            // Absent rather than empty when the condition is derived from
+            // elapsed time or from policy: a field that always holds an event
+            // ID should not sometimes hold a placeholder.
             "condition": hits[0].condition.label(),
-            "event_id": hits[0].event_id.clone().unwrap_or_default(),
+            "event_id": hits[0].event_id,
             "event_type": "watch-reached",
         }),
     }
