@@ -145,18 +145,26 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<()> {
     }
 }
 
-/// What to say when the sweep found no project at all.
+/// What to say when the rollup has no repository to show.
 ///
 /// Printing nothing is the same shape as a command that died with its output
-/// swallowed, and this rollup used to refuse loudly when it could not run.
-/// Naming where it looked turns an empty answer back into an answer.
+/// swallowed, and this rollup used to refuse loudly when it could not run. But
+/// an empty rollup is not proof of an empty registry: a project with no ledger,
+/// or one whose journal points somewhere gone, is registered and still
+/// contributes no store. Claiming "nothing is registered" there would replace
+/// silence with something worse — a confident false statement.
 fn nothing_found() -> String {
-    match crate::config::load().ok().and_then(|cfg| {
-        crate::registry::journals_root(&cfg)
-            .to_str()
-            .map(str::to_owned)
-    }) {
-        Some(root) => format!("no projects found: nothing is registered under {root}"),
+    let registered = crate::config::load().ok().and_then(|cfg| {
+        let root = crate::registry::journals_root(&cfg).display().to_string();
+        crate::registry::projects(&cfg)
+            .ok()
+            .map(|projects| (projects.len(), root))
+    });
+    match registered {
+        Some((0, root)) => format!("no projects found: nothing is registered under {root}"),
+        Some((count, _)) => {
+            format!("no open changes: {count} project(s) registered, none with a ledger to report")
+        }
         None => "no projects found".to_string(),
     }
 }

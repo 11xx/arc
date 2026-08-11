@@ -212,6 +212,30 @@ fn workspace_rollups_answer_when_nothing_is_registered() {
     assert!(value["repos"].as_array().unwrap().is_empty(), "{value}");
 }
 
+/// An empty rollup is not proof of an empty registry: a project with no ledger
+/// is registered and still contributes no store. Saying "nothing is registered"
+/// there replaces silence with something worse — a confident false statement.
+#[test]
+fn an_empty_rollup_does_not_claim_an_empty_registry() {
+    let repo = Repo::new();
+    let orphan = repo.home.join(".local/ai/journals").join("-some-project");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("20260101T000000Z-a-todo.md"), "# Item\n").unwrap();
+    fs::write(
+        orphan.join("bindings.jsonl"),
+        "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
+         \"event\":\"bound\",\"anchor\":\"/gone/away\"}\n",
+    )
+    .unwrap();
+
+    repo.arc(&repo.root)
+        .args(["workspace", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("1 project(s) registered"))
+        .stdout(predicates::str::contains("nothing is registered").not());
+}
+
 /// `list` and `inbox` report changes, so an unreachable project has nothing to
 /// contribute to them — but disappearing from a rollup is how work goes unseen,
 /// which is the failure this whole feature exists to prevent. So they say what
