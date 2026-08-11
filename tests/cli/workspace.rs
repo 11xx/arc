@@ -191,6 +191,38 @@ fn workspace_backlog_names_an_unreachable_project() {
     assert_eq!(stranded["reason"], "anchor does not exist");
 }
 
+/// `list` and `inbox` report changes, so an unreachable project has nothing to
+/// contribute to them — but disappearing from a rollup is how work goes unseen,
+/// which is the failure this whole feature exists to prevent. So they say what
+/// they skipped and where to look, even though only `backlog` can report it.
+#[test]
+fn workspace_list_says_what_it_skipped() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "feat-visible", "--no-worktree"])
+        .assert()
+        .success();
+
+    let journals = repo.home.join(".local/ai/journals");
+    let orphan = journals.join("-gone-elsewhere");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("20260101T000000Z-left-todo.md"), "# Left\n").unwrap();
+    fs::write(
+        orphan.join("bindings.jsonl"),
+        "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
+         \"event\":\"bound\",\"anchor\":\"/gone/elsewhere\"}\n",
+    )
+    .unwrap();
+
+    repo.arc(&repo.root)
+        .args(["workspace", "list"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("-gone-elsewhere"))
+        .stderr(predicates::str::contains("/gone/elsewhere"))
+        .stderr(predicates::str::contains("journal rebind"));
+}
+
 /// Opening a change registers a project with a binding and nothing else, so a
 /// repository moved before anything is written to its journal leaves a
 /// directory with no artifacts that still names a project holding open work.

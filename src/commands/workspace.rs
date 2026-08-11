@@ -61,12 +61,32 @@ fn workspace_stores() -> Result<Vec<(String, Store)>> {
     }
 }
 
-/// Ledgers found through the project registry. A project the registry knows
-/// but cannot reach contributes no store; `backlog` reports it by name rather
-/// than dropping it, which is the whole point of enumerating.
+/// Ledgers found through the project registry.
+///
+/// A project the registry knows but cannot reach contributes no store, and
+/// says so: `backlog` reports it in full, and these rollups at least name it
+/// rather than letting it disappear. A project whose journal keeps a dead
+/// anchor is exactly the case worth hearing about, since its ledger may be
+/// perfectly healthy at a path nothing here can find.
 fn registry_stores(cfg: &crate::config::Config) -> Result<Vec<(String, Store)>> {
     let mut stores = Vec::new();
     for project in crate::registry::projects(cfg)? {
+        if project.is_orphan() {
+            // Named by its journal directory, not by `label()`: for an orphan
+            // that reads the dead anchor's last component, which identifies
+            // nothing an operator can act on.
+            eprintln!(
+                "warning: skipping {}: its project is not at {}; \
+                 `arc workspace backlog` reports it, `arc journal rebind` adopts it",
+                project.journal_dir.display(),
+                project
+                    .anchor
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "any single resolvable path".into())
+            );
+            continue;
+        }
         let Some(root) = project.ledger.clone() else {
             continue;
         };
