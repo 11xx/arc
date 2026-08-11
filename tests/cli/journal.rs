@@ -4166,29 +4166,19 @@ fn rebind_adopts_over_a_journal_holding_only_its_binding() {
 }
 
 /// The slug maps `/` and `.` alike, so two different paths can share one
-/// journal directory. A move between them leaves a dead anchor naming a
-/// project that is gone, while this project resolves to the same journal — so
-/// the anchor is restated as an appended fact, keeping what it superseded.
+/// journal directory. A dead anchor there is simply wrong about who owns the
+/// directory — but restating it is safe only while there is no history to
+/// inherit, since arc cannot tell "this project moved" from "a different
+/// project of that name was deleted".
 #[test]
-fn a_dead_anchor_is_restated_when_the_journal_is_still_this_project() {
+fn a_dead_anchor_is_restated_only_while_there_is_no_history_to_inherit() {
     let repo = Repo::new();
     let dir = journal_dir(&repo);
-    let src = repo.home.join("body.md");
-    fs::write(&src, "before\n").unwrap();
+    // Registered by opening a change: a binding and nothing else.
     repo.arc(&repo.root)
-        .args([
-            "journal",
-            "note",
-            "before",
-            "--kind",
-            "note",
-            "--body-file",
-            src.to_str().unwrap(),
-        ])
+        .args(["begin", "feat-collided", "--no-worktree"])
         .assert()
         .success();
-
-    // A path that no longer exists but slugs to this same journal directory.
     fs::write(
         dir.join("bindings.jsonl"),
         "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
@@ -4196,17 +4186,10 @@ fn a_dead_anchor_is_restated_when_the_journal_is_still_this_project() {
     )
     .unwrap();
 
-    fs::write(&src, "after\n").unwrap();
+    // Opening another change registers the project again, and this time finds
+    // a binding that names somewhere gone.
     repo.arc(&repo.root)
-        .args([
-            "journal",
-            "note",
-            "after",
-            "--kind",
-            "note",
-            "--body-file",
-            src.to_str().unwrap(),
-        ])
+        .args(["begin", "feat-second", "--no-worktree"])
         .assert()
         .success();
 
@@ -4216,6 +4199,53 @@ fn a_dead_anchor_is_restated_when_the_journal_is_still_this_project() {
     assert_eq!(last["previous_anchor"], "/gone/but/same/slug");
     // Appended, never rewritten: what it superseded is still on the record.
     assert_eq!(bindings.lines().count(), 2);
+}
+
+/// Once the journal holds artifacts, a dead anchor is left exactly as it is:
+/// inheriting another project's history is what `rebind` exists to make
+/// explicit, and `workspace backlog` reports the journal as an orphan instead.
+#[test]
+fn a_dead_anchor_over_real_history_is_left_for_rebind() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    let src = repo.home.join("body.md");
+    fs::write(&src, "history\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "history",
+            "--kind",
+            "note",
+            "--body-file",
+            src.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    fs::write(
+        dir.join("bindings.jsonl"),
+        "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
+         \"event\":\"bound\",\"anchor\":\"/gone/but/same/slug\"}\n",
+    )
+    .unwrap();
+
+    fs::write(&src, "more\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "more",
+            "--kind",
+            "note",
+            "--body-file",
+            src.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let bindings = fs::read_to_string(dir.join("bindings.jsonl")).unwrap();
+    assert_eq!(bindings.lines().count(), 1, "{bindings}");
+    assert!(bindings.contains("/gone/but/same/slug"), "{bindings}");
 }
 
 /// A live anchor is never restated: only `rebind` moves a journal between

@@ -207,6 +207,21 @@ fn configured_anchor(cfg: &Config, journal_dir: &Path) -> Result<Option<PathBuf>
 /// is not a Git repository has no ledger either, which is not an error — the
 /// journal is what registered it.
 fn ledger_at(cfg: &Config, anchor: &Path) -> Result<Option<PathBuf>> {
+    // `ARC_DATA_DIR` names one store for one repository, so it cannot stand for
+    // every project in a sweep — but it is exactly right for the project the
+    // caller is standing in, whose ledger would otherwise be reported missing
+    // from its own workspace views.
+    if let Some(exact) = std::env::var_os("ARC_DATA_DIR") {
+        if std::env::current_dir()
+            .ok()
+            .and_then(|cwd| crate::gitio::common_dir(&cwd).ok())
+            .and_then(|common| crate::gitio::common_dir(anchor).ok().map(|a| a == common))
+            .unwrap_or(false)
+        {
+            let root = PathBuf::from(exact);
+            return Ok(Store::open_at(&root)?.map(|_| root));
+        }
+    }
     let root = match &cfg.data_root {
         Some(data_root) => data_root.join(crate::config::path_slug(anchor)),
         None => match crate::gitio::common_dir(anchor) {

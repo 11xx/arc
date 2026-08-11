@@ -470,6 +470,18 @@ fn looks_like_a_journal(dir: &Path) -> Result<bool> {
     Ok(false)
 }
 
+/// Remove a target journal that holds nothing but its own binding, so the
+/// adopted journal can be renamed into its place.
+fn clear_bound_target(target: &Path) -> Result<()> {
+    let stale = bindings_path(target);
+    if stale.is_file() {
+        std::fs::remove_file(&stale)
+            .with_context(|| format!("cannot remove {}", stale.display()))?;
+    }
+    std::fs::remove_dir(target)
+        .with_context(|| format!("cannot replace empty {}", target.display()))
+}
+
 /// Whether a journal holds anything a rebind could destroy by merging.
 ///
 /// A binding is not history: it says which project the directory belongs to,
@@ -590,13 +602,20 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
         // instead. Clearing it last keeps the window in which the target is
         // unbound as short as the move allows: everything that can fail on its
         // own has already succeeded, and only the rename remains.
-        let stale = bindings_path(&target);
-        if stale.is_file() {
-            std::fs::remove_file(&stale)
-                .with_context(|| format!("cannot remove {}", stale.display()))?;
+        if let Err(error) = clear_bound_target(&target) {
+            // The archive has already moved, so put it back before failing:
+            // a retry should start from where it began, not from half a move.
+            if archive_moved {
+                if let Err(rollback) = std::fs::rename(&target_archive, &source_archive) {
+                    bail!(
+                        "{error}. Its cold archive is now at {} and could not be put back: \
+                         {rollback}",
+                        target_archive.display()
+                    );
+                }
+            }
+            return Err(error);
         }
-        std::fs::remove_dir(&target)
-            .with_context(|| format!("cannot replace empty {}", target.display()))?;
     }
     if let Err(error) = std::fs::rename(&source, &target) {
         // A rename across filesystems cannot be atomic. Put back what did
@@ -1483,12 +1502,18 @@ fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
     };
     if let Some(recorded) = recorded.as_deref() {
         // Two different paths can slug to one journal directory, because the
-        // slug maps `/` and `.` alike. When that happens a move leaves a dead
-        // anchor naming a project that no longer exists, while this project —
-        // ledger and all — resolves to the very same journal. Restate the
-        // anchor, as an appended fact rather than an edit: adopting *another*
-        // journal is still `rebind`'s job and stays explicit.
-        if recorded == anchor.to_string_lossy() || Path::new(recorded).is_dir() {
+        // slug maps `/` and `.` alike. A dead anchor there names a project that
+        // is gone while this one resolves to the very same journal, so the
+        // record is simply wrong about who owns it.
+        //
+        // Restating is safe only while there is no history to inherit. arc
+        // cannot tell "this project moved between colliding paths" from "a
+        // different project of that name was deleted", and in the second case a
+        // silent restatement would hand one project another's artifacts. So a
+        // journal holding history keeps its dead anchor and is reported as an
+        // orphan; adopting it stays `rebind`'s explicit job.
+        let stale = !Path::new(recorded).is_dir();
+        if !stale || recorded == anchor.to_string_lossy() || holds_history(dir)? {
             return Ok(());
         }
     }
