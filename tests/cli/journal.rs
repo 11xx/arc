@@ -4000,6 +4000,37 @@ fn a_journal_records_the_project_it_belongs_to() {
     );
 }
 
+/// A finding is read by a person, and the rebind command inside it is copied
+/// by one. Both fail if the detail arrives with the source's wrapping in it.
+#[test]
+fn journal_doctor_split_advice_reads_as_one_sentence() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    let orphan = dir.parent().unwrap().join("-old-path-repo");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("20260101T000000Z-alpha-todo.md"), "# Alpha\n").unwrap();
+    fs::write(
+        orphan.join("bindings.jsonl"),
+        "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
+         \"event\":\"bound\",\"anchor\":\"/old/path/repo\"}\n",
+    )
+    .unwrap();
+
+    let report = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    let detail = report["advice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["code"] == "split-journal")
+        .map(|item| item["detail"].as_str().unwrap().to_string())
+        .unwrap_or_else(|| panic!("no split-journal advice: {report}"));
+    assert!(!detail.contains("  "), "{detail}");
+    assert!(
+        detail.contains(&format!("`arc journal rebind {}`", orphan.display())),
+        "{detail}"
+    );
+}
+
 /// The failure this exists to catch is a quiet one, so the detector reports it
 /// where an operator already looks.
 #[test]

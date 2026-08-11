@@ -770,7 +770,8 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
         advice.push(DoctorFinding {
             code: "split-journal",
             detail: format!(
-                "{} holds artifacts for a project of this name; if this project moved,                  `arc journal rebind {}` adopts it",
+                "{} holds artifacts for a project of this name; if this project moved, \
+                 `arc journal rebind {}` adopts it",
                 candidate.display(),
                 candidate.display()
             ),
