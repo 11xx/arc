@@ -67,7 +67,10 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   `arc show`; comment replies render beneath their parent comment.
 - **Approval staleness is structural:** a verdict is valid only while
   the branch head equals the approved patchset head. Any new commit
-  makes it stale.
+  makes it stale. Which patchset a verdict binds to is therefore a fact worth
+  stating: `arc review --patchset` takes the patchset id or the revision the
+  reviewer actually read, and without it the verdict claims the newest patchset
+  — which is not always the one that was reviewed.
 - **Gates** are declared in `.arc/gates.toml` (committed). `arc verify`
   runs a gate and records command, exact revision, result, exit code, duration,
   and hostname — local evidence with provenance, the local analogue of required

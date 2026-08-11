@@ -551,15 +551,34 @@ fn build_anchor(
     }))
 }
 
+/// A patchset named by its own id, or by the revision it recorded.
+///
+/// A reviewer reports on a revision — it read `8c839c1`, not `ps-06`. Making
+/// the lead translate that by hand is where a verdict gets attached to the
+/// wrong patchset, so accept either. A revision may be abbreviated, and must
+/// identify exactly one patchset: two patchsets can share a head when a brief
+/// was renegotiated without new commits, and guessing between them would
+/// reintroduce the error this exists to prevent.
 fn resolve_patchset_id(st: &ChangeState, patchset: Option<String>) -> Result<Option<String>> {
-    match patchset {
-        Some(id) => {
-            if !st.patchsets.iter().any(|p| p.id == id) {
-                bail!("unknown patchset {id:?}");
-            }
-            Ok(Some(id))
-        }
-        None => Ok(st.latest_patchset().map(|p| p.id.clone())),
+    let Some(reference) = patchset else {
+        return Ok(st.latest_patchset().map(|p| p.id.clone()));
+    };
+    if st.patchsets.iter().any(|p| p.id == reference) {
+        return Ok(Some(reference));
+    }
+    let matches: Vec<&str> = st
+        .patchsets
+        .iter()
+        .filter(|p| p.head.starts_with(&reference))
+        .map(|p| p.id.as_str())
+        .collect();
+    match matches.as_slice() {
+        [single] => Ok(Some((*single).to_string())),
+        [] => bail!("unknown patchset {reference:?}: no patchset has that id or revision"),
+        many => bail!(
+            "revision {reference:?} matches {}; name the patchset instead",
+            many.join(", ")
+        ),
     }
 }
 
