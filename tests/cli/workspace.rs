@@ -62,6 +62,43 @@ fn workspace_list_falls_back_to_the_project_registry() {
     assert!(slugs.contains(&"feat-registry".to_string()), "{slugs:?}");
 }
 
+/// Opening a change is the moment a directory provably becomes an arc project,
+/// so it registers itself. Otherwise a repository with open changes but no
+/// journal writes would be invisible to every cross-project view — structure,
+/// not habit, has to guarantee it.
+#[test]
+fn begin_registers_the_project_for_cross_project_views() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "feat-unwritten", "--no-worktree"])
+        .assert()
+        .success();
+
+    // No journal artifact was ever written, only a change opened.
+    let journal = journal_dir_of(&repo);
+    assert!(journal.join("bindings.jsonl").is_file(), "{journal:?}");
+    assert!(
+        !journal.join("events.jsonl").exists(),
+        "registering must not fabricate journal history"
+    );
+
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "list", "--json"]);
+    let value = json_stdout(&mut report);
+    let slugs: Vec<String> = value["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|repo| repo["changes"].as_array().unwrap())
+        .map(|row| row["slug"].as_str().unwrap().to_string())
+        .collect();
+    assert!(slugs.contains(&"feat-unwritten".to_string()), "{slugs:?}");
+}
+
+fn journal_dir_of(repo: &Repo) -> PathBuf {
+    PathBuf::from(stdout(repo.arc(&repo.root).args(["journal", "dir"])).trim())
+}
+
 /// The backlog joins both halves — what the ledger says is waiting on a
 /// verdict, and what the journal says is waiting on a session.
 #[test]

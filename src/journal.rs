@@ -1478,6 +1478,21 @@ fn append_event(ctx: &Ctx, dir: &Path, event: &JournalEvent) -> Result<()> {
     write_event(dir, event)
 }
 
+/// Register this project, so that opening a change is enough to make it
+/// discoverable. The journal root is what enumerates projects, so a repository
+/// whose ledger has changes but whose journal was never written would be
+/// invisible to every cross-project view — the one place arc's own structure,
+/// rather than habit, has to guarantee the project is known.
+///
+/// Advisory: nothing about opening a change depends on this succeeding, and a
+/// journal that already carries a binding is left exactly as it is.
+pub(crate) fn register_project(ctx: &Ctx) -> Result<()> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("cannot create journal dir {}", dir.display()))?;
+    ensure_bound(ctx, &dir)
+}
+
 fn write_event(dir: &Path, event: &JournalEvent) -> Result<()> {
     use std::io::Write;
     let mut line = serde_json::to_string(event)?;

@@ -674,6 +674,14 @@ per project, keyed by its anchor — is what knows they exist. A journal records
 its anchor in `bindings.jsonl`; one written before that is reconstructed from
 its directory name and confirmed against the filesystem, and a name that
 resolves to no single existing path stays unresolved rather than guessed at.
+`arc begin` registers the project, so opening a change is enough to make a
+repository discoverable even if nothing is ever written to its journal. A
+`[journals] dirs` scope registers its project too, which is how a directory
+that is not a Git repository takes part.
+
+A cold archive is identified structurally rather than by its name: `<x>-archive`
+is skipped only when journal `<x>` is also present, so a project genuinely
+called that is not lost.
 
 `list` prints per-repo open-change rows; `inbox` concatenates each repo's inbox
 rollup, tagged with the repo. The scan opens each store read-only, never

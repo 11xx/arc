@@ -176,6 +176,12 @@ pub fn begin(
         }
     }
     crate::journal::auto_log(ctx, slug, &format!("opened change {change_id}"));
+    // Opening a change is the moment a directory provably becomes an arc
+    // project, and the journal root is what makes projects enumerable. Record
+    // the binding here rather than relying on someone also writing a note.
+    if let Err(error) = crate::journal::register_project(ctx) {
+        eprintln!("warning: could not register this project for cross-project views: {error:#}");
+    }
 
     println!("change: {change_id}");
     println!("branch: {branch_name}");
