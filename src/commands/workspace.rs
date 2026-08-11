@@ -145,6 +145,30 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<()> {
     }
 }
 
+/// What to say when the rollup has no repository to show.
+///
+/// Printing nothing is the same shape as a command that died with its output
+/// swallowed, and this rollup used to refuse loudly when it could not run. But
+/// an empty rollup is not proof of an empty registry: a project with no ledger,
+/// or one whose journal points somewhere gone, is registered and still
+/// contributes no store. Claiming "nothing is registered" there would replace
+/// silence with something worse — a confident false statement.
+fn nothing_found() -> String {
+    let registered = crate::config::load().ok().and_then(|cfg| {
+        let root = crate::registry::journals_root(&cfg).display().to_string();
+        crate::registry::projects(&cfg)
+            .ok()
+            .map(|projects| (projects.len(), root))
+    });
+    match registered {
+        Some((0, root)) => format!("no projects found: nothing is registered under {root}"),
+        Some((count, _)) => {
+            format!("no open changes: {count} project(s) registered, none with a ledger to report")
+        }
+        None => "no projects found".to_string(),
+    }
+}
+
 fn workspace_list(stores: &[(String, Store)], json: bool) -> Result<()> {
     let mut repos = Vec::new();
     for (repo, store) in stores {
@@ -174,6 +198,10 @@ fn workspace_list(stores: &[(String, Store)], json: bool) -> Result<()> {
             })?
         );
     } else {
+        if repos.is_empty() {
+            println!("{}", nothing_found());
+            return Ok(());
+        }
         for repo in &repos {
             println!("# {}", repo.repo);
             if repo.changes.is_empty() {
@@ -229,6 +257,10 @@ fn workspace_inbox(stores: &[(String, Store)], json: bool) -> Result<()> {
             })?
         );
     } else {
+        if repos.is_empty() {
+            println!("{}", nothing_found());
+            return Ok(());
+        }
         for repo in &repos {
             println!("# {}", repo.repo);
             for (name, rows) in repo.inbox.sections() {

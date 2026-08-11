@@ -191,6 +191,51 @@ fn workspace_backlog_names_an_unreachable_project() {
     assert_eq!(stranded["reason"], "anchor does not exist");
 }
 
+/// Printing nothing is the same shape as a command that died with its output
+/// swallowed, and this rollup used to refuse loudly when it could not run. An
+/// empty answer has to read as an answer, and `--json` keeps its shape.
+#[test]
+fn workspace_rollups_answer_when_nothing_is_registered() {
+    let repo = Repo::new();
+    for view in ["list", "inbox"] {
+        repo.arc(&repo.root)
+            .args(["workspace", view])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("no projects found"))
+            .stdout(predicates::str::contains("journals"));
+    }
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "list", "--json"]);
+    let value = json_stdout(&mut report);
+    assert_eq!(value["schema"], "arc-workspace/1");
+    assert!(value["repos"].as_array().unwrap().is_empty(), "{value}");
+}
+
+/// An empty rollup is not proof of an empty registry: a project with no ledger
+/// is registered and still contributes no store. Saying "nothing is registered"
+/// there replaces silence with something worse — a confident false statement.
+#[test]
+fn an_empty_rollup_does_not_claim_an_empty_registry() {
+    let repo = Repo::new();
+    let orphan = repo.home.join(".local/ai/journals").join("-some-project");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("20260101T000000Z-a-todo.md"), "# Item\n").unwrap();
+    fs::write(
+        orphan.join("bindings.jsonl"),
+        "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
+         \"event\":\"bound\",\"anchor\":\"/gone/away\"}\n",
+    )
+    .unwrap();
+
+    repo.arc(&repo.root)
+        .args(["workspace", "list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("1 project(s) registered"))
+        .stdout(predicates::str::contains("nothing is registered").not());
+}
+
 /// `list` and `inbox` report changes, so an unreachable project has nothing to
 /// contribute to them — but disappearing from a rollup is how work goes unseen,
 /// which is the failure this whole feature exists to prevent. So they say what

@@ -701,7 +701,8 @@ ranked against each other across projects, because arc records no priority that
 spans repositories. A project whose journal holds work but whose anchor no
 longer resolves is reported under `unreachable` with the `journal rebind` that
 adopts it; `list` and `inbox` cannot report it, so they name what they skipped
-on stderr rather than dropping it silently: it is exactly the backlog no per-project command can reach, since
+on stderr rather than dropping it silently, and say so plainly when no
+project is registered at all rather than printing nothing: it is exactly the backlog no per-project command can reach, since
 standing in the project is how every other view starts. `--since <stamp>` turns
 the report into a delta, where the journal counts mean arrivals rather than
 outstanding work; blocked work is still reported in full. arc stores no
