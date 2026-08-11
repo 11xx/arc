@@ -191,6 +191,27 @@ fn workspace_backlog_names_an_unreachable_project() {
     assert_eq!(stranded["reason"], "anchor does not exist");
 }
 
+/// Printing nothing is the same shape as a command that died with its output
+/// swallowed, and this rollup used to refuse loudly when it could not run. An
+/// empty answer has to read as an answer, and `--json` keeps its shape.
+#[test]
+fn workspace_rollups_answer_when_nothing_is_registered() {
+    let repo = Repo::new();
+    for view in ["list", "inbox"] {
+        repo.arc(&repo.root)
+            .args(["workspace", view])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("no projects found"))
+            .stdout(predicates::str::contains("journals"));
+    }
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "list", "--json"]);
+    let value = json_stdout(&mut report);
+    assert_eq!(value["schema"], "arc-workspace/1");
+    assert!(value["repos"].as_array().unwrap().is_empty(), "{value}");
+}
+
 /// `list` and `inbox` report changes, so an unreachable project has nothing to
 /// contribute to them — but disappearing from a rollup is how work goes unseen,
 /// which is the failure this whole feature exists to prevent. So they say what

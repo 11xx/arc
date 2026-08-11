@@ -145,6 +145,22 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<()> {
     }
 }
 
+/// What to say when the sweep found no project at all.
+///
+/// Printing nothing is the same shape as a command that died with its output
+/// swallowed, and this rollup used to refuse loudly when it could not run.
+/// Naming where it looked turns an empty answer back into an answer.
+fn nothing_found() -> String {
+    match crate::config::load().ok().and_then(|cfg| {
+        crate::registry::journals_root(&cfg)
+            .to_str()
+            .map(str::to_owned)
+    }) {
+        Some(root) => format!("no projects found: nothing is registered under {root}"),
+        None => "no projects found".to_string(),
+    }
+}
+
 fn workspace_list(stores: &[(String, Store)], json: bool) -> Result<()> {
     let mut repos = Vec::new();
     for (repo, store) in stores {
@@ -174,6 +190,10 @@ fn workspace_list(stores: &[(String, Store)], json: bool) -> Result<()> {
             })?
         );
     } else {
+        if repos.is_empty() {
+            println!("{}", nothing_found());
+            return Ok(());
+        }
         for repo in &repos {
             println!("# {}", repo.repo);
             if repo.changes.is_empty() {
@@ -229,6 +249,10 @@ fn workspace_inbox(stores: &[(String, Store)], json: bool) -> Result<()> {
             })?
         );
     } else {
+        if repos.is_empty() {
+            println!("{}", nothing_found());
+            return Ok(());
+        }
         for repo in &repos {
             println!("# {}", repo.repo);
             for (name, rows) in repo.inbox.sections() {
