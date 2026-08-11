@@ -13,6 +13,7 @@ mod journal;
 mod model;
 mod policy;
 mod project;
+mod registry;
 mod render;
 mod session_store;
 mod state;
@@ -831,7 +832,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: HooksCmd,
     },
-    /// Aggregate open changes or inboxes across a configured data_root
+    /// Aggregate changes, inboxes, or backlog across every known project
     Workspace {
         #[command(subcommand)]
         cmd: WorkspaceCmd,
@@ -877,6 +878,17 @@ enum WorkspaceCmd {
     },
     /// The inbox rollup for every repo under the data_root
     Inbox {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ledger and journal backlog across every project, ranked by what is
+    /// blocked on a decision rather than on work
+    Backlog {
+        /// Report only what was filed at or after this journal stamp
+        /// (20260101T000000Z) or RFC 3339 timestamp; blocked work is always
+        /// reported, because a stale blocker is the point
+        #[arg(long)]
+        since: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -1898,6 +1910,9 @@ fn run(cli: Cli) -> Result<i32> {
             let (view, json) = match cmd {
                 WorkspaceCmd::List { json } => (commands::WorkspaceView::List, json),
                 WorkspaceCmd::Inbox { json } => (commands::WorkspaceView::Inbox, json),
+                WorkspaceCmd::Backlog { since, json } => {
+                    (commands::WorkspaceView::Backlog { since }, json)
+                }
             };
             commands::workspace(&ctx, view, json)?;
             Ok(0)

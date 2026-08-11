@@ -33,14 +33,181 @@ fn workspace_list_aggregates_repos_and_tags_rows_with_slugs() {
     assert_eq!(value["repos"].as_array().unwrap().len(), 2);
 }
 
+/// Without a data_root the ledgers sit inside each repository's Git common
+/// dir, where nothing can enumerate them. The journal registry is what knows
+/// they exist, so discovery falls back to it rather than refusing.
 #[test]
-fn workspace_requires_configured_data_root() {
+fn workspace_list_falls_back_to_the_project_registry() {
     let repo = Repo::new();
     repo.arc(&repo.root)
-        .args(["workspace", "list"])
+        .args(["begin", "feat-registry", "--no-worktree"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("requires a configured data_root"));
+        .success();
+    // A journal write is what registers the project.
+    repo.arc(&repo.root)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "list", "--json"]);
+    let value = json_stdout(&mut report);
+    let slugs: Vec<String> = value["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|repo| repo["changes"].as_array().unwrap())
+        .map(|row| row["slug"].as_str().unwrap().to_string())
+        .collect();
+    assert!(slugs.contains(&"feat-registry".to_string()), "{slugs:?}");
+}
+
+/// The backlog joins both halves — what the ledger says is waiting on a
+/// verdict, and what the journal says is waiting on a session.
+#[test]
+fn workspace_backlog_reports_ledger_and_journal_together() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "feat-pending", "--no-worktree"])
+        .assert()
+        .success();
+    let src = repo.home.join("body.md");
+    fs::write(&src, "work waiting for a session\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "waiting",
+            "--kind",
+            "todo",
+            "--body-file",
+            src.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut report);
+    assert_eq!(value["schema"], "arc-workspace-backlog/1");
+    let project = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["anchor"].as_str().unwrap().ends_with("repo"))
+        .unwrap_or_else(|| panic!("project missing: {value}"));
+    assert_eq!(project["open_items"], 1);
+    // A change with no verdict yet is waiting on a reviewer.
+    assert!(
+        project["needs_review"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id.as_str().unwrap().starts_with("feat-pending")),
+        "{project}"
+    );
+}
+
+/// A journal whose project has vanished holds work no per-project command can
+/// reach: standing in the project is how every other view starts. The sweep is
+/// the only thing that can see it, so it names it instead of skipping it.
+#[test]
+fn workspace_backlog_names_an_unreachable_project() {
+    let repo = Repo::new();
+    let src = repo.home.join("body.md");
+    fs::write(&src, "stranded\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "stranded",
+            "--kind",
+            "todo",
+            "--body-file",
+            src.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // A second journal for a project that is not there any more.
+    let journals = repo.home.join(".local/ai/journals");
+    let orphan = journals.join("-gone-away-project");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("20260101T000000Z-left-todo.md"), "# Left\n").unwrap();
+    fs::write(
+        orphan.join("bindings.jsonl"),
+        "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
+         \"event\":\"bound\",\"anchor\":\"/gone/away/project\"}\n",
+    )
+    .unwrap();
+
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut report);
+    let stranded = value["unreachable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["slug"] == "-gone-away-project")
+        .unwrap_or_else(|| panic!("orphan not reported: {value}"));
+    assert_eq!(stranded["anchor"], "/gone/away/project");
+    assert_eq!(stranded["reason"], "anchor does not exist");
+}
+
+/// Under --since the journal counts mean arrivals, not outstanding work, or a
+/// delta would read as a full report and be believed as one.
+#[test]
+fn workspace_backlog_since_counts_arrivals_only() {
+    let repo = Repo::new();
+    let src = repo.home.join("body.md");
+    fs::write(&src, "older\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "older",
+            "--kind",
+            "todo",
+            "--body-file",
+            src.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Everything filed so far predates a cutoff in the far future.
+    let mut report = repo.arc(&repo.root);
+    report.args([
+        "workspace",
+        "backlog",
+        "--json",
+        "--since",
+        "20990101T000000Z",
+    ]);
+    let value = json_stdout(&mut report);
+    let mine = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["anchor"].as_str().unwrap().ends_with("repo"));
+    assert!(mine.is_none_or(|entry| entry["open_items"] == 0), "{value}");
+
+    // And a cutoff in the past counts it.
+    let mut report = repo.arc(&repo.root);
+    report.args([
+        "workspace",
+        "backlog",
+        "--json",
+        "--since",
+        "20000101T000000Z",
+    ]);
+    let value = json_stdout(&mut report);
+    let mine = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["anchor"].as_str().unwrap().ends_with("repo"))
+        .unwrap_or_else(|| panic!("project missing: {value}"));
+    assert_eq!(mine["open_items"], 1);
 }
 
 #[test]

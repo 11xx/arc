@@ -10,6 +10,7 @@ use serde::Serialize;
 pub enum WorkspaceView {
     List,
     Inbox,
+    Backlog { since: Option<String> },
 }
 
 #[derive(Serialize)]
@@ -46,12 +47,43 @@ struct RepoInbox {
     inbox: crate::inbox::Inbox,
 }
 
-/// A `data_root` subdirectory that is an arc store, with its slug label.
+/// Every ledger this workspace can reach, with its label.
+///
+/// Two discovery modes, and the configured one always wins. With a `data_root`
+/// the stores sit side by side and enumerate directly. Without one they live
+/// inside each repository's Git common dir, where the journal registry is what
+/// knows they exist at all.
 fn workspace_stores() -> Result<Vec<(String, Store)>> {
-    let data_root = crate::config::load()?.data_root.context(
-        "arc workspace requires a configured data_root; per-repo git-common-dir \
-         ledgers are not enumerable (set data_root in the config file or ARC_DATA_ROOT)",
-    )?;
+    let cfg = crate::config::load()?;
+    match cfg.data_root {
+        Some(_) => data_root_stores(),
+        None => registry_stores(&cfg),
+    }
+}
+
+/// Ledgers found through the project registry. A project the registry knows
+/// but cannot reach contributes no store; `backlog` reports it by name rather
+/// than dropping it, which is the whole point of enumerating.
+fn registry_stores(cfg: &crate::config::Config) -> Result<Vec<(String, Store)>> {
+    let mut stores = Vec::new();
+    for project in crate::registry::projects(cfg)? {
+        let Some(root) = project.ledger.clone() else {
+            continue;
+        };
+        match Store::open_at(&root) {
+            Ok(Some(store)) => stores.push((project.label(), store)),
+            Ok(None) => {}
+            Err(error) => eprintln!("warning: skipping {}: {error:#}", project.label()),
+        }
+    }
+    Ok(stores)
+}
+
+/// A `data_root` subdirectory that is an arc store, with its slug label.
+fn data_root_stores() -> Result<Vec<(String, Store)>> {
+    let data_root = crate::config::load()?
+        .data_root
+        .context("data_root is unset")?;
     let mut stores = Vec::new();
     let entries = std::fs::read_dir(&data_root)
         .with_context(|| format!("cannot read data_root {}", data_root.display()))?;
@@ -81,11 +113,15 @@ fn repo_states(store: &Store) -> Result<BTreeMap<String, ChangeState>> {
     Ok(states)
 }
 
-pub fn workspace(_ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<()> {
+pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<()> {
+    if let WorkspaceView::Backlog { since } = view {
+        return workspace_backlog(ctx, since.as_deref(), json);
+    }
     let stores = workspace_stores()?;
     match view {
         WorkspaceView::List => workspace_list(&stores, json),
         WorkspaceView::Inbox => workspace_inbox(&stores, json),
+        WorkspaceView::Backlog { .. } => unreachable!("handled above"),
     }
 }
 
@@ -187,6 +223,197 @@ fn workspace_inbox(stores: &[(String, Store)], json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct Backlog {
+    schema: &'static str,
+    projects: Vec<ProjectBacklog>,
+    unreachable: Vec<UnreachableProject>,
+}
+
+#[derive(Serialize)]
+struct ProjectBacklog {
+    project: String,
+    anchor: String,
+    /// Changes whose next step is a verdict rather than more work.
+    needs_review: Vec<String>,
+    audit_owed: Vec<String>,
+    open_items: usize,
+    later_items: usize,
+    feature_requests: usize,
+    /// The primary tier's oldest entry, in days. A one-item queue never looks
+    /// like a backlog from inside the project; across projects it is visible.
+    oldest_open_days: Option<u64>,
+}
+
+impl ProjectBacklog {
+    /// Whether anything here is waiting on a person rather than on work.
+    fn blocked(&self) -> usize {
+        self.needs_review.len() + self.audit_owed.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.blocked() == 0
+            && self.open_items == 0
+            && self.later_items == 0
+            && self.feature_requests == 0
+    }
+}
+
+#[derive(Serialize)]
+struct UnreachableProject {
+    slug: String,
+    journal_dir: String,
+    anchor: Option<String>,
+    reason: &'static str,
+}
+
+/// One backlog across every project the registry knows, ledger and journal
+/// together.
+///
+/// Ranked by what is blocked, never by comparing items across projects: arc
+/// records no priority that spans repositories, and inventing one here would
+/// be a routing opinion rather than a derived fact.
+fn workspace_backlog(ctx: &Ctx, since: Option<&str>, json: bool) -> Result<()> {
+    let cfg = crate::config::load()?;
+    let cutoff = match since {
+        Some(raw) => Some(
+            crate::journal::parse_since(raw)
+                .with_context(|| format!("cannot read --since {raw:?}"))?,
+        ),
+        None => None,
+    };
+    let mut projects = Vec::new();
+    let mut unreachable = Vec::new();
+
+    for project in crate::registry::projects(&cfg)? {
+        if !project.reachable {
+            // An orphan holds work nobody can reach; a merely empty journal at
+            // a vanished path is housekeeping, not a finding.
+            if project.is_orphan() {
+                unreachable.push(UnreachableProject {
+                    slug: project.slug.clone(),
+                    journal_dir: project.journal_dir.display().to_string(),
+                    anchor: project.anchor.as_ref().map(|p| p.display().to_string()),
+                    reason: match project.anchor {
+                        Some(_) => "anchor does not exist",
+                        None => "journal name resolves to no single path",
+                    },
+                });
+            }
+            continue;
+        }
+        let anchor = project
+            .anchor
+            .clone()
+            .expect("a reachable project has an anchor");
+
+        let (needs_review, audit_owed) = match &project.ledger {
+            Some(root) => ledger_queues(root)?,
+            None => (Vec::new(), Vec::new()),
+        };
+
+        let items = crate::journal::collect_open_in(ctx, &project.journal_dir, &anchor, None)?;
+        // Under --since the counts mean "filed since", not "outstanding": a
+        // delta that reported the whole queue beside a delta heading would read
+        // as a full report and be believed as one.
+        let (open_items, later_items, feature_requests) = match cutoff {
+            Some(cutoff) => items.tier_counts_since(cutoff),
+            None => items.tier_counts(),
+        };
+        let entry = ProjectBacklog {
+            project: project.label(),
+            anchor: anchor.display().to_string(),
+            needs_review,
+            audit_owed,
+            open_items,
+            later_items,
+            feature_requests,
+            // Age is a property of the whole queue, so it would contradict
+            // counts that mean "filed since". A delta reports arrivals only.
+            oldest_open_days: cutoff.is_none().then(|| items.oldest_open_days()).flatten(),
+        };
+        if !entry.is_empty() {
+            projects.push(entry);
+        }
+    }
+    projects.sort_by(|a, b| {
+        b.blocked()
+            .cmp(&a.blocked())
+            .then_with(|| b.open_items.cmp(&a.open_items))
+            .then_with(|| a.project.cmp(&b.project))
+    });
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&Backlog {
+                schema: "arc-workspace-backlog/1",
+                projects,
+                unreachable,
+            })?
+        );
+        return Ok(());
+    }
+
+    if let Some(raw) = since {
+        println!("since {raw}: journal counts are what was filed since, not what is outstanding");
+    }
+    if projects.is_empty() && unreachable.is_empty() {
+        println!("nothing outstanding across every known project");
+        return Ok(());
+    }
+    for project in &projects {
+        println!("# {} ({})", project.project, project.anchor);
+        for change in &project.needs_review {
+            println!("  needs-review  {change}");
+        }
+        for change in &project.audit_owed {
+            println!("  audit-owed    {change}");
+        }
+        let age = match project.oldest_open_days {
+            Some(days) => format!(", oldest {days}d"),
+            None => String::new(),
+        };
+        println!(
+            "  journal       {} open, {} later, {} feature-request{}",
+            project.open_items, project.later_items, project.feature_requests, age
+        );
+    }
+    if !unreachable.is_empty() {
+        println!("unreachable:");
+        for project in &unreachable {
+            println!("  {}  {}", project.slug, project.reason);
+            println!("    journal: {}", project.journal_dir);
+            println!("    adopt from the project's new location: arc journal rebind <dir>");
+        }
+    }
+    Ok(())
+}
+
+/// The two ledger buckets a lead reads across projects: what awaits a verdict,
+/// and what shipped owing one.
+fn ledger_queues(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
+    let Some(store) = Store::open_at(root)? else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let states = repo_states(&store)?;
+    let mut needs_review = Vec::new();
+    let mut audit_owed = Vec::new();
+    for state in states.values() {
+        // Audit debt outlives integration, so it is asked of every change;
+        // a review verdict is only owed while the change is still open.
+        if state.audit_debt_outstanding() {
+            audit_owed.push(state.change_id.clone());
+        }
+        if !state.is_closed() && crate::inbox::needs_review(state) {
+            needs_review.push(state.change_id.clone());
+        }
+    }
+    needs_review.sort();
+    audit_owed.sort();
+    Ok((needs_review, audit_owed))
 }
 
 /// Print the exact, safe rebase command for every open change that depended on

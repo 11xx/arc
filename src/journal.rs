@@ -1434,7 +1434,7 @@ fn append_journal(
 }
 
 /// The path this journal is bound to, as last recorded.
-fn recorded_anchor(dir: &Path) -> Result<Option<String>> {
+pub(crate) fn recorded_anchor(dir: &Path) -> Result<Option<String>> {
     Ok(read_bindings(dir)?.pop().map(|binding| binding.anchor))
 }
 
@@ -1831,6 +1831,27 @@ fn artifact_age_seconds(now: DateTime<Utc>, stamp: &str) -> Option<u64> {
         .ok()?
         .and_utc();
     Some(now.signed_duration_since(created).num_seconds().max(0) as u64)
+}
+
+/// An artifact's filing time, read from the stamp its name carries.
+fn parse_artifact_timestamp(stamp: &str) -> Option<DateTime<Utc>> {
+    NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%SZ")
+        .ok()
+        .map(|naive| naive.and_utc())
+}
+
+/// A caller-supplied boundary for "what is new", in either the journal's own
+/// stamp format or RFC 3339. arc stores no previous-run marker: the delta's
+/// memory belongs to whoever scheduled the run, so the command stays derived.
+pub(crate) fn parse_since(raw: &str) -> Result<DateTime<Utc>> {
+    if let Some(parsed) = parse_artifact_timestamp(raw) {
+        return Ok(parsed);
+    }
+    DateTime::parse_from_rfc3339(raw)
+        .map(|parsed| parsed.with_timezone(&Utc))
+        .map_err(|_| {
+            anyhow::anyhow!("expected a journal stamp (20260101T000000Z) or an RFC 3339 timestamp")
+        })
 }
 
 /// A discussion waits from its newest typed position, falling back to artifact
@@ -2421,6 +2442,39 @@ impl OpenItems {
         )
     }
 
+    /// The primary tier's oldest entry, in whole days. Across projects this is
+    /// what makes a small queue visible: one item waiting a month does not look
+    /// like a backlog from inside its own project.
+    pub(crate) fn oldest_open_days(&self) -> Option<u64> {
+        self.open
+            .iter()
+            .filter_map(|entry| entry.age_seconds)
+            .max()
+            .map(|seconds| seconds / 86_400)
+    }
+
+    /// Tier counts restricted to artifacts filed at or after `cutoff` — the
+    /// delta question, what is new, asked of one project's queue.
+    ///
+    /// An artifact whose stamp cannot be read is counted as new. A delta that
+    /// silently drops what it cannot date would under-report, and this queue
+    /// exists to stop work going unseen.
+    pub(crate) fn tier_counts_since(&self, cutoff: DateTime<Utc>) -> (usize, usize, usize) {
+        let count = |entries: &Vec<ArtifactEntry>| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    parse_artifact_timestamp(&entry.timestamp).is_none_or(|filed| filed >= cutoff)
+                })
+                .count()
+        };
+        (
+            count(&self.open),
+            count(&self.later),
+            count(&self.feature_requests),
+        )
+    }
+
     /// The primary tier's newest entries as `(file, kind, heading-or-topic)`,
     /// for callers that surface a pointer rather than the whole queue.
     pub(crate) fn primary_preview(&self, limit: usize) -> Vec<(String, String, String)> {
@@ -2442,6 +2496,18 @@ impl OpenItems {
 /// `journal open` and by every view that surfaces the backlog beside
 /// ledger state.
 pub(crate) fn collect_open(ctx: &Ctx, kind: Option<&str>) -> Result<OpenItems> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    collect_open_in(ctx, &dir, &ctx.cwd, kind)
+}
+
+/// The same queue for an explicitly named journal directory and project, so a
+/// cross-project view can read a backlog it is not standing in.
+pub(crate) fn collect_open_in(
+    ctx: &Ctx,
+    dir: &Path,
+    project: &Path,
+    kind: Option<&str>,
+) -> Result<OpenItems> {
     if let Some(kind) = kind {
         if !is_actionable_kind(kind) {
             bail!(
@@ -2457,14 +2523,14 @@ pub(crate) fn collect_open(ctx: &Ctx, kind: Option<&str>) -> Result<OpenItems> {
             );
         }
     }
-    let dir = resolve_dir(&ctx.cwd)?;
+    let dir = dir.to_path_buf();
     let mut open: Vec<ArtifactEntry> = Vec::new();
     let mut later: Vec<ArtifactEntry> = Vec::new();
     let mut feature_requests: Vec<ArtifactEntry> = Vec::new();
     let now = Utc::now();
     let journal = read_events(&dir)?;
     let lanes = lanes_from_journal(&journal, now);
-    let changes = open_changes_for_annotation(&ctx.cwd);
+    let changes = open_changes_for_annotation(project);
     let (_, caller_session) = identity(ctx);
     if dir.is_dir() {
         let mut open_names: Vec<String> = Vec::new();
