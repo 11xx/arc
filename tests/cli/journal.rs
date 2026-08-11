@@ -4128,6 +4128,43 @@ fn journal_rebind_adopts_an_orphan_and_refuses_a_populated_target() {
         .stderr(predicates::str::contains("already holds content"));
 }
 
+/// Opening a change registers the project, so a moved project's new journal
+/// holds a binding before anyone writes to it. A binding is not history — it
+/// states what a rebind is about to restate — so adopting the stranded journal
+/// must still work. Refusing here would close the recovery path in exactly the
+/// situation it exists for.
+#[test]
+fn rebind_adopts_over_a_journal_holding_only_its_binding() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    // The project registered itself, and nothing else has been written.
+    repo.arc(&repo.root)
+        .args(["begin", "feat-after-move", "--no-worktree"])
+        .assert()
+        .success();
+    assert!(dir.join("bindings.jsonl").is_file());
+    assert!(!dir.join("events.jsonl").exists());
+
+    let orphan = dir.parent().unwrap().join("-old-path-repo");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("20260101T000000Z-alpha-todo.md"), "# Alpha\n").unwrap();
+    fs::write(
+        orphan.join("bindings.jsonl"),
+        "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
+         \"event\":\"bound\",\"anchor\":\"/old/path/repo\"}\n",
+    )
+    .unwrap();
+
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "rebind", orphan.to_str().unwrap()]),
+    );
+    assert!(out.contains("rebound: /old/path/repo -> "), "{out}");
+    assert!(dir.join("20260101T000000Z-alpha-todo.md").is_file());
+    let open = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(open.contains("alpha"), "{open}");
+}
+
 /// A rebind moves whatever it is given, so what it refuses matters more than
 /// what it does. Every refusal lands before anything moves.
 #[test]

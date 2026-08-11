@@ -470,6 +470,24 @@ fn looks_like_a_journal(dir: &Path) -> Result<bool> {
     Ok(false)
 }
 
+/// Whether a journal holds anything a rebind could destroy by merging.
+///
+/// A binding is not history: it says which project the directory belongs to,
+/// which is exactly what a rebind is about to restate. Opening a change
+/// registers the project, so a journal freshly created at a moved project's new
+/// path holds a binding and nothing else — and refusing that would close the
+/// recovery path in the one situation it exists for.
+fn holds_history(dir: &Path) -> Result<bool> {
+    for entry in std::fs::read_dir(dir)? {
+        let name = entry?.file_name().to_string_lossy().to_string();
+        if name == "bindings.jsonl" {
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Adopt an orphaned journal for the project standing here.
 ///
 /// The move is recorded rather than performed as an untracked `mv`, so the
@@ -509,7 +527,7 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
             );
         }
     }
-    if target.is_dir() && std::fs::read_dir(&target)?.next().is_some() {
+    if target.is_dir() && holds_history(&target)? {
         bail!(
             "target journal {} already holds content; merging two histories is not something \
              a rebind can do without losing which came from where",
@@ -553,6 +571,14 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
     if target.is_dir() {
+        // Only a binding can be here — `holds_history` refused anything else —
+        // and it says this directory belongs to the project doing the
+        // rebinding, which is what the adopted journal now records instead.
+        let stale = bindings_path(&target);
+        if stale.is_file() {
+            std::fs::remove_file(&stale)
+                .with_context(|| format!("cannot remove {}", stale.display()))?;
+        }
         std::fs::remove_dir(&target)
             .with_context(|| format!("cannot replace empty {}", target.display()))?;
     }

@@ -884,9 +884,11 @@ enum WorkspaceCmd {
     /// Ledger and journal backlog across every project, ranked by what is
     /// blocked on a decision rather than on work
     Backlog {
-        /// Report only what was filed at or after this journal stamp
-        /// (20260101T000000Z) or RFC 3339 timestamp; blocked work is always
-        /// reported, because a stale blocker is the point
+        /// Count only journal items filed at or after this journal stamp
+        /// (20260101T000000Z) or RFC 3339 timestamp, so the tiers read as
+        /// arrivals rather than as what is outstanding. Changes awaiting a
+        /// verdict and audit debt are always reported in full: a blocker
+        /// matters more the longer it has been one
         #[arg(long)]
         since: Option<String>,
         #[arg(long)]
