@@ -4024,10 +4024,17 @@ fn journal_doctor_split_advice_reads_as_one_sentence() {
         .find(|item| item["code"] == "split-journal")
         .map(|item| item["detail"].as_str().unwrap().to_string())
         .unwrap_or_else(|| panic!("no split-journal advice: {report}"));
-    assert!(!detail.contains("  "), "{detail}");
-    assert!(
-        detail.contains(&format!("`arc journal rebind {}`", orphan.display())),
-        "{detail}"
+    // Assert the whole rendered sentence, not a space-run heuristic: the detail
+    // interpolates a path this change does not govern, and a temporary directory
+    // is free to contain whatever spacing it likes.
+    assert_eq!(
+        detail,
+        format!(
+            "{} holds artifacts for a project of this name; if this project moved, \
+             `arc journal rebind {}` adopts it",
+            orphan.display(),
+            orphan.display()
+        )
     );
 }
 
