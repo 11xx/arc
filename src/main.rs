@@ -630,7 +630,9 @@ enum Cmd {
         /// Snapshot the clean change worktree before recording the verdict
         #[arg(long)]
         snapshot: bool,
-        /// Patchset under review (defaults to the latest)
+        /// Patchset under review, by id or by the revision it recorded.
+        /// Defaults to the latest — which is what the verdict then claims,
+        /// whatever the reviewer actually read
         #[arg(long)]
         patchset: Option<String>,
         /// Root cause of requested rework; repeat for a mixed round

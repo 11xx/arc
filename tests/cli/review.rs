@@ -159,3 +159,61 @@ fn changes_requested_requires_typed_causes_and_stats_tallies_them() {
     }
     assert_eq!(event_count(&repo, &change_id), before + 1);
 }
+
+/// A reviewer reports on a revision, not on arc's patchset numbering. Making
+/// the lead translate by hand is where a verdict gets bound to work nobody
+/// reviewed, so a revision names its patchset directly.
+#[test]
+fn a_verdict_can_name_the_revision_that_was_reviewed() {
+    let repo = Repo::new();
+    let (_, worktree, first_head) = change_with_patchset(&repo, "review-by-revision");
+
+    // A second patchset lands before the verdict for the first is recorded.
+    repo.commit(&worktree, "later.txt", "later\n", "feat: later");
+    repo.arc(&worktree)
+        .args(["snapshot", "review-by-revision"])
+        .assert()
+        .success();
+
+    repo.arc(&worktree)
+        .args([
+            "review",
+            "review-by-revision",
+            "--verdict",
+            "approved",
+            "--patchset",
+            &first_head[..8],
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ps-01"));
+
+    // Recorded against what was read, so the newer patchset is still unapproved.
+    let status = json_stdout(repo.arc(&worktree).args(["status", "review-by-revision"]));
+    assert_eq!(status["verdict"]["patchset_id"], "ps-01");
+    assert!(!status["verdict"]["valid_for_current_head"]
+        .as_bool()
+        .unwrap());
+}
+
+/// An unknown revision is refused rather than silently falling back to the
+/// latest, which is the failure this flag exists to prevent.
+#[test]
+fn an_unknown_revision_is_refused_not_defaulted() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "review-bad-revision");
+    repo.arc(&worktree)
+        .args([
+            "review",
+            "review-bad-revision",
+            "--verdict",
+            "approved",
+            "--patchset",
+            "deadbeef",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "no patchset has that id or revision",
+        ));
+}
