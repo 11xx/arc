@@ -191,6 +191,47 @@ fn workspace_backlog_names_an_unreachable_project() {
     assert_eq!(stranded["reason"], "anchor does not exist");
 }
 
+/// Opening a change registers a project with a binding and nothing else, so a
+/// repository moved before anything is written to its journal leaves a
+/// directory with no artifacts that still names a project holding open work.
+/// A dead anchor is what makes an orphan; artifacts only add to it.
+#[test]
+fn workspace_backlog_names_a_binding_only_orphan() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "feat-registered", "--no-worktree"])
+        .assert()
+        .success();
+
+    // A second project, registered the same way and then gone.
+    let journals = repo.home.join(".local/ai/journals");
+    let orphan = journals.join("-vanished-project");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(
+        orphan.join("bindings.jsonl"),
+        "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
+         \"event\":\"bound\",\"anchor\":\"/vanished/project\"}\n",
+    )
+    .unwrap();
+    assert!(
+        fs::read_dir(&orphan)
+            .unwrap()
+            .all(|entry| entry.unwrap().file_name() == "bindings.jsonl"),
+        "fixture must hold no artifacts"
+    );
+
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut report);
+    let named = value["unreachable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["slug"] == "-vanished-project")
+        .unwrap_or_else(|| panic!("binding-only orphan not reported: {value}"));
+    assert_eq!(named["anchor"], "/vanished/project");
+}
+
 /// Under --since the journal counts mean arrivals, not outstanding work, or a
 /// delta would read as a full report and be believed as one.
 #[test]

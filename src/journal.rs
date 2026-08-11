@@ -570,18 +570,6 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
-    if target.is_dir() {
-        // Only a binding can be here — `holds_history` refused anything else —
-        // and it says this directory belongs to the project doing the
-        // rebinding, which is what the adopted journal now records instead.
-        let stale = bindings_path(&target);
-        if stale.is_file() {
-            std::fs::remove_file(&stale)
-                .with_context(|| format!("cannot remove {}", stale.display()))?;
-        }
-        std::fs::remove_dir(&target)
-            .with_context(|| format!("cannot replace empty {}", target.display()))?;
-    }
     // The cold archive moves first: it is the half nobody looks at, so a
     // failure there is recoverable while the hot journal is still in place.
     let mut archive_moved = false;
@@ -594,6 +582,21 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
             )
         })?;
         archive_moved = true;
+    }
+    if target.is_dir() {
+        // Only a binding can be here — `holds_history` refused anything else —
+        // and it says this directory belongs to the project doing the
+        // rebinding, which is what the adopted journal is about to record
+        // instead. Clearing it last keeps the window in which the target is
+        // unbound as short as the move allows: everything that can fail on its
+        // own has already succeeded, and only the rename remains.
+        let stale = bindings_path(&target);
+        if stale.is_file() {
+            std::fs::remove_file(&stale)
+                .with_context(|| format!("cannot remove {}", stale.display()))?;
+        }
+        std::fs::remove_dir(&target)
+            .with_context(|| format!("cannot replace empty {}", target.display()))?;
     }
     if let Err(error) = std::fs::rename(&source, &target) {
         // A rename across filesystems cannot be atomic. Put back what did
@@ -1473,14 +1476,22 @@ pub(crate) fn recorded_anchor(dir: &Path) -> Result<Option<String>> {
 fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
     // The question is whether a binding was recorded, not whether a file
     // exists: an empty or unreadable bindings file would otherwise suppress
-    // the record forever. The read is cheap and short-circuits before the
-    // journal is resolved again.
-    if recorded_anchor(dir)?.is_some() {
-        return Ok(());
-    }
+    // the record forever.
+    let recorded = recorded_anchor(dir)?;
     let Some(anchor) = resolve(&ctx.cwd)?.anchor else {
         return Ok(());
     };
+    if let Some(recorded) = recorded.as_deref() {
+        // Two different paths can slug to one journal directory, because the
+        // slug maps `/` and `.` alike. When that happens a move leaves a dead
+        // anchor naming a project that no longer exists, while this project —
+        // ledger and all — resolves to the very same journal. Restate the
+        // anchor, as an appended fact rather than an edit: adopting *another*
+        // journal is still `rebind`'s job and stays explicit.
+        if recorded == anchor.to_string_lossy() || Path::new(recorded).is_dir() {
+            return Ok(());
+        }
+    }
     let (harness, session) = identity(ctx);
     append_binding(
         ctx,
@@ -1490,7 +1501,7 @@ fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
             ts: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             event: "bound".to_string(),
             anchor: anchor.display().to_string(),
-            previous_anchor: None,
+            previous_anchor: recorded,
             harness: Some(harness),
             session: Some(session),
         },

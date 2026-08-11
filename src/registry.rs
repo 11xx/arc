@@ -60,11 +60,23 @@ impl Project {
             .unwrap_or_else(|| self.slug.clone())
     }
 
-    /// An orphan: a journal holding work whose project cannot be found. The
-    /// case worth reporting loudly, because no per-project command can reach
-    /// it — standing in the project is how every other view starts.
+    /// An orphan: a journal that says it belongs to a project which is not
+    /// there. The case worth reporting loudly, because no per-project command
+    /// can reach it — standing in the project is how every other view starts.
+    ///
+    /// Artifacts are not what makes one. Opening a change registers a project
+    /// with a binding and nothing else, so a repository moved before anything
+    /// was written to its journal leaves a directory that holds no artifacts
+    /// and still names a project with open changes. A recorded anchor that no
+    /// longer resolves is the signal; content only adds to it.
     pub fn is_orphan(&self) -> bool {
-        !self.reachable && self.has_content()
+        if self.reachable {
+            return false;
+        }
+        matches!(
+            self.anchor_source,
+            AnchorSource::Binding | AnchorSource::Configured
+        ) || self.has_content()
     }
 
     fn has_content(&self) -> bool {

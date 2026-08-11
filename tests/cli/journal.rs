@@ -4165,6 +4165,97 @@ fn rebind_adopts_over_a_journal_holding_only_its_binding() {
     assert!(open.contains("alpha"), "{open}");
 }
 
+/// The slug maps `/` and `.` alike, so two different paths can share one
+/// journal directory. A move between them leaves a dead anchor naming a
+/// project that is gone, while this project resolves to the same journal — so
+/// the anchor is restated as an appended fact, keeping what it superseded.
+#[test]
+fn a_dead_anchor_is_restated_when_the_journal_is_still_this_project() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    let src = repo.home.join("body.md");
+    fs::write(&src, "before\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "before",
+            "--kind",
+            "note",
+            "--body-file",
+            src.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // A path that no longer exists but slugs to this same journal directory.
+    fs::write(
+        dir.join("bindings.jsonl"),
+        "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
+         \"event\":\"bound\",\"anchor\":\"/gone/but/same/slug\"}\n",
+    )
+    .unwrap();
+
+    fs::write(&src, "after\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "after",
+            "--kind",
+            "note",
+            "--body-file",
+            src.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let bindings = fs::read_to_string(dir.join("bindings.jsonl")).unwrap();
+    let last: serde_json::Value = serde_json::from_str(bindings.lines().last().unwrap()).unwrap();
+    assert_eq!(last["anchor"], repo.root.to_str().unwrap());
+    assert_eq!(last["previous_anchor"], "/gone/but/same/slug");
+    // Appended, never rewritten: what it superseded is still on the record.
+    assert_eq!(bindings.lines().count(), 2);
+}
+
+/// A live anchor is never restated: only `rebind` moves a journal between
+/// projects, and it stays explicit.
+#[test]
+fn a_live_anchor_is_left_alone() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    let other = repo.home.join("other-project");
+    fs::create_dir_all(&other).unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("bindings.jsonl"),
+        format!(
+            "{{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
+             \"event\":\"bound\",\"anchor\":\"{}\"}}\n",
+            other.display()
+        ),
+    )
+    .unwrap();
+
+    let src = repo.home.join("body.md");
+    fs::write(&src, "written\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "written",
+            "--kind",
+            "note",
+            "--body-file",
+            src.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let bindings = fs::read_to_string(dir.join("bindings.jsonl")).unwrap();
+    assert_eq!(bindings.lines().count(), 1, "{bindings}");
+}
+
 /// A rebind moves whatever it is given, so what it refuses matters more than
 /// what it does. Every refusal lands before anything moves.
 #[test]
