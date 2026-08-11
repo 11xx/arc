@@ -470,6 +470,36 @@ fn looks_like_a_journal(dir: &Path) -> Result<bool> {
     Ok(false)
 }
 
+/// Remove a target journal that holds nothing but its own binding, so the
+/// adopted journal can be renamed into its place.
+fn clear_bound_target(target: &Path) -> Result<()> {
+    let stale = bindings_path(target);
+    if stale.is_file() {
+        std::fs::remove_file(&stale)
+            .with_context(|| format!("cannot remove {}", stale.display()))?;
+    }
+    std::fs::remove_dir(target)
+        .with_context(|| format!("cannot replace empty {}", target.display()))
+}
+
+/// Whether a journal holds anything a rebind could destroy by merging.
+///
+/// A binding is not history: it says which project the directory belongs to,
+/// which is exactly what a rebind is about to restate. Opening a change
+/// registers the project, so a journal freshly created at a moved project's new
+/// path holds a binding and nothing else — and refusing that would close the
+/// recovery path in the one situation it exists for.
+fn holds_history(dir: &Path) -> Result<bool> {
+    for entry in std::fs::read_dir(dir)? {
+        let name = entry?.file_name().to_string_lossy().to_string();
+        if name == "bindings.jsonl" {
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Adopt an orphaned journal for the project standing here.
 ///
 /// The move is recorded rather than performed as an untracked `mv`, so the
@@ -509,7 +539,7 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
             );
         }
     }
-    if target.is_dir() && std::fs::read_dir(&target)?.next().is_some() {
+    if target.is_dir() && holds_history(&target)? {
         bail!(
             "target journal {} already holds content; merging two histories is not something \
              a rebind can do without losing which came from where",
@@ -552,10 +582,6 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
-    if target.is_dir() {
-        std::fs::remove_dir(&target)
-            .with_context(|| format!("cannot replace empty {}", target.display()))?;
-    }
     // The cold archive moves first: it is the half nobody looks at, so a
     // failure there is recoverable while the hot journal is still in place.
     let mut archive_moved = false;
@@ -568,6 +594,28 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
             )
         })?;
         archive_moved = true;
+    }
+    if target.is_dir() {
+        // Only a binding can be here — `holds_history` refused anything else —
+        // and it says this directory belongs to the project doing the
+        // rebinding, which is what the adopted journal is about to record
+        // instead. Clearing it last keeps the window in which the target is
+        // unbound as short as the move allows: everything that can fail on its
+        // own has already succeeded, and only the rename remains.
+        if let Err(error) = clear_bound_target(&target) {
+            // The archive has already moved, so put it back before failing:
+            // a retry should start from where it began, not from half a move.
+            if archive_moved {
+                if let Err(rollback) = std::fs::rename(&target_archive, &source_archive) {
+                    bail!(
+                        "{error}. Its cold archive is now at {} and could not be put back: \
+                         {rollback}",
+                        target_archive.display()
+                    );
+                }
+            }
+            return Err(error);
+        }
     }
     if let Err(error) = std::fs::rename(&source, &target) {
         // A rename across filesystems cannot be atomic. Put back what did
@@ -1434,7 +1482,7 @@ fn append_journal(
 }
 
 /// The path this journal is bound to, as last recorded.
-fn recorded_anchor(dir: &Path) -> Result<Option<String>> {
+pub(crate) fn recorded_anchor(dir: &Path) -> Result<Option<String>> {
     Ok(read_bindings(dir)?.pop().map(|binding| binding.anchor))
 }
 
@@ -1447,14 +1495,28 @@ fn recorded_anchor(dir: &Path) -> Result<Option<String>> {
 fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
     // The question is whether a binding was recorded, not whether a file
     // exists: an empty or unreadable bindings file would otherwise suppress
-    // the record forever. The read is cheap and short-circuits before the
-    // journal is resolved again.
-    if recorded_anchor(dir)?.is_some() {
-        return Ok(());
-    }
+    // the record forever.
+    let recorded = recorded_anchor(dir)?;
     let Some(anchor) = resolve(&ctx.cwd)?.anchor else {
         return Ok(());
     };
+    if let Some(recorded) = recorded.as_deref() {
+        // Two different paths can slug to one journal directory, because the
+        // slug maps `/` and `.` alike. A dead anchor there names a project that
+        // is gone while this one resolves to the very same journal, so the
+        // record is simply wrong about who owns it.
+        //
+        // Restating is safe only while there is no history to inherit. arc
+        // cannot tell "this project moved between colliding paths" from "a
+        // different project of that name was deleted", and in the second case a
+        // silent restatement would hand one project another's artifacts. So a
+        // journal holding history keeps its dead anchor and is reported as an
+        // orphan; adopting it stays `rebind`'s explicit job.
+        let stale = !Path::new(recorded).is_dir();
+        if !stale || recorded == anchor.to_string_lossy() || holds_history(dir)? {
+            return Ok(());
+        }
+    }
     let (harness, session) = identity(ctx);
     append_binding(
         ctx,
@@ -1464,7 +1526,7 @@ fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
             ts: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             event: "bound".to_string(),
             anchor: anchor.display().to_string(),
-            previous_anchor: None,
+            previous_anchor: recorded,
             harness: Some(harness),
             session: Some(session),
         },
@@ -1476,6 +1538,21 @@ fn append_event(ctx: &Ctx, dir: &Path, event: &JournalEvent) -> Result<()> {
         eprintln!("warning: could not record this journal's project binding: {error:#}");
     }
     write_event(dir, event)
+}
+
+/// Register this project, so that opening a change is enough to make it
+/// discoverable. The journal root is what enumerates projects, so a repository
+/// whose ledger has changes but whose journal was never written would be
+/// invisible to every cross-project view — the one place arc's own structure,
+/// rather than habit, has to guarantee the project is known.
+///
+/// Advisory: nothing about opening a change depends on this succeeding, and a
+/// journal that already carries a binding is left exactly as it is.
+pub(crate) fn register_project(ctx: &Ctx) -> Result<()> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("cannot create journal dir {}", dir.display()))?;
+    ensure_bound(ctx, &dir)
 }
 
 fn write_event(dir: &Path, event: &JournalEvent) -> Result<()> {
@@ -1831,6 +1908,27 @@ fn artifact_age_seconds(now: DateTime<Utc>, stamp: &str) -> Option<u64> {
         .ok()?
         .and_utc();
     Some(now.signed_duration_since(created).num_seconds().max(0) as u64)
+}
+
+/// An artifact's filing time, read from the stamp its name carries.
+fn parse_artifact_timestamp(stamp: &str) -> Option<DateTime<Utc>> {
+    NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%SZ")
+        .ok()
+        .map(|naive| naive.and_utc())
+}
+
+/// A caller-supplied boundary for "what is new", in either the journal's own
+/// stamp format or RFC 3339. arc stores no previous-run marker: the delta's
+/// memory belongs to whoever scheduled the run, so the command stays derived.
+pub(crate) fn parse_since(raw: &str) -> Result<DateTime<Utc>> {
+    if let Some(parsed) = parse_artifact_timestamp(raw) {
+        return Ok(parsed);
+    }
+    DateTime::parse_from_rfc3339(raw)
+        .map(|parsed| parsed.with_timezone(&Utc))
+        .map_err(|_| {
+            anyhow::anyhow!("expected a journal stamp (20260101T000000Z) or an RFC 3339 timestamp")
+        })
 }
 
 /// A discussion waits from its newest typed position, falling back to artifact
@@ -2421,6 +2519,39 @@ impl OpenItems {
         )
     }
 
+    /// The primary tier's oldest entry, in whole days. Across projects this is
+    /// what makes a small queue visible: one item waiting a month does not look
+    /// like a backlog from inside its own project.
+    pub(crate) fn oldest_open_days(&self) -> Option<u64> {
+        self.open
+            .iter()
+            .filter_map(|entry| entry.age_seconds)
+            .max()
+            .map(|seconds| seconds / 86_400)
+    }
+
+    /// Tier counts restricted to artifacts filed at or after `cutoff` — the
+    /// delta question, what is new, asked of one project's queue.
+    ///
+    /// An artifact whose stamp cannot be read is counted as new. A delta that
+    /// silently drops what it cannot date would under-report, and this queue
+    /// exists to stop work going unseen.
+    pub(crate) fn tier_counts_since(&self, cutoff: DateTime<Utc>) -> (usize, usize, usize) {
+        let count = |entries: &Vec<ArtifactEntry>| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    parse_artifact_timestamp(&entry.timestamp).is_none_or(|filed| filed >= cutoff)
+                })
+                .count()
+        };
+        (
+            count(&self.open),
+            count(&self.later),
+            count(&self.feature_requests),
+        )
+    }
+
     /// The primary tier's newest entries as `(file, kind, heading-or-topic)`,
     /// for callers that surface a pointer rather than the whole queue.
     pub(crate) fn primary_preview(&self, limit: usize) -> Vec<(String, String, String)> {
@@ -2442,6 +2573,18 @@ impl OpenItems {
 /// `journal open` and by every view that surfaces the backlog beside
 /// ledger state.
 pub(crate) fn collect_open(ctx: &Ctx, kind: Option<&str>) -> Result<OpenItems> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    collect_open_in(ctx, &dir, &ctx.cwd, kind)
+}
+
+/// The same queue for an explicitly named journal directory and project, so a
+/// cross-project view can read a backlog it is not standing in.
+pub(crate) fn collect_open_in(
+    ctx: &Ctx,
+    dir: &Path,
+    project: &Path,
+    kind: Option<&str>,
+) -> Result<OpenItems> {
     if let Some(kind) = kind {
         if !is_actionable_kind(kind) {
             bail!(
@@ -2457,14 +2600,14 @@ pub(crate) fn collect_open(ctx: &Ctx, kind: Option<&str>) -> Result<OpenItems> {
             );
         }
     }
-    let dir = resolve_dir(&ctx.cwd)?;
+    let dir = dir.to_path_buf();
     let mut open: Vec<ArtifactEntry> = Vec::new();
     let mut later: Vec<ArtifactEntry> = Vec::new();
     let mut feature_requests: Vec<ArtifactEntry> = Vec::new();
     let now = Utc::now();
     let journal = read_events(&dir)?;
     let lanes = lanes_from_journal(&journal, now);
-    let changes = open_changes_for_annotation(&ctx.cwd);
+    let changes = open_changes_for_annotation(project);
     let (_, caller_session) = identity(ctx);
     if dir.is_dir() {
         let mut open_names: Vec<String> = Vec::new();

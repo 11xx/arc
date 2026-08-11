@@ -666,14 +666,44 @@ trailers.
 
 Three read-only conveniences for a lead working across repos and handoffs.
 
-`arc workspace list|inbox [--json]` aggregates every arc store under a
-configured `data_root` (it errors otherwise, since per-repo git-common-dir
-ledgers are not enumerable). `list` prints per-repo open-change rows; `inbox`
-concatenates each repo's inbox rollup, tagged with the repo. The scan opens
-each store read-only, never creates one, and skips unreadable entries with a
-warning. JSON is versioned `arc-workspace/1`. The workspace inbox is
-ledger-derived — it consults no per-repo working tree, so rebase and gate
-buckets are not evaluated there.
+`arc workspace list|inbox|backlog [--json]` aggregates across every project.
+Discovery has two modes and the configured one wins: with a `data_root` the
+stores sit side by side and enumerate directly; without one they live inside
+each repository's Git common dir, where the journal registry — one directory
+per project, keyed by its anchor — is what knows they exist. A journal records
+its anchor in `bindings.jsonl`; one written before that is reconstructed from
+its directory name and confirmed against the filesystem, and a name that
+resolves to no single existing path stays unresolved rather than guessed at.
+`arc begin` registers the project, so opening a change is enough to make a
+repository discoverable even if nothing is ever written to its journal. A
+`[journals] dirs` scope registers its project too, which is how a directory
+that is not a Git repository takes part.
+
+A cold archive is identified structurally rather than by its name: `<x>-archive`
+is skipped only when journal `<x>` is also present, so a project genuinely
+called that is not lost.
+
+`list` prints per-repo open-change rows; `inbox` concatenates each repo's inbox
+rollup, tagged with the repo. The scan opens each store read-only, never
+creates one, and skips unreadable entries with a warning. JSON is versioned
+`arc-workspace/1`. The workspace inbox is ledger-derived — it consults no
+per-repo working tree, so rebase and gate buckets are not evaluated there.
+
+`backlog` answers what no single repository can: where work is blocked on a
+decision rather than on effort. Per project it reports changes awaiting a
+verdict, changes carrying audit debt, the journal's three tiers, and the
+primary tier's oldest entry — a one-item queue never looks like a backlog from
+inside its own project. Projects are ranked by what is blocked; items are never
+ranked against each other across projects, because arc records no priority that
+spans repositories. A project whose journal holds work but whose anchor no
+longer resolves is reported under `unreachable` with the `journal rebind` that
+adopts it; `list` and `inbox` cannot report it, so they name what they skipped
+on stderr rather than dropping it silently: it is exactly the backlog no per-project command can reach, since
+standing in the project is how every other view starts. `--since <stamp>` turns
+the report into a delta, where the journal counts mean arrivals rather than
+outstanding work; blocked work is still reported in full. arc stores no
+previous-run marker — the boundary is supplied by the caller, so the command
+stays derived. JSON is versioned `arc-workspace-backlog/1`.
 
 `arc brief <change> --scaffold <name>` prepends a template to the brief being
 recorded (`--scaffold` alone records the template). A repo-local

@@ -18,10 +18,16 @@ ORIENT (start here, in this order)
   arc journal open       The actionable backlog — work waiting for a session.
   arc resume <change>    One change's brief, live state, and journal context.
   arc inbox              Lead-facing queue across open changes.
+  arc workspace backlog  The same question asked of every project at once.
 
   Work waiting for this project lives in two places. The ledger holds changes
   already open; the journal holds everything not yet opened as one. An empty
   inbox does not mean an empty queue — check both, which is what `catchup` does.
+
+  Every command above answers for the project you are standing in. Some
+  questions are comparisons — which project to open next, what has waited
+  longest, where a verdict is the only thing missing — and those are answerable
+  only across projects, which is what `workspace backlog` is for.
 
 RUN A CHANGE
   arc begin <slug> --profile <p>     Open a change: branch + worktree + record.
