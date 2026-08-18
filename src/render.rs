@@ -4,6 +4,23 @@ use crate::state::ChangeState;
 use crate::status::{Blocker, GateStatus, StatusReport};
 use std::fmt::Write;
 
+/// Why a passing verification cannot be reused as evidence at its revision.
+/// `None` when it can, or when it did not pass — a failure explains itself.
+fn unusable_evidence_reason(entry: &crate::state::VerificationEntry) -> Option<&'static str> {
+    if entry.green_at_head() || entry.result != crate::model::VerifyResult::Pass {
+        return None;
+    }
+    Some(if entry.tree_moved {
+        "the worktree changed while the command ran"
+    } else if entry.worktree_dirty == Some(true) {
+        "the worktree was dirty, so no checkout of this revision reproduces it"
+    } else if entry.tested_tree.is_some() {
+        "the worktree's cleanliness was not recorded"
+    } else {
+        "the tested tree was not recorded"
+    })
+}
+
 /// One gate's line in a human-facing gate list: the raw result, plus why a
 /// passing result still does not count at head.
 pub fn gate_line(gate: &GateStatus) -> String {
@@ -459,6 +476,12 @@ pub fn markdown(
                     v.runner.as_deref().unwrap_or("unknown runner"),
                     v.hostname
                 );
+            }
+            // A passing run that cannot be reused reads as `Pass` above, next
+            // to a gate summary that says the same gate is not green. Saying
+            // why here is what keeps the two from contradicting each other.
+            if let Some(reason) = unusable_evidence_reason(v) {
+                let _ = writeln!(w, "  - not reusable as evidence: {reason}");
             }
         }
     }

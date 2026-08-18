@@ -129,6 +129,32 @@ fn verify_all_parallel_completes_sleep_gates_and_appends_evidence_in_name_order(
             .all(|gate| gate["green_at_head"] == false),
         "{status}"
     );
+    // The tree was recorded; what a shared-worktree parallel run cannot
+    // establish is whether it was clean. Saying the tree went unrecorded
+    // would point at the wrong recovery.
+    let resume = stdout(repo.arc(&repo.root).args(["resume", "parallel-gates"]));
+    assert!(
+        resume.contains("not green at head: the worktree's cleanliness was not recorded"),
+        "{resume}"
+    );
+    assert!(
+        !resume.contains("the tested tree was not recorded"),
+        "{resume}"
+    );
+    // Cleaning cannot fix evidence whose cleanliness was never observed; only
+    // a sequential rerun can.
+    stdout(repo.arc(&repo.root).args(["snapshot", "parallel-gates"]));
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "parallel-gates", "--json"]),
+    );
+    assert!(
+        status["next_action"]
+            .as_str()
+            .unwrap()
+            .starts_with("run_gate:"),
+        "{status}"
+    );
 }
 
 #[test]
@@ -929,7 +955,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
         .code(12);
 
     let status = json_stdout(repo.arc(&worktree).args(["status", "probe-readiness"]));
-    assert_eq!(status["schema"], "arc-status/6");
+    assert_eq!(status["schema"], "arc-status/7");
     assert_eq!(status["probes"][0]["name"], "marker-exists");
     assert_eq!(status["probes"][0]["brief_version"], 2);
     assert_eq!(status["probes"][0]["discriminating_at_head"], false);
@@ -1467,6 +1493,10 @@ fn dirty_gate_evidence_is_named_by_resume_check_and_the_next_action() {
         repo.arc(&wt)
             .args(["check", "named"])
             .assert()
+            // Not the gate exit code: an unapproved head outranks a gate that
+            // is not green, and this change has no verdict. The gate blocker
+            // is still reported, which is what this asserts.
+            .failure()
             .get_output()
             .stdout
             .clone(),
@@ -1480,10 +1510,23 @@ fn dirty_gate_evidence_is_named_by_resume_check_and_the_next_action() {
     let status = json_stdout(repo.arc(&wt).args(["status", "named", "--json"]));
     assert_eq!(status["next_action"], "clean_worktree:unit", "{status}");
 
-    // Committing the tree — not another gate run — is what clears it.
-    git(&wt, &["add", "scratch.rs"]);
-    git(&wt, &["commit", "-m", "chore: commit scratch"]);
-    repo.arc(&wt).args(["snapshot", "named"]).assert().success();
+    // `show` renders the same evidence as history; it must not read `Pass`
+    // beside a summary saying the gate is not green.
+    let shown = stdout(repo.arc(&wt).args(["show", "named"]));
+    assert!(
+        shown.contains("not reusable as evidence: the worktree was dirty"),
+        "{shown}"
+    );
+
+    // Cleaning the tree at the same head is what the advice asked for, and it
+    // must change the advice: the stale evidence can only be replaced by a
+    // rerun, which cleaning cannot do.
+    fs::remove_file(wt.join("scratch.rs")).unwrap();
+    let status = json_stdout(repo.arc(&wt).args(["status", "named", "--json"]));
+    assert_eq!(status["next_action"], "run_gate:unit", "{status}");
+    assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
+
+    // Only the rerun clears the gate.
     repo.arc(&wt)
         .args(["verify", "named", "--gate", "unit"])
         .assert()
