@@ -108,13 +108,9 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
             validated.bundle.repository_id, store.repository_id
         );
     }
-    for event in &validated.events {
-        if plan.new_events.contains(&event.event_id) {
-            store.append_raw_event(&validated.bundle.change_id, &event.event_id, &event.bytes)?;
-        }
-    }
-    // Repository-scoped context, so the imported change's recorded revisions
-    // stay followable here. Already-present ones are the same fact.
+    // Repository-scoped context first, so a contradiction there is found
+    // before any change event is written. An import that failed halfway would
+    // leave a change imported and its revisions unresolvable.
     let mut rewrites = 0;
     for value in &validated.bundle.repository_events {
         let Some(event_id) = value.get("event_id").and_then(serde_json::Value::as_str) else {
@@ -124,6 +120,11 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         bytes.push(b'\n');
         if store.append_raw_repository_event(event_id, &bytes)? {
             rewrites += 1;
+        }
+    }
+    for event in &validated.events {
+        if plan.new_events.contains(&event.event_id) {
+            store.append_raw_event(&validated.bundle.change_id, &event.event_id, &event.bytes)?;
         }
     }
     if rewrites > 0 {

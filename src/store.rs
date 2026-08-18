@@ -684,6 +684,18 @@ impl Store {
         create_private_dir_all(&dir)?;
         let path = dir.join(format!("{event_id}.json"));
         if path.exists() {
+            // Same ID, different bytes is a contradiction, not a duplicate:
+            // accepting it would keep the local mapping while reporting the
+            // bundle imported, and every later resolution would use history
+            // the bundle disagrees with.
+            let existing: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+            let incoming: serde_json::Value = serde_json::from_slice(bytes)?;
+            if existing != incoming {
+                bail!(
+                    "repository event {event_id} already exists here with different content; \
+                     nothing was imported"
+                );
+            }
             return Ok(false);
         }
         write_exclusive(&path, bytes)
