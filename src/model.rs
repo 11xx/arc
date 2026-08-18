@@ -424,11 +424,17 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
-    /// Observed PR lifecycle. `merged` carries the actual merge commit.
+    /// Observed PR lifecycle, bound to the exact link and head it was read
+    /// at. `merged` carries the actual merge commit. The binding fields are
+    /// absent only on events written before lifecycle facts were bound.
     ForgePrState {
         state: crate::forge::ForgePrState,
         #[serde(skip_serializing_if = "Option::is_none")]
         merge_sha: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        link_event_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pr_head: Option<String>,
     },
     /// An event whose `event_type` this build does not recognize (e.g. one
     /// imported from a newer arc). Typed loading skips these entries; the

@@ -1331,7 +1331,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 head_ref,
                 head_sha,
             } => {
-                state.forge.link = Some(crate::forge::ForgeLinkRecord {
+                let record = crate::forge::ForgeLinkRecord {
+                    event_id: ev.event_id.clone(),
                     pr_number: *pr_number,
                     url: url.clone(),
                     base_repo: base_repo.clone(),
@@ -1339,7 +1340,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     head_repo: head_repo.clone(),
                     head_ref: head_ref.clone(),
                     head_sha: head_sha.clone(),
-                });
+                };
+                state.forge.links.push(record.clone());
+                state.forge.link = Some(record);
             }
             Payload::ForgeChecks {
                 pr_head,
@@ -1355,11 +1358,31 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             Payload::ForgePrState {
                 state: pr_state,
                 merge_sha,
+                link_event_id,
+                pr_head,
             } => {
-                state.forge.pr_state = Some(crate::forge::ForgePrStateRecord {
-                    state: *pr_state,
-                    merge_sha: merge_sha.clone(),
-                });
+                // A binding naming a link this change has not recorded yet
+                // cannot describe any PR the ledger knows about. In a
+                // well-formed ledger that is impossible — events replay in ID
+                // order — so it means an imported or hand-edited history, and
+                // the honest reading is that the fact binds to nothing.
+                let unresolved_binding = match (link_event_id, pr_head) {
+                    (Some(id), Some(_)) => {
+                        !state.forge.links.iter().any(|link| link.event_id == *id)
+                    }
+                    (None, None) => false,
+                    _ => true,
+                };
+                state
+                    .forge
+                    .pr_states
+                    .push(crate::forge::ForgePrStateRecord {
+                        state: *pr_state,
+                        merge_sha: merge_sha.clone(),
+                        link_event_id: link_event_id.clone(),
+                        pr_head: pr_head.clone(),
+                        unresolved_binding,
+                    });
             }
             // An event this build does not recognize. Typed loading skips
             // unknown events before replay, so this arm is defensive: keep the

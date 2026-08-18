@@ -132,6 +132,9 @@ impl ForgeProjectionRecord {
 /// Latest-wins observed link, reduced from `forge-link`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ForgeLinkRecord {
+    /// The `forge-link` event that recorded this link. Lifecycle facts bind
+    /// to it, so relinking cannot inherit the previous PR's state.
+    pub event_id: String,
     pub pr_number: u64,
     pub url: String,
     pub base_repo: String,
@@ -139,6 +142,20 @@ pub struct ForgeLinkRecord {
     pub head_repo: String,
     pub head_ref: String,
     pub head_sha: String,
+}
+
+impl ForgeLinkRecord {
+    /// Whether two link observations name the same pull request at the same
+    /// head. Re-recording an identical link is a second reading, not a move.
+    pub fn same_pr_as(&self, other: &ForgeLinkRecord) -> bool {
+        self.pr_number == other.pr_number
+            && self.url == other.url
+            && self.base_repo == other.base_repo
+            && self.base_ref == other.base_ref
+            && self.head_repo == other.head_repo
+            && self.head_ref == other.head_ref
+            && self.head_sha == other.head_sha
+    }
 }
 
 /// Latest-wins observed check rollup, reduced from `forge-checks`.
@@ -149,11 +166,23 @@ pub struct ForgeChecksRecord {
     pub detail: Option<String>,
 }
 
-/// Latest-wins observed PR lifecycle, reduced from `forge-pr-state`.
+/// One observed PR lifecycle fact, bound to the link and head it was read
+/// at. Lifecycle observations accumulate rather than overwrite: an older
+/// fact about a superseded PR is history, not the current state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ForgePrStateRecord {
     pub state: ForgePrState,
     pub merge_sha: Option<String>,
+    /// The link this was observed against. `None` predates binding.
+    pub link_event_id: Option<String>,
+    /// The PR head this was observed at. `None` predates binding.
+    pub pr_head: Option<String>,
+    /// The binding named a link this change had not recorded when the fact
+    /// was written, or named only half of one. Neither describes any PR this
+    /// ledger knows about, so the fact is never current — and it is not
+    /// legacy either, because it did try to bind.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub unresolved_binding: bool,
 }
 
 /// Accumulated forge facts for one change: the latest of each observed
@@ -163,16 +192,67 @@ pub struct ForgeState {
     pub projection: Option<ForgeProjectionRecord>,
     pub link: Option<ForgeLinkRecord>,
     pub checks: Option<ForgeChecksRecord>,
-    pub pr_state: Option<ForgePrStateRecord>,
+    /// Every observed lifecycle fact, oldest first. The current state is
+    /// whichever one matches the current link and head, not the newest.
+    pub pr_states: Vec<ForgePrStateRecord>,
+    /// Every `forge-link` event, in order, paired with the link it recorded.
+    /// Re-recording the same link is a second reading, not a relink, so the
+    /// history is kept by content rather than counted by event.
+    pub links: Vec<ForgeLinkRecord>,
 }
 
 impl ForgeState {
+    /// The lifecycle fact that describes the current link and head, if one
+    /// was observed there. Newest first, because a PR can legitimately be
+    /// observed more than once at the same head.
+    ///
+    /// A fact written before lifecycle binding names no link or head. It is
+    /// read as current only while the change has recorded exactly one link:
+    /// with nothing to have relinked from, there is no other PR it could
+    /// have described.
+    pub fn current_pr_state(&self) -> Option<&ForgePrStateRecord> {
+        let link = self.link.as_ref()?;
+        // Recording the same link twice is one PR observed twice, not a
+        // relink, so a fact bound to any event that recorded this exact link
+        // still describes it. Comparing event IDs alone would discard a good
+        // observation because somebody re-read the same PR.
+        let same_link: Vec<&str> = self
+            .links
+            .iter()
+            .filter(|candidate| candidate.same_pr_as(link))
+            .map(|candidate| candidate.event_id.as_str())
+            .collect();
+        self.pr_states.iter().rev().find(|record| {
+            if record.unresolved_binding {
+                return false;
+            }
+            match (&record.link_event_id, &record.pr_head) {
+                (Some(event), Some(head)) => {
+                    same_link.contains(&event.as_str()) && *head == link.head_sha
+                }
+                // Unbound predates binding entirely, and is read as current
+                // only while this change has recorded one distinct link.
+                (None, None) => !self.relinked(),
+                // Half a binding describes nothing.
+                _ => false,
+            }
+        })
+    }
+
+    /// Whether this change has recorded more than one distinct link.
+    pub fn relinked(&self) -> bool {
+        self.links
+            .iter()
+            .any(|candidate| !candidate.same_pr_as(&self.links[0]))
+    }
+
     /// Whether this change has recorded any forge fact at all.
     pub fn is_empty(&self) -> bool {
         self.projection.is_none()
             && self.link.is_none()
             && self.checks.is_none()
-            && self.pr_state.is_none()
+            && self.pr_states.is_empty()
+            && self.links.is_empty()
     }
 }
 
@@ -392,21 +472,36 @@ pub fn build_status(
         (Some(_), None) | (None, _) => ("unknown", None),
     };
 
-    let pr_state = forge.pr_state.as_ref().map(|p| ForgePrStateView {
+    // Lifecycle facts are read at a specific PR and head. Pairing the newest
+    // one with the current link would let a fact about a superseded PR speak
+    // for its replacement, which is exactly how `forge_ready` could go true
+    // after a relink. An observation that cannot be shown to describe the
+    // current link and head leaves the state unknown instead.
+    let current_pr_state = forge.current_pr_state();
+    let pr_state = current_pr_state.map(|p| ForgePrStateView {
         state: p.state.as_str().to_string(),
         merge_sha: p.merge_sha.clone(),
     });
 
     let mut caveats = Vec::new();
+    if current_pr_state.is_none() && !forge.pr_states.is_empty() {
+        caveats.push(
+            match forge.link {
+                None => "pr-state unknown: lifecycle facts are recorded but no link is",
+                Some(_) => {
+                    "pr-state unknown: no recorded lifecycle fact was observed at this link and \
+                     head"
+                }
+            }
+            .to_string(),
+        );
+    }
     if checks == "not-configured" {
         caveats
             .push("checks not-configured: zero hosted checks is not a passing result".to_string());
     }
 
-    let pr_open = matches!(
-        forge.pr_state.as_ref().map(|p| p.state),
-        Some(ForgePrState::Open)
-    );
+    let pr_open = matches!(current_pr_state.map(|p| p.state), Some(ForgePrState::Open));
     let checks_ok = matches!(checks, "passed" | "not-configured");
     let forge_ready = forge.link.is_some() && head_match && checks_ok && pr_open;
 
@@ -450,6 +545,99 @@ mod tests {
 
     fn observed(p: &ForgeProjectionRecord) -> ForgeTuple {
         p.tuple()
+    }
+
+    fn link(event_id: &str, pr: u64, head: &str) -> ForgeLinkRecord {
+        ForgeLinkRecord {
+            event_id: event_id.into(),
+            pr_number: pr,
+            url: format!("https://example.invalid/pull/{pr}"),
+            base_repo: "o/r".into(),
+            base_ref: "main".into(),
+            head_repo: "o/r".into(),
+            head_ref: "arc/x".into(),
+            head_sha: head.into(),
+        }
+    }
+
+    fn pr_state(link_event_id: Option<&str>, pr_head: Option<&str>) -> ForgePrStateRecord {
+        ForgePrStateRecord {
+            state: ForgePrState::Open,
+            merge_sha: None,
+            link_event_id: link_event_id.map(str::to_string),
+            pr_head: pr_head.map(str::to_string),
+            unresolved_binding: false,
+        }
+    }
+
+    fn state_with(links: Vec<ForgeLinkRecord>, pr_states: Vec<ForgePrStateRecord>) -> ForgeState {
+        ForgeState {
+            projection: None,
+            link: links.last().cloned(),
+            checks: None,
+            pr_states,
+            links,
+        }
+    }
+
+    /// A fact recorded before binding existed names no link. It describes the
+    /// current PR only while there has been one, because with nothing to have
+    /// relinked from there is no other PR it could have been about.
+    #[test]
+    fn an_unbound_fact_is_current_until_the_change_relinks() {
+        let one = link("01A", 1, "aaa");
+        let unbound = pr_state(None, None);
+        let single = state_with(vec![one.clone()], vec![unbound.clone()]);
+        assert_eq!(single.current_pr_state(), Some(&unbound));
+
+        let relinked = state_with(vec![one.clone(), link("01B", 2, "bbb")], vec![unbound]);
+        assert_eq!(relinked.current_pr_state(), None);
+
+        // Reading the same PR twice is not a relink.
+        let re_read = state_with(
+            vec![one.clone(), link("01B", 1, "aaa")],
+            vec![pr_state(None, None)],
+        );
+        assert!(re_read.current_pr_state().is_some());
+    }
+
+    /// A bound fact follows the PR it named, not the event that recorded the
+    /// link, so re-reading the same PR does not discard it.
+    #[test]
+    fn a_bound_fact_survives_a_second_reading_of_the_same_link() {
+        let bound = pr_state(Some("01A"), Some("aaa"));
+        let state = state_with(
+            vec![link("01A", 1, "aaa"), link("01B", 1, "aaa")],
+            vec![bound.clone()],
+        );
+        assert_eq!(state.current_pr_state(), Some(&bound));
+
+        // A different PR at the same head is a relink, and the old fact was
+        // about the old PR.
+        let moved = state_with(
+            vec![link("01A", 1, "aaa"), link("01B", 2, "aaa")],
+            vec![bound],
+        );
+        assert_eq!(moved.current_pr_state(), None);
+    }
+
+    /// Half a binding describes nothing, and neither does one naming a link
+    /// this change never recorded. Reading either as legacy would let an
+    /// imported or hand-edited fact speak for the current PR.
+    #[test]
+    fn a_partial_or_unresolved_binding_is_never_current() {
+        let one = link("01A", 1, "aaa");
+        for broken in [
+            pr_state(Some("01A"), None),
+            pr_state(None, Some("aaa")),
+            ForgePrStateRecord {
+                unresolved_binding: true,
+                ..pr_state(Some("01A"), Some("aaa"))
+            },
+        ] {
+            let state = state_with(vec![one.clone()], vec![broken.clone()]);
+            assert_eq!(state.current_pr_state(), None, "{broken:?}");
+        }
     }
 
     #[test]

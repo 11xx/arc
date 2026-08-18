@@ -967,6 +967,10 @@ enum ForgeCmd {
         /// Required when state is merged
         #[arg(long = "merge-sha")]
         merge_sha: Option<String>,
+        /// The forge-link event this state was read at (defaults to the
+        /// current link); the head is taken from that link
+        #[arg(long)]
+        link: Option<String>,
     },
 }
 
@@ -1865,8 +1869,9 @@ fn run(cli: Cli) -> Result<i32> {
                 change,
                 state,
                 merge_sha,
+                link,
             } => {
-                commands::forge_pr_state(&ctx, &change, state, merge_sha)?;
+                commands::forge_pr_state(&ctx, &change, state, merge_sha, link)?;
                 Ok(0)
             }
         },

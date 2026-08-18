@@ -432,6 +432,19 @@ rule), the recorded checks state (`stale` for an older head, `unknown`
 when none exists at the linked head), `pr_state`, and `forge_ready` —
 true only when linked, head-matched, checks in {passed, not-configured},
 and the PR is open, with `not-configured` surfaced as an explicit caveat.
+A lifecycle fact binds to the link it was read at: `arc forge pr-state`
+requires a recorded link, takes the head from it rather than from the
+caller, and `--link <EVENT>` refuses anything but the current link.
+`--link` resolves against every link the change recorded, so a prefix
+shared by a superseded link and the current one names neither.
+Observations accumulate, and the reported `pr_state` is the newest one
+matching the current link and head — so after a relink the state is
+`unknown` (with a caveat) and `forge_ready` false until the new PR is
+observed. Re-recording the same link is a second reading rather than a
+relink, and does not invalidate what was observed at it. A fact recorded
+before this binding names no link, and is read as current only while the
+change has recorded one distinct link; a fact naming half a binding, or a
+link this change never recorded, describes nothing and is never current.
 A held, linked change renders an `awaiting_user` fact carrying the PR URL.
 These facts are advisory rendering plus the fail-closed link validation;
 they never change local `integrate` semantics. Close an externally merged

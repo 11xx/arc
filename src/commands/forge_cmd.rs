@@ -98,12 +98,16 @@ pub fn forge_checks(
     Ok(())
 }
 
-/// Record the observed PR lifecycle state. `merged` requires `--merge-sha`.
+/// Record the observed PR lifecycle state, bound to the link it was read at.
+/// `merged` requires `--merge-sha`. The head comes from the resolved link
+/// rather than the caller, so a lifecycle fact can never claim a head its PR
+/// does not have.
 pub fn forge_pr_state(
     ctx: &Ctx,
     reference: &str,
     pr_state: crate::forge::ForgePrState,
     merge_sha: Option<String>,
+    link: Option<String>,
 ) -> Result<()> {
     if pr_state == crate::forge::ForgePrState::Merged && merge_sha.is_none() {
         bail!("forge pr-state merged requires --merge-sha");
@@ -115,9 +119,44 @@ pub fn forge_pr_state(
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let st = state::reduce(&store.load_events(&change_id)?)?;
+    let Some(current) = st.forge.link.as_ref() else {
+        bail!("no forge link recorded on {change_id}; record one before its state");
+    };
+    if let Some(named) = link.as_deref() {
+        // Resolved against every link this change recorded, not just the
+        // current one: a prefix shared by a superseded link and the current
+        // one names neither, and silently recording against the current PR is
+        // exactly the confusion this binding exists to prevent.
+        if named.trim().is_empty() {
+            bail!("name the link this state was read at; an empty reference matches every link");
+        }
+        let matches: Vec<&str> = st
+            .forge
+            .links
+            .iter()
+            .map(|link| link.event_id.as_str())
+            .filter(|event_id| event_id.starts_with(named))
+            .collect();
+        match matches.as_slice() {
+            [one] if *one == current.event_id => {}
+            [one] => bail!(
+                "{one} is not the current link on {change_id} (that is {}); a lifecycle fact \
+                 about a superseded PR cannot be recorded as current",
+                current.event_id
+            ),
+            [] => bail!("{named} is not a link recorded on {change_id}"),
+            many => bail!(
+                "{named} matches {} links on {change_id}; name one exactly",
+                many.len()
+            ),
+        }
+    }
+    let link = current;
     let payload = Payload::ForgePrState {
         state: pr_state,
         merge_sha,
+        link_event_id: Some(link.event_id.clone()),
+        pr_head: Some(link.head_sha.clone()),
     };
     ensure_append_allowed(&st, &payload)?;
     let event = ctx.event(&store, &change_id, payload);
