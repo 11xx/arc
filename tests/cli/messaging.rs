@@ -248,7 +248,7 @@ fn status_lists_messages_and_assignment_without_changing_schema() {
         .success();
 
     let status = json_stdout(repo.arc(&repo.root).args(["status", "msg-status"]));
-    assert_eq!(status["schema"], "arc-status/7");
+    assert_eq!(status["schema"], "arc-status/8");
     assert_eq!(status["assigned_to"], "codex");
     let messages = status["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 2);

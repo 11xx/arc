@@ -84,7 +84,8 @@ arc mangen <dir>                                      # writes <dir>/arc.1
 - **`arc integrate`** performs the merge only when, atomically checked:
   the head equals the approved patchset head, no blocking finding is
   open, every required gate is green at that exact head, and no hold is
-  active. Holds are independent: `arc hold` prints the event that identifies
+  active. Holds are independent (`arc-status/8` turned the singular `hold` into
+  `holds`): `arc hold` prints the event that identifies
   the hold it set, `arc release-hold <change> <hold>` lifts exactly that one
   (a unique prefix is enough; an empty or ambiguous one is refused), and
   every other hold stays in force. A release naming a hold that is no longer
@@ -297,7 +298,7 @@ condition is reached, with a JSON diagnostic containing the winning
 watch conditions are checked in their supplied order and the first reached
 condition wins.
 
-`arc status <change>` prints the versioned `arc-status/7` JSON report —
+`arc status <change>` prints the versioned `arc-status/8` JSON report —
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, claim owner/activity/stage timing, snapshot
 provenance, a blocker summary, a machine-readable `next_action`, an additive

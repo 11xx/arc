@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/7";
+pub const STATUS_SCHEMA: &str = "arc-status/8";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// Two identities arc assumed cannot establish that two people acted. The
