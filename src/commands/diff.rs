@@ -97,14 +97,26 @@ fn diff_integrated(
         .closure
         .as_ref()
         .with_context(|| format!("{change_id} is not closed; nothing integrated to render"))?;
+    if closure.outcome != crate::model::Closure::Integrated {
+        bail!(
+            "{change_id} was {}, not integrated; there is no integration range to render",
+            format!("{:?}", closure.outcome).to_lowercase()
+        );
+    }
     let head = closure.integrated_commit.as_deref().with_context(|| {
         format!("{change_id} closed without an integration commit; nothing to render")
     })?;
     // A closure written before arc recorded the range knows what landed but
     // not what it landed onto. Guessing a base would misreport the range an
-    // audit is about, so the caller supplies it.
+    // audit is about, so the caller supplies it — and only then, because a
+    // recorded range is the fact and an override would quietly replace it.
     let base = match (base, closure.target_before.as_deref()) {
-        (Some(base), _) => gitio::rev_parse(&ctx.cwd, &base)?,
+        (Some(_), Some(before)) => bail!(
+            "{change_id} recorded its integration base ({}); --base would render a range it \
+             did not integrate",
+            &before[..before.len().min(8)]
+        ),
+        (Some(base), None) => gitio::rev_parse(&ctx.cwd, &base)?,
         (None, Some(before)) => before.to_string(),
         (None, None) => bail!(
             "{change_id} recorded no integration base; pass --base <rev> to name what {head} \

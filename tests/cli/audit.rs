@@ -117,6 +117,11 @@ fn audit_diff_integrated_uses_the_recorded_range() {
         .assert()
         .success();
 
+    // The target moves on after the merge. A patchset range would follow the
+    // change's own base; the recorded range names where the target stood at
+    // integration, and only that.
+    repo.commit(&repo.root, "unrelated.rs", "later\n", "chore: later work");
+
     // The range is the merge against what the target was, so the file the
     // change added appears in it.
     let rendered = stdout(
@@ -142,10 +147,30 @@ fn audit_diff_integrated_uses_the_recorded_range() {
     let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
     assert_eq!(event["target_before"], target_before, "{event}");
 
+    assert!(!rendered.contains("unrelated.rs"), "{rendered}");
+
     // Selectors that describe a different range are refused rather than
-    // silently ignored.
+    // silently ignored — including --findings, whose anchors are a patchset
+    // question, and --base, which would replace a range that was recorded.
+    for selector in [
+        vec!["diff", "ranged", "--integrated", "--since-approved"],
+        vec!["diff", "ranged", "--integrated", "--findings"],
+        vec!["diff", "ranged", "--integrated", "--base", "HEAD"],
+    ] {
+        repo.arc(&repo.root).args(selector).assert().failure();
+    }
+
+    // An abandoned change has no integration range, and says so.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "dropped", "--no-worktree"]),
+    );
     repo.arc(&repo.root)
-        .args(["diff", "ranged", "--integrated", "--since-approved"])
+        .args(["close", "dropped", "--abandoned"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["diff", "dropped", "--integrated"])
         .assert()
         .failure();
 

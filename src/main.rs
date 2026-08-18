@@ -269,7 +269,7 @@ enum Cmd {
         #[arg(long, conflicts_with = "patchset")]
         since_approved: bool,
         /// Render the exact recorded integration range of a closed change
-        #[arg(long, conflicts_with_all = ["patchset", "between", "since_approved"])]
+        #[arg(long, conflicts_with_all = ["patchset", "between", "since_approved", "findings"])]
         integrated: bool,
         /// Base revision for an integration that recorded none
         #[arg(long, requires = "integrated")]

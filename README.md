@@ -830,9 +830,12 @@ intended failure.
 `arc diff <change> --integrated` renders the exact range an integration
 recorded — from where the target stood before to the commit that landed —
 which is what an audit reviews; a patchset range describes the work instead.
-It conflicts with `--patchset`, `--between`, and `--since-approved`. A closure
-written before arc recorded the range knows what landed but not what it landed
-onto, so it requires `--base <rev>` rather than having one guessed.
+It conflicts with `--patchset`, `--between`, `--since-approved`, and
+`--findings`, whose anchors are a patchset question. A closure written before
+arc recorded the range knows what landed but not what it landed onto, so it
+requires `--base <rev>` rather than having one guessed; passing `--base` where
+a range *was* recorded is refused, because the recorded range is the fact. A
+change that was abandoned or superseded has no integration range and says so.
 
 `arc restack <change> --advise` prints, for each open dependent of a change,
 the exact `git rebase --onto <target> <base>` command to run in that
