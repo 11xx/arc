@@ -131,9 +131,10 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   approval stand, because then it is an authorization input like the verdict
   itself — and not when one was declared beside an approval that needed no
   waiver, where it authorized nothing. A
-  gate is green for the command it ran: editing a declaration after its
-  evidence was recorded means the declared check has not run, the gate reports
-  `declaration_changed` rather than counting, and `verify --skip-green` reruns
+  gate is green for the declaration it ran — command and timeout both, since a
+  run under a laxer timeout is not evidence for a stricter one. Editing a
+  declaration after its evidence was recorded means the declared check has not
+  run, so the gate reports `declaration_changed` rather than counting, and `verify --skip-green` reruns
   it instead of reusing a run of something else. Before merging, readiness is
   recomputed and the basis rebuilt; if the two differ, nothing is written.
   `arc integrate --dry-run` prints the basis it would record, when the merge

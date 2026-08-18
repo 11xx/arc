@@ -343,6 +343,12 @@ pub enum Payload {
         /// Arc terminated the gate after its declared timeout elapsed.
         #[serde(default, skip_serializing_if = "is_false")]
         timed_out: bool,
+        /// The timeout the gate was declared with when this ran. A run under a
+        /// laxer timeout is not evidence for a stricter one, and `None` — on
+        /// events written before this was recorded, or a gate declaring no
+        /// timeout — is unknown rather than unlimited.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
         hostname: String,
         /// Evidence that arc did not execute itself (e.g. a sandboxed
         /// executor ran the gate, or the result comes from another host).

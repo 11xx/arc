@@ -718,10 +718,14 @@ fn build_report(
                 // gate's name. A declaration edited after the run describes a
                 // different check, and counting the old pass would let a gate
                 // nobody has run authorize a merge.
+                // The whole declaration, not just the command: a run under a
+                // laxer timeout is not evidence for a stricter one, and a run
+                // whose declared timeout is unknown cannot be shown to satisfy
+                // a declaration that has one.
                 green_at_head: evidence
-                    .is_some_and(|e| e.green_at_head() && e.command == gate.command),
+                    .is_some_and(|e| e.green_at_head() && matches_declaration(e, gate)),
                 declaration_changed: evidence
-                    .is_some_and(|e| e.green_at_head() && e.command != gate.command),
+                    .is_some_and(|e| e.green_at_head() && !matches_declaration(e, gate)),
                 attested: evidence.is_some_and(|e| e.attested),
                 tested_tree: evidence.and_then(|e| e.tested_tree.clone()),
                 worktree_dirty: evidence.and_then(|e| e.worktree_dirty),
@@ -1157,6 +1161,14 @@ pub fn reviewer_coverage(state: &ChangeState) -> Vec<ReviewerCoverage> {
             .then_with(|| a.reviewer.cmp(&b.reviewer))
     });
     rows
+}
+
+/// Whether recorded evidence ran the gate as it is declared now.
+pub fn matches_declaration(
+    evidence: &crate::state::VerificationEntry,
+    gate: &crate::gates::Gate,
+) -> bool {
+    evidence.command == gate.command && evidence.timeout_seconds == gate.timeout
 }
 
 /// One advisory: something a lead should know before integrating, which is

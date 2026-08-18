@@ -888,6 +888,7 @@ mod tests {
             "1",
             0,
             Payload::VerificationRecorded {
+                timeout_seconds: None,
                 tested_tree: None,
                 worktree_dirty: None,
                 tree_moved: false,
@@ -911,6 +912,7 @@ mod tests {
             "2",
             0,
             Payload::VerificationRecorded {
+                timeout_seconds: None,
                 tested_tree: None,
                 worktree_dirty: None,
                 tree_moved: false,

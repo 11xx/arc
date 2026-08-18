@@ -1057,6 +1057,20 @@ fn guarded_integration_records_exact_authorization_basis() {
     let worktree = repo.home.join(".worktrees/repo-second");
     repo.commit(&worktree, "second.rs", "two\n", "feat: second");
     git(&worktree, &["merge", "--no-edit", "master"]);
+    // This change declares the gate with a timeout the target does not. The
+    // evidence must run under the declaration it will be recorded against —
+    // a gate is green for what it ran, timeout included.
+    fs::create_dir_all(worktree.join(".arc")).unwrap();
+    fs::write(
+        worktree.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\ntimeout = \"90s\"\n",
+    )
+    .unwrap();
+    git(&worktree, &["add", ".arc/gates.toml"]);
+    git(
+        &worktree,
+        &["commit", "-m", "chore: declare a gate timeout"],
+    );
     stdout(repo.arc(&worktree).args(["snapshot", "second"]));
     repo.arc(&worktree)
         .args(["verify", "second", "--gate", "unit"])
@@ -1073,15 +1087,9 @@ fn guarded_integration_records_exact_authorization_basis() {
         .expect("review prints its event")
         .to_string();
 
-    // Uncommitted config in the *invocation* worktree: exactly the state Git
+    // Uncommitted policy in the *invocation* worktree: exactly the state Git
     // cannot recover afterwards, and the state readiness is computed from.
     // The target worktree must stay clean, so the edit belongs here.
-    fs::create_dir_all(worktree.join(".arc")).unwrap();
-    fs::write(
-        worktree.join(".arc/gates.toml"),
-        "[gates.unit]\ncommand = \"true\"\ntimeout = \"90s\"\n",
-    )
-    .unwrap();
     fs::write(
         worktree.join(".arc/policy.toml"),
         "[policy]\nrequire_declared_actor = false\nforbid_self_approval = false\n\n[provenance]\ngit_identity = \"shared\"\n",
@@ -1189,7 +1197,7 @@ fn changing_a_gate_declaration_ungreens_its_recorded_evidence() {
     let status = json_stdout(repo.arc(&worktree).args(["status", "redeclared", "--json"]));
     assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
 
-    // The declaration now names a different check, which nothing has run.
+    // A different command is a different check, which nothing has run.
     fs::write(
         worktree.join(".arc/gates.toml"),
         "[gates.unit]\ncommand = \"true # a different check\"\n",
@@ -1199,6 +1207,24 @@ fn changing_a_gate_declaration_ungreens_its_recorded_evidence() {
     assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
     assert_eq!(status["gates"][0]["declaration_changed"], true, "{status}");
     assert_eq!(status["integrate_ready"], false, "{status}");
+
+    // A timeout is part of the declaration too: the same command under a
+    // laxer timeout is not evidence for a stricter one.
+    fs::write(
+        worktree.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\ntimeout = \"1s\"\n",
+    )
+    .unwrap();
+    let status = json_stdout(repo.arc(&worktree).args(["status", "redeclared", "--json"]));
+    assert_eq!(status["gates"][0]["declaration_changed"], true, "{status}");
+    assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
+
+    // Back to a command nothing has run, for the reuse check below.
+    fs::write(
+        worktree.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true # a different check\"\n",
+    )
+    .unwrap();
 
     // Reuse is reuse of a run: --skip-green must not report the old pass as
     // satisfying a declaration nothing has run.
