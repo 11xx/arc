@@ -244,7 +244,12 @@ pub fn validate_mapping(mapping: &BTreeMap<String, Option<String>>) -> Result<()
 }
 
 fn is_revision(token: &str) -> bool {
-    token.len() >= 7 && token.len() <= 64 && token.chars().all(|c| c.is_ascii_hexdigit())
+    token.len() >= 7
+        && token.len() <= 64
+        && token.chars().all(|c| c.is_ascii_hexdigit())
+        // The zero object is how Git spells "no object". A rewrite from it
+        // would claim a successor for a commit that never existed.
+        && !token.chars().all(|c| c == '0')
 }
 
 #[cfg(test)]
@@ -408,6 +413,21 @@ mod tests {
     /// The recording path spells a dropped commit as no successor. A payload
     /// that instead maps to the zero object means something no recorded map
     /// can mean, and a reader would repeat it as a rewrite to nothing.
+    /// The zero object is how Git spells "no object". A rewrite *from* it
+    /// would claim a successor for a commit that never existed.
+    #[test]
+    fn a_zero_old_revision_is_not_a_revision() {
+        assert!(parse_commit_map(
+            "0000000000000000000000000000000000000000 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        )
+        .is_err());
+        let zero_old = BTreeMap::from([(
+            "0000000000000000000000000000000000000000".to_string(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+        )]);
+        assert!(validate_mapping(&zero_old).is_err());
+    }
+
     #[test]
     fn a_mapping_that_no_recorded_map_could_mean_is_refused() {
         let zeroed = BTreeMap::from([(
