@@ -383,7 +383,18 @@ fn brief_scaffold_sol_low_records_the_fences() {
     assert!(brief.contains("staged, no SHA"), "{brief}");
     assert!(brief.contains("heartbeat"), "{brief}");
     assert!(brief.contains("Acceptance probes"), "{brief}");
-    assert!(brief.contains("arc verify --command"), "{brief}");
+    // The rule the scaffold exists to carry: naming a command is not a probe
+    // contract, and a probe that passes at both ends proves nothing.
+    assert!(brief.contains("--probes-json"), "{brief}");
+    assert!(brief.contains("--probe-phase baseline"), "{brief}");
+    assert!(brief.contains("**fail at the brief's base"), "{brief}");
+    assert!(brief.contains("the expected reason"), "{brief}");
+    assert!(brief.contains("no probe contract was recorded"), "{brief}");
+    assert!(brief.contains("exits only the subshell"), "{brief}");
+    // The claim that probes never gate was true before probes were declarable
+    // and is false now; a scaffold that still said it would teach the wrong
+    // contract to every delegated executor.
+    assert!(!brief.contains("never gates integration"), "{brief}");
     assert!(
         brief.contains("never edit a probe to make it pass"),
         "{brief}"
