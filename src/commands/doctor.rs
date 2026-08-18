@@ -51,6 +51,11 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         &mut states,
         &mut known_patchsets,
     )?;
+    // Before anything that reads them: a malformed repository event must be
+    // reported as the problem it is, not surface as a fatal error inside
+    // whatever happened to read it first — which is what doctor exists to
+    // prevent for every other kind of event.
+    inspect_repository_events(&Store::discover(&ctx.cwd)?, &mut problems);
     inspect_dangling_revisions(&ctx.cwd, &Store::discover(&ctx.cwd)?, &states, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
@@ -177,16 +182,37 @@ fn inspect_dangling_revisions(
     }
     // One batch rather than a process per revision: a ledger of any age holds
     // thousands, and a doctor that costs a minute stops being run.
+    // A map that cannot be read is reported by `inspect_repository_events`;
+    // here it means only that no revision can be followed forward, which is
+    // the same answer as no rewrite having been recorded.
+    let rewrites = crate::rewrite::RewriteMap::load(store).unwrap_or_default();
     for revision in gitio::missing_objects(cwd, wanted.keys().map(String::as_str))? {
         let short = &revision[..revision.len().min(8)];
         let referents = wanted
             .get(&revision)
             .map(|set| set.iter().cloned().collect::<Vec<_>>().join(", "))
             .unwrap_or_default();
-        advice.push(Finding {
-            code: "dangling-revision",
-            detail: format!("{short} is recorded but no longer in this repository: {referents}"),
-        });
+        // A revision a recorded rewrite moved is not a casualty: the event
+        // still says what it said, and the reader can follow it forward.
+        match rewrites.fate(&revision) {
+            Some(crate::rewrite::Fate::Rewritten(successor)) => advice.push(Finding {
+                code: "revision-rewritten",
+                detail: format!(
+                    "{short} was rewritten to {}: {referents}",
+                    &successor[..successor.len().min(8)]
+                ),
+            }),
+            Some(crate::rewrite::Fate::Dropped) => advice.push(Finding {
+                code: "revision-dropped",
+                detail: format!("{short} was dropped by a recorded rewrite: {referents}"),
+            }),
+            None => advice.push(Finding {
+                code: "dangling-revision",
+                detail: format!(
+                    "{short} is recorded but no longer in this repository: {referents}"
+                ),
+            }),
+        }
     }
     Ok(())
 }
@@ -431,6 +457,81 @@ fn inspect_hold_releases(
                 Payload::HoldReleased { .. } => active.clear(),
                 _ => {}
             }
+        }
+    }
+}
+
+/// Repository-scoped events, checked the way a change's events are: a
+/// malformed one must be reported as a problem rather than surfacing as a
+/// failure inside whatever first tried to read it.
+fn inspect_repository_events(store: &Store, problems: &mut Vec<Finding>) {
+    let files = match store.repository_event_files() {
+        Ok(files) => files,
+        Err(error) => {
+            problems.push(Finding {
+                code: "malformed-repository-event",
+                detail: error.to_string(),
+            });
+            return;
+        }
+    };
+    for (event_id, bytes) in files {
+        // An ID that could not have been written is still on disk, and every
+        // path that reads by ID validates: reporting it is how the owner
+        // learns why those paths refuse the file.
+        if let Err(error) = crate::ids::validate_id_component(&event_id) {
+            problems.push(Finding {
+                code: "malformed-repository-event",
+                detail: format!("{event_id}: {error}"),
+            });
+            // Every later check would report the same cause; one finding per
+            // broken file is what makes the report readable.
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(error) => {
+                problems.push(Finding {
+                    code: "malformed-repository-event",
+                    detail: format!("{event_id}: {error}"),
+                });
+                continue;
+            }
+        };
+        if let Err(error) = crate::bundle::parse_typed_event(&value) {
+            problems.push(Finding {
+                code: "malformed-repository-event",
+                detail: format!("{event_id}: {error}"),
+            });
+            // Everything below reads fields this file does not have, and
+            // would report the same broken file two or three more times.
+            continue;
+        }
+        if let Ok(Some(event)) = crate::bundle::parse_typed_event(&value) {
+            if let Payload::HistoryRewritten { mapping, .. } = &event.payload {
+                if let Err(error) = crate::rewrite::validate_mapping(mapping) {
+                    problems.push(Finding {
+                        code: "invalid-rewrite-mapping",
+                        detail: format!("{event_id}: {error}"),
+                    });
+                }
+            }
+        }
+        let scope = value.get("change_id").and_then(serde_json::Value::as_str);
+        if scope != Some(Store::REPOSITORY_SCOPE) {
+            problems.push(Finding {
+                code: "misscoped-repository-event",
+                detail: format!(
+                    "{event_id} is stored as a repository event but names change {}",
+                    scope.unwrap_or("(none)")
+                ),
+            });
+        }
+        if value.get("event_id").and_then(serde_json::Value::as_str) != Some(event_id.as_str()) {
+            problems.push(Finding {
+                code: "malformed-repository-event",
+                detail: format!("{event_id} contains a different event_id"),
+            });
         }
     }
 }

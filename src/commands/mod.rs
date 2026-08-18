@@ -10,6 +10,7 @@ mod doctor;
 mod findings;
 mod forge_cmd;
 mod gatekeeping;
+mod history;
 mod hooks;
 mod lifecycle;
 mod messaging;
@@ -46,6 +47,7 @@ pub use gatekeeping::{
     check_selection, close, done, hold, integrate, release_hold, snapshot_with_verify, verify,
     CloseArgs, VerifyArgs,
 };
+pub use history::{record_rewrite, resolve_rewritten};
 pub use hooks::{
     hook_run, install as hooks_install, query_commit, status as hooks_status,
     uninstall as hooks_uninstall,
@@ -56,7 +58,7 @@ pub use lifecycle::{
 };
 pub(crate) use lifecycle::{print_projected, status_output};
 pub use messaging::{catchup, inbox, message, messages};
-pub use observe::{events, watch, WatchArgs, WatchQuorum};
+pub use observe::{events, watch, EventsArgs, WatchArgs, WatchQuorum};
 pub use rescue::rescue;
 pub use review::{comment, finding, read_review, reply, resolve, review, ReviewArgs};
 use serde::Serialize;

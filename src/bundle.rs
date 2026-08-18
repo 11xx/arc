@@ -24,6 +24,13 @@ pub struct Bundle {
     #[serde(default = "legacy_store_format")]
     pub store_format: u32,
     pub events: Vec<Value>,
+    /// Repository-scoped events, carried so a change's recorded revisions stay
+    /// followable after transport. A rewrite is not change-scoped, but a
+    /// bundle that drops it hands the receiver revisions nothing can resolve.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repository_events: Vec<Value>,
+    // Validated at parse, not at write: an import that discovered a malformed
+    // one halfway through would already have written change events.
 }
 
 /// Bundles written before the format was carried came from a build that wrote
@@ -71,6 +78,14 @@ impl Bundle {
         });
 
         let events_sha256 = checksum(&events)?;
+        // The checksum covers the change's events, which is what the receiver
+        // replays. Repository events travel beside them: they are context for
+        // resolving recorded revisions, not part of this change's history.
+        let repository_events = store
+            .raw_repository_events_unseen(&std::collections::BTreeSet::new())?
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect();
         Ok(Bundle {
             schema: BUNDLE_SCHEMA.to_string(),
             store_format: crate::model::SCHEMA_VERSION,
@@ -79,6 +94,7 @@ impl Bundle {
             event_count: events.len(),
             events_sha256,
             events,
+            repository_events,
         })
     }
 
@@ -107,6 +123,43 @@ impl Bundle {
         }
         ids::validate_id_component(&bundle.repository_id)?;
         ids::validate_id_component(&bundle.change_id)?;
+        // Repository events are validated here, before anything is written:
+        // an import that found a malformed one halfway through would already
+        // have appended change events, and a stored malformed envelope breaks
+        // every later read of the rewrite map.
+        for value in &bundle.repository_events {
+            let envelope = event_envelope(value)
+                .context("bundled repository event is not a well-formed event")?;
+            ids::validate_id_component(envelope.event_id)?;
+            if envelope.change_id != Store::REPOSITORY_SCOPE {
+                bail!(
+                    "bundled repository event {} names change {:?}, not the repository scope",
+                    envelope.event_id,
+                    envelope.change_id
+                );
+            }
+            let typed = parse_typed_event(value).with_context(|| {
+                format!(
+                    "bundled repository event {} is malformed",
+                    envelope.event_id
+                )
+            })?;
+            // A bundle carries the payload directly, so the rules the
+            // recording path enforces have to be enforced here too. Otherwise
+            // an imported map says something no recorded map could — a
+            // rewrite to the zero object, where "dropped" is spelled as no
+            // successor at all.
+            if let Some(crate::model::Payload::HistoryRewritten { mapping, .. }) =
+                typed.as_ref().map(|event| &event.payload)
+            {
+                crate::rewrite::validate_mapping(mapping).with_context(|| {
+                    format!(
+                        "bundled repository event {} records a mapping it cannot mean",
+                        envelope.event_id
+                    )
+                })?;
+            }
+        }
         if bundle.event_count != bundle.events.len() {
             bail!(
                 "event_count {} does not match {} bundled events",

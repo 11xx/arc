@@ -59,6 +59,11 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
                 require_declared_actor: false,
             });
             validate_import_candidate(store.as_ref(), &validated, &plan.new_events)?;
+            // The same refusals the import makes: a preflight that reports
+            // success for a bundle the real path rejects is believed, and
+            // wrong. A destination with no store still checks the bundle
+            // against itself.
+            plan_repository_events(store.as_ref(), &validated)?;
         }
         print_import_report(
             &validated,
@@ -108,16 +113,90 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
             validated.bundle.repository_id, store.repository_id
         );
     }
+    // Every repository event is checked before the first one is written, and
+    // all of them before any change event: an import that discovered a
+    // contradiction halfway would leave one rewrite recorded, another not, and
+    // a change whose revisions resolve through half a map.
+    // Held across planning and writing: the combined map is judged as a
+    // whole, so two imports of different changes must not interleave between
+    // the judgement and the write that makes it true.
+    let _repository_events = store.lock_repository_events()?;
+    let incoming = plan_repository_events(Some(&store), &validated)?;
+    let mut rewrites = 0;
+    for (event_id, bytes) in &incoming {
+        if store.append_raw_repository_event(event_id, bytes)? {
+            rewrites += 1;
+        }
+    }
     for event in &validated.events {
         if plan.new_events.contains(&event.event_id) {
             store.append_raw_event(&validated.bundle.change_id, &event.event_id, &event.bytes)?;
         }
+    }
+    if rewrites > 0 {
+        println!("repository events: {rewrites} imported");
     }
     drop(transition);
     for (name, head) in pins {
         gitio::update_ref(&ctx.cwd, &name, &head)?;
     }
     Ok(0)
+}
+
+/// The repository events an import would write, refusing every contradiction
+/// before the first is written — including two bundled events sharing an ID,
+/// which no check against the destination can see.
+fn plan_repository_events(
+    store: Option<&Store>,
+    validated: &ValidatedBundle,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    let mut incoming: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for value in &validated.bundle.repository_events {
+        let Some(event_id) = value.get("event_id").and_then(serde_json::Value::as_str) else {
+            bail!("bundled repository event has no event_id");
+        };
+        let mut bytes = serde_json::to_vec_pretty(value)?;
+        bytes.push(b'\n');
+        if store.is_some_and(|store| {
+            store
+                .repository_event_conflicts(event_id, &bytes)
+                .unwrap_or(false)
+        }) {
+            bail!(
+                "repository event {event_id} already exists here with different content; \
+                 nothing was imported"
+            );
+        }
+        if let Some(existing) = incoming.get(event_id) {
+            if existing != &bytes {
+                bail!(
+                    "the bundle carries two different repository events with ID {event_id}; \
+                     nothing was imported"
+                );
+            }
+        }
+        incoming.insert(event_id.to_string(), bytes);
+    }
+    // Two events with different IDs can still disagree about one revision, and
+    // no per-event check sees that. The combined map is the thing that has to
+    // hold together, so it is built before anything is written.
+    let mut combined = match store {
+        Some(store) => store.load_repository_events()?,
+        // A destination with no store holds nothing to contradict, but the
+        // bundle must still hold together on its own.
+        None => Vec::new(),
+    };
+    for value in &validated.bundle.repository_events {
+        if let Some(event) = crate::bundle::parse_typed_event(value)? {
+            if !combined.iter().any(|held| held.event_id == event.event_id) {
+                combined.push(event);
+            }
+        }
+    }
+    combined.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+    crate::rewrite::RewriteMap::from_events(combined.iter())
+        .context("the bundle's rewrites contradict this repository's; nothing was imported")?;
+    Ok(incoming)
 }
 
 fn classify_import_events(root: &Path, validated: &ValidatedBundle) -> Result<ImportEventPlan> {

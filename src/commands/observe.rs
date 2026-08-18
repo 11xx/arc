@@ -6,19 +6,36 @@ use super::*;
 /// Replay raw ledger events as compact NDJSON, optionally continuing as new
 /// event files arrive. Event IDs are ULIDs, so replay and each observed polling
 /// batch can be sorted across changes; concurrent appends may cross batches.
-pub fn events(
-    ctx: &Ctx,
-    follow: bool,
-    change: Option<&str>,
-    tags: &[String],
-    event_type: Option<&str>,
-    since: Option<ulid::Ulid>,
-    exec_command: Option<&str>,
-) -> Result<()> {
+/// What to stream, as the CLI expresses it. One struct rather than eight
+/// arguments, because the selectors are mutually exclusive and a call site
+/// should show which one it chose.
+pub struct EventsArgs<'a> {
+    pub follow: bool,
+    pub change: Option<&'a str>,
+    pub tags: &'a [String],
+    pub repository_scope: bool,
+    pub event_type: Option<&'a str>,
+    pub since: Option<ulid::Ulid>,
+    pub exec_command: Option<&'a str>,
+}
+
+pub fn events(ctx: &Ctx, args: EventsArgs<'_>) -> Result<()> {
+    let EventsArgs {
+        follow,
+        change,
+        tags,
+        repository_scope,
+        event_type,
+        since,
+        exec_command,
+    } = args;
     if change.is_some() && !tags.is_empty() {
         bail!("--change and --tag select different scopes; supply one");
     }
     let store = ctx.store()?;
+    // A flag rather than a reserved reference value: `repository` is a
+    // perfectly good slug, and a magic string would shadow the change a
+    // caller actually named.
     let change_id = change
         .map(|reference| store.resolve_change(reference))
         .transpose()?;
@@ -46,9 +63,10 @@ pub fn events(
         Some(resolve_tagged(ctx, &tags)?.into_iter().collect())
     };
     loop {
-        let raw_events = match &change_id {
-            Some(id) => store.raw_events_unseen(id, &seen)?,
-            None => store.raw_events_all_unseen(&seen)?,
+        let raw_events = match (&change_id, repository_scope) {
+            (Some(id), _) => store.raw_events_unseen(id, &seen)?,
+            (None, true) => store.raw_repository_events_unseen(&seen)?,
+            (None, false) => store.raw_events_all_unseen(&seen)?,
         };
         let observed_events = !raw_events.is_empty();
         if tagged.is_some()

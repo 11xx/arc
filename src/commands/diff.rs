@@ -64,6 +64,14 @@ pub fn diff(ctx: &Ctx, reference: &str, args: DiffArgs) -> Result<()> {
     } else {
         (patchset.base.clone(), patchset.head.clone())
     };
+    // A recorded revision a rewrite moved no longer resolves. Following it
+    // forward renders the surviving commit; the event itself is untouched.
+    let rewrites = crate::rewrite::RewriteMap::load(&store)?;
+    let (left, right) = (
+        follow_rewrites(ctx, &rewrites, left),
+        follow_rewrites(ctx, &rewrites, right),
+    );
+
     let mut args = vec!["diff".to_string()];
     if stat {
         args.push("--stat".to_string());
@@ -76,9 +84,35 @@ pub fn diff(ctx: &Ctx, reference: &str, args: DiffArgs) -> Result<()> {
     gitio::git_inherit(&ctx.cwd, &args)?;
 
     if findings {
-        render_findings(ctx, &state, &patchset.id, &patchset.head);
+        // Anchors resolve blobs at the patchset head. After a rewrite that
+        // head is gone, and checking against it would report every anchor as
+        // drifted — a claim about the rewrite, not about the finding.
+        let head = follow_rewrites(ctx, &rewrites, patchset.head.clone());
+        render_findings(ctx, &state, &patchset.id, &head);
     }
     Ok(())
+}
+
+/// Where a recorded revision survives, when the one the ledger names is gone.
+///
+/// Every range arc renders goes through this: a recorded revision that a
+/// rewrite moved is exactly the case the rewrite record exists to answer, and
+/// an audit range has the same claim on that answer as a patchset range.
+fn follow_rewrites(ctx: &Ctx, rewrites: &crate::rewrite::RewriteMap, revision: String) -> String {
+    if rewrites.is_empty() || gitio::rev_parse(&ctx.cwd, &revision).is_ok() {
+        return revision;
+    }
+    match rewrites.fate(&revision) {
+        Some(crate::rewrite::Fate::Rewritten(successor)) => {
+            eprintln!(
+                "note: {} was rewritten to {}; rendering the surviving commit",
+                &revision[..revision.len().min(8)],
+                &successor[..successor.len().min(8)]
+            );
+            successor
+        }
+        Some(crate::rewrite::Fate::Dropped) | None => revision,
+    }
 }
 
 /// The exact range an integration recorded: from where the target stood
@@ -123,11 +157,17 @@ fn diff_integrated(
              landed onto"
         ),
     };
+    // The audit range has the same claim on the rewrite record as a patchset
+    // range: a recorded revision that moved is precisely what it answers.
+    let rewrites = crate::rewrite::RewriteMap::load(&ctx.store()?)?;
+    let base = follow_rewrites(ctx, &rewrites, base);
+    let head = follow_rewrites(ctx, &rewrites, head.to_string());
+
     let mut args = vec!["diff".to_string()];
     if stat {
         args.push("--stat".to_string());
     }
-    args.extend([base, head.to_string()]);
+    args.extend([base, head]);
     if !paths.is_empty() {
         args.push("--".to_string());
         args.extend(paths);

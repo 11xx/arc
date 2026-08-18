@@ -1,5 +1,48 @@
 use super::common::*;
 
+/// Doctor's job is to report malformed state, so a malformed repository event
+/// must be a finding rather than a fatal error raised by whichever inspection
+/// happened to read it first.
+#[test]
+fn a_malformed_repository_event_is_reported_rather_than_fatal() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "readable", "--no-worktree"]),
+    );
+    let dir = repo.root.join(".git/arc/repository/events");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("01BADBADBADBADBADBADBADBAD.json"), "not json\n").unwrap();
+
+    let out = stdout(repo.arc(&repo.root).args(["doctor"]));
+    assert!(out.contains("malformed-repository-event"), "{out}");
+
+    // An ID no write path could have produced is reported too, once, rather
+    // than passing because nothing on the read path looked at it.
+    fs::write(dir.join("bad name.json"), "{}\n").unwrap();
+    let out = stdout(repo.arc(&repo.root).args(["doctor"]));
+    // Both broken files are reported: one unreadable file must not hide the
+    // state of another, which is the point of the report.
+    assert!(out.contains("01BADBADBADBADBADBADBADBAD"), "{out}");
+    assert_eq!(
+        out.lines().filter(|line| line.contains("bad name")).count(),
+        1,
+        "one finding per broken file: {out}"
+    );
+
+    // A well-named file whose contents are not an event is one finding too,
+    // not one per field the checks below it would have read.
+    fs::write(dir.join("01VALIDBUTEMPTY0000000000.json"), "{}\n").unwrap();
+    let out = stdout(repo.arc(&repo.root).args(["doctor"]));
+    assert_eq!(
+        out.lines()
+            .filter(|line| line.contains("01VALIDBUTEMPTY0000000000"))
+            .count(),
+        1,
+        "one finding per broken file: {out}"
+    );
+}
+
 #[test]
 fn doctor_clean_ledger_exits_zero() {
     let repo = Repo::new();
@@ -212,4 +255,185 @@ fn doctor_reports_a_recorded_revision_git_can_no_longer_resolve() {
     );
     // Advice never fails the command: the ledger is not malformed.
     repo.arc(&repo.root).args(["doctor"]).assert().success();
+}
+
+/// A rewrite is a fact about the repository, so it is recorded rather than
+/// applied. Every event keeps saying exactly what it said; what changes is
+/// that a reader can follow a recorded revision forward, and that doctor stops
+/// calling a moved revision a casualty.
+#[test]
+fn a_recorded_rewrite_translates_revisions_instead_of_migrating_events() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "rewritten"]));
+    let worktree = repo.home.join(".worktrees/repo-rewritten");
+    repo.commit(&worktree, "work.rs", "one\n", "feat: work");
+    stdout(repo.arc(&worktree).args(["snapshot", "rewritten"]));
+    let recorded = repo.head(&worktree);
+
+    // The operator rewrites history. arc's retention ref is what keeps a
+    // recorded revision reachable, so a real rewrite takes it with everything
+    // else: dropping it here is what a force-pushed, garbage-collected
+    // repository looks like from the ledger's side.
+    git(
+        &worktree,
+        &["commit", "--amend", "-m", "feat: work, rewritten"],
+    );
+    let rewritten = repo.head(&worktree);
+    for ref_name in git_out(
+        &worktree,
+        &["for-each-ref", "--format=%(refname)", "refs/arc/"],
+    )
+    .lines()
+    .map(str::to_string)
+    .collect::<Vec<_>>()
+    {
+        git(&worktree, &["update-ref", "-d", &ref_name]);
+    }
+    git(&worktree, &["reflog", "expire", "--expire=now", "--all"]);
+    git(&worktree, &["gc", "--prune=now", "--quiet"]);
+
+    // Before the rewrite is recorded, the revision is simply gone.
+    let before = stdout(repo.arc(&repo.root).args(["doctor"]));
+    assert!(before.contains("dangling-revision"), "{before}");
+
+    let map = repo.root.join("commit-map");
+    fs::write(&map, format!("{recorded} {rewritten}\n")).unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            map.to_str().unwrap(),
+            "--reason",
+            "signed an unsigned commit",
+            "--tool",
+            "git commit --amend",
+        ])
+        .assert()
+        .success();
+
+    // The event is untouched, and no migrated duplicate was appended beside
+    // it: one patchset event, still naming what it named.
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "rewritten",
+        "--type",
+        "patchset-added",
+    ]));
+    assert!(events.contains(&recorded), "{events}");
+    assert_eq!(events.lines().count(), 1, "{events}");
+    assert!(!events.contains(&rewritten), "{events}");
+
+    // The rewrite itself is readable, which is what makes it a fact rather
+    // than a private note.
+    let repository_events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--repository",
+        "--type",
+        "history-rewritten",
+    ]));
+    assert!(repository_events.contains(&recorded), "{repository_events}");
+
+    // What changed is the reading.
+    let after = stdout(repo.arc(&repo.root).args(["doctor"]));
+    assert!(after.contains("revision-rewritten"), "{after}");
+    assert!(!after.contains("dangling-revision"), "{after}");
+
+    // `repository` is a perfectly good slug, and naming it must select that
+    // change rather than the repository's own events.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "repository", "--no-worktree"]),
+    );
+    let opened = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "repository",
+        "--type",
+        "change-opened",
+    ]));
+    assert!(opened.contains("\"slug\":\"repository\""), "{opened}");
+
+    let resolved = stdout(repo.arc(&repo.root).args(["history", "resolve", &recorded]));
+    assert!(resolved.contains(&rewritten), "{resolved}");
+
+    // A revision nothing rewrote is reported as unmoved, with exit 2 so a
+    // script can tell the two apart.
+    repo.arc(&repo.root)
+        .args(["history", "resolve", &rewritten])
+        .assert()
+        .code(2);
+
+    // An abbreviation resolves, because a map may abbreviate what the ledger
+    // records in full and vice versa.
+    repo.arc(&repo.root)
+        .args(["history", "resolve", &recorded[..10]])
+        .assert()
+        .success();
+
+    // A successor that exists but is not a commit is not a survivor either:
+    // `diff` would follow a recorded revision into something Git refuses.
+    let blob = {
+        let out = std::process::Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(&repo.root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.as_mut().unwrap().write_all(b"not a commit\n")?;
+                child.wait_with_output()
+            })
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let blob_map = repo.root.join("blob-map");
+    fs::write(&blob_map, format!("{recorded} {blob}\n")).unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            blob_map.to_str().unwrap(),
+            "--reason",
+            "a map naming a blob",
+        ])
+        .assert()
+        .failure();
+
+    // A map naming a successor this repository does not have describes some
+    // other repository's history, and is refused rather than recorded.
+    let bogus = repo.root.join("bogus-map");
+    fs::write(
+        &bogus,
+        format!("{recorded} 0123456789012345678901234567890123456789\n"),
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            bogus.to_str().unwrap(),
+            "--reason",
+            "a map from somewhere else",
+        ])
+        .assert()
+        .failure();
+
+    // The rewrite travels with a bundle: a receiver that has the rewritten
+    // history can still follow the change's recorded revisions.
+    let bundle = repo.home.join("bundle.json");
+    repo.arc(&repo.root)
+        .args(["export", "rewritten", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let exported: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    assert_eq!(
+        exported["repository_events"].as_array().unwrap().len(),
+        1,
+        "{exported}"
+    );
 }

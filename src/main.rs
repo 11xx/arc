@@ -15,6 +15,7 @@ mod policy;
 mod project;
 mod registry;
 mod render;
+mod rewrite;
 mod session_store;
 mod state;
 mod status;
@@ -460,6 +461,9 @@ enum Cmd {
         /// Limit events to the changes carrying all supplied tags (repeatable)
         #[arg(long)]
         tag: Vec<String>,
+        /// Read the repository's own events instead of a change's
+        #[arg(long, conflicts_with_all = ["change_flag", "tag"])]
+        repository: bool,
         /// Limit events to one raw kebab-case event_type value
         #[arg(long = "type")]
         event_type: Option<String>,
@@ -826,6 +830,11 @@ enum Cmd {
         #[arg(long)]
         superseded: Option<String>,
     },
+    /// Record a Git history rewrite that happened to this repository
+    History {
+        #[command(subcommand)]
+        cmd: HistoryCmd,
+    },
     /// Record and validate observed forge (hosted-PR) facts
     Forge {
         #[command(subcommand)]
@@ -991,6 +1000,26 @@ enum ForgeCmd {
         #[arg(long)]
         link: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum HistoryCmd {
+    /// Record a rewrite the operator performed, with its commit map. arc never
+    /// rewrites history, offers to, or computes the mapping
+    Rewrite {
+        /// Commit map (`<old> <new>` per line, as git filter-repo writes), or
+        /// '-' for stdin
+        #[arg(long)]
+        map: String,
+        /// Why the history was rewritten
+        #[arg(long)]
+        reason: String,
+        /// What performed the rewrite
+        #[arg(long)]
+        tool: Option<String>,
+    },
+    /// Show where a recorded revision ended up
+    Resolve { revision: String },
 }
 
 fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'static str)> {
@@ -1466,18 +1495,22 @@ fn run(cli: Cli) -> Result<i32> {
             follow,
             change,
             tag,
+            repository,
             event_type,
             since,
             exec_command,
         } => {
             commands::events(
                 &ctx,
-                follow,
-                change.as_deref(),
-                &tag,
-                event_type.as_deref(),
-                since,
-                exec_command.as_deref(),
+                commands::EventsArgs {
+                    follow,
+                    change: change.as_deref(),
+                    tags: &tag,
+                    repository_scope: repository,
+                    event_type: event_type.as_deref(),
+                    since,
+                    exec_command: exec_command.as_deref(),
+                },
             )?;
             Ok(0)
         }
@@ -1917,6 +1950,13 @@ fn run(cli: Cli) -> Result<i32> {
                 commands::forge_pr_state(&ctx, &change, state, merge_sha, link)?;
                 Ok(0)
             }
+        },
+        Cmd::History { cmd } => match cmd {
+            HistoryCmd::Rewrite { map, reason, tool } => {
+                commands::record_rewrite(&ctx, &map, reason, tool)?;
+                Ok(0)
+            }
+            HistoryCmd::Resolve { revision } => commands::resolve_rewritten(&ctx, &revision),
         },
         Cmd::Config {
             check_writable,

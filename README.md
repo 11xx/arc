@@ -861,6 +861,74 @@ dependent's worktree once the change integrates. It only prints — arc never
 rewrites a branch — and writes no events; with no dependents it says so and
 exits 0.
 
+## History rewrites
+
+Git history is occasionally rewritten for reasons unrelated to any change:
+signing an old commit, purging a secret, correcting an author, an upstream
+force-push. Every revision the ledger recorded then names an object that no
+longer exists.
+
+The ledger is append-only, so migrating those events is unavailable by
+construction — and should stay unavailable. A ledger that rewrites itself when
+Git moves is a projection of whatever Git currently says, which is the thing
+arc exists to supplement rather than mirror. So the rewrite is recorded as the
+fact it is:
+
+```sh
+git filter-repo --...                        # you rewrite; arc never does
+arc history rewrite --map .git/filter-repo/commit-map \
+  --reason "signed two unsigned commits" --tool git-filter-repo
+arc history resolve <old-sha>                # exit 2 when nothing moved it
+```
+
+The commit map is `<old> <new>` per line, as `git filter-repo` writes it,
+including its `old`/`new` column header. A new revision of all zeroes records a
+commit the rewrite dropped, which survives at nothing; a line mapping a commit
+to itself is not a move and is not recorded; and a revision mapped twice to
+different successors is refused. arc never rewrites history, offers to, or
+computes the mapping — but it does check that every revision the map
+claims survives is a commit in this repository, so a map from somewhere else,
+or one naming an object that is not a commit, is refused rather than recorded
+as fact.
+
+Revisions match by prefix in either direction, so a map may abbreviate what
+the ledger records in full and a caller may abbreviate what the map records;
+an abbreviation matching more than one recorded revision names none of them.
+
+Nothing already written changes. An old event keeps saying exactly what it
+said; readers gain the ability to follow it forward. `arc doctor` reports a
+moved revision as `revision-rewritten` naming its successor, and a dropped one
+as `revision-dropped`, instead of `dangling-revision`. `arc diff` renders the
+surviving commit when a recorded one no longer resolves — every range it
+renders, the patchset one, the head its finding anchors are checked against,
+and the `--integrated` audit range alike — saying so on stderr. `arc events
+--repository` reads the repository's own events, and a bundle carries
+them so an imported change's revisions stay followable. An import refuses a
+bundle whose rewrites contradict this repository's: two events with different
+IDs can still disagree about one revision, so it is the combined map that must
+hold together, and it is checked before anything is written. Recording a
+rewrite locally is checked the same way and takes the same repository-scoped
+lock, so two imports of different changes cannot each accept half of a
+contradiction.
+
+Both write paths also refuse a mapping that cannot mean what it says — a
+rewrite to the zero object, where a dropped commit is spelled as no successor
+at all; a revision mapped to itself; anything that is not a revision. A
+mapping that reached the ledger another way is skipped by readers rather than
+making the whole map unreadable, and `arc doctor` reports it as
+`invalid-rewrite-mapping`.
+
+Approval does not survive translation, and should not: a verdict binds to an
+exact patchset head, and only a content comparison could say whether a
+rewritten head is the same work. Re-approving a rewrite that preserved the
+tree is cheap; one that did not must be re-reviewed.
+
+A rewrite is not change-scoped — it happens to every recorded revision at once
+— so it is stored as a repository-scoped event under `repository/events/`
+rather than filed under a change that did not cause it. `arc doctor` checks
+those events like any other, reporting a malformed or misscoped one instead of
+letting it surface as a failure inside whatever first tried to read it.
+
 ## Policy
 
 Repository integration policy is declared in `.arc/policy.toml`. Policies are
