@@ -26,7 +26,7 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                 let Some(patchset) = state.latest_patchset() else {
                     return ChainReview {
                         subject: None,
-                        brief_author: brief.map(|brief| brief.actor.clone()),
+                        brief_author: None,
                         reviewed_only_by_brief_author: None,
                         at_final: ChainReviewWindow {
                             verdicts: 0,
@@ -105,7 +105,17 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                 let at_final = window(&final_patchset_ids, &final_heads);
                 let lifetime = window(&lifetime_patchset_ids, &lifetime_heads);
                 let coverage = crate::status::reviewer_coverage(state);
-                let brief_author = brief.map(|brief| brief.actor.clone());
+                // The brief this patchset was built from, and its effective
+                // author read the same way a verdict's identity is — a lead
+                // acting for an executor is that executor on both sides, or
+                // the comparison compares different things.
+                let brief_author = state.brief_for(patchset).map(|brief| {
+                    brief
+                        .on_behalf_of
+                        .as_deref()
+                        .unwrap_or(&brief.actor)
+                        .to_string()
+                });
                 // Identity inequality is not independence: in an orchestrated
                 // chain the patchset subject is the executor and the verdict
                 // comes from the lead, so the identities always differ. What

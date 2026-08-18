@@ -502,10 +502,13 @@ With `--review`, each member also gets a compact lifetime summary with its
 final-patchset verdict count alongside it. The JSON view includes the recorded
 subject and `at_final` and `lifetime` windows, each containing distinct verdict
 identities, verdict and finding counts, and ad hoc verification count.
-`brief_author` names who wrote the brief the work was done from, and
+`brief_author` names who wrote the brief this patchset was built from —
+not the newest brief, and read through `--on-behalf-of` the same way a
+verdict's identity is — and
 `reviewed_only_by_brief_author` says whether every lifetime verdict came
 from that identity (null when there is no brief, or no verdict to
-attribute). Neither claims a review was independent: in an orchestrated
+attribute; both fields are omitted rather than emitted as null). Neither
+claims a review was independent: in an orchestrated
 chain the patchset subject is the executor and the verdict comes from the
 lead, so identities always differ, and arc cannot know that a reviewer
 directed the work. It reports who wrote what, and stops there.

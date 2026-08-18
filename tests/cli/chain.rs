@@ -312,8 +312,102 @@ fn chain_review_reports_brief_author_only_review_without_inferring_independence(
 
     // The removed boolean is not merely renamed: nothing in the map answers
     // whether review was independent, because the ledger cannot know it.
-    assert!(led["review"]["non_self_verdict"].is_null(), "{led}");
-    assert!(panel["review"]["non_self_verdict"].is_null(), "{panel}");
+    assert!(led["review"].get("non_self_verdict").is_none(), "{led}");
+    assert!(panel["review"].get("non_self_verdict").is_none(), "{panel}");
+}
+
+/// Two ways the attribution can be wrong: reading the newest brief rather than
+/// the one the patchset was built from, and reading a brief's author more
+/// literally than a verdict's. A lead acting for an executor is that executor
+/// on both sides, or the comparison compares different things.
+#[test]
+fn brief_authorship_follows_the_patchset_and_the_delegated_subject() {
+    let repo = Repo::new();
+
+    // The work is briefed, snapshotted, and reviewed. Only afterwards does a
+    // second brief version land, from a different author.
+    let rebriefed = tagged_patchset(&repo, "review-rebriefed");
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Lead").args([
+        "brief",
+        "review-rebriefed",
+        "--body-file",
+        "-",
+    ]));
+    stdout(
+        repo.arc(&rebriefed)
+            .env("ARC_ACTOR", "Executor")
+            .args(["snapshot", "review-rebriefed"]),
+    );
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Lead").args([
+        "review",
+        "review-rebriefed",
+        "--verdict",
+        "approved",
+    ]));
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Someone Else").args([
+        "brief",
+        "review-rebriefed",
+        "--body-file",
+        "-",
+        "--cause-note",
+        "a later correction nobody re-snapshotted against",
+    ]));
+
+    // A lead recording both the brief and the verdict for an executor: the
+    // effective author is the executor on both sides.
+    let delegated = tagged_patchset(&repo, "review-delegated");
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Lead").args([
+        "brief",
+        "review-delegated",
+        "--body-file",
+        "-",
+        "--on-behalf-of",
+        "Executor",
+    ]));
+    stdout(
+        repo.arc(&delegated)
+            .env("ARC_ACTOR", "Executor")
+            .args(["snapshot", "review-delegated"]),
+    );
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Lead").args([
+        "review",
+        "review-delegated",
+        "--verdict",
+        "approved",
+        "--on-behalf-of",
+        "Executor",
+    ]));
+
+    let output = chain_review_json(&repo, "program");
+    let member = |slug: &str| {
+        output["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["slug"] == slug)
+            .unwrap()
+            .clone()
+    };
+
+    let rebriefed = member("review-rebriefed");
+    assert_eq!(
+        rebriefed["review"]["brief_author"], "Lead",
+        "the patchset was built from Lead's brief, whatever landed later: {rebriefed}"
+    );
+    assert_eq!(
+        rebriefed["review"]["reviewed_only_by_brief_author"], true,
+        "{rebriefed}"
+    );
+
+    let delegated = member("review-delegated");
+    assert_eq!(
+        delegated["review"]["brief_author"], "Executor",
+        "{delegated}"
+    );
+    assert_eq!(
+        delegated["review"]["reviewed_only_by_brief_author"], true,
+        "{delegated}"
+    );
 }
 
 #[test]
