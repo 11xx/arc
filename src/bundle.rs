@@ -24,6 +24,11 @@ pub struct Bundle {
     #[serde(default = "legacy_store_format")]
     pub store_format: u32,
     pub events: Vec<Value>,
+    /// Repository-scoped events, carried so a change's recorded revisions stay
+    /// followable after transport. A rewrite is not change-scoped, but a
+    /// bundle that drops it hands the receiver revisions nothing can resolve.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repository_events: Vec<Value>,
 }
 
 /// Bundles written before the format was carried came from a build that wrote
@@ -71,6 +76,14 @@ impl Bundle {
         });
 
         let events_sha256 = checksum(&events)?;
+        // The checksum covers the change's events, which is what the receiver
+        // replays. Repository events travel beside them: they are context for
+        // resolving recorded revisions, not part of this change's history.
+        let repository_events = store
+            .raw_repository_events_unseen(&std::collections::BTreeSet::new())?
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect();
         Ok(Bundle {
             schema: BUNDLE_SCHEMA.to_string(),
             store_format: crate::model::SCHEMA_VERSION,
@@ -79,6 +92,7 @@ impl Bundle {
             event_count: events.len(),
             events_sha256,
             events,
+            repository_events,
         })
     }
 

@@ -881,15 +881,27 @@ arc history rewrite --map .git/filter-repo/commit-map \
 arc history resolve <old-sha>                # exit 2 when nothing moved it
 ```
 
-The commit map is `<old> <new>` per line, as `git filter-repo` writes it; a
-new revision of all zeroes records a commit the rewrite dropped, which has no
-successor. arc never rewrites history, offers to, or computes the mapping.
+The commit map is `<old> <new>` per line, as `git filter-repo` writes it,
+including its `old`/`new` column header. A new revision of all zeroes records a
+commit the rewrite dropped, which survives at nothing; a line mapping a commit
+to itself is not a move and is not recorded; and a revision mapped twice to
+different successors is refused. arc never rewrites history, offers to, or
+computes the mapping — but it does check that what the map claims survives is
+actually in this repository, so a map from somewhere else is refused rather
+than recorded as fact.
+
+Revisions match by prefix in either direction, so a map may abbreviate what
+the ledger records in full and a caller may abbreviate what the map records;
+an abbreviation matching more than one recorded revision names none of them.
 
 Nothing already written changes. An old event keeps saying exactly what it
 said; readers gain the ability to follow it forward. `arc doctor` reports a
-moved revision as `revision-rewritten` naming its successor instead of
-`dangling-revision`, and `arc diff` renders the surviving commit when a
-recorded one no longer resolves, saying so on stderr.
+moved revision as `revision-rewritten` naming its successor, and a dropped one
+as `revision-dropped`, instead of `dangling-revision`. `arc diff` renders the
+surviving commit when a recorded one no longer resolves — including the head
+its finding anchors are checked against — saying so on stderr. `arc events
+--change repository` reads the repository's own events, and a bundle carries
+them so an imported change's revisions stay followable.
 
 Approval does not survive translation, and should not: a verdict binds to an
 exact patchset head, and only a content comparison could say whether a
@@ -898,7 +910,9 @@ tree is cheap; one that did not must be re-reviewed.
 
 A rewrite is not change-scoped — it happens to every recorded revision at once
 — so it is stored as a repository-scoped event under `repository/events/`
-rather than filed under a change that did not cause it.
+rather than filed under a change that did not cause it. `arc doctor` checks
+those events like any other, reporting a malformed or misscoped one instead of
+letting it surface as a failure inside whatever first tried to read it.
 
 ## Policy
 

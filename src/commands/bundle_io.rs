@@ -113,6 +113,22 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
             store.append_raw_event(&validated.bundle.change_id, &event.event_id, &event.bytes)?;
         }
     }
+    // Repository-scoped context, so the imported change's recorded revisions
+    // stay followable here. Already-present ones are the same fact.
+    let mut rewrites = 0;
+    for value in &validated.bundle.repository_events {
+        let Some(event_id) = value.get("event_id").and_then(serde_json::Value::as_str) else {
+            bail!("bundled repository event has no event_id");
+        };
+        let mut bytes = serde_json::to_vec_pretty(value)?;
+        bytes.push(b'\n');
+        if store.append_raw_repository_event(event_id, &bytes)? {
+            rewrites += 1;
+        }
+    }
+    if rewrites > 0 {
+        println!("repository events: {rewrites} imported");
+    }
     drop(transition);
     for (name, head) in pins {
         gitio::update_ref(&ctx.cwd, &name, &head)?;

@@ -606,6 +606,39 @@ impl Store {
         for change_id in self.list_change_ids()? {
             events.extend(self.raw_events_unseen(&change_id, seen)?);
         }
+        // Repository-scoped events are part of this repository's history, and
+        // an unscoped stream that omitted them would make them write-only.
+        events.extend(self.raw_repository_events_unseen(seen)?);
+        events.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(events)
+    }
+
+    /// Repository-scoped raw events not already seen, in ID order.
+    pub fn raw_repository_events_unseen(
+        &self,
+        seen: &BTreeSet<String>,
+    ) -> Result<Vec<(String, serde_json::Value)>> {
+        let dir = self.repository_events_dir();
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", dir.display()))
+            }
+        };
+        let mut events = Vec::new();
+        for entry in entries {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            let Some(event_id) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if seen.contains(event_id) {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_slice(&fs::read(dir.join(&name))?)
+                .with_context(|| format!("malformed event file {}", dir.join(&name).display()))?;
+            events.push((event_id.to_string(), value));
+        }
         events.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(events)
     }
@@ -641,6 +674,21 @@ impl Store {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
         }
+    }
+
+    /// Write a repository-scoped event verbatim, as import does for a change.
+    /// Idempotent: a rewrite already recorded here is the same fact.
+    pub fn append_raw_repository_event(&self, event_id: &str, bytes: &[u8]) -> Result<bool> {
+        ids::validate_id_component(event_id)?;
+        let dir = self.repository_events_dir();
+        create_private_dir_all(&dir)?;
+        let path = dir.join(format!("{event_id}.json"));
+        if path.exists() {
+            return Ok(false);
+        }
+        write_exclusive(&path, bytes)
+            .with_context(|| format!("repository event {event_id} already exists during import"))?;
+        Ok(true)
     }
 
     pub fn append_raw_event(&self, change_id: &str, event_id: &str, bytes: &[u8]) -> Result<()> {

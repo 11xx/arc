@@ -488,9 +488,10 @@ pub enum Payload {
     /// follow a recorded revision forward. arc never performs the rewrite and
     /// never computes the mapping; the operator supplies it.
     HistoryRewritten {
-        /// Old revision to its replacement. A revision the rewrite dropped
-        /// entirely maps to nothing and is absent.
-        mapping: std::collections::BTreeMap<String, String>,
+        /// Old revision to its replacement, or to nothing when the rewrite
+        /// dropped the commit entirely. A revision the rewrite left alone is
+        /// absent: that is not a move.
+        mapping: std::collections::BTreeMap<String, Option<String>>,
         reason: String,
         /// What performed the rewrite, when the operator says so.
         #[serde(skip_serializing_if = "Option::is_none")]

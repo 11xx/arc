@@ -19,7 +19,12 @@ pub fn events(
         bail!("--change and --tag select different scopes; supply one");
     }
     let store = ctx.store()?;
+    // The reserved repository scope is not a change, so it does not resolve
+    // like one; naming it explicitly is how a caller reads facts about the
+    // repository rather than about a change.
+    let repository_scope = change == Some(Store::REPOSITORY_SCOPE);
     let change_id = change
+        .filter(|_| !repository_scope)
         .map(|reference| store.resolve_change(reference))
         .transpose()?;
     // A tagged program is the unit an orchestrator waits on, and following
@@ -46,9 +51,10 @@ pub fn events(
         Some(resolve_tagged(ctx, &tags)?.into_iter().collect())
     };
     loop {
-        let raw_events = match &change_id {
-            Some(id) => store.raw_events_unseen(id, &seen)?,
-            None => store.raw_events_all_unseen(&seen)?,
+        let raw_events = match (&change_id, repository_scope) {
+            (Some(id), _) => store.raw_events_unseen(id, &seen)?,
+            (None, true) => store.raw_repository_events_unseen(&seen)?,
+            (None, false) => store.raw_events_all_unseen(&seen)?,
         };
         let observed_events = !raw_events.is_empty();
         if tagged.is_some()

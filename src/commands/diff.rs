@@ -71,8 +71,8 @@ pub fn diff(ctx: &Ctx, reference: &str, args: DiffArgs) -> Result<()> {
         if rewrites.is_empty() || gitio::rev_parse(&ctx.cwd, &revision).is_ok() {
             return revision;
         }
-        match rewrites.successor(&revision) {
-            Some(successor) => {
+        match rewrites.fate(&revision) {
+            Some(crate::rewrite::Fate::Rewritten(successor)) => {
                 eprintln!(
                     "note: {} was rewritten to {}; rendering the surviving commit",
                     &revision[..revision.len().min(8)],
@@ -80,10 +80,10 @@ pub fn diff(ctx: &Ctx, reference: &str, args: DiffArgs) -> Result<()> {
                 );
                 successor
             }
-            None => revision,
+            Some(crate::rewrite::Fate::Dropped) | None => revision,
         }
     };
-    let (left, right) = (follow(left), follow(right));
+    let (left, right) = (follow(left.clone()), follow(right.clone()));
 
     let mut args = vec!["diff".to_string()];
     if stat {
@@ -97,7 +97,11 @@ pub fn diff(ctx: &Ctx, reference: &str, args: DiffArgs) -> Result<()> {
     gitio::git_inherit(&ctx.cwd, &args)?;
 
     if findings {
-        render_findings(ctx, &state, &patchset.id, &patchset.head);
+        // Anchors resolve blobs at the patchset head. After a rewrite that
+        // head is gone, and checking against it would report every anchor as
+        // drifted — a claim about the rewrite, not about the finding.
+        let head = follow(patchset.head.clone());
+        render_findings(ctx, &state, &patchset.id, &head);
     }
     Ok(())
 }

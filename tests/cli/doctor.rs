@@ -269,7 +269,8 @@ fn a_recorded_rewrite_translates_revisions_instead_of_migrating_events() {
         .assert()
         .success();
 
-    // The event is untouched: the patchset still names what it named.
+    // The event is untouched, and no migrated duplicate was appended beside
+    // it: one patchset event, still naming what it named.
     let events = stdout(repo.arc(&repo.root).args([
         "events",
         "--change",
@@ -278,6 +279,19 @@ fn a_recorded_rewrite_translates_revisions_instead_of_migrating_events() {
         "patchset-added",
     ]));
     assert!(events.contains(&recorded), "{events}");
+    assert_eq!(events.lines().count(), 1, "{events}");
+    assert!(!events.contains(&rewritten), "{events}");
+
+    // The rewrite itself is readable, which is what makes it a fact rather
+    // than a private note.
+    let repository_events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "repository",
+        "--type",
+        "history-rewritten",
+    ]));
+    assert!(repository_events.contains(&recorded), "{repository_events}");
 
     // What changed is the reading.
     let after = stdout(repo.arc(&repo.root).args(["doctor"]));
@@ -293,4 +307,45 @@ fn a_recorded_rewrite_translates_revisions_instead_of_migrating_events() {
         .args(["history", "resolve", &rewritten])
         .assert()
         .code(2);
+
+    // An abbreviation resolves, because a map may abbreviate what the ledger
+    // records in full and vice versa.
+    repo.arc(&repo.root)
+        .args(["history", "resolve", &recorded[..10]])
+        .assert()
+        .success();
+
+    // A map naming a successor this repository does not have describes some
+    // other repository's history, and is refused rather than recorded.
+    let bogus = repo.root.join("bogus-map");
+    fs::write(
+        &bogus,
+        format!("{recorded} 0123456789012345678901234567890123456789\n"),
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            bogus.to_str().unwrap(),
+            "--reason",
+            "a map from somewhere else",
+        ])
+        .assert()
+        .failure();
+
+    // The rewrite travels with a bundle: a receiver that has the rewritten
+    // history can still follow the change's recorded revisions.
+    let bundle = repo.home.join("bundle.json");
+    repo.arc(&repo.root)
+        .args(["export", "rewritten", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let exported: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    assert_eq!(
+        exported["repository_events"].as_array().unwrap().len(),
+        1,
+        "{exported}"
+    );
 }

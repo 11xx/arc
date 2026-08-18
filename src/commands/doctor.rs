@@ -56,6 +56,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
     inspect_audit_debt(&states, &mut advice);
     inspect_hold_releases(&Store::discover(&ctx.cwd)?, &states, &mut advice);
+    inspect_repository_events(&Store::discover(&ctx.cwd)?, &mut problems);
 
     let open_states = states
         .iter()
@@ -186,13 +187,17 @@ fn inspect_dangling_revisions(
             .unwrap_or_default();
         // A revision a recorded rewrite moved is not a casualty: the event
         // still says what it said, and the reader can follow it forward.
-        match rewrites.successor(&revision) {
-            Some(successor) => advice.push(Finding {
+        match rewrites.fate(&revision) {
+            Some(crate::rewrite::Fate::Rewritten(successor)) => advice.push(Finding {
                 code: "revision-rewritten",
                 detail: format!(
                     "{short} was rewritten to {}: {referents}",
                     &successor[..successor.len().min(8)]
                 ),
+            }),
+            Some(crate::rewrite::Fate::Dropped) => advice.push(Finding {
+                code: "revision-dropped",
+                detail: format!("{short} was dropped by a recorded rewrite: {referents}"),
             }),
             None => advice.push(Finding {
                 code: "dangling-revision",
@@ -445,6 +450,40 @@ fn inspect_hold_releases(
                 Payload::HoldReleased { .. } => active.clear(),
                 _ => {}
             }
+        }
+    }
+}
+
+/// Repository-scoped events, checked the way a change's events are: a
+/// malformed one must be reported as a problem rather than surfacing as a
+/// failure inside whatever first tried to read it.
+fn inspect_repository_events(store: &Store, problems: &mut Vec<Finding>) {
+    let events = match store.raw_repository_events_unseen(&BTreeSet::new()) {
+        Ok(events) => events,
+        Err(error) => {
+            problems.push(Finding {
+                code: "malformed-repository-event",
+                detail: error.to_string(),
+            });
+            return;
+        }
+    };
+    for (event_id, value) in events {
+        let scope = value.get("change_id").and_then(serde_json::Value::as_str);
+        if scope != Some(Store::REPOSITORY_SCOPE) {
+            problems.push(Finding {
+                code: "misscoped-repository-event",
+                detail: format!(
+                    "{event_id} is stored as a repository event but names change {}",
+                    scope.unwrap_or("(none)")
+                ),
+            });
+        }
+        if value.get("event_id").and_then(serde_json::Value::as_str) != Some(event_id.as_str()) {
+            problems.push(Finding {
+                code: "malformed-repository-event",
+                detail: format!("{event_id} contains a different event_id"),
+            });
         }
     }
 }
