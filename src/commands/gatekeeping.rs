@@ -1443,6 +1443,27 @@ pub fn close(
                 })?,
             };
             let target = into.unwrap_or_else(|| st.target_branch.clone());
+            if !gitio::branch_exists(&ctx.cwd, &target) {
+                bail!(
+                    "{target} is not a branch in this repository; an assertion names where the \
+                     work actually landed"
+                );
+            }
+            // An assertion arc did not guard still has to be about this
+            // change. Without these two checks it could name any commit at
+            // all, and the ledger would record an integration that never
+            // happened — worse than recording nothing, because it reads as
+            // authoritative.
+            if !gitio::is_ancestor(&ctx.cwd, &patchset.head, &rev)? {
+                bail!(
+                    "{rev} does not contain {} ({}), so it is not an integration of this change",
+                    patchset.id,
+                    &patchset.head[..patchset.head.len().min(8)]
+                );
+            }
+            if !gitio::is_ancestor(&ctx.cwd, &rev, &target)? {
+                bail!("{rev} is not on {target}; nothing there integrated this change");
+            }
             // The first parent of a merge — or of a squash commit — is where
             // the target stood before. Asking Git is what keeps the assertion
             // from being an unchecked claim about the target; a revision with

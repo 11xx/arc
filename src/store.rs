@@ -70,6 +70,18 @@ impl Store {
             Ok(bytes) => {
                 let cfg: StoreConfig =
                     serde_json::from_slice(&bytes).context("malformed arc config.json")?;
+                // A store written by a newer arc may hold event types this
+                // build would skip as unknown — and skipping a lifecycle event
+                // means reading a closed change as open. Refusing is the only
+                // honest answer; the alternative is a second closure.
+                if cfg.schema_version > crate::model::SCHEMA_VERSION {
+                    bail!(
+                        "this ledger was written by a newer arc (store format {}, this build \
+                         understands {}); upgrade arc rather than reading it with this build",
+                        cfg.schema_version,
+                        crate::model::SCHEMA_VERSION
+                    );
+                }
                 cfg.repository_id
             }
             Err(_) => {

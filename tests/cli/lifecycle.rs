@@ -1096,11 +1096,65 @@ fn guarded_and_asserted_integrations_have_distinct_event_types_and_targets() {
     assert_eq!(event["integrated_commit"], external, "{event}");
     assert_eq!(event["source_head"], asserted_head, "{event}");
     assert_eq!(event["target_before"], before_external, "{event}");
+    assert_eq!(event["source_patchset_id"], "ps-01", "{event}");
+    assert_eq!(event["target_branch"], "master", "{event}");
+    assert!(
+        stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "asserted",
+            "--type",
+            "change-closed",
+        ]))
+        .trim()
+        .is_empty(),
+        "an asserted integration writes no change-closed event either"
+    );
     let status = json_stdout(repo.arc(&repo.root).args(["status", "asserted", "--json"]));
     assert_eq!(status["closure"]["integration"], "asserted", "{status}");
 
-    // Both are integrated; the ledger says how each one got there.
+    // Both are integrated; the ledger says how each one got there, and the
+    // human view says it too rather than rendering them identically.
     assert_eq!(status["state"], "closed", "{status}");
+    let shown = stdout(repo.arc(&repo.root).args(["show", "asserted"]));
+    assert!(shown.contains("asserted; arc did not guard it"), "{shown}");
+    let shown = stdout(repo.arc(&repo.root).args(["show", "guarded"]));
+    assert!(shown.contains("guarded by arc"), "{shown}");
+
+    // An assertion arc did not guard is still checked against Git: it must
+    // name a branch that exists, a revision that contains the patchset head,
+    // and one that is actually on that branch.
+    stdout(repo.arc(&repo.root).args(["begin", "unrelated"]));
+    let unrelated_worktree = repo.home.join(".worktrees/repo-unrelated");
+    repo.commit(&unrelated_worktree, "other.rs", "x\n", "feat: unrelated");
+    stdout(
+        repo.arc(&unrelated_worktree)
+            .args(["snapshot", "unrelated"]),
+    );
+    repo.arc(&repo.root)
+        .args([
+            "close",
+            "unrelated",
+            "--assert-integrated",
+            &external,
+            "--into",
+            "master",
+        ])
+        .assert()
+        .failure();
+    repo.arc(&repo.root)
+        .args([
+            "close",
+            "unrelated",
+            "--assert-integrated",
+            &repo.head(&unrelated_worktree),
+            "--into",
+            "no-such-branch",
+        ])
+        .assert()
+        .failure();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "unrelated", "--json"]));
+    assert_eq!(status["state"], "open", "{status}");
 }
 
 /// A declared gate that never ran (or failed) blocks with exit 5; a pass

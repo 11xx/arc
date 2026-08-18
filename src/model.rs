@@ -2,7 +2,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// The store format this build writes and understands. A build refuses a
+/// store stamped newer than this, because the alternative is what silently
+/// went wrong before: an older binary skipping event types it does not know,
+/// concluding the change is still open, and closing it a second way.
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {

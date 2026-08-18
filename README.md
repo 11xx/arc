@@ -474,7 +474,8 @@ link this change never recorded, describes nothing and is never current.
 A held, linked change renders an `awaiting_user` fact carrying the PR URL.
 These facts are advisory rendering plus the fail-closed link validation;
 they never change local `integrate` semantics. Close an externally merged
-PR through `arc close --assert-integrated <merge-sha>`.
+PR through `arc close --assert-integrated <merge-sha>`, which needs a
+recorded patchset to name what landed.
 
 ## Execution roles
 

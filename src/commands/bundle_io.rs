@@ -170,6 +170,46 @@ fn validate_import_candidate(
     candidate.sort_by(|a, b| a.event_id.cmp(&b.event_id));
     state::reduce(&candidate)
         .context("combined local and bundled known events are not replayable")?;
+    // Replayability is not admissibility. A bundle legitimately carries the
+    // lifecycle events a command would not append by hand, so the CLI's own
+    // permission table is the wrong question here; what an import must still
+    // refuse is a history that contradicts itself — a change closed twice, or
+    // work recorded after it closed.
+    let mut closed_at: Option<&str> = None;
+    for event in &candidate {
+        let terminal = matches!(
+            event.payload,
+            Payload::ChangeClosed { .. }
+                | Payload::ChangeIntegrated { .. }
+                | Payload::IntegrationAsserted { .. }
+        );
+        if let Some(first) = closed_at {
+            if terminal {
+                bail!(
+                    "bundle closes {} twice: {first}, then {}",
+                    validated.bundle.change_id,
+                    event.event_id
+                );
+            }
+            // The audit domain exists precisely to record review after
+            // closure, and forge observations outlive the merge they describe.
+            if !matches!(
+                append_permission(&event.payload),
+                AppendPermission::AnyPhaseFact
+                    | AppendPermission::IntegratedOnlyFact
+                    | AppendPermission::OpenOrIntegratedFact
+            ) {
+                bail!(
+                    "bundled event {} records work after {} closed at {first}",
+                    event.event_id,
+                    validated.bundle.change_id
+                );
+            }
+        }
+        if terminal {
+            closed_at = Some(&event.event_id);
+        }
+    }
     Ok(())
 }
 
