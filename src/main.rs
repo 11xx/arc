@@ -1502,13 +1502,15 @@ fn run(cli: Cli) -> Result<i32> {
         } => {
             commands::events(
                 &ctx,
-                follow,
-                change.as_deref(),
-                &tag,
-                repository,
-                event_type.as_deref(),
-                since,
-                exec_command.as_deref(),
+                commands::EventsArgs {
+                    follow,
+                    change: change.as_deref(),
+                    tags: &tag,
+                    repository_scope: repository,
+                    event_type: event_type.as_deref(),
+                    since,
+                    exec_command: exec_command.as_deref(),
+                },
             )?;
             Ok(0)
         }
