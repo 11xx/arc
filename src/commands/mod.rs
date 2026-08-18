@@ -707,6 +707,7 @@ mod tests {
                 source_head: None,
                 target_branch: None,
                 target_before: None,
+                authorization: None,
                 integrated_commit: None,
                 superseded_by: None,
                 event_id: "event".into(),

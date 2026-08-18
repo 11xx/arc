@@ -67,6 +67,15 @@ pub enum GitIdentityMode {
     Shared,
 }
 
+impl GitIdentityMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GitIdentityMode::PerActor => "per-actor",
+            GitIdentityMode::Shared => "shared",
+        }
+    }
+}
+
 /// The `[journals]` table: a `dirs` map from stable path prefix to journal
 /// directory. A dedicated table (rather than a general `[project."…"]`
 /// namespace) keeps the override self-documenting and matches config.rs's

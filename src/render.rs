@@ -36,6 +36,54 @@ pub fn gate_line(gate: &GateStatus) -> String {
     }
 }
 
+/// The authorization basis, as a human-readable block. Used by
+/// `integrate --dry-run` to show what the merge would be recorded as resting
+/// on, before anything is written.
+pub fn authorization_basis(basis: &crate::model::AuthorizationBasis) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "    verdict: {}", basis.verdict_event_id);
+    for (gate, evidence) in &basis.gate_evidence {
+        let _ = writeln!(out, "    gate {gate}: {evidence}");
+    }
+    for prerequisite in &basis.prerequisites {
+        let _ = writeln!(
+            out,
+            "    prerequisite {}: closed by {}{}",
+            prerequisite.change_id,
+            prerequisite.closure_event_id,
+            prerequisite
+                .integrated_commit
+                .as_deref()
+                .map(|commit| format!(" at {}", short_sha(commit)))
+                .unwrap_or_default()
+        );
+    }
+    let _ = writeln!(
+        out,
+        "    blocking findings: {}; holds: {}",
+        basis.blocking_findings.len(),
+        basis.holds.len()
+    );
+    for (name, gate) in &basis.gates {
+        let _ = writeln!(
+            out,
+            "    gate declaration {name}: {}{}",
+            gate.command,
+            gate.timeout
+                .map(|timeout| format!(" (timeout {timeout}s)"))
+                .unwrap_or_default()
+        );
+    }
+    let _ = write!(
+        out,
+        "    policy: forbid_self_approval={}, require_declared_actor={}, git_identity={}",
+        basis.policy.forbid_self_approval,
+        basis.policy.require_declared_actor,
+        basis.policy.provenance_git_identity
+    );
+    out
+}
+
 /// Human-readable Markdown view of one change. Suitable for terminals
 /// and for dropping into a journal artifact; the ledger stays private.
 pub fn markdown(

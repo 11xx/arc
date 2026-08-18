@@ -1211,6 +1211,11 @@ fn integrate_one(
     let approved_patchset_id = approved_patchset.id.clone();
     let approved_head = approved_patchset.head.clone();
 
+    // Read before the merge, from the same worktree state the readiness
+    // decision was made against: this is what the merge is authorized on, and
+    // a later read would be a different question.
+    let authorization = authorization_basis(ctx, &store, &st, &report, &approved_patchset_id)?;
+
     let wt = gitio::worktree_for_branch(&ctx.cwd, &target)?
         .with_context(|| format!("no worktree has {target:?} checked out; check it out first"))?;
     if !gitio::is_clean(&wt)? {
@@ -1246,6 +1251,7 @@ fn integrate_one(
             source_head: approved_head.clone(),
             target_branch: target.clone(),
             target_before: old_target.clone(),
+            authorization: Some(authorization),
         },
     );
     store.append_event(&ev)?;
@@ -1285,6 +1291,98 @@ fn integrate_one(
 /// anything: run the same readiness preflight, then simulate the merge with
 /// the needs-rebase machinery. Exit code mirrors `check`: 0 when the merge
 /// would proceed cleanly, otherwise the first blocker's code.
+/// Everything the guard consumed to authorize one merge, read from the same
+/// state the readiness decision was made against.
+///
+/// The gate and policy values are the ones actually in effect in this
+/// invocation's worktree — including uncommitted ones, which is exactly the
+/// state Git cannot recover for an auditor later.
+fn authorization_basis(
+    ctx: &Ctx,
+    store: &Store,
+    st: &ChangeState,
+    report: &crate::status::StatusReport,
+    approved_patchset_id: &str,
+) -> Result<crate::model::AuthorizationBasis> {
+    let verdict = st
+        .verdicts
+        .iter()
+        .rev()
+        .find(|verdict| {
+            verdict.patchset_id == approved_patchset_id
+                && verdict.verdict == crate::model::Verdict::Approved
+        })
+        .context("integration is ready but no approving verdict covers the merged patchset")?;
+
+    let mut gate_evidence = BTreeMap::new();
+    for gate in &report.gates {
+        let evidence = gate.evidence_event_id.clone().with_context(|| {
+            format!(
+                "gate {} is green at head with no recorded evidence event",
+                gate.name
+            )
+        })?;
+        gate_evidence.insert(gate.name.clone(), evidence);
+    }
+
+    let mut prerequisites = Vec::new();
+    for blocker in &st.blocked_by {
+        let blocker_state = match store.load_events(blocker) {
+            Ok(events) => state::reduce(&events)?,
+            // A prerequisite whose ledger this store does not hold was
+            // resolved by the dependency check as unknown-but-not-blocking;
+            // recording nothing is truthful, inventing a closure is not.
+            Err(_) => continue,
+        };
+        if let Some(closure) = &blocker_state.closure {
+            prerequisites.push(crate::model::PrerequisiteClosure {
+                change_id: blocker.clone(),
+                closure_event_id: closure.event_id.clone(),
+                integrated_commit: closure.integrated_commit.clone(),
+            });
+        }
+    }
+
+    let toplevel = gitio::toplevel(&ctx.cwd)?;
+    let gates = crate::gates::load(&toplevel)?;
+    let policy = crate::policy::load(&toplevel)?;
+    let normalized_gates = gates
+        .required_for(&st.profile)
+        .into_iter()
+        .map(|(name, gate)| {
+            (
+                name.clone(),
+                crate::model::NormalizedGate {
+                    command: gate.command.clone(),
+                    profiles: gate.profiles.clone(),
+                    timeout: gate.timeout,
+                },
+            )
+        })
+        .collect();
+
+    Ok(crate::model::AuthorizationBasis {
+        verdict_event_id: verdict.event_id.clone(),
+        gate_evidence,
+        prerequisites,
+        // Empty by construction: `integrate_ready` is false while either is
+        // non-empty, so the event cannot be written otherwise. Recording them
+        // says the guard checked, rather than leaving an auditor to infer it.
+        blocking_findings: report.open_blocking_findings.clone(),
+        holds: report
+            .holds
+            .iter()
+            .map(|hold| hold.hold_event_id.clone())
+            .collect(),
+        gates: normalized_gates,
+        policy: crate::model::NormalizedPolicy {
+            forbid_self_approval: policy.policy.forbid_self_approval,
+            require_declared_actor: policy.policy.require_declared_actor,
+            provenance_git_identity: policy.provenance.git_identity.as_str().to_string(),
+        },
+    })
+}
+
 fn integrate_dry_run(
     ctx: &Ctx,
     store: &Store,
@@ -1324,6 +1422,15 @@ fn integrate_dry_run(
             "clean"
         }
     );
+    let basis = authorization_basis(
+        ctx,
+        store,
+        st,
+        &report,
+        &st.latest_patchset().context("no patchset recorded")?.id,
+    )?;
+    println!("  authorization basis it would record:");
+    println!("{}", render::authorization_basis(&basis));
     println!("  no events, refs, or worktrees were modified");
     Ok(if conflicts {
         status::Blocker::NeedsRebase.exit_code()

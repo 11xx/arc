@@ -415,6 +415,10 @@ pub enum Payload {
         source_head: String,
         target_branch: String,
         target_before: String,
+        /// Everything the guard consumed to authorize this one irreversible
+        /// decision. Absent only on events written before arc recorded it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authorization: Option<AuthorizationBasis>,
     },
     /// An integration somebody performed elsewhere and asserted afterwards.
     /// Deliberately carries no authorization: arc did not guard this merge and
@@ -477,6 +481,56 @@ pub enum Payload {
     /// underlying files and raw export preserve their original bytes intact.
     #[serde(other)]
     Unknown,
+}
+
+/// The inputs to one guarded merge, recorded on the event that performed it.
+///
+/// An auditor could otherwise only replay preceding events and recover the
+/// contemporaneous `.arc/gates.toml` and `.arc/policy.toml` from Git — and
+/// uncommitted policy state is unrecoverable entirely. This does not make the
+/// ledger a config store: arc records no configuration history, only the
+/// values one irreversible decision was actually taken on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizationBasis {
+    /// The verdict that approved the merged patchset.
+    pub verdict_event_id: String,
+    /// One passing verification per resolved required gate, by gate name.
+    pub gate_evidence: std::collections::BTreeMap<String, String>,
+    /// Each prerequisite change and the closure that satisfied it.
+    pub prerequisites: Vec<PrerequisiteClosure>,
+    /// Vectors that had to be empty for this event to be written at all.
+    /// Recorded rather than implied, so an auditor reads a checked fact
+    /// instead of inferring one from an absence.
+    pub blocking_findings: Vec<String>,
+    pub holds: Vec<String>,
+    /// The normalized gate declarations consumed, by gate name.
+    pub gates: std::collections::BTreeMap<String, NormalizedGate>,
+    /// The normalized policy values consumed.
+    pub policy: NormalizedPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrerequisiteClosure {
+    pub change_id: String,
+    pub closure_event_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrated_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NormalizedGate {
+    pub command: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub profiles: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NormalizedPolicy {
+    pub forbid_self_approval: bool,
+    pub require_declared_actor: bool,
+    pub provenance_git_identity: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
