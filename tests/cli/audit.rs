@@ -34,6 +34,69 @@ fn self_approved_change(repo: &Repo, slug: &str) -> PathBuf {
 
 /// The write path evaluates the same policy `check` does, so an approval that
 /// cannot gate says so when it is recorded rather than one command later.
+/// An import is the one path that does not go through the CLI's refusals, so
+/// it must refuse the same contradictions itself: a change closed twice, or
+/// review recorded after an abandonment, which no audit domain covers.
+#[test]
+fn import_refuses_a_history_that_contradicts_itself() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "twice", "--no-worktree"]),
+    );
+    repo.arc(&repo.root)
+        .args(["close", "twice", "--abandoned"])
+        .assert()
+        .success();
+    let bundle = repo.home.join("twice.json");
+    repo.arc(&repo.root)
+        .args(["export", "twice", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    let events = value["events"].as_array().unwrap().clone();
+    let closure = events
+        .iter()
+        .find(|event| event["event_type"] == "change-closed")
+        .unwrap()
+        .clone();
+    let mut second = closure.clone();
+    second["event_id"] = serde_json::json!("01ZZZZZZZZZZZZZZZZZZZZZZZZ");
+    let tampered: Vec<serde_json::Value> = events
+        .iter()
+        .cloned()
+        .chain(std::iter::once(second))
+        .collect();
+    // The checksum has to match, or both commands refuse the bundle for being
+    // corrupt and this test passes without reaching the contradiction it is
+    // about.
+    let mut digest = <sha2::Sha256 as sha2::Digest>::new();
+    for event in &tampered {
+        sha2::Digest::update(&mut digest, serde_json::to_vec(event).unwrap());
+        sha2::Digest::update(&mut digest, b"\n");
+    }
+    value["events_sha256"] = serde_json::json!(hex::encode(sha2::Digest::finalize(digest)));
+    value["event_count"] = serde_json::json!(tampered.len());
+    value["events"] = serde_json::json!(tampered);
+    fs::write(&bundle, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+    let other = Repo::new();
+    // The dry run must reach the same conclusion as the import: a preflight
+    // that reports success for a bundle the real path refuses is worse than
+    // no preflight, because it is believed.
+    other
+        .arc(&other.root)
+        .args(["import", bundle.to_str().unwrap(), "--dry-run"])
+        .assert()
+        .failure();
+    other
+        .arc(&other.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .failure();
+}
+
 #[test]
 fn review_reports_an_approval_that_cannot_gate() {
     let repo = repo_forbidding_self_approval();

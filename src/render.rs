@@ -67,15 +67,33 @@ pub fn markdown(
         );
     }
     if let Some(c) = &state.closure {
+        // How an integration happened is the distinction the ledger exists to
+        // hold; a human view that renders all three identically hides it from
+        // the reader most likely to care.
+        let how = match c.integration {
+            Some(crate::state::IntegrationKind::Guarded) => " (guarded by arc)",
+            Some(crate::state::IntegrationKind::Asserted) => " (asserted; arc did not guard it)",
+            Some(crate::state::IntegrationKind::LegacyUnclassified) => {
+                " (recorded before arc distinguished guarded from asserted)"
+            }
+            None => "",
+        };
         let _ = writeln!(
             w,
-            "- Closed: {:?}{}",
+            "- Closed: {:?}{}{how}",
             c.outcome,
             c.integrated_commit
                 .as_deref()
                 .map(|s| format!(" at `{s}`"))
                 .unwrap_or_default()
         );
+        if let (Some(branch), Some(before)) = (&c.target_branch, &c.target_before) {
+            let _ = writeln!(
+                w,
+                "  - into `{branch}`, which stood at `{}`",
+                &before[..before.len().min(8)]
+            );
+        }
     }
     if !state.tags.is_empty() {
         let _ = writeln!(w, "- Tags: {}", state.tags.join(", "));
@@ -1081,6 +1099,22 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                 (Some(id), None) => id.clone(),
                 (None, reason) => reason.clone().unwrap_or_default(),
             },
+        ),
+        Payload::ChangeIntegrated {
+            integrated_commit,
+            target_branch,
+            ..
+        } => (
+            "change-integrated",
+            format!("{} into {target_branch}", short_sha(integrated_commit)),
+        ),
+        Payload::IntegrationAsserted {
+            integrated_commit,
+            target_branch,
+            ..
+        } => (
+            "integration-asserted",
+            format!("{} into {target_branch}", short_sha(integrated_commit)),
         ),
         Payload::ChangeClosed {
             outcome,

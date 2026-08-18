@@ -70,6 +70,7 @@ impl Store {
             Ok(bytes) => {
                 let cfg: StoreConfig =
                     serde_json::from_slice(&bytes).context("malformed arc config.json")?;
+                ensure_readable_format(cfg.schema_version, &config_path)?;
                 cfg.repository_id
             }
             Err(_) => {
@@ -85,6 +86,9 @@ impl Store {
                         .context("arc config.json unreadable after creation race")
                 })?;
                 let cfg: StoreConfig = serde_json::from_slice(&fs::read(&config_path)?)?;
+                // The winner of a creation race may be a newer build, so the
+                // config now on disk is not necessarily the one written above.
+                ensure_readable_format(cfg.schema_version, &config_path)?;
                 cfg.repository_id
             }
         };
@@ -383,6 +387,7 @@ impl Store {
     /// a ULID event ID indicates a real bug and fails loudly.
     pub fn append_event(&self, event: &Event) -> Result<()> {
         self.refuse_undeclared_author(event)?;
+        self.stamp_format_for(&event.payload)?;
         ids::validate_id_component(&event.change_id)?;
         ids::validate_id_component(&event.event_id)?;
         let dir = self.events_dir(&event.change_id);
@@ -392,6 +397,43 @@ impl Store {
         body.push(b'\n');
         write_exclusive(&path, &body)
             .with_context(|| format!("event {} already exists", event.event_id))
+    }
+
+    /// Record that this store now holds events an older build would skip.
+    ///
+    /// The format barrier only works if the store says which format it is. A
+    /// ledger created by an older arc keeps its stamp until something writes
+    /// an event that older arc would not understand — and a skipped lifecycle
+    /// event is how a closed change gets read as open and closed a second way.
+    /// Stamping at that moment, rather than on every open, means a build that
+    /// only read a ledger never locks its owner out of it.
+    fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
+        self.stamp_format_for_event_type(match payload {
+            Payload::ChangeIntegrated { .. } => Some("change-integrated"),
+            Payload::IntegrationAsserted { .. } => Some("integration-asserted"),
+            _ => None,
+        })
+    }
+
+    /// The same stamp, decided from an event type rather than a typed payload,
+    /// so the import path and the record path cannot disagree.
+    fn stamp_format_for_event_type(&self, event_type: Option<&str>) -> Result<()> {
+        let introduced_in = match event_type {
+            Some("change-integrated") | Some("integration-asserted") => 2,
+            _ => return Ok(()),
+        };
+        let config_path = self.root.join("config.json");
+        let mut cfg: StoreConfig = serde_json::from_slice(&fs::read(&config_path)?)
+            .context("malformed arc config.json")?;
+        if cfg.schema_version >= introduced_in {
+            return Ok(());
+        }
+        cfg.schema_version = introduced_in;
+        let body = serde_json::to_vec_pretty(&cfg)?;
+        let temporary = config_path.with_extension(format!("json.{}", ids::new_event_id()));
+        fs::write(&temporary, &body)?;
+        fs::rename(&temporary, &config_path)
+            .with_context(|| format!("cannot stamp store format in {}", config_path.display()))
     }
 
     /// Under `require_declared_actor`, refuse to record an event whose author
@@ -537,6 +579,7 @@ impl Store {
             Ok(bytes) => {
                 let cfg: StoreConfig = serde_json::from_slice(&bytes)
                     .with_context(|| format!("malformed {}", path.display()))?;
+                ensure_readable_format(cfg.schema_version, &path)?;
                 Ok(Some(cfg.repository_id))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -547,12 +590,42 @@ impl Store {
     pub fn append_raw_event(&self, change_id: &str, event_id: &str, bytes: &[u8]) -> Result<()> {
         ids::validate_id_component(change_id)?;
         ids::validate_id_component(event_id)?;
+        // Import writes bytes rather than a typed payload, but the store it
+        // writes into is the same one an older build may reopen. A bundle
+        // carrying an integration event must stamp the format exactly as a
+        // locally recorded one does.
+        self.stamp_format_for_event_type(
+            serde_json::from_slice::<serde_json::Value>(bytes)
+                .ok()
+                .as_ref()
+                .and_then(|value| value.get("event_type"))
+                .and_then(serde_json::Value::as_str),
+        )?;
         let dir = self.events_dir(change_id);
         create_private_dir_all(&dir)?;
         let path = dir.join(format!("{event_id}.json"));
         write_exclusive(&path, bytes)
             .with_context(|| format!("event {event_id} already exists during import"))
     }
+}
+
+/// Whether this build may read a store at all.
+///
+/// A store written by a newer arc may hold event types this build would skip
+/// as unknown — and skipping a lifecycle event means reading a closed change
+/// as open, then closing it a second way. Refusing is the only honest answer,
+/// and it has to hold on every path that opens a store, not just the one that
+/// creates it.
+fn ensure_readable_format(schema_version: u32, path: &Path) -> Result<()> {
+    if schema_version > crate::model::SCHEMA_VERSION {
+        bail!(
+            "{} was written by a newer arc (store format {schema_version}, this build \
+             understands {}); upgrade arc rather than reading it with this build",
+            path.display(),
+            crate::model::SCHEMA_VERSION
+        );
+    }
+    Ok(())
 }
 
 fn create_private_dir(path: &Path) -> Result<()> {

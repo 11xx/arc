@@ -53,14 +53,12 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     if dry_run {
         let plan = classify_import_events(&root, &validated)?;
         if plan.conflicts.is_empty() {
-            if let Some(repository_id) = &local_repository_id {
-                let store = Store {
-                    root: root.clone(),
-                    repository_id: repository_id.clone(),
-                    require_declared_actor: false,
-                };
-                validate_import_candidate(&store, &validated, &plan.new_events)?;
-            }
+            let store = local_repository_id.as_ref().map(|repository_id| Store {
+                root: root.clone(),
+                repository_id: repository_id.clone(),
+                require_declared_actor: false,
+            });
+            validate_import_candidate(store.as_ref(), &validated, &plan.new_events)?;
         }
         print_import_report(
             &validated,
@@ -86,7 +84,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     // local transition could land between validation and the raw appends.
     let plan = classify_import_events(&root, &validated)?;
     if plan.conflicts.is_empty() {
-        validate_import_candidate(&store, &validated, &plan.new_events)?;
+        validate_import_candidate(Some(&store), &validated, &plan.new_events)?;
     }
 
     print_import_report(
@@ -142,20 +140,27 @@ fn classify_import_events(root: &Path, validated: &ValidatedBundle) -> Result<Im
     Ok(plan)
 }
 
+/// Whether the bundle's events, combined with whatever this store already
+/// holds, form a history that can exist. `None` is a destination with no store
+/// yet: there is nothing local to combine with, and the bundle must still
+/// stand on its own — otherwise a dry run against a fresh destination reports
+/// success for an import that will fail.
 fn validate_import_candidate(
-    store: &Store,
+    store: Option<&Store>,
     validated: &ValidatedBundle,
     new_events: &[String],
 ) -> Result<()> {
     let mut candidate = Vec::new();
-    if store
-        .list_change_ids()?
-        .iter()
-        .any(|change_id| change_id == &validated.bundle.change_id)
-    {
-        for (_, value) in store.raw_events(&validated.bundle.change_id)? {
-            if let Some(event) = crate::bundle::parse_typed_event(&value)? {
-                candidate.push(event);
+    if let Some(store) = store {
+        if store
+            .list_change_ids()?
+            .iter()
+            .any(|change_id| change_id == &validated.bundle.change_id)
+        {
+            for (_, value) in store.raw_events(&validated.bundle.change_id)? {
+                if let Some(event) = crate::bundle::parse_typed_event(&value)? {
+                    candidate.push(event);
+                }
             }
         }
     }
@@ -170,6 +175,60 @@ fn validate_import_candidate(
     candidate.sort_by(|a, b| a.event_id.cmp(&b.event_id));
     state::reduce(&candidate)
         .context("combined local and bundled known events are not replayable")?;
+    // Replayability is not admissibility. A bundle legitimately carries the
+    // lifecycle events a command would not append by hand, so the CLI's own
+    // permission table is the wrong question here; what an import must still
+    // refuse is a history that contradicts itself — a change closed twice, or
+    // work recorded after it closed.
+    let mut closed_at: Option<&str> = None;
+    let mut integrated = false;
+    for event in &candidate {
+        let terminal = matches!(
+            event.payload,
+            Payload::ChangeClosed { .. }
+                | Payload::ChangeIntegrated { .. }
+                | Payload::IntegrationAsserted { .. }
+        );
+        if let Some(first) = closed_at {
+            if terminal {
+                bail!(
+                    "bundle closes {} twice: {first}, then {}",
+                    validated.bundle.change_id,
+                    event.event_id
+                );
+            }
+            // What may follow a closure depends on which closure it was: the
+            // audit domain records review after an integration, and a
+            // changelog entry belongs to something that shipped. Neither
+            // belongs after an abandonment.
+            let admissible = match append_permission(&event.payload) {
+                AppendPermission::AnyPhaseFact => true,
+                AppendPermission::IntegratedOnlyFact | AppendPermission::OpenOrIntegratedFact => {
+                    integrated
+                }
+                _ => false,
+            };
+            if !admissible {
+                bail!(
+                    "bundled event {} records work after {} closed at {first}",
+                    event.event_id,
+                    validated.bundle.change_id
+                );
+            }
+        }
+        if terminal {
+            closed_at = Some(&event.event_id);
+            integrated = matches!(
+                event.payload,
+                Payload::ChangeIntegrated { .. }
+                    | Payload::IntegrationAsserted { .. }
+                    | Payload::ChangeClosed {
+                        outcome: Closure::Integrated,
+                        ..
+                    }
+            );
+        }
+    }
     Ok(())
 }
 

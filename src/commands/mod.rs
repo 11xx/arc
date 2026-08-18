@@ -44,7 +44,7 @@ pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_pr_state};
 pub(crate) use gatekeeping::dependency_order;
 pub use gatekeeping::{
     check_selection, close, done, hold, integrate, release_hold, snapshot_with_verify, verify,
-    VerifyArgs,
+    CloseArgs, VerifyArgs,
 };
 pub use hooks::{
     hook_run, install as hooks_install, query_commit, status as hooks_status,
@@ -702,6 +702,11 @@ mod tests {
             forge: crate::forge::ForgeState::default(),
             closure: closure.map(|outcome| crate::state::ClosureState {
                 outcome,
+                integration: None,
+                source_patchset_id: None,
+                source_head: None,
+                target_branch: None,
+                target_before: None,
                 integrated_commit: None,
                 superseded_by: None,
                 event_id: "event".into(),

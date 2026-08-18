@@ -996,6 +996,249 @@ fn brief_author_only_review_warns_but_remains_integrate_ready() {
         .success();
 }
 
+/// A merge arc guarded and a merge somebody performed elsewhere are different
+/// facts, and a ledger whose reason to exist is being authoritative about
+/// integration cannot write them byte-identically. The asserted variant
+/// deliberately carries no authorization; it records what was claimed.
+#[test]
+fn guarded_and_asserted_integrations_have_distinct_event_types_and_targets() {
+    let repo = Repo::new();
+
+    // Guarded: arc performs the merge under its own preconditions.
+    stdout(repo.arc(&repo.root).args(["begin", "guarded"]));
+    let worktree = repo.home.join(".worktrees/repo-guarded");
+    repo.commit(&worktree, "guarded.rs", "done\n", "feat: guarded");
+    stdout(repo.arc(&worktree).args(["snapshot", "guarded"]));
+    let source_head = repo.head(&worktree);
+    let target_before = repo.head(&repo.root);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["review", "guarded", "--verdict", "approved"]),
+    );
+    repo.arc(&repo.root)
+        .args(["integrate", "guarded"])
+        .assert()
+        .success();
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "guarded",
+        "--type",
+        "change-integrated",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+    assert_eq!(event["source_head"], source_head, "{event}");
+    assert_eq!(event["source_patchset_id"], "ps-01", "{event}");
+    assert_eq!(event["target_branch"], "master", "{event}");
+    assert_eq!(event["target_before"], target_before, "{event}");
+    assert!(
+        stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "guarded",
+            "--type",
+            "change-closed",
+        ]))
+        .trim()
+        .is_empty(),
+        "a guarded merge writes no change-closed event"
+    );
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "guarded", "--json"]));
+    assert_eq!(status["closure"]["integration"], "guarded", "{status}");
+
+    // The store now holds an event an older build would skip, so it says so.
+    // A barrier nothing stamps protects only stores this build created.
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
+    assert_eq!(config["schema_version"], 2, "{config}");
+
+    // Asserted: somebody else merged it, and says so afterwards.
+    stdout(repo.arc(&repo.root).args(["begin", "asserted"]));
+    let asserted_worktree = repo.home.join(".worktrees/repo-asserted");
+    repo.commit(
+        &asserted_worktree,
+        "asserted.rs",
+        "done\n",
+        "feat: asserted",
+    );
+    stdout(repo.arc(&asserted_worktree).args(["snapshot", "asserted"]));
+    let asserted_head = repo.head(&asserted_worktree);
+    let before_external = repo.head(&repo.root);
+    git(
+        &repo.root,
+        &[
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            "-m",
+            "external merge",
+            &asserted_head,
+        ],
+    );
+    let external = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args([
+            "close",
+            "asserted",
+            "--assert-integrated",
+            &external,
+            "--patchset",
+            "ps-01",
+            "--into",
+            "master",
+        ])
+        .assert()
+        .success();
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "asserted",
+        "--type",
+        "integration-asserted",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+    assert_eq!(event["integrated_commit"], external, "{event}");
+    assert_eq!(event["source_head"], asserted_head, "{event}");
+    assert_eq!(event["target_before"], before_external, "{event}");
+    assert_eq!(event["source_patchset_id"], "ps-01", "{event}");
+    assert_eq!(event["target_branch"], "master", "{event}");
+    assert!(
+        stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "asserted",
+            "--type",
+            "change-closed",
+        ]))
+        .trim()
+        .is_empty(),
+        "an asserted integration writes no change-closed event either"
+    );
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "asserted", "--json"]));
+    assert_eq!(status["closure"]["integration"], "asserted", "{status}");
+
+    // Both are integrated; the ledger says how each one got there, and the
+    // human view says it too rather than rendering them identically.
+    assert_eq!(status["state"], "closed", "{status}");
+    let shown = stdout(repo.arc(&repo.root).args(["show", "asserted"]));
+    assert!(shown.contains("asserted; arc did not guard it"), "{shown}");
+    let shown = stdout(repo.arc(&repo.root).args(["show", "guarded"]));
+    assert!(shown.contains("guarded by arc"), "{shown}");
+
+    // A fast-forward has no merge commit, so its first parent is the change's
+    // own previous commit — recording that as the prior target would put the
+    // change's work outside the range it integrated. Absent is honest.
+    stdout(repo.arc(&repo.root).args(["begin", "fast-forward"]));
+    let ff_worktree = repo.home.join(".worktrees/repo-fast-forward");
+    repo.commit(&ff_worktree, "ff-one.rs", "one\n", "feat: one");
+    repo.commit(&ff_worktree, "ff-two.rs", "two\n", "feat: two");
+    stdout(repo.arc(&ff_worktree).args(["snapshot", "fast-forward"]));
+    let before_ff = repo.head(&repo.root);
+    let ff_head = repo.head(&ff_worktree);
+    git(&repo.root, &["merge", "--ff-only", &ff_head]);
+    repo.arc(&repo.root)
+        .args(["close", "fast-forward", "--assert-integrated", &ff_head])
+        .assert()
+        .success();
+    let event: serde_json::Value = serde_json::from_str(
+        stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "fast-forward",
+            "--type",
+            "integration-asserted",
+        ]))
+        .trim(),
+    )
+    .unwrap();
+    assert!(
+        event.get("target_before").is_none(),
+        "a fast-forward has no prior target to read: {event}"
+    );
+
+    // The caller can name it, and then it is recorded.
+    stdout(repo.arc(&repo.root).args(["begin", "named-base"]));
+    let named_worktree = repo.home.join(".worktrees/repo-named-base");
+    repo.commit(&named_worktree, "named.rs", "x\n", "feat: named");
+    stdout(repo.arc(&named_worktree).args(["snapshot", "named-base"]));
+    let named_head = repo.head(&named_worktree);
+    git(&repo.root, &["merge", "--ff-only", &named_head]);
+    repo.arc(&repo.root)
+        .args([
+            "close",
+            "named-base",
+            "--assert-integrated",
+            &named_head,
+            "--target-before",
+            &before_ff,
+        ])
+        .assert()
+        .success();
+    let event: serde_json::Value = serde_json::from_str(
+        stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "named-base",
+            "--type",
+            "integration-asserted",
+        ]))
+        .trim(),
+    )
+    .unwrap();
+    assert_eq!(event["target_before"], before_ff, "{event}");
+
+    // A merge is its own witness: overriding its first parent would record a
+    // range the merge did not integrate.
+    repo.arc(&repo.root)
+        .args([
+            "close",
+            "asserted",
+            "--assert-integrated",
+            &external,
+            "--target-before",
+            &before_external,
+        ])
+        .assert()
+        .failure();
+
+    // An assertion arc did not guard is still checked against Git: it must
+    // name a branch that exists, a revision that contains the patchset head,
+    // and one that is actually on that branch.
+    stdout(repo.arc(&repo.root).args(["begin", "unrelated"]));
+    let unrelated_worktree = repo.home.join(".worktrees/repo-unrelated");
+    repo.commit(&unrelated_worktree, "other.rs", "x\n", "feat: unrelated");
+    stdout(
+        repo.arc(&unrelated_worktree)
+            .args(["snapshot", "unrelated"]),
+    );
+    repo.arc(&repo.root)
+        .args([
+            "close",
+            "unrelated",
+            "--assert-integrated",
+            &external,
+            "--into",
+            "master",
+        ])
+        .assert()
+        .failure();
+    repo.arc(&repo.root)
+        .args([
+            "close",
+            "unrelated",
+            "--assert-integrated",
+            &repo.head(&unrelated_worktree),
+            "--into",
+            "no-such-branch",
+        ])
+        .assert()
+        .failure();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "unrelated", "--json"]));
+    assert_eq!(status["state"], "open", "{status}");
+}
+
 /// A declared gate that never ran (or failed) blocks with exit 5; a pass
 /// at the exact head unblocks.
 #[test]

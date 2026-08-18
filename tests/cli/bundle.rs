@@ -1,5 +1,82 @@
 use super::common::*;
 
+/// Skipping an event type is safe for a comment and fatal for a closure: a
+/// build that did not know an integration event would read the change as open
+/// and close it a second way. So the bundle carries the format it was written
+/// with, and an older importer refuses rather than half-reading it.
+/// A bundle carrying an integration event makes the destination hold events
+/// an older build would skip, exactly as recording one locally does. A stamp
+/// applied on only one of those paths protects only half the ledgers.
+#[test]
+fn importing_an_integration_stamps_the_destination_store_format() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "shipped"]));
+    let worktree = repo.home.join(".worktrees/repo-shipped");
+    repo.commit(&worktree, "shipped.rs", "done\n", "feat: shipped");
+    stdout(repo.arc(&worktree).args(["snapshot", "shipped"]));
+    stdout(
+        repo.arc(&repo.root)
+            .args(["review", "shipped", "--verdict", "approved"]),
+    );
+    repo.arc(&repo.root)
+        .args(["integrate", "shipped"])
+        .assert()
+        .success();
+    let bundle = repo.home.join("shipped.json");
+    repo.arc(&repo.root)
+        .args(["export", "shipped", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // A destination whose store predates the format.
+    let other = Repo::new();
+    stdout(
+        other
+            .arc(&other.root)
+            .args(["begin", "seed", "--no-worktree"]),
+    );
+    let config_path = other.root.join(".git/arc/config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    config["schema_version"] = serde_json::json!(1);
+    fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+
+    other
+        .arc(&other.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    assert_eq!(config["schema_version"], 2, "{config}");
+}
+
+#[test]
+fn a_bundle_from_a_newer_arc_is_refused_rather_than_partially_imported() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "future", "--no-worktree"]),
+    );
+    let bundle = repo.home.join("future.json");
+    repo.arc(&repo.root)
+        .args(["export", "future", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    assert!(value["store_format"].as_u64().is_some(), "{value}");
+    value["store_format"] = serde_json::json!(9999);
+    fs::write(&bundle, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+    let other = Repo::new();
+    other
+        .arc(&other.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .failure();
+}
+
 #[test]
 fn export_is_deterministic() {
     let repo = Repo::new();

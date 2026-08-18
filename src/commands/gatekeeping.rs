@@ -1207,11 +1207,9 @@ fn integrate_one(
 
     // The approved head, merged by exact SHA so a branch moved after
     // approval can never smuggle unreviewed commits into the merge.
-    let approved_head = st
-        .latest_patchset()
-        .context("no patchset recorded")?
-        .head
-        .clone();
+    let approved_patchset = st.latest_patchset().context("no patchset recorded")?;
+    let approved_patchset_id = approved_patchset.id.clone();
+    let approved_head = approved_patchset.head.clone();
 
     let wt = gitio::worktree_for_branch(&ctx.cwd, &target)?
         .with_context(|| format!("no worktree has {target:?} checked out; check it out first"))?;
@@ -1242,10 +1240,12 @@ fn integrate_one(
     let ev = ctx.event(
         &store,
         &change_id,
-        Payload::ChangeClosed {
-            outcome: Closure::Integrated,
-            integrated_commit: Some(merged.clone()),
-            superseded_by: None,
+        Payload::ChangeIntegrated {
+            integrated_commit: merged.clone(),
+            source_patchset_id: approved_patchset_id.clone(),
+            source_head: approved_head.clone(),
+            target_branch: target.clone(),
+            target_before: old_target.clone(),
         },
     );
     store.append_event(&ev)?;
@@ -1404,13 +1404,27 @@ pub(crate) fn dependency_order(selected: &BTreeMap<String, ChangeState>) -> Resu
     Ok(ordered)
 }
 
-pub fn close(
-    ctx: &Ctx,
-    reference: &str,
-    integrated: Option<String>,
-    abandoned: bool,
-    superseded_by: Option<String>,
-) -> Result<()> {
+/// How a change is being closed, as the CLI expresses it. One struct rather
+/// than eight positional arguments, because the outcomes are mutually
+/// exclusive and a call site should show which one it chose.
+pub struct CloseArgs {
+    pub assert_integrated: Option<String>,
+    pub patchset: Option<String>,
+    pub into: Option<String>,
+    pub target_before: Option<String>,
+    pub abandoned: bool,
+    pub superseded_by: Option<String>,
+}
+
+pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
+    let CloseArgs {
+        assert_integrated,
+        patchset,
+        into,
+        target_before,
+        abandoned,
+        superseded_by,
+    } = args;
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
@@ -1418,14 +1432,80 @@ pub fn close(
     if st.is_closed() {
         bail!("change {change_id} is already closed");
     }
-    let (payload, integrated_rev) = match (integrated, abandoned, superseded_by) {
+    if patchset.is_some() && assert_integrated.is_none() {
+        bail!("--patchset describes an asserted integration; pass --assert-integrated <REV>");
+    }
+    if into.is_some() && assert_integrated.is_none() {
+        bail!("--into describes an asserted integration; pass --assert-integrated <REV>");
+    }
+    if target_before.is_some() && assert_integrated.is_none() {
+        bail!("--target-before describes an asserted integration; pass --assert-integrated <REV>");
+    }
+    let (payload, integrated_rev) = match (assert_integrated, abandoned, superseded_by) {
         (Some(rev), false, None) => {
             let rev = gitio::rev_parse(&ctx.cwd, &rev)?;
+            let patchset = match patchset {
+                Some(id) => st
+                    .patchsets
+                    .iter()
+                    .find(|patchset| patchset.id == id)
+                    .with_context(|| format!("{id} is not a patchset of {change_id}"))?,
+                None => st.latest_patchset().with_context(|| {
+                    format!(
+                        "no patchset recorded on {change_id}, so nothing says what was \
+                         integrated; record one with `arc snapshot {change_id}` first"
+                    )
+                })?,
+            };
+            let target = into.unwrap_or_else(|| st.target_branch.clone());
+            if !gitio::branch_exists(&ctx.cwd, &target) {
+                bail!(
+                    "{target} is not a branch in this repository; an assertion names where the \
+                     work actually landed"
+                );
+            }
+            // An assertion arc did not guard still has to be about this
+            // change. Without these two checks it could name any commit at
+            // all, and the ledger would record an integration that never
+            // happened — worse than recording nothing, because it reads as
+            // authoritative.
+            if !gitio::is_ancestor(&ctx.cwd, &patchset.head, &rev)? {
+                bail!(
+                    "{rev} does not contain {} ({}), so it is not an integration of this change",
+                    patchset.id,
+                    &patchset.head[..patchset.head.len().min(8)]
+                );
+            }
+            if !gitio::is_ancestor(&ctx.cwd, &rev, &target)? {
+                bail!("{rev} is not on {target}; nothing there integrated this change");
+            }
+            // For a merge, the first parent is where the target stood before,
+            // and Git can be asked. For a fast-forward it is not: the parent
+            // is the previous commit *of this change*, and recording it would
+            // put the change's own work outside the range it integrated.
+            // Nothing in the repository says where the branch pointed, so the
+            // caller supplies it or the event records none — an absent base is
+            // honest, a wrong one is not.
+            let parents = gitio::commit_parents(&ctx.cwd, &rev)?;
+            let target_before = match (target_before, parents.len()) {
+                // A merge records where the target stood, and Git is a better
+                // witness than the caller: letting a flag override it would
+                // record a range the merge did not integrate.
+                (Some(_), 2..) => bail!(
+                    "{rev} is a merge, so where the target stood is its first parent; \
+                     --target-before would record a range it did not integrate"
+                ),
+                (None, 2..) => parents.into_iter().next(),
+                (Some(named), _) => Some(gitio::rev_parse(&ctx.cwd, &named)?),
+                (None, _) => None,
+            };
             (
-                Payload::ChangeClosed {
-                    outcome: Closure::Integrated,
-                    integrated_commit: Some(rev.clone()),
-                    superseded_by: None,
+                Payload::IntegrationAsserted {
+                    integrated_commit: rev.clone(),
+                    source_patchset_id: patchset.id.clone(),
+                    source_head: patchset.head.clone(),
+                    target_branch: target,
+                    target_before,
                 },
                 Some(rev),
             )
@@ -1449,7 +1529,9 @@ pub fn close(
                 None,
             )
         }
-        _ => bail!("provide exactly one of --integrated <rev>, --abandoned, --superseded <change>"),
+        _ => bail!(
+            "provide exactly one of --assert-integrated <rev>, --abandoned, --superseded <change>"
+        ),
     };
     let ev = ctx.event(&store, &change_id, payload);
     store.append_event(&ev)?;
