@@ -332,6 +332,10 @@ pub struct VerificationEntry {
     pub probe: Option<ProbeEvidenceRef>,
     pub gate: Option<String>,
     pub command: String,
+    /// The timeout the gate declared when this ran. `None` predates the field
+    /// or means the gate declared none — unknown, not unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
     pub revision: String,
     pub result: VerifyResult,
     pub attested: bool,
@@ -462,6 +466,11 @@ pub struct ClosureState {
     pub target_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_before: Option<String>,
+    /// What the guard consumed to authorize a guarded merge. Absent on an
+    /// asserted integration, which arc did not authorize, and on guarded
+    /// events written before arc recorded it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<crate::model::AuthorizationBasis>,
     pub event_id: String,
     #[serde(skip)]
     pub created_at: DateTime<Utc>,
@@ -488,6 +497,7 @@ fn integrated_closure(
         source_head: Some(source_head.to_string()),
         target_branch: Some(target_branch.to_string()),
         target_before,
+        authorization: None,
         event_id: ev.event_id.clone(),
         created_at: ev.created_at,
     }
@@ -1281,6 +1291,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             Payload::VerificationRecorded {
                 gate,
                 command,
+                timeout_seconds,
                 revision,
                 result,
                 hostname,
@@ -1352,6 +1363,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 }
                 state.verifications.push(VerificationEntry {
                     event_id: ev.event_id.clone(),
+                    timeout_seconds: *timeout_seconds,
                     tested_tree: tested_tree.clone(),
                     worktree_dirty: *worktree_dirty,
                     tree_moved: *tree_moved,
@@ -1449,6 +1461,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     source_head: None,
                     target_branch: None,
                     target_before: None,
+                    authorization: None,
                     event_id: ev.event_id.clone(),
                     created_at: ev.created_at,
                 });
@@ -1459,8 +1472,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 source_head,
                 target_branch,
                 target_before,
+                authorization,
             } => {
-                state.closure = Some(integrated_closure(
+                let mut closure = integrated_closure(
                     ev,
                     IntegrationKind::Guarded,
                     integrated_commit,
@@ -1468,7 +1482,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     source_head,
                     target_branch,
                     Some(target_before.clone()),
-                ));
+                );
+                closure.authorization = authorization.clone();
+                state.closure = Some(closure);
             }
             Payload::IntegrationAsserted {
                 integrated_commit,
@@ -1973,6 +1989,7 @@ mod tests {
         let evidence = ev(
             change,
             Payload::VerificationRecorded {
+                timeout_seconds: None,
                 gate: Some("unit".into()),
                 command: "true".into(),
                 revision: "head".into(),

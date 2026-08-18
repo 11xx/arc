@@ -996,6 +996,271 @@ fn brief_author_only_review_warns_but_remains_integrate_ready() {
         .success();
 }
 
+/// `integrate` computes readiness from the invocation worktree's gate and
+/// policy files, the latest verdict, exact-head evidence, findings,
+/// dependencies and hold state — and before this, the closure it wrote
+/// retained none of it. An auditor had to replay preceding events and recover
+/// the contemporaneous config from Git, and uncommitted policy state was
+/// unrecoverable entirely. So the probe changes both files without committing
+/// them, and asserts the event holds those exact values.
+#[test]
+fn guarded_integration_records_exact_authorization_basis() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: declare a gate"]);
+
+    let prerequisite = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "first",
+        "--no-worktree",
+    ])));
+    let dependent = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "second",
+        "--blocked-by",
+        "first",
+    ])));
+
+    // The prerequisite integrates first, so the dependent's basis has a
+    // closure to name.
+    let first_worktree = repo.home.join(".worktrees/repo-first");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            first_worktree.to_str().unwrap(),
+            "arc/first",
+        ],
+    );
+    repo.commit(&first_worktree, "first.rs", "one\n", "feat: first");
+    stdout(repo.arc(&first_worktree).args(["snapshot", "first"]));
+    repo.arc(&first_worktree)
+        .args(["verify", "first", "--gate", "unit"])
+        .assert()
+        .success();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["review", "first", "--verdict", "approved"]),
+    );
+    repo.arc(&repo.root)
+        .args(["integrate", "first"])
+        .assert()
+        .success();
+
+    let worktree = repo.home.join(".worktrees/repo-second");
+    repo.commit(&worktree, "second.rs", "two\n", "feat: second");
+    git(&worktree, &["merge", "--no-edit", "master"]);
+    // This change declares the gate with a timeout the target does not. The
+    // evidence must run under the declaration it will be recorded against —
+    // a gate is green for what it ran, timeout included.
+    fs::create_dir_all(worktree.join(".arc")).unwrap();
+    fs::write(
+        worktree.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\ntimeout = \"90s\"\n",
+    )
+    .unwrap();
+    git(&worktree, &["add", ".arc/gates.toml"]);
+    git(
+        &worktree,
+        &["commit", "-m", "chore: declare a gate timeout"],
+    );
+    stdout(repo.arc(&worktree).args(["snapshot", "second"]));
+    repo.arc(&worktree)
+        .args(["verify", "second", "--gate", "unit"])
+        .assert()
+        .success();
+    let verdict_event =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["review", "second", "--verdict", "approved"]),
+        );
+    let verdict_event = verdict_event
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .expect("review prints its event")
+        .to_string();
+
+    // Uncommitted policy in the *invocation* worktree: exactly the state Git
+    // cannot recover afterwards, and the state readiness is computed from.
+    // The target worktree must stay clean, so the edit belongs here.
+    fs::write(
+        worktree.join(".arc/policy.toml"),
+        "[policy]\nrequire_declared_actor = false\nforbid_self_approval = false\n\n[provenance]\ngit_identity = \"shared\"\n",
+    )
+    .unwrap();
+
+    // The dry run prints the basis it would record, and writes nothing.
+    let dry_out = repo
+        .arc(&worktree)
+        .args(["integrate", "second", "--dry-run"])
+        .assert()
+        .get_output()
+        .clone();
+    let dry = format!(
+        "{}{}",
+        String::from_utf8_lossy(&dry_out.stdout),
+        String::from_utf8_lossy(&dry_out.stderr)
+    );
+    assert!(
+        dry.contains("authorization basis it would record"),
+        "dry run output was: {dry}"
+    );
+    assert!(dry.contains(&verdict_event), "{dry}");
+    assert!(dry.contains("git_identity=shared"), "{dry}");
+
+    repo.arc(&worktree)
+        .args(["integrate", "second", "--into", "master"])
+        .assert()
+        .success();
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "second",
+        "--type",
+        "change-integrated",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+    let basis = &event["authorization"];
+    assert_eq!(basis["verdict_event_id"], verdict_event, "{event}");
+    // The exact evidence event, not merely that some evidence existed.
+    let recorded = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "second",
+        "--type",
+        "verification-recorded",
+    ]));
+    let evidence_id = recorded
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["gate"] == "unit")
+        .map(|event| event["event_id"].as_str().unwrap().to_string())
+        .next_back()
+        .expect("a recorded gate verification");
+    assert_eq!(basis["gate_evidence"]["unit"], evidence_id, "{event}");
+    assert_eq!(
+        basis["prerequisites"][0]["change_id"], prerequisite,
+        "{event}"
+    );
+    assert!(
+        basis["prerequisites"][0]["integrated_commit"]
+            .as_str()
+            .is_some(),
+        "{event}"
+    );
+    assert_eq!(basis["blocking_findings"], serde_json::json!([]), "{event}");
+    assert_eq!(basis["holds"], serde_json::json!([]), "{event}");
+    // The uncommitted values, not the committed ones.
+    assert_eq!(basis["gates"]["unit"]["timeout"], 90, "{event}");
+    assert_eq!(
+        basis["policy"]["provenance_git_identity"], "shared",
+        "{event}"
+    );
+    assert_eq!(event["target_branch"], "master", "{event}");
+    assert!(!dependent.is_empty());
+    // No waiver was involved, so none is claimed.
+    assert!(basis.get("audit_debt_event_id").is_none(), "{event}");
+}
+
+/// The basis records what authorized the merge. Editing a gate's declaration
+/// after its evidence was recorded means the declared check has not run, so
+/// the gate is not green — and the basis can never pair a command with
+/// evidence for a different one.
+#[test]
+fn changing_a_gate_declaration_ungreens_its_recorded_evidence() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: declare a gate"]);
+    stdout(repo.arc(&repo.root).args(["begin", "redeclared"]));
+    let worktree = repo.home.join(".worktrees/repo-redeclared");
+    repo.commit(&worktree, "work.rs", "done\n", "feat: work");
+    git(&worktree, &["merge", "--no-edit", "master"]);
+    stdout(repo.arc(&worktree).args(["snapshot", "redeclared"]));
+    repo.arc(&worktree)
+        .args(["verify", "redeclared", "--gate", "unit"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&worktree).args(["status", "redeclared", "--json"]));
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
+
+    // A different command is a different check, which nothing has run.
+    fs::write(
+        worktree.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true # a different check\"\n",
+    )
+    .unwrap();
+    let status = json_stdout(repo.arc(&worktree).args(["status", "redeclared", "--json"]));
+    assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
+    assert_eq!(status["gates"][0]["declaration_changed"], true, "{status}");
+    assert_eq!(status["integrate_ready"], false, "{status}");
+    // And the reader is told which repair this is: the evidence's provenance
+    // is fine, the declaration moved.
+    let resume = stdout(repo.arc(&worktree).args(["resume", "redeclared"]));
+    assert!(
+        resume.contains("the gate declaration changed since this evidence was recorded"),
+        "{resume}"
+    );
+
+    // A timeout is part of the declaration too: the same command under a
+    // laxer timeout is not evidence for a stricter one.
+    fs::write(
+        worktree.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\ntimeout = \"1s\"\n",
+    )
+    .unwrap();
+    let status = json_stdout(repo.arc(&worktree).args(["status", "redeclared", "--json"]));
+    assert_eq!(status["gates"][0]["declaration_changed"], true, "{status}");
+    assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
+
+    // Reuse honours the same rule: the same command under a stricter timeout
+    // is a declaration nothing has run.
+    let reused =
+        stdout(
+            repo.arc(&worktree)
+                .args(["verify", "redeclared", "--all", "--skip-green"]),
+        );
+    assert!(!reused.contains("skipped (green at head)"), "{reused}");
+
+    // Back to a command nothing has run, for the reuse check below.
+    fs::write(
+        worktree.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true # a different check\"\n",
+    )
+    .unwrap();
+
+    // Reuse is reuse of a run: --skip-green must not report the old pass as
+    // satisfying a declaration nothing has run.
+    let reused =
+        stdout(
+            repo.arc(&worktree)
+                .args(["verify", "redeclared", "--all", "--skip-green"]),
+        );
+    assert!(!reused.contains("skipped (green at head)"), "{reused}");
+    // It ran the declaration that is current, and the evidence says so. It is
+    // still not green, because the edited declaration is uncommitted and the
+    // tree is therefore dirty — a separate rule, and the honest one.
+    let status = json_stdout(repo.arc(&worktree).args(["status", "redeclared", "--json"]));
+    assert_eq!(
+        status["gates"][0]["command"], "true # a different check",
+        "{status}"
+    );
+    assert_eq!(status["gates"][0]["worktree_dirty"], true, "{status}");
+}
+
 /// A merge arc guarded and a merge somebody performed elsewhere are different
 /// facts, and a ledger whose reason to exist is being authoritative about
 /// integration cannot write them byte-identically. The asserted variant

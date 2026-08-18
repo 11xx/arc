@@ -119,8 +119,26 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   status` reports which happened as `closure.integration`: `guarded`,
   `asserted`, or `legacy-unclassified` for closures written before the two
   could be told apart. `change-closed` now carries only `abandoned` and
-  `superseded`. `arc integrate
-  --tag '#series'` applies that same guarded path to every matching change
+  `superseded`. A guarded merge also
+  records the **authorization basis** it was taken on: the approving verdict
+  event, one passing verification event per resolved required gate, each
+  prerequisite's closure, the blocking-finding and hold vectors that had to be
+  empty for the event to be written, and the normalized gate and policy values
+  actually consumed — including uncommitted ones, which Git cannot recover for
+  an auditor afterwards. This is not a config store: arc records no
+  configuration history, only the inputs to one irreversible decision.
+  It also records the audit-debt declaration when that waiver is what let the
+  approval stand, because then it is an authorization input like the verdict
+  itself — and not when one was declared beside an approval that needed no
+  waiver, where it authorized nothing. A
+  gate is green for the declaration it ran — command and timeout both, since a
+  run under a laxer timeout is not evidence for a stricter one. Editing a
+  declaration after its evidence was recorded means the declared check has not
+  run, so the gate reports `declaration_changed` rather than counting, and `verify --skip-green` reruns
+  it instead of reusing a run of something else. Before merging, readiness is
+  recomputed and the basis rebuilt; if the two differ, nothing is written.
+  `arc integrate --dry-run` prints the basis it would record, when the merge
+  would happen at all. `arc integrate --tag '#series'` applies that same guarded path to every matching change
   in dependency order, stopping at the first refusal. Refusals carry typed
   exit codes.
 

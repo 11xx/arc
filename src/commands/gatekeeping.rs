@@ -88,6 +88,7 @@ struct CompletedVerification {
     probe: Option<ProbeEvidenceRef>,
     gate: Option<String>,
     command: String,
+    timeout_seconds: Option<u64>,
     revision: String,
     result: VerifyResult,
     exit_code: Option<i32>,
@@ -269,10 +270,15 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         let mut reused = Vec::new();
         let mut to_run = Vec::new();
         for (name, gate) in required {
+            // Reuse is reuse of a *run*, so the recorded command must be the
+            // one declared now. Skipping on a name match would report a gate
+            // as satisfied by a run of something else.
             let reusable = skip_green
                 .then(|| st.gate_evidence_at(name, &head))
                 .flatten()
-                .filter(|evidence| evidence.green_at_head());
+                .filter(|evidence| {
+                    evidence.green_at_head() && status::matches_declaration(evidence, gate)
+                });
             if let Some(evidence) = reusable {
                 println!("gate {name}: skipped (green at head)");
                 reused.push((name.clone(), evidence.event_id.clone()));
@@ -794,6 +800,7 @@ fn execute_verification(
         probe,
         gate,
         command,
+        timeout_seconds,
         revision,
         result,
         exit_code,
@@ -841,6 +848,7 @@ fn append_verifications(
             probe: item.probe,
             gate: item.gate,
             command: item.command,
+            timeout_seconds: item.timeout_seconds,
             revision: item.revision,
             result: item.result,
             exit_code: item.exit_code,
@@ -1211,6 +1219,24 @@ fn integrate_one(
     let approved_patchset_id = approved_patchset.id.clone();
     let approved_head = approved_patchset.head.clone();
 
+    // Read before the merge, from the same worktree state the readiness
+    // decision was made against: this is what the merge is authorized on, and
+    // a later read would be a different question.
+    let authorization = authorization_basis(ctx, &store, &st, &report, &approved_patchset_id)?;
+    // Configuration files are not under any lock arc holds, so readiness and
+    // the basis are two reads of something that can move between them.
+    // Recomputing readiness against the basis's own gate set is what keeps the
+    // merge from proceeding under one configuration and recording another.
+    let confirmation = ctx.report(&store, &st)?;
+    let confirmed_basis =
+        authorization_basis(ctx, &store, &st, &confirmation, &approved_patchset_id)?;
+    if confirmed_basis != authorization || !confirmation.integrate_ready {
+        bail!(
+            "gate or policy configuration changed while preparing the merge; nothing was \
+             written — re-run once the worktree has settled"
+        );
+    }
+
     let wt = gitio::worktree_for_branch(&ctx.cwd, &target)?
         .with_context(|| format!("no worktree has {target:?} checked out; check it out first"))?;
     if !gitio::is_clean(&wt)? {
@@ -1246,6 +1272,7 @@ fn integrate_one(
             source_head: approved_head.clone(),
             target_branch: target.clone(),
             target_before: old_target.clone(),
+            authorization: Some(authorization),
         },
     );
     store.append_event(&ev)?;
@@ -1285,6 +1312,127 @@ fn integrate_one(
 /// anything: run the same readiness preflight, then simulate the merge with
 /// the needs-rebase machinery. Exit code mirrors `check`: 0 when the merge
 /// would proceed cleanly, otherwise the first blocker's code.
+/// Everything the guard consumed to authorize one merge, read from the same
+/// state the readiness decision was made against.
+///
+/// The gate and policy values are the ones actually in effect in this
+/// invocation's worktree — including uncommitted ones, which is exactly the
+/// state Git cannot recover for an auditor later.
+fn authorization_basis(
+    ctx: &Ctx,
+    store: &Store,
+    st: &ChangeState,
+    report: &crate::status::StatusReport,
+    approved_patchset_id: &str,
+) -> Result<crate::model::AuthorizationBasis> {
+    let verdict = st
+        .verdicts
+        .iter()
+        .rev()
+        .find(|verdict| {
+            verdict.patchset_id == approved_patchset_id
+                && verdict.verdict == crate::model::Verdict::Approved
+        })
+        .context("integration is ready but no approving verdict covers the merged patchset")?;
+
+    let mut gate_evidence = BTreeMap::new();
+    for gate in &report.gates {
+        let evidence = gate.evidence_event_id.clone().with_context(|| {
+            format!(
+                "gate {} is green at head with no recorded evidence event",
+                gate.name
+            )
+        })?;
+        gate_evidence.insert(gate.name.clone(), evidence);
+    }
+
+    let mut prerequisites = Vec::new();
+    for blocker in &st.blocked_by {
+        // A basis missing a prerequisite is a basis that misstates what was
+        // checked, so an unreadable one refuses the merge rather than being
+        // quietly omitted.
+        let events = store.load_events(blocker).with_context(|| {
+            format!("prerequisite {blocker} cannot be read, so the authorization basis                      would be incomplete")
+        })?;
+        let mut blocker_id = blocker.clone();
+        let mut blocker_state = state::reduce(&events)?;
+        // Dependency readiness follows supersession, so the basis must record
+        // the closure that actually satisfied the dependency rather than the
+        // superseded one, whose integrated commit is null.
+        let mut seen = vec![blocker_id.clone()];
+        while let Some(successor) = blocker_state
+            .closure
+            .as_ref()
+            .filter(|closure| closure.outcome == Closure::Superseded)
+            .and_then(|closure| closure.superseded_by.clone())
+        {
+            if seen.contains(&successor) {
+                break;
+            }
+            let Ok(events) = store.load_events(&successor) else {
+                break;
+            };
+            seen.push(successor.clone());
+            blocker_id = successor;
+            blocker_state = state::reduce(&events)?;
+        }
+        if let Some(closure) = &blocker_state.closure {
+            prerequisites.push(crate::model::PrerequisiteClosure {
+                change_id: blocker_id,
+                closure_event_id: closure.event_id.clone(),
+                integrated_commit: closure.integrated_commit.clone(),
+            });
+        }
+    }
+
+    let toplevel = gitio::toplevel(&ctx.cwd)?;
+    let gates = crate::gates::load(&toplevel)?;
+    let policy = crate::policy::load(&toplevel)?;
+    let normalized_gates = gates
+        .required_for(&st.profile)
+        .into_iter()
+        .map(|(name, gate)| {
+            (
+                name.clone(),
+                crate::model::NormalizedGate {
+                    command: gate.command.clone(),
+                    profiles: gate.profiles.clone(),
+                    timeout: gate.timeout,
+                },
+            )
+        })
+        .collect();
+
+    Ok(crate::model::AuthorizationBasis {
+        verdict_event_id: verdict.event_id.clone(),
+        gate_evidence,
+        prerequisites,
+        // Empty by construction: `integrate_ready` is false while either is
+        // non-empty, so the event cannot be written otherwise. Recording them
+        // says the guard checked, rather than leaving an auditor to infer it.
+        blocking_findings: report.open_blocking_findings.clone(),
+        holds: report
+            .holds
+            .iter()
+            .map(|hold| hold.hold_event_id.clone())
+            .collect(),
+        gates: normalized_gates,
+        policy: crate::model::NormalizedPolicy {
+            forbid_self_approval: policy.policy.forbid_self_approval,
+            require_declared_actor: policy.policy.require_declared_actor,
+            provenance_git_identity: policy.provenance.git_identity.as_str().to_string(),
+        },
+        // Only when the waiver is what let the approval stand. A debt declared
+        // beside an approval that needed no waiver authorized nothing, and
+        // recording it would claim the merge rested on something it did not.
+        audit_debt_event_id: st
+            .audit_debt
+            .as_ref()
+            .filter(|_| report.approval_waived_by_audit_debt)
+            .map(|debt| debt.event_id.clone()),
+    })
+}
+
 fn integrate_dry_run(
     ctx: &Ctx,
     store: &Store,
@@ -1292,6 +1440,15 @@ fn integrate_dry_run(
     target: &str,
     message: Option<&str>,
 ) -> Result<i32> {
+    // The refusals a real integration makes before touching anything: an
+    // undeclared actor, and a target worktree that is missing or dirty. A dry
+    // run that skipped them would report a merge the real path refuses.
+    ctx.ensure_declared_actor(store)?;
+    let target_worktree = gitio::worktree_for_branch(&ctx.cwd, target)?
+        .with_context(|| format!("no worktree has {target:?} checked out; check it out first"))?;
+    if !gitio::is_clean(&target_worktree)? {
+        bail!("target worktree {} is not clean", target_worktree.display());
+    }
     let report = ctx.report(store, st)?;
     if !report.integrate_ready {
         eprint!("{}", render::blocker_explanation(st, &report));
@@ -1324,6 +1481,20 @@ fn integrate_dry_run(
             "clean"
         }
     );
+    // Only when the merge would actually happen: a conflicting dry run
+    // records nothing, so printing a basis "it would record" would describe
+    // an event that could not be written.
+    if !conflicts {
+        let basis = authorization_basis(
+            ctx,
+            store,
+            st,
+            &report,
+            &st.latest_patchset().context("no patchset recorded")?.id,
+        )?;
+        println!("  authorization basis it would record:");
+        println!("{}", render::authorization_basis(&basis));
+    }
     println!("  no events, refs, or worktrees were modified");
     Ok(if conflicts {
         status::Blocker::NeedsRebase.exit_code()

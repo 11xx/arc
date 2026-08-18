@@ -88,6 +88,10 @@ pub struct GateStatus {
     pub command: String,
     pub result: String,
     pub green_at_head: bool,
+    /// Passing evidence exists at this head, but for a different command than
+    /// the gate now declares. Not green: the declaration is the check.
+    #[serde(skip_serializing_if = "is_false")]
+    pub declaration_changed: bool,
     /// The head evidence for this gate is attested (arc did not run it), so a
     /// lead can apply stricter judgment even though it counts for green-ness.
     pub attested: bool,
@@ -125,6 +129,12 @@ impl GateStatus {
     pub fn not_green_reason(&self) -> Option<&'static str> {
         if self.green_at_head {
             return None;
+        }
+        // Before the provenance checks: this evidence may be perfectly good
+        // provenance for a command the gate no longer declares, and saying
+        // its tree was unrecorded would send the reader to the wrong repair.
+        if self.declaration_changed {
+            return Some("the gate declaration changed since this evidence was recorded");
         }
         Some(match self.result.as_str() {
             "pending" => "no evidence at head",
@@ -387,6 +397,10 @@ pub struct StatusReport {
     pub blocker_summary: BlockerSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_rejection_reason: Option<String>,
+    /// A declared audit debt is what let a self-approval stand. Only then is
+    /// the waiver an authorization input; otherwise it changed nothing.
+    #[serde(skip_serializing_if = "is_false")]
+    pub approval_waived_by_audit_debt: bool,
     pub next_action: String,
     pub ready_reason: String,
     pub ready_to_integrate: bool,
@@ -574,6 +588,7 @@ fn build_report(
         _ => false,
     };
 
+    let mut waiver_authorized_approval = false;
     let verdict = state.latest_verdict().map(|v| {
         let approved_patchset = latest_patchset
             .as_ref()
@@ -586,10 +601,21 @@ fn build_report(
         // forward where a query can find it — which is the only way a
         // single-operator change can ship at all when no independent reviewer
         // is reachable.
-        let rejected_self_approval = policy.policy.forbid_self_approval
-            && !state.audit_debt_waives_current_head()
+        let would_reject_self_approval = policy.policy.forbid_self_approval
             && approved_patchset
                 .is_some_and(|patchset| undeclared_or_self(patchset, v.effective_author(), v));
+        // The waiver only authorizes anything when it is what let the approval
+        // stand. Recording it otherwise would claim a merge rested on a waiver
+        // that changed nothing.
+        // Only an approval can be waived into validity. A waiver declared
+        // beside a changes-requested or comment-only verdict authorized
+        // nothing, and saying otherwise would report an approval that does
+        // not exist.
+        waiver_authorized_approval = v.verdict == Verdict::Approved
+            && would_reject_self_approval
+            && state.audit_debt_waives_current_head();
+        let rejected_self_approval =
+            would_reject_self_approval && !state.audit_debt_waives_current_head();
         let valid = v.verdict == Verdict::Approved
             && latest_patchset
                 .as_ref()
@@ -607,6 +633,7 @@ fn build_report(
             valid_for_current_head: valid,
         }
     });
+    let approval_waived_by_audit_debt = waiver_authorized_approval;
     let approval_rejection_reason = verdict.as_ref().and_then(|verdict| {
         (!verdict.valid_for_current_head
             && verdict.verdict == Verdict::Approved
@@ -698,7 +725,18 @@ fn build_report(
                 // are displayed and neither counts as green — throwing them
                 // away would push loops toward not recording at all, which is
                 // worse than recording them honestly.
-                green_at_head: evidence.is_some_and(|e| e.green_at_head()),
+                // Evidence is green for the command it ran, not for the
+                // gate's name. A declaration edited after the run describes a
+                // different check, and counting the old pass would let a gate
+                // nobody has run authorize a merge.
+                // The whole declaration, not just the command: a run under a
+                // laxer timeout is not evidence for a stricter one, and a run
+                // whose declared timeout is unknown cannot be shown to satisfy
+                // a declaration that has one.
+                green_at_head: evidence
+                    .is_some_and(|e| e.green_at_head() && matches_declaration(e, gate)),
+                declaration_changed: evidence
+                    .is_some_and(|e| e.green_at_head() && !matches_declaration(e, gate)),
                 attested: evidence.is_some_and(|e| e.attested),
                 tested_tree: evidence.and_then(|e| e.tested_tree.clone()),
                 worktree_dirty: evidence.and_then(|e| e.worktree_dirty),
@@ -945,6 +983,7 @@ fn build_report(
         probes: probe_statuses,
         blocker_summary,
         approval_rejection_reason,
+        approval_waived_by_audit_debt,
         next_action,
         ready_reason,
         ready_to_integrate: ready,
@@ -1133,6 +1172,14 @@ pub fn reviewer_coverage(state: &ChangeState) -> Vec<ReviewerCoverage> {
             .then_with(|| a.reviewer.cmp(&b.reviewer))
     });
     rows
+}
+
+/// Whether recorded evidence ran the gate as it is declared now.
+pub fn matches_declaration(
+    evidence: &crate::state::VerificationEntry,
+    gate: &crate::gates::Gate,
+) -> bool {
+    evidence.command == gate.command && evidence.timeout_seconds == gate.timeout
 }
 
 /// One advisory: something a lead should know before integrating, which is
