@@ -107,7 +107,10 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   was integrated. A bundle carries the store format it was written with, and an
   import refuses one from a newer arc rather than skipping lifecycle events it
   does not know — which would read a closed change as open. The same check runs
-  on every path that opens a store, not only the one that creates it. `arc
+  on every path that opens a store, not only the one that creates it, and a
+  ledger created by an older arc is stamped the moment something writes an
+  event that older arc would skip — not on every open, so a build that merely
+  read a ledger never locks its owner out of it. `arc
   status` reports which happened as `closure.integration`: `guarded`,
   `asserted`, or `legacy-unclassified` for closures written before the two
   could be told apart. `change-closed` now carries only `abandoned` and

@@ -387,6 +387,7 @@ impl Store {
     /// a ULID event ID indicates a real bug and fails loudly.
     pub fn append_event(&self, event: &Event) -> Result<()> {
         self.refuse_undeclared_author(event)?;
+        self.stamp_format_for(&event.payload)?;
         ids::validate_id_component(&event.change_id)?;
         ids::validate_id_component(&event.event_id)?;
         let dir = self.events_dir(&event.change_id);
@@ -396,6 +397,33 @@ impl Store {
         body.push(b'\n');
         write_exclusive(&path, &body)
             .with_context(|| format!("event {} already exists", event.event_id))
+    }
+
+    /// Record that this store now holds events an older build would skip.
+    ///
+    /// The format barrier only works if the store says which format it is. A
+    /// ledger created by an older arc keeps its stamp until something writes
+    /// an event that older arc would not understand — and a skipped lifecycle
+    /// event is how a closed change gets read as open and closed a second way.
+    /// Stamping at that moment, rather than on every open, means a build that
+    /// only read a ledger never locks its owner out of it.
+    fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
+        let introduced_in = match payload {
+            Payload::ChangeIntegrated { .. } | Payload::IntegrationAsserted { .. } => 2,
+            _ => return Ok(()),
+        };
+        let config_path = self.root.join("config.json");
+        let mut cfg: StoreConfig = serde_json::from_slice(&fs::read(&config_path)?)
+            .context("malformed arc config.json")?;
+        if cfg.schema_version >= introduced_in {
+            return Ok(());
+        }
+        cfg.schema_version = introduced_in;
+        let body = serde_json::to_vec_pretty(&cfg)?;
+        let temporary = config_path.with_extension(format!("json.{}", ids::new_event_id()));
+        fs::write(&temporary, &body)?;
+        fs::rename(&temporary, &config_path)
+            .with_context(|| format!("cannot stamp store format in {}", config_path.display()))
     }
 
     /// Under `require_declared_actor`, refuse to record an event whose author

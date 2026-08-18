@@ -1047,6 +1047,12 @@ fn guarded_and_asserted_integrations_have_distinct_event_types_and_targets() {
     let status = json_stdout(repo.arc(&repo.root).args(["status", "guarded", "--json"]));
     assert_eq!(status["closure"]["integration"], "guarded", "{status}");
 
+    // The store now holds an event an older build would skip, so it says so.
+    // A barrier nothing stamps protects only stores this build created.
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
+    assert_eq!(config["schema_version"], 2, "{config}");
+
     // Asserted: somebody else merged it, and says so afterwards.
     stdout(repo.arc(&repo.root).args(["begin", "asserted"]));
     let asserted_worktree = repo.home.join(".worktrees/repo-asserted");
