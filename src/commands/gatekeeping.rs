@@ -1079,6 +1079,12 @@ pub fn release_hold(
 /// Resolve a hold reference to an exact active hold event, accepting a unique
 /// prefix the way every other event reference in the CLI does.
 fn resolve_hold(state: &ChangeState, reference: &str, change_id: &str) -> Result<String> {
+    // An unset shell variable expands to the empty string, which every ID is
+    // a prefix of. Releasing a hold by accident is exactly what the identity
+    // exists to prevent.
+    if reference.is_empty() {
+        bail!("name the hold to release; an empty reference matches every hold");
+    }
     let matches: Vec<&String> = state
         .holds
         .keys()

@@ -48,6 +48,10 @@ pub struct InboxRow {
     /// Seconds elapsed in the active claim stage when this is a claim-backed row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub age_seconds: Option<u64>,
+    /// Every active hold when this is a held row. A row that cannot name the
+    /// hold cannot be acted on: releasing one names the event that set it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub holds: Vec<crate::status::HoldEntry>,
 }
 
 /// The `arc-inbox/3` rollup: a lead-facing queue derived entirely from
@@ -126,6 +130,7 @@ impl Inbox {
             owner: None,
             stage: None,
             age_seconds: None,
+            holds: Vec::new(),
         };
         let claim_row = |claim: &ClaimStatus| {
             let next_actor = if claim.owner.harness.is_empty() {
@@ -142,11 +147,14 @@ impl Inbox {
                 owner: Some(claim.owner.clone()),
                 stage: Some(claim.stage.clone()),
                 age_seconds: Some(claim.age_seconds),
+                holds: Vec::new(),
             }
         };
 
         if !report.holds.is_empty() {
-            self.held.push(row("lead"));
+            let mut held = row("lead");
+            held.holds = report.holds.clone();
+            self.held.push(held);
         }
         if report.blocker_status.blocked {
             self.blocked.push(row("wait"));
@@ -208,6 +216,7 @@ impl Inbox {
             owner: None,
             stage: None,
             age_seconds: None,
+            holds: Vec::new(),
         });
     }
 }

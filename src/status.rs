@@ -222,8 +222,8 @@ pub struct FindingSummary {
 #[derive(Debug, Serialize)]
 pub struct HoldSummary {
     pub active: bool,
-    /// Every active hold, oldest first. Holds are independent, so a caller
-    /// that acts on one has not cleared the others.
+    /// Every active hold, in event-ID order. Holds are independent, so a
+    /// caller that acts on one has not cleared the others.
     pub reasons: Vec<HoldEntry>,
 }
 
@@ -241,7 +241,7 @@ fn hold_entries(state: &ChangeState) -> Vec<HoldEntry> {
 
 /// One active hold, named by the event that set it so a release can lift
 /// exactly that one.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HoldEntry {
     pub hold_event_id: String,
     pub reason: String,

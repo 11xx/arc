@@ -489,7 +489,7 @@ pub struct ChangeState {
     pub claim: Option<ClaimState>,
     #[serde(skip)]
     pub(crate) retired_claim_ids: BTreeSet<String>,
-    /// Active holds by the `HoldSet` event that set them, oldest first. Two
+    /// Active holds, keyed by the `HoldSet` event that set them. Two
     /// collaborators hold independently: neither replaces the other's, and a
     /// release names the one it lifts.
     pub holds: BTreeMap<String, HoldState>,
@@ -1319,7 +1319,15 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             // ledgers truthful rather than leaving holds nobody can lift.
             Payload::HoldReleased { hold_event_id, .. } => match hold_event_id {
                 Some(id) => {
-                    state.holds.remove(id);
+                    // Silently ignoring an unknown reference would let a
+                    // forward-referencing or foreign-change release leave a
+                    // hold active while claiming it was lifted.
+                    if state.holds.remove(id).is_none() {
+                        bail!(
+                            "hold release {} names {id}, which is not an active hold",
+                            ev.event_id
+                        );
+                    }
                 }
                 None => state.holds.clear(),
             },
@@ -1734,7 +1742,12 @@ mod tests {
         ));
         let state = reduce(&events).unwrap();
         assert_eq!(state.holds.len(), 2);
-        let first = state.holds.keys().next().unwrap().clone();
+        // The identity is the setting event's own ID, not a key the reducer
+        // invented: that is what makes it nameable from outside the reducer.
+        let first = events[1].event_id.clone();
+        let second = events[2].event_id.clone();
+        assert!(state.holds.contains_key(&first));
+        assert!(state.holds.contains_key(&second));
 
         events.push(ev(
             change,
@@ -1746,6 +1759,20 @@ mod tests {
         let state = reduce(&events).unwrap();
         assert_eq!(state.holds.len(), 1);
         assert!(!state.holds.contains_key(&first));
+        assert!(state.holds.contains_key(&second));
+
+        // A release naming a hold that is not active is a contradiction in the
+        // ledger, not a no-op: accepting it would report a hold as lifted
+        // while it stayed in force.
+        let mut broken = events.clone();
+        broken.push(ev(
+            change,
+            Payload::HoldReleased {
+                hold_event_id: Some(first.clone()),
+                reason: None,
+            },
+        ));
+        assert!(reduce(&broken).is_err());
 
         events.push(ev(
             change,

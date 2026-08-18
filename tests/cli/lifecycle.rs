@@ -729,10 +729,7 @@ fn hold_blocks_integration() {
 #[test]
 fn independent_holds_release_by_event_id() {
     let repo = Repo::new();
-    stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "two-holds", "--no-worktree"]),
-    );
+    stdout(repo.arc(&repo.root).args(["begin", "two-holds"]));
     let hold_id = |out: String| {
         out.split_whitespace()
             .nth(1)
@@ -752,6 +749,63 @@ fn independent_holds_release_by_event_id() {
         "release manager waiting on a dependency",
     ])));
     assert_ne!(reviewer, release_manager);
+
+    // The printed identity is the HoldSet event itself, not a key arc made up.
+    let set_events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "two-holds",
+        "--type",
+        "hold-set",
+    ]));
+    let ids: Vec<String> = set_events
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["event_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(ids, vec![reviewer.clone(), release_manager.clone()]);
+
+    // An unset shell variable expands to an empty string, which is a prefix of
+    // every hold. Releasing one by accident is what identity exists to stop.
+    repo.arc(&repo.root)
+        .args(["release-hold", "two-holds", ""])
+        .assert()
+        .failure();
+
+    // With something to integrate, the hold is what the next action names —
+    // and it names which hold, because there are two.
+    repo.commit(
+        &repo.home.join(".worktrees/repo-two-holds"),
+        "work.rs",
+        "done\n",
+        "feat: work",
+    );
+    stdout(
+        repo.arc(&repo.home.join(".worktrees/repo-two-holds"))
+            .args(["snapshot", "two-holds"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["review", "two-holds", "--verdict", "approved"]),
+    );
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "two-holds"]));
+    assert_eq!(
+        status["next_action"],
+        format!("release_hold:{reviewer}"),
+        "{status}"
+    );
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    let held = inbox["held"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["change_id"].as_str().unwrap().starts_with("two-holds"))
+        .expect("held row");
+    assert_eq!(held["holds"].as_array().unwrap().len(), 2, "{inbox}");
 
     let status = json_stdout(repo.arc(&repo.root).args(["status", "two-holds"]));
     assert_eq!(status["holds"].as_array().unwrap().len(), 2, "{status}");
