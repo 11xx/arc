@@ -846,7 +846,7 @@ fn blocker_label(state: &ChangeState, states: &BTreeMap<String, ChangeState>) ->
     if !state.open_blocking_findings().is_empty() {
         return format!("{} findings", state.open_blocking_findings().len());
     }
-    if state.hold.is_some() {
+    if !state.holds.is_empty() {
         return "hold".into();
     }
     "—".into()

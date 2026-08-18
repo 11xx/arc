@@ -145,7 +145,7 @@ impl Inbox {
             }
         };
 
-        if report.hold.is_some() {
+        if !report.holds.is_empty() {
             self.held.push(row("lead"));
         }
         if report.blocker_status.blocked {

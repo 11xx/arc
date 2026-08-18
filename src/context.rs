@@ -466,7 +466,11 @@ pub fn prompt(ctx: &Ctx, reference: Option<&str>) -> Result<()> {
         stage,
         verdict,
         gates,
-        if state.hold.is_some() { " [hold]" } else { "" }
+        if state.holds.is_empty() {
+            ""
+        } else {
+            " [hold]"
+        }
     );
     Ok(())
 }

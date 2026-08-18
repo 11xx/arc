@@ -700,10 +700,15 @@ fn hold_blocks_integration() {
         .assert()
         .success();
 
-    repo.arc(&wt)
-        .args(["hold", "fix-h", "--reason", "manual testing first"])
-        .assert()
-        .success();
+    let held = stdout(
+        repo.arc(&wt)
+            .args(["hold", "fix-h", "--reason", "manual testing first"]),
+    );
+    let hold_id = held
+        .split_whitespace()
+        .nth(1)
+        .expect("hold prints the event that identifies it")
+        .to_string();
     repo.arc(&wt).args(["check", "fix-h"]).assert().code(4);
     repo.arc(&repo.root)
         .args(["integrate", "fix-h"])
@@ -711,10 +716,101 @@ fn hold_blocks_integration() {
         .code(4);
 
     repo.arc(&wt)
-        .args(["release-hold", "fix-h"])
+        .args(["release-hold", "fix-h", &hold_id])
         .assert()
         .success();
     repo.arc(&wt).args(["check", "fix-h"]).assert().success();
+}
+
+/// Holds are coordination, not a single switch. Two collaborators must be able
+/// to hold the same change for unrelated reasons, and either one releasing must
+/// leave the other's in force — otherwise the second hold silently erased the
+/// first, and releasing erased both.
+#[test]
+fn independent_holds_release_by_event_id() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "two-holds", "--no-worktree"]),
+    );
+    let hold_id = |out: String| {
+        out.split_whitespace()
+            .nth(1)
+            .expect("hold prints the event that identifies it")
+            .to_string()
+    };
+    let reviewer = hold_id(stdout(repo.arc(&repo.root).args([
+        "hold",
+        "two-holds",
+        "--reason",
+        "reviewer waiting on the user",
+    ])));
+    let release_manager = hold_id(stdout(repo.arc(&repo.root).args([
+        "hold",
+        "two-holds",
+        "--reason",
+        "release manager waiting on a dependency",
+    ])));
+    assert_ne!(reviewer, release_manager);
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "two-holds"]));
+    assert_eq!(status["holds"].as_array().unwrap().len(), 2, "{status}");
+    assert_eq!(
+        status["blocker_summary"]["hold"]["active"], true,
+        "{status}"
+    );
+    assert_eq!(
+        status["blocker_summary"]["hold"]["reasons"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "{status}"
+    );
+
+    // Releasing one leaves the other in force, and the change stays held.
+    repo.arc(&repo.root)
+        .args(["release-hold", "two-holds", &reviewer])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "two-holds"]));
+    let holds = status["holds"].as_array().unwrap();
+    assert_eq!(holds.len(), 1, "{status}");
+    assert_eq!(holds[0]["hold_event_id"], release_manager, "{status}");
+    assert_eq!(
+        holds[0]["reason"], "release manager waiting on a dependency",
+        "{status}"
+    );
+    let check = String::from_utf8(
+        repo.arc(&repo.root)
+            .args(["check", "two-holds"])
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .unwrap();
+    assert!(check.contains(&release_manager), "{check}");
+    assert!(!check.contains(&reviewer), "{check}");
+
+    // A release naming a hold that is not active is refused rather than
+    // guessing which one was meant.
+    repo.arc(&repo.root)
+        .args(["release-hold", "two-holds", &reviewer])
+        .assert()
+        .failure();
+
+    repo.arc(&repo.root)
+        .args(["release-hold", "two-holds", &release_manager])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "two-holds"]));
+    assert!(status["holds"].as_array().unwrap().is_empty(), "{status}");
+    assert_eq!(
+        status["blocker_summary"]["hold"]["active"], false,
+        "{status}"
+    );
 }
 
 /// A declared gate that never ran (or failed) blocks with exit 5; a pass
@@ -1118,10 +1214,15 @@ fn closed_change_append_policy_matches_command_families() {
         .args(["claim", "closed-policy"])
         .assert()
         .success();
-    repo.arc(&repo.root)
-        .args(["hold", "closed-policy", "--reason", "operator pause"])
-        .assert()
-        .success();
+    let hold_id =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["hold", "closed-policy", "--reason", "operator pause"]),
+        )
+        .split_whitespace()
+        .nth(1)
+        .expect("hold prints the event that identifies it")
+        .to_string();
     let comment = stdout(repo.arc(&repo.root).args([
         "comment",
         "closed-policy",
@@ -1188,6 +1289,7 @@ fn closed_change_append_policy_matches_command_families() {
         .args([
             "release-hold",
             "closed-policy",
+            &hold_id,
             "--reason",
             "closure ended liveness",
         ])

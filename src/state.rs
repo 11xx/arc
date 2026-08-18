@@ -424,6 +424,16 @@ pub struct MessageEntry {
     pub created_at: DateTime<Utc>,
 }
 
+/// One active hold, identified by the event that set it. Holds accumulate:
+/// releasing one leaves every other in place.
+#[derive(Debug, Clone, Serialize)]
+pub struct HoldState {
+    pub hold_event_id: String,
+    pub reason: String,
+    pub held_by: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ClosureState {
     pub outcome: Closure,
@@ -479,7 +489,10 @@ pub struct ChangeState {
     pub claim: Option<ClaimState>,
     #[serde(skip)]
     pub(crate) retired_claim_ids: BTreeSet<String>,
-    pub hold: Option<String>,
+    /// Active holds by the `HoldSet` event that set them, oldest first. Two
+    /// collaborators hold independently: neither replaces the other's, and a
+    /// release names the one it lifts.
+    pub holds: BTreeMap<String, HoldState>,
     pub closure: Option<ClosureState>,
     pub forge: crate::forge::ForgeState,
 }
@@ -602,7 +615,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     verification_runs: Vec::new(),
                     claim: None,
                     retired_claim_ids: BTreeSet::new(),
-                    hold: None,
+                    holds: BTreeMap::new(),
                     closure: None,
                     forge: crate::forge::ForgeState::default(),
                 },
@@ -1290,8 +1303,26 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     },
                 )?;
             }
-            Payload::HoldSet { reason } => state.hold = Some(reason.clone()),
-            Payload::HoldReleased { .. } => state.hold = None,
+            Payload::HoldSet { reason } => {
+                state.holds.insert(
+                    ev.event_id.clone(),
+                    HoldState {
+                        hold_event_id: ev.event_id.clone(),
+                        reason: reason.clone(),
+                        held_by: ev.actor.clone(),
+                        created_at: ev.created_at,
+                    },
+                );
+            }
+            // A release naming no hold predates hold identity, where releasing
+            // meant releasing everything. Honouring that keeps replay of old
+            // ledgers truthful rather than leaving holds nobody can lift.
+            Payload::HoldReleased { hold_event_id, .. } => match hold_event_id {
+                Some(id) => {
+                    state.holds.remove(id);
+                }
+                None => state.holds.clear(),
+            },
             Payload::ChangeClosed {
                 outcome,
                 integrated_commit,
@@ -1682,19 +1713,48 @@ mod tests {
         assert!(!f2.blocks_integration());
     }
 
+    /// Two collaborators hold independently: releasing one leaves the other
+    /// in place, and only a release that names no hold — which is how every
+    /// event written before holds had identity looks — clears everything.
     #[test]
-    fn hold_toggles() {
+    fn holds_are_independent_and_a_legacy_release_still_clears_all() {
         let change = "fix-abc123";
         let mut events = vec![opened(change)];
         events.push(ev(
             change,
             Payload::HoldSet {
-                reason: "testing".into(),
+                reason: "reviewer waiting on the user".into(),
             },
         ));
-        assert!(reduce(&events).unwrap().hold.is_some());
-        events.push(ev(change, Payload::HoldReleased { reason: None }));
-        assert!(reduce(&events).unwrap().hold.is_none());
+        events.push(ev(
+            change,
+            Payload::HoldSet {
+                reason: "release manager waiting on a dependency".into(),
+            },
+        ));
+        let state = reduce(&events).unwrap();
+        assert_eq!(state.holds.len(), 2);
+        let first = state.holds.keys().next().unwrap().clone();
+
+        events.push(ev(
+            change,
+            Payload::HoldReleased {
+                hold_event_id: Some(first.clone()),
+                reason: None,
+            },
+        ));
+        let state = reduce(&events).unwrap();
+        assert_eq!(state.holds.len(), 1);
+        assert!(!state.holds.contains_key(&first));
+
+        events.push(ev(
+            change,
+            Payload::HoldReleased {
+                hold_event_id: None,
+                reason: None,
+            },
+        ));
+        assert!(reduce(&events).unwrap().holds.is_empty());
     }
 
     #[test]

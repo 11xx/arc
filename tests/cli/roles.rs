@@ -34,7 +34,7 @@ fn implementer_role_refuses_lead_owned_commands_without_appending_events() {
         (
             "release-hold",
             "reviewer or lead",
-            vec!["release-hold", "role-guard"],
+            vec!["release-hold", "role-guard", "01HOLD"],
         ),
         ("close", "lead", vec!["close", "role-guard", "--abandoned"]),
         ("integrate", "lead", vec!["integrate", "role-guard"]),

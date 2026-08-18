@@ -1054,7 +1054,12 @@ fn verification_gate_can_mutate_arc_state_without_lock_reentry_deadlock() {
         "--json",
     ])))
     .unwrap();
-    assert_eq!(state["hold"], "gate-self-mutation");
+    let holds = state["holds"].as_object().expect("holds map");
+    assert_eq!(holds.len(), 1);
+    assert_eq!(
+        holds.values().next().unwrap()["reason"],
+        "gate-self-mutation"
+    );
     assert_eq!(state["verifications"].as_array().unwrap().len(), 1);
 }
 
