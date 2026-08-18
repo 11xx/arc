@@ -169,6 +169,20 @@ fn plan_repository_events(
         }
         incoming.insert(event_id.to_string(), bytes);
     }
+    // Two events with different IDs can still disagree about one revision, and
+    // no per-event check sees that. The combined map is the thing that has to
+    // hold together, so it is built before anything is written.
+    let mut combined = store.load_repository_events()?;
+    for value in &validated.bundle.repository_events {
+        if let Some(event) = crate::bundle::parse_typed_event(value)? {
+            if !combined.iter().any(|held| held.event_id == event.event_id) {
+                combined.push(event);
+            }
+        }
+    }
+    combined.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+    crate::rewrite::RewriteMap::from_events(combined.iter())
+        .context("the bundle's rewrites contradict this repository's; nothing was imported")?;
     Ok(incoming)
 }
 

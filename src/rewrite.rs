@@ -50,8 +50,16 @@ pub struct RewriteMap {
 
 impl RewriteMap {
     pub fn load(store: &Store) -> Result<Self> {
+        Self::from_events(store.load_repository_events()?.iter())
+    }
+
+    /// The same map, built from a given sequence of events. Import uses it to
+    /// judge the combination of what a bundle carries and what is already
+    /// here — two events with different IDs can still disagree about one
+    /// revision, which no per-event check can see.
+    pub fn from_events<'a>(events: impl Iterator<Item = &'a crate::model::Event>) -> Result<Self> {
         let mut steps: BTreeMap<String, Option<String>> = BTreeMap::new();
-        for event in store.load_repository_events()? {
+        for event in events {
             if let Payload::HistoryRewritten { mapping, .. } = &event.payload {
                 for (old, new) in mapping {
                     // Two rewrites may each move a revision — that is a chain,
@@ -323,6 +331,41 @@ mod tests {
     fn a_conflicting_duplicate_is_refused() {
         assert!(parse_commit_map("aaaaaaaaaa bbbbbbbbbb\naaaaaaaaaa cccccccccc\n").is_err());
         assert!(parse_commit_map("aaaaaaaaaa bbbbbbbbbb\naaaaaaaaaa bbbbbbbbbb\n").is_ok());
+    }
+
+    /// Two events, two IDs, one revision, two answers. Neither event is
+    /// wrong on its own, which is exactly why the combination has to be
+    /// judged rather than each event in turn.
+    #[test]
+    fn separate_events_that_disagree_about_one_revision_are_refused() {
+        let event = |id: &str, old: &str, new: &str| crate::model::Event {
+            schema_version: crate::model::SCHEMA_VERSION,
+            event_id: id.to_string(),
+            repository_id: "repo".into(),
+            change_id: crate::store::Store::REPOSITORY_SCOPE.to_string(),
+            actor: "tester".into(),
+            actor_source: None,
+            harness: None,
+            session: None,
+            on_behalf_of: None,
+            created_at: chrono::Utc::now(),
+            payload: Payload::HistoryRewritten {
+                mapping: BTreeMap::from([(old.to_string(), Some(new.to_string()))]),
+                reason: "test".into(),
+                tool: None,
+            },
+        };
+        let agreeing = [
+            event("01A", "aaaaaaaaaa", "bbbbbbbbbb"),
+            event("01B", "aaaaaaaaaa", "bbbbbbbbbb"),
+        ];
+        assert!(RewriteMap::from_events(agreeing.iter()).is_ok());
+
+        let disagreeing = [
+            event("01A", "aaaaaaaaaa", "bbbbbbbbbb"),
+            event("01B", "aaaaaaaaaa", "cccccccccc"),
+        ];
+        assert!(RewriteMap::from_events(disagreeing.iter()).is_err());
     }
 
     #[test]
