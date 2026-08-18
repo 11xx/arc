@@ -521,9 +521,16 @@ impl ChangeState {
         self.briefs.last()
     }
 
-    /// Who wrote the brief the work was done from, when there is one.
-    pub fn brief_author(&self) -> Option<&str> {
-        self.latest_brief().map(|brief| brief.actor.as_str())
+    /// Who wrote the brief a patchset was built from, read the same way a
+    /// verdict's identity is: a lead acting for an executor is that executor
+    /// on both sides, or the comparison compares different things.
+    ///
+    /// Bound to the patchset rather than to the newest brief, because a brief
+    /// version recorded after the snapshot describes work this patchset is
+    /// not.
+    pub fn brief_author_for(&self, patchset: &Patchset) -> Option<&str> {
+        self.brief_for(patchset)
+            .map(|brief| brief.on_behalf_of.as_deref().unwrap_or(&brief.actor))
     }
 
     /// Whether every verdict identity in some window came from the brief's
@@ -535,9 +542,10 @@ impl ChangeState {
     /// caller chose decides which verdicts that covers.
     pub fn reviewed_only_by_brief_author<'a>(
         &self,
+        patchset: &Patchset,
         identities: impl IntoIterator<Item = &'a str>,
     ) -> Option<bool> {
-        let author = self.brief_author()?;
+        let author = self.brief_author_for(patchset)?;
         let mut identities = identities.into_iter().peekable();
         identities.peek()?;
         Some(identities.all(|identity| identity == author))

@@ -1197,13 +1197,24 @@ pub fn advisories(
     // Saying it before integration is the point of an advisory: arc reports
     // that the identity which briefed the work is the only one that approved
     // it, and infers nothing about whether that was independent.
-    let covering_reviewers = review_map
+    // Verdicts on the patchset that is shipping — not the review map, whose
+    // rows count a reviewer's whole history. A reviewer who approved an
+    // earlier patchset and only filed a finding on this one has approved
+    // nothing here, and one who filed only findings has approved nothing at
+    // all; counting either would answer a question about the wrong window.
+    let covering_reviewers = state
+        .verdicts
         .iter()
-        .filter(|row| row.covers_final)
-        .map(|row| row.reviewer.as_str());
+        .filter(|verdict| verdict.patchset_id == final_patchset.id)
+        .map(|verdict| {
+            verdict
+                .on_behalf_of
+                .as_deref()
+                .unwrap_or(verdict.actor.as_str())
+        });
     if let (Some(author), Some(true)) = (
-        state.brief_author(),
-        state.reviewed_only_by_brief_author(covering_reviewers),
+        state.brief_author_for(final_patchset),
+        state.reviewed_only_by_brief_author(final_patchset, covering_reviewers),
     ) {
         warnings.push(Advisory {
             code: "brief-author-only-review",

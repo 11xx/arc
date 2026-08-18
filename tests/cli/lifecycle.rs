@@ -938,6 +938,49 @@ fn brief_author_only_review_warns_but_remains_integrate_ready() {
         .args(["check", "briefed"])
         .assert()
         .code(0);
+
+    // A brief version recorded after the snapshot describes work this patchset
+    // is not, so it cannot change who briefed what shipped.
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Someone Else").args([
+        "brief",
+        "briefed",
+        "--body-file",
+        "-",
+        "--cause-note",
+        "a later correction nobody re-snapshotted against",
+    ]));
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "briefed", "--json"]));
+    assert!(
+        status["advisories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|advisory| advisory["code"] == "brief-author-only-review"
+                && advisory["detail"].as_str().unwrap().contains("Lead")),
+        "{status}"
+    );
+
+    // A reviewer who filed only a finding on this patchset has approved
+    // nothing here, so it neither silences the advisory nor lets it claim a
+    // verdict that does not exist — whatever that reviewer approved earlier.
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Finder").args([
+        "finding",
+        "briefed",
+        "--summary",
+        "a note, not a verdict",
+        "--severity",
+        "minor",
+    ]));
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "briefed", "--json"]));
+    assert!(
+        status["advisories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|advisory| advisory["code"] == "brief-author-only-review"),
+        "{status}"
+    );
+
     repo.arc(&repo.root)
         .args(["integrate", "briefed"])
         .assert()
