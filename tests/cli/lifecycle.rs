@@ -615,7 +615,7 @@ fn conflicting_target_movement_requires_rebase_before_integration() {
         .code(11);
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "conflict-r"]))).unwrap();
-    assert_eq!(status["schema"], "arc-status/8");
+    assert_eq!(status["schema"], "arc-status/9");
     assert_eq!(status["needs_rebase"], true);
     assert!(status["blockers"]
         .as_array()
@@ -880,6 +880,122 @@ fn independent_holds_release_by_event_id() {
     );
 }
 
+/// The review map makes review-only-by-the-brief-author visible after the
+/// fact; saying it before integration is the point of an advisory. It must
+/// stay an advisory: an orchestrator's review is a valid review unless a
+/// project's policy says otherwise, so this never moves readiness or the exit
+/// code.
+#[test]
+fn brief_author_only_review_warns_but_remains_integrate_ready() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "briefed"]));
+    let worktree = repo.home.join(".worktrees/repo-briefed");
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Lead").args([
+        "brief",
+        "briefed",
+        "--body-file",
+        "-",
+    ]));
+    repo.commit(&worktree, "work.rs", "done\n", "feat: work");
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "Executor")
+            .args(["snapshot", "briefed"]),
+    );
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Lead").args([
+        "review",
+        "briefed",
+        "--verdict",
+        "approved",
+    ]));
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "briefed", "--json"]));
+    let advisories = status["advisories"].as_array().unwrap();
+    assert!(
+        advisories
+            .iter()
+            .any(|advisory| advisory["code"] == "brief-author-only-review"
+                && advisory["detail"].as_str().unwrap().contains("Lead")),
+        "{status}"
+    );
+    // The identities differ, so nothing here claims the review was not
+    // independent — only that one identity wrote the brief and the verdict.
+    assert_eq!(status["integrate_ready"], true, "{status}");
+
+    let check = json_stdout(repo.arc(&repo.root).args(["check", "briefed", "--json"]));
+    assert_eq!(check["schema"], "arc-check/2", "{check}");
+    assert_eq!(check["ready"], true, "{check}");
+    assert_eq!(check["exit_code"], 0, "{check}");
+    assert!(
+        check["advisories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|advisory| advisory["code"] == "brief-author-only-review"),
+        "{check}"
+    );
+    repo.arc(&repo.root)
+        .args(["check", "briefed"])
+        .assert()
+        .code(0);
+
+    // A brief version recorded after the snapshot describes work this patchset
+    // is not, so it cannot change who briefed what shipped.
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Someone Else").args([
+        "brief",
+        "briefed",
+        "--body-file",
+        "-",
+        "--cause-note",
+        "a later correction nobody re-snapshotted against",
+    ]));
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "briefed", "--json"]));
+    assert!(
+        status["advisories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|advisory| advisory["code"] == "brief-author-only-review"
+                && advisory["detail"].as_str().unwrap().contains("Lead")),
+        "{status}"
+    );
+
+    // A reviewer who filed only a finding on this patchset has approved
+    // nothing here, so it neither silences the advisory nor lets it claim a
+    // verdict that does not exist — whatever that reviewer approved earlier.
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Finder").args([
+        "finding",
+        "briefed",
+        "--summary",
+        "a note, not a verdict",
+        "--severity",
+        "minor",
+    ]));
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "briefed", "--json"]));
+    assert!(
+        status["advisories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|advisory| advisory["code"] == "brief-author-only-review"),
+        "{status}"
+    );
+
+    // A tagged preflight is read before `integrate --tag`, so it carries the
+    // advisories too.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["metadata", "briefed", "--tag", "series"]),
+    );
+    let tagged = stdout(repo.arc(&repo.root).args(["check", "--tag", "series"]));
+    assert!(tagged.contains("brief-author-only-review"), "{tagged}");
+
+    repo.arc(&repo.root)
+        .args(["integrate", "briefed"])
+        .assert()
+        .success();
+}
+
 /// A declared gate that never ran (or failed) blocks with exit 5; a pass
 /// at the exact head unblocks.
 #[test]
@@ -1052,7 +1168,7 @@ fn status_projection_and_stage_note_file_read_stdin() {
         .args(["status", "projected", "--get", "schema"])
         .assert()
         .success()
-        .stdout("arc-status/8\n");
+        .stdout("arc-status/9\n");
 
     repo.arc(&wt)
         .args([

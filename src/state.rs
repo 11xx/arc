@@ -521,6 +521,36 @@ impl ChangeState {
         self.briefs.last()
     }
 
+    /// Who wrote the brief a patchset was built from, read the same way a
+    /// verdict's identity is: a lead acting for an executor is that executor
+    /// on both sides, or the comparison compares different things.
+    ///
+    /// Bound to the patchset rather than to the newest brief, because a brief
+    /// version recorded after the snapshot describes work this patchset is
+    /// not.
+    pub fn brief_author_for(&self, patchset: &Patchset) -> Option<&str> {
+        self.brief_for(patchset)
+            .map(|brief| brief.on_behalf_of.as_deref().unwrap_or(&brief.actor))
+    }
+
+    /// Whether every verdict identity in some window came from the brief's
+    /// author. `None` when there is no brief, or no verdict to attribute.
+    ///
+    /// This asserts nothing about independence — arc cannot know that a
+    /// reviewer directed the work. It reports that the identity which wrote
+    /// the brief is the only one that recorded a verdict, and the window the
+    /// caller chose decides which verdicts that covers.
+    pub fn reviewed_only_by_brief_author<'a>(
+        &self,
+        patchset: &Patchset,
+        identities: impl IntoIterator<Item = &'a str>,
+    ) -> Option<bool> {
+        let author = self.brief_author_for(patchset)?;
+        let mut identities = identities.into_iter().peekable();
+        identities.peek()?;
+        Some(identities.all(|identity| identity == author))
+    }
+
     /// The latest verdict overall; validity against the current head is
     /// a Git-time question answered by the status layer.
     pub fn latest_verdict(&self) -> Option<&VerdictEntry> {

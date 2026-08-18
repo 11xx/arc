@@ -297,23 +297,28 @@ fn review_map_names_the_reviewer_that_never_saw_the_final_patchset() {
     assert_eq!(row["covers_final"], false);
     assert_eq!(row["last_patchset"], "ps-01");
 
-    let warnings = status["coverage_warnings"].as_array().unwrap();
+    let advisories = status["advisories"].as_array().unwrap();
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.as_str().unwrap().contains("Reviewer last saw ps-01")),
-        "{warnings:?}"
+        advisories.iter().any(|advisory| {
+            advisory["code"] == "reviewer-behind-final-patchset"
+                && advisory["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Reviewer last saw ps-01")
+        }),
+        "{advisories:?}"
     );
 
     // Advisory only: thin coverage never becomes a blocker.
     let check = json_stdout(repo.arc(&repo.root).args(["check", "drifted", "--json"]));
-    assert!(check["coverage_warnings"]
+    assert_eq!(check["schema"], "arc-check/2", "{check}");
+    assert!(check["advisories"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|w| w.as_str().unwrap().contains("ps-01")));
+        .any(|advisory| advisory["detail"].as_str().unwrap().contains("ps-01")));
     let text = stdout(repo.arc(&repo.root).args(["check", "drifted"]));
-    assert!(text.contains("Review coverage:"), "{text}");
+    assert!(text.contains("Advisories (never blocking):"), "{text}");
 }
 
 #[test]
@@ -406,12 +411,16 @@ fn unattributed_reviewer_is_reported_as_unknown_not_as_independence() {
     assert_eq!(row["covers_final"], true);
     assert_eq!(row["is_author"], true);
     assert_eq!(row["attribution_unknown"], true);
-    let warnings = status["coverage_warnings"].as_array().unwrap();
+    let advisories = status["advisories"].as_array().unwrap();
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.as_str().unwrap().contains("distinguishable")),
-        "{warnings:?}"
+        advisories.iter().any(|advisory| {
+            advisory["code"] == "reviewer-attribution-unknown"
+                && advisory["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("distinguishable")
+        }),
+        "{advisories:?}"
     );
 }
 

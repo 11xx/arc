@@ -299,7 +299,7 @@ condition is reached, with a JSON diagnostic containing the winning
 watch conditions are checked in their supplied order and the first reached
 condition wins.
 
-`arc status <change>` prints the versioned `arc-status/8` JSON report —
+`arc status <change>` prints the versioned `arc-status/9` JSON report —
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, claim owner/activity/stage timing, snapshot
 provenance, a blocker summary, a machine-readable `next_action`, an additive
@@ -683,7 +683,7 @@ worktree, the advice is the rerun. Once the tree is clean the advice
 becomes `run_gate:<gate>`, since
 evidence already recorded cannot be repaired by cleaning; only a fresh run
 replaces it. The `clean_worktree:<gate>` action arrived in `arc-status/7`;
-the current schema is `arc-status/8`.
+the current schema is `arc-status/9`.
 
 Executed gates capture combined stdout and stderr, retaining only the final
 4096 bytes. Failed-gate tails appear in `arc show` and `arc status`; successful
@@ -853,12 +853,20 @@ of corrections ship unseen — an identity comparison reads that as clean.
 
 So arc derives a **review map**: for every identity that filed a verdict or
 finding, the newest patchset it saw, and whether that is the final one. `arc
-status --json` carries it as `review_map`, `arc show` renders it, and `arc
-check` prints warnings like `Reviewer last saw ps-07; integrating ps-11`. These
-never block — plenty of changes legitimately ship with a single reviewer. A
-reviewer that cannot be told apart from the patchset author (neither side
-recorded `--on-behalf-of`) is reported as unknown attribution rather than
-counted as independent or as self-review.
+status --json` carries it as `review_map`, and `arc show` renders it.
+
+What that map implies is reported as **advisories**: `arc status --json` and
+`arc check --json` (`arc-check/2`) carry `advisories`, each a stable `code`
+with a `detail` line, and `arc check` prints them under `Advisories (never
+blocking)`. The codes are `reviewer-behind-final-patchset`
+(`Reviewer last saw ps-07; integrating ps-11`), `no-independent-reviewer`,
+`reviewer-attribution-unknown`, `brief-author-only-review`, and
+`audit-debt-outstanding`. None of them changes readiness or the exit code:
+plenty of changes legitimately ship with a single reviewer, and an
+orchestrator's review is a valid review unless a project's policy says
+otherwise. A reviewer that cannot be told apart from the patchset author
+(neither side recorded `--on-behalf-of`) is reported as unknown attribution
+rather than counted as independent or as self-review.
 
 When `forbid_self_approval` is set and no second actor is reachable, a change
 would otherwise be unshippable. Declaring an **audit debt** resolves that

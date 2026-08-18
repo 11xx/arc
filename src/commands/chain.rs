@@ -109,28 +109,16 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                 // author read the same way a verdict's identity is — a lead
                 // acting for an executor is that executor on both sides, or
                 // the comparison compares different things.
-                let brief_author = state.brief_for(patchset).map(|brief| {
-                    brief
-                        .on_behalf_of
-                        .as_deref()
-                        .unwrap_or(&brief.actor)
-                        .to_string()
-                });
+                let brief_author = state.brief_author_for(patchset).map(str::to_string);
                 // Identity inequality is not independence: in an orchestrated
                 // chain the patchset subject is the executor and the verdict
                 // comes from the lead, so the identities always differ. What
                 // the ledger can say is who wrote the brief and whether
                 // anybody else recorded a verdict.
-                let reviewed_only_by_brief_author = match (&brief_author, lifetime.identities.len())
-                {
-                    (Some(author), 1..) => Some(
-                        lifetime
-                            .identities
-                            .iter()
-                            .all(|identity| identity == author),
-                    ),
-                    _ => None,
-                };
+                let reviewed_only_by_brief_author = state.reviewed_only_by_brief_author(
+                    patchset,
+                    lifetime.identities.iter().map(String::as_str),
+                );
                 ChainReview {
                     brief_author,
                     reviewed_only_by_brief_author,
