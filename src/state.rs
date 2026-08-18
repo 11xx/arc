@@ -444,9 +444,66 @@ pub struct ClosureState {
     pub outcome: Closure,
     pub integrated_commit: Option<String>,
     pub superseded_by: Option<String>,
+    /// How the integration happened, for an integrated closure: `guarded`
+    /// when arc performed and guarded the merge, `asserted` when somebody
+    /// performed it elsewhere and said so, `legacy-unclassified` for closures
+    /// written before arc could tell those apart. Absent when the change did
+    /// not integrate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integration: Option<IntegrationKind>,
+    /// The patchset and head that were merged, the branch merged into, and
+    /// where that branch stood first. Absent on legacy closures, which
+    /// recorded none of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_patchset_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_head: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_before: Option<String>,
     pub event_id: String,
     #[serde(skip)]
     pub created_at: DateTime<Utc>,
+}
+
+/// The closure an integration event reduces to. Both kinds record the same
+/// facts; they differ in whether arc guarded the merge.
+#[allow(clippy::too_many_arguments)]
+fn integrated_closure(
+    ev: &Event,
+    integration: IntegrationKind,
+    integrated_commit: &str,
+    source_patchset_id: &str,
+    source_head: &str,
+    target_branch: &str,
+    target_before: Option<String>,
+) -> ClosureState {
+    ClosureState {
+        outcome: Closure::Integrated,
+        integrated_commit: Some(integrated_commit.to_string()),
+        superseded_by: None,
+        integration: Some(integration),
+        source_patchset_id: Some(source_patchset_id.to_string()),
+        source_head: Some(source_head.to_string()),
+        target_branch: Some(target_branch.to_string()),
+        target_before,
+        event_id: ev.event_id.clone(),
+        created_at: ev.created_at,
+    }
+}
+
+/// How an integrated change reached its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IntegrationKind {
+    /// arc performed the merge and verified its own preconditions.
+    Guarded,
+    /// Somebody else performed it; arc recorded the assertion.
+    Asserted,
+    /// Written before the two were distinguishable. arc cannot infer which
+    /// this was, and says so rather than guessing.
+    LegacyUnclassified,
 }
 
 /// The current state of one change, derived by replaying its events in
@@ -1384,9 +1441,51 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     outcome: *outcome,
                     integrated_commit: integrated_commit.clone(),
                     superseded_by: superseded_by.clone(),
+                    // An integrated `ChangeClosed` predates the distinction,
+                    // and arc cannot truthfully infer how the merge happened.
+                    integration: (*outcome == Closure::Integrated)
+                        .then_some(IntegrationKind::LegacyUnclassified),
+                    source_patchset_id: None,
+                    source_head: None,
+                    target_branch: None,
+                    target_before: None,
                     event_id: ev.event_id.clone(),
                     created_at: ev.created_at,
                 });
+            }
+            Payload::ChangeIntegrated {
+                integrated_commit,
+                source_patchset_id,
+                source_head,
+                target_branch,
+                target_before,
+            } => {
+                state.closure = Some(integrated_closure(
+                    ev,
+                    IntegrationKind::Guarded,
+                    integrated_commit,
+                    source_patchset_id,
+                    source_head,
+                    target_branch,
+                    Some(target_before.clone()),
+                ));
+            }
+            Payload::IntegrationAsserted {
+                integrated_commit,
+                source_patchset_id,
+                source_head,
+                target_branch,
+                target_before,
+            } => {
+                state.closure = Some(integrated_closure(
+                    ev,
+                    IntegrationKind::Asserted,
+                    integrated_commit,
+                    source_patchset_id,
+                    source_head,
+                    target_branch,
+                    target_before.clone(),
+                ));
             }
             Payload::ForgeProjection {
                 host,

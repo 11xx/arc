@@ -1082,6 +1082,22 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                 (None, reason) => reason.clone().unwrap_or_default(),
             },
         ),
+        Payload::ChangeIntegrated {
+            integrated_commit,
+            target_branch,
+            ..
+        } => (
+            "change-integrated",
+            format!("{} into {target_branch}", short_sha(integrated_commit)),
+        ),
+        Payload::IntegrationAsserted {
+            integrated_commit,
+            target_branch,
+            ..
+        } => (
+            "integration-asserted",
+            format!("{} into {target_branch}", short_sha(integrated_commit)),
+        ),
         Payload::ChangeClosed {
             outcome,
             integrated_commit,

@@ -120,8 +120,9 @@ fn superseded_prerequisites_resolve_after_successor_integration() {
     assert_eq!(wedged["blocked"], true);
     assert_eq!(wedged["blockers_ready"][0]["status"], "wedged");
 
+    stdout(repo.arc(&repo.root).args(["snapshot", &successor]));
     repo.arc(&repo.root)
-        .args(["close", &successor, "--integrated", "HEAD"])
+        .args(["close", &successor, "--assert-integrated", "HEAD"])
         .assert()
         .success();
     let ready: serde_json::Value =
@@ -152,8 +153,9 @@ fn superseded_prerequisites_resolve_after_successor_integration() {
         .args(["close", &second, "--superseded", &third])
         .assert()
         .success();
+    stdout(repo.arc(&repo.root).args(["snapshot", &third]));
     repo.arc(&repo.root)
-        .args(["close", &third, "--integrated", "HEAD"])
+        .args(["close", &third, "--assert-integrated", "HEAD"])
         .assert()
         .success();
     let transitive: serde_json::Value = serde_json::from_str(&stdout(

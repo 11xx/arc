@@ -1207,11 +1207,9 @@ fn integrate_one(
 
     // The approved head, merged by exact SHA so a branch moved after
     // approval can never smuggle unreviewed commits into the merge.
-    let approved_head = st
-        .latest_patchset()
-        .context("no patchset recorded")?
-        .head
-        .clone();
+    let approved_patchset = st.latest_patchset().context("no patchset recorded")?;
+    let approved_patchset_id = approved_patchset.id.clone();
+    let approved_head = approved_patchset.head.clone();
 
     let wt = gitio::worktree_for_branch(&ctx.cwd, &target)?
         .with_context(|| format!("no worktree has {target:?} checked out; check it out first"))?;
@@ -1242,10 +1240,12 @@ fn integrate_one(
     let ev = ctx.event(
         &store,
         &change_id,
-        Payload::ChangeClosed {
-            outcome: Closure::Integrated,
-            integrated_commit: Some(merged.clone()),
-            superseded_by: None,
+        Payload::ChangeIntegrated {
+            integrated_commit: merged.clone(),
+            source_patchset_id: approved_patchset_id.clone(),
+            source_head: approved_head.clone(),
+            target_branch: target.clone(),
+            target_before: old_target.clone(),
         },
     );
     store.append_event(&ev)?;
@@ -1407,7 +1407,9 @@ pub(crate) fn dependency_order(selected: &BTreeMap<String, ChangeState>) -> Resu
 pub fn close(
     ctx: &Ctx,
     reference: &str,
-    integrated: Option<String>,
+    assert_integrated: Option<String>,
+    patchset: Option<String>,
+    into: Option<String>,
     abandoned: bool,
     superseded_by: Option<String>,
 ) -> Result<()> {
@@ -1418,14 +1420,41 @@ pub fn close(
     if st.is_closed() {
         bail!("change {change_id} is already closed");
     }
-    let (payload, integrated_rev) = match (integrated, abandoned, superseded_by) {
+    if patchset.is_some() && assert_integrated.is_none() {
+        bail!("--patchset describes an asserted integration; pass --assert-integrated <REV>");
+    }
+    if into.is_some() && assert_integrated.is_none() {
+        bail!("--into describes an asserted integration; pass --assert-integrated <REV>");
+    }
+    let (payload, integrated_rev) = match (assert_integrated, abandoned, superseded_by) {
         (Some(rev), false, None) => {
             let rev = gitio::rev_parse(&ctx.cwd, &rev)?;
+            let patchset = match patchset {
+                Some(id) => st
+                    .patchsets
+                    .iter()
+                    .find(|patchset| patchset.id == id)
+                    .with_context(|| format!("{id} is not a patchset of {change_id}"))?,
+                None => st.latest_patchset().with_context(|| {
+                    format!(
+                        "no patchset recorded on {change_id}, so nothing says what was \
+                         integrated; record one with `arc snapshot {change_id}` first"
+                    )
+                })?,
+            };
+            let target = into.unwrap_or_else(|| st.target_branch.clone());
+            // The first parent of a merge — or of a squash commit — is where
+            // the target stood before. Asking Git is what keeps the assertion
+            // from being an unchecked claim about the target; a revision with
+            // no parent had no prior target state to name.
+            let target_before = gitio::commit_parents(&ctx.cwd, &rev)?.into_iter().next();
             (
-                Payload::ChangeClosed {
-                    outcome: Closure::Integrated,
-                    integrated_commit: Some(rev.clone()),
-                    superseded_by: None,
+                Payload::IntegrationAsserted {
+                    integrated_commit: rev.clone(),
+                    source_patchset_id: patchset.id.clone(),
+                    source_head: patchset.head.clone(),
+                    target_branch: target,
+                    target_before,
                 },
                 Some(rev),
             )
@@ -1449,7 +1478,9 @@ pub fn close(
                 None,
             )
         }
-        _ => bail!("provide exactly one of --integrated <rev>, --abandoned, --superseded <change>"),
+        _ => bail!(
+            "provide exactly one of --assert-integrated <rev>, --abandoned, --superseded <change>"
+        ),
     };
     let ev = ctx.event(&store, &change_id, payload);
     store.append_event(&ev)?;

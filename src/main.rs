@@ -799,9 +799,16 @@ enum Cmd {
     /// Close a change without arc performing the merge
     Close {
         change: String,
-        /// Already integrated at this revision
-        #[arg(long)]
-        integrated: Option<String>,
+        /// Assert an integration arc did not perform, at this revision. Carries
+        /// no authorization: arc did not guard this merge
+        #[arg(long = "assert-integrated")]
+        assert_integrated: Option<String>,
+        /// The patchset that was integrated (defaults to the latest)
+        #[arg(long, requires = "assert_integrated")]
+        patchset: Option<String>,
+        /// The branch it was integrated into (defaults to the target branch)
+        #[arg(long, requires = "assert_integrated")]
+        into: Option<String>,
         #[arg(long)]
         abandoned: bool,
         /// Superseded by another change
@@ -1817,11 +1824,21 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Close {
             change,
-            integrated,
+            assert_integrated,
+            patchset,
+            into,
             abandoned,
             superseded,
         } => {
-            commands::close(&ctx, &change, integrated, abandoned, superseded)?;
+            commands::close(
+                &ctx,
+                &change,
+                assert_integrated,
+                patchset,
+                into,
+                abandoned,
+                superseded,
+            )?;
             Ok(0)
         }
         Cmd::Forge { cmd } => match cmd {

@@ -392,12 +392,39 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// A terminal outcome arc did not merge itself. New writes carry only
+    /// `abandoned` and `superseded`; an `integrated` outcome here is history
+    /// from before arc distinguished a guarded merge from an assertion.
     ChangeClosed {
         outcome: Closure,
         #[serde(skip_serializing_if = "Option::is_none")]
         integrated_commit: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         superseded_by: Option<String>,
+    },
+    /// A merge arc performed under its own guard: the head equalled the
+    /// approved patchset head, gates were green at it, no finding blocked and
+    /// no hold was active, and the merge commit's parents were verified.
+    ChangeIntegrated {
+        integrated_commit: String,
+        source_patchset_id: String,
+        source_head: String,
+        target_branch: String,
+        target_before: String,
+    },
+    /// An integration somebody performed elsewhere and asserted afterwards.
+    /// Deliberately carries no authorization: arc did not guard this merge and
+    /// cannot claim it was authorized, only that it was asserted.
+    IntegrationAsserted {
+        integrated_commit: String,
+        source_patchset_id: String,
+        source_head: String,
+        target_branch: String,
+        /// Where the target stood first, read from the asserted revision's
+        /// first parent. Absent when it has none, which is the only case
+        /// where there was no prior target state to name.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_before: Option<String>,
     },
     /// Declared forge projection: the explicit repository tuple plus policy
     /// a later observed link is validated against. Latest declaration wins.
@@ -489,9 +516,10 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         Payload::AuditVerdictRecorded { .. }
         | Payload::AuditFindingAdded { .. }
         | Payload::AuditDispositionRecorded { .. } => AppendPermission::IntegratedOnlyFact,
-        Payload::ChangeOpened { .. } | Payload::ChangeClosed { .. } => {
-            AppendPermission::LifecycleOwned
-        }
+        Payload::ChangeOpened { .. }
+        | Payload::ChangeClosed { .. }
+        | Payload::ChangeIntegrated { .. }
+        | Payload::IntegrationAsserted { .. } => AppendPermission::LifecycleOwned,
         Payload::Unknown => AppendPermission::OpaqueImported,
     }
 }

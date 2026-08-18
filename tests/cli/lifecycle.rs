@@ -996,6 +996,113 @@ fn brief_author_only_review_warns_but_remains_integrate_ready() {
         .success();
 }
 
+/// A merge arc guarded and a merge somebody performed elsewhere are different
+/// facts, and a ledger whose reason to exist is being authoritative about
+/// integration cannot write them byte-identically. The asserted variant
+/// deliberately carries no authorization; it records what was claimed.
+#[test]
+fn guarded_and_asserted_integrations_have_distinct_event_types_and_targets() {
+    let repo = Repo::new();
+
+    // Guarded: arc performs the merge under its own preconditions.
+    stdout(repo.arc(&repo.root).args(["begin", "guarded"]));
+    let worktree = repo.home.join(".worktrees/repo-guarded");
+    repo.commit(&worktree, "guarded.rs", "done\n", "feat: guarded");
+    stdout(repo.arc(&worktree).args(["snapshot", "guarded"]));
+    let source_head = repo.head(&worktree);
+    let target_before = repo.head(&repo.root);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["review", "guarded", "--verdict", "approved"]),
+    );
+    repo.arc(&repo.root)
+        .args(["integrate", "guarded"])
+        .assert()
+        .success();
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "guarded",
+        "--type",
+        "change-integrated",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+    assert_eq!(event["source_head"], source_head, "{event}");
+    assert_eq!(event["source_patchset_id"], "ps-01", "{event}");
+    assert_eq!(event["target_branch"], "master", "{event}");
+    assert_eq!(event["target_before"], target_before, "{event}");
+    assert!(
+        stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "guarded",
+            "--type",
+            "change-closed",
+        ]))
+        .trim()
+        .is_empty(),
+        "a guarded merge writes no change-closed event"
+    );
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "guarded", "--json"]));
+    assert_eq!(status["closure"]["integration"], "guarded", "{status}");
+
+    // Asserted: somebody else merged it, and says so afterwards.
+    stdout(repo.arc(&repo.root).args(["begin", "asserted"]));
+    let asserted_worktree = repo.home.join(".worktrees/repo-asserted");
+    repo.commit(
+        &asserted_worktree,
+        "asserted.rs",
+        "done\n",
+        "feat: asserted",
+    );
+    stdout(repo.arc(&asserted_worktree).args(["snapshot", "asserted"]));
+    let asserted_head = repo.head(&asserted_worktree);
+    let before_external = repo.head(&repo.root);
+    git(
+        &repo.root,
+        &[
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            "-m",
+            "external merge",
+            &asserted_head,
+        ],
+    );
+    let external = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args([
+            "close",
+            "asserted",
+            "--assert-integrated",
+            &external,
+            "--patchset",
+            "ps-01",
+            "--into",
+            "master",
+        ])
+        .assert()
+        .success();
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "asserted",
+        "--type",
+        "integration-asserted",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+    assert_eq!(event["integrated_commit"], external, "{event}");
+    assert_eq!(event["source_head"], asserted_head, "{event}");
+    assert_eq!(event["target_before"], before_external, "{event}");
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "asserted", "--json"]));
+    assert_eq!(status["closure"]["integration"], "asserted", "{status}");
+
+    // Both are integrated; the ledger says how each one got there.
+    assert_eq!(status["state"], "closed", "{status}");
+}
+
 /// A declared gate that never ran (or failed) blocks with exit 5; a pass
 /// at the exact head unblocks.
 #[test]

@@ -702,6 +702,11 @@ mod tests {
             forge: crate::forge::ForgeState::default(),
             closure: closure.map(|outcome| crate::state::ClosureState {
                 outcome,
+                integration: None,
+                source_patchset_id: None,
+                source_head: None,
+                target_branch: None,
+                target_before: None,
                 integrated_commit: None,
                 superseded_by: None,
                 event_id: "event".into(),

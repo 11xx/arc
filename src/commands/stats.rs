@@ -284,10 +284,12 @@ fn wall_time(events: &[Event]) -> Option<u64> {
         .find(|event| {
             matches!(
                 event.payload,
-                Payload::ChangeClosed {
-                    outcome: crate::model::Closure::Integrated,
-                    ..
-                }
+                Payload::ChangeIntegrated { .. }
+                    | Payload::IntegrationAsserted { .. }
+                    | Payload::ChangeClosed {
+                        outcome: crate::model::Closure::Integrated,
+                        ..
+                    }
             )
         })?
         .created_at;

@@ -86,14 +86,32 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   the head equals the approved patchset head, no blocking finding is
   open, every required gate is green at that exact head, and no hold is
   active. Holds are independent (`arc-status/8` turned the singular `hold` into
-  `holds`): `arc hold` prints the event that identifies
-  the hold it set, `arc release-hold <change> <hold>` lifts exactly that one
-  (a unique prefix is enough; an empty or ambiguous one is refused), and
-  every other hold stays in force. A release naming a hold that is no longer
-  active replays as a no-op rather than a failure — two collaborators may
-  reach the same conclusion, and a ledger nobody can reduce is a ledger
-  nobody can repair. `arc doctor` reports it as `hold-release-names-no-hold`. It merges the approved SHA (not the branch name) with
-  `--no-ff`, then verifies the merge commit's parents. `arc integrate
+  `holds`): `arc hold` prints the event that identifies the hold it set, `arc
+  release-hold <change> <hold>` lifts exactly that one (a unique prefix is
+  enough; an empty or ambiguous one is refused), and every other hold stays in
+  force. A release naming a hold that is no longer active replays as a no-op
+  rather than a failure — two collaborators may reach the same conclusion, and
+  a ledger nobody can reduce is a ledger nobody can repair. `arc doctor`
+  reports it as `hold-release-names-no-hold`.
+
+  It merges the approved SHA (not the branch name) with `--no-ff`, then
+  verifies the merge commit's parents. It records a `change-integrated` event
+  carrying the patchset and head that were merged, the branch merged into, and
+  where that branch stood first. A merge arc did not perform is `arc close
+  --assert-integrated <rev> [--patchset <ps>] [--into <branch>]`, which writes
+  `integration-asserted` — the same facts, deliberately without authorization,
+  because arc did not guard that merge and cannot claim it was authorized. The
+  assertion is still checked against Git: the target branch must exist, the
+  revision must contain the patchset head, and it must be on that branch — and
+  the change must have a recorded patchset, because otherwise nothing says what
+  was integrated. A bundle carries the store format it was written with, and an
+  import refuses one from a newer arc rather than skipping lifecycle events it
+  does not know — which would read a closed change as open. The same check runs
+  on every path that opens a store, not only the one that creates it. `arc
+  status` reports which happened as `closure.integration`: `guarded`,
+  `asserted`, or `legacy-unclassified` for closures written before the two
+  could be told apart. `change-closed` now carries only `abandoned` and
+  `superseded`. `arc integrate
   --tag '#series'` applies that same guarded path to every matching change
   in dependency order, stopping at the first refusal. Refusals carry typed
   exit codes.
@@ -456,7 +474,7 @@ link this change never recorded, describes nothing and is never current.
 A held, linked change renders an `awaiting_user` fact carrying the PR URL.
 These facts are advisory rendering plus the fail-closed link validation;
 they never change local `integrate` semantics. Close an externally merged
-PR through `arc close --integrated <merge-sha>`.
+PR through `arc close --assert-integrated <merge-sha>`.
 
 ## Execution roles
 

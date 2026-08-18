@@ -419,9 +419,11 @@ fn restack_advise_prints_rebase_for_dependent_and_writes_nothing() {
     let base = begin_change(&repo, "base-change", None);
     let dependent = begin_change(&repo, "dependent", Some("base-change"));
 
-    // Integrate the blocker (recorded as a close at a revision).
+    // Integrate the blocker (asserted: arc did not perform this merge, so the
+    // assertion has to name the patchset it claims reached the target).
+    stdout(repo.arc(&repo.root).args(["snapshot", "base-change"]));
     repo.arc(&repo.root)
-        .args(["close", "base-change", "--integrated", "HEAD"])
+        .args(["close", "base-change", "--assert-integrated", "HEAD"])
         .assert()
         .success();
 
