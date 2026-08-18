@@ -107,7 +107,9 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   was integrated. Where the target stood before is read from a merge commit's
   first parent; a fast-forward has no such parent — its first parent is the
   change's own previous commit — so `--target-before <rev>` names it, and
-  without one the event records no base rather than a wrong one. A bundle carries the store format it was written with, and an
+  without one the event records no base rather than a wrong one. On a merge
+  the flag is refused: Git is the better witness, and overriding it would
+  record a range the merge did not integrate. A bundle carries the store format it was written with, and an
   import refuses one from a newer arc rather than skipping lifecycle events it
   does not know — which would read a closed change as open. The same check runs
   on every path that opens a store, not only the one that creates it, and a

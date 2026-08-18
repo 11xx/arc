@@ -1488,8 +1488,15 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
             // honest, a wrong one is not.
             let parents = gitio::commit_parents(&ctx.cwd, &rev)?;
             let target_before = match (target_before, parents.len()) {
-                (Some(named), _) => Some(gitio::rev_parse(&ctx.cwd, &named)?),
+                // A merge records where the target stood, and Git is a better
+                // witness than the caller: letting a flag override it would
+                // record a range the merge did not integrate.
+                (Some(_), 2..) => bail!(
+                    "{rev} is a merge, so where the target stood is its first parent; \
+                     --target-before would record a range it did not integrate"
+                ),
                 (None, 2..) => parents.into_iter().next(),
+                (Some(named), _) => Some(gitio::rev_parse(&ctx.cwd, &named)?),
                 (None, _) => None,
             };
             (

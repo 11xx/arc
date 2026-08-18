@@ -1189,6 +1189,20 @@ fn guarded_and_asserted_integrations_have_distinct_event_types_and_targets() {
     .unwrap();
     assert_eq!(event["target_before"], before_ff, "{event}");
 
+    // A merge is its own witness: overriding its first parent would record a
+    // range the merge did not integrate.
+    repo.arc(&repo.root)
+        .args([
+            "close",
+            "asserted",
+            "--assert-integrated",
+            &external,
+            "--target-before",
+            &before_external,
+        ])
+        .assert()
+        .failure();
+
     // An assertion arc did not guard is still checked against Git: it must
     // name a branch that exists, a revision that contains the patchset head,
     // and one that is actually on that branch.
