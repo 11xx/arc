@@ -601,8 +601,13 @@ fn build_report(
         // The waiver only authorizes anything when it is what let the approval
         // stand. Recording it otherwise would claim a merge rested on a waiver
         // that changed nothing.
-        waiver_authorized_approval =
-            would_reject_self_approval && state.audit_debt_waives_current_head();
+        // Only an approval can be waived into validity. A waiver declared
+        // beside a changes-requested or comment-only verdict authorized
+        // nothing, and saying otherwise would report an approval that does
+        // not exist.
+        waiver_authorized_approval = v.verdict == Verdict::Approved
+            && would_reject_self_approval
+            && state.audit_debt_waives_current_head();
         let rejected_self_approval =
             would_reject_self_approval && !state.audit_debt_waives_current_head();
         let valid = v.verdict == Verdict::Approved

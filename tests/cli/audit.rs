@@ -181,6 +181,32 @@ fn the_basis_records_a_waiver_only_when_it_authorized_the_merge() {
     );
 }
 
+/// Only an approval can be waived into validity. A waiver declared beside a
+/// verdict that approves nothing authorized nothing.
+#[test]
+fn a_waiver_beside_a_non_approval_authorizes_nothing() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "not-approved");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["review", "not-approved", "--verdict", "comment-only"]),
+    );
+    repo.arc(&repo.root)
+        .args(["audit-debt", "not-approved", "--reason", "none reachable"])
+        .assert()
+        .success();
+    let status = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "not-approved", "--json"]),
+    );
+    assert!(
+        status
+            .get("approval_waived_by_audit_debt")
+            .is_none_or(|waived| waived == false),
+        "{status}"
+    );
+}
+
 #[test]
 fn integrate_declares_the_debt_in_one_step() {
     let repo = repo_forbidding_self_approval();
