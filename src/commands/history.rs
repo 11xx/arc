@@ -21,14 +21,21 @@ pub fn record_rewrite(ctx: &Ctx, map: &str, reason: String, tool: Option<String>
     // the dangling warning, while nothing could resolve the successor. arc
     // does not verify that the rewrite happened — it verifies that what the
     // map claims survives is actually here.
-    let missing =
-        crate::gitio::missing_objects(&ctx.cwd, mapping.values().filter_map(|new| new.as_deref()))?;
-    if !missing.is_empty() {
+    // Present is not enough: a successor has to be a commit. A map naming a
+    // blob or tree that happens to exist would be recorded, and `diff` would
+    // then follow a recorded revision into something Git refuses to diff.
+    let mut unusable = Vec::new();
+    for successor in mapping.values().filter_map(|new| new.as_deref()) {
+        if crate::gitio::rev_parse(&ctx.cwd, &format!("{successor}^{{commit}}")).is_err() {
+            unusable.push(successor.to_string());
+        }
+    }
+    if !unusable.is_empty() {
         bail!(
-            "{} of the mapped revisions are not in this repository ({}); this map does not \
-             describe this repository's history",
-            missing.len(),
-            missing
+            "{} of the mapped revisions are not commits in this repository ({}); this map does \
+             not describe this repository's history",
+            unusable.len(),
+            unusable
                 .iter()
                 .take(3)
                 .map(|revision| revision[..revision.len().min(8)].to_string())

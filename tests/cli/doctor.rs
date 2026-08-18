@@ -315,6 +315,37 @@ fn a_recorded_rewrite_translates_revisions_instead_of_migrating_events() {
         .assert()
         .success();
 
+    // A successor that exists but is not a commit is not a survivor either:
+    // `diff` would follow a recorded revision into something Git refuses.
+    let blob = {
+        let out = std::process::Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(&repo.root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.as_mut().unwrap().write_all(b"not a commit\n")?;
+                child.wait_with_output()
+            })
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let blob_map = repo.root.join("blob-map");
+    fs::write(&blob_map, format!("{recorded} {blob}\n")).unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            blob_map.to_str().unwrap(),
+            "--reason",
+            "a map naming a blob",
+        ])
+        .assert()
+        .failure();
+
     // A map naming a successor this repository does not have describes some
     // other repository's history, and is refused rather than recorded.
     let bogus = repo.root.join("bogus-map");

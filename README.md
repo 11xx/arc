@@ -886,9 +886,10 @@ including its `old`/`new` column header. A new revision of all zeroes records a
 commit the rewrite dropped, which survives at nothing; a line mapping a commit
 to itself is not a move and is not recorded; and a revision mapped twice to
 different successors is refused. arc never rewrites history, offers to, or
-computes the mapping — but it does check that what the map claims survives is
-actually in this repository, so a map from somewhere else is refused rather
-than recorded as fact.
+computes the mapping — but it does check that every revision the map
+claims survives is a commit in this repository, so a map from somewhere else,
+or one naming an object that is not a commit, is refused rather than recorded
+as fact.
 
 Revisions match by prefix in either direction, so a map may abbreviate what
 the ledger records in full and a caller may abbreviate what the map records;
