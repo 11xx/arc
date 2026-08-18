@@ -160,8 +160,10 @@ impl GateStatus {
         // including a rerun of a gate that failed, and including a gate that
         // failed *because* of the uncommitted file. Cleaning is not claimed to
         // fix a failure; it is the precondition for any run whose result is
-        // usable. It also cannot loop: this reads the live tree, so once the
-        // tree is clean the advice becomes the rerun.
+        // usable. It also cannot loop where the live tree is known: this reads
+        // it, so once the tree is clean the advice becomes the rerun. Where it
+        // is unknown — a change with no worktree — the advice is the rerun,
+        // and whether such a change can gate at all is its own question.
         if worktree_dirty == Some(true) {
             return format!("clean_worktree:{}", self.name);
         }

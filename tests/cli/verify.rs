@@ -1540,11 +1540,14 @@ fn dirty_gate_evidence_is_named_by_resume_check_and_the_next_action() {
     // rerun.
     fs::write(
         repo.root.join(".arc/gates.toml"),
-        "[gates.unit]\ncommand = \"false\"\n",
+        "[gates.unit]\ncommand = \"test ! -e scratch.rs\"\n",
     )
     .unwrap();
     git(&repo.root, &["add", ".arc/gates.toml"]);
-    git(&repo.root, &["commit", "-m", "test: make the gate fail"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: a gate the untracked file fails"],
+    );
     git(&wt, &["merge", "--no-edit", "master"]);
     stdout(repo.arc(&wt).args(["snapshot", "named"]));
     fs::write(wt.join("scratch.rs"), "untracked again\n").unwrap();
@@ -1560,11 +1563,18 @@ fn dirty_gate_evidence_is_named_by_resume_check_and_the_next_action() {
     assert_eq!(status["head_matches_latest_patchset"], true, "{status}");
     assert_eq!(status["next_action"], "clean_worktree:unit", "{status}");
 
-    // Cleaning does not fix the failure, and the advice says so by becoming
-    // the rerun rather than repeating itself.
+    // This gate fails *only* because of the untracked file, which is the case
+    // a rerun could never clear. Cleaning, then rerunning, reaches green —
+    // and the advice walks exactly that path.
     fs::remove_file(wt.join("scratch.rs")).unwrap();
     let status = json_stdout(repo.arc(&wt).args(["status", "named", "--json"]));
     assert_eq!(status["next_action"], "run_gate:unit", "{status}");
+    repo.arc(&wt)
+        .args(["verify", "named", "--gate", "unit"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&wt).args(["status", "named", "--json"]));
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
 }
 
 /// Re-snapshotting at the same head is how a patchset binds to a corrected
