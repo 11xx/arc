@@ -73,6 +73,8 @@ The absence of declared probes means "no probe contract was recorded", never
 - Work only in this change's worktree. `git rebase master` first — earlier
   chain members land ahead of you, so the base is stale by design. Rebase
   before the brief is recorded where you can; a baseline is only as good as
+  the base it was measured at. Rebase
+  before the brief is recorded where you can; a baseline is only as good as
   the base it was measured at.
 - Run as `ARC_ROLE=implementer` with `ARC_HARNESS`/`ARC_SESSION` set, and a
   distinct `ARC_ACTOR`. Loop: `arc stage <change> implementing --claim` →

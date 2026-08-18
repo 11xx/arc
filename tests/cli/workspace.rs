@@ -403,6 +403,9 @@ fn brief_scaffold_sol_low_records_the_fences() {
     assert!(brief.contains("--result fail --tested-revision"), "{brief}");
     assert!(brief.contains("--execution-host"), "{brief}");
     assert!(brief.contains("HEAD *is* the brief"), "{brief}");
+    // A baseline measured at a base the work is no longer built on can pass
+    // for something the target brought rather than for the change.
+    assert!(brief.contains("ask for a new"), "{brief}");
     // The claim that probes never gate was true before probes were declarable
     // and is false now; a scaffold that still said it would teach the wrong
     // contract to every delegated executor.
