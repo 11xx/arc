@@ -676,6 +676,22 @@ impl Store {
         }
     }
 
+    /// Whether a repository event can be written: absent, or present with
+    /// byte-identical content. Checked for every event before the first is
+    /// written, so a contradiction cannot leave a partial import behind.
+    pub fn repository_event_conflicts(&self, event_id: &str, bytes: &[u8]) -> Result<bool> {
+        ids::validate_id_component(event_id)?;
+        let path = self
+            .repository_events_dir()
+            .join(format!("{event_id}.json"));
+        if !path.exists() {
+            return Ok(false);
+        }
+        let existing: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        let incoming: serde_json::Value = serde_json::from_slice(bytes)?;
+        Ok(existing != incoming)
+    }
+
     /// Write a repository-scoped event verbatim, as import does for a change.
     /// Idempotent: a rewrite already recorded here is the same fact.
     pub fn append_raw_repository_event(&self, event_id: &str, bytes: &[u8]) -> Result<bool> {

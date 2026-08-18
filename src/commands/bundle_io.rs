@@ -108,17 +108,28 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
             validated.bundle.repository_id, store.repository_id
         );
     }
-    // Repository-scoped context first, so a contradiction there is found
-    // before any change event is written. An import that failed halfway would
-    // leave a change imported and its revisions unresolvable.
-    let mut rewrites = 0;
+    // Every repository event is checked before the first one is written, and
+    // all of them before any change event: an import that discovered a
+    // contradiction halfway would leave one rewrite recorded, another not, and
+    // a change whose revisions resolve through half a map.
+    let mut incoming = Vec::with_capacity(validated.bundle.repository_events.len());
     for value in &validated.bundle.repository_events {
         let Some(event_id) = value.get("event_id").and_then(serde_json::Value::as_str) else {
             bail!("bundled repository event has no event_id");
         };
         let mut bytes = serde_json::to_vec_pretty(value)?;
         bytes.push(b'\n');
-        if store.append_raw_repository_event(event_id, &bytes)? {
+        if store.repository_event_conflicts(event_id, &bytes)? {
+            bail!(
+                "repository event {event_id} already exists here with different content; \
+                 nothing was imported"
+            );
+        }
+        incoming.push((event_id.to_string(), bytes));
+    }
+    let mut rewrites = 0;
+    for (event_id, bytes) in &incoming {
+        if store.append_raw_repository_event(event_id, bytes)? {
             rewrites += 1;
         }
     }
