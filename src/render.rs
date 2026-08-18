@@ -67,12 +67,20 @@ pub fn authorization_basis(basis: &crate::model::AuthorizationBasis) -> String {
     for (name, gate) in &basis.gates {
         let _ = writeln!(
             out,
-            "    gate declaration {name}: {}{}",
+            "    gate declaration {name}: {}{}{}",
             gate.command,
             gate.timeout
                 .map(|timeout| format!(" (timeout {timeout}s)"))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            if gate.profiles.is_empty() {
+                String::new()
+            } else {
+                format!(" (profiles: {})", gate.profiles.join(", "))
+            }
         );
+    }
+    if let Some(debt) = &basis.audit_debt_event_id {
+        let _ = writeln!(out, "    audit debt waiving review: {debt}");
     }
     let _ = write!(
         out,

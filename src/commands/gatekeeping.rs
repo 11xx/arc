@@ -1215,6 +1215,24 @@ fn integrate_one(
     // decision was made against: this is what the merge is authorized on, and
     // a later read would be a different question.
     let authorization = authorization_basis(ctx, &store, &st, &report, &approved_patchset_id)?;
+    // Configuration files are not under any lock arc holds, so readiness and
+    // the basis are two reads of something that can move between them.
+    // Recomputing readiness against the basis's own gate set is what keeps the
+    // merge from proceeding under one configuration and recording another.
+    let confirmation = ctx.report(&store, &st)?;
+    if confirmation.gates.len() != report.gates.len()
+        || confirmation
+            .gates
+            .iter()
+            .zip(&report.gates)
+            .any(|(now, before)| now.command != before.command || !now.green_at_head)
+        || !confirmation.integrate_ready
+    {
+        bail!(
+            "gate or policy configuration changed while preparing the merge; nothing was \
+             written — re-run once the worktree has settled"
+        );
+    }
 
     let wt = gitio::worktree_for_branch(&ctx.cwd, &target)?
         .with_context(|| format!("no worktree has {target:?} checked out; check it out first"))?;
@@ -1327,16 +1345,37 @@ fn authorization_basis(
 
     let mut prerequisites = Vec::new();
     for blocker in &st.blocked_by {
-        let blocker_state = match store.load_events(blocker) {
-            Ok(events) => state::reduce(&events)?,
-            // A prerequisite whose ledger this store does not hold was
-            // resolved by the dependency check as unknown-but-not-blocking;
-            // recording nothing is truthful, inventing a closure is not.
-            Err(_) => continue,
-        };
+        // A basis missing a prerequisite is a basis that misstates what was
+        // checked, so an unreadable one refuses the merge rather than being
+        // quietly omitted.
+        let events = store.load_events(blocker).with_context(|| {
+            format!("prerequisite {blocker} cannot be read, so the authorization basis                      would be incomplete")
+        })?;
+        let mut blocker_id = blocker.clone();
+        let mut blocker_state = state::reduce(&events)?;
+        // Dependency readiness follows supersession, so the basis must record
+        // the closure that actually satisfied the dependency rather than the
+        // superseded one, whose integrated commit is null.
+        let mut seen = vec![blocker_id.clone()];
+        while let Some(successor) = blocker_state
+            .closure
+            .as_ref()
+            .filter(|closure| closure.outcome == Closure::Superseded)
+            .and_then(|closure| closure.superseded_by.clone())
+        {
+            if seen.contains(&successor) {
+                break;
+            }
+            let Ok(events) = store.load_events(&successor) else {
+                break;
+            };
+            seen.push(successor.clone());
+            blocker_id = successor;
+            blocker_state = state::reduce(&events)?;
+        }
         if let Some(closure) = &blocker_state.closure {
             prerequisites.push(crate::model::PrerequisiteClosure {
-                change_id: blocker.clone(),
+                change_id: blocker_id,
                 closure_event_id: closure.event_id.clone(),
                 integrated_commit: closure.integrated_commit.clone(),
             });
@@ -1380,6 +1419,11 @@ fn authorization_basis(
             require_declared_actor: policy.policy.require_declared_actor,
             provenance_git_identity: policy.provenance.git_identity.as_str().to_string(),
         },
+        audit_debt_event_id: st
+            .audit_debt
+            .as_ref()
+            .filter(|_| st.audit_debt_waives_current_head())
+            .map(|debt| debt.event_id.clone()),
     })
 }
 
@@ -1422,15 +1466,20 @@ fn integrate_dry_run(
             "clean"
         }
     );
-    let basis = authorization_basis(
-        ctx,
-        store,
-        st,
-        &report,
-        &st.latest_patchset().context("no patchset recorded")?.id,
-    )?;
-    println!("  authorization basis it would record:");
-    println!("{}", render::authorization_basis(&basis));
+    // Only when the merge would actually happen: a conflicting dry run
+    // records nothing, so printing a basis "it would record" would describe
+    // an event that could not be written.
+    if !conflicts {
+        let basis = authorization_basis(
+            ctx,
+            store,
+            st,
+            &report,
+            &st.latest_patchset().context("no patchset recorded")?.id,
+        )?;
+        println!("  authorization basis it would record:");
+        println!("{}", render::authorization_basis(&basis));
+    }
     println!("  no events, refs, or worktrees were modified");
     Ok(if conflicts {
         status::Blocker::NeedsRebase.exit_code()

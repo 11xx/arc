@@ -507,6 +507,11 @@ pub struct AuthorizationBasis {
     pub gates: std::collections::BTreeMap<String, NormalizedGate>,
     /// The normalized policy values consumed.
     pub policy: NormalizedPolicy,
+    /// The audit-debt declaration that made a self-approved merge eligible,
+    /// when one did. It is an authorization input like the verdict: without
+    /// it the merge would have been refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_debt_event_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

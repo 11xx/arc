@@ -1122,7 +1122,22 @@ fn guarded_integration_records_exact_authorization_basis() {
     let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
     let basis = &event["authorization"];
     assert_eq!(basis["verdict_event_id"], verdict_event, "{event}");
-    assert!(basis["gate_evidence"]["unit"].as_str().is_some(), "{event}");
+    // The exact evidence event, not merely that some evidence existed.
+    let recorded = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "second",
+        "--type",
+        "verification-recorded",
+    ]));
+    let evidence_id = recorded
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["gate"] == "unit")
+        .map(|event| event["event_id"].as_str().unwrap().to_string())
+        .next_back()
+        .expect("a recorded gate verification");
+    assert_eq!(basis["gate_evidence"]["unit"], evidence_id, "{event}");
     assert_eq!(
         basis["prerequisites"][0]["change_id"], prerequisite,
         "{event}"
@@ -1143,6 +1158,47 @@ fn guarded_integration_records_exact_authorization_basis() {
     );
     assert_eq!(event["target_branch"], "master", "{event}");
     assert!(!dependent.is_empty());
+    // No waiver was involved, so none is claimed.
+    assert!(basis.get("audit_debt_event_id").is_none(), "{event}");
+}
+
+/// The basis records what authorized the merge. Editing a gate's declaration
+/// after its evidence was recorded means the declared check has not run, so
+/// the gate is not green — and the basis can never pair a command with
+/// evidence for a different one.
+#[test]
+fn changing_a_gate_declaration_ungreens_its_recorded_evidence() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: declare a gate"]);
+    stdout(repo.arc(&repo.root).args(["begin", "redeclared"]));
+    let worktree = repo.home.join(".worktrees/repo-redeclared");
+    repo.commit(&worktree, "work.rs", "done\n", "feat: work");
+    git(&worktree, &["merge", "--no-edit", "master"]);
+    stdout(repo.arc(&worktree).args(["snapshot", "redeclared"]));
+    repo.arc(&worktree)
+        .args(["verify", "redeclared", "--gate", "unit"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&worktree).args(["status", "redeclared", "--json"]));
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
+
+    // The declaration now names a different check, which nothing has run.
+    fs::write(
+        worktree.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true # a different check\"\n",
+    )
+    .unwrap();
+    let status = json_stdout(repo.arc(&worktree).args(["status", "redeclared", "--json"]));
+    assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
+    assert_eq!(status["gates"][0]["declaration_changed"], true, "{status}");
+    assert_eq!(status["integrate_ready"], false, "{status}");
 }
 
 /// A merge arc guarded and a merge somebody performed elsewhere are different

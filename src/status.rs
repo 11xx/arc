@@ -88,6 +88,10 @@ pub struct GateStatus {
     pub command: String,
     pub result: String,
     pub green_at_head: bool,
+    /// Passing evidence exists at this head, but for a different command than
+    /// the gate now declares. Not green: the declaration is the check.
+    #[serde(skip_serializing_if = "is_false")]
+    pub declaration_changed: bool,
     /// The head evidence for this gate is attested (arc did not run it), so a
     /// lead can apply stricter judgment even though it counts for green-ness.
     pub attested: bool,
@@ -698,7 +702,14 @@ fn build_report(
                 // are displayed and neither counts as green — throwing them
                 // away would push loops toward not recording at all, which is
                 // worse than recording them honestly.
-                green_at_head: evidence.is_some_and(|e| e.green_at_head()),
+                // Evidence is green for the command it ran, not for the
+                // gate's name. A declaration edited after the run describes a
+                // different check, and counting the old pass would let a gate
+                // nobody has run authorize a merge.
+                green_at_head: evidence
+                    .is_some_and(|e| e.green_at_head() && e.command == gate.command),
+                declaration_changed: evidence
+                    .is_some_and(|e| e.green_at_head() && e.command != gate.command),
                 attested: evidence.is_some_and(|e| e.attested),
                 tested_tree: evidence.and_then(|e| e.tested_tree.clone()),
                 worktree_dirty: evidence.and_then(|e| e.worktree_dirty),
