@@ -59,6 +59,11 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
                 require_declared_actor: false,
             });
             validate_import_candidate(store.as_ref(), &validated, &plan.new_events)?;
+            // The same refusals the import makes: a preflight that reports
+            // success for a bundle the real path rejects is believed, and
+            // wrong. A destination with no store still checks the bundle
+            // against itself.
+            plan_repository_events(store.as_ref(), &validated)?;
         }
         print_import_report(
             &validated,
@@ -112,32 +117,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     // all of them before any change event: an import that discovered a
     // contradiction halfway would leave one rewrite recorded, another not, and
     // a change whose revisions resolve through half a map.
-    let mut incoming: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    for value in &validated.bundle.repository_events {
-        let Some(event_id) = value.get("event_id").and_then(serde_json::Value::as_str) else {
-            bail!("bundled repository event has no event_id");
-        };
-        let mut bytes = serde_json::to_vec_pretty(value)?;
-        bytes.push(b'\n');
-        if store.repository_event_conflicts(event_id, &bytes)? {
-            bail!(
-                "repository event {event_id} already exists here with different content; \
-                 nothing was imported"
-            );
-        }
-        // Two bundled events sharing an ID conflict with each other, which no
-        // check against the destination can see: on a clean destination both
-        // pass, and the second fails only once the first has been written.
-        if let Some(existing) = incoming.get(event_id) {
-            if existing != &bytes {
-                bail!(
-                    "the bundle carries two different repository events with ID {event_id}; \
-                     nothing was imported"
-                );
-            }
-        }
-        incoming.insert(event_id.to_string(), bytes);
-    }
+    let incoming = plan_repository_events(&store, &validated)?;
     let mut rewrites = 0;
     for (event_id, bytes) in &incoming {
         if store.append_raw_repository_event(event_id, bytes)? {
@@ -157,6 +137,39 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         gitio::update_ref(&ctx.cwd, &name, &head)?;
     }
     Ok(0)
+}
+
+/// The repository events an import would write, refusing every contradiction
+/// before the first is written — including two bundled events sharing an ID,
+/// which no check against the destination can see.
+fn plan_repository_events(
+    store: &Store,
+    validated: &ValidatedBundle,
+) -> Result<BTreeMap<String, Vec<u8>>> {
+    let mut incoming: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for value in &validated.bundle.repository_events {
+        let Some(event_id) = value.get("event_id").and_then(serde_json::Value::as_str) else {
+            bail!("bundled repository event has no event_id");
+        };
+        let mut bytes = serde_json::to_vec_pretty(value)?;
+        bytes.push(b'\n');
+        if store.repository_event_conflicts(event_id, &bytes)? {
+            bail!(
+                "repository event {event_id} already exists here with different content; \
+                 nothing was imported"
+            );
+        }
+        if let Some(existing) = incoming.get(event_id) {
+            if existing != &bytes {
+                bail!(
+                    "the bundle carries two different repository events with ID {event_id}; \
+                     nothing was imported"
+                );
+            }
+        }
+        incoming.insert(event_id.to_string(), bytes);
+    }
+    Ok(incoming)
 }
 
 fn classify_import_events(root: &Path, validated: &ValidatedBundle) -> Result<ImportEventPlan> {
