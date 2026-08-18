@@ -1127,6 +1127,68 @@ fn guarded_and_asserted_integrations_have_distinct_event_types_and_targets() {
     let shown = stdout(repo.arc(&repo.root).args(["show", "guarded"]));
     assert!(shown.contains("guarded by arc"), "{shown}");
 
+    // A fast-forward has no merge commit, so its first parent is the change's
+    // own previous commit — recording that as the prior target would put the
+    // change's work outside the range it integrated. Absent is honest.
+    stdout(repo.arc(&repo.root).args(["begin", "fast-forward"]));
+    let ff_worktree = repo.home.join(".worktrees/repo-fast-forward");
+    repo.commit(&ff_worktree, "ff-one.rs", "one\n", "feat: one");
+    repo.commit(&ff_worktree, "ff-two.rs", "two\n", "feat: two");
+    stdout(repo.arc(&ff_worktree).args(["snapshot", "fast-forward"]));
+    let before_ff = repo.head(&repo.root);
+    let ff_head = repo.head(&ff_worktree);
+    git(&repo.root, &["merge", "--ff-only", &ff_head]);
+    repo.arc(&repo.root)
+        .args(["close", "fast-forward", "--assert-integrated", &ff_head])
+        .assert()
+        .success();
+    let event: serde_json::Value = serde_json::from_str(
+        stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "fast-forward",
+            "--type",
+            "integration-asserted",
+        ]))
+        .trim(),
+    )
+    .unwrap();
+    assert!(
+        event.get("target_before").is_none(),
+        "a fast-forward has no prior target to read: {event}"
+    );
+
+    // The caller can name it, and then it is recorded.
+    stdout(repo.arc(&repo.root).args(["begin", "named-base"]));
+    let named_worktree = repo.home.join(".worktrees/repo-named-base");
+    repo.commit(&named_worktree, "named.rs", "x\n", "feat: named");
+    stdout(repo.arc(&named_worktree).args(["snapshot", "named-base"]));
+    let named_head = repo.head(&named_worktree);
+    git(&repo.root, &["merge", "--ff-only", &named_head]);
+    repo.arc(&repo.root)
+        .args([
+            "close",
+            "named-base",
+            "--assert-integrated",
+            &named_head,
+            "--target-before",
+            &before_ff,
+        ])
+        .assert()
+        .success();
+    let event: serde_json::Value = serde_json::from_str(
+        stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "named-base",
+            "--type",
+            "integration-asserted",
+        ]))
+        .trim(),
+    )
+    .unwrap();
+    assert_eq!(event["target_before"], before_ff, "{event}");
+
     // An assertion arc did not guard is still checked against Git: it must
     // name a branch that exists, a revision that contains the patchset head,
     // and one that is actually on that branch.

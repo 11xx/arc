@@ -1410,6 +1410,7 @@ pub fn close(
     assert_integrated: Option<String>,
     patchset: Option<String>,
     into: Option<String>,
+    target_before: Option<String>,
     abandoned: bool,
     superseded_by: Option<String>,
 ) -> Result<()> {
@@ -1425,6 +1426,9 @@ pub fn close(
     }
     if into.is_some() && assert_integrated.is_none() {
         bail!("--into describes an asserted integration; pass --assert-integrated <REV>");
+    }
+    if target_before.is_some() && assert_integrated.is_none() {
+        bail!("--target-before describes an asserted integration; pass --assert-integrated <REV>");
     }
     let (payload, integrated_rev) = match (assert_integrated, abandoned, superseded_by) {
         (Some(rev), false, None) => {
@@ -1464,11 +1468,19 @@ pub fn close(
             if !gitio::is_ancestor(&ctx.cwd, &rev, &target)? {
                 bail!("{rev} is not on {target}; nothing there integrated this change");
             }
-            // The first parent of a merge — or of a squash commit — is where
-            // the target stood before. Asking Git is what keeps the assertion
-            // from being an unchecked claim about the target; a revision with
-            // no parent had no prior target state to name.
-            let target_before = gitio::commit_parents(&ctx.cwd, &rev)?.into_iter().next();
+            // For a merge, the first parent is where the target stood before,
+            // and Git can be asked. For a fast-forward it is not: the parent
+            // is the previous commit *of this change*, and recording it would
+            // put the change's own work outside the range it integrated.
+            // Nothing in the repository says where the branch pointed, so the
+            // caller supplies it or the event records none — an absent base is
+            // honest, a wrong one is not.
+            let parents = gitio::commit_parents(&ctx.cwd, &rev)?;
+            let target_before = match (target_before, parents.len()) {
+                (Some(named), _) => Some(gitio::rev_parse(&ctx.cwd, &named)?),
+                (None, 2..) => parents.into_iter().next(),
+                (None, _) => None,
+            };
             (
                 Payload::IntegrationAsserted {
                     integrated_commit: rev.clone(),

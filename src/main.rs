@@ -809,6 +809,11 @@ enum Cmd {
         /// The branch it was integrated into (defaults to the target branch)
         #[arg(long, requires = "assert_integrated")]
         into: Option<String>,
+        /// Where the target stood before. Read from a merge commit's first
+        /// parent; a fast-forward has none to read, so name it or the event
+        /// records no base
+        #[arg(long = "target-before", requires = "assert_integrated")]
+        target_before: Option<String>,
         #[arg(long)]
         abandoned: bool,
         /// Superseded by another change
@@ -1827,6 +1832,7 @@ fn run(cli: Cli) -> Result<i32> {
             assert_integrated,
             patchset,
             into,
+            target_before,
             abandoned,
             superseded,
         } => {
@@ -1836,6 +1842,7 @@ fn run(cli: Cli) -> Result<i32> {
                 assert_integrated,
                 patchset,
                 into,
+                target_before,
                 abandoned,
                 superseded,
             )?;
