@@ -97,6 +97,69 @@ fn import_refuses_a_history_that_contradicts_itself() {
         .failure();
 }
 
+/// An audit reviews what reached the target, which is the range the
+/// integration recorded — not a patchset range, which describes the work.
+/// A closure that recorded no range cannot have one guessed for it.
+#[test]
+fn audit_diff_integrated_uses_the_recorded_range() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "ranged"]));
+    let worktree = repo.home.join(".worktrees/repo-ranged");
+    repo.commit(&worktree, "ranged.rs", "done\n", "feat: ranged");
+    stdout(repo.arc(&worktree).args(["snapshot", "ranged"]));
+    let target_before = repo.head(&repo.root);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["review", "ranged", "--verdict", "approved"]),
+    );
+    repo.arc(&repo.root)
+        .args(["integrate", "ranged"])
+        .assert()
+        .success();
+
+    // The range is the merge against what the target was, so the file the
+    // change added appears in it.
+    let rendered = stdout(
+        repo.arc(&repo.root)
+            .args(["diff", "ranged", "--integrated"]),
+    );
+    assert!(rendered.contains("ranged.rs"), "{rendered}");
+    let stat = stdout(
+        repo.arc(&repo.root)
+            .args(["diff", "ranged", "--integrated", "--stat"]),
+    );
+    assert!(stat.contains("ranged.rs"), "{stat}");
+
+    // It is the recorded base, not the patchset base: the target moved on,
+    // and the range still names where it stood at integration.
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "ranged",
+        "--type",
+        "change-integrated",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+    assert_eq!(event["target_before"], target_before, "{event}");
+
+    // Selectors that describe a different range are refused rather than
+    // silently ignored.
+    repo.arc(&repo.root)
+        .args(["diff", "ranged", "--integrated", "--since-approved"])
+        .assert()
+        .failure();
+
+    // A change that never integrated has no range to render.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "unmerged", "--no-worktree"]),
+    );
+    repo.arc(&repo.root)
+        .args(["diff", "unmerged", "--integrated"])
+        .assert()
+        .failure();
+}
+
 #[test]
 fn review_reports_an_approval_that_cannot_gate() {
     let repo = repo_forbidding_self_approval();
