@@ -14,7 +14,7 @@
 
 use crate::model::Payload;
 use crate::store::Store;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 
 /// What became of a recorded revision.
@@ -61,6 +61,14 @@ impl RewriteMap {
         let mut steps: BTreeMap<String, Option<String>> = BTreeMap::new();
         for event in events {
             if let Payload::HistoryRewritten { mapping, .. } = &event.payload {
+                // Both write paths refuse a mapping that cannot mean what it
+                // says, so a valid ledger holds none. One that arrived another
+                // way is skipped rather than made fatal: a map nobody can read
+                // is worse than a map missing an entry, and `arc doctor`
+                // reports it as `invalid-rewrite-mapping`.
+                if validate_mapping(mapping).is_err() {
+                    continue;
+                }
                 for (old, new) in mapping {
                     // Two rewrites may each move a revision — that is a chain,
                     // and following it is the point. But two *different*
@@ -206,6 +214,35 @@ pub fn parse_commit_map(text: &str) -> Result<BTreeMap<String, Option<String>>> 
 /// Whether a token looks like a Git object name: hex, and long enough to
 /// abbreviate one. Matching is by prefix elsewhere, so the length floor is
 /// what keeps `a` from matching half the repository.
+/// Whether a recorded mapping means what a recorded mapping can mean.
+///
+/// `parse_commit_map` enforces this on the way in, but a bundle carries the
+/// payload directly: without the same check, an imported map could say a
+/// revision was rewritten to the zero object — which the recording path spells
+/// as "dropped" — and every reader would report a rewrite to nothing.
+pub fn validate_mapping(mapping: &BTreeMap<String, Option<String>>) -> Result<()> {
+    for (old, new) in mapping {
+        if !is_revision(old) {
+            anyhow::bail!("{old:?} is not a revision");
+        }
+        match new {
+            None => {}
+            Some(new) if new.chars().all(|c| c == '0') => anyhow::bail!(
+                "{old} maps to the zero object; a dropped commit is recorded as no successor"
+            ),
+            Some(new) if !is_revision(new) => anyhow::bail!("{new:?} is not a revision"),
+            Some(new) if new == old => {
+                anyhow::bail!("{old} maps to itself, which is not a rewrite")
+            }
+            Some(_) => {}
+        }
+    }
+    if mapping.is_empty() {
+        anyhow::bail!("the rewrite records no revision");
+    }
+    Ok(())
+}
+
 fn is_revision(token: &str) -> bool {
     token.len() >= 7 && token.len() <= 64 && token.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -366,6 +403,24 @@ mod tests {
             event("01B", "aaaaaaaaaa", "cccccccccc"),
         ];
         assert!(RewriteMap::from_events(disagreeing.iter()).is_err());
+    }
+
+    /// The recording path spells a dropped commit as no successor. A payload
+    /// that instead maps to the zero object means something no recorded map
+    /// can mean, and a reader would repeat it as a rewrite to nothing.
+    #[test]
+    fn a_mapping_that_no_recorded_map_could_mean_is_refused() {
+        let zeroed = BTreeMap::from([(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            Some("0000000000000000000000000000000000000000".to_string()),
+        )]);
+        assert!(validate_mapping(&zeroed).is_err());
+
+        let identity = BTreeMap::from([("aaaaaaaaaa".to_string(), Some("aaaaaaaaaa".to_string()))]);
+        assert!(validate_mapping(&identity).is_err());
+
+        let dropped = BTreeMap::from([("aaaaaaaaaa".to_string(), None)]);
+        assert!(validate_mapping(&dropped).is_ok());
     }
 
     #[test]

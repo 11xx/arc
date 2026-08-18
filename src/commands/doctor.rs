@@ -469,6 +469,16 @@ fn inspect_repository_events(store: &Store, problems: &mut Vec<Finding>) {
         }
     };
     for (event_id, value) in events {
+        if let Ok(Some(event)) = crate::bundle::parse_typed_event(&value) {
+            if let Payload::HistoryRewritten { mapping, .. } = &event.payload {
+                if let Err(error) = crate::rewrite::validate_mapping(mapping) {
+                    problems.push(Finding {
+                        code: "invalid-rewrite-mapping",
+                        detail: format!("{event_id}: {error}"),
+                    });
+                }
+            }
+        }
         let scope = value.get("change_id").and_then(serde_json::Value::as_str);
         if scope != Some(Store::REPOSITORY_SCOPE) {
             problems.push(Finding {

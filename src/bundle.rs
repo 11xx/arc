@@ -138,12 +138,27 @@ impl Bundle {
                     envelope.change_id
                 );
             }
-            parse_typed_event(value).with_context(|| {
+            let typed = parse_typed_event(value).with_context(|| {
                 format!(
                     "bundled repository event {} is malformed",
                     envelope.event_id
                 )
             })?;
+            // A bundle carries the payload directly, so the rules the
+            // recording path enforces have to be enforced here too. Otherwise
+            // an imported map says something no recorded map could — a
+            // rewrite to the zero object, where "dropped" is spelled as no
+            // successor at all.
+            if let Some(crate::model::Payload::HistoryRewritten { mapping, .. }) =
+                typed.as_ref().map(|event| &event.payload)
+            {
+                crate::rewrite::validate_mapping(mapping).with_context(|| {
+                    format!(
+                        "bundled repository event {} records a mapping it cannot mean",
+                        envelope.event_id
+                    )
+                })?;
+            }
         }
         if bundle.event_count != bundle.events.len() {
             bail!(

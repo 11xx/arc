@@ -910,6 +910,13 @@ rewrite locally is checked the same way and takes the same repository-scoped
 lock, so two imports of different changes cannot each accept half of a
 contradiction.
 
+Both write paths also refuse a mapping that cannot mean what it says — a
+rewrite to the zero object, where a dropped commit is spelled as no successor
+at all; a revision mapped to itself; anything that is not a revision. A
+mapping that reached the ledger another way is skipped by readers rather than
+making the whole map unreadable, and `arc doctor` reports it as
+`invalid-rewrite-mapping`.
+
 Approval does not survive translation, and should not: a verdict binds to an
 exact patchset head, and only a content comparison could say whether a
 rewritten head is the same work. Re-approving a rewrite that preserved the
