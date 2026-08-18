@@ -29,6 +29,8 @@ pub struct Bundle {
     /// bundle that drops it hands the receiver revisions nothing can resolve.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repository_events: Vec<Value>,
+    // Validated at parse, not at write: an import that discovered a malformed
+    // one halfway through would already have written change events.
 }
 
 /// Bundles written before the format was carried came from a build that wrote
@@ -121,6 +123,28 @@ impl Bundle {
         }
         ids::validate_id_component(&bundle.repository_id)?;
         ids::validate_id_component(&bundle.change_id)?;
+        // Repository events are validated here, before anything is written:
+        // an import that found a malformed one halfway through would already
+        // have appended change events, and a stored malformed envelope breaks
+        // every later read of the rewrite map.
+        for value in &bundle.repository_events {
+            let envelope = event_envelope(value)
+                .context("bundled repository event is not a well-formed event")?;
+            ids::validate_id_component(envelope.event_id)?;
+            if envelope.change_id != Store::REPOSITORY_SCOPE {
+                bail!(
+                    "bundled repository event {} names change {:?}, not the repository scope",
+                    envelope.event_id,
+                    envelope.change_id
+                );
+            }
+            parse_typed_event(value).with_context(|| {
+                format!(
+                    "bundled repository event {} is malformed",
+                    envelope.event_id
+                )
+            })?;
+        }
         if bundle.event_count != bundle.events.len() {
             bail!(
                 "event_count {} does not match {} bundled events",

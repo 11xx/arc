@@ -27,6 +27,21 @@ pub enum Fate {
     Dropped,
 }
 
+fn describe(fate: &Option<String>) -> String {
+    match fate {
+        Some(revision) => revision.clone(),
+        None => "dropped".to_string(),
+    }
+}
+
+/// One resolution step. Ambiguity is not the same as no match: the first
+/// means the answer is unknown, the second that the chain ended.
+enum Step {
+    Unmapped,
+    Ambiguous,
+    Mapped { key: String, fate: Option<String> },
+}
+
 /// Every recorded rewrite, flattened into one old-to-fate mapping.
 #[derive(Debug, Default, Clone)]
 pub struct RewriteMap {
@@ -39,6 +54,20 @@ impl RewriteMap {
         for event in store.load_repository_events()? {
             if let Payload::HistoryRewritten { mapping, .. } = &event.payload {
                 for (old, new) in mapping {
+                    // Two rewrites may each move a revision — that is a chain,
+                    // and following it is the point. But two *different*
+                    // successors for the same revision is a contradiction, and
+                    // silently keeping the last one would answer a question the
+                    // ledger cannot answer.
+                    if let Some(existing) = steps.get(old) {
+                        if existing != new {
+                            anyhow::bail!(
+                                "recorded rewrites disagree about {old}: {} and {}",
+                                describe(existing),
+                                describe(new)
+                            );
+                        }
+                    }
                     steps.insert(old.clone(), new.clone());
                 }
             }
@@ -59,41 +88,56 @@ impl RewriteMap {
     /// what the map stores in full. An abbreviation matching more than one
     /// recorded revision names none of them.
     pub fn fate(&self, revision: &str) -> Option<Fate> {
-        let mut seen: Vec<String> = Vec::new();
+        let mut visited: Vec<String> = Vec::new();
         let mut current = revision.to_string();
         loop {
-            let (key, next) = self.step(&current)?;
-            match next {
-                None => return Some(Fate::Dropped),
-                Some(next) => {
-                    // Only a hand-written map can cycle. Stopping beats
-                    // looping, and beats reporting an arbitrary node as a
-                    // survivor.
-                    if seen.iter().any(|step| step == &next) {
+            match self.step(&current) {
+                // Nothing rewrote this one. Either the caller asked about a
+                // revision no rewrite touched, or we followed the chain to
+                // its end and this is where it survives.
+                Step::Unmapped => {
+                    return visited
+                        .is_empty()
+                        .then_some(())
+                        .map_or(Some(Fate::Rewritten(current)), |()| None)
+                }
+                // An abbreviation matching two recorded revisions names
+                // neither, and a chain that reaches one cannot be followed —
+                // reporting the ambiguous node as a survivor would be a guess.
+                Step::Ambiguous => return None,
+                Step::Mapped { key, fate } => {
+                    // Only a hand-written map can cycle. Visiting a key twice
+                    // is what a cycle is, whatever spelling led back to it.
+                    if visited.contains(&key) {
                         return None;
                     }
-                    seen.push(key);
-                    current = next;
+                    visited.push(key);
+                    match fate {
+                        None => return Some(Fate::Dropped),
+                        Some(next) => current = next,
+                    }
                 }
-            }
-            if self.step(&current).is_none() {
-                return Some(Fate::Rewritten(current));
             }
         }
     }
 
     /// One hop, resolving `revision` against the map by prefix in either
-    /// direction. Returns the matched key and its fate.
-    fn step(&self, revision: &str) -> Option<(String, Option<String>)> {
+    /// direction.
+    fn step(&self, revision: &str) -> Step {
         let mut matches = self
             .steps
             .iter()
             .filter(|(old, _)| old.starts_with(revision) || revision.starts_with(old.as_str()));
-        let (old, fate) = matches.next()?;
+        let Some((old, fate)) = matches.next() else {
+            return Step::Unmapped;
+        };
         if matches.next().is_some() {
-            return None;
+            return Step::Ambiguous;
         }
-        Some((old.clone(), fate.clone()))
+        Step::Mapped {
+            key: old.clone(),
+            fate: fate.clone(),
+        }
     }
 }
 
@@ -214,6 +258,25 @@ mod tests {
     fn a_dropped_revision_is_not_a_survivor() {
         let map = map(&[("aaaaaaaaaa", None)]);
         assert_eq!(map.fate("aaaaaaaaaa"), Some(Fate::Dropped));
+    }
+
+    /// Ambiguity anywhere along a chain makes the answer unknown, not the
+    /// ambiguous node a survivor.
+    #[test]
+    fn an_ambiguous_chain_resolves_to_nothing() {
+        let map = map(&[
+            ("aaaaaaaaaa", Some("bbbbbbbbbb")),
+            ("bbbbbbbbbb11", Some("cccccccccc")),
+            ("bbbbbbbbbb22", Some("dddddddddd")),
+        ]);
+        assert_eq!(map.fate("aaaaaaaaaa"), None);
+    }
+
+    /// A cycle is visiting a key twice, whatever spelling led back to it.
+    #[test]
+    fn a_chain_that_returns_to_a_visited_key_resolves_to_nothing() {
+        let map = map(&[("aaaaaaaaaa", Some("aaaaaaaaaaaa"))]);
+        assert_eq!(map.fate("aaaaaaaaaa"), None);
     }
 
     #[test]
