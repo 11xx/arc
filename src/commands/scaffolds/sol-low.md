@@ -27,7 +27,12 @@ base revision and passes at the patchset head**. Record both phases:
 - `arc verify <change> --probe <name>` at the final commit
 
 Record the baseline while HEAD *is* the brief's base revision — arc refuses it
-otherwise, attested or not. Evidence binds to the exact brief the patchset
+otherwise, attested or not. That base is the brief's, not the patchset's: if
+you rebase onto a moved target after recording it, the baseline describes a
+revision the work is no longer built on, and a probe can pass for something
+the target brought rather than for the change. Rebase first, then record the
+brief, then record the baseline; if the target moves again, ask for a new
+brief rather than reusing a baseline measured somewhere else. Evidence binds to the exact brief the patchset
 carries, the probe name, the phase, and those exact revisions; recording
 against a different brief version, or at any other revision, leaves evidence
 arc does not count.
@@ -66,7 +71,9 @@ The absence of declared probes means "no probe contract was recorded", never
 ## Execution contract (clear-spec delegated slice)
 
 - Work only in this change's worktree. `git rebase master` first — earlier
-  chain members land ahead of you, so the base is stale by design.
+  chain members land ahead of you, so the base is stale by design. Rebase
+  before the brief is recorded where you can; a baseline is only as good as
+  the base it was measured at.
 - Run as `ARC_ROLE=implementer` with `ARC_HARNESS`/`ARC_SESSION` set, and a
   distinct `ARC_ACTOR`. Loop: `arc stage <change> implementing --claim` →
   implement in scoped commits → `arc done`, then STOP for lead review.
