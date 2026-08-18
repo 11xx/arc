@@ -105,9 +105,30 @@ fn audit_diff_integrated_uses_the_recorded_range() {
     let repo = Repo::new();
     stdout(repo.arc(&repo.root).args(["begin", "ranged"]));
     let worktree = repo.home.join(".worktrees/repo-ranged");
+
+    // The target moves while the change is in flight, and the change picks
+    // that work up by merging it. Recorded against the older base — the
+    // stacked shape, where a patchset spans its whole ancestry — the patchset
+    // range contains the target's work and the integration range does not.
+    // A fixture where the two coincide proves nothing about which one is used.
+    let original_base = repo.head(&repo.root);
+    repo.commit(
+        &repo.root,
+        "target-work.rs",
+        "target\n",
+        "chore: target work",
+    );
     repo.commit(&worktree, "ranged.rs", "done\n", "feat: ranged");
-    stdout(repo.arc(&worktree).args(["snapshot", "ranged"]));
+    git(&worktree, &["merge", "--no-edit", "master"]);
+    stdout(
+        repo.arc(&worktree)
+            .args(["snapshot", "ranged", "--base", &original_base]),
+    );
     let target_before = repo.head(&repo.root);
+    assert_ne!(
+        target_before, original_base,
+        "the fixture must move the target, or the two ranges coincide"
+    );
     stdout(
         repo.arc(&repo.root)
             .args(["review", "ranged", "--verdict", "approved"]),
@@ -116,11 +137,6 @@ fn audit_diff_integrated_uses_the_recorded_range() {
         .args(["integrate", "ranged"])
         .assert()
         .success();
-
-    // The target moves on after the merge. A patchset range would follow the
-    // change's own base; the recorded range names where the target stood at
-    // integration, and only that.
-    repo.commit(&repo.root, "unrelated.rs", "later\n", "chore: later work");
 
     // The range is the merge against what the target was, so the file the
     // change added appears in it.
@@ -147,7 +163,15 @@ fn audit_diff_integrated_uses_the_recorded_range() {
     let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
     assert_eq!(event["target_before"], target_before, "{event}");
 
-    assert!(!rendered.contains("unrelated.rs"), "{rendered}");
+    // The target's own work is in the base, so it is not in the range —
+    // while `diff ranged` (the patchset range) does contain it.
+    assert!(!rendered.contains("target-work.rs"), "{rendered}");
+    let patchset_range = stdout(repo.arc(&repo.root).args(["diff", "ranged"]));
+    assert!(
+        patchset_range.contains("target-work.rs"),
+        "{patchset_range}"
+    );
+    assert!(patchset_range.contains("ranged.rs"), "{patchset_range}");
 
     // Selectors that describe a different range are refused rather than
     // silently ignored — including --findings, whose anchors are a patchset
