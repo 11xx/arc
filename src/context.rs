@@ -410,7 +410,7 @@ pub fn resume(
         println!("- (none)");
     } else {
         for gate in &status.report.gates {
-            println!("- {}: {}", gate.name, gate.result);
+            println!("- {}: {}", gate.name, crate::render::gate_line(gate));
         }
     }
     println!("\nNext action: {}", status.report.next_action);

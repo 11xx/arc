@@ -116,6 +116,42 @@ pub struct GateStatus {
     pub timed_out: bool,
 }
 
+impl GateStatus {
+    /// Why this gate is not green at head, in the caller's terms.
+    ///
+    /// A gate whose evidence passed but cannot be reused says so here; the
+    /// bare result would read `pass` and contradict every readiness check.
+    /// `None` means the gate is green.
+    pub fn not_green_reason(&self) -> Option<&'static str> {
+        if self.green_at_head {
+            return None;
+        }
+        Some(match self.result.as_str() {
+            "pending" => "no evidence at head",
+            "fail" => "the gate failed",
+            _ if self.tree_moved => "the worktree changed while the gate ran",
+            _ if self.worktree_dirty == Some(true) => {
+                "evidence recorded on a dirty worktree, so no checkout of this revision \
+                 reproduces it"
+            }
+            _ => "the tested tree was not recorded, so the evidence has no provenance",
+        })
+    }
+
+    /// What actually clears this gate. Re-running a gate against a dirty tree
+    /// records the same unusable evidence, so the loop only terminates by
+    /// naming the tree.
+    pub fn clearing_action(&self) -> String {
+        match self.not_green_reason() {
+            None => "integrate".into(),
+            Some(_) if self.tree_moved || self.worktree_dirty == Some(true) => {
+                format!("clean_worktree:{}", self.name)
+            }
+            Some(_) => format!("run_gate:{}", self.name),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProbeStatus {
     pub name: String,
@@ -778,7 +814,7 @@ fn build_report(
     } else if state.hold.is_some() {
         "release_hold".into()
     } else if let Some(gate) = gate_statuses.iter().find(|gate| !gate.green_at_head) {
-        format!("run_gate:{}", gate.name)
+        gate.clearing_action()
     } else if let Some(probe) = probe_statuses
         .iter()
         .find(|probe| !probe.discriminating_at_head)

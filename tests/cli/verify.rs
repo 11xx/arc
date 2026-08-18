@@ -1431,6 +1431,67 @@ fn evidence_from_a_dirty_worktree_is_recorded_and_not_green() {
     assert_eq!(status["gates"][0]["worktree_dirty"], true, "{status}");
 }
 
+/// A gate whose evidence cannot be reused reads `pass` in every raw result
+/// field, so a caller who is only shown the result concludes the opposite of
+/// what readiness concluded. Every human-facing surface names the reason, and
+/// the next step names the tree rather than another run against it — re-running
+/// a gate on a still-dirty tree records the same unusable evidence forever.
+#[test]
+fn dirty_gate_evidence_is_named_by_resume_check_and_the_next_action() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gate"]);
+    stdout(repo.arc(&repo.root).args(["begin", "named"]));
+    let wt = repo.home.join(".worktrees/repo-named");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    repo.arc(&wt).args(["snapshot", "named"]).assert().success();
+    fs::write(wt.join("scratch.rs"), "untracked\n").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "named", "--gate", "unit"])
+        .assert()
+        .success();
+
+    let resume = stdout(repo.arc(&wt).args(["resume", "named"]));
+    assert!(
+        resume.contains("unit: pass (not green at head: evidence recorded on a dirty worktree"),
+        "{resume}"
+    );
+
+    let check = String::from_utf8(
+        repo.arc(&wt)
+            .args(["check", "named"])
+            .assert()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .unwrap();
+    assert!(
+        check.contains("not green at head: evidence recorded on a dirty worktree"),
+        "{check}"
+    );
+
+    let status = json_stdout(repo.arc(&wt).args(["status", "named", "--json"]));
+    assert_eq!(status["next_action"], "clean_worktree:unit", "{status}");
+
+    // Committing the tree — not another gate run — is what clears it.
+    git(&wt, &["add", "scratch.rs"]);
+    git(&wt, &["commit", "-m", "chore: commit scratch"]);
+    repo.arc(&wt).args(["snapshot", "named"]).assert().success();
+    repo.arc(&wt)
+        .args(["verify", "named", "--gate", "unit"])
+        .assert()
+        .success();
+    let resume = stdout(repo.arc(&wt).args(["resume", "named"]));
+    assert!(resume.contains("unit: pass\n"), "{resume}");
+}
+
 /// Re-snapshotting at the same head is how a patchset binds to a corrected
 /// brief. Counting that as a revision cycle would inflate the rework signal
 /// for exactly the leads careful enough to correct one.

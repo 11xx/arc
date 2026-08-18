@@ -1,8 +1,17 @@
 use crate::commands::ArcAlternative;
 use crate::model::{Event, Payload};
 use crate::state::ChangeState;
-use crate::status::{Blocker, StatusReport};
+use crate::status::{Blocker, GateStatus, StatusReport};
 use std::fmt::Write;
+
+/// One gate's line in a human-facing gate list: the raw result, plus why a
+/// passing result still does not count at head.
+pub fn gate_line(gate: &GateStatus) -> String {
+    match gate.not_green_reason() {
+        None => gate.result.clone(),
+        Some(reason) => format!("{} (not green at head: {reason})", gate.result),
+    }
+}
 
 /// Human-readable Markdown view of one change. Suitable for terminals
 /// and for dropping into a journal artifact; the ledger stays private.
@@ -710,7 +719,12 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
             }
             Blocker::GatesNotGreen => {
                 for gate in report.gates.iter().filter(|gate| !gate.green_at_head) {
-                    let _ = writeln!(out, "  - Gate `{}` is not green at head", gate.name);
+                    let _ = writeln!(
+                        out,
+                        "  - Gate `{}` is not green at head: {}",
+                        gate.name,
+                        gate.not_green_reason().unwrap_or_default()
+                    );
                 }
             }
             Blocker::AcceptanceProbesNotGreen => {
@@ -1147,7 +1161,13 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .gates
             .iter()
             .filter(|gate| !gate.green_at_head)
-            .map(|gate| format!("gate `{}` is not green at head", gate.name))
+            .map(|gate| {
+                format!(
+                    "gate `{}` is not green at head: {}",
+                    gate.name,
+                    gate.not_green_reason().unwrap_or_default()
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n"),
     );

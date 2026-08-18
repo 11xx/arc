@@ -637,6 +637,13 @@ cleanliness remains unknown and passing results do not count as green. A
 boundary change is still recorded as `tree_moved` and explains the stronger
 failure.
 
+Evidence that passed but cannot be reused reads `pass` in its raw result, so
+every human-facing surface names why it does not count: `arc resume`, `arc
+rescue`, and `arc check` render the reason beside the gate. Because a rerun
+against the same unusable tree records the same unusable evidence, the
+`next_action` for a dirty or moved tree is `clean_worktree:<gate>` rather than
+`run_gate:<gate>` — commit or clean the worktree, then run the gate.
+
 Executed gates capture combined stdout and stderr, retaining only the final
 4096 bytes. Failed-gate tails appear in `arc show` and `arc status`; successful
 gates stay compact. A declared timeout terminates and reaps the gate's entire
