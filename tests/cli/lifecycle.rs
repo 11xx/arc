@@ -1219,6 +1219,15 @@ fn changing_a_gate_declaration_ungreens_its_recorded_evidence() {
     assert_eq!(status["gates"][0]["declaration_changed"], true, "{status}");
     assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
 
+    // Reuse honours the same rule: the same command under a stricter timeout
+    // is a declaration nothing has run.
+    let reused =
+        stdout(
+            repo.arc(&worktree)
+                .args(["verify", "redeclared", "--all", "--skip-green"]),
+        );
+    assert!(!reused.contains("skipped (green at head)"), "{reused}");
+
     // Back to a command nothing has run, for the reuse check below.
     fs::write(
         worktree.join(".arc/gates.toml"),
