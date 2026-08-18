@@ -85,7 +85,7 @@ arc mangen <dir>                                      # writes <dir>/arc.1
 - **`arc integrate`** performs the merge only when, atomically checked:
   the head equals the approved patchset head, no blocking finding is
   open, every required gate is green at that exact head, and no hold is
-  active. Holds are independent (`arc-status/9` turned the singular `hold` into
+  active. Holds are independent (`arc-status/8` turned the singular `hold` into
   `holds`): `arc hold` prints the event that identifies
   the hold it set, `arc release-hold <change> <hold>` lifts exactly that one
   (a unique prefix is enough; an empty or ambiguous one is refused), and
