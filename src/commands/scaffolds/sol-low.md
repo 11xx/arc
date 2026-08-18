@@ -50,10 +50,13 @@ Three limits attestation and differential evidence do not lift:
   and bindings, never at whether arc ran anything, and an attested run
   captures no output — so the reviewer has nothing to inspect. Attest only
   what a sandbox genuinely prevented, and say which.
-- The reviewer still inspects the baseline output and confirms it failed for
-  the expected reason. A probe that fails at the base for an unrelated reason —
-  a missing fixture, a compile error — is not discriminating, and arc cannot
-  tell the difference.
+- Where arc ran the probe, the reviewer still inspects the captured baseline
+  output and confirms it failed for the expected reason. A probe that fails at
+  the base for an unrelated reason — a missing fixture, a compile error — is
+  not discriminating, and arc cannot tell the difference. An attested baseline
+  captures no output, so that confirmation is unavailable: the pair shows the
+  results differ and nothing more, which is a weaker claim and should be
+  treated as one.
 - Differential evidence does not replace independent review. It shows the
   change moved one named behavior; it says nothing about what else moved.
 

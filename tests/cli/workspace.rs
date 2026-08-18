@@ -389,6 +389,9 @@ fn brief_scaffold_sol_low_records_the_fences() {
     assert!(brief.contains("--probe-phase baseline"), "{brief}");
     assert!(brief.contains("**fails at that brief"), "{brief}");
     assert!(brief.contains("the expected reason"), "{brief}");
+    // Attested evidence cannot support the confirmation the line above asks
+    // for, and the scaffold must not ask for both at once.
+    assert!(brief.contains("An attested baseline"), "{brief}");
     assert!(brief.contains("no probe contract was recorded"), "{brief}");
     assert!(
         brief.contains("exit` inside one exits only that subshell"),
@@ -399,18 +402,12 @@ fn brief_scaffold_sol_low_records_the_fences() {
     assert!(brief.contains("out=$(cmd) || exit 1"), "{brief}");
     assert!(brief.contains("--result fail --tested-revision"), "{brief}");
     assert!(brief.contains("--execution-host"), "{brief}");
-    assert!(
-        brief.contains("HEAD *is* the brief"),
-        "{brief}"
-    );
+    assert!(brief.contains("HEAD *is* the brief"), "{brief}");
     // The claim that probes never gate was true before probes were declarable
     // and is false now; a scaffold that still said it would teach the wrong
     // contract to every delegated executor.
     assert!(!brief.contains("never gates integration"), "{brief}");
-    assert!(
-        brief.contains("never edit a probe to make it"),
-        "{brief}"
-    );
+    assert!(brief.contains("never edit a probe to make it"), "{brief}");
 }
 
 #[test]
