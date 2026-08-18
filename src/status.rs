@@ -156,9 +156,10 @@ impl GateStatus {
         if self.green_at_head {
             return "integrate".into();
         }
-        // While the tree is dirty, no run can produce evidence that counts —
-        // including a rerun of a gate that failed, and including a gate that
-        // failed *because* of the uncommitted file. Cleaning is not claimed to
+        // While the tree is dirty, no local run can produce evidence that
+        // counts — attested evidence carries its own execution context and is
+        // unaffected — including a rerun of a gate that failed, and including
+        // a gate that failed *because* of the uncommitted file. Cleaning is not claimed to
         // fix a failure; it is the precondition for any run whose result is
         // usable. It also cannot loop where the live tree is known: this reads
         // it, so once the tree is clean the advice becomes the rerun. Where it
