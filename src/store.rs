@@ -408,8 +408,18 @@ impl Store {
     /// Stamping at that moment, rather than on every open, means a build that
     /// only read a ledger never locks its owner out of it.
     fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
-        let introduced_in = match payload {
-            Payload::ChangeIntegrated { .. } | Payload::IntegrationAsserted { .. } => 2,
+        self.stamp_format_for_event_type(match payload {
+            Payload::ChangeIntegrated { .. } => Some("change-integrated"),
+            Payload::IntegrationAsserted { .. } => Some("integration-asserted"),
+            _ => None,
+        })
+    }
+
+    /// The same stamp, decided from an event type rather than a typed payload,
+    /// so the import path and the record path cannot disagree.
+    fn stamp_format_for_event_type(&self, event_type: Option<&str>) -> Result<()> {
+        let introduced_in = match event_type {
+            Some("change-integrated") | Some("integration-asserted") => 2,
             _ => return Ok(()),
         };
         let config_path = self.root.join("config.json");
@@ -580,6 +590,17 @@ impl Store {
     pub fn append_raw_event(&self, change_id: &str, event_id: &str, bytes: &[u8]) -> Result<()> {
         ids::validate_id_component(change_id)?;
         ids::validate_id_component(event_id)?;
+        // Import writes bytes rather than a typed payload, but the store it
+        // writes into is the same one an older build may reopen. A bundle
+        // carrying an integration event must stamp the format exactly as a
+        // locally recorded one does.
+        self.stamp_format_for_event_type(
+            serde_json::from_slice::<serde_json::Value>(bytes)
+                .ok()
+                .as_ref()
+                .and_then(|value| value.get("event_type"))
+                .and_then(serde_json::Value::as_str),
+        )?;
         let dir = self.events_dir(change_id);
         create_private_dir_all(&dir)?;
         let path = dir.join(format!("{event_id}.json"));
