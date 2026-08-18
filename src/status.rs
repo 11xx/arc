@@ -153,11 +153,16 @@ impl GateStatus {
     /// replaced by a rerun — the historical dirty flag on evidence already
     /// recorded is not something cleaning can change.
     pub fn clearing_action(&self, worktree_dirty: Option<bool>) -> String {
-        match self.not_green_reason() {
-            None => "integrate".into(),
-            Some(_) if worktree_dirty == Some(true) => format!("clean_worktree:{}", self.name),
-            Some(_) => format!("run_gate:{}", self.name),
+        if self.green_at_head {
+            return "integrate".into();
         }
+        // A gate that failed is a gate that failed: cleaning the tree cannot
+        // turn `fail` into `pass`, and advising it would send the caller to
+        // tidy a worktree instead of fixing the code.
+        if self.result == "fail" || worktree_dirty != Some(true) {
+            return format!("run_gate:{}", self.name);
+        }
+        format!("clean_worktree:{}", self.name)
     }
 }
 

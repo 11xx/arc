@@ -1494,9 +1494,9 @@ fn dirty_gate_evidence_is_named_by_resume_check_and_the_next_action() {
             .args(["check", "named"])
             .assert()
             // Not the gate exit code: an unapproved head outranks a gate that
-            // is not green, and this change has no verdict. The gate blocker
-            // is still reported, which is what this asserts.
-            .failure()
+            // is not green, and this change has no verdict. Pinning 3 keeps
+            // that precedence asserted rather than accepting either code.
+            .code(3)
             .get_output()
             .stdout
             .clone(),
@@ -1533,6 +1533,26 @@ fn dirty_gate_evidence_is_named_by_resume_check_and_the_next_action() {
         .success();
     let resume = stdout(repo.arc(&wt).args(["resume", "named"]));
     assert!(resume.contains("unit: pass\n"), "{resume}");
+
+    // A gate that failed is a gate that failed. Cleaning a tree cannot turn
+    // `fail` into `pass`, so a dirty tree must not redirect the advice away
+    // from the code.
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"false\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: make the gate fail"]);
+    git(&wt, &["merge", "--no-edit", "master"]);
+    stdout(repo.arc(&wt).args(["snapshot", "named"]));
+    fs::write(wt.join("scratch.rs"), "untracked again\n").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "named", "--gate", "unit"])
+        .assert()
+        .failure();
+    let status = json_stdout(repo.arc(&wt).args(["status", "named", "--json"]));
+    assert_eq!(status["next_action"], "run_gate:unit", "{status}");
 }
 
 /// Re-snapshotting at the same head is how a patchset binds to a corrected

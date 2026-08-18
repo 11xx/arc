@@ -4,10 +4,16 @@ use crate::state::ChangeState;
 use crate::status::{Blocker, GateStatus, StatusReport};
 use std::fmt::Write;
 
-/// Why a passing verification cannot be reused as evidence at its revision.
-/// `None` when it can, or when it did not pass — a failure explains itself.
-fn unusable_evidence_reason(entry: &crate::state::VerificationEntry) -> Option<&'static str> {
-    if entry.green_at_head() || entry.result != crate::model::VerifyResult::Pass {
+/// Why a passing *gate* verification cannot be reused as evidence at its
+/// revision. `None` when it can, when it did not pass — a failure explains
+/// itself — or when it is not gate evidence: probe readiness is a different
+/// question, answered by the probe's own baseline and final results.
+fn unusable_gate_evidence_reason(entry: &crate::state::VerificationEntry) -> Option<&'static str> {
+    if entry.gate.is_none()
+        || entry.probe.is_some()
+        || entry.green_at_head()
+        || entry.result != crate::model::VerifyResult::Pass
+    {
         return None;
     }
     Some(if entry.tree_moved {
@@ -480,7 +486,7 @@ pub fn markdown(
             // A passing run that cannot be reused reads as `Pass` above, next
             // to a gate summary that says the same gate is not green. Saying
             // why here is what keeps the two from contradicting each other.
-            if let Some(reason) = unusable_evidence_reason(v) {
+            if let Some(reason) = unusable_gate_evidence_reason(v) {
                 let _ = writeln!(w, "  - not reusable as evidence: {reason}");
             }
         }

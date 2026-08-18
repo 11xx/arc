@@ -639,7 +639,8 @@ failure.
 
 Evidence that passed but cannot be reused reads `pass` in its raw result, so
 every human-facing surface names why it does not count: `arc resume`, `arc
-rescue`, and `arc check` render the reason beside the gate. Because a rerun
+rescue`, and `arc check` render the reason beside the gate, and `arc show`
+renders it beside the verification it belongs to. Because a rerun
 against the same unusable tree records the same unusable evidence, the
 `next_action` is `clean_worktree:<gate>` while the worktree is actually
 dirty, rather than `run_gate:<gate>` — commit or clean it, then run the
