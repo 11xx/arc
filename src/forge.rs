@@ -132,6 +132,9 @@ impl ForgeProjectionRecord {
 /// Latest-wins observed link, reduced from `forge-link`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ForgeLinkRecord {
+    /// The `forge-link` event that recorded this link. Lifecycle facts bind
+    /// to it, so relinking cannot inherit the previous PR's state.
+    pub event_id: String,
     pub pr_number: u64,
     pub url: String,
     pub base_repo: String,
@@ -149,11 +152,17 @@ pub struct ForgeChecksRecord {
     pub detail: Option<String>,
 }
 
-/// Latest-wins observed PR lifecycle, reduced from `forge-pr-state`.
+/// One observed PR lifecycle fact, bound to the link and head it was read
+/// at. Lifecycle observations accumulate rather than overwrite: an older
+/// fact about a superseded PR is history, not the current state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ForgePrStateRecord {
     pub state: ForgePrState,
     pub merge_sha: Option<String>,
+    /// The link this was observed against. `None` predates binding.
+    pub link_event_id: Option<String>,
+    /// The PR head this was observed at. `None` predates binding.
+    pub pr_head: Option<String>,
 }
 
 /// Accumulated forge facts for one change: the latest of each observed
@@ -163,16 +172,41 @@ pub struct ForgeState {
     pub projection: Option<ForgeProjectionRecord>,
     pub link: Option<ForgeLinkRecord>,
     pub checks: Option<ForgeChecksRecord>,
-    pub pr_state: Option<ForgePrStateRecord>,
+    /// Every observed lifecycle fact, oldest first. The current state is
+    /// whichever one matches the current link and head, not the newest.
+    pub pr_states: Vec<ForgePrStateRecord>,
+    /// How many links this change has recorded. A change that never relinked
+    /// has no ambiguity to resolve, which is what lets unbound legacy facts
+    /// still be read as current.
+    pub link_count: usize,
 }
 
 impl ForgeState {
+    /// The lifecycle fact that describes the current link and head, if one
+    /// was observed there. Newest first, because a PR can legitimately be
+    /// observed more than once at the same head.
+    ///
+    /// A fact written before lifecycle binding names no link or head. It is
+    /// read as current only while the change has recorded exactly one link:
+    /// with nothing to have relinked from, there is no other PR it could
+    /// have described.
+    pub fn current_pr_state(&self) -> Option<&ForgePrStateRecord> {
+        let link = self.link.as_ref()?;
+        self.pr_states
+            .iter()
+            .rev()
+            .find(|record| match (&record.link_event_id, &record.pr_head) {
+                (Some(event), Some(head)) => *event == link.event_id && *head == link.head_sha,
+                _ => self.link_count == 1,
+            })
+    }
+
     /// Whether this change has recorded any forge fact at all.
     pub fn is_empty(&self) -> bool {
         self.projection.is_none()
             && self.link.is_none()
             && self.checks.is_none()
-            && self.pr_state.is_none()
+            && self.pr_states.is_empty()
     }
 }
 
@@ -392,21 +426,31 @@ pub fn build_status(
         (Some(_), None) | (None, _) => ("unknown", None),
     };
 
-    let pr_state = forge.pr_state.as_ref().map(|p| ForgePrStateView {
+    // Lifecycle facts are read at a specific PR and head. Pairing the newest
+    // one with the current link would let a fact about a superseded PR speak
+    // for its replacement, which is exactly how `forge_ready` could go true
+    // after a relink. An observation that cannot be shown to describe the
+    // current link and head leaves the state unknown instead.
+    let current_pr_state = forge.current_pr_state();
+    let pr_state = current_pr_state.map(|p| ForgePrStateView {
         state: p.state.as_str().to_string(),
         merge_sha: p.merge_sha.clone(),
     });
 
     let mut caveats = Vec::new();
+    if current_pr_state.is_none() && !forge.pr_states.is_empty() {
+        caveats.push(
+            "pr-state unknown: every recorded lifecycle fact was observed at a different link \
+             or head"
+                .to_string(),
+        );
+    }
     if checks == "not-configured" {
         caveats
             .push("checks not-configured: zero hosted checks is not a passing result".to_string());
     }
 
-    let pr_open = matches!(
-        forge.pr_state.as_ref().map(|p| p.state),
-        Some(ForgePrState::Open)
-    );
+    let pr_open = matches!(current_pr_state.map(|p| p.state), Some(ForgePrState::Open));
     let checks_ok = matches!(checks, "passed" | "not-configured");
     let forge_ready = forge.link.is_some() && head_match && checks_ok && pr_open;
 

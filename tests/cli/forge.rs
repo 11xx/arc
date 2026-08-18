@@ -498,7 +498,9 @@ fn forge_ready_truth_table() {
 #[test]
 fn forge_pr_state_merged_requires_merge_sha() {
     let repo = Repo::new();
-    let (_id, _wt, _head) = forge_change(&repo, "merged");
+    let (_id, _wt, head) = forge_change(&repo, "merged");
+    declare_same_repo(&repo, "merged", "arc/merged");
+    link_at(&repo, "merged", "1", &head, "arc/merged");
     repo.arc(&repo.root)
         .args(["forge", "pr-state", "merged", "--state", "merged"])
         .assert()
@@ -519,6 +521,92 @@ fn forge_pr_state_merged_requires_merge_sha() {
     let status = status_json(&repo, "merged");
     assert_eq!(status["forge"]["pr_state"]["state"], "merged");
     assert_eq!(status["forge"]["pr_state"]["merge_sha"], "abc123");
+}
+
+/// A lifecycle fact is an observation of one PR at one head. Pairing the
+/// newest such fact with the newest link let an "open" read from a PR that was
+/// since replaced speak for its replacement, which is how `forge_ready` could
+/// go true for a PR nobody had looked at. After a relink the state is unknown
+/// until it is observed again.
+#[test]
+fn pr_state_is_bound_to_link_and_head_after_relink() {
+    let repo = Repo::new();
+    let (_id, wt, head) = forge_change(&repo, "relink");
+    declare_same_repo(&repo, "relink", "arc/relink");
+    link_at(&repo, "relink", "1", &head, "arc/relink");
+    repo.arc(&repo.root)
+        .args(["forge", "pr-state", "relink", "--state", "open"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "checks",
+            "relink",
+            "--pr-head",
+            &head,
+            "--state",
+            "passed",
+        ])
+        .assert()
+        .success();
+    let status = status_json(&repo, "relink");
+    assert_eq!(status["forge"]["pr_state"]["state"], "open", "{status}");
+    assert_eq!(status["forge"]["forge_ready"], true, "{status}");
+
+    // A second PR at a new head: the old "open" describes the old PR, so the
+    // current lifecycle state is unknown and readiness goes false.
+    repo.commit(&wt, "more.txt", "more\n", "feat: more");
+    stdout(repo.arc(&wt).args(["snapshot", "relink"]));
+    let head2 = repo.head(&wt);
+    link_at(&repo, "relink", "2", &head2, "arc/relink");
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "checks",
+            "relink",
+            "--pr-head",
+            &head2,
+            "--state",
+            "passed",
+        ])
+        .assert()
+        .success();
+    let status = status_json(&repo, "relink");
+    assert!(status["forge"]["pr_state"].is_null(), "{status}");
+    assert_eq!(status["forge"]["forge_ready"], false, "{status}");
+    assert!(
+        status["forge"]["caveats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|caveat| caveat.as_str().unwrap().contains("pr-state unknown")),
+        "{status}"
+    );
+
+    // Observing the new PR restores readiness, and the fact binds to it.
+    repo.arc(&repo.root)
+        .args(["forge", "pr-state", "relink", "--state", "open"])
+        .assert()
+        .success();
+    let status = status_json(&repo, "relink");
+    assert_eq!(status["forge"]["pr_state"]["state"], "open", "{status}");
+    assert_eq!(status["forge"]["forge_ready"], true, "{status}");
+
+    // Naming a link that is not the current one is refused rather than
+    // recorded as though it described the current PR.
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "pr-state",
+            "relink",
+            "--state",
+            "closed",
+            "--link",
+            "01SUPERSEDED",
+        ])
+        .assert()
+        .failure();
 }
 
 #[test]

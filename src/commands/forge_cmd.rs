@@ -98,12 +98,16 @@ pub fn forge_checks(
     Ok(())
 }
 
-/// Record the observed PR lifecycle state. `merged` requires `--merge-sha`.
+/// Record the observed PR lifecycle state, bound to the link it was read at.
+/// `merged` requires `--merge-sha`. The head comes from the resolved link
+/// rather than the caller, so a lifecycle fact can never claim a head its PR
+/// does not have.
 pub fn forge_pr_state(
     ctx: &Ctx,
     reference: &str,
     pr_state: crate::forge::ForgePrState,
     merge_sha: Option<String>,
+    link: Option<String>,
 ) -> Result<()> {
     if pr_state == crate::forge::ForgePrState::Merged && merge_sha.is_none() {
         bail!("forge pr-state merged requires --merge-sha");
@@ -115,9 +119,21 @@ pub fn forge_pr_state(
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let st = state::reduce(&store.load_events(&change_id)?)?;
+    let link = match (&st.forge.link, link.as_deref()) {
+        (None, _) => bail!("no forge link recorded on {change_id}; record one before its state"),
+        (Some(current), None) => current,
+        (Some(current), Some(named)) if current.event_id.starts_with(named) => current,
+        (Some(current), Some(named)) => bail!(
+            "{named} is not the current link on {change_id} (that is {}); a lifecycle fact about \
+             a superseded PR cannot be recorded as current",
+            current.event_id
+        ),
+    };
     let payload = Payload::ForgePrState {
         state: pr_state,
         merge_sha,
+        link_event_id: Some(link.event_id.clone()),
+        pr_head: Some(link.head_sha.clone()),
     };
     ensure_append_allowed(&st, &payload)?;
     let event = ctx.event(&store, &change_id, payload);

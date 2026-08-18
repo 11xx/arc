@@ -1331,7 +1331,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 head_ref,
                 head_sha,
             } => {
+                state.forge.link_count += 1;
                 state.forge.link = Some(crate::forge::ForgeLinkRecord {
+                    event_id: ev.event_id.clone(),
                     pr_number: *pr_number,
                     url: url.clone(),
                     base_repo: base_repo.clone(),
@@ -1355,11 +1357,18 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             Payload::ForgePrState {
                 state: pr_state,
                 merge_sha,
+                link_event_id,
+                pr_head,
             } => {
-                state.forge.pr_state = Some(crate::forge::ForgePrStateRecord {
-                    state: *pr_state,
-                    merge_sha: merge_sha.clone(),
-                });
+                state
+                    .forge
+                    .pr_states
+                    .push(crate::forge::ForgePrStateRecord {
+                        state: *pr_state,
+                        merge_sha: merge_sha.clone(),
+                        link_event_id: link_event_id.clone(),
+                        pr_head: pr_head.clone(),
+                    });
             }
             // An event this build does not recognize. Typed loading skips
             // unknown events before replay, so this arm is defensive: keep the
