@@ -591,7 +591,7 @@ to invoke `codex exec` on itself.
 
 ## Export / import
 
-Move one change's complete ledger as a deterministic `arc-bundle/1`
+Move one change's complete ledger as a deterministic `arc-bundle/2`
 JSON file:
 
 ```sh

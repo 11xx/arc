@@ -1,5 +1,35 @@
 use super::common::*;
 
+/// Skipping an event type is safe for a comment and fatal for a closure: a
+/// build that did not know an integration event would read the change as open
+/// and close it a second way. So the bundle carries the format it was written
+/// with, and an older importer refuses rather than half-reading it.
+#[test]
+fn a_bundle_from_a_newer_arc_is_refused_rather_than_partially_imported() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "future", "--no-worktree"]),
+    );
+    let bundle = repo.home.join("future.json");
+    repo.arc(&repo.root)
+        .args(["export", "future", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    assert!(value["store_format"].as_u64().is_some(), "{value}");
+    value["store_format"] = serde_json::json!(9999);
+    fs::write(&bundle, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+    let other = Repo::new();
+    other
+        .arc(&other.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .failure();
+}
+
 #[test]
 fn export_is_deterministic() {
     let repo = Repo::new();

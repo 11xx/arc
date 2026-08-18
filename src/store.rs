@@ -70,18 +70,7 @@ impl Store {
             Ok(bytes) => {
                 let cfg: StoreConfig =
                     serde_json::from_slice(&bytes).context("malformed arc config.json")?;
-                // A store written by a newer arc may hold event types this
-                // build would skip as unknown — and skipping a lifecycle event
-                // means reading a closed change as open. Refusing is the only
-                // honest answer; the alternative is a second closure.
-                if cfg.schema_version > crate::model::SCHEMA_VERSION {
-                    bail!(
-                        "this ledger was written by a newer arc (store format {}, this build \
-                         understands {}); upgrade arc rather than reading it with this build",
-                        cfg.schema_version,
-                        crate::model::SCHEMA_VERSION
-                    );
-                }
+                ensure_readable_format(cfg.schema_version, &config_path)?;
                 cfg.repository_id
             }
             Err(_) => {
@@ -549,6 +538,7 @@ impl Store {
             Ok(bytes) => {
                 let cfg: StoreConfig = serde_json::from_slice(&bytes)
                     .with_context(|| format!("malformed {}", path.display()))?;
+                ensure_readable_format(cfg.schema_version, &path)?;
                 Ok(Some(cfg.repository_id))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -565,6 +555,25 @@ impl Store {
         write_exclusive(&path, bytes)
             .with_context(|| format!("event {event_id} already exists during import"))
     }
+}
+
+/// Whether this build may read a store at all.
+///
+/// A store written by a newer arc may hold event types this build would skip
+/// as unknown — and skipping a lifecycle event means reading a closed change
+/// as open, then closing it a second way. Refusing is the only honest answer,
+/// and it has to hold on every path that opens a store, not just the one that
+/// creates it.
+fn ensure_readable_format(schema_version: u32, path: &Path) -> Result<()> {
+    if schema_version > crate::model::SCHEMA_VERSION {
+        bail!(
+            "{} was written by a newer arc (store format {schema_version}, this build \
+             understands {}); upgrade arc rather than reading it with this build",
+            path.display(),
+            crate::model::SCHEMA_VERSION
+        );
+    }
+    Ok(())
 }
 
 fn create_private_dir(path: &Path) -> Result<()> {

@@ -8,7 +8,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
-pub const BUNDLE_SCHEMA: &str = "arc-bundle/1";
+pub const BUNDLE_SCHEMA: &str = "arc-bundle/2";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Bundle {
@@ -17,7 +17,19 @@ pub struct Bundle {
     pub change_id: String,
     pub event_count: usize,
     pub events_sha256: String,
+    /// The store format the exporting build wrote. An importer that would skip
+    /// event types it does not know refuses instead: skipping a lifecycle
+    /// event means reading a closed change as open, and then closing it a
+    /// second way.
+    #[serde(default = "legacy_store_format")]
+    pub store_format: u32,
     pub events: Vec<Value>,
+}
+
+/// Bundles written before the format was carried came from a build that wrote
+/// store format 1.
+fn legacy_store_format() -> u32 {
+    1
 }
 
 impl Bundle {
@@ -61,6 +73,7 @@ impl Bundle {
         let events_sha256 = checksum(&events)?;
         Ok(Bundle {
             schema: BUNDLE_SCHEMA.to_string(),
+            store_format: crate::model::SCHEMA_VERSION,
             repository_id: origin_repository_id.expect("non-empty event list"),
             change_id: change_id.to_string(),
             event_count: events.len(),
@@ -78,6 +91,14 @@ impl Bundle {
     pub fn parse(bytes: &[u8]) -> Result<ValidatedBundle> {
         let bundle: Bundle =
             serde_json::from_slice(bytes).context("malformed arc export bundle")?;
+        if bundle.store_format > crate::model::SCHEMA_VERSION {
+            bail!(
+                "bundle was written by a newer arc (store format {}, this build understands \
+                 {}); upgrade arc rather than importing history it would not fully read",
+                bundle.store_format,
+                crate::model::SCHEMA_VERSION
+            );
+        }
         if bundle.schema != BUNDLE_SCHEMA {
             bail!(
                 "unsupported bundle schema {:?}; expected {BUNDLE_SCHEMA:?}",

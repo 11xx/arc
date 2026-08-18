@@ -176,6 +176,7 @@ fn validate_import_candidate(
     // refuse is a history that contradicts itself — a change closed twice, or
     // work recorded after it closed.
     let mut closed_at: Option<&str> = None;
+    let mut integrated = false;
     for event in &candidate {
         let terminal = matches!(
             event.payload,
@@ -191,14 +192,18 @@ fn validate_import_candidate(
                     event.event_id
                 );
             }
-            // The audit domain exists precisely to record review after
-            // closure, and forge observations outlive the merge they describe.
-            if !matches!(
-                append_permission(&event.payload),
-                AppendPermission::AnyPhaseFact
-                    | AppendPermission::IntegratedOnlyFact
-                    | AppendPermission::OpenOrIntegratedFact
-            ) {
+            // What may follow a closure depends on which closure it was: the
+            // audit domain records review after an integration, and a
+            // changelog entry belongs to something that shipped. Neither
+            // belongs after an abandonment.
+            let admissible = match append_permission(&event.payload) {
+                AppendPermission::AnyPhaseFact => true,
+                AppendPermission::IntegratedOnlyFact | AppendPermission::OpenOrIntegratedFact => {
+                    integrated
+                }
+                _ => false,
+            };
+            if !admissible {
                 bail!(
                     "bundled event {} records work after {} closed at {first}",
                     event.event_id,
@@ -208,6 +213,15 @@ fn validate_import_candidate(
         }
         if terminal {
             closed_at = Some(&event.event_id);
+            integrated = matches!(
+                event.payload,
+                Payload::ChangeIntegrated { .. }
+                    | Payload::IntegrationAsserted { .. }
+                    | Payload::ChangeClosed {
+                        outcome: Closure::Integrated,
+                        ..
+                    }
+            );
         }
     }
     Ok(())
