@@ -1524,6 +1524,11 @@ fn check_tagged(ctx: &Ctx, tags: Vec<String>) -> Result<i32> {
                 aggregate = code;
             }
         }
+        // A tagged preflight is what a lead reads before `integrate --tag`.
+        // Reporting a member ready while withholding that nobody but the
+        // brief's author approved it hides the advisory exactly where it was
+        // going to be acted on.
+        render::advisories(&report);
     }
     Ok(aggregate)
 }

@@ -981,6 +981,15 @@ fn brief_author_only_review_warns_but_remains_integrate_ready() {
         "{status}"
     );
 
+    // A tagged preflight is read before `integrate --tag`, so it carries the
+    // advisories too.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["metadata", "briefed", "--tag", "series"]),
+    );
+    let tagged = stdout(repo.arc(&repo.root).args(["check", "--tag", "series"]));
+    assert!(tagged.contains("brief-author-only-review"), "{tagged}");
+
     repo.arc(&repo.root)
         .args(["integrate", "briefed"])
         .assert()
