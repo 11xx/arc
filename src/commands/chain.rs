@@ -26,7 +26,8 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                 let Some(patchset) = state.latest_patchset() else {
                     return ChainReview {
                         subject: None,
-                        non_self_verdict: false,
+                        brief_author: None,
+                        reviewed_only_by_brief_author: None,
                         at_final: ChainReviewWindow {
                             verdicts: 0,
                             identities: Vec::new(),
@@ -104,11 +105,35 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                 let at_final = window(&final_patchset_ids, &final_heads);
                 let lifetime = window(&lifetime_patchset_ids, &lifetime_heads);
                 let coverage = crate::status::reviewer_coverage(state);
+                // The brief this patchset was built from, and its effective
+                // author read the same way a verdict's identity is — a lead
+                // acting for an executor is that executor on both sides, or
+                // the comparison compares different things.
+                let brief_author = state.brief_for(patchset).map(|brief| {
+                    brief
+                        .on_behalf_of
+                        .as_deref()
+                        .unwrap_or(&brief.actor)
+                        .to_string()
+                });
+                // Identity inequality is not independence: in an orchestrated
+                // chain the patchset subject is the executor and the verdict
+                // comes from the lead, so the identities always differ. What
+                // the ledger can say is who wrote the brief and whether
+                // anybody else recorded a verdict.
+                let reviewed_only_by_brief_author = match (&brief_author, lifetime.identities.len())
+                {
+                    (Some(author), 1..) => Some(
+                        lifetime
+                            .identities
+                            .iter()
+                            .all(|identity| identity == author),
+                    ),
+                    _ => None,
+                };
                 ChainReview {
-                    non_self_verdict: lifetime
-                        .identities
-                        .iter()
-                        .any(|identity| identity != &subject),
+                    brief_author,
+                    reviewed_only_by_brief_author,
                     subject: Some(subject),
                     at_final,
                     lifetime,
@@ -205,6 +230,13 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                             println!(
                                 "  coverage: {} last saw {} (stale)",
                                 row.reviewer, row.last_patchset
+                            );
+                        }
+                    }
+                    if review.reviewed_only_by_brief_author == Some(true) {
+                        if let Some(author) = &review.brief_author {
+                            println!(
+                                "  review: every verdict came from {author}, who wrote the brief"
                             );
                         }
                     }

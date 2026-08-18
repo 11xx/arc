@@ -146,7 +146,7 @@ fn chain_json_has_versioned_schema_member_state_and_no_stored_aggregate_state() 
     begin(&repo, "chain-shape", &["--tag", "program"]);
 
     let output = chain_json(&repo, "program");
-    assert_eq!(output["schema"], "arc-chain/2");
+    assert_eq!(output["schema"], "arc-chain/3");
     assert_eq!(output["members"][0]["state"], "open");
     assert!(output.get("complete").is_none());
     assert!(output.get("paused").is_none());
@@ -174,7 +174,7 @@ fn chain_review_is_opt_in_and_keeps_the_existing_schema() {
 }
 
 #[test]
-fn chain_review_distinguishes_self_and_non_self_verdicts() {
+fn chain_review_reports_verdict_identities_without_inferring_independence() {
     let repo = Repo::new();
     let self_worktree = tagged_patchset(&repo, "review-self");
     stdout(
@@ -220,13 +220,200 @@ fn chain_review_distinguishes_self_and_non_self_verdicts() {
         self_review["review"]["lifetime"]["identities"],
         serde_json::json!(["Alice"])
     );
-    assert_eq!(self_review["review"]["non_self_verdict"], false);
+    // No brief was recorded, so there is no author to attribute a verdict to
+    // and arc says so rather than inferring independence from identities.
+    // The author is absent; the answer is present and null, because a
+    // consumer needs to see that the question was asked and had no answer.
+    assert!(self_review["review"].get("brief_author").is_none());
+    assert!(self_review["review"]
+        .get("reviewed_only_by_brief_author")
+        .is_some_and(|value| value.is_null()));
     assert_eq!(other_review["review"]["subject"], "Bob");
     assert_eq!(
         other_review["review"]["lifetime"]["identities"],
         serde_json::json!(["Carol"])
     );
-    assert_eq!(other_review["review"]["non_self_verdict"], true);
+    assert!(other_review["review"]
+        .get("reviewed_only_by_brief_author")
+        .is_some_and(|value| value.is_null()));
+}
+
+/// Identity inequality is not independence. In an orchestrated chain the
+/// patchset subject is the executor and the verdict comes from the lead, so
+/// the identities always differ and a boolean built on that comparison reports
+/// independent review for work the lead directed and then approved. The map
+/// reports the fact the ledger holds — who wrote the brief, and whether only
+/// that identity recorded a verdict — and infers nothing further.
+#[test]
+fn chain_review_reports_brief_author_only_review_without_inferring_independence() {
+    let repo = Repo::new();
+
+    // The lead briefs the work, an executor implements it, and the lead
+    // approves. Every identity differs from the patchset subject.
+    let led = tagged_patchset(&repo, "review-led");
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Lead").args([
+        "brief",
+        "review-led",
+        "--body-file",
+        "-",
+    ]));
+    stdout(
+        repo.arc(&led)
+            .env("ARC_ACTOR", "Executor")
+            .args(["snapshot", "review-led"]),
+    );
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Lead").args([
+        "review",
+        "review-led",
+        "--verdict",
+        "approved",
+    ]));
+
+    // The same shape, except somebody other than the brief's author also
+    // recorded a verdict.
+    let panel = tagged_patchset(&repo, "review-panel");
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Lead").args([
+        "brief",
+        "review-panel",
+        "--body-file",
+        "-",
+    ]));
+    stdout(
+        repo.arc(&panel)
+            .env("ARC_ACTOR", "Executor")
+            .args(["snapshot", "review-panel"]),
+    );
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Reviewer").args([
+        "review",
+        "review-panel",
+        "--verdict",
+        "approved",
+    ]));
+
+    let output = chain_review_json(&repo, "program");
+    let member = |slug: &str| {
+        output["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["slug"] == slug)
+            .unwrap()
+            .clone()
+    };
+
+    let led = member("review-led");
+    assert_eq!(led["review"]["subject"], "Executor", "{led}");
+    assert_eq!(led["review"]["brief_author"], "Lead", "{led}");
+    assert_eq!(
+        led["review"]["reviewed_only_by_brief_author"], true,
+        "{led}"
+    );
+
+    let panel = member("review-panel");
+    assert_eq!(panel["review"]["brief_author"], "Lead", "{panel}");
+    assert_eq!(
+        panel["review"]["reviewed_only_by_brief_author"], false,
+        "{panel}"
+    );
+
+    // The removed boolean is not merely renamed: nothing in the map answers
+    // whether review was independent, because the ledger cannot know it.
+    assert!(led["review"].get("non_self_verdict").is_none(), "{led}");
+    assert!(panel["review"].get("non_self_verdict").is_none(), "{panel}");
+}
+
+/// Two ways the attribution can be wrong: reading the newest brief rather than
+/// the one the patchset was built from, and reading a brief's author more
+/// literally than a verdict's. A lead acting for an executor is that executor
+/// on both sides, or the comparison compares different things.
+#[test]
+fn brief_authorship_follows_the_patchset_and_the_delegated_subject() {
+    let repo = Repo::new();
+
+    // The work is briefed, snapshotted, and reviewed. Only afterwards does a
+    // second brief version land, from a different author.
+    let rebriefed = tagged_patchset(&repo, "review-rebriefed");
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Lead").args([
+        "brief",
+        "review-rebriefed",
+        "--body-file",
+        "-",
+    ]));
+    stdout(
+        repo.arc(&rebriefed)
+            .env("ARC_ACTOR", "Executor")
+            .args(["snapshot", "review-rebriefed"]),
+    );
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Lead").args([
+        "review",
+        "review-rebriefed",
+        "--verdict",
+        "approved",
+    ]));
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Someone Else").args([
+        "brief",
+        "review-rebriefed",
+        "--body-file",
+        "-",
+        "--cause-note",
+        "a later correction nobody re-snapshotted against",
+    ]));
+
+    // A lead recording both the brief and the verdict for an executor: the
+    // effective author is the executor on both sides.
+    let delegated = tagged_patchset(&repo, "review-delegated");
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Lead").args([
+        "brief",
+        "review-delegated",
+        "--body-file",
+        "-",
+        "--on-behalf-of",
+        "Executor",
+    ]));
+    stdout(
+        repo.arc(&delegated)
+            .env("ARC_ACTOR", "Executor")
+            .args(["snapshot", "review-delegated"]),
+    );
+    stdout(repo.arc(&repo.root).env("ARC_ACTOR", "Lead").args([
+        "review",
+        "review-delegated",
+        "--verdict",
+        "approved",
+        "--on-behalf-of",
+        "Executor",
+    ]));
+
+    let output = chain_review_json(&repo, "program");
+    let member = |slug: &str| {
+        output["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["slug"] == slug)
+            .unwrap()
+            .clone()
+    };
+
+    let rebriefed = member("review-rebriefed");
+    assert_eq!(
+        rebriefed["review"]["brief_author"], "Lead",
+        "the patchset was built from Lead's brief, whatever landed later: {rebriefed}"
+    );
+    assert_eq!(
+        rebriefed["review"]["reviewed_only_by_brief_author"], true,
+        "{rebriefed}"
+    );
+
+    let delegated = member("review-delegated");
+    assert_eq!(
+        delegated["review"]["brief_author"], "Executor",
+        "{delegated}"
+    );
+    assert_eq!(
+        delegated["review"]["reviewed_only_by_brief_author"], true,
+        "{delegated}"
+    );
 }
 
 #[test]
@@ -315,14 +502,16 @@ fn chain_review_ignores_superseded_patchsets() {
         serde_json::json!(["Carol"])
     );
     assert_eq!(output["members"][0]["review"]["lifetime"]["findings"], 1);
-    assert_eq!(output["members"][0]["review"]["non_self_verdict"], true);
+    assert!(output["members"][0]["review"]
+        .get("reviewed_only_by_brief_author")
+        .is_some_and(|value| value.is_null()));
 }
 
 #[test]
-fn chain_review_json_keeps_arc_chain_v1() {
+fn chain_review_json_carries_its_schema_version() {
     let repo = Repo::new();
     begin(&repo, "review-schema", &["--tag", "program"]);
 
     let output = chain_review_json(&repo, "program");
-    assert_eq!(output["schema"], "arc-chain/2");
+    assert_eq!(output["schema"], "arc-chain/3");
 }

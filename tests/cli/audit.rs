@@ -259,9 +259,8 @@ fn audit_findings_are_recorded_and_kept_out_of_the_shipped_findings() {
 }
 
 /// The failure the review map exists to catch: a genuine independent reviewer
-/// participated, approved an early patchset, and never saw what shipped.
-/// `non_self_verdict`-style identity comparison reads clean here; coverage
-/// does not.
+/// participated, approved an early patchset, and never saw what shipped. Any
+/// identity comparison reads clean here; coverage does not.
 #[test]
 fn review_map_names_the_reviewer_that_never_saw_the_final_patchset() {
     let repo = Repo::new();

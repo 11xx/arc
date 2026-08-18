@@ -514,7 +514,7 @@ arc chain '#radio' --review
 `arc chain` includes open and closed members exactly once in dependency order,
 reports their current brief plan bindings and the referenced plan history, and
 names the same next ready change that `arc take --tag` would select. The JSON
-form uses the `arc-chain/2` schema. The view is entirely derived and does not
+form uses the `arc-chain/3` schema. The view is entirely derived and does not
 infer aggregate completion, pauses, unopened slices, duplicate slices, or a
 progress percentage.
 
@@ -522,8 +522,18 @@ With `--review`, each member also gets a compact lifetime summary with its
 final-patchset verdict count alongside it. The JSON view includes the recorded
 subject and `at_final` and `lifetime` windows, each containing distinct verdict
 identities, verdict and finding counts, and ad hoc verification count.
-`non_self_verdict` reports whether any lifetime verdict identity differs from
-the subject.
+`brief_author` names who wrote the brief this patchset was built from —
+not the newest brief, and read through `--on-behalf-of` the same way a
+verdict's identity is — and
+`reviewed_only_by_brief_author` says whether every lifetime verdict came
+from that identity (null when there is no brief, or no verdict to
+attribute). `brief_author` is omitted when there is no brief, while
+`reviewed_only_by_brief_author` is emitted as null, because there the
+absence of an answer is itself the answer. Neither claims a review was
+independent: in an orchestrated
+chain the patchset subject is the executor and the verdict comes from the
+lead, so identities always differ, and arc cannot know that a reviewer
+directed the work. It reports who wrote what, and stops there.
 
 `arc take` considers open, unheld changes whose blockers are integrated and
 whose claims are absent, expired, or stale. It selects higher priorities first,

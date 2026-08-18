@@ -48,6 +48,11 @@ pub struct Brief {
     pub event_id: String,
     pub ts: DateTime<Utc>,
     pub actor: String,
+    /// Subject a lead recorded this brief for. The brief's effective author is
+    /// this when present, matching how a verdict's identity is read — the two
+    /// must agree, or comparing them compares different things.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<String>,
     pub title: Option<String>,
     pub body: String,
     pub caused_by: Vec<BriefCause>,
@@ -502,6 +507,16 @@ impl ChangeState {
         self.patchsets.last()
     }
 
+    /// The brief a patchset was built from, which is not always the newest
+    /// one: recording a new brief without re-snapshotting leaves the patchset
+    /// bound to the version the work was actually done against.
+    pub fn brief_for(&self, patchset: &Patchset) -> Option<&Brief> {
+        let brief_ref = patchset.brief_ref.as_ref()?;
+        self.briefs
+            .iter()
+            .find(|brief| brief.event_id == brief_ref.event_id)
+    }
+
     pub fn latest_brief(&self) -> Option<&Brief> {
         self.briefs.last()
     }
@@ -702,6 +717,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 event_id: ev.event_id.clone(),
                 ts: ev.created_at,
                 actor: ev.actor.clone(),
+                on_behalf_of: ev.on_behalf_of.clone(),
                 title: title.clone(),
                 body: body.clone(),
                 caused_by: caused_by.clone(),
