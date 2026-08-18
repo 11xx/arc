@@ -1,5 +1,23 @@
 use super::common::*;
 
+/// Doctor's job is to report malformed state, so a malformed repository event
+/// must be a finding rather than a fatal error raised by whichever inspection
+/// happened to read it first.
+#[test]
+fn a_malformed_repository_event_is_reported_rather_than_fatal() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "readable", "--no-worktree"]),
+    );
+    let dir = repo.root.join(".git/arc/repository/events");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("01BADBADBADBADBADBADBADBAD.json"), "not json\n").unwrap();
+
+    let out = stdout(repo.arc(&repo.root).args(["doctor"]));
+    assert!(out.contains("malformed-repository-event"), "{out}");
+}
+
 #[test]
 fn doctor_clean_ledger_exits_zero() {
     let repo = Repo::new();

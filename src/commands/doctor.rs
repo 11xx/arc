@@ -51,12 +51,16 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         &mut states,
         &mut known_patchsets,
     )?;
+    // Before anything that reads them: a malformed repository event must be
+    // reported as the problem it is, not surface as a fatal error inside
+    // whatever happened to read it first — which is what doctor exists to
+    // prevent for every other kind of event.
+    inspect_repository_events(&Store::discover(&ctx.cwd)?, &mut problems);
     inspect_dangling_revisions(&ctx.cwd, &Store::discover(&ctx.cwd)?, &states, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
     inspect_audit_debt(&states, &mut advice);
     inspect_hold_releases(&Store::discover(&ctx.cwd)?, &states, &mut advice);
-    inspect_repository_events(&Store::discover(&ctx.cwd)?, &mut problems);
 
     let open_states = states
         .iter()
@@ -178,7 +182,10 @@ fn inspect_dangling_revisions(
     }
     // One batch rather than a process per revision: a ledger of any age holds
     // thousands, and a doctor that costs a minute stops being run.
-    let rewrites = crate::rewrite::RewriteMap::load(store)?;
+    // A map that cannot be read is reported by `inspect_repository_events`;
+    // here it means only that no revision can be followed forward, which is
+    // the same answer as no rewrite having been recorded.
+    let rewrites = crate::rewrite::RewriteMap::load(store).unwrap_or_default();
     for revision in gitio::missing_objects(cwd, wanted.keys().map(String::as_str))? {
         let short = &revision[..revision.len().min(8)];
         let referents = wanted
