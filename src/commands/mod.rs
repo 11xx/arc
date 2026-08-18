@@ -487,7 +487,7 @@ pub(crate) fn find_unblocked_changes(
         .filter(|candidate| {
             candidate.change_id != current_change_id
                 && !candidate.is_closed()
-                && candidate.hold.is_none()
+                && candidate.holds.is_empty()
                 && !dependency_status(candidate, states).blocked
                 && candidate.claim.as_ref().is_none_or(|claim| {
                     let timing = state::claim_timing_at(claim, chrono::Utc::now());
@@ -698,7 +698,7 @@ mod tests {
             verification_runs: Vec::new(),
             claim: None,
             retired_claim_ids: BTreeSet::new(),
-            hold: None,
+            holds: BTreeMap::new(),
             forge: crate::forge::ForgeState::default(),
             closure: closure.map(|outcome| crate::state::ClosureState {
                 outcome,
@@ -713,7 +713,15 @@ mod tests {
     #[test]
     fn find_unblocked_changes_returns_only_open_ready_work() {
         let mut held = change("d-id", &[], None);
-        held.hold = Some("waiting for user".into());
+        held.holds.insert(
+            "01HOLD".into(),
+            crate::state::HoldState {
+                hold_event_id: "01HOLD".into(),
+                reason: "waiting for user".into(),
+                held_by: "lead".into(),
+                created_at: Utc::now(),
+            },
+        );
         let states = BTreeMap::from([
             (
                 "a-id".into(),

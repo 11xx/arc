@@ -13,7 +13,7 @@ pub(crate) fn ready_candidate<'a>(
         .values()
         .filter(|candidate| {
             !candidate.is_closed()
-                && candidate.hold.is_none()
+                && candidate.holds.is_empty()
                 && tags.iter().all(|tag| candidate.tags.contains(tag))
                 && !dependency_status(candidate, states).blocked
                 && candidate.claim.as_ref().is_none_or(|claim| {

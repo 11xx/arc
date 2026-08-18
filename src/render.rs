@@ -59,8 +59,12 @@ pub fn markdown(
     if let Some(wt) = &state.worktree {
         let _ = writeln!(w, "- Worktree: `{wt}`");
     }
-    if let Some(hold) = &state.hold {
-        let _ = writeln!(w, "- **Hold active:** {hold}");
+    for hold in state.holds.values() {
+        let _ = writeln!(
+            w,
+            "- **Hold active** (`{}`, {}): {}",
+            hold.hold_event_id, hold.held_by, hold.reason
+        );
     }
     if let Some(c) = &state.closure {
         let _ = writeln!(
@@ -780,11 +784,13 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                 }
             }
             Blocker::HoldActive => {
-                let _ = writeln!(
-                    out,
-                    "  - {}",
-                    report.hold.as_deref().unwrap_or("hold active")
-                );
+                for hold in &report.holds {
+                    let _ = writeln!(
+                        out,
+                        "  - hold `{}` by {}: {}",
+                        hold.hold_event_id, hold.held_by, hold.reason
+                    );
+                }
             }
         }
         let _ = writeln!(out);
@@ -1064,7 +1070,17 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             format!("{gate} reused {evidence_event_id}"),
         ),
         Payload::HoldSet { reason } => ("hold-set", reason.clone()),
-        Payload::HoldReleased { reason } => ("hold-released", reason.clone().unwrap_or_default()),
+        Payload::HoldReleased {
+            hold_event_id,
+            reason,
+        } => (
+            "hold-released",
+            match (hold_event_id, reason) {
+                (Some(id), Some(reason)) => format!("{id}: {reason}"),
+                (Some(id), None) => id.clone(),
+                (None, reason) => reason.clone().unwrap_or_default(),
+            },
+        ),
         Payload::ChangeClosed {
             outcome,
             integrated_commit,
@@ -1228,7 +1244,12 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
         &mut out,
         Blocker::HoldActive,
         "no active hold",
-        report.hold.clone().unwrap_or_default(),
+        report
+            .holds
+            .iter()
+            .map(|hold| format!("hold `{}`: {}", hold.hold_event_id, hold.reason))
+            .collect::<Vec<_>>()
+            .join("\n"),
     );
 
     let _ = writeln!(out);

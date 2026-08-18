@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/7";
+pub const STATUS_SCHEMA: &str = "arc-status/8";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// Two identities arc assumed cannot establish that two people acted. The
@@ -222,7 +222,30 @@ pub struct FindingSummary {
 #[derive(Debug, Serialize)]
 pub struct HoldSummary {
     pub active: bool,
-    pub reason: Option<String>,
+    /// Every active hold, in event-ID order. Holds are independent, so a
+    /// caller that acts on one has not cleared the others.
+    pub reasons: Vec<HoldEntry>,
+}
+
+fn hold_entries(state: &ChangeState) -> Vec<HoldEntry> {
+    state
+        .holds
+        .values()
+        .map(|hold| HoldEntry {
+            hold_event_id: hold.hold_event_id.clone(),
+            reason: hold.reason.clone(),
+            held_by: hold.held_by.clone(),
+        })
+        .collect()
+}
+
+/// One active hold, named by the event that set it so a release can lift
+/// exactly that one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HoldEntry {
+    pub hold_event_id: String,
+    pub reason: String,
+    pub held_by: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -357,7 +380,7 @@ pub struct StatusReport {
     pub coverage_warnings: Vec<String>,
     pub findings: Vec<FindingSummary>,
     pub open_blocking_findings: Vec<String>,
-    pub hold: Option<String>,
+    pub holds: Vec<HoldEntry>,
     pub gates: Vec<GateStatus>,
     pub probes: Vec<ProbeStatus>,
     pub blocker_summary: BlockerSummary,
@@ -785,7 +808,7 @@ fn build_report(
     {
         blockers.push(Blocker::AcceptanceProbesNotGreen);
     }
-    if state.hold.is_some() {
+    if !state.holds.is_empty() {
         blockers.push(Blocker::HoldActive);
     }
 
@@ -807,8 +830,8 @@ fn build_report(
         blocking_findings: open_blocking.len(),
         gate_status: gate_summary,
         hold: HoldSummary {
-            active: state.hold.is_some(),
-            reason: state.hold.clone(),
+            active: !state.holds.is_empty(),
+            reasons: hold_entries(state),
         },
         approval_reason: approval_rejection_reason.clone(),
     };
@@ -831,8 +854,8 @@ fn build_report(
         "snapshot".into()
     } else if !open_blocking.is_empty() {
         "resolve_findings".into()
-    } else if state.hold.is_some() {
-        "release_hold".into()
+    } else if let Some(hold) = state.holds.values().next() {
+        format!("release_hold:{}", hold.hold_event_id)
     } else if let Some(gate) = gate_statuses.iter().find(|gate| !gate.green_at_head) {
         gate.clearing_action(worktree_dirty)
     } else if let Some(probe) = probe_statuses
@@ -858,7 +881,7 @@ fn build_report(
         latest_patchset
             .as_ref()
             .map(|patchset| patchset.head.as_str()),
-        state.hold.is_some(),
+        !state.holds.is_empty(),
     );
 
     let ready = blockers.is_empty();
@@ -916,7 +939,7 @@ fn build_report(
         coverage_warnings,
         findings,
         open_blocking_findings: open_blocking,
-        hold: state.hold.clone(),
+        holds: hold_entries(state),
         gates: gate_statuses,
         probes: probe_statuses,
         blocker_summary,

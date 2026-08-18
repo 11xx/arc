@@ -55,6 +55,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
     inspect_audit_debt(&states, &mut advice);
+    inspect_hold_releases(&Store::discover(&ctx.cwd)?, &states, &mut advice);
 
     let open_states = states
         .iter()
@@ -395,6 +396,42 @@ fn inspect_audit_debt(states: &BTreeMap<String, ChangeState>, advice: &mut Vec<F
             code: "audit-debt-outstanding",
             detail: format!("{change_id}: {reason}"),
         });
+    }
+}
+
+/// A release that names no active hold. Replay ignores it so the ledger stays
+/// readable; this is where it becomes visible, because it means either a hold
+/// was released twice or the events do not say what somebody thought.
+fn inspect_hold_releases(
+    store: &Store,
+    states: &BTreeMap<String, ChangeState>,
+    advice: &mut Vec<Finding>,
+) {
+    for change_id in states.keys() {
+        let mut active: BTreeSet<String> = BTreeSet::new();
+        for event in store.load_events(change_id).unwrap_or_default() {
+            match &event.payload {
+                Payload::HoldSet { .. } => {
+                    active.insert(event.event_id.clone());
+                }
+                Payload::HoldReleased {
+                    hold_event_id: Some(id),
+                    ..
+                } => {
+                    if !active.remove(id) {
+                        advice.push(Finding {
+                            code: "hold-release-names-no-hold",
+                            detail: format!(
+                                "{change_id}: release {} names {id}, which was not an active hold",
+                                event.event_id
+                            ),
+                        });
+                    }
+                }
+                Payload::HoldReleased { .. } => active.clear(),
+                _ => {}
+            }
+        }
     }
 }
 

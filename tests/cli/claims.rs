@@ -172,7 +172,7 @@ fn claim_lifecycle_reports_defaults_renewal_conflict_release_and_expiry() {
         .success();
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "claim-life"]))).unwrap();
-    assert_eq!(status["schema"], "arc-status/7");
+    assert_eq!(status["schema"], "arc-status/8");
     assert_eq!(status["claim"]["owner"]["actor"], "tester");
     assert_eq!(status["claim"]["owner"]["harness"], "test");
     assert_eq!(status["claim"]["owner"]["session"], "session-a");
@@ -1054,7 +1054,12 @@ fn verification_gate_can_mutate_arc_state_without_lock_reentry_deadlock() {
         "--json",
     ])))
     .unwrap();
-    assert_eq!(state["hold"], "gate-self-mutation");
+    let holds = state["holds"].as_object().expect("holds map");
+    assert_eq!(holds.len(), 1);
+    assert_eq!(
+        holds.values().next().unwrap()["reason"],
+        "gate-self-mutation"
+    );
     assert_eq!(state["verifications"].as_array().unwrap().len(), 1);
 }
 

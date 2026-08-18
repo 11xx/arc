@@ -384,6 +384,11 @@ pub enum Payload {
         reason: String,
     },
     HoldReleased {
+        /// The `HoldSet` event this releases. Absent only on events written
+        /// before holds had identity, where it keeps its historical
+        /// release-everything meaning.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hold_event_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },

@@ -615,7 +615,7 @@ fn conflicting_target_movement_requires_rebase_before_integration() {
         .code(11);
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "conflict-r"]))).unwrap();
-    assert_eq!(status["schema"], "arc-status/7");
+    assert_eq!(status["schema"], "arc-status/8");
     assert_eq!(status["needs_rebase"], true);
     assert!(status["blockers"]
         .as_array()
@@ -700,10 +700,15 @@ fn hold_blocks_integration() {
         .assert()
         .success();
 
-    repo.arc(&wt)
-        .args(["hold", "fix-h", "--reason", "manual testing first"])
-        .assert()
-        .success();
+    let held = stdout(
+        repo.arc(&wt)
+            .args(["hold", "fix-h", "--reason", "manual testing first"]),
+    );
+    let hold_id = held
+        .split_whitespace()
+        .nth(1)
+        .expect("hold prints the event that identifies it")
+        .to_string();
     repo.arc(&wt).args(["check", "fix-h"]).assert().code(4);
     repo.arc(&repo.root)
         .args(["integrate", "fix-h"])
@@ -711,10 +716,168 @@ fn hold_blocks_integration() {
         .code(4);
 
     repo.arc(&wt)
-        .args(["release-hold", "fix-h"])
+        .args(["release-hold", "fix-h", &hold_id])
         .assert()
         .success();
     repo.arc(&wt).args(["check", "fix-h"]).assert().success();
+}
+
+/// Holds are coordination, not a single switch. Two collaborators must be able
+/// to hold the same change for unrelated reasons, and either one releasing must
+/// leave the other's in force — otherwise the second hold silently erased the
+/// first, and releasing erased both.
+#[test]
+fn independent_holds_release_by_event_id() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "two-holds"]));
+    let hold_id = |out: String| {
+        out.split_whitespace()
+            .nth(1)
+            .expect("hold prints the event that identifies it")
+            .to_string()
+    };
+    let reviewer = hold_id(stdout(repo.arc(&repo.root).args([
+        "hold",
+        "two-holds",
+        "--reason",
+        "reviewer waiting on the user",
+    ])));
+    let release_manager = hold_id(stdout(repo.arc(&repo.root).args([
+        "hold",
+        "two-holds",
+        "--reason",
+        "release manager waiting on a dependency",
+    ])));
+    assert_ne!(reviewer, release_manager);
+
+    // The printed identity is the HoldSet event itself, not a key arc made up.
+    let set_events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "two-holds",
+        "--type",
+        "hold-set",
+    ]));
+    let ids: std::collections::BTreeSet<String> = set_events
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["event_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert!(ids.contains(&reviewer), "{set_events}");
+    assert!(ids.contains(&release_manager), "{set_events}");
+    assert_eq!(ids.len(), 2, "{set_events}");
+
+    // An unset shell variable expands to an empty string, which is a prefix of
+    // every hold. Releasing one by accident is what identity exists to stop.
+    repo.arc(&repo.root)
+        .args(["release-hold", "two-holds", ""])
+        .assert()
+        .failure();
+
+    // With something to integrate, the hold is what the next action names —
+    // and it names which hold, because there are two.
+    repo.commit(
+        &repo.home.join(".worktrees/repo-two-holds"),
+        "work.rs",
+        "done\n",
+        "feat: work",
+    );
+    stdout(
+        repo.arc(&repo.home.join(".worktrees/repo-two-holds"))
+            .args(["snapshot", "two-holds"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["review", "two-holds", "--verdict", "approved"]),
+    );
+    // Which hold is named first is the ledger's ordering, not this test's
+    // business; that it names one of the two active holds is the contract.
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "two-holds"]));
+    let next = status["next_action"].as_str().unwrap().to_string();
+    assert!(
+        next == format!("release_hold:{reviewer}")
+            || next == format!("release_hold:{release_manager}"),
+        "{status}"
+    );
+
+    // The text inbox names the holds too, or the row cannot be acted on.
+    let inbox_text = stdout(repo.arc(&repo.root).args(["inbox"]));
+    assert!(inbox_text.contains(&reviewer), "{inbox_text}");
+    assert!(
+        inbox_text.contains("release manager waiting on a dependency"),
+        "{inbox_text}"
+    );
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    let held = inbox["held"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["change_id"].as_str().unwrap().starts_with("two-holds"))
+        .expect("held row");
+    assert_eq!(held["holds"].as_array().unwrap().len(), 2, "{inbox}");
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "two-holds"]));
+    assert_eq!(status["holds"].as_array().unwrap().len(), 2, "{status}");
+    assert_eq!(
+        status["blocker_summary"]["hold"]["active"], true,
+        "{status}"
+    );
+    assert_eq!(
+        status["blocker_summary"]["hold"]["reasons"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "{status}"
+    );
+
+    // Releasing one leaves the other in force, and the change stays held.
+    repo.arc(&repo.root)
+        .args(["release-hold", "two-holds", &reviewer])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "two-holds"]));
+    let holds = status["holds"].as_array().unwrap();
+    assert_eq!(holds.len(), 1, "{status}");
+    assert_eq!(holds[0]["hold_event_id"], release_manager, "{status}");
+    assert_eq!(
+        holds[0]["reason"], "release manager waiting on a dependency",
+        "{status}"
+    );
+    let check = String::from_utf8(
+        repo.arc(&repo.root)
+            .args(["check", "two-holds"])
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .unwrap();
+    assert!(check.contains(&release_manager), "{check}");
+    assert!(!check.contains(&reviewer), "{check}");
+
+    // A release naming a hold that is not active is refused rather than
+    // guessing which one was meant.
+    repo.arc(&repo.root)
+        .args(["release-hold", "two-holds", &reviewer])
+        .assert()
+        .failure();
+
+    repo.arc(&repo.root)
+        .args(["release-hold", "two-holds", &release_manager])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "two-holds"]));
+    assert!(status["holds"].as_array().unwrap().is_empty(), "{status}");
+    assert_eq!(
+        status["blocker_summary"]["hold"]["active"], false,
+        "{status}"
+    );
 }
 
 /// A declared gate that never ran (or failed) blocks with exit 5; a pass
@@ -889,7 +1052,7 @@ fn status_projection_and_stage_note_file_read_stdin() {
         .args(["status", "projected", "--get", "schema"])
         .assert()
         .success()
-        .stdout("arc-status/7\n");
+        .stdout("arc-status/8\n");
 
     repo.arc(&wt)
         .args([
@@ -1118,10 +1281,15 @@ fn closed_change_append_policy_matches_command_families() {
         .args(["claim", "closed-policy"])
         .assert()
         .success();
-    repo.arc(&repo.root)
-        .args(["hold", "closed-policy", "--reason", "operator pause"])
-        .assert()
-        .success();
+    let hold_id =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["hold", "closed-policy", "--reason", "operator pause"]),
+        )
+        .split_whitespace()
+        .nth(1)
+        .expect("hold prints the event that identifies it")
+        .to_string();
     let comment = stdout(repo.arc(&repo.root).args([
         "comment",
         "closed-policy",
@@ -1188,6 +1356,7 @@ fn closed_change_append_policy_matches_command_families() {
         .args([
             "release-hold",
             "closed-policy",
+            &hold_id,
             "--reason",
             "closure ended liveness",
         ])

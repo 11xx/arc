@@ -423,7 +423,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/7 schema)
+    /// Machine-readable status report (the versioned arc-status/8 schema)
     Status {
         change: Option<String>,
         /// Accepted for compatibility; status output is always JSON
@@ -742,9 +742,10 @@ enum Cmd {
         #[arg(long, conflicts_with = "reason")]
         reason_file: Option<String>,
     },
-    /// Release the active hold
+    /// Release one hold by the event that set it (a unique prefix is enough)
     ReleaseHold {
         change: String,
+        hold: String,
         #[arg(long)]
         reason: Option<String>,
     },
@@ -1741,8 +1742,12 @@ fn run(cli: Cli) -> Result<i32> {
             commands::hold(&ctx, &change, reason)?;
             Ok(0)
         }
-        Cmd::ReleaseHold { change, reason } => {
-            commands::release_hold(&ctx, &change, reason)?;
+        Cmd::ReleaseHold {
+            change,
+            hold,
+            reason,
+        } => {
+            commands::release_hold(&ctx, &change, &hold, reason)?;
             Ok(0)
         }
         Cmd::Integrate {

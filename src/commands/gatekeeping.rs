@@ -1039,20 +1039,68 @@ pub fn hold(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {
     ensure_append_allowed(&st, &payload)?;
     let ev = ctx.event(&store, &change_id, payload);
     store.append_event(&ev)?;
-    println!("hold set on {change_id}");
+    // The event ID is how this hold is released, so printing it is what makes
+    // an independent hold usable rather than merely recorded.
+    println!("hold {} set on {change_id}", ev.event_id);
     Ok(())
 }
 
-pub fn release_hold(ctx: &Ctx, reference: &str, reason: Option<String>) -> Result<()> {
+/// Release one hold by the event that set it. Naming the hold is what lets two
+/// collaborators hold the same change without either lifting the other's.
+pub fn release_hold(
+    ctx: &Ctx,
+    reference: &str,
+    hold_event_id: &str,
+    reason: Option<String>,
+) -> Result<()> {
     let store = ctx.store()?;
     let (change_id, _transition, st) = locked_state(&store, reference)?;
-    if st.hold.is_none() {
+    if st.holds.is_empty() {
         bail!("no active hold on {change_id}");
     }
-    let ev = ctx.event(&store, &change_id, Payload::HoldReleased { reason });
+    let held = resolve_hold(&st, hold_event_id, &change_id)?;
+    let ev = ctx.event(
+        &store,
+        &change_id,
+        Payload::HoldReleased {
+            hold_event_id: Some(held.clone()),
+            reason,
+        },
+    );
     store.append_event(&ev)?;
-    println!("hold released on {change_id}");
+    println!("hold {held} released on {change_id}");
+    let left = st.holds.len() - 1;
+    if left > 0 {
+        println!("{left} other hold(s) still active");
+    }
     Ok(())
+}
+
+/// Resolve a hold reference to an exact active hold event, accepting a unique
+/// prefix the way every other event reference in the CLI does.
+fn resolve_hold(state: &ChangeState, reference: &str, change_id: &str) -> Result<String> {
+    // An unset shell variable expands to the empty string, which every ID is
+    // a prefix of. Releasing a hold by accident is exactly what the identity
+    // exists to prevent.
+    if reference.is_empty() {
+        bail!("name the hold to release; an empty reference matches every hold");
+    }
+    let matches: Vec<&String> = state
+        .holds
+        .keys()
+        .filter(|id| id.starts_with(reference))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => bail!(
+            "{reference} is not an active hold on {change_id}; active: {}",
+            state.holds.keys().cloned().collect::<Vec<_>>().join(", ")
+        ),
+        many => bail!(
+            "{reference} matches {} active holds on {change_id}; name one exactly",
+            many.len()
+        ),
+    }
 }
 
 pub fn integrate(
