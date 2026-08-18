@@ -269,10 +269,13 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         let mut reused = Vec::new();
         let mut to_run = Vec::new();
         for (name, gate) in required {
+            // Reuse is reuse of a *run*, so the recorded command must be the
+            // one declared now. Skipping on a name match would report a gate
+            // as satisfied by a run of something else.
             let reusable = skip_green
                 .then(|| st.gate_evidence_at(name, &head))
                 .flatten()
-                .filter(|evidence| evidence.green_at_head());
+                .filter(|evidence| evidence.green_at_head() && evidence.command == gate.command);
             if let Some(evidence) = reusable {
                 println!("gate {name}: skipped (green at head)");
                 reused.push((name.clone(), evidence.event_id.clone()));
@@ -1220,14 +1223,9 @@ fn integrate_one(
     // Recomputing readiness against the basis's own gate set is what keeps the
     // merge from proceeding under one configuration and recording another.
     let confirmation = ctx.report(&store, &st)?;
-    if confirmation.gates.len() != report.gates.len()
-        || confirmation
-            .gates
-            .iter()
-            .zip(&report.gates)
-            .any(|(now, before)| now.command != before.command || !now.green_at_head)
-        || !confirmation.integrate_ready
-    {
+    let confirmed_basis =
+        authorization_basis(ctx, &store, &st, &confirmation, &approved_patchset_id)?;
+    if confirmed_basis != authorization || !confirmation.integrate_ready {
         bail!(
             "gate or policy configuration changed while preparing the merge; nothing was \
              written — re-run once the worktree has settled"
@@ -1434,6 +1432,15 @@ fn integrate_dry_run(
     target: &str,
     message: Option<&str>,
 ) -> Result<i32> {
+    // The refusals a real integration makes before touching anything: an
+    // undeclared actor, and a target worktree that is missing or dirty. A dry
+    // run that skipped them would report a merge the real path refuses.
+    ctx.ensure_declared_actor(store)?;
+    let target_worktree = gitio::worktree_for_branch(&ctx.cwd, target)?
+        .with_context(|| format!("no worktree has {target:?} checked out; check it out first"))?;
+    if !gitio::is_clean(&target_worktree)? {
+        bail!("target worktree {} is not clean", target_worktree.display());
+    }
     let report = ctx.report(store, st)?;
     if !report.integrate_ready {
         eprint!("{}", render::blocker_explanation(st, &report));

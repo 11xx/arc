@@ -1199,6 +1199,24 @@ fn changing_a_gate_declaration_ungreens_its_recorded_evidence() {
     assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
     assert_eq!(status["gates"][0]["declaration_changed"], true, "{status}");
     assert_eq!(status["integrate_ready"], false, "{status}");
+
+    // Reuse is reuse of a run: --skip-green must not report the old pass as
+    // satisfying a declaration nothing has run.
+    let reused =
+        stdout(
+            repo.arc(&worktree)
+                .args(["verify", "redeclared", "--all", "--skip-green"]),
+        );
+    assert!(!reused.contains("skipped (green at head)"), "{reused}");
+    // It ran the declaration that is current, and the evidence says so. It is
+    // still not green, because the edited declaration is uncommitted and the
+    // tree is therefore dirty — a separate rule, and the honest one.
+    let status = json_stdout(repo.arc(&worktree).args(["status", "redeclared", "--json"]));
+    assert_eq!(
+        status["gates"][0]["command"], "true # a different check",
+        "{status}"
+    );
+    assert_eq!(status["gates"][0]["worktree_dirty"], true, "{status}");
 }
 
 /// A merge arc guarded and a merge somebody performed elsewhere are different
