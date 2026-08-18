@@ -104,7 +104,10 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   assertion is still checked against Git: the target branch must exist, the
   revision must contain the patchset head, and it must be on that branch — and
   the change must have a recorded patchset, because otherwise nothing says what
-  was integrated. A bundle carries the store format it was written with, and an
+  was integrated. Where the target stood before is read from a merge commit's
+  first parent; a fast-forward has no such parent — its first parent is the
+  change's own previous commit — so `--target-before <rev>` names it, and
+  without one the event records no base rather than a wrong one. A bundle carries the store format it was written with, and an
   import refuses one from a newer arc rather than skipping lifecycle events it
   does not know — which would read a closed change as open. The same check runs
   on every path that opens a store, not only the one that creates it, and a
