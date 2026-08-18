@@ -119,16 +119,39 @@ pub fn forge_pr_state(
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let st = state::reduce(&store.load_events(&change_id)?)?;
-    let link = match (&st.forge.link, link.as_deref()) {
-        (None, _) => bail!("no forge link recorded on {change_id}; record one before its state"),
-        (Some(current), None) => current,
-        (Some(current), Some(named)) if current.event_id.starts_with(named) => current,
-        (Some(current), Some(named)) => bail!(
-            "{named} is not the current link on {change_id} (that is {}); a lifecycle fact about \
-             a superseded PR cannot be recorded as current",
-            current.event_id
-        ),
+    let Some(current) = st.forge.link.as_ref() else {
+        bail!("no forge link recorded on {change_id}; record one before its state");
     };
+    if let Some(named) = link.as_deref() {
+        // Resolved against every link this change recorded, not just the
+        // current one: a prefix shared by a superseded link and the current
+        // one names neither, and silently recording against the current PR is
+        // exactly the confusion this binding exists to prevent.
+        if named.trim().is_empty() {
+            bail!("name the link this state was read at; an empty reference matches every link");
+        }
+        let matches: Vec<&str> = st
+            .forge
+            .links
+            .iter()
+            .map(|link| link.event_id.as_str())
+            .filter(|event_id| event_id.starts_with(named))
+            .collect();
+        match matches.as_slice() {
+            [one] if *one == current.event_id => {}
+            [one] => bail!(
+                "{one} is not the current link on {change_id} (that is {}); a lifecycle fact \
+                 about a superseded PR cannot be recorded as current",
+                current.event_id
+            ),
+            [] => bail!("{named} is not a link recorded on {change_id}"),
+            many => bail!(
+                "{named} matches {} links on {change_id}; name one exactly",
+                many.len()
+            ),
+        }
+    }
+    let link = current;
     let payload = Payload::ForgePrState {
         state: pr_state,
         merge_sha,

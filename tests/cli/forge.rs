@@ -609,6 +609,59 @@ fn pr_state_is_bound_to_link_and_head_after_relink() {
         .failure();
 }
 
+/// The cases around the binding, which the relink test does not reach: a
+/// second reading of the same PR must not invalidate what was observed, a
+/// prefix shared by two links names neither, and a link recorded twice is not
+/// a relink.
+#[test]
+fn pr_state_binding_survives_a_re_read_and_refuses_an_ambiguous_link() {
+    let repo = Repo::new();
+    let (_id, _wt, head) = forge_change(&repo, "rebind");
+    declare_same_repo(&repo, "rebind", "arc/rebind");
+    link_at(&repo, "rebind", "1", &head, "arc/rebind");
+    repo.arc(&repo.root)
+        .args(["forge", "pr-state", "rebind", "--state", "open"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "forge",
+            "checks",
+            "rebind",
+            "--pr-head",
+            &head,
+            "--state",
+            "passed",
+        ])
+        .assert()
+        .success();
+
+    // Reading the same PR again records the same link a second time. It is
+    // one PR observed twice, not a relink, so the lifecycle fact still holds.
+    link_at(&repo, "rebind", "1", &head, "arc/rebind");
+    let status = status_json(&repo, "rebind");
+    assert_eq!(status["forge"]["pr_state"]["state"], "open", "{status}");
+    assert_eq!(status["forge"]["forge_ready"], true, "{status}");
+
+    // An empty --link matches every link, so it names none.
+    repo.arc(&repo.root)
+        .args([
+            "forge", "pr-state", "rebind", "--state", "closed", "--link", "",
+        ])
+        .assert()
+        .failure();
+
+    // A prefix shared by both recorded links names neither.
+    repo.arc(&repo.root)
+        .args([
+            "forge", "pr-state", "rebind", "--state", "closed", "--link", "01",
+        ])
+        .assert()
+        .failure();
+    let status = status_json(&repo, "rebind");
+    assert_eq!(status["forge"]["pr_state"]["state"], "open", "{status}");
+}
+
 #[test]
 fn forge_held_and_linked_renders_awaiting_user() {
     let repo = Repo::new();
