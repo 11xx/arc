@@ -14,7 +14,7 @@
 
 use crate::model::Payload;
 use crate::store::Store;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::BTreeMap;
 
 /// What became of a recorded revision.
