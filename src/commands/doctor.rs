@@ -503,6 +503,9 @@ fn inspect_repository_events(store: &Store, problems: &mut Vec<Finding>) {
                 code: "malformed-repository-event",
                 detail: format!("{event_id}: {error}"),
             });
+            // Everything below reads fields this file does not have, and
+            // would report the same broken file two or three more times.
+            continue;
         }
         if let Ok(Some(event)) = crate::bundle::parse_typed_event(&value) {
             if let Payload::HistoryRewritten { mapping, .. } = &event.payload {

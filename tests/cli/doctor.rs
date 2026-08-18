@@ -29,6 +29,18 @@ fn a_malformed_repository_event_is_reported_rather_than_fatal() {
         1,
         "one finding per broken file: {out}"
     );
+
+    // A well-named file whose contents are not an event is one finding too,
+    // not one per field the checks below it would have read.
+    fs::write(dir.join("01VALIDBUTEMPTY0000000000.json"), "{}\n").unwrap();
+    let out = stdout(repo.arc(&repo.root).args(["doctor"]));
+    assert_eq!(
+        out.lines()
+            .filter(|line| line.contains("01VALIDBUTEMPTY0000000000"))
+            .count(),
+        1,
+        "one finding per broken file: {out}"
+    );
 }
 
 #[test]

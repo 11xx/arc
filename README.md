@@ -899,8 +899,9 @@ Nothing already written changes. An old event keeps saying exactly what it
 said; readers gain the ability to follow it forward. `arc doctor` reports a
 moved revision as `revision-rewritten` naming its successor, and a dropped one
 as `revision-dropped`, instead of `dangling-revision`. `arc diff` renders the
-surviving commit when a recorded one no longer resolves — including the head
-its finding anchors are checked against — saying so on stderr. `arc events
+surviving commit when a recorded one no longer resolves — every range it
+renders, the patchset one, the head its finding anchors are checked against,
+and the `--integrated` audit range alike — saying so on stderr. `arc events
 --repository` reads the repository's own events, and a bundle carries
 them so an imported change's revisions stay followable. An import refuses a
 bundle whose rewrites contradict this repository's: two events with different
