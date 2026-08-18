@@ -112,7 +112,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     // all of them before any change event: an import that discovered a
     // contradiction halfway would leave one rewrite recorded, another not, and
     // a change whose revisions resolve through half a map.
-    let mut incoming = Vec::with_capacity(validated.bundle.repository_events.len());
+    let mut incoming: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     for value in &validated.bundle.repository_events {
         let Some(event_id) = value.get("event_id").and_then(serde_json::Value::as_str) else {
             bail!("bundled repository event has no event_id");
@@ -125,7 +125,18 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
                  nothing was imported"
             );
         }
-        incoming.push((event_id.to_string(), bytes));
+        // Two bundled events sharing an ID conflict with each other, which no
+        // check against the destination can see: on a clean destination both
+        // pass, and the second fails only once the first has been written.
+        if let Some(existing) = incoming.get(event_id) {
+            if existing != &bytes {
+                bail!(
+                    "the bundle carries two different repository events with ID {event_id}; \
+                     nothing was imported"
+                );
+            }
+        }
+        incoming.insert(event_id.to_string(), bytes);
     }
     let mut rewrites = 0;
     for (event_id, bytes) in &incoming {
