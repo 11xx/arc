@@ -1534,9 +1534,10 @@ fn dirty_gate_evidence_is_named_by_resume_check_and_the_next_action() {
     let resume = stdout(repo.arc(&wt).args(["resume", "named"]));
     assert!(resume.contains("unit: pass\n"), "{resume}");
 
-    // A gate that failed is a gate that failed. Cleaning a tree cannot turn
-    // `fail` into `pass`, so a dirty tree must not redirect the advice away
-    // from the code.
+    // A failing gate on a dirty tree is still told to clean first: while the
+    // tree is dirty no run produces usable evidence, whatever the result. The
+    // advice terminates because it reads the live tree — once clean, it is the
+    // rerun.
     fs::write(
         repo.root.join(".arc/gates.toml"),
         "[gates.unit]\ncommand = \"false\"\n",
@@ -1551,6 +1552,17 @@ fn dirty_gate_evidence_is_named_by_resume_check_and_the_next_action() {
         .args(["verify", "named", "--gate", "unit"])
         .assert()
         .failure();
+    let status = json_stdout(repo.arc(&wt).args(["status", "named", "--json"]));
+    let gate = &status["gates"][0];
+    assert_eq!(gate["result"], "fail", "{status}");
+    assert_eq!(gate["worktree_dirty"], true, "{status}");
+    assert_eq!(gate["revision"], status["current_head"], "{status}");
+    assert_eq!(status["head_matches_latest_patchset"], true, "{status}");
+    assert_eq!(status["next_action"], "clean_worktree:unit", "{status}");
+
+    // Cleaning does not fix the failure, and the advice says so by becoming
+    // the rerun rather than repeating itself.
+    fs::remove_file(wt.join("scratch.rs")).unwrap();
     let status = json_stdout(repo.arc(&wt).args(["status", "named", "--json"]));
     assert_eq!(status["next_action"], "run_gate:unit", "{status}");
 }

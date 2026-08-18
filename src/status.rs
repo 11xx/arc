@@ -156,13 +156,16 @@ impl GateStatus {
         if self.green_at_head {
             return "integrate".into();
         }
-        // A gate that failed is a gate that failed: cleaning the tree cannot
-        // turn `fail` into `pass`, and advising it would send the caller to
-        // tidy a worktree instead of fixing the code.
-        if self.result == "fail" || worktree_dirty != Some(true) {
-            return format!("run_gate:{}", self.name);
+        // While the tree is dirty, no run can produce evidence that counts —
+        // including a rerun of a gate that failed, and including a gate that
+        // failed *because* of the uncommitted file. Cleaning is not claimed to
+        // fix a failure; it is the precondition for any run whose result is
+        // usable. It also cannot loop: this reads the live tree, so once the
+        // tree is clean the advice becomes the rerun.
+        if worktree_dirty == Some(true) {
+            return format!("clean_worktree:{}", self.name);
         }
-        format!("clean_worktree:{}", self.name)
+        format!("run_gate:{}", self.name)
     }
 }
 

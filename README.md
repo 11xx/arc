@@ -643,10 +643,12 @@ rescue`, and `arc check` render the reason beside the gate, and `arc show`
 renders it beside the verification it belongs to. Because a rerun
 against the same unusable tree records the same unusable evidence, the
 `next_action` is `clean_worktree:<gate>` while the worktree is actually
-dirty, rather than `run_gate:<gate>` — commit or clean it, then run the
-gate. Once the tree is clean the advice returns to `run_gate:<gate>`,
-because evidence already recorded cannot be repaired by cleaning; only a
-fresh run replaces it. `clean_worktree:<gate>` is new in `arc-status/7`.
+dirty — for any gate that is not green, including one that failed, because
+while the tree is dirty no run produces evidence that counts. Cleaning is
+not a fix for a failure; it is the precondition for a run whose result is
+usable. Once the tree is clean the advice becomes `run_gate:<gate>`, since
+evidence already recorded cannot be repaired by cleaning; only a fresh run
+replaces it. `clean_worktree:<gate>` is new in `arc-status/7`.
 
 Executed gates capture combined stdout and stderr, retaining only the final
 4096 bytes. Failed-gate tails appear in `arc show` and `arc status`; successful
