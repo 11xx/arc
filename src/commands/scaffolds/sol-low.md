@@ -17,21 +17,39 @@
 behavior from a plausible wrong implementation; a brief whose material risk
 has no such command is not ready to delegate>
 
-Declare them on the brief with `--probes-json`, so the probe is a contract
-rather than a sentence. Naming a command is not sufficient: a declared probe is
-structurally ready only once arc has observed it **fail at the brief's base
-revision and pass at the head**. Record both phases:
+Declare them on the brief with `arc brief <change> --probes-json` (a JSON
+array inline, a path, or `-` for stdin), so a probe is a contract rather than
+a sentence. Naming a command is not sufficient: a declared probe blocks
+readiness until evidence bound to the patchset's brief **fails at that brief's
+base revision and passes at the patchset head**. Record both phases:
 
 - `arc verify <change> --probe <name> --probe-phase baseline` at the base
 - `arc verify <change> --probe <name>` at the final commit
 
+Record the baseline while HEAD *is* the brief's base revision — arc refuses it
+otherwise, attested or not. Evidence binds to the exact brief the patchset
+carries, the probe name, the phase, and those exact revisions; recording
+against a different brief version, or at any other revision, leaves evidence
+arc does not count.
+
 A probe that passes at both ends proves nothing about the change. If the
-sandbox prevents running one, record it with `arc verify --attest --result
-pass` and say so — attested evidence carries an external execution context
-instead of local provenance.
+sandbox prevents running one, attest it — and an attested baseline attests the
+failure, because that is what the phase asserts:
 
-Two limits that differential evidence does not lift:
+    arc verify <change> --probe <name> --probe-phase baseline --attest \
+      --result fail --tested-revision <base-sha> \
+      --execution-host <where> --runner <who>
 
+    arc verify <change> --probe <name> --attest \
+      --result pass --tested-revision <head-sha> \
+      --execution-host <where> --runner <who>
+
+Three limits attestation and differential evidence do not lift:
+
+- Attested evidence is a claim arc did not check. Readiness looks at results
+  and bindings, never at whether arc ran anything, and an attested run
+  captures no output — so the reviewer has nothing to inspect. Attest only
+  what a sandbox genuinely prevented, and say which.
 - The reviewer still inspects the baseline output and confirms it failed for
   the expected reason. A probe that fails at the base for an unrelated reason —
   a missing fixture, a compile error — is not discriminating, and arc cannot
@@ -54,13 +72,18 @@ The absence of declared probes means "no probe contract was recorded", never
   symbol, or assumption is missing or wrong, run
   `arc stage <change> blocked-on --note "<what>"`, `arc release-claim`, and
   stop — do not work around it.
-- If a probe cannot be run, or fails for what looks like a defect in the probe
-  rather than the implementation, stop and request a new brief —
-  never edit a probe to make it pass.
-- When writing a probe, remember that `exit` inside a command substitution
-  exits only the subshell: `[ "$(cmd || exit 1)" = x ]` never fails the probe.
-  Bind the result to a variable and test it, or use `set -e` outside any
-  substitution.
+- If a probe fails for what looks like a defect in the probe rather than the
+  implementation, stop and request a new brief — never edit a probe to make it
+  pass. If it cannot be run at all, attest it as above and say why; if you
+  cannot honestly attest it either, stop.
+- When writing a probe, remember that a command substitution runs in a
+  subshell: `exit` inside one exits only that subshell, and
+  `[ "$(cmd || exit 1)" = x ]` reports on the *output*, not on whether `cmd`
+  succeeded — it passes when a failing `cmd` still prints `x`. Bind the
+  output and check the status explicitly:
+
+      out=$(cmd) || exit 1
+      [ "$out" = x ] || exit 1
 - Never run `review`, `integrate`, or `close`; those are the lead's.
 
 ## Sandbox facts (arc-driving executors)

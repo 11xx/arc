@@ -45,8 +45,9 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   contract records a new patchset even at an unchanged Git head. Reviews and
   approvals bind to patchsets, never to moving branch names.
 - A **brief** is a change-scoped implementation contract stored in the ledger;
-  goal-scoped analysis briefs stay in the project journal, and briefs never
-  gate checking or integration.
+  goal-scoped analysis briefs stay in the project journal. A brief's prose
+  never gates checking or integration, but the acceptance probes declared on
+  one do: see below.
 - A **changelog entry** is change-scoped release copy stored in the ledger.
   Integrated entries project into the generated `[Unreleased]` block.
 - A **chain** is a tagged blocked-by series: independent siblings can run in
@@ -737,8 +738,10 @@ because the other verdicts do not ask for a revision. References resolve by
 unique prefix and are stored canonically, so an ambiguous prefix refuses
 rather than picking a candidate: the resolved identifier is permanent.
 
-`--probes-json <file>` binds named acceptance commands to one brief version.
-Probe names are unique kebab-case slugs. Run a declaration explicitly with
+`arc brief --probes-json` binds named acceptance commands to one brief
+version, taking a JSON array inline, a path, or `-` for stdin. Probe names are
+unique kebab-case slugs. Declaring a probe is `brief`'s job; `arc verify` only
+records evidence for one. Run it explicitly with
 `arc verify <change> --probe <name> --probe-phase baseline|final`; the phase
 defaults to `final`, and `--brief-version <n>` selects a historical contract.
 A baseline run is valid only at that brief's base revision and treats command
