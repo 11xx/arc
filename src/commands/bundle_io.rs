@@ -117,7 +117,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     // all of them before any change event: an import that discovered a
     // contradiction halfway would leave one rewrite recorded, another not, and
     // a change whose revisions resolve through half a map.
-    let incoming = plan_repository_events(&store, &validated)?;
+    let incoming = plan_repository_events(Some(&store), &validated)?;
     let mut rewrites = 0;
     for (event_id, bytes) in &incoming {
         if store.append_raw_repository_event(event_id, bytes)? {
@@ -143,7 +143,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
 /// before the first is written — including two bundled events sharing an ID,
 /// which no check against the destination can see.
 fn plan_repository_events(
-    store: &Store,
+    store: Option<&Store>,
     validated: &ValidatedBundle,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut incoming: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -153,7 +153,11 @@ fn plan_repository_events(
         };
         let mut bytes = serde_json::to_vec_pretty(value)?;
         bytes.push(b'\n');
-        if store.repository_event_conflicts(event_id, &bytes)? {
+        if store.is_some_and(|store| {
+            store
+                .repository_event_conflicts(event_id, &bytes)
+                .unwrap_or(false)
+        }) {
             bail!(
                 "repository event {event_id} already exists here with different content; \
                  nothing was imported"
@@ -172,7 +176,12 @@ fn plan_repository_events(
     // Two events with different IDs can still disagree about one revision, and
     // no per-event check sees that. The combined map is the thing that has to
     // hold together, so it is built before anything is written.
-    let mut combined = store.load_repository_events()?;
+    let mut combined = match store {
+        Some(store) => store.load_repository_events()?,
+        // A destination with no store holds nothing to contradict, but the
+        // bundle must still hold together on its own.
+        None => Vec::new(),
+    };
     for value in &validated.bundle.repository_events {
         if let Some(event) = crate::bundle::parse_typed_event(value)? {
             if !combined.iter().any(|held| held.event_id == event.event_id) {
