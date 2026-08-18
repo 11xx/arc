@@ -63,12 +63,22 @@ fn import_refuses_a_history_that_contradicts_itself() {
         .clone();
     let mut second = closure.clone();
     second["event_id"] = serde_json::json!("01ZZZZZZZZZZZZZZZZZZZZZZZZ");
-    value["events"] = serde_json::json!(events
+    let tampered: Vec<serde_json::Value> = events
         .iter()
         .cloned()
         .chain(std::iter::once(second))
-        .collect::<Vec<_>>());
-    value["event_count"] = serde_json::json!(value["events"].as_array().unwrap().len());
+        .collect();
+    // The checksum has to match, or both commands refuse the bundle for being
+    // corrupt and this test passes without reaching the contradiction it is
+    // about.
+    let mut digest = <sha2::Sha256 as sha2::Digest>::new();
+    for event in &tampered {
+        sha2::Digest::update(&mut digest, serde_json::to_vec(event).unwrap());
+        sha2::Digest::update(&mut digest, b"\n");
+    }
+    value["events_sha256"] = serde_json::json!(hex::encode(sha2::Digest::finalize(digest)));
+    value["event_count"] = serde_json::json!(tampered.len());
+    value["events"] = serde_json::json!(tampered);
     fs::write(&bundle, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
     let other = Repo::new();
