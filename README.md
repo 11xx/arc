@@ -86,7 +86,11 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   open, every required gate is green at that exact head, and no hold is
   active. Holds are independent: `arc hold` prints the event that identifies
   the hold it set, `arc release-hold <change> <hold>` lifts exactly that one
-  (a unique prefix is enough), and every other hold stays in force. It merges the approved SHA (not the branch name) with
+  (a unique prefix is enough; an empty or ambiguous one is refused), and
+  every other hold stays in force. A release naming a hold that is no longer
+  active replays as a no-op rather than a failure — two collaborators may
+  reach the same conclusion, and a ledger nobody can reduce is a ledger
+  nobody can repair. `arc doctor` reports it as `hold-release-names-no-hold`. It merges the approved SHA (not the branch name) with
   `--no-ff`, then verifies the merge commit's parents. `arc integrate
   --tag '#series'` applies that same guarded path to every matching change
   in dependency order, stopping at the first refusal. Refusals carry typed

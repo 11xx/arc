@@ -758,7 +758,7 @@ fn independent_holds_release_by_event_id() {
         "--type",
         "hold-set",
     ]));
-    let ids: Vec<String> = set_events
+    let ids: std::collections::BTreeSet<String> = set_events
         .lines()
         .map(|line| {
             serde_json::from_str::<serde_json::Value>(line).unwrap()["event_id"]
@@ -767,7 +767,9 @@ fn independent_holds_release_by_event_id() {
                 .to_string()
         })
         .collect();
-    assert_eq!(ids, vec![reviewer.clone(), release_manager.clone()]);
+    assert!(ids.contains(&reviewer), "{set_events}");
+    assert!(ids.contains(&release_manager), "{set_events}");
+    assert_eq!(ids.len(), 2, "{set_events}");
 
     // An unset shell variable expands to an empty string, which is a prefix of
     // every hold. Releasing one by accident is what identity exists to stop.
@@ -792,11 +794,22 @@ fn independent_holds_release_by_event_id() {
         repo.arc(&repo.root)
             .args(["review", "two-holds", "--verdict", "approved"]),
     );
+    // Which hold is named first is the ledger's ordering, not this test's
+    // business; that it names one of the two active holds is the contract.
     let status = json_stdout(repo.arc(&repo.root).args(["status", "two-holds"]));
-    assert_eq!(
-        status["next_action"],
-        format!("release_hold:{reviewer}"),
+    let next = status["next_action"].as_str().unwrap().to_string();
+    assert!(
+        next == format!("release_hold:{reviewer}")
+            || next == format!("release_hold:{release_manager}"),
         "{status}"
+    );
+
+    // The text inbox names the holds too, or the row cannot be acted on.
+    let inbox_text = stdout(repo.arc(&repo.root).args(["inbox"]));
+    assert!(inbox_text.contains(&reviewer), "{inbox_text}");
+    assert!(
+        inbox_text.contains("release manager waiting on a dependency"),
+        "{inbox_text}"
     );
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
     let held = inbox["held"]

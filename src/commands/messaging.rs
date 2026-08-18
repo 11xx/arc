@@ -197,6 +197,14 @@ pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
                         .map(|a| format!(" [assigned: {a}]"))
                         .unwrap_or_default()
                 );
+                // A held row that cannot name its holds cannot be acted on:
+                // releasing one takes the event that set it.
+                for hold in &row.holds {
+                    println!(
+                        "    hold {} by {}: {}",
+                        hold.hold_event_id, hold.held_by, hold.reason
+                    );
+                }
             }
         }
         render_journal_backlog(inbox.journal.as_ref());

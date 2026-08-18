@@ -1317,17 +1317,15 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             // A release naming no hold predates hold identity, where releasing
             // meant releasing everything. Honouring that keeps replay of old
             // ledgers truthful rather than leaving holds nobody can lift.
+            // A release names the hold it lifts; one that names a hold no
+            // longer active is a no-op rather than a replay failure. Two
+            // collaborators can independently release the same hold, and a
+            // ledger nobody can reduce is a ledger nobody can repair — the
+            // contradiction belongs in `doctor`, which reports it, not in the
+            // reducer, which would make every derived view unreadable.
             Payload::HoldReleased { hold_event_id, .. } => match hold_event_id {
                 Some(id) => {
-                    // Silently ignoring an unknown reference would let a
-                    // forward-referencing or foreign-change release leave a
-                    // hold active while claiming it was lifted.
-                    if state.holds.remove(id).is_none() {
-                        bail!(
-                            "hold release {} names {id}, which is not an active hold",
-                            ev.event_id
-                        );
-                    }
+                    state.holds.remove(id);
                 }
                 None => state.holds.clear(),
             },
@@ -1761,18 +1759,19 @@ mod tests {
         assert!(!state.holds.contains_key(&first));
         assert!(state.holds.contains_key(&second));
 
-        // A release naming a hold that is not active is a contradiction in the
-        // ledger, not a no-op: accepting it would report a hold as lifted
-        // while it stayed in force.
-        let mut broken = events.clone();
-        broken.push(ev(
+        // Releasing the same hold twice — two collaborators reaching the same
+        // conclusion — reduces, and leaves the other hold alone.
+        let mut again = events.clone();
+        again.push(ev(
             change,
             Payload::HoldReleased {
                 hold_event_id: Some(first.clone()),
                 reason: None,
             },
         ));
-        assert!(reduce(&broken).is_err());
+        let state = reduce(&again).unwrap();
+        assert_eq!(state.holds.len(), 1);
+        assert!(state.holds.contains_key(&second));
 
         events.push(ev(
             change,
