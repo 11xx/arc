@@ -658,7 +658,8 @@ result is usable. Where the live tree is unknown, because the change has no
 worktree, the advice is the rerun. Once the tree is clean the advice
 becomes `run_gate:<gate>`, since
 evidence already recorded cannot be repaired by cleaning; only a fresh run
-replaces it. `clean_worktree:<gate>` is new in `arc-status/7`.
+replaces it. The `clean_worktree:<gate>` action arrived in `arc-status/7`;
+the current schema is `arc-status/8`.
 
 Executed gates capture combined stdout and stderr, retaining only the final
 4096 bytes. Failed-gate tails appear in `arc show` and `arc status`; successful
