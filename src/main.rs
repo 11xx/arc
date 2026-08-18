@@ -461,6 +461,9 @@ enum Cmd {
         /// Limit events to the changes carrying all supplied tags (repeatable)
         #[arg(long)]
         tag: Vec<String>,
+        /// Read the repository's own events instead of a change's
+        #[arg(long, conflicts_with_all = ["change_flag", "tag"])]
+        repository: bool,
         /// Limit events to one raw kebab-case event_type value
         #[arg(long = "type")]
         event_type: Option<String>,
@@ -1492,6 +1495,7 @@ fn run(cli: Cli) -> Result<i32> {
             follow,
             change,
             tag,
+            repository,
             event_type,
             since,
             exec_command,
@@ -1501,6 +1505,7 @@ fn run(cli: Cli) -> Result<i32> {
                 follow,
                 change.as_deref(),
                 &tag,
+                repository,
                 event_type.as_deref(),
                 since,
                 exec_command.as_deref(),

@@ -11,6 +11,7 @@ pub fn events(
     follow: bool,
     change: Option<&str>,
     tags: &[String],
+    repository_scope: bool,
     event_type: Option<&str>,
     since: Option<ulid::Ulid>,
     exec_command: Option<&str>,
@@ -19,12 +20,10 @@ pub fn events(
         bail!("--change and --tag select different scopes; supply one");
     }
     let store = ctx.store()?;
-    // The reserved repository scope is not a change, so it does not resolve
-    // like one; naming it explicitly is how a caller reads facts about the
-    // repository rather than about a change.
-    let repository_scope = change == Some(Store::REPOSITORY_SCOPE);
+    // A flag rather than a reserved reference value: `repository` is a
+    // perfectly good slug, and a magic string would shadow the change a
+    // caller actually named.
     let change_id = change
-        .filter(|_| !repository_scope)
         .map(|reference| store.resolve_change(reference))
         .transpose()?;
     // A tagged program is the unit an orchestrator waits on, and following

@@ -286,8 +286,7 @@ fn a_recorded_rewrite_translates_revisions_instead_of_migrating_events() {
     // than a private note.
     let repository_events = stdout(repo.arc(&repo.root).args([
         "events",
-        "--change",
-        "repository",
+        "--repository",
         "--type",
         "history-rewritten",
     ]));
@@ -297,6 +296,21 @@ fn a_recorded_rewrite_translates_revisions_instead_of_migrating_events() {
     let after = stdout(repo.arc(&repo.root).args(["doctor"]));
     assert!(after.contains("revision-rewritten"), "{after}");
     assert!(!after.contains("dangling-revision"), "{after}");
+
+    // `repository` is a perfectly good slug, and naming it must select that
+    // change rather than the repository's own events.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "repository", "--no-worktree"]),
+    );
+    let opened = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "repository",
+        "--type",
+        "change-opened",
+    ]));
+    assert!(opened.contains("\"slug\":\"repository\""), "{opened}");
 
     let resolved = stdout(repo.arc(&repo.root).args(["history", "resolve", &recorded]));
     assert!(resolved.contains(&rewritten), "{resolved}");

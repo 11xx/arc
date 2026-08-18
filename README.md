@@ -901,7 +901,7 @@ moved revision as `revision-rewritten` naming its successor, and a dropped one
 as `revision-dropped`, instead of `dangling-revision`. `arc diff` renders the
 surviving commit when a recorded one no longer resolves — including the head
 its finding anchors are checked against — saying so on stderr. `arc events
---change repository` reads the repository's own events, and a bundle carries
+--repository` reads the repository's own events, and a bundle carries
 them so an imported change's revisions stay followable. An import refuses a
 bundle whose rewrites contradict this repository's: two events with different
 IDs can still disagree about one revision, so it is the combined map that must
