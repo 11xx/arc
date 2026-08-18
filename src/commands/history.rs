@@ -15,6 +15,9 @@ pub fn record_rewrite(ctx: &Ctx, map: &str, reason: String, tool: Option<String>
     } else {
         std::fs::read_to_string(map).with_context(|| format!("cannot read commit map {map}"))?
     };
+    // The same lock the import path takes: a rewrite recorded here and one
+    // arriving in a bundle build the same map, and it is judged as a whole.
+    let _repository_events = store.lock_repository_events()?;
     let mapping = parse_commit_map(&text)?;
     // A map from another repository, or with a typo in it, would otherwise be
     // recorded as fact: doctor would report a rewritten revision and suppress
@@ -43,6 +46,9 @@ pub fn record_rewrite(ctx: &Ctx, map: &str, reason: String, tool: Option<String>
                 .join(", ")
         );
     }
+    // Recording is judged against what is already held, for the same reason
+    // an import is: two rewrites can disagree about one revision.
+    let mut combined = store.load_repository_events()?;
     let count = mapping.len();
     let event = ctx.event(
         &store,
@@ -53,6 +59,10 @@ pub fn record_rewrite(ctx: &Ctx, map: &str, reason: String, tool: Option<String>
             tool,
         },
     );
+    combined.push(event.clone());
+    combined.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+    RewriteMap::from_events(combined.iter())
+        .context("this rewrite contradicts one already recorded; nothing was written")?;
     store.append_repository_event(&event)?;
     println!("history rewrite recorded: {count} revisions");
     println!("event: {}", event.event_id);

@@ -117,6 +117,10 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     // all of them before any change event: an import that discovered a
     // contradiction halfway would leave one rewrite recorded, another not, and
     // a change whose revisions resolve through half a map.
+    // Held across planning and writing: the combined map is judged as a
+    // whole, so two imports of different changes must not interleave between
+    // the judgement and the write that makes it true.
+    let _repository_events = store.lock_repository_events()?;
     let incoming = plan_repository_events(Some(&store), &validated)?;
     let mut rewrites = 0;
     for (event_id, bytes) in &incoming {

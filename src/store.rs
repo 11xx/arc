@@ -214,6 +214,13 @@ impl Store {
     }
 
     /// Prove the store's advisory-lock path is writable without mutating state.
+    /// Serialize writes to the repository's own events. They are not
+    /// change-scoped, so a per-change lock does not order two imports of
+    /// different changes — and the map they build is judged as a whole.
+    pub fn lock_repository_events(&self) -> Result<TransitionLock> {
+        self.lock_file("repository-events.lock", "repository events", LOCK_TIMEOUT)
+    }
+
     pub fn lock_probe(&self) -> Result<TransitionLock> {
         self.lock_file("probe.lock", "writability probe", LOCK_TIMEOUT)
     }

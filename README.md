@@ -905,7 +905,10 @@ its finding anchors are checked against — saying so on stderr. `arc events
 them so an imported change's revisions stay followable. An import refuses a
 bundle whose rewrites contradict this repository's: two events with different
 IDs can still disagree about one revision, so it is the combined map that must
-hold together, and it is checked before anything is written.
+hold together, and it is checked before anything is written. Recording a
+rewrite locally is checked the same way and takes the same repository-scoped
+lock, so two imports of different changes cannot each accept half of a
+contradiction.
 
 Approval does not survive translation, and should not: a verdict binds to an
 exact patchset head, and only a content comparison could say whether a
