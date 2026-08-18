@@ -127,8 +127,10 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   actually consumed — including uncommitted ones, which Git cannot recover for
   an auditor afterwards. This is not a config store: arc records no
   configuration history, only the inputs to one irreversible decision.
-  It also records the audit-debt declaration when one waived the missing
-  verdict, because that is an authorization input like the verdict itself. A
+  It also records the audit-debt declaration when that waiver is what let the
+  approval stand, because then it is an authorization input like the verdict
+  itself — and not when one was declared beside an approval that needed no
+  waiver, where it authorized nothing. A
   gate is green for the command it ran: editing a declaration after its
   evidence was recorded means the declared check has not run, the gate reports
   `declaration_changed` rather than counting, and `verify --skip-green` reruns

@@ -1417,10 +1417,13 @@ fn authorization_basis(
             require_declared_actor: policy.policy.require_declared_actor,
             provenance_git_identity: policy.provenance.git_identity.as_str().to_string(),
         },
+        // Only when the waiver is what let the approval stand. A debt declared
+        // beside an approval that needed no waiver authorized nothing, and
+        // recording it would claim the merge rested on something it did not.
         audit_debt_event_id: st
             .audit_debt
             .as_ref()
-            .filter(|_| st.audit_debt_waives_current_head())
+            .filter(|_| report.approval_waived_by_audit_debt)
             .map(|debt| debt.event_id.clone()),
     })
 }

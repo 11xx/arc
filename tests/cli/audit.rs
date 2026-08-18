@@ -146,6 +146,41 @@ fn declared_audit_debt_lets_a_self_approved_change_integrate() {
     assert_eq!(status["audit_debt"]["reason"], "no second actor reachable");
 }
 
+/// A waiver authorizes a merge only when it is what let the approval stand.
+/// Declared beside an approval that needed no waiver, it changed nothing, and
+/// recording it would claim the merge rested on something it did not.
+#[test]
+fn the_basis_records_a_waiver_only_when_it_authorized_the_merge() {
+    let repo = repo_forbidding_self_approval();
+    self_approved_change(&repo, "owed-basis");
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "owed-basis",
+            "--audit-debt",
+            "no reviewer reachable",
+        ])
+        .assert()
+        .success();
+    let event: serde_json::Value = serde_json::from_str(
+        stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "owed-basis",
+            "--type",
+            "change-integrated",
+        ]))
+        .trim(),
+    )
+    .unwrap();
+    assert!(
+        event["authorization"]["audit_debt_event_id"]
+            .as_str()
+            .is_some(),
+        "the waiver is what let this one ship: {event}"
+    );
+}
+
 #[test]
 fn integrate_declares_the_debt_in_one_step() {
     let repo = repo_forbidding_self_approval();

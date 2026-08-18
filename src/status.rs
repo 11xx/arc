@@ -391,6 +391,10 @@ pub struct StatusReport {
     pub blocker_summary: BlockerSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_rejection_reason: Option<String>,
+    /// A declared audit debt is what let a self-approval stand. Only then is
+    /// the waiver an authorization input; otherwise it changed nothing.
+    #[serde(skip_serializing_if = "is_false")]
+    pub approval_waived_by_audit_debt: bool,
     pub next_action: String,
     pub ready_reason: String,
     pub ready_to_integrate: bool,
@@ -578,6 +582,7 @@ fn build_report(
         _ => false,
     };
 
+    let mut waiver_authorized_approval = false;
     let verdict = state.latest_verdict().map(|v| {
         let approved_patchset = latest_patchset
             .as_ref()
@@ -590,10 +595,16 @@ fn build_report(
         // forward where a query can find it — which is the only way a
         // single-operator change can ship at all when no independent reviewer
         // is reachable.
-        let rejected_self_approval = policy.policy.forbid_self_approval
-            && !state.audit_debt_waives_current_head()
+        let would_reject_self_approval = policy.policy.forbid_self_approval
             && approved_patchset
                 .is_some_and(|patchset| undeclared_or_self(patchset, v.effective_author(), v));
+        // The waiver only authorizes anything when it is what let the approval
+        // stand. Recording it otherwise would claim a merge rested on a waiver
+        // that changed nothing.
+        waiver_authorized_approval =
+            would_reject_self_approval && state.audit_debt_waives_current_head();
+        let rejected_self_approval =
+            would_reject_self_approval && !state.audit_debt_waives_current_head();
         let valid = v.verdict == Verdict::Approved
             && latest_patchset
                 .as_ref()
@@ -611,6 +622,7 @@ fn build_report(
             valid_for_current_head: valid,
         }
     });
+    let approval_waived_by_audit_debt = waiver_authorized_approval;
     let approval_rejection_reason = verdict.as_ref().and_then(|verdict| {
         (!verdict.valid_for_current_head
             && verdict.verdict == Verdict::Approved
@@ -956,6 +968,7 @@ fn build_report(
         probes: probe_statuses,
         blocker_summary,
         approval_rejection_reason,
+        approval_waived_by_audit_debt,
         next_action,
         ready_reason,
         ready_to_integrate: ready,
