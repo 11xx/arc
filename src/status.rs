@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/6";
+pub const STATUS_SCHEMA: &str = "arc-status/7";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// Two identities arc assumed cannot establish that two people acted. The
@@ -114,6 +114,62 @@ pub struct GateStatus {
     pub output_tail: Option<String>,
     #[serde(skip_serializing_if = "is_false")]
     pub timed_out: bool,
+}
+
+impl GateStatus {
+    /// Why this gate is not green at head, in the caller's terms.
+    ///
+    /// A gate whose evidence passed but cannot be reused says so here; the
+    /// bare result would read `pass` and contradict every readiness check.
+    /// `None` means the gate is green.
+    pub fn not_green_reason(&self) -> Option<&'static str> {
+        if self.green_at_head {
+            return None;
+        }
+        Some(match self.result.as_str() {
+            "pending" => "no evidence at head",
+            "fail" => "the gate failed",
+            _ if self.tree_moved => "the worktree changed while the gate ran",
+            _ if self.worktree_dirty == Some(true) => {
+                "evidence recorded on a dirty worktree, so no checkout of this revision \
+                 reproduces it"
+            }
+            // Parallel gates share one worktree, so no boundary comparison can
+            // prove that a gate did not change a tracked file and restore it.
+            // The tree was recorded; what is missing is whether it was clean.
+            _ if self.tested_tree.is_some() => {
+                "the worktree's cleanliness was not recorded, which is what a shared-worktree \
+                 parallel run can never establish"
+            }
+            _ => "the tested tree was not recorded, so the evidence has no provenance",
+        })
+    }
+
+    /// What actually clears this gate, given the state of the worktree now.
+    ///
+    /// Re-running a gate against a still-dirty tree records the same unusable
+    /// evidence, so while the tree is dirty the only step that makes progress
+    /// is cleaning it. Once it is clean the stale evidence can only be
+    /// replaced by a rerun — the historical dirty flag on evidence already
+    /// recorded is not something cleaning can change.
+    pub fn clearing_action(&self, worktree_dirty: Option<bool>) -> String {
+        if self.green_at_head {
+            return "integrate".into();
+        }
+        // While the tree is dirty, no local run can produce evidence that
+        // counts — attested evidence carries its own execution context and is
+        // unaffected — including a rerun of a gate that failed, and including
+        // a gate that failed *because* of the uncommitted file. Cleaning is not claimed to
+        // fix a failure; it is the precondition for any run whose result is
+        // usable. It also cannot loop where the live tree is known: this reads
+        // it, so once the tree is clean the advice becomes the rerun. Where it
+        // is unknown — a change with no worktree — the advice is the rerun,
+        // and whether such a change can gate at all is its own question.
+        if worktree_dirty == Some(true) {
+            return format!("clean_worktree:{}", self.name);
+        }
+        format!("run_gate:{}", self.name)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -778,7 +834,7 @@ fn build_report(
     } else if state.hold.is_some() {
         "release_hold".into()
     } else if let Some(gate) = gate_statuses.iter().find(|gate| !gate.green_at_head) {
-        format!("run_gate:{}", gate.name)
+        gate.clearing_action(worktree_dirty)
     } else if let Some(probe) = probe_statuses
         .iter()
         .find(|probe| !probe.discriminating_at_head)

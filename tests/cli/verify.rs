@@ -129,6 +129,32 @@ fn verify_all_parallel_completes_sleep_gates_and_appends_evidence_in_name_order(
             .all(|gate| gate["green_at_head"] == false),
         "{status}"
     );
+    // The tree was recorded; what a shared-worktree parallel run cannot
+    // establish is whether it was clean. Saying the tree went unrecorded
+    // would point at the wrong recovery.
+    let resume = stdout(repo.arc(&repo.root).args(["resume", "parallel-gates"]));
+    assert!(
+        resume.contains("not green at head: the worktree's cleanliness was not recorded"),
+        "{resume}"
+    );
+    assert!(
+        !resume.contains("the tested tree was not recorded"),
+        "{resume}"
+    );
+    // Cleaning cannot fix evidence whose cleanliness was never observed; only
+    // a sequential rerun can.
+    stdout(repo.arc(&repo.root).args(["snapshot", "parallel-gates"]));
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "parallel-gates", "--json"]),
+    );
+    assert!(
+        status["next_action"]
+            .as_str()
+            .unwrap()
+            .starts_with("run_gate:"),
+        "{status}"
+    );
 }
 
 #[test]
@@ -929,7 +955,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
         .code(12);
 
     let status = json_stdout(repo.arc(&worktree).args(["status", "probe-readiness"]));
-    assert_eq!(status["schema"], "arc-status/6");
+    assert_eq!(status["schema"], "arc-status/7");
     assert_eq!(status["probes"][0]["name"], "marker-exists");
     assert_eq!(status["probes"][0]["brief_version"], 2);
     assert_eq!(status["probes"][0]["discriminating_at_head"], false);
@@ -1429,6 +1455,126 @@ fn evidence_from_a_dirty_worktree_is_recorded_and_not_green() {
         .success();
     let status = json_stdout(repo.arc(&wt).args(["status", "dirty", "--json"]));
     assert_eq!(status["gates"][0]["worktree_dirty"], true, "{status}");
+}
+
+/// A gate whose evidence cannot be reused reads `pass` in every raw result
+/// field, so a caller who is only shown the result concludes the opposite of
+/// what readiness concluded. Every human-facing surface names the reason, and
+/// the next step names the tree rather than another run against it — re-running
+/// a gate on a still-dirty tree records the same unusable evidence forever.
+#[test]
+fn dirty_gate_evidence_is_named_by_resume_check_and_the_next_action() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gate"]);
+    stdout(repo.arc(&repo.root).args(["begin", "named"]));
+    let wt = repo.home.join(".worktrees/repo-named");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    repo.arc(&wt).args(["snapshot", "named"]).assert().success();
+    fs::write(wt.join("scratch.rs"), "untracked\n").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "named", "--gate", "unit"])
+        .assert()
+        .success();
+
+    let resume = stdout(repo.arc(&wt).args(["resume", "named"]));
+    assert!(
+        resume.contains("unit: pass (not green at head: evidence recorded on a dirty worktree"),
+        "{resume}"
+    );
+
+    let check = String::from_utf8(
+        repo.arc(&wt)
+            .args(["check", "named"])
+            .assert()
+            // Not the gate exit code: an unapproved head outranks a gate that
+            // is not green, and this change has no verdict. Pinning 3 keeps
+            // that precedence asserted rather than accepting either code.
+            .code(3)
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .unwrap();
+    assert!(
+        check.contains("not green at head: evidence recorded on a dirty worktree"),
+        "{check}"
+    );
+
+    let status = json_stdout(repo.arc(&wt).args(["status", "named", "--json"]));
+    assert_eq!(status["next_action"], "clean_worktree:unit", "{status}");
+
+    // `show` renders the same evidence as history; it must not read `Pass`
+    // beside a summary saying the gate is not green.
+    let shown = stdout(repo.arc(&wt).args(["show", "named"]));
+    assert!(
+        shown.contains("not reusable as evidence: the worktree was dirty"),
+        "{shown}"
+    );
+
+    // Cleaning the tree at the same head is what the advice asked for, and it
+    // must change the advice: the stale evidence can only be replaced by a
+    // rerun, which cleaning cannot do.
+    fs::remove_file(wt.join("scratch.rs")).unwrap();
+    let status = json_stdout(repo.arc(&wt).args(["status", "named", "--json"]));
+    assert_eq!(status["next_action"], "run_gate:unit", "{status}");
+    assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
+
+    // Only the rerun clears the gate.
+    repo.arc(&wt)
+        .args(["verify", "named", "--gate", "unit"])
+        .assert()
+        .success();
+    let resume = stdout(repo.arc(&wt).args(["resume", "named"]));
+    assert!(resume.contains("unit: pass\n"), "{resume}");
+
+    // A failing gate on a dirty tree is still told to clean first: while the
+    // tree is dirty no run produces usable evidence, whatever the result. The
+    // advice terminates because it reads the live tree — once clean, it is the
+    // rerun.
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"test ! -e scratch.rs\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: a gate the untracked file fails"],
+    );
+    git(&wt, &["merge", "--no-edit", "master"]);
+    stdout(repo.arc(&wt).args(["snapshot", "named"]));
+    fs::write(wt.join("scratch.rs"), "untracked again\n").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "named", "--gate", "unit"])
+        .assert()
+        .failure();
+    let status = json_stdout(repo.arc(&wt).args(["status", "named", "--json"]));
+    let gate = &status["gates"][0];
+    assert_eq!(gate["result"], "fail", "{status}");
+    assert_eq!(gate["worktree_dirty"], true, "{status}");
+    assert_eq!(gate["revision"], status["current_head"], "{status}");
+    assert_eq!(status["head_matches_latest_patchset"], true, "{status}");
+    assert_eq!(status["next_action"], "clean_worktree:unit", "{status}");
+
+    // This gate fails *only* because of the untracked file, which is the case
+    // a rerun could never clear. Cleaning, then rerunning, reaches green —
+    // and the advice walks exactly that path.
+    fs::remove_file(wt.join("scratch.rs")).unwrap();
+    let status = json_stdout(repo.arc(&wt).args(["status", "named", "--json"]));
+    assert_eq!(status["next_action"], "run_gate:unit", "{status}");
+    repo.arc(&wt)
+        .args(["verify", "named", "--gate", "unit"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&wt).args(["status", "named", "--json"]));
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
 }
 
 /// Re-snapshotting at the same head is how a patchset binds to a corrected

@@ -1,8 +1,40 @@
 use crate::commands::ArcAlternative;
 use crate::model::{Event, Payload};
 use crate::state::ChangeState;
-use crate::status::{Blocker, StatusReport};
+use crate::status::{Blocker, GateStatus, StatusReport};
 use std::fmt::Write;
+
+/// Why a passing *gate* verification cannot be reused as evidence at its
+/// revision. `None` when it can, when it did not pass — a failure explains
+/// itself — or when it is not gate evidence: probe readiness is a different
+/// question, answered by the probe's own baseline and final results.
+fn unusable_gate_evidence_reason(entry: &crate::state::VerificationEntry) -> Option<&'static str> {
+    if entry.gate.is_none()
+        || entry.probe.is_some()
+        || entry.green_at_head()
+        || entry.result != crate::model::VerifyResult::Pass
+    {
+        return None;
+    }
+    Some(if entry.tree_moved {
+        "the worktree changed while the command ran"
+    } else if entry.worktree_dirty == Some(true) {
+        "the worktree was dirty, so no checkout of this revision reproduces it"
+    } else if entry.tested_tree.is_some() {
+        "the worktree's cleanliness was not recorded"
+    } else {
+        "the tested tree was not recorded"
+    })
+}
+
+/// One gate's line in a human-facing gate list: the raw result, plus why a
+/// passing result still does not count at head.
+pub fn gate_line(gate: &GateStatus) -> String {
+    match gate.not_green_reason() {
+        None => gate.result.clone(),
+        Some(reason) => format!("{} (not green at head: {reason})", gate.result),
+    }
+}
 
 /// Human-readable Markdown view of one change. Suitable for terminals
 /// and for dropping into a journal artifact; the ledger stays private.
@@ -451,6 +483,12 @@ pub fn markdown(
                     v.hostname
                 );
             }
+            // A passing run that cannot be reused reads as `Pass` above, next
+            // to a gate summary that says the same gate is not green. Saying
+            // why here is what keeps the two from contradicting each other.
+            if let Some(reason) = unusable_gate_evidence_reason(v) {
+                let _ = writeln!(w, "  - not reusable as evidence: {reason}");
+            }
         }
     }
 
@@ -710,7 +748,12 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
             }
             Blocker::GatesNotGreen => {
                 for gate in report.gates.iter().filter(|gate| !gate.green_at_head) {
-                    let _ = writeln!(out, "  - Gate `{}` is not green at head", gate.name);
+                    let _ = writeln!(
+                        out,
+                        "  - Gate `{}` is not green at head: {}",
+                        gate.name,
+                        gate.not_green_reason().unwrap_or_default()
+                    );
                 }
             }
             Blocker::AcceptanceProbesNotGreen => {
@@ -1147,7 +1190,13 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .gates
             .iter()
             .filter(|gate| !gate.green_at_head)
-            .map(|gate| format!("gate `{}` is not green at head", gate.name))
+            .map(|gate| {
+                format!(
+                    "gate `{}` is not green at head: {}",
+                    gate.name,
+                    gate.not_green_reason().unwrap_or_default()
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n"),
     );

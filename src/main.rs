@@ -423,7 +423,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/6 schema)
+    /// Machine-readable status report (the versioned arc-status/7 schema)
     Status {
         change: Option<String>,
         /// Accepted for compatibility; status output is always JSON

@@ -291,7 +291,7 @@ condition is reached, with a JSON diagnostic containing the winning
 watch conditions are checked in their supplied order and the first reached
 condition wins.
 
-`arc status <change>` prints the versioned `arc-status/6` JSON report —
+`arc status <change>` prints the versioned `arc-status/7` JSON report —
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, claim owner/activity/stage timing, snapshot
 provenance, a blocker summary, a machine-readable `next_action`, an additive
@@ -636,6 +636,22 @@ worktree cannot prove that no gate made a transient change and restored it, so
 cleanliness remains unknown and passing results do not count as green. A
 boundary change is still recorded as `tree_moved` and explains the stronger
 failure.
+
+Evidence that passed but cannot be reused reads `pass` in its raw result, so
+every human-facing surface names why it does not count: `arc resume`, `arc
+rescue`, and `arc check` render the reason beside the gate, and `arc show`
+renders it beside the verification it belongs to. Because a rerun
+against the same unusable tree records the same unusable evidence, the
+`next_action` is `clean_worktree:<gate>` while the worktree is actually
+dirty — for any gate that is not green, including one that failed, because
+while the tree is dirty no local run produces evidence that counts
+(attested evidence carries its own execution context instead). Cleaning is
+not a fix for a failure; it is the precondition for a local run whose
+result is usable. Where the live tree is unknown, because the change has no
+worktree, the advice is the rerun. Once the tree is clean the advice
+becomes `run_gate:<gate>`, since
+evidence already recorded cannot be repaired by cleaning; only a fresh run
+replaces it. `clean_worktree:<gate>` is new in `arc-status/7`.
 
 Executed gates capture combined stdout and stderr, retaining only the final
 4096 bytes. Failed-gate tails appear in `arc show` and `arc status`; successful

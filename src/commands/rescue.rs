@@ -276,7 +276,7 @@ fn render(output: &RescueOutput<'_>) {
         println!("- (none)");
     } else {
         for gate in output.gates {
-            println!("- {}: {}", gate.name, gate.result);
+            println!("- {}: {}", gate.name, crate::render::gate_line(gate));
         }
     }
     println!("\n## Assessment\n");
