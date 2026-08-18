@@ -1207,6 +1207,13 @@ fn changing_a_gate_declaration_ungreens_its_recorded_evidence() {
     assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
     assert_eq!(status["gates"][0]["declaration_changed"], true, "{status}");
     assert_eq!(status["integrate_ready"], false, "{status}");
+    // And the reader is told which repair this is: the evidence's provenance
+    // is fine, the declaration moved.
+    let resume = stdout(repo.arc(&worktree).args(["resume", "redeclared"]));
+    assert!(
+        resume.contains("the gate declaration changed since this evidence was recorded"),
+        "{resume}"
+    );
 
     // A timeout is part of the declaration too: the same command under a
     // laxer timeout is not evidence for a stricter one.

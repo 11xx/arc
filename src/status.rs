@@ -130,6 +130,12 @@ impl GateStatus {
         if self.green_at_head {
             return None;
         }
+        // Before the provenance checks: this evidence may be perfectly good
+        // provenance for a command the gate no longer declares, and saying
+        // its tree was unrecorded would send the reader to the wrong repair.
+        if self.declaration_changed {
+            return Some("the gate declaration changed since this evidence was recorded");
+        }
         Some(match self.result.as_str() {
             "pending" => "no evidence at head",
             "fail" => "the gate failed",
