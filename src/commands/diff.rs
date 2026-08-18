@@ -3,21 +3,38 @@
 use super::*;
 use crate::state::Patchset;
 
+/// What to render, as the CLI expresses it. One struct rather than eight
+/// positional arguments, because the selectors are mutually exclusive and a
+/// caller reading the call site should see which one it chose.
+pub struct DiffArgs {
+    pub patchset: Option<String>,
+    pub stat: bool,
+    pub findings: bool,
+    pub between: Option<Vec<String>>,
+    pub since_approved: bool,
+    pub integrated: bool,
+    pub base: Option<String>,
+    pub paths: Vec<String>,
+}
+
 /// Render one recorded patchset through Git, optionally followed by the
 /// unresolved findings whose anchors are checked against that patchset head.
-#[allow(clippy::too_many_arguments)]
-pub fn diff(
-    ctx: &Ctx,
-    reference: &str,
-    patchset: Option<String>,
-    stat: bool,
-    findings: bool,
-    between: Option<Vec<String>>,
-    since_approved: bool,
-    paths: Vec<String>,
-) -> Result<()> {
+pub fn diff(ctx: &Ctx, reference: &str, args: DiffArgs) -> Result<()> {
+    let DiffArgs {
+        patchset,
+        stat,
+        findings,
+        between,
+        since_approved,
+        integrated,
+        base,
+        paths,
+    } = args;
     let store = ctx.store()?;
     let (change_id, state) = ctx.load_state(&store, reference)?;
+    if integrated {
+        return diff_integrated(ctx, &state, &change_id, stat, base, paths);
+    }
     let patchset = match patchset {
         Some(id) => state
             .patchsets
@@ -61,6 +78,61 @@ pub fn diff(
     if findings {
         render_findings(ctx, &state, &patchset.id, &patchset.head);
     }
+    Ok(())
+}
+
+/// The exact range an integration recorded: from where the target stood
+/// before to the commit that landed. This is what an audit reviews — not a
+/// patchset range, which describes the work rather than what reached the
+/// target.
+fn diff_integrated(
+    ctx: &Ctx,
+    state: &ChangeState,
+    change_id: &str,
+    stat: bool,
+    base: Option<String>,
+    paths: Vec<String>,
+) -> Result<()> {
+    let closure = state
+        .closure
+        .as_ref()
+        .with_context(|| format!("{change_id} is not closed; nothing integrated to render"))?;
+    if closure.outcome != crate::model::Closure::Integrated {
+        bail!(
+            "{change_id} was {}, not integrated; there is no integration range to render",
+            format!("{:?}", closure.outcome).to_lowercase()
+        );
+    }
+    let head = closure.integrated_commit.as_deref().with_context(|| {
+        format!("{change_id} closed without an integration commit; nothing to render")
+    })?;
+    // A closure written before arc recorded the range knows what landed but
+    // not what it landed onto. Guessing a base would misreport the range an
+    // audit is about, so the caller supplies it — and only then, because a
+    // recorded range is the fact and an override would quietly replace it.
+    let base = match (base, closure.target_before.as_deref()) {
+        (Some(_), Some(before)) => bail!(
+            "{change_id} recorded its integration base ({}); --base would render a range it \
+             did not integrate",
+            &before[..before.len().min(8)]
+        ),
+        (Some(base), None) => gitio::rev_parse(&ctx.cwd, &base)?,
+        (None, Some(before)) => before.to_string(),
+        (None, None) => bail!(
+            "{change_id} recorded no integration base; pass --base <rev> to name what {head} \
+             landed onto"
+        ),
+    };
+    let mut args = vec!["diff".to_string()];
+    if stat {
+        args.push("--stat".to_string());
+    }
+    args.extend([base, head.to_string()]);
+    if !paths.is_empty() {
+        args.push("--".to_string());
+        args.extend(paths);
+    }
+    gitio::git_inherit(&ctx.cwd, &args)?;
     Ok(())
 }
 

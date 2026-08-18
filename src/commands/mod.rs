@@ -37,7 +37,7 @@ pub use changelog::changelog;
 pub use claims::{claim, release_claim, stage, take};
 use clap::ValueEnum;
 pub use config_cmd::check_writable;
-pub use diff::diff;
+pub use diff::{diff, DiffArgs};
 pub use doctor::run as run_doctor;
 pub use findings::{findings, FindingsFormat};
 pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_pr_state};

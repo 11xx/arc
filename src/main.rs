@@ -268,6 +268,12 @@ enum Cmd {
         /// Compare the last approved patchset with the latest snapshot
         #[arg(long, conflicts_with = "patchset")]
         since_approved: bool,
+        /// Render the exact recorded integration range of a closed change
+        #[arg(long, conflicts_with_all = ["patchset", "between", "since_approved", "findings"])]
+        integrated: bool,
+        /// Base revision for an integration that recorded none
+        #[arg(long, requires = "integrated")]
+        base: Option<String>,
         /// Git pathspecs, passed after -- to git diff
         #[arg(index = 2, last = true)]
         paths: Vec<String>,
@@ -1281,18 +1287,24 @@ fn run(cli: Cli) -> Result<i32> {
             findings,
             between,
             since_approved,
+            integrated,
+            base,
             paths,
         } => {
             let change = infer(change.as_deref())?;
             commands::diff(
                 &ctx,
                 &change,
-                patchset,
-                stat,
-                findings,
-                between,
-                since_approved,
-                paths,
+                commands::DiffArgs {
+                    patchset,
+                    stat,
+                    findings,
+                    between,
+                    since_approved,
+                    integrated,
+                    base,
+                    paths,
+                },
             )?;
             Ok(0)
         }

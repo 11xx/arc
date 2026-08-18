@@ -77,7 +77,7 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
     arc inbox                       audit-owed bucket, including closed changes
     arc catchup                     the same, with each reason
     arc query --audit-debt          change IDs alone, for scripting
-    arc diff <change>               what to review; works after closure
+    arc diff <change> --integrated  the exact range that landed, for an audit
     arc audit <change> --verdict <v>          discharge it
     arc findings <change> --audit             what an audit raised
 

@@ -827,6 +827,16 @@ passes at the patchset head. That pair proves behavioral discrimination, not
 semantic relevance: reviewers still inspect the baseline output to confirm the
 intended failure.
 
+`arc diff <change> --integrated` renders the exact range an integration
+recorded — from where the target stood before to the commit that landed —
+which is what an audit reviews; a patchset range describes the work instead.
+It conflicts with `--patchset`, `--between`, `--since-approved`, and
+`--findings`, whose anchors are a patchset question. A closure written before
+arc recorded the range knows what landed but not what it landed onto, so it
+requires `--base <rev>` rather than having one guessed; passing `--base` where
+a range *was* recorded is refused, because the recorded range is the fact. A
+change that was abandoned or superseded has no integration range and says so.
+
 `arc restack <change> --advise` prints, for each open dependent of a change,
 the exact `git rebase --onto <target> <base>` command to run in that
 dependent's worktree once the change integrates. It only prints — arc never
@@ -906,7 +916,7 @@ arc integrate <change> --audit-debt "no independent reviewer reachable"
 arc inbox                                    # audit-owed bucket
 arc catchup                                  # the same, with reasons
 arc query --audit-debt                       # IDs alone, for scripting
-arc diff <change>                            # what to review
+arc diff <change> --integrated               # the exact range that landed
 arc audit <change> --verdict approved --body-file -
 arc findings <change> --audit                # what the audit raised
 ```

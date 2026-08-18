@@ -97,6 +97,118 @@ fn import_refuses_a_history_that_contradicts_itself() {
         .failure();
 }
 
+/// An audit reviews what reached the target, which is the range the
+/// integration recorded — not a patchset range, which describes the work.
+/// A closure that recorded no range cannot have one guessed for it.
+#[test]
+fn audit_diff_integrated_uses_the_recorded_range() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "ranged"]));
+    let worktree = repo.home.join(".worktrees/repo-ranged");
+
+    // The target moves while the change is in flight, and the change picks
+    // that work up by merging it. Recorded against the older base — the
+    // stacked shape, where a patchset spans its whole ancestry — the patchset
+    // range contains the target's work and the integration range does not.
+    // A fixture where the two coincide proves nothing about which one is used.
+    let original_base = repo.head(&repo.root);
+    repo.commit(
+        &repo.root,
+        "target-work.rs",
+        "target\n",
+        "chore: target work",
+    );
+    repo.commit(&worktree, "ranged.rs", "done\n", "feat: ranged");
+    git(&worktree, &["merge", "--no-edit", "master"]);
+    stdout(
+        repo.arc(&worktree)
+            .args(["snapshot", "ranged", "--base", &original_base]),
+    );
+    let target_before = repo.head(&repo.root);
+    assert_ne!(
+        target_before, original_base,
+        "the fixture must move the target, or the two ranges coincide"
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["review", "ranged", "--verdict", "approved"]),
+    );
+    repo.arc(&repo.root)
+        .args(["integrate", "ranged"])
+        .assert()
+        .success();
+
+    // The range is the merge against what the target was, so the file the
+    // change added appears in it.
+    let rendered = stdout(
+        repo.arc(&repo.root)
+            .args(["diff", "ranged", "--integrated"]),
+    );
+    assert!(rendered.contains("ranged.rs"), "{rendered}");
+    let stat = stdout(
+        repo.arc(&repo.root)
+            .args(["diff", "ranged", "--integrated", "--stat"]),
+    );
+    assert!(stat.contains("ranged.rs"), "{stat}");
+
+    // It is the recorded base, not the patchset base: the target moved on,
+    // and the range still names where it stood at integration.
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "ranged",
+        "--type",
+        "change-integrated",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+    assert_eq!(event["target_before"], target_before, "{event}");
+
+    // The target's own work is in the base, so it is not in the range —
+    // while `diff ranged` (the patchset range) does contain it.
+    assert!(!rendered.contains("target-work.rs"), "{rendered}");
+    let patchset_range = stdout(repo.arc(&repo.root).args(["diff", "ranged"]));
+    assert!(
+        patchset_range.contains("target-work.rs"),
+        "{patchset_range}"
+    );
+    assert!(patchset_range.contains("ranged.rs"), "{patchset_range}");
+
+    // Selectors that describe a different range are refused rather than
+    // silently ignored — including --findings, whose anchors are a patchset
+    // question, and --base, which would replace a range that was recorded.
+    for selector in [
+        vec!["diff", "ranged", "--integrated", "--since-approved"],
+        vec!["diff", "ranged", "--integrated", "--findings"],
+        vec!["diff", "ranged", "--integrated", "--base", "HEAD"],
+    ] {
+        repo.arc(&repo.root).args(selector).assert().failure();
+    }
+
+    // An abandoned change has no integration range, and says so.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "dropped", "--no-worktree"]),
+    );
+    repo.arc(&repo.root)
+        .args(["close", "dropped", "--abandoned"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["diff", "dropped", "--integrated"])
+        .assert()
+        .failure();
+
+    // A change that never integrated has no range to render.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "unmerged", "--no-worktree"]),
+    );
+    repo.arc(&repo.root)
+        .args(["diff", "unmerged", "--integrated"])
+        .assert()
+        .failure();
+}
+
 #[test]
 fn review_reports_an_approval_that_cannot_gate() {
     let repo = repo_forbidding_self_approval();
