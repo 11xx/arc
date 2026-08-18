@@ -53,14 +53,12 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     if dry_run {
         let plan = classify_import_events(&root, &validated)?;
         if plan.conflicts.is_empty() {
-            if let Some(repository_id) = &local_repository_id {
-                let store = Store {
-                    root: root.clone(),
-                    repository_id: repository_id.clone(),
-                    require_declared_actor: false,
-                };
-                validate_import_candidate(&store, &validated, &plan.new_events)?;
-            }
+            let store = local_repository_id.as_ref().map(|repository_id| Store {
+                root: root.clone(),
+                repository_id: repository_id.clone(),
+                require_declared_actor: false,
+            });
+            validate_import_candidate(store.as_ref(), &validated, &plan.new_events)?;
         }
         print_import_report(
             &validated,
@@ -86,7 +84,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     // local transition could land between validation and the raw appends.
     let plan = classify_import_events(&root, &validated)?;
     if plan.conflicts.is_empty() {
-        validate_import_candidate(&store, &validated, &plan.new_events)?;
+        validate_import_candidate(Some(&store), &validated, &plan.new_events)?;
     }
 
     print_import_report(
@@ -142,20 +140,27 @@ fn classify_import_events(root: &Path, validated: &ValidatedBundle) -> Result<Im
     Ok(plan)
 }
 
+/// Whether the bundle's events, combined with whatever this store already
+/// holds, form a history that can exist. `None` is a destination with no store
+/// yet: there is nothing local to combine with, and the bundle must still
+/// stand on its own — otherwise a dry run against a fresh destination reports
+/// success for an import that will fail.
 fn validate_import_candidate(
-    store: &Store,
+    store: Option<&Store>,
     validated: &ValidatedBundle,
     new_events: &[String],
 ) -> Result<()> {
     let mut candidate = Vec::new();
-    if store
-        .list_change_ids()?
-        .iter()
-        .any(|change_id| change_id == &validated.bundle.change_id)
-    {
-        for (_, value) in store.raw_events(&validated.bundle.change_id)? {
-            if let Some(event) = crate::bundle::parse_typed_event(&value)? {
-                candidate.push(event);
+    if let Some(store) = store {
+        if store
+            .list_change_ids()?
+            .iter()
+            .any(|change_id| change_id == &validated.bundle.change_id)
+        {
+            for (_, value) in store.raw_events(&validated.bundle.change_id)? {
+                if let Some(event) = crate::bundle::parse_typed_event(&value)? {
+                    candidate.push(event);
+                }
             }
         }
     }

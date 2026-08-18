@@ -72,6 +72,14 @@ fn import_refuses_a_history_that_contradicts_itself() {
     fs::write(&bundle, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
     let other = Repo::new();
+    // The dry run must reach the same conclusion as the import: a preflight
+    // that reports success for a bundle the real path refuses is worse than
+    // no preflight, because it is believed.
+    other
+        .arc(&other.root)
+        .args(["import", bundle.to_str().unwrap(), "--dry-run"])
+        .assert()
+        .failure();
     other
         .arc(&other.root)
         .args(["import", bundle.to_str().unwrap()])
