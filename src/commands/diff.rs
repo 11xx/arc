@@ -64,6 +64,27 @@ pub fn diff(ctx: &Ctx, reference: &str, args: DiffArgs) -> Result<()> {
     } else {
         (patchset.base.clone(), patchset.head.clone())
     };
+    // A recorded revision a rewrite moved no longer resolves. Following it
+    // forward renders the surviving commit; the event itself is untouched.
+    let rewrites = crate::rewrite::RewriteMap::load(&store)?;
+    let follow = |revision: String| -> String {
+        if rewrites.is_empty() || gitio::rev_parse(&ctx.cwd, &revision).is_ok() {
+            return revision;
+        }
+        match rewrites.successor(&revision) {
+            Some(successor) => {
+                eprintln!(
+                    "note: {} was rewritten to {}; rendering the surviving commit",
+                    &revision[..revision.len().min(8)],
+                    &successor[..successor.len().min(8)]
+                );
+                successor
+            }
+            None => revision,
+        }
+    };
+    let (left, right) = (follow(left), follow(right));
+
     let mut args = vec!["diff".to_string()];
     if stat {
         args.push("--stat".to_string());

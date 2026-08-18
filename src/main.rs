@@ -15,6 +15,7 @@ mod policy;
 mod project;
 mod registry;
 mod render;
+mod rewrite;
 mod session_store;
 mod state;
 mod status;
@@ -826,6 +827,11 @@ enum Cmd {
         #[arg(long)]
         superseded: Option<String>,
     },
+    /// Record a Git history rewrite that happened to this repository
+    History {
+        #[command(subcommand)]
+        cmd: HistoryCmd,
+    },
     /// Record and validate observed forge (hosted-PR) facts
     Forge {
         #[command(subcommand)]
@@ -991,6 +997,26 @@ enum ForgeCmd {
         #[arg(long)]
         link: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum HistoryCmd {
+    /// Record a rewrite the operator performed, with its commit map. arc never
+    /// rewrites history, offers to, or computes the mapping
+    Rewrite {
+        /// Commit map (`<old> <new>` per line, as git filter-repo writes), or
+        /// '-' for stdin
+        #[arg(long)]
+        map: String,
+        /// Why the history was rewritten
+        #[arg(long)]
+        reason: String,
+        /// What performed the rewrite
+        #[arg(long)]
+        tool: Option<String>,
+    },
+    /// Show where a recorded revision ended up
+    Resolve { revision: String },
 }
 
 fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'static str)> {
@@ -1917,6 +1943,13 @@ fn run(cli: Cli) -> Result<i32> {
                 commands::forge_pr_state(&ctx, &change, state, merge_sha, link)?;
                 Ok(0)
             }
+        },
+        Cmd::History { cmd } => match cmd {
+            HistoryCmd::Rewrite { map, reason, tool } => {
+                commands::record_rewrite(&ctx, &map, reason, tool)?;
+                Ok(0)
+            }
+            HistoryCmd::Resolve { revision } => commands::resolve_rewritten(&ctx, &revision),
         },
         Cmd::Config {
             check_writable,

@@ -213,3 +213,84 @@ fn doctor_reports_a_recorded_revision_git_can_no_longer_resolve() {
     // Advice never fails the command: the ledger is not malformed.
     repo.arc(&repo.root).args(["doctor"]).assert().success();
 }
+
+/// A rewrite is a fact about the repository, so it is recorded rather than
+/// applied. Every event keeps saying exactly what it said; what changes is
+/// that a reader can follow a recorded revision forward, and that doctor stops
+/// calling a moved revision a casualty.
+#[test]
+fn a_recorded_rewrite_translates_revisions_instead_of_migrating_events() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "rewritten"]));
+    let worktree = repo.home.join(".worktrees/repo-rewritten");
+    repo.commit(&worktree, "work.rs", "one\n", "feat: work");
+    stdout(repo.arc(&worktree).args(["snapshot", "rewritten"]));
+    let recorded = repo.head(&worktree);
+
+    // The operator rewrites history. arc's retention ref is what keeps a
+    // recorded revision reachable, so a real rewrite takes it with everything
+    // else: dropping it here is what a force-pushed, garbage-collected
+    // repository looks like from the ledger's side.
+    git(
+        &worktree,
+        &["commit", "--amend", "-m", "feat: work, rewritten"],
+    );
+    let rewritten = repo.head(&worktree);
+    for ref_name in git_out(
+        &worktree,
+        &["for-each-ref", "--format=%(refname)", "refs/arc/"],
+    )
+    .lines()
+    .map(str::to_string)
+    .collect::<Vec<_>>()
+    {
+        git(&worktree, &["update-ref", "-d", &ref_name]);
+    }
+    git(&worktree, &["reflog", "expire", "--expire=now", "--all"]);
+    git(&worktree, &["gc", "--prune=now", "--quiet"]);
+
+    // Before the rewrite is recorded, the revision is simply gone.
+    let before = stdout(repo.arc(&repo.root).args(["doctor"]));
+    assert!(before.contains("dangling-revision"), "{before}");
+
+    let map = repo.root.join("commit-map");
+    fs::write(&map, format!("{recorded} {rewritten}\n")).unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            map.to_str().unwrap(),
+            "--reason",
+            "signed an unsigned commit",
+            "--tool",
+            "git commit --amend",
+        ])
+        .assert()
+        .success();
+
+    // The event is untouched: the patchset still names what it named.
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "rewritten",
+        "--type",
+        "patchset-added",
+    ]));
+    assert!(events.contains(&recorded), "{events}");
+
+    // What changed is the reading.
+    let after = stdout(repo.arc(&repo.root).args(["doctor"]));
+    assert!(after.contains("revision-rewritten"), "{after}");
+    assert!(!after.contains("dangling-revision"), "{after}");
+
+    let resolved = stdout(repo.arc(&repo.root).args(["history", "resolve", &recorded]));
+    assert!(resolved.contains(&rewritten), "{resolved}");
+
+    // A revision nothing rewrote is reported as unmoved, with exit 2 so a
+    // script can tell the two apart.
+    repo.arc(&repo.root)
+        .args(["history", "resolve", &rewritten])
+        .assert()
+        .code(2);
+}

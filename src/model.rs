@@ -482,6 +482,20 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         pr_head: Option<String>,
     },
+    /// A Git history rewrite that happened to this repository, recorded
+    /// rather than applied. Nothing already written changes: an old event
+    /// keeps saying exactly what it said, and readers gain the ability to
+    /// follow a recorded revision forward. arc never performs the rewrite and
+    /// never computes the mapping; the operator supplies it.
+    HistoryRewritten {
+        /// Old revision to its replacement. A revision the rewrite dropped
+        /// entirely maps to nothing and is absent.
+        mapping: std::collections::BTreeMap<String, String>,
+        reason: String,
+        /// What performed the rewrite, when the operator says so.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
+    },
     /// An event whose `event_type` this build does not recognize (e.g. one
     /// imported from a newer arc). Typed loading skips these entries; the
     /// underlying files and raw export preserve their original bytes intact.
@@ -589,6 +603,9 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::ChangeClosed { .. }
         | Payload::ChangeIntegrated { .. }
         | Payload::IntegrationAsserted { .. } => AppendPermission::LifecycleOwned,
+        // Repository-scoped: it is never appended to a change's log, so no
+        // change-phase policy applies to it.
+        Payload::HistoryRewritten { .. } => AppendPermission::AnyPhaseFact,
         Payload::Unknown => AppendPermission::OpaqueImported,
     }
 }

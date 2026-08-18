@@ -177,16 +177,30 @@ fn inspect_dangling_revisions(
     }
     // One batch rather than a process per revision: a ledger of any age holds
     // thousands, and a doctor that costs a minute stops being run.
+    let rewrites = crate::rewrite::RewriteMap::load(store)?;
     for revision in gitio::missing_objects(cwd, wanted.keys().map(String::as_str))? {
         let short = &revision[..revision.len().min(8)];
         let referents = wanted
             .get(&revision)
             .map(|set| set.iter().cloned().collect::<Vec<_>>().join(", "))
             .unwrap_or_default();
-        advice.push(Finding {
-            code: "dangling-revision",
-            detail: format!("{short} is recorded but no longer in this repository: {referents}"),
-        });
+        // A revision a recorded rewrite moved is not a casualty: the event
+        // still says what it said, and the reader can follow it forward.
+        match rewrites.successor(&revision) {
+            Some(successor) => advice.push(Finding {
+                code: "revision-rewritten",
+                detail: format!(
+                    "{short} was rewritten to {}: {referents}",
+                    &successor[..successor.len().min(8)]
+                ),
+            }),
+            None => advice.push(Finding {
+                code: "dangling-revision",
+                detail: format!(
+                    "{short} is recorded but no longer in this repository: {referents}"
+                ),
+            }),
+        }
     }
     Ok(())
 }

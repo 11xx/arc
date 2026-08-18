@@ -1172,6 +1172,12 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             "integration-asserted",
             format!("{} into {target_branch}", short_sha(integrated_commit)),
         ),
+        Payload::HistoryRewritten {
+            mapping, reason, ..
+        } => (
+            "history-rewritten",
+            format!("{} revisions: {reason}", mapping.len()),
+        ),
         Payload::ChangeClosed {
             outcome,
             integrated_commit,

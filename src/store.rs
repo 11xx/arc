@@ -142,6 +142,62 @@ impl Store {
         self.changes_dir().join(change_id).join("events")
     }
 
+    /// Events about the repository rather than about one change. A history
+    /// rewrite is not change-scoped: it happens to every recorded revision at
+    /// once, and filing it under one change would misstate what it is.
+    fn repository_events_dir(&self) -> PathBuf {
+        self.root.join("repository").join("events")
+    }
+
+    /// The reserved `change_id` a repository-scoped event carries, so the
+    /// event schema stays one shape.
+    pub const REPOSITORY_SCOPE: &'static str = "repository";
+
+    pub fn append_repository_event(&self, event: &Event) -> Result<()> {
+        self.refuse_undeclared_author(event)?;
+        ids::validate_id_component(&event.event_id)?;
+        let dir = self.repository_events_dir();
+        create_private_dir_all(&dir)?;
+        let path = dir.join(format!("{}.json", event.event_id));
+        let mut body = serde_json::to_vec_pretty(event)?;
+        body.push(b'\n');
+        write_exclusive(&path, &body)
+            .with_context(|| format!("event {} already exists", event.event_id))
+    }
+
+    /// Repository-scoped events in ID order. A repository that has never had
+    /// one has no directory, which is not an error.
+    pub fn load_repository_events(&self) -> Result<Vec<Event>> {
+        let dir = self.repository_events_dir();
+        let mut names: Vec<String> = Vec::new();
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", dir.display()))
+            }
+        };
+        for entry in entries {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".json") {
+                names.push(name);
+            }
+        }
+        names.sort();
+        let mut events = Vec::with_capacity(names.len());
+        for name in names {
+            let path = dir.join(&name);
+            let bytes = fs::read(&path)?;
+            let event: Event = serde_json::from_slice(&bytes)
+                .with_context(|| format!("malformed event file {}", path.display()))?;
+            if matches!(event.payload, crate::model::Payload::Unknown) {
+                continue;
+            }
+            events.push(event);
+        }
+        Ok(events)
+    }
+
     /// Serialize state-derived transitions for one change across processes.
     pub fn lock_transition(&self, change_id: &str) -> Result<TransitionLock> {
         ids::validate_id_component(change_id)?;

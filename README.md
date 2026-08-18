@@ -861,6 +861,45 @@ dependent's worktree once the change integrates. It only prints — arc never
 rewrites a branch — and writes no events; with no dependents it says so and
 exits 0.
 
+## History rewrites
+
+Git history is occasionally rewritten for reasons unrelated to any change:
+signing an old commit, purging a secret, correcting an author, an upstream
+force-push. Every revision the ledger recorded then names an object that no
+longer exists.
+
+The ledger is append-only, so migrating those events is unavailable by
+construction — and should stay unavailable. A ledger that rewrites itself when
+Git moves is a projection of whatever Git currently says, which is the thing
+arc exists to supplement rather than mirror. So the rewrite is recorded as the
+fact it is:
+
+```sh
+git filter-repo --...                        # you rewrite; arc never does
+arc history rewrite --map .git/filter-repo/commit-map \
+  --reason "signed two unsigned commits" --tool git-filter-repo
+arc history resolve <old-sha>                # exit 2 when nothing moved it
+```
+
+The commit map is `<old> <new>` per line, as `git filter-repo` writes it; a
+new revision of all zeroes records a commit the rewrite dropped, which has no
+successor. arc never rewrites history, offers to, or computes the mapping.
+
+Nothing already written changes. An old event keeps saying exactly what it
+said; readers gain the ability to follow it forward. `arc doctor` reports a
+moved revision as `revision-rewritten` naming its successor instead of
+`dangling-revision`, and `arc diff` renders the surviving commit when a
+recorded one no longer resolves, saying so on stderr.
+
+Approval does not survive translation, and should not: a verdict binds to an
+exact patchset head, and only a content comparison could say whether a
+rewritten head is the same work. Re-approving a rewrite that preserved the
+tree is cheap; one that did not must be re-reviewed.
+
+A rewrite is not change-scoped — it happens to every recorded revision at once
+— so it is stored as a repository-scoped event under `repository/events/`
+rather than filed under a change that did not cause it.
+
 ## Policy
 
 Repository integration policy is declared in `.arc/policy.toml`. Policies are

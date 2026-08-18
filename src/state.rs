@@ -1582,6 +1582,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                         unresolved_binding,
                     });
             }
+            // Repository-scoped, so it is never in a change's log; if one
+            // arrives by import it says nothing about this change.
+            Payload::HistoryRewritten { .. } => {}
             // An event this build does not recognize. Typed loading skips
             // unknown events before replay, so this arm is defensive: keep the
             // raw history intact without mutating the derived view.
