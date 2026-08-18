@@ -1839,12 +1839,14 @@ fn run(cli: Cli) -> Result<i32> {
             commands::close(
                 &ctx,
                 &change,
-                assert_integrated,
-                patchset,
-                into,
-                target_before,
-                abandoned,
-                superseded,
+                commands::CloseArgs {
+                    assert_integrated,
+                    patchset,
+                    into,
+                    target_before,
+                    abandoned,
+                    superseded_by: superseded,
+                },
             )?;
             Ok(0)
         }

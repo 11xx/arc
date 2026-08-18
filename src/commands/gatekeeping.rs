@@ -1404,16 +1404,27 @@ pub(crate) fn dependency_order(selected: &BTreeMap<String, ChangeState>) -> Resu
     Ok(ordered)
 }
 
-pub fn close(
-    ctx: &Ctx,
-    reference: &str,
-    assert_integrated: Option<String>,
-    patchset: Option<String>,
-    into: Option<String>,
-    target_before: Option<String>,
-    abandoned: bool,
-    superseded_by: Option<String>,
-) -> Result<()> {
+/// How a change is being closed, as the CLI expresses it. One struct rather
+/// than eight positional arguments, because the outcomes are mutually
+/// exclusive and a call site should show which one it chose.
+pub struct CloseArgs {
+    pub assert_integrated: Option<String>,
+    pub patchset: Option<String>,
+    pub into: Option<String>,
+    pub target_before: Option<String>,
+    pub abandoned: bool,
+    pub superseded_by: Option<String>,
+}
+
+pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
+    let CloseArgs {
+        assert_integrated,
+        patchset,
+        into,
+        target_before,
+        abandoned,
+        superseded_by,
+    } = args;
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
