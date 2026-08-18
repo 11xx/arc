@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-pub const CHAIN_SCHEMA: &str = "arc-chain/2";
+pub const CHAIN_SCHEMA: &str = "arc-chain/3";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChainMember {
@@ -21,11 +21,21 @@ pub struct ChainMember {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChainReview {
     pub subject: Option<String>,
-    pub non_self_verdict: bool,
+    /// Who wrote the brief the work was done from, when there is one. In an
+    /// orchestrated chain this is the lead, and the verdict usually comes from
+    /// the same identity — a fact worth reporting, and one arc holds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brief_author: Option<String>,
+    /// Whether every verdict in the lifetime window came from the brief's
+    /// author. `None` when there is no brief, or no verdict to attribute.
+    ///
+    /// This makes no inference about independence: arc cannot know that a
+    /// reviewer directed the work, only that the same identity wrote the
+    /// brief and the verdict.
+    pub reviewed_only_by_brief_author: Option<bool>,
     pub at_final: ChainReviewWindow,
     pub lifetime: ChainReviewWindow,
-    /// Per reviewer, the newest patchset it saw. `non_self_verdict` answers
-    /// whether somebody independent ever looked; this answers whether anybody
+    /// Per reviewer, the newest patchset it saw. This answers whether anybody
     /// looked at what shipped, which is the question that catches a panel
     /// running correctly right up to the corrections nobody re-reviewed.
     pub coverage: Vec<crate::status::ReviewerCoverage>,

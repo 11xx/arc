@@ -381,7 +381,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Show a tagged program in dependency order (arc-chain/2 schema)
+    /// Show a tagged program in dependency order (arc-chain/3 schema)
     Chain {
         tag: String,
         #[arg(long)]
