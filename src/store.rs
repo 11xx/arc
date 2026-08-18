@@ -86,6 +86,9 @@ impl Store {
                         .context("arc config.json unreadable after creation race")
                 })?;
                 let cfg: StoreConfig = serde_json::from_slice(&fs::read(&config_path)?)?;
+                // The winner of a creation race may be a newer build, so the
+                // config now on disk is not necessarily the one written above.
+                ensure_readable_format(cfg.schema_version, &config_path)?;
                 cfg.repository_id
             }
         };
