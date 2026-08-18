@@ -617,8 +617,8 @@ pub fn markdown(
                 format_args!(" [{} verdicts, {} findings]", row.verdicts, row.findings),
             );
         }
-        for warning in &report.coverage_warnings {
-            let _ = writeln!(w, "- warning: {warning}");
+        for advisory in &report.advisories {
+            let _ = writeln!(w, "- advisory ({}): {}", advisory.code, advisory.detail);
         }
     }
 
@@ -667,16 +667,17 @@ pub fn markdown(
 
 /// Advisory review-coverage lines, printed after the ready/blocked verdict.
 ///
-/// These are warnings by design. Blocking on thin coverage would refuse the
-/// single-reviewer changes that make up most of the work; the point is that
-/// nobody integrates without having been told.
-pub fn coverage_warnings(report: &StatusReport) {
-    if report.coverage_warnings.is_empty() {
+/// These are advisories by design. Blocking on thin coverage would refuse the
+/// single-reviewer changes that make up most of the work, and an
+/// orchestrator's review is a valid review unless a project's policy says
+/// otherwise; the point is that nobody integrates without having been told.
+pub fn advisories(report: &StatusReport) {
+    if report.advisories.is_empty() {
         return;
     }
-    println!("\nReview coverage:");
-    for warning in &report.coverage_warnings {
-        println!("  warning: {warning}");
+    println!("\nAdvisories (never blocking):");
+    for advisory in &report.advisories {
+        println!("  {}: {}", advisory.code, advisory.detail);
     }
 }
 

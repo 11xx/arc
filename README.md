@@ -853,12 +853,20 @@ of corrections ship unseen — an identity comparison reads that as clean.
 
 So arc derives a **review map**: for every identity that filed a verdict or
 finding, the newest patchset it saw, and whether that is the final one. `arc
-status --json` carries it as `review_map`, `arc show` renders it, and `arc
-check` prints warnings like `Reviewer last saw ps-07; integrating ps-11`. These
-never block — plenty of changes legitimately ship with a single reviewer. A
-reviewer that cannot be told apart from the patchset author (neither side
-recorded `--on-behalf-of`) is reported as unknown attribution rather than
-counted as independent or as self-review.
+status --json` carries it as `review_map`, and `arc show` renders it.
+
+What that map implies is reported as **advisories**: `arc status --json` and
+`arc check --json` (`arc-check/2`) carry `advisories`, each a stable `code`
+with a `detail` line, and `arc check` prints them under `Advisories (never
+blocking)`. The codes are `reviewer-behind-final-patchset`
+(`Reviewer last saw ps-07; integrating ps-11`), `no-independent-reviewer`,
+`reviewer-attribution-unknown`, `brief-author-only-review`, and
+`audit-debt-outstanding`. None of them changes readiness or the exit code:
+plenty of changes legitimately ship with a single reviewer, and an
+orchestrator's review is a valid review unless a project's policy says
+otherwise. A reviewer that cannot be told apart from the patchset author
+(neither side recorded `--on-behalf-of`) is reported as unknown attribution
+rather than counted as independent or as self-review.
 
 When `forbid_self_approval` is set and no second actor is reachable, a change
 would otherwise be unshippable. Declaring an **audit debt** resolves that

@@ -859,7 +859,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
         .stdout
         .clone();
     let check: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(check["schema"], "arc-check/1");
+    assert_eq!(check["schema"], "arc-check/2");
     assert!(check["blockers"]
         .as_array()
         .unwrap()

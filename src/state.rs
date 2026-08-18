@@ -521,6 +521,28 @@ impl ChangeState {
         self.briefs.last()
     }
 
+    /// Who wrote the brief the work was done from, when there is one.
+    pub fn brief_author(&self) -> Option<&str> {
+        self.latest_brief().map(|brief| brief.actor.as_str())
+    }
+
+    /// Whether every verdict identity in some window came from the brief's
+    /// author. `None` when there is no brief, or no verdict to attribute.
+    ///
+    /// This asserts nothing about independence — arc cannot know that a
+    /// reviewer directed the work. It reports that the identity which wrote
+    /// the brief is the only one that recorded a verdict, and the window the
+    /// caller chose decides which verdicts that covers.
+    pub fn reviewed_only_by_brief_author<'a>(
+        &self,
+        identities: impl IntoIterator<Item = &'a str>,
+    ) -> Option<bool> {
+        let author = self.brief_author()?;
+        let mut identities = identities.into_iter().peekable();
+        identities.peek()?;
+        Some(identities.all(|identity| identity == author))
+    }
+
     /// The latest verdict overall; validity against the current head is
     /// a Git-time question answered by the status layer.
     pub fn latest_verdict(&self) -> Option<&VerdictEntry> {

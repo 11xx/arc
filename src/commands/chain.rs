@@ -121,16 +121,8 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                 // comes from the lead, so the identities always differ. What
                 // the ledger can say is who wrote the brief and whether
                 // anybody else recorded a verdict.
-                let reviewed_only_by_brief_author = match (&brief_author, lifetime.identities.len())
-                {
-                    (Some(author), 1..) => Some(
-                        lifetime
-                            .identities
-                            .iter()
-                            .all(|identity| identity == author),
-                    ),
-                    _ => None,
-                };
+                let reviewed_only_by_brief_author = state
+                    .reviewed_only_by_brief_author(lifetime.identities.iter().map(String::as_str));
                 ChainReview {
                     brief_author,
                     reviewed_only_by_brief_author,

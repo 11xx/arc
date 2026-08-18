@@ -374,10 +374,11 @@ pub struct StatusReport {
     pub verdict: Option<VerdictStatus>,
     /// Who reviewed what, newest coverage first. Additive in arc-status/6.
     pub review_map: Vec<ReviewerCoverage>,
-    /// Warnings about review coverage of the final patchset. Advisory: plenty
-    /// of changes legitimately ship with one reviewer, so these never block.
+    /// What a lead should know before integrating and arc will not refuse for:
+    /// thin or stale review coverage, review only by the brief's author, an
+    /// undischarged audit obligation. Never affects readiness or exit status.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub coverage_warnings: Vec<String>,
+    pub advisories: Vec<Advisory>,
     pub findings: Vec<FindingSummary>,
     pub open_blocking_findings: Vec<String>,
     pub holds: Vec<HoldEntry>,
@@ -640,7 +641,7 @@ fn build_report(
     });
 
     let review_map = reviewer_coverage(state);
-    let coverage_warnings = coverage_warnings(&review_map, latest_patchset.as_ref());
+    let advisories = advisories(&review_map, latest_patchset.as_ref(), state);
 
     let findings: Vec<FindingSummary> = state
         .findings
@@ -936,7 +937,7 @@ fn build_report(
         worktree_dirty,
         verdict,
         review_map,
-        coverage_warnings,
+        advisories,
         findings,
         open_blocking_findings: open_blocking,
         holds: hold_entries(state),
@@ -1134,23 +1135,39 @@ pub fn reviewer_coverage(state: &ChangeState) -> Vec<ReviewerCoverage> {
     rows
 }
 
-/// Advisory coverage warnings for `arc check`. Never blockers: a change with
-/// one reviewer is normal, and refusing it would make the tool unusable for
-/// the single-operator case it is most often run in.
-pub fn coverage_warnings(
+/// One advisory: something a lead should know before integrating, which is
+/// deliberately not a blocker. An orchestrator's review is a valid review
+/// unless a project's policy says otherwise, so arc reports the shape of the
+/// review and lets the project judge it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Advisory {
+    /// Stable machine-readable kind, so a consumer can act on one advisory
+    /// without parsing prose.
+    pub code: &'static str,
+    pub detail: String,
+}
+
+/// Advisories for `arc check`. Never blockers: a change with one reviewer is
+/// normal, and refusing it would make the tool unusable for the
+/// single-operator case it is most often run in.
+pub fn advisories(
     review_map: &[ReviewerCoverage],
     final_patchset: Option<&crate::state::Patchset>,
-) -> Vec<String> {
+    state: &ChangeState,
+) -> Vec<Advisory> {
     let Some(final_patchset) = final_patchset else {
         return Vec::new();
     };
     let mut warnings = Vec::new();
     for row in review_map {
         if !row.covers_final {
-            warnings.push(format!(
-                "{} last saw {}; integrating {}",
-                row.reviewer, row.last_patchset, final_patchset.id
-            ));
+            warnings.push(Advisory {
+                code: "reviewer-behind-final-patchset",
+                detail: format!(
+                    "{} last saw {}; integrating {}",
+                    row.reviewer, row.last_patchset, final_patchset.id
+                ),
+            });
         }
     }
     let independent = review_map
@@ -1161,13 +1178,46 @@ pub fn coverage_warnings(
             .iter()
             .any(|row| row.covers_final && row.attribution_unknown);
         warnings.push(if unknown {
-            format!(
-                "no reviewer of {} is distinguishable from its author; \
-                 record --on-behalf-of to make attribution legible",
-                final_patchset.id
-            )
+            Advisory {
+                code: "reviewer-attribution-unknown",
+                detail: format!(
+                    "no reviewer of {} is distinguishable from its author; \
+                     record --on-behalf-of to make attribution legible",
+                    final_patchset.id
+                ),
+            }
         } else {
-            format!("no independent reviewer covers {}", final_patchset.id)
+            Advisory {
+                code: "no-independent-reviewer",
+                detail: format!("no independent reviewer covers {}", final_patchset.id),
+            }
+        });
+    }
+    // The review map makes brief-author-only review visible after the fact.
+    // Saying it before integration is the point of an advisory: arc reports
+    // that the identity which briefed the work is the only one that approved
+    // it, and infers nothing about whether that was independent.
+    let covering_reviewers = review_map
+        .iter()
+        .filter(|row| row.covers_final)
+        .map(|row| row.reviewer.as_str());
+    if let (Some(author), Some(true)) = (
+        state.brief_author(),
+        state.reviewed_only_by_brief_author(covering_reviewers),
+    ) {
+        warnings.push(Advisory {
+            code: "brief-author-only-review",
+            detail: format!(
+                "every verdict on {} came from {author}, who wrote the brief",
+                final_patchset.id
+            ),
+        });
+    }
+    if state.audit_debt_outstanding() {
+        warnings.push(Advisory {
+            code: "audit-debt-outstanding",
+            detail: "a review obligation was recorded at integration and is not discharged"
+                .to_string(),
         });
     }
     warnings

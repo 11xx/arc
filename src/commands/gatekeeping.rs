@@ -39,10 +39,12 @@ struct CheckOutput<'a> {
     ready: bool,
     exit_code: i32,
     blockers: Vec<CheckBlocker>,
-    /// Advisory review-coverage warnings. Never affect `ready` or the exit
-    /// code; a change may legitimately ship with one reviewer.
-    #[serde(skip_serializing_if = "<[String]>::is_empty")]
-    coverage_warnings: &'a [String],
+    /// What a lead should know and arc will not refuse for. Never affects
+    /// `ready` or the exit code; a change may legitimately ship with one
+    /// reviewer, and an orchestrator's review is a valid review unless a
+    /// project's policy says otherwise.
+    #[serde(skip_serializing_if = "<[crate::status::Advisory]>::is_empty")]
+    advisories: &'a [crate::status::Advisory],
 }
 
 #[derive(serde::Serialize)]
@@ -1465,7 +1467,7 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
     let code = status::check_exit_code(&report);
     if json {
         let output = CheckOutput {
-            schema: "arc-check/1",
+            schema: "arc-check/2",
             change_id: &change_id,
             ready: report.integrate_ready,
             exit_code: code,
@@ -1477,7 +1479,7 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
                     exit_code: blocker.exit_code(),
                 })
                 .collect(),
-            coverage_warnings: &report.coverage_warnings,
+            advisories: &report.advisories,
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(code);
@@ -1489,7 +1491,7 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
     } else {
         print!("{}", render::blocker_explanation(&st, &report));
     }
-    render::coverage_warnings(&report);
+    render::advisories(&report);
     Ok(code)
 }
 
