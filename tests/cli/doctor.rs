@@ -16,6 +16,19 @@ fn a_malformed_repository_event_is_reported_rather_than_fatal() {
 
     let out = stdout(repo.arc(&repo.root).args(["doctor"]));
     assert!(out.contains("malformed-repository-event"), "{out}");
+
+    // An ID no write path could have produced is reported too, once, rather
+    // than passing because nothing on the read path looked at it.
+    fs::write(dir.join("bad name.json"), "{}\n").unwrap();
+    let out = stdout(repo.arc(&repo.root).args(["doctor"]));
+    // Both broken files are reported: one unreadable file must not hide the
+    // state of another, which is the point of the report.
+    assert!(out.contains("01BADBADBADBADBADBADBADBAD"), "{out}");
+    assert_eq!(
+        out.lines().filter(|line| line.contains("bad name")).count(),
+        1,
+        "one finding per broken file: {out}"
+    );
 }
 
 #[test]

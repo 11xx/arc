@@ -620,6 +620,30 @@ impl Store {
         Ok(events)
     }
 
+    /// Every repository event file, readable or not, as (id, bytes). Doctor
+    /// walks this rather than the parsed listing: one unreadable file must not
+    /// hide the state of every other, which is the whole point of the report.
+    pub fn repository_event_files(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let dir = self.repository_events_dir();
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", dir.display()))
+            }
+        };
+        let mut files = Vec::new();
+        for entry in entries {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            let Some(event_id) = name.strip_suffix(".json") else {
+                continue;
+            };
+            files.push((event_id.to_string(), fs::read(dir.join(&name))?));
+        }
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(files)
+    }
+
     /// Repository-scoped raw events not already seen, in ID order.
     pub fn raw_repository_events_unseen(
         &self,

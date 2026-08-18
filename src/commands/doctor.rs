@@ -465,8 +465,8 @@ fn inspect_hold_releases(
 /// malformed one must be reported as a problem rather than surfacing as a
 /// failure inside whatever first tried to read it.
 fn inspect_repository_events(store: &Store, problems: &mut Vec<Finding>) {
-    let events = match store.raw_repository_events_unseen(&BTreeSet::new()) {
-        Ok(events) => events,
+    let files = match store.repository_event_files() {
+        Ok(files) => files,
         Err(error) => {
             problems.push(Finding {
                 code: "malformed-repository-event",
@@ -475,7 +475,35 @@ fn inspect_repository_events(store: &Store, problems: &mut Vec<Finding>) {
             return;
         }
     };
-    for (event_id, value) in events {
+    for (event_id, bytes) in files {
+        // An ID that could not have been written is still on disk, and every
+        // path that reads by ID validates: reporting it is how the owner
+        // learns why those paths refuse the file.
+        if let Err(error) = crate::ids::validate_id_component(&event_id) {
+            problems.push(Finding {
+                code: "malformed-repository-event",
+                detail: format!("{event_id}: {error}"),
+            });
+            // Every later check would report the same cause; one finding per
+            // broken file is what makes the report readable.
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(error) => {
+                problems.push(Finding {
+                    code: "malformed-repository-event",
+                    detail: format!("{event_id}: {error}"),
+                });
+                continue;
+            }
+        };
+        if let Err(error) = crate::bundle::parse_typed_event(&value) {
+            problems.push(Finding {
+                code: "malformed-repository-event",
+                detail: format!("{event_id}: {error}"),
+            });
+        }
         if let Ok(Some(event)) = crate::bundle::parse_typed_event(&value) {
             if let Payload::HistoryRewritten { mapping, .. } = &event.payload {
                 if let Err(error) = crate::rewrite::validate_mapping(mapping) {
