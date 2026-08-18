@@ -222,14 +222,20 @@ fn chain_review_reports_verdict_identities_without_inferring_independence() {
     );
     // No brief was recorded, so there is no author to attribute a verdict to
     // and arc says so rather than inferring independence from identities.
-    assert!(self_review["review"]["brief_author"].is_null());
-    assert!(self_review["review"]["reviewed_only_by_brief_author"].is_null());
+    // The author is absent; the answer is present and null, because a
+    // consumer needs to see that the question was asked and had no answer.
+    assert!(self_review["review"].get("brief_author").is_none());
+    assert!(self_review["review"]
+        .get("reviewed_only_by_brief_author")
+        .is_some_and(|value| value.is_null()));
     assert_eq!(other_review["review"]["subject"], "Bob");
     assert_eq!(
         other_review["review"]["lifetime"]["identities"],
         serde_json::json!(["Carol"])
     );
-    assert!(other_review["review"]["reviewed_only_by_brief_author"].is_null());
+    assert!(other_review["review"]
+        .get("reviewed_only_by_brief_author")
+        .is_some_and(|value| value.is_null()));
 }
 
 /// Identity inequality is not independence. In an orchestrated chain the
@@ -496,7 +502,9 @@ fn chain_review_ignores_superseded_patchsets() {
         serde_json::json!(["Carol"])
     );
     assert_eq!(output["members"][0]["review"]["lifetime"]["findings"], 1);
-    assert!(output["members"][0]["review"]["reviewed_only_by_brief_author"].is_null());
+    assert!(output["members"][0]["review"]
+        .get("reviewed_only_by_brief_author")
+        .is_some_and(|value| value.is_null()));
 }
 
 #[test]

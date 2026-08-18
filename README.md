@@ -507,8 +507,10 @@ not the newest brief, and read through `--on-behalf-of` the same way a
 verdict's identity is — and
 `reviewed_only_by_brief_author` says whether every lifetime verdict came
 from that identity (null when there is no brief, or no verdict to
-attribute; both fields are omitted rather than emitted as null). Neither
-claims a review was independent: in an orchestrated
+attribute). `brief_author` is omitted when there is no brief, while
+`reviewed_only_by_brief_author` is emitted as null, because there the
+absence of an answer is itself the answer. Neither claims a review was
+independent: in an orchestrated
 chain the patchset subject is the executor and the verdict comes from the
 lead, so identities always differ, and arc cannot know that a reviewer
 directed the work. It reports who wrote what, and stops there.

@@ -27,7 +27,9 @@ pub struct ChainReview {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub brief_author: Option<String>,
     /// Whether every verdict in the lifetime window came from the brief's
-    /// author. `None` when there is no brief, or no verdict to attribute.
+    /// author. Emitted as null when there is no brief, or no verdict to
+    /// attribute — unlike `brief_author`, which is simply absent, here the
+    /// absence of an answer is the answer and a consumer should see it.
     ///
     /// This makes no inference about independence: arc cannot know that a
     /// reviewer directed the work, only that the same identity wrote the
