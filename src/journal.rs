@@ -2954,12 +2954,15 @@ struct DiscussionSummary {
     participants: Vec<String>,
     /// Typed `position` events that named a `--ref`.
     reply_refs: usize,
-    /// Position blocks the reply graph cannot see, because no `position_id`
-    /// carries them: written by hand, or recorded by an older `journal append`
-    /// before ids existed. They are real positions — counted in `positions` and
-    /// `stances`, and their authors counted in `participants` — that nothing can
-    /// reference and therefore nothing can report as answered.
+    /// Position blocks in the file that no `position` event carries: written by
+    /// hand, recorded before ids existed, or carrying an id the log never saw.
+    /// They are real positions — counted in `positions` and `stances` — that
+    /// nothing can reference and therefore nothing can report as answered.
     unplaced: usize,
+    /// Positions the event log records whose heading is no longer in the file,
+    /// which is the same file-versus-log disagreement from the other side. They
+    /// appear in `rounds` and `unanswered` and in no count taken from the text.
+    detached: usize,
     rounds: Vec<DiscussionRound>,
     unanswered: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3102,6 +3105,18 @@ fn is_position_heading(line: &str) -> bool {
     rest.is_empty() || rest.starts_with(char::is_whitespace)
 }
 
+/// The `pos-…` id a position heading carries, when it carries one. A heading
+/// written by hand may carry none, and one written before ids existed carries
+/// none either; both are headings the reply graph has no way to name.
+fn position_heading_id(line: &str) -> Option<String> {
+    let rest = line.trim_start().strip_prefix("### Position")?.trim_start();
+    let id: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    id.starts_with("pos-").then_some(id)
+}
+
 /// Count position blocks, and the stance each one states.
 ///
 /// A block's stance is the first non-blank line under its heading, which is
@@ -3109,7 +3124,8 @@ fn is_position_heading(line: &str) -> bool {
 /// first line argues instead of voting is counted as `unstated`, so a tally
 /// that undercounts says so instead of reading as a settled result — and a
 /// `Position:` line anywhere else, including inside a fenced example, is prose.
-fn position_structure(body: &str) -> (usize, StanceTally) {
+fn position_structure(body: &str) -> (usize, StanceTally, Vec<Option<String>>) {
+    let mut heading_ids: Vec<Option<String>> = Vec::new();
     let mut positions = 0;
     let mut tally = StanceTally::default();
     let mut open_block = false;
@@ -3153,6 +3169,7 @@ fn position_structure(body: &str) -> (usize, StanceTally) {
         }
         if is_position_heading(line) {
             close_block(&mut open_block, decided, &mut tally);
+            heading_ids.push(position_heading_id(line));
             positions += 1;
             open_block = true;
             decided = false;
@@ -3186,7 +3203,7 @@ fn position_structure(body: &str) -> (usize, StanceTally) {
         }
     }
     close_block(&mut open_block, decided, &mut tally);
-    (positions, tally)
+    (positions, tally, heading_ids)
 }
 
 /// Derived summary of a discussion. Structural counts (positions, stances) come
@@ -3205,7 +3222,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
     let events = read_events(&dir)?;
 
-    let (positions, stances) = position_structure(&body);
+    let (positions, stances, heading_ids) = position_structure(&body);
 
     // Typed position events for this file, in ledger order.
     let position_events: Vec<&JournalEvent> = events
@@ -3230,11 +3247,31 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     // disagree about how many positions exist. The difference is the honest
     // denominator gap, and reporting it is what keeps `unanswered` from reading
     // as the whole answer when it is only the part with ids.
-    let placed = position_events
+    // The file and the event log can disagree in both directions, and each
+    // direction is a different fact. Compare the ids rather than the counts:
+    // subtraction clamped one direction to zero and mislabelled the other.
+    let recorded: HashSet<&str> = position_events
         .iter()
-        .filter(|event| event.position_id.is_some())
+        .filter_map(|event| event.position_id.as_deref())
+        .collect();
+    let heading_id_set: HashSet<&str> = heading_ids.iter().filter_map(|id| id.as_deref()).collect();
+    // A heading no event carries: written by hand with no id, written before
+    // ids existed, or carrying an id the log never recorded. Whichever way, the
+    // graph cannot name it, so nothing can answer it.
+    let unplaced = heading_ids
+        .iter()
+        .filter(|id| match id {
+            None => true,
+            Some(id) => !recorded.contains(id.as_str()),
+        })
         .count();
-    let unplaced = positions.saturating_sub(placed);
+    // A position the log records whose heading is no longer in the file. The
+    // graph counts it and the tally does not, which is the same disagreement
+    // seen from the other side.
+    let detached = recorded
+        .iter()
+        .filter(|id| !heading_id_set.contains(*id))
+        .count();
 
     // Resolution: the newest consumed event for this file, if any. The resolver
     // participated when a position event shares its harness-native session.
@@ -3263,6 +3300,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         participants,
         reply_refs,
         unplaced,
+        detached,
         rounds,
         unanswered,
         resolution,
@@ -3326,13 +3364,20 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     );
     if summary.unplaced > 0 {
         println!(
-            "unplaced: {} position{} carr{} no id, so nothing can reference \
-             {} and nothing above counts {} as answered",
+            "unplaced: {} position{} in the file that no event carries, so \
+             nothing can reference {} and nothing above counts {} as answered",
             summary.unplaced,
             if summary.unplaced == 1 { "" } else { "s" },
-            if summary.unplaced == 1 { "ies" } else { "y" },
             if summary.unplaced == 1 { "it" } else { "them" },
             if summary.unplaced == 1 { "it" } else { "them" },
+        );
+    }
+    if summary.detached > 0 {
+        println!(
+            "detached: {} recorded position{} whose heading is no longer in the \
+             file, counted in the rounds above and in no count taken from the text",
+            summary.detached,
+            if summary.detached == 1 { "" } else { "s" },
         );
     }
     match &summary.resolution {
