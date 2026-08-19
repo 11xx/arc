@@ -224,6 +224,8 @@ pub enum JournalCmd {
     /// Add a position block to an artifact and emit a typed `position` event.
     /// The body's first line states the stance the tally counts:
     /// `Position: for | against | amend`
+    /// Pass `--question <id> --option <opt>` to argue under one branch of an
+    /// open question instead of unconditionally
     Position {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -234,6 +236,53 @@ pub enum JournalCmd {
         /// Body source: a file path, or '-' for stdin (the position argument,
         /// written verbatim below a tool-computed `### Position` heading).
         /// Its first line states the stance: `Position: for | against | amend`
+        #[arg(long)]
+        body_file: String,
+        /// Argue under one option of an open question, rather than
+        /// unconditionally. Pass the question ID; `--option` names the branch
+        #[arg(long)]
+        question: Option<String>,
+        /// The option this position argues under; requires `--question`
+        #[arg(long)]
+        option: Option<String>,
+    },
+    /// Pose a question on a discussion that only a person can settle, and emit
+    /// a typed `question` event. Placement is the design: `opening` is answered
+    /// before any position is filed, so everyone argues from the same premise;
+    /// `closing` is answered once the argument is in. There is no mid-argument
+    /// placement — a question that blocks halfway makes the caller watch a run
+    /// they delegated. Argue a closing question on both sides first, with
+    /// `position --question <id> --option <opt>`
+    Question {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// When it is answered: `opening` settles a premise before any
+        /// position is filed; `closing` settles a choice the argument raised.
+        /// There is deliberately no mid-argument placement
+        #[arg(long, value_parser = ["opening", "closing"])]
+        placement: String,
+        /// An answer the question offers; repeat for each. Two or more
+        #[arg(long = "option", required = true)]
+        options: Vec<String>,
+        /// Body source: a file path, or '-' for stdin (what the question asks,
+        /// written verbatim below a tool-computed `### Question` heading)
+        #[arg(long)]
+        body_file: String,
+    },
+    /// Settle an open question by choosing one of its options, once. Branches
+    /// that lost stay in the file: a branch argued and not taken is the only
+    /// record that the alternative was explored rather than never considered
+    Answer {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// The question being settled
+        #[arg(long)]
+        question: String,
+        /// The option chosen; must be one the question offered
+        #[arg(long)]
+        option: String,
+        /// Body source: a file path, or '-' for stdin (why, written verbatim
+        /// below a tool-computed `### Answer` heading)
         #[arg(long)]
         body_file: String,
     },
@@ -287,8 +336,11 @@ pub enum JournalCmd {
     /// Derived summary of a discussion: stance tally, participants, replies,
     /// age, and resolution with a resolver-participation flag (read-only).
     /// The tally counts `Position: for | against | amend` lines inside
-    /// `### Position` blocks, and flags blocks that state no stance. Resolve a
-    /// discussion with `journal consume --outcome done --decision <file>`
+    /// `### Position` blocks, and flags blocks that state no stance. Reports
+    /// each open question with the positions argued under every option, so a
+    /// branch nobody explored is visible before the question is answered.
+    /// Resolve a discussion with `journal consume --outcome done --decision
+    /// <file>`
     Discussion {
         /// Discussion artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -388,7 +440,28 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             filename,
             reference,
             body_file,
-        } => position(ctx, &filename, reference.as_deref(), &body_file),
+            question,
+            option,
+        } => position(
+            ctx,
+            &filename,
+            reference.as_deref(),
+            &body_file,
+            question.as_deref(),
+            option.as_deref(),
+        ),
+        JournalCmd::Question {
+            filename,
+            placement,
+            options,
+            body_file,
+        } => question(ctx, &filename, &placement, &options, &body_file),
+        JournalCmd::Answer {
+            filename,
+            question,
+            option,
+            body_file,
+        } => answer(ctx, &filename, &question, &option, &body_file),
         JournalCmd::Events { limit } => events(ctx, limit),
         JournalCmd::Catchup {
             limit,
@@ -1180,7 +1253,25 @@ fn log_line(ctx: &Ctx, topic: &str, message: &str) -> Result<i32> {
 /// stable position ID, activity time, identity, and reply edge. Advisory and
 /// fail-open like every journal write — the block is appended even if the
 /// identity is only partially known, and the file stays hand-writable.
-fn position(ctx: &Ctx, filename: &str, reference: Option<&str>, body_file: &str) -> Result<i32> {
+fn position(
+    ctx: &Ctx,
+    filename: &str,
+    reference: Option<&str>,
+    body_file: &str,
+    question: Option<&str>,
+    option: Option<&str>,
+) -> Result<i32> {
+    // A branch needs both halves: which question, and which of its answers.
+    // Refusing here keeps a half-declared branch out of the log, where it
+    // would render as a position arguing under nothing.
+    let branch = match (question, option) {
+        (Some(question), Some(option)) => Some((question.to_string(), option.to_string())),
+        (None, None) => None,
+        (Some(_), None) => bail!("--question needs --option: name the branch this position argues"),
+        (None, Some(_)) => {
+            bail!("--option needs --question: name the question the branch belongs to")
+        }
+    };
     if filename.contains(['/', '\\']) {
         bail!("journal position takes an artifact filename inside the journal dir, not a path");
     }
@@ -1198,8 +1289,29 @@ fn position(ctx: &Ctx, filename: &str, reference: Option<&str>, body_file: &str)
     if !path.is_file() {
         bail!("no such artifact {} in {}", filename, dir.display());
     }
-    if is_consumed(&read_events(&dir)?, filename) {
+    let existing = read_events(&dir)?;
+    if is_consumed(&existing, filename) {
         bail!("cannot append to consumed artifact {filename}; open a successor discussion");
+    }
+    // A branch naming a question that was never posed, or an option it never
+    // offered, is an orphan: it renders under nothing and silently drops out of
+    // every branch count. Refuse it rather than record it.
+    if let Some((question, option)) = &branch {
+        let Some(posed) = existing.iter().find(|event| {
+            event.known()
+                && event.event == "question"
+                && event.file.as_deref() == Some(filename)
+                && event.question_id.as_deref() == Some(question.as_str())
+        }) else {
+            bail!("no question {question} on {filename}");
+        };
+        let offered = posed.options.clone().unwrap_or_default();
+        if !offered.iter().any(|value| value == option) {
+            bail!(
+                "{option:?} is not one of the options {question} offered ({})",
+                offered.join(", ")
+            );
+        }
     }
 
     let now = Utc::now();
@@ -1209,9 +1321,13 @@ fn position(ctx: &Ctx, filename: &str, reference: Option<&str>, body_file: &str)
     // The heading is tool-computed so the position timestamp is never authored
     // by hand. The model, when known, is the primary attribution — the whole
     // reason positions carry `### Position <id> (<model> via <harness>, <ts>)`.
+    let under = match &branch {
+        Some((question, option)) => format!(" under {question}={option}"),
+        None => String::new(),
+    };
     let heading = match ctx.model.as_deref().filter(|value| !value.is_empty()) {
-        Some(model) => format!("### Position {position_id} ({model} via {harness}, {ts})"),
-        None => format!("### Position {position_id} ({harness}, {ts})"),
+        Some(model) => format!("### Position {position_id} ({model} via {harness}, {ts}){under}"),
+        None => format!("### Position {position_id} ({harness}, {ts}){under}"),
     };
     let block = format!("\n{heading}\n\n{}\n", body.trim_end_matches('\n'));
 
@@ -1232,6 +1348,150 @@ fn position(ctx: &Ctx, filename: &str, reference: Option<&str>, body_file: &str)
     event.file = Some(filename.to_string());
     event.position_id = Some(position_id);
     event.reference = reference.map(str::to_string);
+    if let Some((question, option)) = branch {
+        event.question_id = Some(question);
+        event.option = Some(option);
+    }
+    append_event(ctx, &dir, &event)?;
+    println!("{}", path.display());
+    Ok(0)
+}
+
+/// Shared preflight for an append to an open discussion: the filename is a
+/// name, the artifact exists, and it has not been consumed. A consumed
+/// artifact is a closed record, so appending to one would edit history.
+fn open_artifact(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String)> {
+    if filename.contains(['/', '\\']) {
+        bail!("journal takes an artifact filename inside the journal dir, not a path");
+    }
+    let Some((_, topic, _)) = parse_artifact_name(filename) else {
+        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+    };
+    let dir = resolve_dir(&ctx.cwd)?;
+    let path = dir.join(filename);
+    if !path.is_file() {
+        bail!("no such artifact {} in {}", filename, dir.display());
+    }
+    if is_consumed(&read_events(&dir)?, filename) {
+        bail!("cannot append to consumed artifact {filename}; open a successor discussion");
+    }
+    Ok((dir, path, topic))
+}
+
+fn append_block(path: &Path, heading: &str, body: &str) -> Result<()> {
+    use std::io::Write;
+    let block = format!("\n{heading}\n\n{}\n", body.trim_end_matches('\n'));
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .with_context(|| format!("cannot open {} for append", path.display()))?;
+    f.write_all(block.as_bytes())
+        .with_context(|| format!("cannot append to {}", path.display()))
+}
+
+/// Pose a question only a person can settle.
+///
+/// Placement is the whole design. An `opening` question is answered before any
+/// position exists, so every participant argues from the same premise. A
+/// `closing` question is answered once the argument is in, so the answer is
+/// made with the reasoning in front of it. There is no mid-argument placement,
+/// because a question that blocks mid-run turns a delegated argument into
+/// something the caller has to watch.
+fn question(
+    ctx: &Ctx,
+    filename: &str,
+    placement: &str,
+    options: &[String],
+    body_file: &str,
+) -> Result<i32> {
+    let mut seen = HashSet::new();
+    for option in options {
+        if option.trim().is_empty() {
+            bail!("an option cannot be empty");
+        }
+        if !seen.insert(option.as_str()) {
+            bail!("option {option:?} is offered twice; a choice needs distinct answers");
+        }
+    }
+    if options.len() < 2 {
+        bail!("a question needs at least two options; one option is a statement");
+    }
+    let body = read_body_verbatim(body_file)?;
+    let (dir, path, topic) = open_artifact(ctx, filename)?;
+
+    let now = Utc::now();
+    let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let question_id = format!("q-{}", ulid::Ulid::new().to_string().to_ascii_lowercase());
+    let heading = format!(
+        "### Question {question_id} ({placement}, {ts}) — {}",
+        options.join(" | ")
+    );
+    append_block(&path, &heading, &body)?;
+
+    let mut event = JournalEvent::base(ctx, now, &topic, "question");
+    event.file = Some(filename.to_string());
+    event.question_id = Some(question_id);
+    event.placement = Some(placement.to_string());
+    event.options = Some(options.to_vec());
+    append_event(ctx, &dir, &event)?;
+    println!("{}", path.display());
+    Ok(0)
+}
+
+/// Settle an open question by choosing one of the options it offered.
+///
+/// The losing branches are not deleted. A branch that was argued and not taken
+/// is evidence about the one that was, and it is the only record that the
+/// alternative was explored rather than never considered.
+fn answer(
+    ctx: &Ctx,
+    filename: &str,
+    question_id: &str,
+    option: &str,
+    body_file: &str,
+) -> Result<i32> {
+    let body = read_body_verbatim(body_file)?;
+    let (dir, path, topic) = open_artifact(ctx, filename)?;
+    let events = read_events(&dir)?;
+
+    let Some(posed) = events.iter().find(|event| {
+        event.known()
+            && event.event == "question"
+            && event.file.as_deref() == Some(filename)
+            && event.question_id.as_deref() == Some(question_id)
+    }) else {
+        bail!("no question {question_id} on {filename}");
+    };
+    let offered = posed.options.clone().unwrap_or_default();
+    if !offered.iter().any(|value| value == option) {
+        bail!(
+            "{option:?} is not one of the options {question_id} offered ({})",
+            offered.join(", ")
+        );
+    }
+    if events.iter().any(|event| {
+        event.known()
+            && event.event == "answer"
+            && event.file.as_deref() == Some(filename)
+            && event.question_id.as_deref() == Some(question_id)
+    }) {
+        bail!("{question_id} is already answered; open a successor question to revisit it");
+    }
+
+    let now = Utc::now();
+    let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let (harness, _) = identity(ctx);
+    let who = match ctx.model.as_deref().filter(|value| !value.is_empty()) {
+        Some(model) => format!("{model} via {harness}"),
+        None => harness.to_string(),
+    };
+    let heading = format!("### Answer {question_id} = {option} ({who}, {ts})");
+    append_block(&path, &heading, &body)?;
+
+    let mut event = JournalEvent::base(ctx, now, &topic, "answer");
+    event.file = Some(filename.to_string());
+    event.question_id = Some(question_id.to_string());
+    event.option = Some(option.to_string());
     append_event(ctx, &dir, &event)?;
     println!("{}", path.display());
     Ok(0)
@@ -1297,6 +1557,25 @@ struct JournalEvent {
     /// events.
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
     reference: Option<String>,
+    /// Stable ID of a question. Set on the `question` event that opens one, on
+    /// an `answer` event that settles it, and on a `position` event argued
+    /// under one of its options. Optional, so every event written before
+    /// questions existed remains valid `journal-events/1` input — the same
+    /// additive shape `position_id` took.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    question_id: Option<String>,
+    /// Where a question is answered: `opening` before any position is filed,
+    /// or `closing` after the argument is in. Never `mid` — a question that
+    /// blocks in the middle makes the caller monitor a run they delegated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    placement: Option<String>,
+    /// The answers a question offers, in the order it offered them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<Vec<String>>,
+    /// One of a question's options: the branch a `position` argues under, or
+    /// the branch an `answer` chose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    option: Option<String>,
 }
 
 /// Which project a journal belongs to, recorded append-only in `bindings.jsonl`
@@ -1385,6 +1664,10 @@ impl JournalEvent {
             status: None,
             position_id: None,
             reference: None,
+            question_id: None,
+            placement: None,
+            options: None,
+            option: None,
         }
     }
 
@@ -1411,6 +1694,22 @@ impl JournalEvent {
                         .is_some_and(|value| ["done", "superseded", "discarded"].contains(&value))
             }
             "archived" => self.file.is_some(),
+            // A question is only a question if it names itself, says when it is
+            // answered, and offers a choice. Two options is the floor: one
+            // option is a statement.
+            "question" => {
+                self.file.is_some()
+                    && self.question_id.is_some()
+                    && self
+                        .placement
+                        .as_deref()
+                        .is_some_and(|value| ["opening", "closing"].contains(&value))
+                    && self
+                        .options
+                        .as_ref()
+                        .is_some_and(|values| values.len() >= 2)
+            }
+            "answer" => self.file.is_some() && self.question_id.is_some() && self.option.is_some(),
             "lane-opened" => self.ttl_seconds.is_some() && self.scope.is_some(),
             "lane-renewed" => true,
             "lane-closed" => self
@@ -2938,6 +3237,34 @@ struct Resolution {
     resolver_participated: bool,
 }
 
+/// One question on a discussion, with what has been argued under it.
+///
+/// `branches` counts positions per option rather than listing them, because
+/// the position ids are already in `rounds`; what a reader needs here is
+/// whether an option was explored at all. An option with no positions is a
+/// branch nobody argued, which is the difference between a choice made between
+/// two explored futures and one made between two labels.
+#[derive(Serialize)]
+struct DiscussionQuestion {
+    id: String,
+    placement: String,
+    options: Vec<String>,
+    branches: Vec<DiscussionBranch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    answered: Option<String>,
+    /// An opening question is meant to settle a premise before anyone argues.
+    /// Set when it is still open and positions exist anyway — the argument
+    /// started without the premise it was supposed to rest on.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    argued_before_answered: bool,
+}
+
+#[derive(Serialize)]
+struct DiscussionBranch {
+    option: String,
+    positions: usize,
+}
+
 #[derive(Serialize)]
 struct DiscussionSummary {
     schema: &'static str,
@@ -2963,6 +3290,10 @@ struct DiscussionSummary {
     /// which is the same file-versus-log disagreement from the other side. They
     /// appear in `rounds` and `unanswered` and in no count taken from the text.
     detached: usize,
+    /// Questions posed on this discussion, oldest first, each with the branches
+    /// argued under it and the answer if one has been given.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    questions: Vec<DiscussionQuestion>,
     rounds: Vec<DiscussionRound>,
     unanswered: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3251,6 +3582,52 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     // disagree about how many positions exist. The difference is the honest
     // denominator gap, and reporting it is what keeps `unanswered` from reading
     // as the whole answer when it is only the part with ids.
+    // Questions, oldest first. A question is only ever posed once, so the
+    // event log order is the order they were asked.
+    let questions: Vec<DiscussionQuestion> = events
+        .iter()
+        .filter(|event| {
+            event.known() && event.event == "question" && event.file.as_deref() == Some(filename)
+        })
+        .filter_map(|posed| {
+            let id = posed.question_id.clone()?;
+            let options = posed.options.clone().unwrap_or_default();
+            let answered = events
+                .iter()
+                .find(|event| {
+                    event.known()
+                        && event.event == "answer"
+                        && event.file.as_deref() == Some(filename)
+                        && event.question_id.as_deref() == Some(id.as_str())
+                })
+                .and_then(|event| event.option.clone());
+            let branches = options
+                .iter()
+                .map(|option| DiscussionBranch {
+                    option: option.clone(),
+                    positions: position_events
+                        .iter()
+                        .filter(|event| {
+                            event.question_id.as_deref() == Some(id.as_str())
+                                && event.option.as_deref() == Some(option.as_str())
+                        })
+                        .count(),
+                })
+                .collect();
+            let argued_before_answered = posed.placement.as_deref() == Some("opening")
+                && answered.is_none()
+                && !position_events.is_empty();
+            Some(DiscussionQuestion {
+                id,
+                placement: posed.placement.clone().unwrap_or_default(),
+                options,
+                branches,
+                answered,
+                argued_before_answered,
+            })
+        })
+        .collect();
+
     // The file and the event log can disagree in both directions, and each
     // direction is a different fact. Compare the ids rather than the counts:
     // subtraction clamped one direction to zero and mislabelled the other.
@@ -3305,6 +3682,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         reply_refs,
         unplaced,
         detached,
+        questions,
         rounds,
         unanswered,
         resolution,
@@ -3349,6 +3727,30 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         summary.reply_refs,
         if summary.reply_refs == 1 { "" } else { "s" }
     );
+    for question in &summary.questions {
+        let state = match &question.answered {
+            Some(option) => format!("answered {option}"),
+            None => "open".to_string(),
+        };
+        println!(
+            "question {} ({}, {state}):",
+            question.id, question.placement
+        );
+        for branch in &question.branches {
+            println!(
+                "  {}: {} position{}",
+                branch.option,
+                branch.positions,
+                if branch.positions == 1 { "" } else { "s" }
+            );
+        }
+        if question.argued_before_answered {
+            println!(
+                "  note: an opening question is meant to settle a premise before anyone \
+                 argues, and positions were filed while this one was still open"
+            );
+        }
+    }
     println!("rounds (same-depth positions could not have read each other):");
     for round in &summary.rounds {
         println!(
