@@ -3110,11 +3110,15 @@ fn is_position_heading(line: &str) -> bool {
 /// none either; both are headings the reply graph has no way to name.
 fn position_heading_id(line: &str) -> Option<String> {
     let rest = line.trim_start().strip_prefix("### Position")?.trim_start();
-    let id: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .collect();
-    id.starts_with("pos-").then_some(id)
+    // Take the whole word and require all of it to be an id, rather than
+    // reading up to the first character that cannot be one. Stopping early
+    // turns `pos-punct!` into `pos-punct`, which then matches a recorded
+    // position the heading does not name — and a false match here hides an
+    // unplaceable heading, which is the one thing this count exists to show.
+    let token = rest.split_whitespace().next()?;
+    let suffix = token.strip_prefix("pos-")?;
+    (!suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_alphanumeric()))
+        .then(|| token.to_string())
 }
 
 /// Count position blocks, and the stance each one states.
@@ -3825,5 +3829,34 @@ impl Orientation {
                 render_open_entry(entry);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod heading_id_tests {
+    use super::position_heading_id;
+
+    /// The id is the whole word or nothing. Reading up to the first character
+    /// that cannot be in an id would turn a malformed heading into a valid one,
+    /// and a heading that falsely matches a recorded position hides the very
+    /// disagreement `unplaced` exists to report.
+    #[test]
+    fn a_heading_id_is_the_whole_word_or_nothing() {
+        assert_eq!(
+            position_heading_id("### Position pos-01abc (m via h, t)").as_deref(),
+            Some("pos-01abc")
+        );
+        assert_eq!(
+            position_heading_id("### Position pos-manual").as_deref(),
+            Some("pos-manual")
+        );
+        // No suffix is not an id, however much it looks like a prefix.
+        assert_eq!(position_heading_id("### Position pos-"), None);
+        // Trailing punctuation belongs to the word, so the word is not an id.
+        assert_eq!(position_heading_id("### Position pos-punct!"), None);
+        assert_eq!(position_heading_id("### Position pos-a.b"), None);
+        // A heading with no id at all: the ordinary hand-written case.
+        assert_eq!(position_heading_id("### Position (m via h, t)"), None);
+        assert_eq!(position_heading_id("## Position pos-01abc"), None);
     }
 }
