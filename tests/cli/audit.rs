@@ -1055,3 +1055,100 @@ fn an_open_change_with_a_debt_is_not_yet_owed_work() {
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
     assert_eq!(inbox["audit-owed"].as_array().unwrap().len(), 1);
 }
+
+/// A change with no verdict at all, so the gate is unmet for want of a review
+/// rather than because a reviewer refused.
+fn unreviewed_change(repo: &Repo, slug: &str) -> PathBuf {
+    stdout(repo.arc(&repo.root).args(["begin", slug]));
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "Solo")
+            .args(["snapshot", slug]),
+    );
+    worktree
+}
+
+/// The waiver stands in for a verdict nobody recorded, in the same invocation
+/// that declares it. Before this, `integrate --audit-debt` recorded the
+/// obligation and refused anyway, so the only way through was to first record a
+/// self-approval nobody believed and waive that — a worse record than none.
+#[test]
+fn a_declared_debt_stands_in_for_a_verdict_nobody_recorded() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = unreviewed_change(&repo, "unreviewed");
+
+    // Blocked for want of an approval, which is the gate the waiver addresses.
+    repo.arc(&worktree)
+        .args(["check", "unreviewed"])
+        .assert()
+        .code(3);
+
+    // One invocation: the merge happens and the obligation is recorded.
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "unreviewed",
+            "--audit-debt",
+            "no reviewer reachable",
+        ])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "unreviewed", "--json"]),
+    );
+    assert_eq!(status["audit_debt_outstanding"], true, "{status}");
+    assert_eq!(
+        status["audit_debt"]["reason"], "no reviewer reachable",
+        "{status}"
+    );
+    // The merge rested on the waiver and the status says so, so a reader cannot
+    // mistake it for a change that was independently approved.
+    assert_eq!(status["approval_waived_by_audit_debt"], true, "{status}");
+}
+
+/// A waiver defers a review nobody has done. It does not overrule one that was
+/// done and came back negative: letting the author waive past `changes-requested`
+/// would turn the mechanism into a way to ignore review rather than defer it.
+#[test]
+fn a_declared_debt_does_not_overrule_a_reviewer_who_refused() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = unreviewed_change(&repo, "refused");
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Reviewer")
+        .args([
+            "review",
+            "refused",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+        ])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args(["audit-debt", "refused", "--reason", "shipping anyway"])
+        .assert()
+        .success();
+
+    // Still blocked: the gate is unmet because someone read this patchset and
+    // asked for changes, which is not a missing verdict.
+    repo.arc(&worktree)
+        .args(["check", "refused"])
+        .assert()
+        .code(3);
+    repo.arc(&repo.root)
+        .args(["integrate", "refused"])
+        .assert()
+        .failure();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "refused", "--json"]));
+    // Absent or false — either way the waiver authorized nothing here.
+    assert_ne!(status["approval_waived_by_audit_debt"], true, "{status}");
+    assert_eq!(status["ready_reason"], "no-valid-approval", "{status}");
+}

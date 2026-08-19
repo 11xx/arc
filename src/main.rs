@@ -779,8 +779,12 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
         /// Integrate without an independent verdict, recording the review this
-        /// change still owes. The obligation survives closure and
-        /// `arc query --audit-debt` finds it; discharge it with `arc audit`.
+        /// change still owes. It stands in for a verdict nobody recorded — and
+        /// for a self-approval policy would reject — in the same invocation.
+        /// It never overrules a reviewer who read this patchset and asked for
+        /// changes: that is a verdict, not a missing one. The obligation
+        /// survives closure and `arc query --audit-debt` finds it; discharge it
+        /// with `arc audit`.
         #[arg(long = "audit-debt", value_name = "REASON")]
         audit_debt: Option<String>,
     },

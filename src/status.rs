@@ -633,7 +633,21 @@ fn build_report(
             valid_for_current_head: valid,
         }
     });
-    let approval_waived_by_audit_debt = waiver_authorized_approval;
+    // True whenever the waiver is load-bearing: it rescued a self-approval, or
+    // it stood in for a verdict that was never recorded. Reporting it only in
+    // the first case would let the second merge look independently approved.
+    let approval_waived_by_audit_debt = waiver_authorized_approval
+        || (state.audit_debt_waives_current_head()
+            && !verdict
+                .as_ref()
+                .map(|v| v.valid_for_current_head)
+                .unwrap_or(false)
+            && !verdict.as_ref().is_some_and(|v| {
+                v.verdict != Verdict::Approved
+                    && latest_patchset
+                        .as_ref()
+                        .is_some_and(|patchset| patchset.id == v.patchset_id)
+            }));
     let approval_rejection_reason = verdict.as_ref().and_then(|verdict| {
         (!verdict.valid_for_current_head
             && verdict.verdict == Verdict::Approved
@@ -831,11 +845,29 @@ fn build_report(
     if !open_blocking.is_empty() {
         blockers.push(Blocker::BlockingFindings);
     }
-    if !verdict
+    // A waiver stands in for a verdict nobody recorded. It does not stand over
+    // one that refused: a reviewer who read this patchset and asked for changes
+    // has said something a waiver has no business overriding, and letting the
+    // author waive past it would make the mechanism a way to ignore review
+    // rather than a way to defer it.
+    //
+    // So the waiver satisfies this gate exactly when the gate is unmet for want
+    // of a verdict — none recorded, or one that only policy's self-approval rule
+    // rejects. The obligation itself is untouched and stays where
+    // `arc query --audit-debt` finds it.
+    let verdict_refuses_this_head = verdict.as_ref().is_some_and(|v| {
+        v.verdict != Verdict::Approved
+            && latest_patchset
+                .as_ref()
+                .is_some_and(|patchset| patchset.id == v.patchset_id)
+    });
+    let approval_valid = verdict
         .as_ref()
         .map(|v| v.valid_for_current_head)
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    let waiver_satisfies_approval =
+        state.audit_debt_waives_current_head() && !verdict_refuses_this_head;
+    if !approval_valid && !waiver_satisfies_approval {
         blockers.push(Blocker::NoValidApproval);
     }
     if gate_statuses.iter().any(|g| !g.green_at_head) {
