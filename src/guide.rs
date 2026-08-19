@@ -29,6 +29,19 @@ ORIENT (start here, in this order)
   longest, where a verdict is the only thing missing — and those are answerable
   only across projects, which is what `workspace backlog` is for.
 
+SETTLE A QUESTION (before it is work)
+  arc journal note --kind discussion   Open an argument instead of a change.
+  arc journal position <file>          Add an attributed stance; --ref answers one.
+  arc journal discussion <file>        Stances, who argued, what is unanswered.
+  arc journal consume <file> --outcome done --decision <d>   Close it.
+  arc begin --from-journal <file>      When the decision becomes work.
+
+  The ledger records what happened and what is allowed; the journal records
+  what people think. A question with more than one defensible answer belongs in
+  a discussion before it belongs in a change — positions carry the model and
+  harness that argued them, so a decision can be read later by who reached it
+  and on what grounds, rather than surviving only in one session's transcript.
+
 RUN A CHANGE
   arc begin <slug> --profile <p>     Open a change: branch + worktree + record.
     --from-journal <file>            Open it from a journal item, consuming it.

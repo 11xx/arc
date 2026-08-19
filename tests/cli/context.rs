@@ -431,6 +431,9 @@ fn bare_arc_prints_the_workflow_guide() {
     for expected in [
         "arc catchup",
         "arc journal open",
+        "SETTLE A QUESTION",
+        "arc journal position",
+        "arc journal discussion",
         "RUN A CHANGE",
         "PROFILES",
         "direct",
