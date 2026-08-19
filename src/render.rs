@@ -41,7 +41,10 @@ pub fn gate_line(gate: &GateStatus) -> String {
 /// on, before anything is written.
 pub fn authorization_basis(basis: &crate::model::AuthorizationBasis) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "    verdict: {}", basis.verdict_event_id);
+    let _ = match &basis.verdict_event_id {
+        Some(verdict) => writeln!(out, "    verdict: {verdict}"),
+        None => writeln!(out, "    verdict: none — authorized by declared audit debt"),
+    };
     for (gate, evidence) in &basis.gate_evidence {
         let _ = writeln!(out, "    gate {gate}: {evidence}");
     }

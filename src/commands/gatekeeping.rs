@@ -1325,15 +1325,17 @@ fn authorization_basis(
     report: &crate::status::StatusReport,
     approved_patchset_id: &str,
 ) -> Result<crate::model::AuthorizationBasis> {
-    let verdict = st
-        .verdicts
-        .iter()
-        .rev()
-        .find(|verdict| {
-            verdict.patchset_id == approved_patchset_id
-                && verdict.verdict == crate::model::Verdict::Approved
-        })
-        .context("integration is ready but no approving verdict covers the merged patchset")?;
+    // Either a verdict approved this patchset, or a declared debt stood in for
+    // the review nobody performed. One of the two must hold: a merge with
+    // neither has nothing authorizing it, and this record exists to say what
+    // did.
+    let verdict = st.verdicts.iter().rev().find(|verdict| {
+        verdict.patchset_id == approved_patchset_id
+            && verdict.verdict == crate::model::Verdict::Approved
+    });
+    if verdict.is_none() && !st.audit_debt_waives_current_head() {
+        anyhow::bail!("integration is ready but nothing authorizes the merged patchset: no approving verdict and no declared audit debt");
+    }
 
     let mut gate_evidence = BTreeMap::new();
     for gate in &report.gates {
@@ -1404,7 +1406,7 @@ fn authorization_basis(
         .collect();
 
     Ok(crate::model::AuthorizationBasis {
-        verdict_event_id: verdict.event_id.clone(),
+        verdict_event_id: verdict.map(|verdict| verdict.event_id.clone()),
         gate_evidence,
         prerequisites,
         // Empty by construction: `integrate_ready` is false while either is

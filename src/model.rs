@@ -513,8 +513,12 @@ pub enum Payload {
 /// values one irreversible decision was actually taken on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorizationBasis {
-    /// The verdict that approved the merged patchset.
-    pub verdict_event_id: String,
+    /// The verdict that approved the merged patchset, when one did. Absent
+    /// when a declared audit debt stood in for a review nobody performed: the
+    /// merge then rests on `audit_debt_event_id` alone, and saying so is more
+    /// honest than naming a verdict that does not exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_event_id: Option<String>,
     /// One passing verification per resolved required gate, by gate name.
     pub gate_evidence: std::collections::BTreeMap<String, String>,
     /// Each prerequisite change and the closure that satisfied it.
