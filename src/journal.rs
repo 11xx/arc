@@ -224,6 +224,8 @@ pub enum JournalCmd {
     /// Add a position block to an artifact and emit a typed `position` event.
     /// The body's first line states the stance the tally counts:
     /// `Position: for | against | amend`
+    /// Pass `--question <id> --option <opt>` to argue under one branch of an
+    /// open question instead of unconditionally
     Position {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -244,7 +246,13 @@ pub enum JournalCmd {
         #[arg(long)]
         option: Option<String>,
     },
-    /// Pose a question on a discussion that only a person can settle
+    /// Pose a question on a discussion that only a person can settle, and emit
+    /// a typed `question` event. Placement is the design: `opening` is answered
+    /// before any position is filed, so everyone argues from the same premise;
+    /// `closing` is answered once the argument is in. There is no mid-argument
+    /// placement — a question that blocks halfway makes the caller watch a run
+    /// they delegated. Argue a closing question on both sides first, with
+    /// `position --question <id> --option <opt>`
     Question {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -261,7 +269,9 @@ pub enum JournalCmd {
         #[arg(long)]
         body_file: String,
     },
-    /// Settle an open question by choosing one of its options
+    /// Settle an open question by choosing one of its options, once. Branches
+    /// that lost stay in the file: a branch argued and not taken is the only
+    /// record that the alternative was explored rather than never considered
     Answer {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -326,8 +336,11 @@ pub enum JournalCmd {
     /// Derived summary of a discussion: stance tally, participants, replies,
     /// age, and resolution with a resolver-participation flag (read-only).
     /// The tally counts `Position: for | against | amend` lines inside
-    /// `### Position` blocks, and flags blocks that state no stance. Resolve a
-    /// discussion with `journal consume --outcome done --decision <file>`
+    /// `### Position` blocks, and flags blocks that state no stance. Reports
+    /// each open question with the positions argued under every option, so a
+    /// branch nobody explored is visible before the question is answered.
+    /// Resolve a discussion with `journal consume --outcome done --decision
+    /// <file>`
     Discussion {
         /// Discussion artifact filename inside the journal dir (a name, not a path)
         filename: String,
