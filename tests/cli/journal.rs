@@ -4443,3 +4443,132 @@ fn journal_doctor_reports_a_malformed_binding() {
         "{report}"
     );
 }
+
+/// A position block with no id is counted by the tally and invisible to the
+/// reply graph, because the graph is keyed on `position_id`. That happens to a
+/// block written by hand, and it happened to every block an older `journal
+/// append` recorded before ids existed. Reporting the difference is what stops
+/// `unanswered` reading as the whole answer when it is only the half with ids.
+#[test]
+fn discussion_reports_positions_the_reply_graph_cannot_see() {
+    let repo = Repo::new();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "naming",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# What do we call it?\n"),
+    );
+    let path = PathBuf::from(out.trim());
+    let file = path.file_name().unwrap().to_string_lossy().to_string();
+
+    // One position through the tool: it gets an id and an event.
+    repo.arc(&repo.root)
+        .args(["journal", "position", &file, "--body-file", "-"])
+        .write_stdin("Position: for\n\nThe tool wrote this one.\n")
+        .assert()
+        .success();
+
+    // One appended by hand, exactly as the older convention taught. No id, so
+    // nothing can `--ref` it and nothing can answer it.
+    let mut body = std::fs::read_to_string(&path).unwrap();
+    body.push_str(
+        "\n### Position (claude-opus-5#high via claude, 2026-01-01T00:00:00Z)\n\
+         \nPosition: against\n\nA hand written block.\n",
+    );
+    std::fs::write(&path, body).unwrap();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+
+    // The tally sees both; the graph sees one; the gap is reported rather than
+    // left for the reader to notice by subtracting.
+    assert_eq!(summary["positions"].as_u64().unwrap(), 2, "{summary}");
+    assert_eq!(summary["unplaced"].as_u64().unwrap(), 1, "{summary}");
+    assert_eq!(
+        summary["unanswered"].as_array().unwrap().len(),
+        1,
+        "{summary}"
+    );
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
+    assert!(
+        text.contains("unplaced: 1 position in the file that no event carries"),
+        "{text}"
+    );
+}
+
+/// The file and the event log can disagree in either direction, and each
+/// direction is a different fact. Counting was not enough to tell them apart:
+/// subtraction clamped one to zero and mislabelled the other as "no id".
+#[test]
+fn discussion_tells_an_unrecorded_heading_from_a_vanished_one() {
+    let repo = Repo::new();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "drift",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Which way?\n"),
+    );
+    let path = PathBuf::from(out.trim());
+    let file = path.file_name().unwrap().to_string_lossy().to_string();
+
+    // A heading that carries an id the log never recorded is still unplaced —
+    // the id is not what makes it answerable, the event is.
+    let mut body = std::fs::read_to_string(&path).unwrap();
+    body.push_str(
+        "\n### Position pos-manual (someone via somewhere, 2026-01-01T00:00:00Z)\n\
+         \nPosition: for\n\nWritten by hand, id and all.\n",
+    );
+    std::fs::write(&path, &body).unwrap();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["unplaced"].as_u64().unwrap(), 1, "{summary}");
+    assert_eq!(summary["detached"].as_u64().unwrap(), 0, "{summary}");
+    let text = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
+    assert!(text.contains("that no event carries"), "{text}");
+    assert!(!text.contains("carries no id"), "{text}");
+
+    // The other direction: the log records a position whose heading is gone.
+    repo.arc(&repo.root)
+        .args(["journal", "position", &file, "--body-file", "-"])
+        .write_stdin("Position: against\n\nRecorded, then edited out.\n")
+        .assert()
+        .success();
+    let recorded = std::fs::read_to_string(&path).unwrap();
+    let trimmed: String = recorded
+        .lines()
+        .filter(|line| !line.starts_with("### Position pos-01"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&path, trimmed).unwrap();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["detached"].as_u64().unwrap(), 1, "{summary}");
+    let text = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
+    assert!(text.contains("no longer in the file"), "{text}");
+}

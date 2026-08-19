@@ -2954,6 +2954,15 @@ struct DiscussionSummary {
     participants: Vec<String>,
     /// Typed `position` events that named a `--ref`.
     reply_refs: usize,
+    /// Position blocks in the file that no `position` event carries: written by
+    /// hand, recorded before ids existed, or carrying an id the log never saw.
+    /// They are real positions — counted in `positions` and `stances` — that
+    /// nothing can reference and therefore nothing can report as answered.
+    unplaced: usize,
+    /// Positions the event log records whose heading is no longer in the file,
+    /// which is the same file-versus-log disagreement from the other side. They
+    /// appear in `rounds` and `unanswered` and in no count taken from the text.
+    detached: usize,
     rounds: Vec<DiscussionRound>,
     unanswered: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3096,6 +3105,22 @@ fn is_position_heading(line: &str) -> bool {
     rest.is_empty() || rest.starts_with(char::is_whitespace)
 }
 
+/// The `pos-…` id a position heading carries, when it carries one. A heading
+/// written by hand may carry none, and one written before ids existed carries
+/// none either; both are headings the reply graph has no way to name.
+fn position_heading_id(line: &str) -> Option<String> {
+    let rest = line.trim_start().strip_prefix("### Position")?.trim_start();
+    // Take the whole word and require all of it to be an id, rather than
+    // reading up to the first character that cannot be one. Stopping early
+    // turns `pos-punct!` into `pos-punct`, which then matches a recorded
+    // position the heading does not name — and a false match here hides an
+    // unplaceable heading, which is the one thing this count exists to show.
+    let token = rest.split_whitespace().next()?;
+    let suffix = token.strip_prefix("pos-")?;
+    (!suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_alphanumeric()))
+        .then(|| token.to_string())
+}
+
 /// Count position blocks, and the stance each one states.
 ///
 /// A block's stance is the first non-blank line under its heading, which is
@@ -3103,7 +3128,8 @@ fn is_position_heading(line: &str) -> bool {
 /// first line argues instead of voting is counted as `unstated`, so a tally
 /// that undercounts says so instead of reading as a settled result — and a
 /// `Position:` line anywhere else, including inside a fenced example, is prose.
-fn position_structure(body: &str) -> (usize, StanceTally) {
+fn position_structure(body: &str) -> (usize, StanceTally, Vec<Option<String>>) {
+    let mut heading_ids: Vec<Option<String>> = Vec::new();
     let mut positions = 0;
     let mut tally = StanceTally::default();
     let mut open_block = false;
@@ -3147,6 +3173,7 @@ fn position_structure(body: &str) -> (usize, StanceTally) {
         }
         if is_position_heading(line) {
             close_block(&mut open_block, decided, &mut tally);
+            heading_ids.push(position_heading_id(line));
             positions += 1;
             open_block = true;
             decided = false;
@@ -3180,7 +3207,7 @@ fn position_structure(body: &str) -> (usize, StanceTally) {
         }
     }
     close_block(&mut open_block, decided, &mut tally);
-    (positions, tally)
+    (positions, tally, heading_ids)
 }
 
 /// Derived summary of a discussion. Structural counts (positions, stances) come
@@ -3199,7 +3226,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
     let events = read_events(&dir)?;
 
-    let (positions, stances) = position_structure(&body);
+    let (positions, stances, heading_ids) = position_structure(&body);
 
     // Typed position events for this file, in ledger order.
     let position_events: Vec<&JournalEvent> = events
@@ -3220,6 +3247,35 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         .filter(|event| event.reference.is_some())
         .count();
     let (rounds, unanswered) = discussion_rounds(&position_events);
+    // The tally reads the file and the graph reads the event log, so they can
+    // disagree about how many positions exist. The difference is the honest
+    // denominator gap, and reporting it is what keeps `unanswered` from reading
+    // as the whole answer when it is only the part with ids.
+    // The file and the event log can disagree in both directions, and each
+    // direction is a different fact. Compare the ids rather than the counts:
+    // subtraction clamped one direction to zero and mislabelled the other.
+    let recorded: HashSet<&str> = position_events
+        .iter()
+        .filter_map(|event| event.position_id.as_deref())
+        .collect();
+    let heading_id_set: HashSet<&str> = heading_ids.iter().filter_map(|id| id.as_deref()).collect();
+    // A heading no event carries: written by hand with no id, written before
+    // ids existed, or carrying an id the log never recorded. Whichever way, the
+    // graph cannot name it, so nothing can answer it.
+    let unplaced = heading_ids
+        .iter()
+        .filter(|id| match id {
+            None => true,
+            Some(id) => !recorded.contains(id.as_str()),
+        })
+        .count();
+    // A position the log records whose heading is no longer in the file. The
+    // graph counts it and the tally does not, which is the same disagreement
+    // seen from the other side.
+    let detached = recorded
+        .iter()
+        .filter(|id| !heading_id_set.contains(*id))
+        .count();
 
     // Resolution: the newest consumed event for this file, if any. The resolver
     // participated when a position event shares its harness-native session.
@@ -3247,6 +3303,8 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         stances,
         participants,
         reply_refs,
+        unplaced,
+        detached,
         rounds,
         unanswered,
         resolution,
@@ -3308,6 +3366,24 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
             summary.unanswered.join(", ")
         }
     );
+    if summary.unplaced > 0 {
+        println!(
+            "unplaced: {} position{} in the file that no event carries, so \
+             nothing can reference {} and nothing above counts {} as answered",
+            summary.unplaced,
+            if summary.unplaced == 1 { "" } else { "s" },
+            if summary.unplaced == 1 { "it" } else { "them" },
+            if summary.unplaced == 1 { "it" } else { "them" },
+        );
+    }
+    if summary.detached > 0 {
+        println!(
+            "detached: {} recorded position{} whose heading is no longer in the \
+             file, counted in the rounds above and in no count taken from the text",
+            summary.detached,
+            if summary.detached == 1 { "" } else { "s" },
+        );
+    }
     match &summary.resolution {
         Some(resolution) => {
             println!(
@@ -3753,5 +3829,34 @@ impl Orientation {
                 render_open_entry(entry);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod heading_id_tests {
+    use super::position_heading_id;
+
+    /// The id is the whole word or nothing. Reading up to the first character
+    /// that cannot be in an id would turn a malformed heading into a valid one,
+    /// and a heading that falsely matches a recorded position hides the very
+    /// disagreement `unplaced` exists to report.
+    #[test]
+    fn a_heading_id_is_the_whole_word_or_nothing() {
+        assert_eq!(
+            position_heading_id("### Position pos-01abc (m via h, t)").as_deref(),
+            Some("pos-01abc")
+        );
+        assert_eq!(
+            position_heading_id("### Position pos-manual").as_deref(),
+            Some("pos-manual")
+        );
+        // No suffix is not an id, however much it looks like a prefix.
+        assert_eq!(position_heading_id("### Position pos-"), None);
+        // Trailing punctuation belongs to the word, so the word is not an id.
+        assert_eq!(position_heading_id("### Position pos-punct!"), None);
+        assert_eq!(position_heading_id("### Position pos-a.b"), None);
+        // A heading with no id at all: the ordinary hand-written case.
+        assert_eq!(position_heading_id("### Position (m via h, t)"), None);
+        assert_eq!(position_heading_id("## Position pos-01abc"), None);
     }
 }
