@@ -4443,3 +4443,66 @@ fn journal_doctor_reports_a_malformed_binding() {
         "{report}"
     );
 }
+
+/// A position block with no id is counted by the tally and invisible to the
+/// reply graph, because the graph is keyed on `position_id`. That happens to a
+/// block written by hand, and it happened to every block an older `journal
+/// append` recorded before ids existed. Reporting the difference is what stops
+/// `unanswered` reading as the whole answer when it is only the half with ids.
+#[test]
+fn discussion_reports_positions_the_reply_graph_cannot_see() {
+    let repo = Repo::new();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "naming",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# What do we call it?\n"),
+    );
+    let path = PathBuf::from(out.trim());
+    let file = path.file_name().unwrap().to_string_lossy().to_string();
+
+    // One position through the tool: it gets an id and an event.
+    repo.arc(&repo.root)
+        .args(["journal", "position", &file, "--body-file", "-"])
+        .write_stdin("Position: for\n\nThe tool wrote this one.\n")
+        .assert()
+        .success();
+
+    // One appended by hand, exactly as the older convention taught. No id, so
+    // nothing can `--ref` it and nothing can answer it.
+    let mut body = std::fs::read_to_string(&path).unwrap();
+    body.push_str(
+        "\n### Position (claude-opus-5#high via claude, 2026-01-01T00:00:00Z)\n\
+         \nPosition: against\n\nA hand written block.\n",
+    );
+    std::fs::write(&path, body).unwrap();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+
+    // The tally sees both; the graph sees one; the gap is reported rather than
+    // left for the reader to notice by subtracting.
+    assert_eq!(summary["positions"].as_u64().unwrap(), 2, "{summary}");
+    assert_eq!(summary["unplaced"].as_u64().unwrap(), 1, "{summary}");
+    assert_eq!(
+        summary["unanswered"].as_array().unwrap().len(),
+        1,
+        "{summary}"
+    );
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
+    assert!(
+        text.contains("unplaced: 1 position carries no id"),
+        "{text}"
+    );
+}

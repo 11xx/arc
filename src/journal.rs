@@ -2954,6 +2954,12 @@ struct DiscussionSummary {
     participants: Vec<String>,
     /// Typed `position` events that named a `--ref`.
     reply_refs: usize,
+    /// Position blocks the reply graph cannot see, because no `position_id`
+    /// carries them: written by hand, or recorded by an older `journal append`
+    /// before ids existed. They are real positions — counted in `positions` and
+    /// `stances`, and their authors counted in `participants` — that nothing can
+    /// reference and therefore nothing can report as answered.
+    unplaced: usize,
     rounds: Vec<DiscussionRound>,
     unanswered: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3220,6 +3226,15 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         .filter(|event| event.reference.is_some())
         .count();
     let (rounds, unanswered) = discussion_rounds(&position_events);
+    // The tally reads the file and the graph reads the event log, so they can
+    // disagree about how many positions exist. The difference is the honest
+    // denominator gap, and reporting it is what keeps `unanswered` from reading
+    // as the whole answer when it is only the part with ids.
+    let placed = position_events
+        .iter()
+        .filter(|event| event.position_id.is_some())
+        .count();
+    let unplaced = positions.saturating_sub(placed);
 
     // Resolution: the newest consumed event for this file, if any. The resolver
     // participated when a position event shares its harness-native session.
@@ -3247,6 +3262,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         stances,
         participants,
         reply_refs,
+        unplaced,
         rounds,
         unanswered,
         resolution,
@@ -3308,6 +3324,17 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
             summary.unanswered.join(", ")
         }
     );
+    if summary.unplaced > 0 {
+        println!(
+            "unplaced: {} position{} carr{} no id, so nothing can reference \
+             {} and nothing above counts {} as answered",
+            summary.unplaced,
+            if summary.unplaced == 1 { "" } else { "s" },
+            if summary.unplaced == 1 { "ies" } else { "y" },
+            if summary.unplaced == 1 { "it" } else { "them" },
+            if summary.unplaced == 1 { "it" } else { "them" },
+        );
+    }
     match &summary.resolution {
         Some(resolution) => {
             println!(
