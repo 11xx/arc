@@ -32,6 +32,8 @@ ORIENT (start here, in this order)
 SETTLE A QUESTION (before it is work)
   arc journal note --kind discussion   Open an argument instead of a change.
   arc journal position <file>          Add an attributed stance; --ref answers one.
+  arc journal question <file>          Ask what only a person can settle.
+  arc journal answer <file>            Choose one of a question's options.
   arc journal discussion <file>        Stances, who argued, what is unanswered.
   arc journal consume <file> --outcome done --decision <d>   Close it.
   arc begin --from-journal <file>      When the decision becomes work.
@@ -41,6 +43,13 @@ SETTLE A QUESTION (before it is work)
   a discussion before it belongs in a change — positions carry the model and
   harness that argued them, so a decision can be read later by who reached it
   and on what grounds, rather than surviving only in one session's transcript.
+
+  A question is the part no model should settle. Placement decides when:
+  `--placement opening` before anyone argues, so every participant starts from
+  the same premise, or `closing` once the argument is in — never mid-argument,
+  which would make you watch a run you delegated. Argue a closing question on
+  both sides first (`position --question <id> --option <opt>`) and the answer
+  picks between explored branches instead of labels.
 
 RUN A CHANGE
   arc begin <slug> --profile <p>     Open a change: branch + worktree + record.
