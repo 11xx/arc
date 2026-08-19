@@ -4572,3 +4572,255 @@ fn discussion_tells_an_unrecorded_heading_from_a_vanished_one() {
     let text = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
     assert!(text.contains("no longer in the file"), "{text}");
 }
+
+/// A wargame is a discussion with more participants, and the thing a discussion
+/// could not express is a question only a person can settle. Placement is the
+/// design: an opening question settles a premise before anyone argues, a
+/// closing question is answered with the argument already in front of it, and
+/// there is deliberately no mid-argument placement.
+#[test]
+fn a_question_carries_its_branches_and_the_answer_picks_one() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "rollout", "# One go, or staged?\n");
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "one-go",
+            "--option",
+            "staged",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Only the operator can weigh the rollback appetite.\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+
+    // A branch on a question nobody posed is an orphan: it would render under
+    // nothing and drop out of every count, so it is refused rather than stored.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--question",
+            "q-nope",
+            "--option",
+            "one-go",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Position: for\n\nOrphan.\n")
+        .assert()
+        .failure();
+
+    // So is an option the question never offered.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "sideways",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Position: for\n\nNot an option.\n")
+        .assert()
+        .failure();
+
+    for option in ["one-go", "staged"] {
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "position",
+                &file,
+                "--question",
+                &question,
+                "--option",
+                option,
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("Position: for\n\nArgued on this branch.\n")
+            .assert()
+            .success();
+    }
+
+    // Both branches argued before the answer, which is the point: the choice is
+    // made between two explored futures rather than two labels.
+    let before = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "discussion", &file, "--json"]),
+    );
+    let posed = &before["questions"][0];
+    assert_eq!(posed["placement"], "closing", "{before}");
+    assert!(posed["answered"].is_null(), "{before}");
+    for branch in posed["branches"].as_array().unwrap() {
+        assert_eq!(branch["positions"].as_u64().unwrap(), 1, "{before}");
+    }
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "staged",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Rollback appetite is low.\n")
+        .assert()
+        .success();
+
+    // The losing branch is not deleted: it is the only record that the
+    // alternative was explored rather than never considered.
+    let after = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "discussion", &file, "--json"]),
+    );
+    assert_eq!(after["questions"][0]["answered"], "staged", "{after}");
+    assert_eq!(
+        after["questions"][0]["branches"][0]["positions"]
+            .as_u64()
+            .unwrap(),
+        1,
+        "{after}"
+    );
+
+    // Answering twice would rewrite a settled decision.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "one-go",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Changed my mind.\n")
+        .assert()
+        .failure();
+}
+
+/// An opening question exists so every participant argues from the same
+/// premise. Arguing while it is still open is not refused — the journal is
+/// advisory — but it is reported, because nothing else would show it.
+#[test]
+fn an_opening_question_argued_before_it_is_answered_says_so() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "store", "# Which datastore?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "postgres",
+            "--option",
+            "sqlite",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Settle it before anyone plans against it.\n")
+        .assert()
+        .success();
+
+    let quiet = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "discussion", &file, "--json"]),
+    );
+    assert!(
+        quiet["questions"][0]["argued_before_answered"].is_null(),
+        "{quiet}"
+    );
+
+    repo.arc(&repo.root)
+        .args(["journal", "position", &file, "--body-file", "-"])
+        .write_stdin("Position: for\n\nArgued anyway.\n")
+        .assert()
+        .success();
+
+    let noisy = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "discussion", &file, "--json"]),
+    );
+    assert_eq!(
+        noisy["questions"][0]["argued_before_answered"], true,
+        "{noisy}"
+    );
+    let text = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
+    assert!(text.contains("settle a premise before anyone"), "{text}");
+}
+
+/// A question needs a real choice, and there is no mid-argument placement: a
+/// question that blocks in the middle makes the caller monitor a run they
+/// delegated.
+#[test]
+fn a_question_needs_two_options_and_one_of_two_placements() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "shape", "# Which shape?\n");
+    for args in [
+        vec!["--placement", "opening", "--option", "only"],
+        vec!["--placement", "mid", "--option", "a", "--option", "b"],
+        vec![
+            "--placement",
+            "closing",
+            "--option",
+            "same",
+            "--option",
+            "same",
+        ],
+    ] {
+        let mut cmd = repo.arc(&repo.root);
+        cmd.args(["journal", "question", &file]);
+        cmd.args(&args);
+        cmd.args(["--body-file", "-"]);
+        cmd.write_stdin("Body.\n").assert().failure();
+    }
+}
+
+fn discussion_named(repo: &Repo, topic: &str, body: &str) -> String {
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                topic,
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin(body.to_string()),
+    );
+    PathBuf::from(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string()
+}
+
+fn question_id(repo: &Repo, file: &str) -> String {
+    let summary = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "discussion", file, "--json"]),
+    );
+    summary["questions"][0]["id"].as_str().unwrap().to_string()
+}
