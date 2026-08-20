@@ -2841,6 +2841,33 @@ fn begin_from_journal_refuses_decision() {
 }
 
 #[test]
+fn concurrent_begin_from_journal_promotes_an_artifact_once() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "promotion-race", "# Promote once?\n");
+    let mut children = Vec::new();
+    for index in 0..12 {
+        let slug = format!("promotion-race-{index}");
+        children.push(spawn_arc(
+            &repo,
+            &repo.root,
+            &["begin", &slug, "--no-worktree", "--from-journal", &file],
+        ));
+    }
+    let successes = children
+        .into_iter()
+        .map(|child| child.wait_with_output().unwrap().status.success())
+        .filter(|success| *success)
+        .count();
+    assert_eq!(successes, 1);
+
+    let consumed = journal_events(&journal_dir(&repo))
+        .into_iter()
+        .filter(|event| event["event"] == "consumed" && event["file"] == file)
+        .count();
+    assert_eq!(consumed, 1);
+}
+
+#[test]
 fn consume_done_links_decision_in_discussion_resolution() {
     let repo = Repo::new();
     let decision = stdout(
@@ -5031,6 +5058,74 @@ fn semantically_invalid_answer_events_are_reported_and_ignored() {
         );
     assert_eq!(summary["questions"][0]["id"], question, "{summary}");
     assert!(summary["questions"][0]["answered"].is_null(), "{summary}");
+}
+
+#[test]
+fn visible_question_blocks_without_events_are_reported_and_guard_state() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "interrupted-question", "# Interrupted?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Choose.\n")
+        .assert()
+        .success();
+    let recorded = question_id(&repo, &file);
+    let path = journal_dir(&repo).join(&file);
+    let mut artifact = fs::read_to_string(&path).unwrap();
+    artifact.push_str(&format!(
+        "\n### Question q-interrupted (opening, 2026-01-01T00:00:00Z) — x | y\n\nVisible only.\n\n### Answer {recorded} = a (human, 2026-01-01T00:00:01Z)\n\nVisible only.\n"
+    ));
+    fs::write(&path, artifact).unwrap();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(
+        summary["unrecorded_question_blocks"],
+        serde_json::json!(["q-interrupted"]),
+        "{summary}"
+    );
+    assert_eq!(
+        summary["unrecorded_answer_blocks"],
+        serde_json::json!([recorded.clone()]),
+        "{summary}"
+    );
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("unrecorded-question-block"))
+        .stdout(predicates::str::contains("unrecorded-answer-block"));
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &recorded,
+            "--option",
+            "a",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Do not duplicate.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("visible answer block"));
 }
 
 #[test]

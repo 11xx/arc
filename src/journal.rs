@@ -34,7 +34,7 @@ const JOURNAL_LOCK_RETRY: Duration = Duration::from_millis(10);
 /// Serialize journal transitions whose preflight depends on current state.
 /// The lock file persists, while the OS releases ownership with this handle,
 /// so a crashed writer cannot strand the journal behind a stale marker.
-struct JournalTransitionLock(File);
+pub(crate) struct JournalTransitionLock(File);
 
 impl Drop for JournalTransitionLock {
     fn drop(&mut self) {
@@ -73,6 +73,10 @@ fn lock_journal_transition(dir: &Path) -> Result<JournalTransitionLock> {
             }
         }
     }
+}
+
+pub(crate) fn lock_transition(ctx: &Ctx) -> Result<JournalTransitionLock> {
+    lock_journal_transition(&resolve_dir(&ctx.cwd)?)
 }
 
 /// Closed set of artifact kinds. Malformed kinds are rejected by clap at
@@ -918,6 +922,28 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     // Semantic checks run on the event stream: consumption, lane liveness,
     // and artifact references all derive from it.
     let events = read_events(&dir)?;
+    for name in &hot_files {
+        if !parse_artifact_name(name)
+            .is_some_and(|(_, _, kind)| kind == JournalKind::Discussion.as_str())
+        {
+            continue;
+        }
+        let body = std::fs::read_to_string(dir.join(name))
+            .with_context(|| format!("cannot read {}", dir.join(name).display()))?;
+        let (questions, answers) = unrecorded_question_blocks(&body, &events, name);
+        if !questions.is_empty() {
+            problems.push(DoctorFinding {
+                code: "unrecorded-question-block",
+                detail: format!("{name}: {}", questions.join(", ")),
+            });
+        }
+        if !answers.is_empty() {
+            problems.push(DoctorFinding {
+                code: "unrecorded-answer-block",
+                detail: format!("{name}: {}", answers.join(", ")),
+            });
+        }
+    }
 
     // A journal is addressed by the slugged path of its project. When that
     // path stops existing the journal becomes unreachable from anywhere, and
@@ -1362,6 +1388,14 @@ fn position(
     // offered, is an orphan: it renders under nothing and silently drops out of
     // every branch count. Refuse it rather than record it.
     if let Some((question, option)) = &branch {
+        let artifact = std::fs::read_to_string(&path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        let (_, unrecorded_answers) = unrecorded_question_blocks(&artifact, &existing, filename);
+        if unrecorded_answers.iter().any(|id| id == question) {
+            bail!(
+                "{question} has a visible answer block with no typed event; repair the journal before extending its branches"
+            );
+        }
         let Some(posed) = existing.iter().find(|event| {
             event.known()
                 && event.event == "question"
@@ -1532,6 +1566,14 @@ fn answer(
     let _transition = lock_journal_transition(&dir)?;
     let (dir, path, topic) = open_discussion(ctx, filename)?;
     let events = read_events(&dir)?;
+    let artifact = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let (_, unrecorded_answers) = unrecorded_question_blocks(&artifact, &events, filename);
+    if unrecorded_answers.iter().any(|id| id == question_id) {
+        bail!(
+            "{question_id} has a visible answer block with no typed event; repair the journal before settling it again"
+        );
+    }
 
     let Some(posed) = events.iter().find(|event| {
         event.known()
@@ -3538,10 +3580,75 @@ struct DiscussionSummary {
     /// argued under it and the answer if one has been given.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     questions: Vec<DiscussionQuestion>,
+    /// Visible question and answer blocks whose typed transition never landed.
+    /// A command can be interrupted between the Markdown and JSONL appends;
+    /// surfacing the IDs keeps that partial write out of silent derived state.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unrecorded_question_blocks: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unrecorded_answer_blocks: Vec<String>,
     rounds: Vec<DiscussionRound>,
     unanswered: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resolution: Option<Resolution>,
+}
+
+#[derive(Default)]
+struct QuestionBlockIds {
+    questions: HashSet<String>,
+    answers: HashSet<String>,
+}
+
+fn question_block_ids(body: &str) -> QuestionBlockIds {
+    let mut ids = QuestionBlockIds::default();
+    for line in body.lines() {
+        if let Some(id) = line
+            .strip_prefix("### Question ")
+            .and_then(|rest| rest.split_once(" (").map(|(id, _)| id))
+            .filter(|id| valid_question_id(id))
+        {
+            ids.questions.insert(id.to_string());
+        }
+        if let Some(id) = line
+            .strip_prefix("### Answer ")
+            .and_then(|rest| rest.split_once(" = ").map(|(id, _)| id))
+            .filter(|id| valid_question_id(id))
+        {
+            ids.answers.insert(id.to_string());
+        }
+    }
+    ids
+}
+
+fn unrecorded_question_blocks(
+    body: &str,
+    events: &[JournalEvent],
+    filename: &str,
+) -> (Vec<String>, Vec<String>) {
+    let blocks = question_block_ids(body);
+    let questions: HashSet<&str> = events
+        .iter()
+        .filter(|event| event.event == "question" && event.file.as_deref() == Some(filename))
+        .filter_map(|event| event.question_id.as_deref())
+        .collect();
+    let answers: HashSet<&str> = events
+        .iter()
+        .filter(|event| event.event == "answer" && event.file.as_deref() == Some(filename))
+        .filter_map(|event| event.question_id.as_deref())
+        .collect();
+    let mut unrecorded_questions = blocks
+        .questions
+        .into_iter()
+        .filter(|id| !questions.contains(id.as_str()))
+        .collect::<Vec<_>>();
+    let mut unrecorded_answers = blocks
+        .answers
+        .into_iter()
+        .filter(|id| !answers.contains(id.as_str()))
+        .collect::<Vec<_>>();
+    unrecorded_questions.sort();
+    unrecorded_answers.sort();
+    (unrecorded_questions, unrecorded_answers)
 }
 
 #[derive(Serialize)]
@@ -3802,6 +3909,8 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     let events = read_events(&dir)?;
 
     let (positions, stances, heading_ids) = position_structure(&body);
+    let (unrecorded_question_blocks, unrecorded_answer_blocks) =
+        unrecorded_question_blocks(&body, &events, filename);
 
     // Typed position events for this file, in ledger order.
     let position_events: Vec<&JournalEvent> = events
@@ -3927,6 +4036,8 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         unplaced,
         detached,
         questions,
+        unrecorded_question_blocks,
+        unrecorded_answer_blocks,
         rounds,
         unanswered,
         resolution,
@@ -3994,6 +4105,18 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
                  argues, and positions were filed while this one was still open"
             );
         }
+    }
+    if !summary.unrecorded_question_blocks.is_empty() {
+        println!(
+            "unrecorded question blocks: {} — visible Markdown has no typed transition; run journal doctor",
+            summary.unrecorded_question_blocks.join(", ")
+        );
+    }
+    if !summary.unrecorded_answer_blocks.is_empty() {
+        println!(
+            "unrecorded answer blocks: {} — visible Markdown has no typed transition; run journal doctor",
+            summary.unrecorded_answer_blocks.join(", ")
+        );
     }
     println!("rounds (same-depth positions could not have read each other):");
     for round in &summary.rounds {
@@ -4251,12 +4374,19 @@ pub fn require_open_actionable(ctx: &Ctx, filename: &str) -> Result<String> {
 
 /// Append a journal `consumed` event marking an artifact superseded by the
 /// change opened from it. The artifact file itself is never edited.
-pub fn consume_superseded_by_change(ctx: &Ctx, filename: &str, change_id: &str) -> Result<()> {
+pub fn consume_superseded_by_change(
+    ctx: &Ctx,
+    filename: &str,
+    change_id: &str,
+    _transition: &JournalTransitionLock,
+) -> Result<()> {
     let Some((_, topic, _)) = parse_artifact_name(filename) else {
         bail!("{filename:?} is not a journal artifact name");
     };
     let dir = resolve_dir(&ctx.cwd)?;
-    let _transition = lock_journal_transition(&dir)?;
+    if is_consumed(&read_events(&dir)?, filename) {
+        bail!("{filename} is already consumed (see the journal)");
+    }
     let message = format!("consumed {filename} [superseded]: change {change_id}");
     append_journal(&dir, ctx, Utc::now(), &topic, &message, None)
 }
