@@ -23,7 +23,57 @@ use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use clap::{Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const JOURNAL_LOCK_TIMEOUT: Duration = Duration::from_secs(1);
+const JOURNAL_LOCK_RETRY: Duration = Duration::from_millis(10);
+
+/// Serialize journal transitions whose preflight depends on current state.
+/// The lock file persists, while the OS releases ownership with this handle,
+/// so a crashed writer cannot strand the journal behind a stale marker.
+struct JournalTransitionLock(File);
+
+impl Drop for JournalTransitionLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+fn lock_journal_transition(dir: &Path) -> Result<JournalTransitionLock> {
+    let lock_dir = dir.join(".locks");
+    std::fs::create_dir_all(&lock_dir)
+        .with_context(|| format!("cannot create journal lock dir {}", lock_dir.display()))?;
+    let path = lock_dir.join("transition.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("cannot open journal transition lock {}", path.display()))?;
+    let deadline = Instant::now() + JOURNAL_LOCK_TIMEOUT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(JournalTransitionLock(file)),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    bail!(
+                        "journal transition lock {} is busy; retry the command",
+                        path.display()
+                    );
+                }
+                thread::sleep(JOURNAL_LOCK_RETRY);
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(error)
+                    .with_context(|| format!("cannot lock journal transition {}", path.display()));
+            }
+        }
+    }
+}
 
 /// Closed set of artifact kinds. Malformed kinds are rejected by clap at
 /// parse time, before anything is written.
@@ -792,9 +842,10 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     if jsonl.is_file() {
         let text = std::fs::read_to_string(&jsonl)
             .with_context(|| format!("cannot read {}", jsonl.display()))?;
+        let mut question_events = Vec::new();
         for (index, line) in text.lines().enumerate() {
             match serde_json::from_str::<JournalEvent>(line) {
-                Ok(event) if event.known() => {}
+                Ok(event) if event.known() => question_events.push((index + 1, event)),
                 Ok(_) => problems.push(DoctorFinding {
                     code: "unknown-jsonl-event",
                     detail: format!("events.jsonl line {}", index + 1),
@@ -803,6 +854,16 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
                     code: "malformed-jsonl",
                     detail: format!("events.jsonl line {}", index + 1),
                 }),
+            }
+        }
+        question_events.sort_by_key(|(_, event)| event.timestamp());
+        let mut machine = QuestionMachine::default();
+        for (line, event) in question_events {
+            if !machine.accept(&event) {
+                problems.push(DoctorFinding {
+                    code: "invalid-question-state",
+                    detail: format!("events.jsonl line {line}"),
+                });
             }
         }
     }
@@ -1275,9 +1336,12 @@ fn position(
     if filename.contains(['/', '\\']) {
         bail!("journal position takes an artifact filename inside the journal dir, not a path");
     }
-    let Some((_, topic, _)) = parse_artifact_name(filename) else {
+    let Some((_, topic, kind)) = parse_artifact_name(filename) else {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     };
+    if branch.is_some() && kind != JournalKind::Discussion.as_str() {
+        bail!("{filename} is a {kind}, not a discussion");
+    }
     // Read the body before touching the filesystem so a bad source path leaves
     // the artifact untouched.
     let body = read_body_verbatim(body_file)?;
@@ -1285,6 +1349,7 @@ fn position(
     // Positions ride an open discussion in the hot directory; a cold archived
     // artifact is a closed record, not an append target.
     let dir = resolve_dir(&ctx.cwd)?;
+    let _transition = lock_journal_transition(&dir)?;
     let path = dir.join(filename);
     if !path.is_file() {
         bail!("no such artifact {} in {}", filename, dir.display());
@@ -1311,6 +1376,13 @@ fn position(
                 "{option:?} is not one of the options {question} offered ({})",
                 offered.join(", ")
             );
+        }
+        if existing.iter().any(|event| {
+            event.event == "answer"
+                && event.file.as_deref() == Some(filename)
+                && event.question_id.as_deref() == Some(question.as_str())
+        }) {
+            bail!("{question} is already answered; its branches are closed");
         }
     }
 
@@ -1360,13 +1432,16 @@ fn position(
 /// Shared preflight for an append to an open discussion: the filename is a
 /// name, the artifact exists, and it has not been consumed. A consumed
 /// artifact is a closed record, so appending to one would edit history.
-fn open_artifact(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String)> {
+fn open_discussion(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String)> {
     if filename.contains(['/', '\\']) {
         bail!("journal takes an artifact filename inside the journal dir, not a path");
     }
-    let Some((_, topic, _)) = parse_artifact_name(filename) else {
+    let Some((_, topic, kind)) = parse_artifact_name(filename) else {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     };
+    if kind != JournalKind::Discussion.as_str() {
+        bail!("{filename} is a {kind}, not a discussion");
+    }
     let dir = resolve_dir(&ctx.cwd)?;
     let path = dir.join(filename);
     if !path.is_file() {
@@ -1417,7 +1492,9 @@ fn question(
         bail!("a question needs at least two options; one option is a statement");
     }
     let body = read_body_verbatim(body_file)?;
-    let (dir, path, topic) = open_artifact(ctx, filename)?;
+    let dir = resolve_dir(&ctx.cwd)?;
+    let _transition = lock_journal_transition(&dir)?;
+    let (dir, path, topic) = open_discussion(ctx, filename)?;
 
     let now = Utc::now();
     let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -1451,7 +1528,9 @@ fn answer(
     body_file: &str,
 ) -> Result<i32> {
     let body = read_body_verbatim(body_file)?;
-    let (dir, path, topic) = open_artifact(ctx, filename)?;
+    let dir = resolve_dir(&ctx.cwd)?;
+    let _transition = lock_journal_transition(&dir)?;
+    let (dir, path, topic) = open_discussion(ctx, filename)?;
     let events = read_events(&dir)?;
 
     let Some(posed) = events.iter().find(|event| {
@@ -1477,6 +1556,28 @@ fn answer(
     }) {
         bail!("{question_id} is already answered; open a successor question to revisit it");
     }
+    if posed.placement.as_deref() == Some("closing") {
+        let argued: HashSet<&str> = events
+            .iter()
+            .filter(|event| {
+                event.event == "position"
+                    && event.file.as_deref() == Some(filename)
+                    && event.question_id.as_deref() == Some(question_id)
+            })
+            .filter_map(|event| event.option.as_deref())
+            .collect();
+        let missing: Vec<&str> = offered
+            .iter()
+            .map(String::as_str)
+            .filter(|offered| !argued.contains(offered))
+            .collect();
+        if !missing.is_empty() {
+            bail!(
+                "closing question {question_id} still has unargued options: {}",
+                missing.join(", ")
+            );
+        }
+    }
 
     let now = Utc::now();
     let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -1499,19 +1600,10 @@ fn answer(
 
 fn events(ctx: &Ctx, limit: Option<usize>) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
-    let jsonl_path = dir.join("events.jsonl");
-    let mut events = Vec::new();
-    if jsonl_path.is_file() {
-        let text = std::fs::read_to_string(&jsonl_path)
-            .with_context(|| format!("cannot read {}", jsonl_path.display()))?;
-        events.extend(
-            text.lines()
-                .filter_map(|line| serde_json::from_str::<JournalEvent>(line).ok())
-                .filter(JournalEvent::known),
-        );
-    }
-    events.sort_by_key(JournalEvent::timestamp);
-    for event in events.into_iter().take(limit.unwrap_or(usize::MAX)) {
+    for event in read_events(&dir)?
+        .into_iter()
+        .take(limit.unwrap_or(usize::MAX))
+    {
         println!("{}", serde_json::to_string(&event)?);
     }
     Ok(0)
@@ -1685,7 +1777,20 @@ impl JournalEvent {
         match self.event.as_str() {
             "log" => self.message.is_some(),
             "note" => self.file.is_some(),
-            "position" => self.file.is_some(),
+            "position" => {
+                self.file.is_some()
+                    && self.placement.is_none()
+                    && self.options.is_none()
+                    && match (self.question_id.as_deref(), self.option.as_deref()) {
+                        (None, None) => true,
+                        (Some(question), Some(option)) => {
+                            valid_question_id(question)
+                                && !option.trim().is_empty()
+                                && self.file_is_discussion()
+                        }
+                        _ => false,
+                    }
+            }
             "consumed" => {
                 self.file.is_some()
                     && self
@@ -1698,8 +1803,8 @@ impl JournalEvent {
             // answered, and offers a choice. Two options is the floor: one
             // option is a statement.
             "question" => {
-                self.file.is_some()
-                    && self.question_id.is_some()
+                self.file_is_discussion()
+                    && self.question_id.as_deref().is_some_and(valid_question_id)
                     && self
                         .placement
                         .as_deref()
@@ -1707,9 +1812,19 @@ impl JournalEvent {
                     && self
                         .options
                         .as_ref()
-                        .is_some_and(|values| values.len() >= 2)
+                        .is_some_and(|values| valid_question_options(values))
+                    && self.option.is_none()
             }
-            "answer" => self.file.is_some() && self.question_id.is_some() && self.option.is_some(),
+            "answer" => {
+                self.file_is_discussion()
+                    && self.question_id.as_deref().is_some_and(valid_question_id)
+                    && self
+                        .option
+                        .as_deref()
+                        .is_some_and(|option| !option.trim().is_empty())
+                    && self.placement.is_none()
+                    && self.options.is_none()
+            }
             "lane-opened" => self.ttl_seconds.is_some() && self.scope.is_some(),
             "lane-renewed" => true,
             "lane-closed" => self
@@ -1717,6 +1832,118 @@ impl JournalEvent {
                 .as_deref()
                 .is_some_and(|value| ["done", "handoff", "abandoned", "expired"].contains(&value)),
             _ => false,
+        }
+    }
+
+    fn file_is_discussion(&self) -> bool {
+        self.file.as_deref().is_some_and(|file| {
+            parse_artifact_name(file)
+                .is_some_and(|(_, _, kind)| kind == JournalKind::Discussion.as_str())
+        })
+    }
+}
+
+fn valid_question_id(value: &str) -> bool {
+    value.strip_prefix("q-").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_alphanumeric())
+    })
+}
+
+fn valid_question_options(values: &[String]) -> bool {
+    let mut seen = HashSet::new();
+    values.len() >= 2
+        && values
+            .iter()
+            .all(|value| !value.trim().is_empty() && seen.insert(value.as_str()))
+}
+
+struct QuestionProgress {
+    placement: String,
+    options: Vec<String>,
+    argued: HashSet<String>,
+    answered: bool,
+}
+
+#[derive(Default)]
+struct QuestionMachine {
+    questions: HashMap<(String, String), QuestionProgress>,
+}
+
+impl QuestionMachine {
+    /// Accept events in journal order while preserving the question state
+    /// machine. Structurally valid JSON is still advisory input: a dangling
+    /// answer or a mutation after settlement is ignored and reported by
+    /// `journal doctor`, never promoted into derived state.
+    fn accept(&mut self, event: &JournalEvent) -> bool {
+        if !event.known() {
+            return false;
+        }
+        match event.event.as_str() {
+            "question" => {
+                let key = (
+                    event.file.clone().expect("known question has a file"),
+                    event.question_id.clone().expect("known question has an id"),
+                );
+                if self.questions.contains_key(&key) {
+                    return false;
+                }
+                self.questions.insert(
+                    key,
+                    QuestionProgress {
+                        placement: event
+                            .placement
+                            .clone()
+                            .expect("known question has placement"),
+                        options: event.options.clone().expect("known question has options"),
+                        argued: HashSet::new(),
+                        answered: false,
+                    },
+                );
+                true
+            }
+            "position" => {
+                let (Some(question), Some(option)) =
+                    (event.question_id.as_deref(), event.option.as_deref())
+                else {
+                    return true;
+                };
+                let key = (
+                    event.file.clone().expect("known position has a file"),
+                    question.to_string(),
+                );
+                let Some(progress) = self.questions.get_mut(&key) else {
+                    return false;
+                };
+                if progress.answered || !progress.options.iter().any(|offered| offered == option) {
+                    return false;
+                }
+                progress.argued.insert(option.to_string());
+                true
+            }
+            "answer" => {
+                let key = (
+                    event.file.clone().expect("known answer has a file"),
+                    event.question_id.clone().expect("known answer has an id"),
+                );
+                let Some(progress) = self.questions.get_mut(&key) else {
+                    return false;
+                };
+                let option = event.option.as_deref().expect("known answer has an option");
+                if progress.answered || !progress.options.iter().any(|offered| offered == option) {
+                    return false;
+                }
+                if progress.placement == "closing"
+                    && progress
+                        .options
+                        .iter()
+                        .any(|offered| !progress.argued.contains(offered))
+                {
+                    return false;
+                }
+                progress.answered = true;
+                true
+            }
+            _ => true,
         }
     }
 }
@@ -1984,11 +2211,15 @@ fn read_events(dir: &Path) -> Result<Vec<JournalEvent>> {
             .with_context(|| format!("cannot read {}", jsonl.display()))?;
         events.extend(text.lines().filter_map(|line| {
             let event: JournalEvent = serde_json::from_str(line).ok()?;
-            event.timestamp().is_some().then_some(event)
+            event.known().then_some(event)
         }));
     }
     events.sort_by_key(JournalEvent::timestamp);
-    Ok(events)
+    let mut machine = QuestionMachine::default();
+    Ok(events
+        .into_iter()
+        .filter(|event| machine.accept(event))
+        .collect())
 }
 
 fn event_message(event: &JournalEvent) -> String {
@@ -1998,6 +2229,19 @@ fn event_message(event: &JournalEvent) -> String {
             .title
             .clone()
             .unwrap_or_else(|| "wrote artifact".into()),
+        "question" => format!(
+            "asked {} [{}] ({}) on {}",
+            event.question_id.as_deref().unwrap_or_default(),
+            event.placement.as_deref().unwrap_or_default(),
+            event.options.clone().unwrap_or_default().join(" | "),
+            event.file.as_deref().unwrap_or_default(),
+        ),
+        "answer" => format!(
+            "answered {} = {} on {}",
+            event.question_id.as_deref().unwrap_or_default(),
+            event.option.as_deref().unwrap_or_default(),
+            event.file.as_deref().unwrap_or_default(),
+        ),
         "consumed" => format!(
             "consumed {} [{}]{}",
             event.file.as_deref().unwrap_or_default(),
@@ -3286,9 +3530,9 @@ struct DiscussionSummary {
     /// They are real positions — counted in `positions` and `stances` — that
     /// nothing can reference and therefore nothing can report as answered.
     unplaced: usize,
-    /// Positions the event log records whose heading is no longer in the file,
-    /// which is the same file-versus-log disagreement from the other side. They
-    /// appear in `rounds` and `unanswered` and in no count taken from the text.
+    /// Positions the event log records whose ID has no recognized matching
+    /// heading. The heading may be gone or malformed; only the mismatch is
+    /// established. These positions still appear in `rounds` and `unanswered`.
     detached: usize,
     /// Questions posed on this discussion, oldest first, each with the branches
     /// argued under it and the answer if one has been given.
@@ -3616,7 +3860,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
                 .collect();
             let argued_before_answered = posed.placement.as_deref() == Some("opening")
                 && answered.is_none()
-                && !position_events.is_empty();
+                && positions > 0;
             Some(DiscussionQuestion {
                 id,
                 placement: posed.placement.clone().unwrap_or_default(),
@@ -3646,9 +3890,9 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
             Some(id) => !recorded.contains(id.as_str()),
         })
         .count();
-    // A position the log records whose heading is no longer in the file. The
-    // graph counts it and the tally does not, which is the same disagreement
-    // seen from the other side.
+    // A recorded ID with no recognized matching heading. The heading may have
+    // been removed or may still exist in malformed form; the ID sets prove the
+    // mismatch, not its cause.
     let detached = recorded
         .iter()
         .filter(|id| !heading_id_set.contains(*id))
@@ -3780,8 +4024,8 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     }
     if summary.detached > 0 {
         println!(
-            "detached: {} recorded position{} whose heading is no longer in the \
-             file, counted in the rounds above and in no count taken from the text",
+            "detached: {} recorded position{} with no recognized matching heading id, \
+             counted in the rounds above; any unmatched text is reported as unplaced",
             summary.detached,
             if summary.detached == 1 { "" } else { "s" },
         );
@@ -3825,6 +4069,7 @@ fn consume(
     decision: Option<&str>,
 ) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
+    let _transition = lock_journal_transition(&dir)?;
     if let Some(decision) = decision {
         if !matches!(outcome, ConsumeOutcome::Done) {
             bail!("--decision is valid only with --outcome done");
@@ -3875,6 +4120,7 @@ fn archive(
     note: Option<&str>,
 ) -> Result<i32> {
     let hot = resolve_dir(&ctx.cwd)?;
+    let _transition = lock_journal_transition(&hot)?;
     if consumed {
         let journal = read_events(&hot)?;
         let mut names = Vec::new();
@@ -4010,6 +4256,7 @@ pub fn consume_superseded_by_change(ctx: &Ctx, filename: &str, change_id: &str) 
         bail!("{filename:?} is not a journal artifact name");
     };
     let dir = resolve_dir(&ctx.cwd)?;
+    let _transition = lock_journal_transition(&dir)?;
     let message = format!("consumed {filename} [superseded]: change {change_id}");
     append_journal(&dir, ctx, Utc::now(), &topic, &message, None)
 }
