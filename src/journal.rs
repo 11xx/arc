@@ -278,8 +278,9 @@ pub enum JournalCmd {
     /// Add a position block to an artifact and emit a typed `position` event.
     /// The body's first line states the stance the tally counts:
     /// `Position: for | against | amend`
-    /// Pass `--question <id> --option <opt>` to argue under one branch of an
-    /// open question instead of unconditionally
+    /// Use `arc journal position <file> --body-file - --question <id> --option
+    /// <opt>` to argue under one branch of an open question instead of
+    /// unconditionally
     Position {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -306,7 +307,9 @@ pub enum JournalCmd {
     /// `closing` is answered once the argument is in. There is no mid-argument
     /// placement — a question that blocks halfway makes the caller watch a run
     /// they delegated. Argue a closing question on both sides first, with
-    /// `position --question <id> --option <opt>`
+    /// `arc journal position <file> --body-file - --question <id> --option
+    /// <opt>`. Pose one with `arc journal question <file> --placement
+    /// opening|closing --option A --option B --body-file -`
     Question {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -325,7 +328,9 @@ pub enum JournalCmd {
     },
     /// Settle an open question by choosing one of its options, once. Branches
     /// that lost stay in the file: a branch argued and not taken is the only
-    /// record that the alternative was explored rather than never considered
+    /// record that the alternative was explored rather than never considered.
+    /// Use `arc journal answer <file> --question <id> --option <chosen>
+    /// --body-file -`
     Answer {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,

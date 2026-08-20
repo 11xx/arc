@@ -2344,6 +2344,15 @@ fn journal_note_scaffold_records_template_and_prepends() {
         body.contains("### Position pos-<ulid> (<model[#effort]"),
         "{body}"
     );
+    for command in [
+        "arc journal question <this-file> --placement opening|closing --option A --option B --body-file -",
+        "arc journal position <this-file> --body-file - --question <id> --option <opt>",
+        "arc journal answer <this-file> --question <id> --option <chosen> --body-file -",
+        "arc begin <slug> --from-journal <file>",
+        "never both",
+    ] {
+        assert!(body.contains(command), "scaffold missing {command:?}:\n{body}");
+    }
 
     // With a body, the template is prepended ahead of it.
     let src = repo.home.join("position.md");
@@ -2363,6 +2372,19 @@ fn journal_note_scaffold_records_template_and_prepends() {
     let template_at = body.find("## Positions").unwrap();
     let take_at = body.find("my own opening take").unwrap();
     assert!(template_at < take_at, "{body}");
+}
+
+#[test]
+fn journal_help_prints_complete_question_workflow_commands() {
+    let repo = Repo::new();
+    let help = stdout(repo.arc(&repo.root).args(["journal", "--help"]));
+    for command in [
+        "arc journal question <file> --placement opening|closing --option A --option B --body-file -",
+        "arc journal position <file> --body-file - --question <id> --option <opt>",
+        "arc journal answer <file> --question <id> --option <chosen> --body-file -",
+    ] {
+        assert!(help.contains(command), "help missing {command:?}:\n{help}");
+    }
 }
 
 #[test]

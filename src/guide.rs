@@ -92,11 +92,11 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   or when nobody distinguishable from the author covers it. Warnings, never
   blockers — one reviewer is a legitimate way to ship.
 
-  If the repository forbids self-approval and no second actor is available,
-  integrate with `arc integrate <change> --audit-debt "<why>"`. That records
-  what review is owed rather than waiving it. The waiver binds to the patchset
-  it was declared for, so new work needs a new declaration — it does not
-  excuse the rest of the change's life.
+  If no independent verdict is available, integrate with
+  `arc integrate <change> --audit-debt "<why>"`. The debt can stand in for an
+  absent verdict or rescue a self-approval rejected by repository policy. It
+  binds to the exact patchset head declared, so new work needs a new
+  declaration — it does not excuse the rest of the change's life.
 
   Coming back to owed work:
 
