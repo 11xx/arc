@@ -4055,6 +4055,11 @@ fn a_journal_records_the_project_it_belongs_to() {
 fn journal_doctor_split_advice_reads_as_one_sentence() {
     let repo = Repo::new();
     let dir = journal_dir(&repo);
+    repo.arc(&repo.root)
+        .args(["journal", "archive", "not-an-artifact"])
+        .assert()
+        .failure();
+    assert!(dir.join(".locks/transition.lock").is_file());
     let orphan = dir.parent().unwrap().join("-old-path-repo");
     fs::create_dir_all(&orphan).unwrap();
     fs::write(orphan.join("20260101T000000Z-alpha-todo.md"), "# Alpha\n").unwrap();
@@ -4193,6 +4198,11 @@ fn rebind_adopts_over_a_journal_holding_only_its_binding() {
         .success();
     assert!(dir.join("bindings.jsonl").is_file());
     assert!(!dir.join("events.jsonl").exists());
+    repo.arc(&repo.root)
+        .args(["journal", "archive", "not-an-artifact"])
+        .assert()
+        .failure();
+    assert!(dir.join(".locks/transition.lock").is_file());
 
     let orphan = dir.parent().unwrap().join("-old-path-repo");
     fs::create_dir_all(&orphan).unwrap();
@@ -4234,6 +4244,11 @@ fn a_dead_anchor_is_restated_only_while_there_is_no_history_to_inherit() {
          \"event\":\"bound\",\"anchor\":\"/gone/but/same/slug\"}\n",
     )
     .unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "archive", "not-an-artifact"])
+        .assert()
+        .failure();
+    assert!(dir.join(".locks/transition.lock").is_file());
 
     // Opening another change registers the project again, and this time finds
     // a binding that names somewhere gone.

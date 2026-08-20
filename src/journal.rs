@@ -30,6 +30,8 @@ use std::time::{Duration, Instant};
 
 const JOURNAL_LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 const JOURNAL_LOCK_RETRY: Duration = Duration::from_millis(10);
+const JOURNAL_LOCK_DIR: &str = ".locks";
+const JOURNAL_TRANSITION_LOCK: &str = "transition.lock";
 
 /// Serialize journal transitions whose preflight depends on current state.
 /// The lock file persists, while the OS releases ownership with this handle,
@@ -43,10 +45,10 @@ impl Drop for JournalTransitionLock {
 }
 
 fn lock_journal_transition(dir: &Path) -> Result<JournalTransitionLock> {
-    let lock_dir = dir.join(".locks");
+    let lock_dir = dir.join(JOURNAL_LOCK_DIR);
     std::fs::create_dir_all(&lock_dir)
         .with_context(|| format!("cannot create journal lock dir {}", lock_dir.display()))?;
-    let path = lock_dir.join("transition.lock");
+    let path = lock_dir.join(JOURNAL_TRANSITION_LOCK);
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -602,9 +604,25 @@ fn looks_like_a_journal(dir: &Path) -> Result<bool> {
     Ok(false)
 }
 
-/// Remove a target journal that holds nothing but its own binding, so the
-/// adopted journal can be renamed into its place.
+/// Remove a target journal that holds only its binding and transition-lock
+/// metadata, so the adopted journal can be renamed into its place.
 fn clear_bound_target(target: &Path) -> Result<()> {
+    let lock_dir = target.join(JOURNAL_LOCK_DIR);
+    if lock_dir.exists() && !holds_only_transition_lock(&lock_dir)? {
+        bail!(
+            "cannot replace internal lock dir {} because it holds unexpected content",
+            lock_dir.display()
+        );
+    }
+    let transition_lock = lock_dir.join(JOURNAL_TRANSITION_LOCK);
+    if transition_lock.is_file() {
+        std::fs::remove_file(&transition_lock)
+            .with_context(|| format!("cannot remove {}", transition_lock.display()))?;
+    }
+    if lock_dir.is_dir() {
+        std::fs::remove_dir(&lock_dir)
+            .with_context(|| format!("cannot replace internal lock dir {}", lock_dir.display()))?;
+    }
     let stale = bindings_path(target);
     if stale.is_file() {
         std::fs::remove_file(&stale)
@@ -614,17 +632,33 @@ fn clear_bound_target(target: &Path) -> Result<()> {
         .with_context(|| format!("cannot replace empty {}", target.display()))
 }
 
+fn holds_only_transition_lock(lock_dir: &Path) -> Result<bool> {
+    if !lock_dir.is_dir() {
+        return Ok(false);
+    }
+    for entry in std::fs::read_dir(lock_dir)? {
+        let entry = entry?;
+        if entry.file_name() != JOURNAL_TRANSITION_LOCK || !entry.file_type()?.is_file() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Whether a journal holds anything a rebind could destroy by merging.
 ///
-/// A binding is not history: it says which project the directory belongs to,
-/// which is exactly what a rebind is about to restate. Opening a change
-/// registers the project, so a journal freshly created at a moved project's new
-/// path holds a binding and nothing else — and refusing that would close the
-/// recovery path in the one situation it exists for.
+/// Bindings and transition locks are not history. A binding says which project
+/// the directory belongs to, which is exactly what a rebind is about to
+/// restate. The lock directory is arc-owned coordination metadata. Neither may
+/// close the recovery path for a journal freshly created at a moved project's
+/// new location.
 fn holds_history(dir: &Path) -> Result<bool> {
     for entry in std::fs::read_dir(dir)? {
-        let name = entry?.file_name().to_string_lossy().to_string();
-        if name == "bindings.jsonl" {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "bindings.jsonl"
+            || (name == JOURNAL_LOCK_DIR && holds_only_transition_lock(&entry.path())?)
+        {
             continue;
         }
         return Ok(true);
@@ -728,12 +762,11 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
         archive_moved = true;
     }
     if target.is_dir() {
-        // Only a binding can be here — `holds_history` refused anything else —
-        // and it says this directory belongs to the project doing the
-        // rebinding, which is what the adopted journal is about to record
-        // instead. Clearing it last keeps the window in which the target is
-        // unbound as short as the move allows: everything that can fail on its
-        // own has already succeeded, and only the rename remains.
+        // Only arc-owned binding and transition-lock metadata can be here —
+        // `holds_history` refused anything else. Clearing it last keeps the
+        // window in which the target is unbound as short as the move allows:
+        // everything that can fail on its own has already succeeded, and only
+        // the rename remains.
         if let Err(error) = clear_bound_target(&target) {
             // The archive has already moved, so put it back before failing:
             // a retry should start from where it began, not from half a move.
@@ -798,7 +831,7 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
 /// hold history is worse than leaving one orphaned, because an orphan is at
 /// least still separable.
 fn split_journal_candidates(dir: &Path, anchor: Option<&Path>) -> Result<Vec<PathBuf>> {
-    if dir.is_dir() && std::fs::read_dir(dir)?.next().is_some() {
+    if dir.is_dir() && holds_history(dir)? {
         return Ok(Vec::new());
     }
     let (Some(root), Some(basename)) = (dir.parent(), anchor.and_then(|a| a.file_name())) else {
