@@ -18,19 +18,20 @@
 
 ## Questions only a person settles
 
-- `arc journal question <this-file> --placement opening|closing --option A
-  --option B` poses one. An `opening` question is answered before anyone argues,
+- `arc journal question <this-file> --placement opening|closing --option A --option B --body-file -`
+  poses one. An `opening` question is answered before anyone argues,
   so every participant starts from the same premise; a `closing` question is
   answered once the argument is in. There is no mid-argument placement, because
   a question that blocks halfway turns a delegated argument into something the
   caller has to sit and watch.
 - Argue a closing question on both sides before it is answered:
-  `arc journal position <this-file> --question <id> --option <opt>`. The losing
+  `arc journal position <this-file> --body-file - --question <id> --option <opt>`.
+  The losing
   branch costs its own inference and buys two things — a choice made between
   explored futures rather than labels, and a decision that is already argued
   when the answer arrives.
-- `arc journal answer <this-file> --question <id> --option <chosen>` settles it,
-  once. Branches that lost stay in the file: a branch that was argued and not
+- `arc journal answer <this-file> --question <id> --option <chosen> --body-file -`
+  settles it, once. Branches that lost stay in the file: a branch that was argued and not
   taken is the only record that the alternative was considered at all.
 
 ## How it resolves
@@ -38,9 +39,10 @@
 - `arc journal consume <file> --outcome done --decision <decision-file>` —
   decided, no code. The terminal `decision` artifact is the citable verdict;
   this file stays the argument record.
-- `--outcome superseded` — the decision becomes work. Open the change with
-  `arc begin --from-journal <file>` (it consumes this file as superseded
-  itself).
+- A still-open discussion becomes work with
+  `arc begin <slug> --from-journal <file>`; `begin` consumes the discussion as
+  superseded itself. Resolution and promotion are exclusive: never consume
+  before `begin`, and never both consume and promote the same discussion.
 - `--outcome discarded` — rejected; say why in `--note`.
 - Shelving needs no outcome: leave open (warm) or `arc journal archive`
   (cold). Re-litigation needs no reopen verb: open a successor discussion

@@ -1333,7 +1333,7 @@ fn authorization_basis(
         verdict.patchset_id == approved_patchset_id
             && verdict.verdict == crate::model::Verdict::Approved
     });
-    if verdict.is_none() && !st.audit_debt_waives_current_head() {
+    if verdict.is_none() && !st.audit_debt_waives_latest_patchset() {
         anyhow::bail!("integration is ready but nothing authorizes the merged patchset: no approving verdict and no declared audit debt");
     }
 

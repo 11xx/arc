@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 /// store stamped newer than this, because the alternative is what silently
 /// went wrong before: an older binary skipping event types it does not know,
 /// concluding the change is still open, and closing it a second way.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {
@@ -532,9 +532,9 @@ pub struct AuthorizationBasis {
     pub gates: std::collections::BTreeMap<String, NormalizedGate>,
     /// The normalized policy values consumed.
     pub policy: NormalizedPolicy,
-    /// The audit-debt declaration that made a self-approved merge eligible,
-    /// when one did. It is an authorization input like the verdict: without
-    /// it the merge would have been refused.
+    /// The audit-debt declaration that stood in for an absent verdict or made
+    /// a self-approved merge eligible. It is an authorization input like the
+    /// verdict: without it the merge would have been refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_debt_event_id: Option<String>,
 }

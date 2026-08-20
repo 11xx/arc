@@ -19,9 +19,10 @@ pub fn declare_audit_debt(ctx: &Ctx, reference: &str, reason: String) -> Result<
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let st = state::reduce(&store.load_events(&change_id)?)?;
-    // An open change waives its self-approval only for the patchset that is
-    // about to ship; a closed one has no gate left to waive, so the debt is
-    // recorded as a bare obligation.
+    // An open change records the missing independent verdict for the patchset
+    // that is about to ship. This can supply an absent verdict or rescue a
+    // self-approval rejected by policy. A closed change has no gate left to
+    // satisfy, so its debt is recorded as a bare obligation.
     let patchset_id = if st.is_closed() {
         None
     } else {

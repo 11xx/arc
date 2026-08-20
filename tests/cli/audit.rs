@@ -1152,3 +1152,44 @@ fn a_declared_debt_does_not_overrule_a_reviewer_who_refused() {
     assert_ne!(status["approval_waived_by_audit_debt"], true, "{status}");
     assert_eq!(status["ready_reason"], "no-valid-approval", "{status}");
 }
+
+/// A waiver binds to the committed head inside its patchset, not only to the
+/// patchset label. Moving the branch without snapshotting must stale both the
+/// approval and the debt rather than integrating the older revision.
+#[test]
+fn a_declared_debt_does_not_overrule_a_stale_approval() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "stale-waiver");
+    repo.arc(&repo.root)
+        .args([
+            "audit-debt",
+            "stale-waiver",
+            "--reason",
+            "review the recorded patchset later",
+        ])
+        .assert()
+        .success();
+
+    repo.commit(
+        &worktree,
+        "work.txt",
+        "moved after snapshot\n",
+        "test: move past waived patchset",
+    );
+
+    let status = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "stale-waiver", "--json"]),
+    );
+    assert_eq!(status["head_matches_latest_patchset"], false, "{status}");
+    assert_ne!(status["approval_waived_by_audit_debt"], true, "{status}");
+    assert_eq!(status["ready_reason"], "no-valid-approval", "{status}");
+    repo.arc(&worktree)
+        .args(["check", "stale-waiver"])
+        .assert()
+        .code(3);
+    repo.arc(&repo.root)
+        .args(["integrate", "stale-waiver"])
+        .assert()
+        .code(3);
+}

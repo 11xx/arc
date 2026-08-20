@@ -19,6 +19,13 @@ pub fn begin(
     from_journal: Option<String>,
 ) -> Result<()> {
     ids::validate_slug(slug)?;
+    // Promotion is one journal transition from the open preflight through the
+    // superseding consume event. Holding the same guard across the Git and
+    // ledger work prevents two callers from both passing the advisory source.
+    let journal_transition = from_journal
+        .as_ref()
+        .map(|_| crate::journal::lock_transition(ctx))
+        .transpose()?;
     // Validate the journal source before writing anything: a bad
     // --from-journal must fail cleanly with no branch, worktree, or event.
     let journal_kind = from_journal
@@ -139,8 +146,14 @@ pub fn begin(
         .as_ref()
         .filter(|_| journal_kind.as_deref() != Some("plan"))
     {
-        if let Err(error) = crate::journal::consume_superseded_by_change(ctx, filename, &change_id)
-        {
+        if let Err(error) = crate::journal::consume_superseded_by_change(
+            ctx,
+            filename,
+            &change_id,
+            journal_transition
+                .as_ref()
+                .expect("from-journal promotion holds the journal transition"),
+        ) {
             eprintln!("warning: could not mark {filename} consumed: {error:#}");
         }
         // Thread the source's content into an initial brief so the change
@@ -175,6 +188,7 @@ pub fn begin(
             }
         }
     }
+    drop(journal_transition);
     crate::journal::auto_log(ctx, slug, &format!("opened change {change_id}"));
     // Opening a change is the moment a directory provably becomes an arc
     // project, and the journal root is what makes projects enumerable. Record

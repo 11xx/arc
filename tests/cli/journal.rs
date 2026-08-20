@@ -2344,6 +2344,15 @@ fn journal_note_scaffold_records_template_and_prepends() {
         body.contains("### Position pos-<ulid> (<model[#effort]"),
         "{body}"
     );
+    for command in [
+        "arc journal question <this-file> --placement opening|closing --option A --option B --body-file -",
+        "arc journal position <this-file> --body-file - --question <id> --option <opt>",
+        "arc journal answer <this-file> --question <id> --option <chosen> --body-file -",
+        "arc begin <slug> --from-journal <file>",
+        "never both",
+    ] {
+        assert!(body.contains(command), "scaffold missing {command:?}:\n{body}");
+    }
 
     // With a body, the template is prepended ahead of it.
     let src = repo.home.join("position.md");
@@ -2363,6 +2372,19 @@ fn journal_note_scaffold_records_template_and_prepends() {
     let template_at = body.find("## Positions").unwrap();
     let take_at = body.find("my own opening take").unwrap();
     assert!(template_at < take_at, "{body}");
+}
+
+#[test]
+fn journal_help_prints_complete_question_workflow_commands() {
+    let repo = Repo::new();
+    let help = stdout(repo.arc(&repo.root).args(["journal", "--help"]));
+    for command in [
+        "arc journal question <file> --placement opening|closing --option A --option B --body-file -",
+        "arc journal position <file> --body-file - --question <id> --option <opt>",
+        "arc journal answer <file> --question <id> --option <chosen> --body-file -",
+    ] {
+        assert!(help.contains(command), "help missing {command:?}:\n{help}");
+    }
 }
 
 #[test]
@@ -2838,6 +2860,33 @@ fn begin_from_journal_refuses_decision() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("not an actionable item"));
+}
+
+#[test]
+fn concurrent_begin_from_journal_promotes_an_artifact_once() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "promotion-race", "# Promote once?\n");
+    let mut children = Vec::new();
+    for index in 0..12 {
+        let slug = format!("promotion-race-{index}");
+        children.push(spawn_arc(
+            &repo,
+            &repo.root,
+            &["begin", &slug, "--no-worktree", "--from-journal", &file],
+        ));
+    }
+    let successes = children
+        .into_iter()
+        .map(|child| child.wait_with_output().unwrap().status.success())
+        .filter(|success| *success)
+        .count();
+    assert_eq!(successes, 1);
+
+    let consumed = journal_events(&journal_dir(&repo))
+        .into_iter()
+        .filter(|event| event["event"] == "consumed" && event["file"] == file)
+        .count();
+    assert_eq!(consumed, 1);
 }
 
 #[test]
@@ -4006,6 +4055,11 @@ fn a_journal_records_the_project_it_belongs_to() {
 fn journal_doctor_split_advice_reads_as_one_sentence() {
     let repo = Repo::new();
     let dir = journal_dir(&repo);
+    repo.arc(&repo.root)
+        .args(["journal", "archive", "not-an-artifact"])
+        .assert()
+        .failure();
+    assert!(dir.join(".locks/transition.lock").is_file());
     let orphan = dir.parent().unwrap().join("-old-path-repo");
     fs::create_dir_all(&orphan).unwrap();
     fs::write(orphan.join("20260101T000000Z-alpha-todo.md"), "# Alpha\n").unwrap();
@@ -4144,6 +4198,11 @@ fn rebind_adopts_over_a_journal_holding_only_its_binding() {
         .success();
     assert!(dir.join("bindings.jsonl").is_file());
     assert!(!dir.join("events.jsonl").exists());
+    repo.arc(&repo.root)
+        .args(["journal", "archive", "not-an-artifact"])
+        .assert()
+        .failure();
+    assert!(dir.join(".locks/transition.lock").is_file());
 
     let orphan = dir.parent().unwrap().join("-old-path-repo");
     fs::create_dir_all(&orphan).unwrap();
@@ -4185,6 +4244,11 @@ fn a_dead_anchor_is_restated_only_while_there_is_no_history_to_inherit() {
          \"event\":\"bound\",\"anchor\":\"/gone/but/same/slug\"}\n",
     )
     .unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "archive", "not-an-artifact"])
+        .assert()
+        .failure();
+    assert!(dir.join(".locks/transition.lock").is_file());
 
     // Opening another change registers the project again, and this time finds
     // a binding that names somewhere gone.
@@ -4570,7 +4634,43 @@ fn discussion_tells_an_unrecorded_heading_from_a_vanished_one() {
         );
     assert_eq!(summary["detached"].as_u64().unwrap(), 1, "{summary}");
     let text = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
-    assert!(text.contains("no longer in the file"), "{text}");
+    assert!(text.contains("no recognized matching heading id"), "{text}");
+}
+
+#[test]
+fn detached_text_does_not_claim_a_malformed_heading_was_deleted() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "malformed-heading", "# Which way?\n");
+    let dir = journal_dir(&repo);
+    let path = dir.join(&file);
+    let mut body = fs::read_to_string(&path).unwrap();
+    body.push_str(
+        "\n### Position pos-punct! (someone, 2026-01-01T00:00:00Z)\n\
+         \nPosition: for\n\nPresent but malformed.\n",
+    );
+    fs::write(&path, body).unwrap();
+
+    let mut event = journal_events(&dir).last().unwrap().clone();
+    event["event"] = serde_json::json!("position");
+    event["position_id"] = serde_json::json!("pos-punct!");
+    event.as_object_mut().unwrap().remove("title");
+    let events_path = dir.join("events.jsonl");
+    let mut events = fs::read_to_string(&events_path).unwrap();
+    events.push_str(&serde_json::to_string(&event).unwrap());
+    events.push('\n');
+    fs::write(events_path, events).unwrap();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["positions"], 1, "{summary}");
+    assert_eq!(summary["unplaced"], 1, "{summary}");
+    assert_eq!(summary["detached"], 1, "{summary}");
+    let text = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
+    assert!(text.contains("no recognized matching heading id"), "{text}");
+    assert!(!text.contains("no longer in the file"), "{text}");
 }
 
 /// A wargame is a discussion with more participants, and the thing a discussion
@@ -4715,6 +4815,149 @@ fn a_question_carries_its_branches_and_the_answer_picks_one() {
         .write_stdin("Changed my mind.\n")
         .assert()
         .failure();
+
+    // Settlement closes every branch, not only the chosen one.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "one-go",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Position: for\n\nToo late.\n")
+        .assert()
+        .failure();
+
+    let catchup = stdout(repo.arc(&repo.root).args(["journal", "catchup"]));
+    assert!(
+        catchup.contains(&format!("asked {question} [closing]")),
+        "{catchup}"
+    );
+    assert!(
+        catchup.contains(&format!("answered {question} = staged")),
+        "{catchup}"
+    );
+}
+
+#[test]
+fn questions_belong_only_to_discussions() {
+    let repo = Repo::new();
+    let path = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "plain",
+                "--kind",
+                "todo",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Plain work\n"),
+    );
+    let file = PathBuf::from(path.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Not a discussion.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a discussion"));
+}
+
+#[test]
+fn a_closing_answer_requires_every_option_to_be_argued() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "coverage", "# Which branch?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Choose after both branches are explored.\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "a",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Premature.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unargued options"));
+
+    for option in ["a", "b"] {
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "position",
+                &file,
+                "--question",
+                &question,
+                "--option",
+                option,
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("Position: for\n\nExplored.\n")
+            .assert()
+            .success();
+    }
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "a",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Now informed.\n")
+        .assert()
+        .success();
 }
 
 /// An opening question exists so every participant argues from the same
@@ -4767,6 +5010,218 @@ fn an_opening_question_argued_before_it_is_answered_says_so() {
     );
     let text = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
     assert!(text.contains("settle a premise before anyone"), "{text}");
+}
+
+#[test]
+fn a_handwritten_position_also_marks_an_unanswered_opening_question_as_argued() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "manual-opening", "# Which premise?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Settle first.\n")
+        .assert()
+        .success();
+
+    let path = journal_dir(&repo).join(&file);
+    let mut body = fs::read_to_string(&path).unwrap();
+    body.push_str("\n### Position (handwritten)\n\nPosition: for\n\nAlready argued.\n");
+    fs::write(path, body).unwrap();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(
+        summary["questions"][0]["argued_before_answered"], true,
+        "{summary}"
+    );
+}
+
+#[test]
+fn semantically_invalid_answer_events_are_reported_and_ignored() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "invalid-answer", "# Which option?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Choose one.\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+    let dir = journal_dir(&repo);
+    let path = dir.join("events.jsonl");
+    let mut lines = fs::read_to_string(&path).unwrap();
+    let mut event = journal_events(&dir).last().unwrap().clone();
+    event["event"] = serde_json::json!("answer");
+    event["option"] = serde_json::json!("sideways");
+    event.as_object_mut().unwrap().remove("placement");
+    event.as_object_mut().unwrap().remove("options");
+    lines.push_str(&serde_json::to_string(&event).unwrap());
+    lines.push('\n');
+    fs::write(path, lines).unwrap();
+
+    let doctor = stdout(repo.arc(&repo.root).args(["journal", "doctor"]));
+    assert!(doctor.contains("invalid-question-state"), "{doctor}");
+    let emitted = stdout(repo.arc(&repo.root).args(["journal", "events"]));
+    assert!(!emitted.contains("sideways"), "{emitted}");
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["questions"][0]["id"], question, "{summary}");
+    assert!(summary["questions"][0]["answered"].is_null(), "{summary}");
+}
+
+#[test]
+fn visible_question_blocks_without_events_are_reported_and_guard_state() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "interrupted-question", "# Interrupted?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Choose.\n")
+        .assert()
+        .success();
+    let recorded = question_id(&repo, &file);
+    let path = journal_dir(&repo).join(&file);
+    let mut artifact = fs::read_to_string(&path).unwrap();
+    artifact.push_str(&format!(
+        "\n### Question q-interrupted (opening, 2026-01-01T00:00:00Z) — x | y\n\nVisible only.\n\n### Answer {recorded} = a (human, 2026-01-01T00:00:01Z)\n\nVisible only.\n"
+    ));
+    fs::write(&path, artifact).unwrap();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(
+        summary["unrecorded_question_blocks"],
+        serde_json::json!(["q-interrupted"]),
+        "{summary}"
+    );
+    assert_eq!(
+        summary["unrecorded_answer_blocks"],
+        serde_json::json!([recorded.clone()]),
+        "{summary}"
+    );
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("unrecorded-question-block"))
+        .stdout(predicates::str::contains("unrecorded-answer-block"));
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &recorded,
+            "--option",
+            "a",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Do not duplicate.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("visible answer block"));
+}
+
+#[test]
+fn concurrent_answers_settle_a_question_once() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "answer-race", "# Settle once?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("One answer only.\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+    let body = repo.home.join("answer.md");
+    fs::write(&body, "Settled.\n").unwrap();
+    let body = body.to_string_lossy().to_string();
+
+    let mut children = Vec::new();
+    for index in 0..16 {
+        let option = if index % 2 == 0 { "a" } else { "b" };
+        children.push(spawn_arc(
+            &repo,
+            &repo.root,
+            &[
+                "journal",
+                "answer",
+                &file,
+                "--question",
+                &question,
+                "--option",
+                option,
+                "--body-file",
+                &body,
+            ],
+        ));
+    }
+    let successes = children
+        .into_iter()
+        .map(|child| child.wait_with_output().unwrap().status.success())
+        .filter(|success| *success)
+        .count();
+    assert_eq!(successes, 1);
+
+    let answers = journal_events(&journal_dir(&repo))
+        .into_iter()
+        .filter(|event| event["event"] == "answer")
+        .count();
+    assert_eq!(answers, 1);
 }
 
 /// A question needs a real choice, and there is no mid-argument placement: a

@@ -30,13 +30,13 @@ ORIENT (start here, in this order)
   only across projects, which is what `workspace backlog` is for.
 
 SETTLE A QUESTION (before it is work)
-  arc journal note --kind discussion   Open an argument instead of a change.
-  arc journal position <file>          Add an attributed stance; --ref answers one.
-  arc journal question <file>          Ask what only a person can settle.
-  arc journal answer <file>            Choose one of a question's options.
-  arc journal discussion <file>        Stances, who argued, what is unanswered.
-  arc journal consume <file> --outcome done --decision <d>   Close it.
-  arc begin --from-journal <file>      When the decision becomes work.
+  arc journal note <topic> --kind discussion --body-file -
+  arc journal position <file> --body-file -
+  arc journal question <file> --placement opening|closing --option <a> --option <b> --body-file -
+  arc journal answer <file> --question <id> --option <choice> --body-file -
+  arc journal discussion <file>        Read stances, branches, and open questions.
+  arc journal consume <file> --outcome done --decision <decision>
+  arc begin <slug> --from-journal <file>
 
   The ledger records what happened and what is allowed; the journal records
   what people think. A question with more than one defensible answer belongs in
@@ -44,12 +44,16 @@ SETTLE A QUESTION (before it is work)
   harness that argued them, so a decision can be read later by who reached it
   and on what grounds, rather than surviving only in one session's transcript.
 
+  Resolve a discussion as done, or promote the still-open discussion to work —
+  never both. `consume --outcome done` cites a terminal decision; `begin
+  --from-journal` consumes the open discussion as superseded by the change.
+
   A question is the part no model should settle. Placement decides when:
   `--placement opening` before anyone argues, so every participant starts from
   the same premise, or `closing` once the argument is in — never mid-argument,
   which would make you watch a run you delegated. Argue a closing question on
-  both sides first (`position --question <id> --option <opt>`) and the answer
-  picks between explored branches instead of labels.
+  both sides first (`position <file> --body-file - --question <id> --option <opt>`)
+  and the answer picks between explored branches instead of labels.
 
 RUN A CHANGE
   arc begin <slug> --profile <p>     Open a change: branch + worktree + record.
@@ -88,11 +92,11 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   or when nobody distinguishable from the author covers it. Warnings, never
   blockers — one reviewer is a legitimate way to ship.
 
-  If the repository forbids self-approval and no second actor is available,
-  integrate with `arc integrate <change> --audit-debt "<why>"`. That records
-  what review is owed rather than waiving it. The waiver binds to the patchset
-  it was declared for, so new work needs a new declaration — it does not
-  excuse the rest of the change's life.
+  If no independent verdict is available, integrate with
+  `arc integrate <change> --audit-debt "<why>"`. The debt can stand in for an
+  absent verdict or rescue a self-approval rejected by repository policy. It
+  binds to the exact patchset head declared, so new work needs a new
+  declaration — it does not excuse the rest of the change's life.
 
   Coming back to owed work:
 

@@ -1742,13 +1742,13 @@ impl ChangeState {
     /// The debt is what makes integration without an independent verdict
     /// honest rather than silent: it survives closure, and
     /// `arc query --audit-debt` finds it once a reviewer is available again.
-    /// Whether the declared debt still excuses a self-approval.
+    /// Whether the declared debt still authorizes its recorded patchset.
     ///
     /// Only while it names the patchset that is about to ship. Any newer
     /// snapshot leaves the waiver behind exactly as it leaves an approval
     /// behind, so re-declaring is a deliberate act rather than a thing that
     /// happened once and never expired.
-    pub fn audit_debt_waives_current_head(&self) -> bool {
+    pub fn audit_debt_waives_latest_patchset(&self) -> bool {
         let Some(debt) = &self.audit_debt else {
             return false;
         };

@@ -510,8 +510,9 @@ Delegated sessions can bind an execution boundary with
 Implementers may not run `review`, `audit`, `audit-debt`, `resolve`, `hold`,
 `release-hold`, `close`, or `integrate`; reviewers may not run `audit-debt`,
 `close`, or `integrate`; leads retain full access. Declaring audit debt is a
-lead decision because an open declaration changes whether a self-approval can
-gate. Role refusals happen before the command takes a lock or writes an event.
+lead decision because an open declaration can supply an absent verdict or let
+a policy-rejected self-approval gate. Role refusals happen before the command
+takes a lock or writes an event.
 An unset or empty role also retains full access for backward compatibility,
 exactly like `lead`.
 
@@ -991,9 +992,9 @@ otherwise. A reviewer that cannot be told apart from the patchset author
 (neither side recorded `--on-behalf-of`) is reported as unknown attribution
 rather than counted as independent or as self-review.
 
-When `forbid_self_approval` is set and no second actor is reachable, a change
-would otherwise be unshippable. Declaring an **audit debt** resolves that
-without waiving anything:
+When no independent verdict is reachable, declaring an **audit debt** records
+the missing review instead of pretending it happened. It can stand in for an
+absent verdict or rescue a self-approval rejected by `forbid_self_approval`:
 
 ```sh
 arc integrate <change> --audit-debt "no independent reviewer reachable"
@@ -1014,10 +1015,11 @@ that includes integrated changes, `arc doctor` reports it as
 
 Three rules keep the escape hatch from becoming a hole:
 
-- **The waiver binds to a patchset.** A debt declared for `ps-01` stops
-  excusing self-approval the moment `ps-02` is snapshotted, exactly as an
-  approval goes stale. Re-declaring is deliberate. A debt declared after
-  integration carries no patchset and waives nothing.
+- **The waiver binds to the exact patchset head.** A debt declared for `ps-01`
+  can supply its absent verdict or excuse its rejected self-approval, but stops
+  applying the moment `ps-02` is snapshotted, exactly as an approval goes
+  stale. Re-declaring is deliberate. A debt declared after integration carries
+  no patchset and waives nothing.
 - **An approving audit must come from another identity.** Otherwise the change
   ships on a self-approval and then clears its own record. Auditing into
   `changes-requested` is open to anyone — raising problems needs no
