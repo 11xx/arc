@@ -68,6 +68,24 @@ fn importing_a_waiver_only_integration_stamps_store_format_three() {
         .args(["integrate", "waiver-only", "--audit-debt", "review later"])
         .assert()
         .success();
+    let event_dir = source.root.join(".git/arc/changes");
+    let integration_path = fs::read_dir(&event_dir)
+        .unwrap()
+        .flat_map(|change| fs::read_dir(change.unwrap().path().join("events")).unwrap())
+        .map(|event| event.unwrap().path())
+        .find(|path| {
+            serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap())
+                .is_ok_and(|event| event["event_type"] == "change-integrated")
+        })
+        .unwrap();
+    let mut integration: serde_json::Value =
+        serde_json::from_slice(&fs::read(&integration_path).unwrap()).unwrap();
+    integration["authorization"]["verdict_event_id"] = serde_json::Value::Null;
+    fs::write(
+        &integration_path,
+        serde_json::to_vec_pretty(&integration).unwrap(),
+    )
+    .unwrap();
     let source_config_path = source.root.join(".git/arc/config.json");
     let mut source_config: serde_json::Value =
         serde_json::from_slice(&fs::read(&source_config_path).unwrap()).unwrap();

@@ -227,6 +227,10 @@ impl Store {
         self.lock_file("probe.lock", "writability probe", LOCK_TIMEOUT)
     }
 
+    fn lock_format(&self) -> Result<TransitionLock> {
+        self.lock_file("format.lock", "store format", LOCK_TIMEOUT)
+    }
+
     /// Create and return the directory used for probe-only event-path writes.
     pub fn probe_events_dir(&self) -> Result<PathBuf> {
         let dir = self.changes_dir();
@@ -495,9 +499,7 @@ impl Store {
                 if value
                     .and_then(|value| value.get("authorization"))
                     .and_then(serde_json::Value::as_object)
-                    .is_some_and(|authorization| {
-                        !authorization.contains_key("verdict_event_id")
-                    }) =>
+                    .is_some_and(authorization_has_no_verdict) =>
             {
                 Some(3)
             }
@@ -511,6 +513,10 @@ impl Store {
         let Some(introduced_in) = introduced_in else {
             return Ok(());
         };
+        // Different changes have different transition locks, but all of them
+        // update this one monotonic barrier. Serialize the read-modify-rename
+        // so a stale format-2 writer cannot land after a format-3 writer.
+        let _format = self.lock_format()?;
         let config_path = self.root.join("config.json");
         let mut cfg: StoreConfig = serde_json::from_slice(&fs::read(&config_path)?)
             .context("malformed arc config.json")?;
@@ -571,9 +577,7 @@ impl Store {
                     && value
                         .get("authorization")
                         .and_then(serde_json::Value::as_object)
-                        .is_some_and(|authorization| {
-                            !authorization.contains_key("verdict_event_id")
-                        })
+                        .is_some_and(authorization_has_no_verdict)
                 {
                     return Ok(true);
                 }
@@ -850,6 +854,14 @@ impl Store {
     }
 }
 
+fn authorization_has_no_verdict(
+    authorization: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    authorization
+        .get("verdict_event_id")
+        .is_none_or(serde_json::Value::is_null)
+}
+
 /// Whether this build may read a store at all.
 ///
 /// A store written by a newer arc may hold event types this build would skip
@@ -921,4 +933,50 @@ fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
     })();
     let _ = fs::remove_file(&temporary);
     publish
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn test_store(root: &Path) -> Store {
+        Store {
+            root: root.to_path_buf(),
+            repository_id: "repo".into(),
+            require_declared_actor: false,
+        }
+    }
+
+    #[test]
+    fn format_stamp_waits_on_one_store_wide_lock_and_never_downgrades() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StoreConfig {
+            schema_version: 1,
+            repository_id: "repo".into(),
+            created_at: chrono::Utc::now(),
+        };
+        fs::write(
+            dir.path().join("config.json"),
+            serde_json::to_vec_pretty(&config).unwrap(),
+        )
+        .unwrap();
+        let held = test_store(dir.path()).lock_format().unwrap();
+        let root = dir.path().to_path_buf();
+        let (sent, received) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            test_store(&root).stamp_format(Some(3)).unwrap();
+            sent.send(()).unwrap();
+        });
+
+        assert!(received.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(held);
+        received.recv_timeout(Duration::from_secs(1)).unwrap();
+        writer.join().unwrap();
+        test_store(dir.path()).stamp_format(Some(2)).unwrap();
+
+        let stored: StoreConfig =
+            serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap()).unwrap();
+        assert_eq!(stored.schema_version, 3);
+    }
 }
