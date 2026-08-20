@@ -397,8 +397,8 @@ pub struct StatusReport {
     pub blocker_summary: BlockerSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_rejection_reason: Option<String>,
-    /// A declared audit debt is what let a self-approval stand. Only then is
-    /// the waiver an authorization input; otherwise it changed nothing.
+    /// A declared audit debt supplied a missing verdict or let a self-approval
+    /// stand. Only then is the waiver an authorization input.
     #[serde(skip_serializing_if = "is_false")]
     pub approval_waived_by_audit_debt: bool,
     pub next_action: String,
@@ -596,11 +596,9 @@ fn build_report(
         // Self-approval compares effective authors, so a lead snapshotting for
         // an executor and then approving as itself is not self-approval, while
         // approving --on-behalf-of that executor is.
-        // A declared audit debt converts the self-approval refusal into a
-        // recorded obligation. The requirement is not waived — it is carried
-        // forward where a query can find it — which is the only way a
-        // single-operator change can ship at all when no independent reviewer
-        // is reachable.
+        // A declared audit debt converts the absent or policy-rejected review
+        // into a recorded obligation. The requirement is carried forward where
+        // a query can find it when no independent reviewer is reachable.
         let would_reject_self_approval = policy.policy.forbid_self_approval
             && approved_patchset
                 .is_some_and(|patchset| undeclared_or_self(patchset, v.effective_author(), v));
@@ -611,11 +609,11 @@ fn build_report(
         // beside a changes-requested or comment-only verdict authorized
         // nothing, and saying otherwise would report an approval that does
         // not exist.
+        let debt_waives_current_head = head_matches && state.audit_debt_waives_latest_patchset();
         waiver_authorized_approval = v.verdict == Verdict::Approved
             && would_reject_self_approval
-            && state.audit_debt_waives_current_head();
-        let rejected_self_approval =
-            would_reject_self_approval && !state.audit_debt_waives_current_head();
+            && debt_waives_current_head;
+        let rejected_self_approval = would_reject_self_approval && !debt_waives_current_head;
         let valid = v.verdict == Verdict::Approved
             && latest_patchset
                 .as_ref()
@@ -636,8 +634,9 @@ fn build_report(
     // True whenever the waiver is load-bearing: it rescued a self-approval, or
     // it stood in for a verdict that was never recorded. Reporting it only in
     // the first case would let the second merge look independently approved.
+    let debt_waives_current_head = head_matches && state.audit_debt_waives_latest_patchset();
     let approval_waived_by_audit_debt = waiver_authorized_approval
-        || (state.audit_debt_waives_current_head()
+        || (debt_waives_current_head
             && !verdict
                 .as_ref()
                 .map(|v| v.valid_for_current_head)
@@ -657,7 +656,7 @@ fn build_report(
                     .as_deref()
                     .unwrap_or(verdict.actor.as_str());
                 policy.policy.forbid_self_approval
-                    && !state.audit_debt_waives_current_head()
+                    && !debt_waives_current_head
                     && patchset.id == verdict.patchset_id
                     && (patchset.effective_author() == verdict_author
                         || patchset.author_assumed()
@@ -865,8 +864,7 @@ fn build_report(
         .as_ref()
         .map(|v| v.valid_for_current_head)
         .unwrap_or(false);
-    let waiver_satisfies_approval =
-        state.audit_debt_waives_current_head() && !verdict_refuses_this_head;
+    let waiver_satisfies_approval = debt_waives_current_head && !verdict_refuses_this_head;
     if !approval_valid && !waiver_satisfies_approval {
         blockers.push(Blocker::NoValidApproval);
     }

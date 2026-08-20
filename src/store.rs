@@ -92,11 +92,13 @@ impl Store {
                 cfg.repository_id
             }
         };
-        Ok(Store {
+        let store = Store {
             root,
             repository_id,
             require_declared_actor,
-        })
+        };
+        store.repair_missing_format_three_stamp()?;
+        Ok(store)
     }
 
     /// Open an existing store at an exact root directory, read-only. Returns
@@ -471,19 +473,43 @@ impl Store {
     /// Stamping at that moment, rather than on every open, means a build that
     /// only read a ledger never locks its owner out of it.
     fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
-        self.stamp_format_for_event_type(match payload {
-            Payload::ChangeIntegrated { .. } => Some("change-integrated"),
-            Payload::IntegrationAsserted { .. } => Some("integration-asserted"),
+        let introduced_in = match payload {
+            Payload::ChangeIntegrated {
+                authorization: Some(authorization),
+                ..
+            } if authorization.verdict_event_id.is_none() => Some(3),
+            Payload::ChangeIntegrated { .. } | Payload::IntegrationAsserted { .. } => Some(2),
             _ => None,
-        })
+        };
+        self.stamp_format(introduced_in)
     }
 
-    /// The same stamp, decided from an event type rather than a typed payload,
-    /// so the import path and the record path cannot disagree.
-    fn stamp_format_for_event_type(&self, event_type: Option<&str>) -> Result<()> {
-        let introduced_in = match event_type {
-            Some("change-integrated") | Some("integration-asserted") => 2,
-            _ => return Ok(()),
+    /// The same stamp, decided from raw imported JSON, so the import path and
+    /// the typed record path cannot disagree about a wire-format addition.
+    fn stamp_format_for_value(&self, value: Option<&serde_json::Value>) -> Result<()> {
+        let introduced_in = match value
+            .and_then(|value| value.get("event_type"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("change-integrated")
+                if value
+                    .and_then(|value| value.get("authorization"))
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|authorization| {
+                        !authorization.contains_key("verdict_event_id")
+                    }) =>
+            {
+                Some(3)
+            }
+            Some("change-integrated") | Some("integration-asserted") => Some(2),
+            _ => None,
+        };
+        self.stamp_format(introduced_in)
+    }
+
+    fn stamp_format(&self, introduced_in: Option<u32>) -> Result<()> {
+        let Some(introduced_in) = introduced_in else {
+            return Ok(());
         };
         let config_path = self.root.join("config.json");
         let mut cfg: StoreConfig = serde_json::from_slice(&fs::read(&config_path)?)
@@ -497,6 +523,63 @@ impl Store {
         fs::write(&temporary, &body)?;
         fs::rename(&temporary, &config_path)
             .with_context(|| format!("cannot stamp store format in {}", config_path.display()))
+    }
+
+    /// Repair stores written during the format-3 omission window. Those
+    /// ledgers already contain waiver-only integration events that a format-2
+    /// reader cannot decode, so restoring the barrier records an existing fact
+    /// rather than upgrading an otherwise old-readable store on mere access.
+    fn repair_missing_format_three_stamp(&self) -> Result<()> {
+        let config_path = self.root.join("config.json");
+        let cfg: StoreConfig = serde_json::from_slice(&fs::read(&config_path)?)
+            .context("malformed arc config.json")?;
+        if cfg.schema_version >= 3 || !self.contains_waiver_only_integration()? {
+            return Ok(());
+        }
+        self.stamp_format(Some(3))
+    }
+
+    fn contains_waiver_only_integration(&self) -> Result<bool> {
+        let changes = self.changes_dir();
+        let entries = match fs::read_dir(&changes) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", changes.display()))
+            }
+        };
+        for change in entries {
+            let events = change?.path().join("events");
+            let event_entries = match fs::read_dir(&events) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| format!("cannot read {}", events.display()))
+                }
+            };
+            for event in event_entries {
+                let path = event?.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                let Ok(value) = serde_json::from_slice::<serde_json::Value>(&fs::read(&path)?)
+                else {
+                    continue;
+                };
+                if value.get("event_type").and_then(serde_json::Value::as_str)
+                    == Some("change-integrated")
+                    && value
+                        .get("authorization")
+                        .and_then(serde_json::Value::as_object)
+                        .is_some_and(|authorization| {
+                            !authorization.contains_key("verdict_event_id")
+                        })
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Under `require_declared_actor`, refuse to record an event whose author
@@ -757,13 +840,8 @@ impl Store {
         // writes into is the same one an older build may reopen. A bundle
         // carrying an integration event must stamp the format exactly as a
         // locally recorded one does.
-        self.stamp_format_for_event_type(
-            serde_json::from_slice::<serde_json::Value>(bytes)
-                .ok()
-                .as_ref()
-                .and_then(|value| value.get("event_type"))
-                .and_then(serde_json::Value::as_str),
-        )?;
+        let value = serde_json::from_slice::<serde_json::Value>(bytes).ok();
+        self.stamp_format_for_value(value.as_ref())?;
         let dir = self.events_dir(change_id);
         create_private_dir_all(&dir)?;
         let path = dir.join(format!("{event_id}.json"));

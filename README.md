@@ -510,8 +510,9 @@ Delegated sessions can bind an execution boundary with
 Implementers may not run `review`, `audit`, `audit-debt`, `resolve`, `hold`,
 `release-hold`, `close`, or `integrate`; reviewers may not run `audit-debt`,
 `close`, or `integrate`; leads retain full access. Declaring audit debt is a
-lead decision because an open declaration changes whether a self-approval can
-gate. Role refusals happen before the command takes a lock or writes an event.
+lead decision because an open declaration can supply an absent verdict or let
+a policy-rejected self-approval gate. Role refusals happen before the command
+takes a lock or writes an event.
 An unset or empty role also retains full access for backward compatibility,
 exactly like `lead`.
 

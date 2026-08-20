@@ -52,6 +52,76 @@ fn importing_an_integration_stamps_the_destination_store_format() {
 }
 
 #[test]
+fn importing_a_waiver_only_integration_stamps_store_format_three() {
+    let source = Repo::new();
+    stdout(source.arc(&source.root).args(["begin", "waiver-only"]));
+    let worktree = source.home.join(".worktrees/repo-waiver-only");
+    source.commit(
+        &worktree,
+        "waiver.txt",
+        "review later\n",
+        "feat: waiver only",
+    );
+    stdout(source.arc(&worktree).args(["snapshot", "waiver-only"]));
+    source
+        .arc(&source.root)
+        .args(["integrate", "waiver-only", "--audit-debt", "review later"])
+        .assert()
+        .success();
+    let source_config_path = source.root.join(".git/arc/config.json");
+    let mut source_config: serde_json::Value =
+        serde_json::from_slice(&fs::read(&source_config_path).unwrap()).unwrap();
+    source_config["schema_version"] = serde_json::json!(2);
+    fs::write(
+        &source_config_path,
+        serde_json::to_vec_pretty(&source_config).unwrap(),
+    )
+    .unwrap();
+    source
+        .arc(&source.root)
+        .args(["status", "waiver-only", "--json"])
+        .assert()
+        .success();
+    let repaired: serde_json::Value =
+        serde_json::from_slice(&fs::read(&source_config_path).unwrap()).unwrap();
+    assert_eq!(repaired["schema_version"], 3, "{repaired}");
+
+    let bundle = source.home.join("waiver-only.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            "waiver-only",
+            "--output",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(worktree.is_dir());
+
+    let destination = Repo::new();
+    stdout(
+        destination
+            .arc(&destination.root)
+            .args(["begin", "seed", "--no-worktree"]),
+    );
+    let config_path = destination.root.join(".git/arc/config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    config["schema_version"] = serde_json::json!(2);
+    fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+
+    destination
+        .arc(&destination.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    assert_eq!(config["schema_version"], 3, "{config}");
+}
+
+#[test]
 fn a_bundle_from_a_newer_arc_is_refused_rather_than_partially_imported() {
     let repo = Repo::new();
     stdout(
