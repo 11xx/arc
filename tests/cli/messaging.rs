@@ -320,7 +320,7 @@ fn inbox_buckets_classify_open_changes() {
     age_event(&repo, &stalled_id, "claim-set", 120);
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/3");
+    assert_eq!(inbox["schema"], "arc-inbox/4");
     assert!(bucket_has(&inbox, "needs-review", &review_id));
     assert!(bucket_has(&inbox, "changes-requested", &cr_id));
     assert!(bucket_has(&inbox, "ready-to-integrate", &ready_id));
@@ -565,4 +565,108 @@ fn catchup_reports_ledger_and_journal_together() {
     let text = stdout(repo.arc(&repo.root).args(["catchup"]));
     assert!(text.contains(&change_id), "{text}");
     assert!(text.contains("later (1):"), "{text}");
+}
+
+/// The bucket predicates are independent, so a state none of them anticipates
+/// lands in no bucket at all and the queue reports empty while work waits. A
+/// comment-only verdict on the newest patchset is exactly such a state: it is
+/// not an approval, so the change is not ready; a verdict exists covering the
+/// head, so review is not owed; and no finding blocks. The catch-all keeps it
+/// visible and names why.
+#[test]
+fn comment_only_verdict_leaves_an_open_change_visible_and_reasoned() {
+    let repo = Repo::new();
+    let (change_id, ..) = change_with_patchset(&repo, "inbox-comment-only");
+    repo.arc(&repo.root)
+        .args(["review", "inbox-comment-only", "--verdict", "comment-only"])
+        .assert()
+        .success();
+
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    assert!(
+        !bucket_has(&inbox, "needs-review", &change_id),
+        "a verdict covering the head means review is not owed"
+    );
+    assert!(
+        !bucket_has(&inbox, "ready-to-integrate", &change_id),
+        "comment-only is not an approval"
+    );
+    assert!(
+        bucket_has(&inbox, "unclassified", &change_id),
+        "an open change no bucket claims must still be reachable from the inbox"
+    );
+    let row = inbox["unclassified"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["change_id"] == change_id)
+        .unwrap();
+    assert_eq!(row["reason"], "no-valid-approval");
+
+    // catchup shares the derivation, so it must surface the change too.
+    let catchup = repo.arc(&repo.root).args(["catchup"]).assert().success();
+    let text = String::from_utf8_lossy(&catchup.get_output().stdout).to_string();
+    assert!(
+        text.contains("unclassified") && text.contains(&change_id),
+        "catchup reported no open changes while one waited: {text}"
+    );
+}
+
+/// A property of the derivation rather than of any one bucket: no per-bucket
+/// test can catch a change that falls between them. Every open change must be
+/// reachable from some bucket, whatever combination of states it is in.
+#[test]
+fn every_open_change_appears_in_some_inbox_bucket() {
+    let repo = Repo::new();
+    let mut expected = Vec::new();
+
+    let (comment_only, ..) = change_with_patchset(&repo, "cover-comment-only");
+    repo.arc(&repo.root)
+        .args(["review", "cover-comment-only", "--verdict", "comment-only"])
+        .assert()
+        .success();
+    expected.push(comment_only);
+
+    expected.push(begin_change(&repo, "cover-bare", None));
+
+    let (reviewed, ..) = change_with_patchset(&repo, "cover-approved");
+    repo.arc(&repo.root)
+        .args(["review", "cover-approved", "--verdict", "approved"])
+        .assert()
+        .success();
+    expected.push(reviewed);
+
+    let (requested, ..) = change_with_patchset(&repo, "cover-requested");
+    repo.arc(&repo.root)
+        .args([
+            "review",
+            "cover-requested",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+        ])
+        .assert()
+        .success();
+    expected.push(requested);
+
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    let buckets = [
+        "needs-review",
+        "changes-requested",
+        "ready-to-integrate",
+        "blocked",
+        "held",
+        "in-progress",
+        "stalled",
+        "unclassified",
+    ];
+    for change_id in &expected {
+        assert!(
+            buckets
+                .iter()
+                .any(|bucket| bucket_has(&inbox, bucket, change_id)),
+            "open change {change_id} is in no inbox bucket; the buckets no longer cover the open set"
+        );
+    }
 }

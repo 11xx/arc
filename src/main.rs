@@ -380,7 +380,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Lead-facing queue rollup: open changes, active claims, and outstanding audit debt (arc-inbox/3 schema)
+    /// Lead-facing queue rollup: open changes, active claims, and outstanding audit debt (arc-inbox/4 schema)
     Inbox {
         /// Restrict to changes assigned to this harness
         #[arg(long = "assigned-to")]
