@@ -1313,3 +1313,28 @@ fn an_undeclared_danger_list_keeps_the_uniform_gate() {
     assert_eq!(status["danger"]["dangerous"], true);
     assert_eq!(status["verdict"]["valid_for_current_head"], false);
 }
+
+/// A declared literal that names nothing reads as coverage while leaving the
+/// surface on a self-verdict. A rename is enough to cause it, and nothing
+/// else in the tool would ever say so.
+#[test]
+fn doctor_reports_a_declared_danger_path_that_matches_nothing() {
+    let repo = repo_with_danger("\"gone.rs\", \"*.missing\"");
+    let out = repo
+        .arc(&repo.root)
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let problems = report["problems"].as_array().unwrap();
+    let hits: Vec<_> = problems
+        .iter()
+        .filter(|p| p["code"] == "danger-path-matches-nothing")
+        .collect();
+    assert_eq!(hits.len(), 1, "only literals are checked: {problems:?}");
+    assert!(
+        hits[0]["detail"].as_str().unwrap().starts_with("gone.rs"),
+        "{:?}",
+        hits[0]
+    );
+}

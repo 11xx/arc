@@ -59,7 +59,9 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   requirement to declared surfaces, so a self-recorded verdict satisfies the
   gate elsewhere; `arc begin --dangerous` raises one change regardless, never
   lowers it, and `arc check` names the rule that fired. An undeclared list
-  keeps the previous uniform gate (`proportional-review-gate`).
+  keeps the previous uniform gate. `arc doctor` reports a declared literal
+  path that matches nothing, which would otherwise read as coverage while
+  leaving that surface on a self-verdict (`proportional-review-gate`).
 
 ### Fixed
 

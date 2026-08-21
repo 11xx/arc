@@ -58,8 +58,10 @@ impl Danger {
 /// Minimal path glob: `**` spans separators, `*` stops at one, everything
 /// else is literal. A trailing `/` matches everything beneath a directory.
 pub fn glob_match(pattern: &str, path: &str) -> bool {
+    // A trailing `/` names a subtree, which is `/**` — spelled out rather than
+    // matched by prefix so wildcards keep working ahead of it.
     if let Some(prefix) = pattern.strip_suffix('/') {
-        return path.starts_with(prefix) && path[prefix.len()..].starts_with('/');
+        return matches_from(format!("{prefix}/**").as_bytes(), path.as_bytes());
     }
     matches_from(pattern.as_bytes(), path.as_bytes())
 }
@@ -69,7 +71,15 @@ fn matches_from(pattern: &[u8], path: &[u8]) -> bool {
         None => path.is_empty(),
         Some(b'*') if pattern.get(1) == Some(&b'*') => {
             let rest = &pattern[2..];
-            // `**` consumes any run, separators included.
+            // `**/` also matches zero directories, so `src/**/*.rs` covers
+            // `src/mod.rs`. Without this a pattern silently misses direct
+            // children, and a miss here lowers a gate rather than raising it.
+            if let Some(after) = rest.strip_prefix(b"/") {
+                if matches_from(after, path) {
+                    return true;
+                }
+            }
+            // `**` otherwise consumes any run, separators included.
             (0..=path.len()).any(|split| matches_from(rest, &path[split..]))
         }
         Some(b'*') => {
@@ -126,6 +136,19 @@ pub fn load(repo_toplevel: &Path) -> Result<PolicyFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn double_star_slash_matches_zero_directories() {
+        // gitignore semantics: `**/` spans zero or more directories, so a
+        // direct child matches. A miss here would silently lower a gate.
+        assert!(glob_match("src/**/*.rs", "src/mod.rs"));
+        assert!(glob_match("src/**/*.rs", "src/commands/mod.rs"));
+        assert!(glob_match("src/**/*.rs", "src/a/b/c.rs"));
+        assert!(!glob_match("src/**/*.rs", "src/mod.txt"));
+        // A trailing slash keeps wildcards working ahead of it.
+        assert!(glob_match("src/*/", "src/commands/mod.rs"));
+        assert!(!glob_match("src/*/", "src/mod.rs"));
+    }
 
     #[test]
     fn globs_match_segments_and_trees() {

@@ -1,6 +1,8 @@
 [policy]
 forbid_self_approval = true
-require_declared_actor = true
+
+[provenance]
+git_identity = "shared"
 
 # Surfaces where a verdict must come from somebody other than the author.
 # Everywhere else a self-recorded verdict satisfies the gate.
@@ -9,6 +11,10 @@ require_declared_actor = true
 # most freely on the changes that needed it least — which destroys the signal
 # the audit-debt queue exists to carry. These are the surfaces where a defect
 # is unrecoverable, self-concealing, or lands in history other work depends on.
+#
+# A literal path that names nothing is worse than no entry at all: it reads as
+# coverage while leaving the surface on a self-verdict. `arc doctor` reports
+# declared literals that match no file.
 [danger]
 paths = [
   # Replay and store format: a defect corrupts an append-only history silently.
@@ -23,10 +29,13 @@ paths = [
   "src/gates.rs",
   "src/status.rs",
   "src/inbox.rs",
+  "src/commands/review.rs",
+  "src/commands/audit.rs",
   # Integrate and merge: the only path that writes to a shared branch.
   "src/gitio.rs",
   "src/chain.rs",
-  "src/commands/integrate.rs",
+  "src/commands/gatekeeping.rs",
+  "src/commands/chain.rs",
   # Output schemas, and this file, which decides all of the above.
   "src/render.rs",
   "src/config.rs",
