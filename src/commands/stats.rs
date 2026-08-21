@@ -943,6 +943,7 @@ mod tests {
                 "1",
                 0,
                 Payload::ChangeOpened {
+                    dangerous: false,
                     slug: "feat".into(),
                     title: "t".into(),
                     profile: "local".into(),

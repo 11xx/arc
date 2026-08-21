@@ -1,5 +1,34 @@
 [policy]
 forbid_self_approval = true
+require_declared_actor = true
 
-[provenance]
-git_identity = "shared"
+# Surfaces where a verdict must come from somebody other than the author.
+# Everywhere else a self-recorded verdict satisfies the gate.
+#
+# A uniform gate over non-uniform risk produces a uniform workaround, spent
+# most freely on the changes that needed it least — which destroys the signal
+# the audit-debt queue exists to carry. These are the surfaces where a defect
+# is unrecoverable, self-concealing, or lands in history other work depends on.
+[danger]
+paths = [
+  # Replay and store format: a defect corrupts an append-only history silently.
+  "src/store.rs",
+  "src/state.rs",
+  "src/model.rs",
+  "src/session_store.rs",
+  "src/bundle.rs",
+  "src/rewrite.rs",
+  # Verdict, gate, and check logic: a broken gate reports green.
+  "src/policy.rs",
+  "src/gates.rs",
+  "src/status.rs",
+  "src/inbox.rs",
+  # Integrate and merge: the only path that writes to a shared branch.
+  "src/gitio.rs",
+  "src/chain.rs",
+  "src/commands/integrate.rs",
+  # Output schemas, and this file, which decides all of the above.
+  "src/render.rs",
+  "src/config.rs",
+  ".arc/policy.toml",
+]

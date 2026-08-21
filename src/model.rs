@@ -122,6 +122,10 @@ pub enum Payload {
         /// Additive: absent for changes not begun via `--from-journal`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         journal_ref: Option<String>,
+        /// Raised at `begin` to demand an independent verdict whatever the
+        /// change turns out to touch. One-way: nothing lowers it later.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dangerous: bool,
     },
     MetadataUpdated {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

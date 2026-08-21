@@ -53,6 +53,14 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   and `begin --from-journal` seeds an initial brief threaded from the source
   artifact (`journal-discussion-derived`).
 
+### Added
+
+- `[danger] paths` in `.arc/policy.toml` scopes the independent-review
+  requirement to declared surfaces, so a self-recorded verdict satisfies the
+  gate elsewhere; `arc begin --dangerous` raises one change regardless, never
+  lowers it, and `arc check` names the rule that fired. An undeclared list
+  keeps the previous uniform gate (`proportional-review-gate`).
+
 ### Fixed
 
 - Git hooks exit successfully without changing commit messages when `arc` is

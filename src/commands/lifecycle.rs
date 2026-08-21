@@ -17,6 +17,7 @@ pub fn begin(
     blocked_by: Vec<String>,
     tags: Vec<String>,
     from_journal: Option<String>,
+    dangerous: bool,
 ) -> Result<()> {
     ids::validate_slug(slug)?;
     // Promotion is one journal transition from the open preflight through the
@@ -135,6 +136,7 @@ pub fn begin(
             blocked_by,
             tags,
             journal_ref: from_journal.clone(),
+            dangerous,
         },
     );
     store.append_event(&ev)?;

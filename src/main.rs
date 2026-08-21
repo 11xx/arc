@@ -178,6 +178,10 @@ enum Cmd {
         /// Open from an actionable journal artifact, consuming it
         #[arg(long = "from-journal")]
         from_journal: Option<String>,
+        /// Require an independent verdict whatever this change turns out to
+        /// touch. One-way: nothing lowers it afterwards
+        #[arg(long)]
+        dangerous: bool,
     },
     /// List changes
     List {
@@ -1217,6 +1221,7 @@ fn run(cli: Cli) -> Result<i32> {
             blocked_by,
             tag,
             from_journal,
+            dangerous,
         } => {
             commands::begin(
                 &ctx,
@@ -1232,6 +1237,7 @@ fn run(cli: Cli) -> Result<i32> {
                 blocked_by,
                 tag,
                 from_journal,
+                dangerous,
             )?;
             Ok(0)
         }

@@ -92,6 +92,15 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   or when nobody distinguishable from the author covers it. Warnings, never
   blockers — one reviewer is a legitimate way to ship.
 
+  Which changes need one is the project's call, declared in
+  `.arc/policy.toml` under `[danger] paths`. A change touching a declared
+  path needs a verdict from somebody other than its author; elsewhere a
+  self-recorded verdict satisfies the gate. Declare nothing and the gate stays
+  uniform, exactly as before. `arc begin --dangerous` raises a single change
+  whatever it turns out to touch, and nothing lowers it afterwards — a project
+  decides its own gate in advance, rather than a change deciding it under
+  pressure to ship. `arc check` names the rule that fired.
+
   If no independent verdict is available, integrate with
   `arc integrate <change> --audit-debt "<why>"`. The debt can stand in for an
   absent verdict or rescue a self-approval rejected by repository policy. It

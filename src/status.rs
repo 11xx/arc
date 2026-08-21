@@ -402,6 +402,9 @@ pub struct StatusReport {
     #[serde(skip_serializing_if = "is_false")]
     pub approval_waived_by_audit_debt: bool,
     pub next_action: String,
+    /// Whether this change is in scope for the independent-review rule, and
+    /// which declaration put it there.
+    pub danger: DangerScope,
     pub ready_reason: String,
     pub ready_to_integrate: bool,
     /// Backward-compatible spelling retained from arc-status/1.
@@ -475,6 +478,114 @@ fn undeclared_or_self(
 
 /// Build the status report: replayed ledger state joined with live Git
 /// facts, dependency state, and the declared gate policy.
+/// Whether a change touches a surface the project declared dangerous, and
+/// therefore whether its verdict must come from somebody other than its
+/// author.
+///
+/// A change may raise itself to dangerous and may never lower itself below
+/// what config declares: escalation is a judgement anyone may make, while
+/// de-escalation would let the party under shipping pressure decide its own
+/// gate, which is the pressure the declaration exists to resist.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DangerScope {
+    /// Whether an independent verdict is required for this change.
+    pub dangerous: bool,
+    /// Why, in a form `arc check` can name.
+    pub rule: DangerRule,
+    /// The touched paths that matched a declared pattern.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DangerRule {
+    /// The project declared no dangerous surfaces, so the gate is uniform.
+    NotDeclared,
+    /// Touched paths matched a declared pattern.
+    DeclaredPath,
+    /// The change raised itself at `begin`.
+    Escalated,
+    /// Nothing the project declared was touched.
+    Untouched,
+    /// The touched set could not be established; assumed dangerous.
+    Undetermined,
+}
+
+impl DangerScope {
+    /// Independent review is owed when the repository forbids self-approval
+    /// *and* this change is in scope for that rule.
+    pub fn requires_independent_review(&self, policy: &PolicyFile) -> bool {
+        policy.policy.forbid_self_approval && self.dangerous
+    }
+
+    /// One line naming why the gate landed where it did.
+    pub fn explain(&self) -> String {
+        match self.rule {
+            DangerRule::NotDeclared => {
+                "the project declares no dangerous surfaces, so every change needs one".into()
+            }
+            DangerRule::Escalated => "the change was opened --dangerous".into(),
+            DangerRule::DeclaredPath => {
+                format!("it touches declared surfaces: {}", self.paths.join(", "))
+            }
+            DangerRule::Untouched => "it touches no declared dangerous surface".into(),
+            DangerRule::Undetermined => {
+                "the touched paths could not be established, so it is assumed dangerous".into()
+            }
+        }
+    }
+
+    /// No working tree to diff. An unknown surface is the one case where
+    /// guessing wrong must not lower the bar.
+    pub fn undetermined(state: &ChangeState) -> Self {
+        DangerScope {
+            dangerous: true,
+            rule: if state.dangerous {
+                DangerRule::Escalated
+            } else {
+                DangerRule::Undetermined
+            },
+            paths: Vec::new(),
+        }
+    }
+
+    fn resolve(state: &ChangeState, policy: &PolicyFile, cwd: &Path, head: Option<&str>) -> Self {
+        if state.dangerous {
+            return DangerScope {
+                dangerous: true,
+                rule: DangerRule::Escalated,
+                paths: Vec::new(),
+            };
+        }
+        // An undeclared list keeps the previous uniform behaviour, so
+        // adopting the feature is opt-in rather than a silent loosening.
+        if !policy.danger.is_declared() {
+            return DangerScope {
+                dangerous: true,
+                rule: DangerRule::NotDeclared,
+                paths: Vec::new(),
+            };
+        }
+        let Some(head) = head else {
+            return DangerScope::undetermined(state);
+        };
+        let Ok(changed) = gitio::changed_paths(cwd, &state.base, head) else {
+            return DangerScope::undetermined(state);
+        };
+        let paths = policy.danger.matching(changed.iter().map(String::as_str));
+        DangerScope {
+            dangerous: !paths.is_empty(),
+            rule: if paths.is_empty() {
+                DangerRule::Untouched
+            } else {
+                DangerRule::DeclaredPath
+            },
+            paths,
+        }
+    }
+}
+
 pub fn build(
     state: &ChangeState,
     cwd: &Path,
@@ -520,6 +631,7 @@ pub fn build_at(
             .map(|worktree| gitio::is_clean(worktree).map(|clean| !clean))
             .transpose()?
     };
+    let danger = DangerScope::resolve(state, policy, cwd, current_head.as_deref());
     build_report(
         state,
         gates,
@@ -530,6 +642,7 @@ pub fn build_at(
         current_head,
         needs_rebase,
         worktree_dirty,
+        danger,
     )
 }
 
@@ -557,6 +670,10 @@ pub fn build_as_of(
         current_head,
         false,
         None,
+        // Without a working tree there is nothing to diff, so the scope
+        // cannot be established. Assume dangerous: an unknown surface is
+        // the one case where guessing wrong must not lower the bar.
+        DangerScope::undetermined(state),
     )
 }
 
@@ -571,6 +688,7 @@ fn build_report(
     current_head: Option<String>,
     needs_rebase: bool,
     worktree_dirty: Option<bool>,
+    danger: DangerScope,
 ) -> Result<StatusReport> {
     let provenance_mode = policy.provenance.git_identity;
     let provenance_check_enabled = provenance_mode == crate::config::GitIdentityMode::PerActor;
@@ -599,7 +717,7 @@ fn build_report(
         // A declared audit debt converts the absent or policy-rejected review
         // into a recorded obligation. The requirement is carried forward where
         // a query can find it when no independent reviewer is reachable.
-        let would_reject_self_approval = policy.policy.forbid_self_approval
+        let would_reject_self_approval = danger.requires_independent_review(policy)
             && approved_patchset
                 .is_some_and(|patchset| undeclared_or_self(patchset, v.effective_author(), v));
         // The waiver only authorizes anything when it is what let the approval
@@ -655,7 +773,7 @@ fn build_report(
                     .on_behalf_of
                     .as_deref()
                     .unwrap_or(verdict.actor.as_str());
-                policy.policy.forbid_self_approval
+                danger.requires_independent_review(policy)
                     && !debt_waives_current_head
                     && patchset.id == verdict.patchset_id
                     && (patchset.effective_author() == verdict_author
@@ -681,7 +799,7 @@ fn build_report(
     });
 
     let review_map = reviewer_coverage(state);
-    let advisories = advisories(&review_map, latest_patchset.as_ref(), state);
+    let advisories = advisories(&review_map, latest_patchset.as_ref(), state, &danger);
 
     let findings: Vec<FindingSummary> = state
         .findings
@@ -1015,6 +1133,7 @@ fn build_report(
         approval_rejection_reason,
         approval_waived_by_audit_debt,
         next_action,
+        danger,
         ready_reason,
         ready_to_integrate: ready,
         integrate_ready: ready,
@@ -1231,6 +1350,7 @@ pub fn advisories(
     review_map: &[ReviewerCoverage],
     final_patchset: Option<&crate::state::Patchset>,
     state: &ChangeState,
+    danger: &DangerScope,
 ) -> Vec<Advisory> {
     let Some(final_patchset) = final_patchset else {
         return Vec::new();
@@ -1250,7 +1370,17 @@ pub fn advisories(
     let independent = review_map
         .iter()
         .any(|row| row.covers_final && !row.is_author && !row.attribution_unknown);
-    if !independent {
+    if !independent && !danger.dangerous {
+        warnings.push(Advisory {
+            code: "self-verdict-permitted",
+            detail: format!(
+                "no independent reviewer covers {}, and none is required: {}",
+                final_patchset.id,
+                danger.explain()
+            ),
+        });
+    }
+    if !independent && danger.dangerous {
         let unknown = review_map
             .iter()
             .any(|row| row.covers_final && row.attribution_unknown);

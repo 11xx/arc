@@ -166,6 +166,17 @@ pub fn current_branch(cwd: &Path) -> Result<Option<String>> {
     }
 }
 
+/// Repository-relative paths a change touched between two revisions.
+pub fn changed_paths(cwd: &Path, base: &str, head: &str) -> Result<Vec<String>> {
+    let out = git(cwd, &["diff", "--name-only", &format!("{base}...{head}")])?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 pub fn merge_base(cwd: &Path, a: &str, b: &str) -> Result<String> {
     git(cwd, &["merge-base", a, b])
 }
