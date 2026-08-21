@@ -10,6 +10,17 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Audit debt is discharged by any independent verdict on the revision that
+  shipped, recorded after the debt was declared, rather than only by
+  `arc audit`. Reviewing before merging no longer forces a choice between a
+  standing debt for a review that happened and a post-integration audit that
+  did not (`audit-debt-discharge`).
+- Reviewer independence is judged against the patchset the reviewer read
+  rather than the newest one, so a later snapshot by another author no longer
+  relabels an earlier self-review as independent (`audit-debt-discharge`).
+
 ### Added
 
 - `arc inbox` and `arc catchup` carry an `unclassified` bucket for open changes

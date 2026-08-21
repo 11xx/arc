@@ -1298,15 +1298,24 @@ pub fn reviewer_coverage(state: &ChangeState) -> Vec<ReviewerCoverage> {
     let mut rows: Vec<ReviewerCoverage> = tallies
         .into_iter()
         .map(|(reviewer, tally)| {
+            // Independence is a fact about the patchset this reviewer
+            // actually read, not about whatever happens to be newest now.
+            // Judging it against the final patchset lets a later snapshot by
+            // a different author retroactively make a reviewer independent,
+            // or a self-review look independent once someone else pushes.
+            let reviewed = state
+                .patchsets
+                .iter()
+                .find(|patchset| patchset.id == tally.best_id);
             let is_author =
-                final_patchset.is_some_and(|patchset| patchset.effective_author() == reviewer);
+                reviewed.is_some_and(|patchset| patchset.effective_author() == reviewer);
             ReviewerCoverage {
                 covers_final: final_patchset.is_some_and(|patchset| patchset.id == tally.best_id),
                 // Indistinguishable rather than independent: the identity
                 // matches the snapshot's and neither side declared a subject.
                 attribution_unknown: is_author
                     && !tally.attributed
-                    && final_patchset.is_some_and(|patchset| patchset.on_behalf_of.is_none()),
+                    && reviewed.is_some_and(|patchset| patchset.on_behalf_of.is_none()),
                 is_author,
                 reviewer,
                 last_patchset: tally.best_id,

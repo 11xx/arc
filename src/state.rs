@@ -1766,7 +1766,7 @@ impl ChangeState {
             .is_some_and(|patchset| patchset.id == declared_for)
     }
 
-    /// A review this change owes and nobody has recorded.
+    /// A review this change owes and nobody has recorded, by any route.
     ///
     /// Scoped to integrated changes because that is when the obligation is
     /// actionable: an audit reviews a revision that shipped, so a debt on an
@@ -1783,10 +1783,48 @@ impl ChangeState {
         {
             return false;
         }
-        !self
+        !self.audit_debt_discharged(debt)
+    }
+
+    /// Any independent verdict on the revision that shipped, recorded after
+    /// the debt was declared, discharges it — whichever command emitted it.
+    ///
+    /// The debt records that no verdict existed, not that one particular
+    /// command must supply it. Requiring `arc audit` specifically left an
+    /// operator who reviewed *before* merging with no honest move: leave a
+    /// debt standing for a review that happened, or file a post-integration
+    /// audit that did not. The verdict's outcome, and anything it found, live
+    /// in the verdict and its findings rather than in the debt.
+    fn audit_debt_discharged(&self, debt: &AuditDebt) -> bool {
+        if self
             .audit_verdicts
             .iter()
             .any(|audit| audit.created_at >= debt.declared_at)
+        {
+            return true;
+        }
+        // Only a verdict on the revision that actually shipped counts; a
+        // verdict on an earlier draft judged something else.
+        let Some(shipped) = self
+            .closure
+            .as_ref()
+            .and_then(|closure| closure.source_patchset_id.as_deref())
+        else {
+            return false;
+        };
+        let Some(author) = self
+            .patchsets
+            .iter()
+            .find(|patchset| patchset.id == shipped)
+            .map(Patchset::effective_author)
+        else {
+            return false;
+        };
+        self.verdicts.iter().any(|verdict| {
+            verdict.created_at >= debt.declared_at
+                && verdict.patchset_id == shipped
+                && verdict.effective_author() != author
+        })
     }
 }
 

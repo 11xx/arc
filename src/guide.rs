@@ -98,6 +98,10 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   or when nobody distinguishable from the author covers it. Warnings, never
   blockers — one reviewer is a legitimate way to ship.
 
+  Independence is judged against the patchset a reviewer actually read, not
+  against whatever is newest. Otherwise a later snapshot by somebody else
+  would retroactively turn a self-review into an independent one.
+
   Which changes need one is the project's call, declared in
   `.arc/policy.toml` under `[danger] paths`. A change touching a declared
   path needs a verdict from somebody other than its author; elsewhere a
@@ -119,8 +123,14 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
     arc catchup                     the same, with each reason
     arc query --audit-debt          change IDs alone, for scripting
     arc diff <change> --integrated  the exact range that landed, for an audit
-    arc audit <change> --verdict <v>          discharge it
+    arc audit <change> --verdict <v>          record a post-integration review
     arc findings <change> --audit             what an audit raised
+
+  Any independent verdict on the revision that shipped, recorded after the
+  debt was declared, discharges it — whether it came from `arc review` before
+  the merge or `arc audit` after. The debt records that no verdict existed,
+  not that one command must supply it. What the verdict concluded lives in
+  the verdict and its findings; discharging the debt does not mean approval.
 
   An audit is a separate event from the verdict that shipped, so attaching one
   never rewrites what shipped with what review. An approving audit must come
