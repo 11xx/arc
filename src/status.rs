@@ -550,7 +550,12 @@ impl DangerScope {
         }
     }
 
-    fn resolve(state: &ChangeState, policy: &PolicyFile, cwd: &Path, head: Option<&str>) -> Self {
+    pub(crate) fn resolve(
+        state: &ChangeState,
+        policy: &PolicyFile,
+        cwd: &Path,
+        head: Option<&str>,
+    ) -> Self {
         if state.dangerous {
             return DangerScope {
                 dangerous: true,
@@ -649,6 +654,12 @@ pub fn build_at(
 /// Build a report from a state replayed to a past event. Live Git facts are
 /// not consulted: the derived latest-patchset head is taken as the head that
 /// was current then, and rebase state is not simulated. Used by `--at`.
+/// A report derived from the ledger alone, for callers with no working tree.
+///
+/// `repo` is any path inside the repository. It is not a working tree and is
+/// not read as one: resolving the danger scope needs the recorded base and
+/// patchset head plus the objects they name, which every clone already has.
+/// Passing `None` leaves the scope undetermined, which assumes dangerous.
 pub fn build_as_of(
     state: &ChangeState,
     gates: &GatesFile,
@@ -656,6 +667,7 @@ pub fn build_as_of(
     dependency_status: BlockerStatus,
     blocks: Vec<String>,
     now: DateTime<Utc>,
+    repo: Option<&Path>,
 ) -> Result<StatusReport> {
     let current_head = state
         .latest_patchset()
@@ -667,13 +679,13 @@ pub fn build_as_of(
         dependency_status,
         blocks,
         now,
-        current_head,
+        current_head.clone(),
         false,
         None,
-        // Without a working tree there is nothing to diff, so the scope
-        // cannot be established. Assume dangerous: an unknown surface is
-        // the one case where guessing wrong must not lower the bar.
-        DangerScope::undetermined(state),
+        match repo {
+            Some(repo) => DangerScope::resolve(state, policy, repo, current_head.as_deref()),
+            None => DangerScope::undetermined(state),
+        },
     )
 }
 

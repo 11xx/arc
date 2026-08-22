@@ -31,6 +31,9 @@ paths = [
   "src/inbox.rs",
   "src/commands/review.rs",
   "src/commands/audit.rs",
+  # `begin` records the --dangerous escalation here, so this file decides a
+  # change's own gate and must not sit outside it.
+  "src/commands/lifecycle.rs",
   # Integrate and merge: the only path that writes to a shared branch.
   "src/gitio.rs",
   "src/chain.rs",

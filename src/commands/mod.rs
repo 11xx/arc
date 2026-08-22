@@ -334,6 +334,7 @@ impl Ctx {
             dependency_status(state, &states),
             changes_blocked_by(&state.change_id, &states),
             chrono::Utc::now(),
+            Some(toplevel.as_path()),
         )
     }
 }

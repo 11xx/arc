@@ -239,6 +239,9 @@ fn workspace_inbox(stores: &[(String, Store)], json: bool) -> Result<()> {
                 dependency_status(state, &states),
                 changes_blocked_by(&state.change_id, &states),
                 chrono::Utc::now(),
+                // Workspace aggregation declares no per-repo policy, so no
+                // danger list is in play and there is nothing to resolve.
+                None,
             )?;
             inbox.absorb(state, &report);
         }

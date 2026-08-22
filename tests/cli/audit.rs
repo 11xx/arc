@@ -1458,3 +1458,67 @@ fn a_later_patchset_by_another_author_does_not_relabel_an_earlier_self_review() 
         "Solo authored the patchset Solo reviewed; a newer snapshot cannot change that"
     );
 }
+
+/// Declared paths are matched against `git diff --name-only`, which names
+/// files. A bare directory exists, passes an existence check, and still
+/// matches nothing — the same silent widening the dead-path check prevents,
+/// one level down.
+#[test]
+fn doctor_reports_a_declared_directory_that_can_never_match() {
+    let repo = repo_with_danger("\"sub\", \"sub/\"");
+    fs::create_dir_all(repo.root.join("sub")).unwrap();
+    fs::write(repo.root.join("sub/file.rs"), "x\n").unwrap();
+    git(&repo.root, &["add", "sub"]);
+    git(&repo.root, &["commit", "-m", "sub"]);
+
+    let out = repo
+        .arc(&repo.root)
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let hits: Vec<&str> = report["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["code"] == "danger-path-matches-nothing")
+        .map(|p| p["detail"].as_str().unwrap())
+        .collect();
+    assert_eq!(hits.len(), 1, "the trailing-slash form is fine: {hits:?}");
+    assert!(hits[0].starts_with("sub is a directory"), "{hits:?}");
+}
+
+/// A report derived from the ledger alone still resolves the danger scope.
+/// `git diff` needs the objects the recorded base and head name, not a working
+/// tree, so assuming dangerous there over-reported the requirement.
+#[test]
+fn a_ledger_only_report_resolves_the_danger_scope() {
+    let repo = repo_with_danger("\"*.rs\"");
+    stdout(repo.arc(&repo.root).args(["begin", "ledger-only"]));
+    let worktree = repo.home.join(".worktrees").join("repo-ledger-only");
+    repo.commit(&worktree, "README.md", "docs\n", "docs: readme");
+    let snapshot_out = stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "Solo")
+            .args(["snapshot", "ledger-only"]),
+    );
+
+    // `--at` replays from the ledger alone, consulting no working tree.
+    let snapshot = snapshot_out
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .expect("snapshot reports its event id")
+        .trim()
+        .to_string();
+    let as_of =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["status", "ledger-only", "--at", &snapshot]),
+        );
+    assert_eq!(
+        as_of["danger"]["rule"], "untouched",
+        "a ledger-only report must resolve the scope, not assume it: {:?}",
+        as_of["danger"]
+    );
+    assert_eq!(as_of["danger"]["dangerous"], false);
+}

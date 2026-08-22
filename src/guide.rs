@@ -109,7 +109,9 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   uniform, exactly as before. `arc begin --dangerous` raises a single change
   whatever it turns out to touch, and nothing lowers it afterwards — a project
   decides its own gate in advance, rather than a change deciding it under
-  pressure to ship. `arc check` names the rule that fired.
+  pressure to ship. `arc check` names the rule that fired, and `arc doctor`
+  reports a declared literal that can never match — one that names nothing, or
+  a directory, since declared paths are matched against changed files.
 
   If no independent verdict is available, integrate with
   `arc integrate <change> --audit-debt "<why>"`. The debt can stand in for an
