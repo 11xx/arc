@@ -58,6 +58,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     inspect_repository_events(&Store::discover(&ctx.cwd)?, &mut problems);
     inspect_dangling_revisions(&ctx.cwd, &Store::discover(&ctx.cwd)?, &states, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
+    inspect_danger_paths(&ctx.cwd, &mut problems);
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
     inspect_audit_debt(&states, &mut advice);
     inspect_hold_releases(&Store::discover(&ctx.cwd)?, &states, &mut advice);
@@ -408,6 +409,35 @@ fn inspect_refs(
 /// An undischarged review obligation is stale state in the sense doctor
 /// reports: nothing is malformed, but work the ledger knows about is waiting
 /// on someone, and it is invisible unless asked for by name.
+/// A declared dangerous path that names nothing.
+///
+/// This fails in the worst direction: the entry reads as coverage while the
+/// surface it was meant to protect stays on a self-recorded verdict. A rename
+/// is enough to cause it, and nothing else would ever say so. Only literals
+/// are checked — a wildcard legitimately matches nothing today.
+fn inspect_danger_paths(cwd: &Path, problems: &mut Vec<Finding>) {
+    let Ok(toplevel) = crate::gitio::toplevel(cwd) else {
+        return;
+    };
+    let Ok(policy) = crate::policy::load(&toplevel) else {
+        return;
+    };
+    for pattern in &policy.danger.paths {
+        if pattern.contains('*') || pattern.ends_with('/') {
+            continue;
+        }
+        if !toplevel.join(pattern).exists() {
+            problems.push(Finding {
+                code: "danger-path-matches-nothing",
+                detail: format!(
+                    "{pattern} is declared dangerous but does not exist; \
+                     the surface it names is on a self-verdict"
+                ),
+            });
+        }
+    }
+}
+
 fn inspect_audit_debt(states: &BTreeMap<String, ChangeState>, advice: &mut Vec<Finding>) {
     for (change_id, state) in states {
         if !state.audit_debt_outstanding() {

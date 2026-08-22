@@ -553,6 +553,11 @@ pub struct ChangeState {
     /// The latest declared review obligation, if one was ever declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_debt: Option<AuditDebt>,
+    /// Raised at `begin` to demand an independent verdict regardless of what
+    /// the change touches. One-way: a change may raise itself, never lower
+    /// itself below what the project declared.
+    #[serde(default)]
+    pub dangerous: bool,
     /// Event IDs of every `blocked-on` stage, so a later brief can name the
     /// block that caused it without rescanning the event log.
     pub blocked_on_stages: Vec<String>,
@@ -694,8 +699,10 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 blocked_by,
                 tags,
                 journal_ref,
+                dangerous,
             } => (
                 ChangeState {
+                    dangerous: *dangerous,
                     change_id: ev.change_id.clone(),
                     slug: slug.clone(),
                     title: title.clone(),
@@ -1808,6 +1815,7 @@ mod tests {
         ev(
             change,
             Payload::ChangeOpened {
+                dangerous: false,
                 slug: "fix".into(),
                 title: "Fix".into(),
                 profile: "local".into(),

@@ -669,6 +669,7 @@ mod tests {
 
     fn change(id: &str, blocked_by: &[&str], closure: Option<Closure>) -> ChangeState {
         ChangeState {
+            dangerous: false,
             change_id: id.into(),
             slug: id.trim_end_matches("-id").into(),
             title: id.into(),

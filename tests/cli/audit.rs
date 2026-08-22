@@ -1193,3 +1193,148 @@ fn a_declared_debt_does_not_overrule_a_stale_approval() {
         .assert()
         .code(3);
 }
+
+fn repo_with_danger(paths: &str) -> Repo {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        format!("[policy]\nforbid_self_approval = true\n\n[danger]\npaths = [{paths}]\n"),
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy"]);
+    repo
+}
+
+/// A uniform gate over non-uniform risk produces a uniform workaround, used
+/// most where it matters least. A change touching nothing the project called
+/// dangerous ships on a self-recorded verdict.
+#[test]
+fn a_change_touching_no_declared_surface_ships_on_a_self_verdict() {
+    let repo = repo_with_danger("\"src/store.rs\"");
+    stdout(repo.arc(&repo.root).args(["begin", "docs-only"]));
+    let worktree = repo.home.join(".worktrees").join("repo-docs-only");
+    repo.commit(&worktree, "README.md", "docs\n", "docs: readme");
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "Solo")
+            .args(["snapshot", "docs-only"]),
+    );
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Solo")
+        .args(["review", "docs-only", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "docs-only", "--json"]));
+    assert_eq!(status["danger"]["dangerous"], false);
+    assert_eq!(status["danger"]["rule"], "untouched");
+    assert_eq!(
+        status["verdict"]["valid_for_current_head"], true,
+        "a self-verdict satisfies the gate off the declared surfaces"
+    );
+    repo.arc(&repo.root)
+        .args(["integrate", "docs-only"])
+        .assert()
+        .success();
+}
+
+/// On a declared surface the rule still binds, and the advisory names which
+/// path put the change in scope.
+#[test]
+fn a_change_touching_a_declared_surface_still_needs_an_independent_verdict() {
+    let repo = repo_with_danger("\"*.rs\"");
+    stdout(repo.arc(&repo.root).args(["begin", "touches-core"]));
+    let worktree = repo.home.join(".worktrees").join("repo-touches-core");
+    repo.commit(&worktree, "store.rs", "core\n", "feat: core");
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "Solo")
+            .args(["snapshot", "touches-core"]),
+    );
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Solo")
+        .args(["review", "touches-core", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "touches-core", "--json"]),
+    );
+    assert_eq!(status["danger"]["dangerous"], true);
+    assert_eq!(status["danger"]["rule"], "declared-path");
+    assert_eq!(status["danger"]["paths"][0], "store.rs");
+    assert_eq!(
+        status["verdict"]["valid_for_current_head"], false,
+        "a self-approval on a declared surface is still rejected"
+    );
+}
+
+/// Escalation is one-way: a change may raise itself, and nothing about what
+/// it happens to touch lowers it again.
+#[test]
+fn begin_dangerous_raises_a_change_that_touches_nothing_declared() {
+    let repo = repo_with_danger("\"src/store.rs\"");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "raised", "--dangerous"]),
+    );
+    let worktree = repo.home.join(".worktrees").join("repo-raised");
+    repo.commit(&worktree, "README.md", "docs\n", "docs: readme");
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "Solo")
+            .args(["snapshot", "raised"]),
+    );
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Solo")
+        .args(["review", "raised", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "raised", "--json"]));
+    assert_eq!(status["danger"]["rule"], "escalated");
+    assert_eq!(
+        status["verdict"]["valid_for_current_head"], false,
+        "a change that raised itself cannot then self-approve"
+    );
+}
+
+/// Adopting the feature must be opt-in: a repository that declares no
+/// dangerous surfaces keeps the uniform gate it had before.
+#[test]
+fn an_undeclared_danger_list_keeps_the_uniform_gate() {
+    let repo = repo_forbidding_self_approval();
+    self_approved_change(&repo, "uniform");
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "uniform", "--json"]));
+    assert_eq!(status["danger"]["rule"], "not-declared");
+    assert_eq!(status["danger"]["dangerous"], true);
+    assert_eq!(status["verdict"]["valid_for_current_head"], false);
+}
+
+/// A declared literal that names nothing reads as coverage while leaving the
+/// surface on a self-verdict. A rename is enough to cause it, and nothing
+/// else in the tool would ever say so.
+#[test]
+fn doctor_reports_a_declared_danger_path_that_matches_nothing() {
+    let repo = repo_with_danger("\"gone.rs\", \"*.missing\"");
+    let out = repo
+        .arc(&repo.root)
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let problems = report["problems"].as_array().unwrap();
+    let hits: Vec<_> = problems
+        .iter()
+        .filter(|p| p["code"] == "danger-path-matches-nothing")
+        .collect();
+    assert_eq!(hits.len(), 1, "only literals are checked: {problems:?}");
+    assert!(
+        hits[0]["detail"].as_str().unwrap().starts_with("gone.rs"),
+        "{:?}",
+        hits[0]
+    );
+}
