@@ -1338,3 +1338,123 @@ fn doctor_reports_a_declared_danger_path_that_matches_nothing() {
         hits[0]
     );
 }
+
+/// The debt records that no verdict existed, not that `arc audit`
+/// specifically must supply one. An operator who reviewed before merging
+/// otherwise had no honest move: leave a debt standing for a review that
+/// happened, or file a post-integration audit that did not.
+#[test]
+fn an_independent_verdict_on_the_shipped_patchset_discharges_the_debt() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "reviewed-early");
+
+    // The debt is declared while no reviewer is reachable.
+    repo.arc(&repo.root)
+        .args(["audit-debt", "reviewed-early", "--reason", "none reachable"])
+        .assert()
+        .success();
+
+    // One then becomes reachable and reviews the same patchset, before merge.
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["review", "reviewed-early", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "reviewed-early"])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "reviewed-early", "--json"]),
+    );
+    assert_eq!(
+        status["audit_debt_outstanding"], false,
+        "an independent verdict on the shipped patchset is the review the debt owed"
+    );
+    let remaining = stdout(repo.arc(&repo.root).args(["query", "--audit-debt"]));
+    assert!(!remaining.contains("reviewed-early"), "{remaining}");
+}
+
+/// Discharge requires independence, not merely a verdict: the author's own
+/// approval is what the debt was declared over in the first place.
+#[test]
+fn the_authors_own_verdict_does_not_discharge_the_debt() {
+    let repo = repo_forbidding_self_approval();
+    self_approved_change(&repo, "self-only");
+    repo.arc(&repo.root)
+        .args(["integrate", "self-only", "--audit-debt", "none reachable"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "self-only", "--json"]));
+    assert_eq!(
+        status["audit_debt_outstanding"], true,
+        "the author's approval is precisely what the debt stands in for"
+    );
+}
+
+/// A verdict on an earlier draft judged something other than what shipped.
+#[test]
+fn a_verdict_on_a_superseded_patchset_does_not_discharge_the_debt() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "moved-on");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["review", "moved-on", "--verdict", "comment-only"])
+        .assert()
+        .success();
+
+    // New work lands and is snapshotted; the reviewer never saw it.
+    repo.commit(&worktree, "more.txt", "more\n", "feat: more");
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "Solo")
+            .args(["snapshot", "moved-on"]),
+    );
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Solo")
+        .args(["review", "moved-on", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "moved-on", "--audit-debt", "shipping now"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "moved-on", "--json"]));
+    assert_eq!(
+        status["audit_debt_outstanding"], true,
+        "the independent verdict judged an earlier revision than the one that shipped"
+    );
+}
+
+/// Independence is a fact about the patchset a reviewer read. Judging it
+/// against whatever is newest lets a later snapshot by someone else
+/// retroactively launder a self-review into an independent one.
+#[test]
+fn a_later_patchset_by_another_author_does_not_relabel_an_earlier_self_review() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "relabel");
+
+    // Somebody else snapshots on top. The earlier verdict is still Solo's own.
+    repo.commit(&worktree, "other.txt", "other\n", "feat: other");
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "Other")
+            .args(["snapshot", "relabel"]),
+    );
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "relabel", "--json"]));
+    let solo = status["review_map"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["reviewer"] == "Solo")
+        .expect("the author's verdict is still in the review map");
+    assert_eq!(
+        solo["is_author"], true,
+        "Solo authored the patchset Solo reviewed; a newer snapshot cannot change that"
+    );
+}
