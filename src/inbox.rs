@@ -3,7 +3,7 @@ use crate::state::{ChangeState, ClaimIdentity};
 use crate::status::{ClaimStatus, StatusReport};
 use serde::Serialize;
 
-pub const INBOX_SCHEMA: &str = "arc-inbox/3";
+pub const INBOX_SCHEMA: &str = "arc-inbox/4";
 
 /// The journal's actionable backlog, carried beside the ledger buckets.
 ///
@@ -52,9 +52,14 @@ pub struct InboxRow {
     /// hold cannot be acted on: releasing one names the event that set it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub holds: Vec<crate::status::HoldEntry>,
+    /// Why this change sits here, when the bucket cannot say so by name.
+    /// Carried by `unclassified` rows, which exist precisely because no
+    /// bucket name explains them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
-/// The `arc-inbox/3` rollup: a lead-facing queue derived entirely from
+/// The `arc-inbox/4` rollup: a lead-facing queue derived entirely from
 /// existing ledger + Git state. A change may appear in more than one bucket
 /// when it is genuinely in more than one actionable state (e.g. blocked and
 /// awaiting review); each bucket is computed independently.
@@ -81,6 +86,16 @@ pub struct Inbox {
     /// track.
     #[serde(rename = "audit-owed")]
     pub audit_owed: Vec<InboxRow>,
+    /// Open changes no other bucket claimed. Every bucket is an independent
+    /// predicate, so a state none of them anticipated lands nowhere and the
+    /// queue reports empty while work waits. This bucket makes that failure
+    /// loud instead of silent; a row here is a gap in the derivation, not a
+    /// resting place, and carries `ready_reason` so it can be acted on.
+    ///
+    /// Always serialized, like every sibling bucket. A consumer told to
+    /// null-check one key and not the other eight will forget, and the key it
+    /// forgets is the one reporting that arc failed to classify open work.
+    pub unclassified: Vec<InboxRow>,
     /// Absent when the journal directory could not be resolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub journal: Option<JournalBacklog>,
@@ -100,11 +115,12 @@ impl Inbox {
             in_progress: Vec::new(),
             stalled: Vec::new(),
             audit_owed: Vec::new(),
+            unclassified: Vec::new(),
         }
     }
 
     /// Bucket names paired with their rows, in rendering order.
-    pub fn sections(&self) -> [(&'static str, &Vec<InboxRow>); 8] {
+    pub fn sections(&self) -> [(&'static str, &Vec<InboxRow>); 9] {
         [
             ("needs-review", &self.needs_review),
             ("changes-requested", &self.changes_requested),
@@ -114,6 +130,7 @@ impl Inbox {
             ("in-progress", &self.in_progress),
             ("stalled", &self.stalled),
             ("audit-owed", &self.audit_owed),
+            ("unclassified", &self.unclassified),
         ]
     }
 
@@ -131,6 +148,7 @@ impl Inbox {
             stage: None,
             age_seconds: None,
             holds: Vec::new(),
+            reason: None,
         };
         let claim_row = |claim: &ClaimStatus| {
             let next_actor = if claim.owner.harness.is_empty() {
@@ -148,16 +166,20 @@ impl Inbox {
                 stage: Some(claim.stage.clone()),
                 age_seconds: Some(claim.age_seconds),
                 holds: Vec::new(),
+                reason: None,
             }
         };
 
+        let mut classified = false;
         if !report.holds.is_empty() {
             let mut held = row("lead");
             held.holds = report.holds.clone();
             self.held.push(held);
+            classified = true;
         }
         if report.blocker_status.blocked {
             self.blocked.push(row("wait"));
+            classified = true;
         }
         if let Some(claim) = report.claim.as_ref().filter(|claim| claim.active) {
             if claim.stale {
@@ -165,6 +187,7 @@ impl Inbox {
             } else {
                 self.in_progress.push(claim_row(claim));
             }
+            classified = true;
         }
         if needs_review(state) {
             let actor = if state.latest_patchset().is_none() {
@@ -173,12 +196,23 @@ impl Inbox {
                 "reviewer"
             };
             self.needs_review.push(row(actor));
+            classified = true;
         }
         if changes_requested(state) {
             self.changes_requested.push(row("implementer"));
+            classified = true;
         }
         if report.ready_to_integrate {
             self.ready_to_integrate.push(row("lead"));
+            classified = true;
+        }
+        if !classified {
+            // Reaching here means every predicate above declined an open
+            // change. Silence would report an empty queue while work waits,
+            // so the change surfaces with the reason it is not ready.
+            let mut row = row("lead");
+            row.reason = Some(report.ready_reason.clone());
+            self.unclassified.push(row);
         }
     }
 
@@ -199,6 +233,8 @@ impl Inbox {
             .sort_by_key(|row| std::cmp::Reverse(row.priority));
         self.audit_owed
             .sort_by_key(|row| std::cmp::Reverse(row.priority));
+        self.unclassified
+            .sort_by_key(|row| std::cmp::Reverse(row.priority));
     }
 
     /// Record a change that owes a review. Called for closed changes too, so
@@ -217,6 +253,7 @@ impl Inbox {
             stage: None,
             age_seconds: None,
             holds: Vec::new(),
+            reason: None,
         });
     }
 }

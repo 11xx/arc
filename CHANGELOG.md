@@ -12,6 +12,10 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `arc inbox` and `arc catchup` carry an `unclassified` bucket for open changes
+  no other bucket claims, so a derivation gap fails loud instead of reporting
+  an empty queue; rows name the blocking reason (`arc-inbox/4`)
+  (`inbox-bucket-gap`).
 - Opt-in `[identity] detect` fills omitted harness, session, and model identity
   from the running harness while preserving explicit values (`identity-detect`).
 - `feature-request` is a first-class journal kind in its own lowest-priority

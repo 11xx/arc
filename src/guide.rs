@@ -24,6 +24,12 @@ ORIENT (start here, in this order)
   already open; the journal holds everything not yet opened as one. An empty
   inbox does not mean an empty queue — check both, which is what `catchup` does.
 
+  Every inbox bucket is an independent predicate, so a change in a state none
+  of them anticipates would land nowhere and the queue would read as empty
+  while work waited. The `unclassified` bucket catches exactly that and names
+  the reason. A row there is a gap in the derivation rather than a resting
+  place: it means arc failed to classify open work, and it is worth reporting.
+
   Every command above answers for the project you are standing in. Some
   questions are comparisons — which project to open next, what has waited
   longest, where a verdict is the only thing missing — and those are answerable
