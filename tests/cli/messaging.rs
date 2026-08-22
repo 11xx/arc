@@ -651,6 +651,7 @@ fn every_open_change_appears_in_some_inbox_bucket() {
     expected.push(requested);
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    // Every bucket serializes even when empty, so this indexes safely.
     let buckets = [
         "needs-review",
         "changes-requested",
@@ -667,6 +668,32 @@ fn every_open_change_appears_in_some_inbox_bucket() {
                 .iter()
                 .any(|bucket| bucket_has(&inbox, bucket, change_id)),
             "open change {change_id} is in no inbox bucket; the buckets no longer cover the open set"
+        );
+    }
+}
+
+/// Every bucket key is present even when empty. The coverage test only ever
+/// sees `unclassified` populated, so without this the absent-key case is
+/// never reached and a consumer indexing it would be the one to find out.
+#[test]
+fn every_inbox_bucket_key_is_present_when_empty() {
+    let repo = Repo::new();
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    for bucket in [
+        "needs-review",
+        "changes-requested",
+        "ready-to-integrate",
+        "blocked",
+        "held",
+        "in-progress",
+        "stalled",
+        "audit-owed",
+        "unclassified",
+    ] {
+        assert!(
+            inbox[bucket].is_array() && inbox[bucket].as_array().unwrap().is_empty(),
+            "bucket {bucket} must serialize as an empty array, got {:?}",
+            inbox[bucket]
         );
     }
 }

@@ -91,7 +91,10 @@ pub struct Inbox {
     /// queue reports empty while work waits. This bucket makes that failure
     /// loud instead of silent; a row here is a gap in the derivation, not a
     /// resting place, and carries `ready_reason` so it can be acted on.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// Always serialized, like every sibling bucket. A consumer told to
+    /// null-check one key and not the other eight will forget, and the key it
+    /// forgets is the one reporting that arc failed to classify open work.
     pub unclassified: Vec<InboxRow>,
     /// Absent when the journal directory could not be resolved.
     #[serde(skip_serializing_if = "Option::is_none")]
