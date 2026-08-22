@@ -426,12 +426,25 @@ fn inspect_danger_paths(cwd: &Path, problems: &mut Vec<Finding>) {
         if pattern.contains('*') || pattern.ends_with('/') {
             continue;
         }
-        if !toplevel.join(pattern).exists() {
+        let target = toplevel.join(pattern);
+        if !target.exists() {
             problems.push(Finding {
                 code: "danger-path-matches-nothing",
                 detail: format!(
                     "{pattern} is declared dangerous but does not exist; \
                      the surface it names is on a self-verdict"
+                ),
+            });
+        } else if target.is_dir() {
+            // Declared paths are matched against `git diff --name-only`,
+            // which names files. A bare directory therefore exists, looks
+            // healthy, and still matches nothing — the same silent widening
+            // one level down.
+            problems.push(Finding {
+                code: "danger-path-matches-nothing",
+                detail: format!(
+                    "{pattern} is a directory, and declared paths are matched \
+                     against changed files; write {pattern}/ to cover its subtree"
                 ),
             });
         }

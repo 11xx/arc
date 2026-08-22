@@ -12,6 +12,14 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- A status report derived from the ledger alone now resolves the danger scope
+  instead of assuming it: `git diff` needs the objects the recorded base and
+  head name, not a working tree, so `arc status --at` no longer over-reports
+  that an independent verdict is required (`danger-scope`).
+- `arc doctor` reports a declared danger path naming a directory. It exists, so
+  the previous check passed it, and it can still never match — declared paths
+  are compared against changed files (`danger-scope`).
+
 - Audit debt is discharged by any independent verdict on the revision that
   shipped, recorded after the debt was declared, rather than only by
   `arc audit`. Reviewing before merging no longer forces a choice between a
