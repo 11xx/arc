@@ -1866,3 +1866,157 @@ fn attested_evidence_is_exempt_from_the_change_head_check() {
         .assert()
         .success();
 }
+
+/// The blocking finding from independent review: exempting every probe from
+/// the head check left `--probe` at its default Final phase recording evidence
+/// status counts only at the patchset head, so a final probe run from the
+/// wrong checkout exited 0 and left `next_action` at `run_probe:` forever.
+/// Only a baseline probe belongs off the head.
+#[test]
+fn a_final_probe_run_away_from_the_change_head_is_refused_like_a_gate() {
+    let repo = Repo::new();
+    let change_id = opened_change_id(&stdout(
+        repo.arc(&repo.root).args(["begin", "final-probe-head"]),
+    ));
+    let worktree = repo.home.join(".worktrees/repo-final-probe-head");
+    let probes = worktree.join("probes.json");
+    fs::write(
+        &probes,
+        r#"[{"name":"marker-exists","command":"test -f probe-marker.txt"}]"#,
+    )
+    .unwrap();
+    repo.arc(&worktree)
+        .args([
+            "brief",
+            "final-probe-head",
+            "--body-file",
+            "-",
+            "--probes-json",
+            probes.to_str().unwrap(),
+        ])
+        .write_stdin("probe contract\n")
+        .assert()
+        .success();
+    repo.commit(
+        &repo.root,
+        "moved.txt",
+        "primary moved on",
+        "chore: move on",
+    );
+
+    repo.arc(&repo.root)
+        .args(["verify", "final-probe-head", "--probe", "marker-exists"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("would be recorded away from"));
+
+    // Nothing was recorded, so no evidence landed where status ignores it.
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        &change_id,
+        "--type",
+        "verification-recorded",
+    ]));
+    assert!(events.trim().is_empty(), "{events}");
+}
+
+/// A baseline probe is the one evidence kind that must sit off the change
+/// head, so the refusal must not reach it. It has its own, stricter rule.
+#[test]
+fn a_baseline_probe_still_runs_at_the_brief_base_revision() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "baseline-probe-head"]));
+    let worktree = repo.home.join(".worktrees/repo-baseline-probe-head");
+    let probes = worktree.join("probes.json");
+    fs::write(
+        &probes,
+        r#"[{"name":"marker-exists","command":"test -f probe-marker.txt"}]"#,
+    )
+    .unwrap();
+    repo.arc(&worktree)
+        .args([
+            "brief",
+            "baseline-probe-head",
+            "--body-file",
+            "-",
+            "--probes-json",
+            probes.to_str().unwrap(),
+        ])
+        .write_stdin("probe contract\n")
+        .assert()
+        .success();
+
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "baseline-probe-head",
+            "--probe",
+            "marker-exists",
+            "--probe-phase",
+            "baseline",
+        ])
+        .assert()
+        .success();
+}
+
+/// Attestation is the caller's assertion, so arc takes the revision it is
+/// given — but evidence off the change head is ignored exactly as it is for a
+/// gate arc ran itself, and silence is what makes that a trap.
+#[test]
+fn attesting_off_the_change_head_warns_that_the_evidence_will_not_count() {
+    let repo = Repo::new();
+    write_two_gates(&repo, "true", "true");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "attest-off-head", "--no-worktree"]),
+    );
+    repo.commit(
+        &repo.root,
+        "moved.txt",
+        "primary moved on",
+        "chore: move on",
+    );
+    let off_head = repo.head(&repo.root);
+
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "attest-off-head",
+            "--gate",
+            "alpha",
+            "--attest",
+            "--result",
+            "pass",
+            "--tested-revision",
+            &off_head,
+            "--execution-host",
+            "runner-1",
+            "--runner",
+            "ci",
+        ])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("will not discharge the gate"));
+}
+
+/// A checkout in the wrong state is not a missing checkout: advising
+/// `git worktree add` beside a worktree that already exists is advice that
+/// cannot be followed, which is the class of bug this change exists to close.
+#[test]
+fn a_detached_head_in_the_change_worktree_is_not_reported_as_having_no_checkout() {
+    let repo = Repo::new();
+    write_two_gates(&repo, "true", "true");
+    stdout(repo.arc(&repo.root).args(["begin", "detached-here"]));
+    let worktree = repo.home.join(".worktrees/repo-detached-here");
+    repo.commit(&worktree, "work.txt", "work", "feat: work");
+    git(&worktree, &["checkout", "--detach", "HEAD~1"]);
+
+    repo.arc(&worktree)
+        .args(["verify", "detached-here", "--gate", "alpha"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is checked out here"))
+        .stderr(predicates::str::contains("git checkout arc/detached-here"))
+        .stderr(predicates::str::contains("has no checkout").not());
+}

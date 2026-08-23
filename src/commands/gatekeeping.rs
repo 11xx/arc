@@ -220,6 +220,16 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 }
             }
         }
+        // A baseline probe is the one kind of evidence that must NOT be at the
+        // change head: it runs at the brief's base revision, checked above.
+        // Every other phase is counted at the head like a gate, so it earns
+        // the same refusal.
+        if phase != ProbePhase::Baseline {
+            match &tested_revision {
+                Some(revision) => warn_if_attested_off_head(ctx, &st, revision),
+                None => ensure_at_change_head(ctx, &st)?,
+            }
+        }
         let expected = match phase {
             ProbePhase::Baseline => VerifyResult::Fail,
             ProbePhase::Final => VerifyResult::Pass,
@@ -253,11 +263,10 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         return Ok(if observed == expected { 0 } else { 1 });
     }
     // Every path below records gate evidence, which status counts only at the
-    // change's head. A probe is exempt because it carries its own revision
-    // rule: a baseline probe must run at the brief's base revision, which is
-    // by design not the head.
-    if !attest {
-        ensure_at_change_head(ctx, &st)?;
+    // change's head.
+    match &tested_revision {
+        Some(revision) => warn_if_attested_off_head(ctx, &st, revision),
+        None => ensure_at_change_head(ctx, &st)?,
     }
     if all {
         let gates = gates::load(&toplevel)?;
@@ -372,6 +381,25 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     )
 }
 
+/// Warn when attested evidence names a revision status will never count.
+///
+/// Attestation is the caller's assertion about a run arc did not observe, so
+/// arc takes the revision it is given rather than overruling it. But evidence
+/// off the change head is ignored exactly as it is for a gate arc ran itself,
+/// and saying nothing is what turns that into a trap.
+fn warn_if_attested_off_head(ctx: &Ctx, st: &state::ChangeState, tested_revision: &str) {
+    let Ok(change_head) = gitio::branch_head(&ctx.cwd, &st.branch) else {
+        return;
+    };
+    if tested_revision != change_head {
+        eprintln!(
+            "warning: attested at {tested_revision}, which is not {}'s head ({change_head}); \
+             status counts evidence only at the head, so this will not discharge the gate",
+            st.change_id
+        );
+    }
+}
+
 /// Refuse to run a gate anywhere but at the change's own head.
 ///
 /// Evidence is recorded at the head of whatever checkout the command ran in,
@@ -389,6 +417,24 @@ fn ensure_at_change_head(ctx: &Ctx, st: &state::ChangeState) -> Result<()> {
     let change_head = gitio::branch_head(&ctx.cwd, &st.branch)?;
     if gitio::head(&ctx.cwd)? == change_head {
         return Ok(());
+    }
+    // `worktree_for_branch` answers "who has the branch checked out", so a
+    // worktree sitting detached on this branch's history answers None. That is
+    // a checkout in the wrong state, not a missing one, and advising `worktree
+    // add` beside it would be advice that cannot be followed.
+    if st
+        .worktree
+        .as_deref()
+        .map(std::path::Path::new)
+        .is_some_and(|recorded| ctx.cwd.starts_with(recorded))
+    {
+        bail!(
+            "{} is checked out here but HEAD is not its branch head ({change_head}), so gate \
+             evidence would be recorded where status will never count it\n\
+             tip: `git checkout {}` in this worktree",
+            st.change_id,
+            st.branch
+        );
     }
     match gitio::worktree_for_branch(&ctx.cwd, &st.branch)? {
         Some(worktree) => bail!(
