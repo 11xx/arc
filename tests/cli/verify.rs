@@ -2020,3 +2020,35 @@ fn a_detached_head_in_the_change_worktree_is_not_reported_as_having_no_checkout(
         .stderr(predicates::str::contains("git checkout arc/detached-here"))
         .stderr(predicates::str::contains("has no checkout").not());
 }
+
+/// The ledger records whatever worktree path it was given, so a change opened
+/// through a symlinked path stores the unresolved one while the caller's cwd
+/// is always the kernel-resolved path. A lexical comparison of the two falls
+/// through to the "no checkout" diagnosis, advising `git worktree add` beside
+/// the checkout the caller is standing in.
+#[test]
+fn a_worktree_recorded_through_a_symlink_still_diagnoses_the_wrong_checkout_state() {
+    let repo = Repo::new();
+    write_two_gates(&repo, "true", "true");
+    let real = repo.home.join("real-worktrees");
+    fs::create_dir_all(&real).unwrap();
+    let link = repo.home.join("linked-worktrees");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    stdout(repo.arc(&repo.root).args([
+        "begin",
+        "linked-here",
+        "--worktree",
+        link.join("wt").to_str().unwrap(),
+    ]));
+    let worktree = real.join("wt");
+    repo.commit(&worktree, "work.txt", "work", "feat: work");
+    git(&worktree, &["checkout", "--detach", "HEAD~1"]);
+
+    repo.arc(&worktree)
+        .args(["verify", "linked-here", "--gate", "alpha"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is checked out here"))
+        .stderr(predicates::str::contains("has no checkout").not());
+}

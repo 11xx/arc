@@ -224,7 +224,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         // change head: it runs at the brief's base revision, checked above.
         // Every other phase is counted at the head like a gate, so it earns
         // the same refusal.
-        if phase != ProbePhase::Baseline {
+        if phase_counts_at_head(phase) {
             match &tested_revision {
                 Some(revision) => warn_if_attested_off_head(ctx, &st, revision),
                 None => ensure_at_change_head(ctx, &st)?,
@@ -381,6 +381,27 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     )
 }
 
+/// Resolve a path for comparison, falling back to the path itself when it
+/// cannot be canonicalized — a recorded worktree may no longer exist, and a
+/// lexical comparison is still the right answer when it does not.
+fn canonical_or_owned(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether evidence from this probe phase is counted at the change's head.
+///
+/// A total match rather than a `!=`: a phase added later must be classified
+/// here deliberately instead of inheriting head treatment because it is not
+/// `Baseline`.
+fn phase_counts_at_head(phase: ProbePhase) -> bool {
+    match phase {
+        // Baseline evidence is counted at the brief's base revision, which is
+        // by design not the head.
+        ProbePhase::Baseline => false,
+        ProbePhase::Final => true,
+    }
+}
+
 /// Warn when attested evidence names a revision status will never count.
 ///
 /// Attestation is the caller's assertion about a run arc did not observe, so
@@ -389,6 +410,11 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
 /// and saying nothing is what turns that into a trap.
 fn warn_if_attested_off_head(ctx: &Ctx, st: &state::ChangeState, tested_revision: &str) {
     let Ok(change_head) = gitio::branch_head(&ctx.cwd, &st.branch) else {
+        eprintln!(
+            "warning: cannot resolve {}'s branch {}, so whether this evidence will be counted \
+             is unknown",
+            st.change_id, st.branch
+        );
         return;
     };
     if tested_revision != change_head {
@@ -410,9 +436,10 @@ fn warn_if_attested_off_head(ctx: &Ctx, st: &state::ChangeState, tested_revision
 /// step that can — and for a change with no checkout at all, names the two
 /// ways to get one.
 ///
-/// `--attest` is exempt: it exists to record evidence arc did not observe, and
-/// carries its own `--tested-revision`. So is a probe, which has its own
-/// revision rule.
+/// This function implements no exemption: every caller that reaches it is
+/// recording evidence status counts at the head. Deciding what is exempt —
+/// attested evidence, and a baseline probe — belongs at the call sites, which
+/// know which kind of evidence they are about to record.
 fn ensure_at_change_head(ctx: &Ctx, st: &state::ChangeState) -> Result<()> {
     let change_head = gitio::branch_head(&ctx.cwd, &st.branch)?;
     if gitio::head(&ctx.cwd)? == change_head {
@@ -426,7 +453,9 @@ fn ensure_at_change_head(ctx: &Ctx, st: &state::ChangeState) -> Result<()> {
         .worktree
         .as_deref()
         .map(std::path::Path::new)
-        .is_some_and(|recorded| ctx.cwd.starts_with(recorded))
+        .is_some_and(|recorded| {
+            canonical_or_owned(&ctx.cwd).starts_with(canonical_or_owned(recorded))
+        })
     {
         bail!(
             "{} is checked out here but HEAD is not its branch head ({change_head}), so gate \
