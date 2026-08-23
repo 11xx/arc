@@ -328,6 +328,17 @@ pub enum JournalCmd {
         #[arg(long)]
         body_file: String,
     },
+    /// Every question awaiting a person, across the journal. arc records
+    /// what agents cannot settle; it does not ask. This is the view an agent
+    /// reads to raise the question through its own harness prompt — file, id,
+    /// placement, the options to offer, and which branches were already
+    /// argued — and `answer` is where the reply comes back. `--json` carries
+    /// the same, for building the prompt without parsing text
+    Questions {
+        /// Emit structured JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// Settle an open question by choosing one of its options, once. Branches
     /// that lost stay in the file: a branch argued and not taken is the only
     /// record that the alternative was explored rather than never considered.
@@ -339,9 +350,17 @@ pub enum JournalCmd {
         /// The question being settled
         #[arg(long)]
         question: String,
-        /// The option chosen; must be one the question offered
-        #[arg(long)]
-        option: String,
+        /// The option chosen; must be one the question offered. A typo is
+        /// refused rather than silently recorded as an answer nobody offered
+        #[arg(long, required_unless_present = "other", conflicts_with = "other")]
+        option: Option<String>,
+        /// An answer none of the offered options expressed, in the answerer's
+        /// own words. Recorded as settling the question and as evidence the
+        /// option set was inadequate, which `arc journal questions` reports —
+        /// a menu the answerer had to step outside of was framed wrong, and
+        /// that is worth knowing before the next one is posed
+        #[arg(long, value_name = "ANSWER")]
+        other: Option<String>,
         /// Body source: a file path, or '-' for stdin (why, written verbatim
         /// below a tool-computed `### Answer` heading)
         #[arg(long)]
@@ -540,8 +559,17 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             filename,
             question,
             option,
+            other,
             body_file,
-        } => answer(ctx, &filename, &question, &option, &body_file),
+        } => answer(
+            ctx,
+            &filename,
+            &question,
+            option.as_deref(),
+            other.as_deref(),
+            &body_file,
+        ),
+        JournalCmd::Questions { json } => questions(ctx, json),
         JournalCmd::Events { limit } => events(ctx, limit),
         JournalCmd::Catchup {
             limit,
@@ -1641,7 +1669,8 @@ fn answer(
     ctx: &Ctx,
     filename: &str,
     question_id: &str,
-    option: &str,
+    option: Option<&str>,
+    other: Option<&str>,
     body_file: &str,
 ) -> Result<i32> {
     let body = read_body_verbatim(body_file)?;
@@ -1667,12 +1696,28 @@ fn answer(
         bail!("no question {question_id} on {filename}");
     };
     let offered = posed.options.clone().unwrap_or_default();
-    if !offered.iter().any(|value| value == option) {
-        bail!(
-            "{option:?} is not one of the options {question_id} offered ({})",
-            offered.join(", ")
-        );
-    }
+    // An answerer who steps outside the menu is settling the question, not
+    // failing to answer it — every harness prompt offers that path, and
+    // refusing it would send the answer back through prose arc cannot read.
+    // It stays a separate flag so a mistyped option cannot become one
+    // silently: a typo would then look like a decision.
+    let chosen = match (option, other) {
+        (Some(option), None) => {
+            if !offered.iter().any(|value| value == option) {
+                bail!(
+                    "{option:?} is not one of the options {question_id} offered ({}); \
+                     pass --other to answer outside them",
+                    offered.join(", ")
+                );
+            }
+            Chosen::Offered(option)
+        }
+        (None, Some(other)) if other.trim().is_empty() => {
+            bail!("--other must say what the answer is")
+        }
+        (None, Some(other)) => Chosen::OffMenu(other.trim()),
+        _ => bail!("pass exactly one of --option or --other"),
+    };
     if events.iter().any(|event| {
         event.known()
             && event.event == "answer"
@@ -1711,16 +1756,181 @@ fn answer(
         Some(model) => format!("{model} via {harness}"),
         None => harness.to_string(),
     };
-    let heading = format!("### Answer {question_id} = {option} ({who}, {ts})");
+    let heading = match chosen {
+        Chosen::Offered(option) => format!("### Answer {question_id} = {option} ({who}, {ts})"),
+        Chosen::OffMenu(answer) => {
+            format!("### Answer {question_id} = (none offered) {answer} ({who}, {ts})")
+        }
+    };
     append_block(&path, &heading, &body)?;
 
     let mut event = JournalEvent::base(ctx, now, &topic, "answer");
     event.file = Some(filename.to_string());
     event.question_id = Some(question_id.to_string());
-    event.option = Some(option.to_string());
+    match chosen {
+        Chosen::Offered(option) => event.option = Some(option.to_string()),
+        Chosen::OffMenu(answer) => {
+            event.option = Some(answer.to_string());
+            event.off_menu = Some(true);
+        }
+    }
     append_event(ctx, &dir, &event)?;
     println!("{}", path.display());
     Ok(0)
+}
+
+#[derive(Serialize)]
+struct OpenQuestion {
+    file: String,
+    topic: String,
+    question: String,
+    placement: String,
+    /// The prose the question was posed with, so a prompt can show what is
+    /// being asked without the caller opening the artifact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heading: Option<String>,
+    asked_at: String,
+    /// The options to offer, each with how many positions argued that branch.
+    /// A branch nobody argued is visible before the question is answered,
+    /// which is the point of arguing them first.
+    options: Vec<QuestionOption>,
+}
+
+#[derive(Serialize)]
+struct QuestionOption {
+    option: String,
+    positions: usize,
+}
+
+#[derive(Serialize)]
+struct OpenQuestions {
+    schema: &'static str,
+    dir: String,
+    questions: Vec<OpenQuestion>,
+}
+
+/// Every unanswered question across the journal.
+///
+/// A question is the one thing arc holds that no model may settle, and until
+/// now nothing listed them: an agent had to open each discussion to find one.
+/// The signal that most needs a person was the only one with no queue.
+fn questions(ctx: &Ctx, json: bool) -> Result<i32> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    let open = open_questions(&dir)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&OpenQuestions {
+                schema: "arc-journal-questions/1",
+                dir: dir.display().to_string(),
+                questions: open,
+            })?
+        );
+        return Ok(0);
+    }
+    if open.is_empty() {
+        println!("no question is waiting on a person");
+        return Ok(0);
+    }
+    println!("questions waiting on a person ({}):", open.len());
+    for question in &open {
+        println!(
+            "  {}  {}  {}  {}",
+            question.asked_at,
+            question.topic,
+            question.placement,
+            question.heading.as_deref().unwrap_or("")
+        );
+        println!("    {} in {}", question.question, question.file);
+        for option in &question.options {
+            println!("    - {} ({} argued)", option.option, option.positions);
+        }
+        println!(
+            "    answer: arc journal answer {} --question {} --option <choice> --body-file -",
+            question.file, question.question
+        );
+    }
+    Ok(0)
+}
+
+/// The prose a question was posed with, read from its block in the artifact.
+///
+/// The artifact's first heading is the wrong thing to show: on a scaffolded
+/// discussion it is whatever the scaffold opens with, and on any file with
+/// several questions it is the same string for all of them. A prompt needs
+/// what was actually asked.
+fn question_text(path: &Path, question_id: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines().skip_while(|line| {
+        !line
+            .strip_prefix("### Question ")
+            .is_some_and(|rest| rest.starts_with(question_id))
+    });
+    lines.next()?;
+    lines
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_string())
+}
+
+/// Every unanswered question in one journal, newest first.
+fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
+    let events = read_events(dir)?;
+    let answered: HashSet<(&str, &str)> = events
+        .iter()
+        .filter(|event| event.known() && event.event == "answer")
+        .filter_map(|event| Some((event.file.as_deref()?, event.question_id.as_deref()?)))
+        .collect();
+    let mut open = Vec::new();
+    for event in events
+        .iter()
+        .filter(|event| event.known() && event.event == "question")
+    {
+        let (Some(file), Some(question)) = (event.file.as_deref(), event.question_id.as_deref())
+        else {
+            continue;
+        };
+        if answered.contains(&(file, question)) {
+            continue;
+        }
+        let argued = |option: &str| {
+            events
+                .iter()
+                .filter(|event| {
+                    event.event == "position"
+                        && event.file.as_deref() == Some(file)
+                        && event.question_id.as_deref() == Some(question)
+                        && event.option.as_deref() == Some(option)
+                })
+                .count()
+        };
+        open.push(OpenQuestion {
+            heading: question_text(&dir.join(file), question),
+            file: file.to_string(),
+            topic: event.topic.clone(),
+            question: question.to_string(),
+            placement: event.placement.clone().unwrap_or_default(),
+            asked_at: event.ts.clone(),
+            options: event
+                .options
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|option| QuestionOption {
+                    positions: argued(&option),
+                    option,
+                })
+                .collect(),
+        });
+    }
+    open.sort_by(|left, right| right.asked_at.cmp(&left.asked_at));
+    Ok(open)
+}
+
+/// Which side of the offered menu an answer came from.
+#[derive(Clone, Copy)]
+enum Chosen<'a> {
+    Offered(&'a str),
+    OffMenu(&'a str),
 }
 
 fn events(ctx: &Ctx, limit: Option<usize>) -> Result<i32> {
@@ -1789,6 +1999,12 @@ struct JournalEvent {
     /// The answers a question offers, in the order it offered them.
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<Vec<String>>,
+    /// True on an `answer` whose text is not one of the options the question
+    /// offered, so `option` carries the answerer's own words rather than a
+    /// branch. Recorded because a menu somebody had to step outside of was
+    /// framed wrong, and that is worth knowing before the next one is posed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    off_menu: Option<bool>,
     /// One of a question's options: the branch a `position` argues under, or
     /// the branch an `answer` chose.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1884,6 +2100,7 @@ impl JournalEvent {
             question_id: None,
             placement: None,
             options: None,
+            off_menu: None,
             option: None,
         }
     }
@@ -2054,7 +2271,13 @@ impl QuestionMachine {
                     return false;
                 };
                 let option = event.option.as_deref().expect("known answer has an option");
-                if progress.answered || !progress.options.iter().any(|offered| offered == option) {
+                // An off-menu answer carries the answerer's words rather than
+                // a branch, so it is not checked against the options — being
+                // outside them is the whole content of the event.
+                let off_menu = event.off_menu.unwrap_or(false);
+                if progress.answered
+                    || (!off_menu && !progress.options.iter().any(|offered| offered == option))
+                {
                     return false;
                 }
                 if progress.placement == "closing"
@@ -4797,6 +5020,10 @@ mod tests {
 pub(crate) struct Orientation {
     lanes: Vec<LaneEntry>,
     memories: Vec<ArtifactEntry>,
+    /// Questions no agent may settle. Reported first, because a session that
+    /// picks up work while one waits can do everything except the thing that
+    /// is actually blocked.
+    open_questions: Vec<OpenQuestion>,
     #[serde(flatten)]
     queue: OpenItems,
 }
@@ -4807,6 +5034,7 @@ pub(crate) fn orientation(ctx: &Ctx) -> Result<Orientation> {
     Ok(Orientation {
         lanes: lanes_from_journal(&read_events(&dir)?, now),
         memories: live_memories(&dir)?,
+        open_questions: open_questions(&dir)?,
         queue: collect_open(ctx, None)?,
     })
 }
@@ -4814,6 +5042,18 @@ pub(crate) fn orientation(ctx: &Ctx) -> Result<Orientation> {
 impl Orientation {
     pub(crate) fn render(&self) {
         render_lanes(&self.lanes, Utc::now());
+        if !self.open_questions.is_empty() {
+            println!("waiting on a person ({}):", self.open_questions.len());
+            for question in &self.open_questions {
+                println!(
+                    "  {}  {}  {}",
+                    question.question,
+                    question.topic,
+                    question.heading.as_deref().unwrap_or("")
+                );
+            }
+            println!("  `arc journal questions` for the options, `journal answer` to settle one");
+        }
         render_memories(&self.memories);
         println!("journal: {}", self.queue.dir());
         println!("  {OPEN_TIER_LEGEND}");
