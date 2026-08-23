@@ -410,9 +410,18 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     } = args;
     causes.sort_unstable();
     causes.dedup();
+    if provisional.is_some() && verdict != Verdict::Approved {
+        // Only an approval discharges the review gate, so only an approval
+        // can owe corroboration for having done so. Recording the marker on
+        // a verdict that gates nothing would leave it in the ledger with no
+        // advisory, no query, and no discharge — tracked and invisible, which
+        // is the state this flag exists to end.
+        bail!("--provisional is only valid with --verdict approved");
+    }
     let provisional = match provisional {
         Some(reason) if reason.trim().is_empty() => bail!(
-            "--provisional must say why this verdict is owed corroboration;              an empty reason records an obligation nobody can discharge knowingly"
+            "--provisional must say why this verdict is owed corroboration; an empty \
+             reason records an obligation nobody can discharge knowingly"
         ),
         other => other.map(|reason| reason.trim().to_string()),
     };

@@ -1406,14 +1406,14 @@ pub fn advisories(
     // whose judgment is not yet trusted" the same state, which is the
     // conflation this advisory exists to end.
     if let Some(reason) = state
-        .latest_verdict()
-        .filter(|verdict| verdict.patchset_id == final_patchset.id)
+        .outstanding_provisional_approval()
         .and_then(|verdict| verdict.provisional.as_deref())
     {
         warnings.push(Advisory {
             code: "provisional-approval",
             detail: format!(
-                "the verdict covering {} is owed corroboration: {reason}.                  Discharge it with `arc audit`",
+                "the verdict covering {} is owed corroboration: {reason}. Discharge it with an \
+                 independent review of this patchset, or `arc audit` after it lands",
                 final_patchset.id
             ),
         });

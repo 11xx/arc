@@ -1681,3 +1681,204 @@ fn a_provisional_verdict_must_say_why() {
             "must say why this verdict is owed corroboration",
         ));
 }
+
+/// The obligation must survive a later verdict of any kind. Deriving it from
+/// the newest verdict let any subsequent record mask a provisional approval
+/// that was still the one gating the change — the obligation vanished with no
+/// audit, which is the silent under-report this whole surface exists to end.
+#[test]
+fn a_later_verdict_does_not_mask_a_provisional_approval_that_still_gates() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "masked");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "carol")
+        .args([
+            "review",
+            "masked",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "unmeasured model",
+        ])
+        .assert()
+        .success();
+    // A comment-only verdict from anyone is not corroboration of anything.
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "dave")
+        .args(["review", "masked", "--verdict", "comment-only"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&worktree).args(["status", "masked", "--json"]));
+    assert_eq!(status["provisional_approval_outstanding"], true, "{status}");
+    assert!(stdout(repo.arc(&repo.root).args(["query", "--provisional"])).contains(&change_id));
+    let check = stdout(repo.arc(&worktree).args(["check", "masked"]));
+    assert!(check.contains("provisional-approval"), "{check}");
+}
+
+/// A provisional approval left behind by a new patchset gates nothing, so
+/// reporting it as owed is an obligation nobody can act on. The JSON flag and
+/// the advisory must agree about that, because they are one derivation.
+#[test]
+fn a_provisional_approval_stops_being_owed_once_a_new_patchset_strands_it() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "stranded");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "carol")
+        .args([
+            "review",
+            "stranded",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "unmeasured model",
+        ])
+        .assert()
+        .success();
+    repo.commit(&worktree, "more.txt", "more\n", "feat: more");
+    stdout(repo.arc(&worktree).args(["snapshot", "stranded"]));
+
+    let status = json_stdout(repo.arc(&worktree).args(["status", "stranded", "--json"]));
+    assert_eq!(
+        status["provisional_approval_outstanding"], false,
+        "{status}"
+    );
+    assert!(!stdout(repo.arc(&repo.root).args(["query", "--provisional"])).contains(&change_id));
+    let check = stdout(repo.arc(&worktree).args(["check", "stranded"]));
+    assert!(!check.contains("provisional-approval"), "{check}");
+}
+
+/// A second independent approval of the same patchset is the corroboration
+/// the obligation was for. Requiring an `arc audit` specifically would mean
+/// the debt could not be discharged before the merge, which is exactly when
+/// it is cheapest to discharge.
+#[test]
+fn an_independent_approval_of_the_same_patchset_corroborates() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "corroborated");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "carol")
+        .args([
+            "review",
+            "corroborated",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "unmeasured model",
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "dave")
+        .args(["review", "corroborated", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "corroborated", "--json"]),
+    );
+    assert_eq!(
+        status["provisional_approval_outstanding"], false,
+        "{status}"
+    );
+    assert!(!stdout(repo.arc(&repo.root).args(["query", "--provisional"])).contains(&change_id));
+}
+
+/// A reviewer confirming its own unproven verdict is the one thing that
+/// cannot be corroboration, whichever command it uses to do it.
+#[test]
+fn a_reviewer_cannot_corroborate_its_own_provisional_approval() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "self-corroborated");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "carol")
+        .args([
+            "review",
+            "self-corroborated",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "unmeasured model",
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "carol")
+        .args(["review", "self-corroborated", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "self-corroborated", "--json"]),
+    );
+    assert_eq!(status["provisional_approval_outstanding"], true, "{status}");
+    assert!(stdout(repo.arc(&repo.root).args(["query", "--provisional"])).contains(&change_id));
+}
+
+/// Only an approval discharges the review gate, so only an approval can owe
+/// corroboration for having done so. Recording the marker elsewhere would
+/// leave it tracked and invisible.
+#[test]
+fn provisional_is_refused_on_a_verdict_that_gates_nothing() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "not-an-approval");
+    repo.arc(&worktree)
+        .args([
+            "review",
+            "not-an-approval",
+            "--verdict",
+            "comment-only",
+            "--provisional",
+            "unmeasured model",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--provisional is only valid with --verdict approved",
+        ));
+}
+
+/// User-facing text is part of the contract. A hard-wrapped literal that
+/// loses its line continuation prints a run of spaces mid-sentence, and a
+/// `contains` assertion never notices.
+#[test]
+fn the_provisional_refusals_and_advisory_read_as_sentences() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "wrapping");
+    let refusal = repo
+        .arc(&worktree)
+        .args([
+            "review",
+            "wrapping",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "   ",
+        ])
+        .output()
+        .unwrap();
+    let refusal = String::from_utf8_lossy(&refusal.stderr).into_owned();
+    assert!(!refusal.contains("  "), "double space in: {refusal}");
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "carol")
+        .args([
+            "review",
+            "wrapping",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "unmeasured model",
+        ])
+        .assert()
+        .success();
+    let check = stdout(repo.arc(&worktree).args(["check", "wrapping"]));
+    let advisory = check
+        .lines()
+        .find(|line| line.contains("provisional-approval"))
+        .unwrap()
+        .trim();
+    assert!(!advisory.contains("  "), "double space in: {advisory}");
+}

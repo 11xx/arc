@@ -1777,28 +1777,53 @@ impl ChangeState {
     /// actionable: an audit reviews a revision that shipped, so a debt on an
     /// open change is a pending waiver rather than owed work. Queueing it
     /// earlier would offer a reviewer an item `arc audit` then refuses.
-    /// Whether a verdict the caller marked as owed corroboration is still
-    /// the change's gating approval, with no audit having supplied it.
+    /// The provisional approval still gating this change, if one is.
+    ///
+    /// One derivation, so the JSON flag, `arc query --provisional`, and the
+    /// `check` advisory cannot disagree about the same obligation. Reading
+    /// the *latest* verdict instead would do both wrong things at once: a
+    /// later verdict of any kind would mask a provisional approval that still
+    /// gates, and a provisional approval left behind by a new patchset would
+    /// keep reporting an obligation that gates nothing.
     ///
     /// Independent of integration, unlike audit debt: a provisional approval
-    /// is an open obligation the moment it is recorded, because the whole
-    /// point is to see it before the merge rather than after.
-    pub fn provisional_approval_outstanding(&self) -> bool {
-        let Some(verdict) = self.latest_verdict() else {
-            return false;
-        };
-        if verdict.provisional.is_none() || verdict.verdict != Verdict::Approved {
-            return false;
-        }
-        !self.corroborated_after(verdict.created_at)
+    /// is an open obligation the moment it is recorded, because the point is
+    /// to see it before the merge rather than after.
+    pub fn outstanding_provisional_approval(&self) -> Option<&VerdictEntry> {
+        let latest = self.latest_patchset()?;
+        let provisional = self.verdicts.iter().rev().find(|verdict| {
+            verdict.verdict == Verdict::Approved
+                && verdict.provisional.is_some()
+                && verdict.patchset_id == latest.id
+        })?;
+        (!self.corroborates(provisional)).then_some(provisional)
     }
 
-    /// Whether an independent audit verdict was recorded after this instant.
-    /// An audit is the discharge for both obligations, so the two share it.
-    fn corroborated_after(&self, when: chrono::DateTime<chrono::Utc>) -> bool {
-        self.audit_verdicts
-            .iter()
-            .any(|audit| audit.created_at > when)
+    pub fn provisional_approval_outstanding(&self) -> bool {
+        self.outstanding_provisional_approval().is_some()
+    }
+
+    /// Whether anything since has supplied the corroboration a provisional
+    /// approval was owed.
+    ///
+    /// Either a later unqualified approval of the same patchset or a later
+    /// audit discharges it — the obligation is for a second judgment, not for
+    /// one particular command to supply it. Both must come from somebody
+    /// else: a reviewer confirming its own unproven verdict is the one thing
+    /// that cannot be corroboration.
+    fn corroborates(&self, provisional: &VerdictEntry) -> bool {
+        let author = provisional.effective_author();
+        let later_clean_approval = self.verdicts.iter().any(|verdict| {
+            verdict.created_at > provisional.created_at
+                && verdict.verdict == Verdict::Approved
+                && verdict.provisional.is_none()
+                && verdict.patchset_id == provisional.patchset_id
+                && verdict.effective_author() != author
+        });
+        let later_audit = self.audit_verdicts.iter().any(|audit| {
+            audit.created_at > provisional.created_at && audit.effective_author() != author
+        });
+        later_clean_approval || later_audit
     }
 
     pub fn audit_debt_outstanding(&self) -> bool {
