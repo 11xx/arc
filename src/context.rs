@@ -35,12 +35,38 @@ pub fn resolve_change_or_infer(
     if let Some(reference) = maybe_arg {
         return store.resolve_change(reference);
     }
-    infer_change(store, cwd)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "cannot infer a change from {}; candidates: (none); pass CHANGE explicitly",
-            cwd.display()
-        )
-    })
+    if let Some(change_id) = infer_change(store, cwd)? {
+        return Ok(change_id);
+    }
+    bail!(
+        "cannot infer a change from {}; candidates: (none); pass CHANGE explicitly\n{}",
+        cwd.display(),
+        no_candidate_tip(store)?
+    )
+}
+
+/// A caller standing outside every recorded worktree has asked a question arc
+/// can answer — it just needs to be told which change. Naming the open
+/// changes and where each is checked out turns a dead end into the next
+/// command; with nothing open at all, the backlog is the honest next step.
+fn no_candidate_tip(store: &Store) -> Result<String> {
+    let open = open_changes(store)?;
+    if open.is_empty() {
+        return Ok(
+            "tip: no change is open here; `arc catchup` shows the ledger queue and the \
+             journal backlog"
+                .to_string(),
+        );
+    }
+    let mut tip = String::from("tip: name one of these, or cd to its worktree:");
+    for state in &open {
+        tip.push_str(&format!(
+            "\n  {}  {}",
+            state.change_id,
+            state.worktree.as_deref().unwrap_or("(no worktree)")
+        ));
+    }
+    Ok(tip)
 }
 
 fn infer_change(store: &Store, cwd: &Path) -> Result<Option<String>> {

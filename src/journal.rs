@@ -1276,6 +1276,29 @@ fn default_scaffold(kind: JournalKind) -> Option<&'static str> {
     }
 }
 
+/// File a feature request: the `arc fr` alias for
+/// `arc journal note --kind feature-request`. The alias exists because a
+/// proposal nobody can find the verb for is a proposal that gets written into
+/// a transcript instead of the journal.
+pub fn feature_request(
+    ctx: &Ctx,
+    topic: &str,
+    body_file: Option<&str>,
+    title: Option<&str>,
+    scaffold: Option<&str>,
+    no_scaffold: bool,
+) -> Result<i32> {
+    note(
+        ctx,
+        topic,
+        JournalKind::FeatureRequest,
+        body_file,
+        title,
+        scaffold,
+        no_scaffold,
+    )
+}
+
 fn note(
     ctx: &Ctx,
     topic: &str,

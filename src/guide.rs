@@ -42,6 +42,7 @@ SETTLE A QUESTION (before it is work)
   arc journal answer <file> --question <id> --option <choice> --body-file -
   arc journal discussion <file>        Read stances, branches, and open questions.
   arc journal consume <file> --outcome done --decision <decision>
+  arc fr <topic> --body-file -         File a proposal nobody is building yet.
   arc begin <slug> --from-journal <file>
 
   The ledger records what happened and what is allowed; the journal records
@@ -49,6 +50,10 @@ SETTLE A QUESTION (before it is work)
   a discussion before it belongs in a change — positions carry the model and
   harness that argued them, so a decision can be read later by who reached it
   and on what grounds, rather than surviving only in one session's transcript.
+
+  A proposal with one defensible answer is not a discussion, it is a feature
+  request: `arc fr` files it, `arc journal open` lists it back, and `begin
+  --from-journal` turns it into work when its turn comes.
 
   Resolve a discussion as done, or promote the still-open discussion to work —
   never both. `consume --outcome done` cites a terminal decision; `begin
