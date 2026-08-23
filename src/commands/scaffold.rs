@@ -42,6 +42,68 @@ pub(crate) fn resolve(ctx: &Ctx, name: &str) -> Result<String> {
     }
 }
 
+/// Every compiled-in scaffold, with the one line each exists to serve.
+pub(crate) const BUILT_IN: [(&str, &str); 4] = [
+    ("sol-low", "brief: a fully specified executor task"),
+    (
+        "sol-high",
+        "brief: a task needing judgment inside stated bounds",
+    ),
+    (
+        "reviewer",
+        "brief: an adversarial review with named pressure points",
+    ),
+    (
+        "discussion",
+        "journal: position headings, stance lines, resolution",
+    ),
+];
+
+/// The scaffold a kind prepends when the caller names none.
+pub(crate) fn default_for_kind(kind: &str) -> Option<&'static str> {
+    // Only a discussion has one. A kind whose artifacts have no conventions
+    // to seed is better off with the body the caller wrote and nothing else.
+    (kind == "discussion").then_some("discussion")
+}
+
+/// Names resolvable here: the built-ins, plus any `.arc/templates/<name>.md`,
+/// with a repo template shadowing a built-in of the same name.
+pub(crate) fn available(ctx: &Ctx) -> Vec<(String, bool)> {
+    let mut names: Vec<(String, bool)> = BUILT_IN
+        .iter()
+        .map(|(name, _)| ((*name).to_string(), false))
+        .collect();
+    let dir = gitio::toplevel(&ctx.cwd)
+        .ok()
+        .map(|top| top.join(".arc").join("templates"));
+    let Some(dir) = dir else {
+        return names;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return names;
+    };
+    let mut local: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .strip_suffix(".md")
+                .map(str::to_string)
+        })
+        .collect();
+    local.sort();
+    for name in local {
+        match names.iter_mut().find(|(known, _)| *known == name) {
+            // A repo template of a built-in's name wins, and saying so is the
+            // point: the body under that name is not the one documented here.
+            Some(entry) => entry.1 = true,
+            None => names.push((name, true)),
+        }
+    }
+    names
+}
+
 /// Prepend a scaffold template to a body being recorded, mirroring the brief
 /// semantics: the template comes first (newline-terminated), a blank line
 /// separates it from the body, and a scaffold with no body records the

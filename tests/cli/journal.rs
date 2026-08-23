@@ -5979,3 +5979,84 @@ fn the_fr_alias_and_the_kind_verb_share_one_help_source() {
     assert!(!alias.is_empty(), "expected the shared write flags");
     assert_eq!(alias, verb);
 }
+
+/// A journal artifact is append-only, so a caller choosing between
+/// `--scaffold`, a kind's default, and `--no-scaffold` was guessing at
+/// something it could not undo. The listing answers all three questions.
+#[test]
+fn journal_scaffolds_lists_names_kind_defaults_and_prints_one() {
+    let repo = Repo::new();
+    let text = stdout(repo.arc(&repo.root).args(["journal", "scaffolds"]));
+    for name in ["sol-low", "sol-high", "reviewer", "discussion"] {
+        assert!(text.contains(name), "missing {name}:\n{text}");
+    }
+    assert!(text.contains("--kind discussion"), "{text}");
+    assert!(
+        text.contains("every other kind records the body alone"),
+        "{text}"
+    );
+
+    let body = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "scaffolds", "--show", "discussion"]),
+    );
+    assert!(body.contains("Position:"), "{body}");
+    // What `--show` prints is what a write would prepend, not a paraphrase.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "seeded",
+            "--kind",
+            "discussion",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("")
+        .assert()
+        .success();
+    let dir = journal_dir(&repo);
+    let name = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.contains("seeded"))
+        .unwrap();
+    let written = fs::read_to_string(dir.join(name)).unwrap();
+    assert!(
+        written.starts_with(body.trim_end_matches('\n')),
+        "{written}"
+    );
+
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "scaffolds", "--json"]),
+    );
+    assert_eq!(value["schema"], "arc-journal-scaffolds/1");
+    assert_eq!(value["kind_defaults"][0]["kind"], "discussion");
+}
+
+/// A repository template shadows a built-in of the same name, and the listing
+/// says so — otherwise the name in the help would describe a body that is no
+/// longer the one being prepended.
+#[test]
+fn a_repository_template_shadows_a_built_in_and_the_listing_says_so() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc/templates")).unwrap();
+    fs::write(
+        repo.root.join(".arc/templates/discussion.md"),
+        "> House discussion rules.\n",
+    )
+    .unwrap();
+    fs::write(repo.root.join(".arc/templates/house.md"), "> House.\n").unwrap();
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "scaffolds"]));
+    assert!(text.contains("shadows any built-in"), "{text}");
+    assert!(text.contains("house"), "{text}");
+
+    let shown = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "scaffolds", "--show", "discussion"]),
+    );
+    assert_eq!(shown, "> House discussion rules.\n");
+}

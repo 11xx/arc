@@ -57,6 +57,7 @@ SETTLE A QUESTION (before it is work)
   arc journal position <file> --body-file -
   arc journal question <file> --placement opening|closing --option <a> --option <b> --body-file -
   arc journal questions                Every question waiting on a person.
+  arc journal scaffolds [--show <n>]   What a write prepends, before it does.
   arc journal answer <file> --question <id> --option <choice> --body-file -
     --other "<answer>"                 Settle it outside the options offered.
   arc journal discussion <file>        Read stances, branches, and open questions.
