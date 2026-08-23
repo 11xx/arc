@@ -676,7 +676,8 @@ enum Cmd {
         summary: String,
         #[command(flatten)]
         body: BodyOpts,
-        /// Record it as blocking, so integration refuses until it is disposed of
+        /// Record it as blocking, so integration refuses until a disposition
+        /// releases it: resolved, accepted-risk, or obsolete
         #[arg(long)]
         blocking: bool,
         #[arg(long, value_enum, default_value = "major")]
@@ -1106,15 +1107,21 @@ enum HooksCmd {
 enum ForgeCmd {
     /// Declare the explicit projection tuple and policy for a change
     Declare {
+        /// Change the projection is declared for
         change: String,
+        /// Forge host the pull request will live on (e.g. github.com)
         #[arg(long)]
         host: String,
+        /// Repository the pull request merges into, as owner/name
         #[arg(long = "base-repo")]
         base_repo: String,
+        /// Branch the pull request merges into
         #[arg(long = "base-ref")]
         base_ref: String,
+        /// Repository the pull request is opened from, as owner/name
         #[arg(long = "head-repo")]
         head_repo: String,
+        /// Branch the pull request is opened from
         #[arg(long = "head-ref")]
         head_ref: String,
         /// same-repository-only (default) | allowed-base-repo=<owner/name>
@@ -1123,35 +1130,49 @@ enum ForgeCmd {
     },
     /// Record the observed post-creation PR tuple (validated, fail-closed)
     Link {
+        /// Change the pull request was opened for
         change: String,
+        /// Pull request number as the forge assigned it
         #[arg(long)]
         pr: u64,
+        /// Canonical URL of the pull request
         #[arg(long)]
         url: String,
+        /// Repository it merges into, as observed, in owner/name form
         #[arg(long = "base-repo")]
         base_repo: String,
+        /// Branch it merges into, as observed
         #[arg(long = "base-ref")]
         base_ref: String,
+        /// Repository it was opened from, as observed, in owner/name form
         #[arg(long = "head-repo")]
         head_repo: String,
+        /// Branch it was opened from, as observed
         #[arg(long = "head-ref")]
         head_ref: String,
+        /// Exact commit at the pull request head when it was read
         #[arg(long = "head-sha")]
         head_sha: String,
     },
     /// Record the observed hosted-check rollup at an exact PR head
     Checks {
+        /// Change whose hosted checks were read
         change: String,
+        /// Exact commit the rollup was read at
         #[arg(long = "pr-head")]
         pr_head: String,
+        /// The rollup the forge reported
         #[arg(long, value_enum)]
         state: forge::ForgeCheckState,
+        /// Free-text detail recorded with the rollup, such as a failing job
         #[arg(long)]
         detail: Option<String>,
     },
     /// Record the observed PR lifecycle state
     PrState {
+        /// Change whose pull request state was read
         change: String,
+        /// The lifecycle state the forge reported
         #[arg(long, value_enum)]
         state: forge::ForgePrState,
         /// Required when state is merged
@@ -1181,7 +1202,10 @@ enum HistoryCmd {
         tool: Option<String>,
     },
     /// Show where a recorded revision ended up
-    Resolve { revision: String },
+    Resolve {
+        /// A revision a rewrite may have moved; the surviving one is printed
+        revision: String,
+    },
 }
 
 fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'static str)> {

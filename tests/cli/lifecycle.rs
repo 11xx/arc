@@ -2257,40 +2257,57 @@ fn piped_output_dies_on_sigpipe_without_panicking() {
 
 /// Help copy is the teaching surface for an agent-facing CLI, so an
 /// undescribed flag or positional is a gap in the contract rather than a
-/// cosmetic one. This walks every command and fails naming what it found,
-/// so the class cannot come back one flag at a time.
+/// cosmetic one. This walks every command *and every nested group*, and
+/// fails naming what it found, so the class cannot come back one flag at a
+/// time.
+///
+/// Walking only the top level was the first version's defect, and the region
+/// it skipped held twenty-eight undescribed entries — including a bare
+/// `--json`, the exact shape the sweep had fixed everywhere it looked.
 #[test]
 fn every_flag_and_positional_carries_a_description() {
     let repo = Repo::new();
-    let root = stdout(repo.arc(&repo.root).arg("--help"));
-    let commands: Vec<String> = root
-        .lines()
-        .skip_while(|line| !line.starts_with("Commands:"))
-        .take_while(|line| !line.starts_with("Options:"))
-        .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
-        .filter_map(|line| line.split_whitespace().next())
-        .map(str::to_string)
-        .collect();
-    assert!(
-        commands.len() > 20,
-        "expected the full command list: {commands:?}"
-    );
 
-    let undescribed = |help: &str| -> Vec<String> {
+    fn subcommands(help: &str) -> Vec<String> {
+        help.lines()
+            .skip_while(|line| !line.starts_with("Commands:"))
+            .skip(1)
+            .take_while(|line| !line.trim().is_empty() || false)
+            .take_while(|line| !line.starts_with("Options:"))
+            .filter(|line| line.starts_with("  ") && !line.starts_with("    "))
+            .filter_map(|line| line.split_whitespace().next())
+            .filter(|name| *name != "help")
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// An item is described when text follows it — on the same line in
+    /// clap's two-column layout, or on the next line in its long one.
+    fn undescribed(help: &str) -> Vec<String> {
         let lines: Vec<&str> = help.lines().collect();
         let mut found = Vec::new();
         for (index, line) in lines.iter().enumerate() {
             let item = line.trim();
-            let is_flag = item.starts_with("--")
-                && item
-                    .split_whitespace()
-                    .next()
-                    .is_some_and(|flag| flag.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
-            // `[possible values: …]` and `[env: …]` are clap's annotations on
-            // the line above, not items of their own.
-            let is_annotation = item.contains(": ");
-            let is_positional = !is_annotation && (item.starts_with('[') || item.starts_with('<'));
-            if !(is_flag || is_positional) || item.contains("  ") {
+            // `[possible values: …]` and `[env: …]` annotate the line above.
+            if item.contains(": ") {
+                continue;
+            }
+            let head = item.split_whitespace().next().unwrap_or("");
+            let is_flag = head.starts_with("--")
+                && head
+                    .trim_start_matches('-')
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '-');
+            let is_positional = head.starts_with('[') || head.starts_with('<');
+            if !(is_flag || is_positional) {
+                continue;
+            }
+            // Two-column layout: the description sits after the item.
+            let rest = item[head.len()..].trim();
+            let rest = rest.strip_prefix('<').map_or(rest, |_| {
+                rest.split_once('>').map_or("", |(_, tail)| tail.trim())
+            });
+            if !rest.is_empty() {
                 continue;
             }
             let next = lines.get(index + 1).map(|line| line.trim()).unwrap_or("");
@@ -2304,15 +2321,43 @@ fn every_flag_and_positional_carries_a_description() {
             }
         }
         found
-    };
+    }
+
+    let mut queue: Vec<Vec<String>> = subcommands(&stdout(repo.arc(&repo.root).arg("--help")))
+        .into_iter()
+        .map(|name| vec![name])
+        .collect();
+    assert!(
+        queue.len() > 20,
+        "expected the full command list: {queue:?}"
+    );
 
     let mut gaps = Vec::new();
-    for command in &commands {
-        let help = stdout(repo.arc(&repo.root).args([command, "--help"]));
+    let mut walked = 0usize;
+    while let Some(path) = queue.pop() {
+        let mut args: Vec<&str> = path.iter().map(String::as_str).collect();
+        args.push("--help");
+        let help = stdout(repo.arc(&repo.root).args(&args));
+        let nested = subcommands(&help);
+        if !nested.is_empty() {
+            for name in nested {
+                let mut child = path.clone();
+                child.push(name);
+                queue.push(child);
+            }
+            continue;
+        }
+        walked += 1;
         for item in undescribed(&help) {
-            gaps.push(format!("{command}: {item}"));
+            gaps.push(format!("{}: {item}", path.join(" ")));
         }
     }
+    // The nested groups are the half that was missed; assert they were
+    // reached rather than trusting the walk.
+    assert!(
+        walked > 50,
+        "expected to reach every leaf command, saw {walked}"
+    );
     assert!(
         gaps.is_empty(),
         "undescribed help entries:\n  {}",
@@ -2399,4 +2444,17 @@ fn env_help_explains_detection_and_its_non_zero_exit() {
     for expected in ["CLAUDE_SESSION_ID", "PI_SESSION_ID", "eval", "non-zero"] {
         assert!(help.contains(expected), "missing {expected}:\n{help}");
     }
+}
+
+/// A blocking finding is released by a disposition that releases it, not by
+/// any disposition: `still-open` and `disputed` are recorded and leave the
+/// gate shut. The help promised what `arc resolve` would not always deliver.
+#[test]
+fn the_blocking_flag_names_which_dispositions_release_the_gate() {
+    let repo = Repo::new();
+    let help = stdout(repo.arc(&repo.root).args(["finding", "--help"]));
+    for expected in ["resolved", "accepted-risk", "obsolete"] {
+        assert!(help.contains(expected), "missing {expected}:\n{help}");
+    }
+    assert!(!help.contains("until it is disposed of"), "{help}");
 }
