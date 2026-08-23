@@ -215,7 +215,8 @@ enum Cmd {
         #[arg(long = "audit-debt")]
         audit_debt: bool,
         /// Only changes whose gating approval was recorded as owed
-        /// corroboration and has not been audited since
+        /// corroboration and has not received it — from an independent
+        /// approval of the same patchset, or from an audit
         #[arg(long)]
         provisional: bool,
         #[arg(long)]
@@ -666,8 +667,9 @@ enum Cmd {
         findings_json: Option<String>,
         /// Say this verdict is owed corroboration, and why. It gates like any
         /// other verdict — independence and staleness are unchanged — but the
-        /// change carries a recorded obligation an `arc audit` discharges,
-        /// and `arc query --provisional` finds it. Use it when the reviewer's
+        /// change carries a recorded obligation until somebody else supplies
+        /// a second judgment, and `arc query --provisional` finds it until
+        /// they do. Use it when the reviewer's
         /// judgment has not been validated: an unproven model, a rushed pass,
         /// a reviewer outside their competence. arc never infers this; naming
         /// which reviewers are proven would be a routing opinion it does not

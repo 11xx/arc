@@ -1702,10 +1702,11 @@ fn a_later_verdict_does_not_mask_a_provisional_approval_that_still_gates() {
         ])
         .assert()
         .success();
-    // A comment-only verdict from anyone is not corroboration of anything.
+    // A finding recorded by anyone is not corroboration of anything, and must
+    // not clear the obligation the way any later verdict once did.
     repo.arc(&worktree)
         .env("ARC_ACTOR", "dave")
-        .args(["review", "masked", "--verdict", "comment-only"])
+        .args(["finding", "masked", "--summary", "a passing note"])
         .assert()
         .success();
 
@@ -1881,4 +1882,171 @@ fn the_provisional_refusals_and_advisory_read_as_sentences() {
         .unwrap()
         .trim();
     assert!(!advisory.contains("  "), "double space in: {advisory}");
+}
+
+/// The author of the change cannot corroborate a verdict on it. Excluding
+/// only the provisional reviewer let an author clear the obligation by
+/// approving their own change — the silent drop this surface exists to end.
+#[test]
+fn the_change_author_cannot_corroborate_a_provisional_approval() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "author-corroborates");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "carol")
+        .args([
+            "review",
+            "author-corroborates",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "unmeasured model",
+        ])
+        .assert()
+        .success();
+    // `change_with_patchset` snapshots as the default test actor, so that
+    // actor is the change's author.
+    repo.arc(&worktree)
+        .args(["review", "author-corroborates", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "author-corroborates", "--json"]),
+    );
+    assert_eq!(status["provisional_approval_outstanding"], true, "{status}");
+    assert!(stdout(repo.arc(&repo.root).args(["query", "--provisional"])).contains(&change_id));
+}
+
+/// A superseding verdict leaves no approval gating the change, so there is no
+/// approval left to owe corroboration. Reporting one would advise work on an
+/// obligation that cannot be acted on.
+#[test]
+fn a_superseding_verdict_leaves_no_provisional_obligation() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "superseded");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "carol")
+        .args([
+            "review",
+            "superseded",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "unmeasured model",
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "dave")
+        .args(["review", "superseded", "--verdict", "comment-only"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&worktree).args(["status", "superseded", "--json"]));
+    assert_eq!(status["integrate_ready"], false, "{status}");
+    assert_eq!(
+        status["provisional_approval_outstanding"], false,
+        "{status}"
+    );
+    assert!(!stdout(repo.arc(&repo.root).args(["query", "--provisional"])).contains(&change_id));
+}
+
+/// A reviewer cannot launder its own obligation by re-approving without the
+/// flag: the second verdict is the same judgment, not a second one.
+#[test]
+fn re_approving_without_the_flag_does_not_clear_the_obligation() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "relaundered");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "carol")
+        .args([
+            "review",
+            "relaundered",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "unmeasured model",
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "carol")
+        .args(["review", "relaundered", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "relaundered", "--json"]),
+    );
+    assert_eq!(status["provisional_approval_outstanding"], true, "{status}");
+    assert!(stdout(repo.arc(&repo.root).args(["query", "--provisional"])).contains(&change_id));
+}
+
+/// An audit by the reviewer whose verdict is owed corroboration is not
+/// corroboration either — the audit path carries the same rule as the review
+/// path, rather than a weaker one nobody noticed.
+#[test]
+fn an_audit_by_the_provisional_reviewer_does_not_discharge() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "self-audited");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "carol")
+        .args([
+            "review",
+            "self-audited",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "unmeasured model",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "self-audited"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "carol")
+        .args(["audit", "self-audited", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    assert!(stdout(repo.arc(&repo.root).args(["query", "--provisional"])).contains(&change_id));
+}
+
+/// Corroboration is of one patchset. An approval of a different patchset is a
+/// judgment about different code.
+#[test]
+fn an_approval_of_another_patchset_does_not_corroborate() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "other-patchset");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "dave")
+        .args(["review", "other-patchset", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.commit(&worktree, "more.txt", "more\n", "feat: more");
+    stdout(repo.arc(&worktree).args(["snapshot", "other-patchset"]));
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "carol")
+        .args([
+            "review",
+            "other-patchset",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "unmeasured model",
+        ])
+        .assert()
+        .success();
+
+    // Dave approved ps-01; the provisional approval covers ps-02.
+    let status = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "other-patchset", "--json"]),
+    );
+    assert_eq!(status["provisional_approval_outstanding"], true, "{status}");
+    assert!(stdout(repo.arc(&repo.root).args(["query", "--provisional"])).contains(&change_id));
 }

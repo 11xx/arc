@@ -326,6 +326,12 @@ impl AuditVerdictEntry {
     pub fn effective_author(&self) -> &str {
         self.on_behalf_of.as_deref().unwrap_or(&self.actor)
     }
+
+    /// Whether arc invented the identity this audit is attributed to rather
+    /// than somebody declaring it.
+    pub fn author_assumed(&self) -> bool {
+        author_assumed(self.on_behalf_of.as_deref(), self.actor_source)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1791,12 +1797,18 @@ impl ChangeState {
     /// to see it before the merge rather than after.
     pub fn outstanding_provisional_approval(&self) -> Option<&VerdictEntry> {
         let latest = self.latest_patchset()?;
+        // Something must actually be gated by an approval before an approval
+        // can owe anything. arc gates on the newest verdict, so a later
+        // changes-requested or comment-only leaves nothing to corroborate.
+        self.latest_verdict().filter(|verdict| {
+            verdict.verdict == Verdict::Approved && verdict.patchset_id == latest.id
+        })?;
         let provisional = self.verdicts.iter().rev().find(|verdict| {
             verdict.verdict == Verdict::Approved
                 && verdict.provisional.is_some()
                 && verdict.patchset_id == latest.id
         })?;
-        (!self.corroborates(provisional)).then_some(provisional)
+        (!self.corroborates(latest, provisional)).then_some(provisional)
     }
 
     pub fn provisional_approval_outstanding(&self) -> bool {
@@ -1811,17 +1823,27 @@ impl ChangeState {
     /// one particular command to supply it. Both must come from somebody
     /// else: a reviewer confirming its own unproven verdict is the one thing
     /// that cannot be corroboration.
-    fn corroborates(&self, provisional: &VerdictEntry) -> bool {
-        let author = provisional.effective_author();
+    fn corroborates(&self, patchset: &Patchset, provisional: &VerdictEntry) -> bool {
+        let reviewer = provisional.effective_author();
+        // Neither the reviewer being corroborated nor the change's own author
+        // can supply it. Excluding only the reviewer would let the author
+        // clear the obligation by approving their own change, which is the
+        // silent drop this whole surface exists to prevent — and an identity
+        // arc invented rather than one somebody declared corroborates
+        // nothing, exactly as it satisfies no independence check elsewhere.
+        let independent = |author: &str, assumed: bool| {
+            author != reviewer && author != patchset.effective_author() && !assumed
+        };
         let later_clean_approval = self.verdicts.iter().any(|verdict| {
             verdict.created_at > provisional.created_at
                 && verdict.verdict == Verdict::Approved
                 && verdict.provisional.is_none()
                 && verdict.patchset_id == provisional.patchset_id
-                && verdict.effective_author() != author
+                && independent(verdict.effective_author(), verdict.author_assumed())
         });
         let later_audit = self.audit_verdicts.iter().any(|audit| {
-            audit.created_at > provisional.created_at && audit.effective_author() != author
+            audit.created_at > provisional.created_at
+                && independent(audit.effective_author(), audit.author_assumed())
         });
         later_clean_approval || later_audit
     }

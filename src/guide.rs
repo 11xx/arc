@@ -82,7 +82,7 @@ RUN A CHANGE
   arc verify --command <cmd>         Same, for an ad hoc probe.
   arc done                           Snapshot, run every gate, print check state.
   arc review --verdict <v>           Record a verdict (+ --findings-json -).
-    --provisional <why>              The verdict gates, and is owed an audit.
+    --provisional <why>              It gates, and owes a second judgment.
   arc resolve                        Dispose of a finding.
   arc check                          Integration preflight; exit code names the blocker.
   arc integrate [--tag <t>]          Guarded --no-ff merge once the gates are green.
@@ -143,7 +143,10 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
 
   Debt and a provisional verdict are the same obligation at two distances:
   debt says no review happened, provisional says one happened and is not yet
-  trusted. An audit discharges either.
+  trusted. Corroboration is a second judgment, not one particular command: an
+  independent approval of the same patchset discharges it before the merge,
+  an audit after. Neither the reviewer being corroborated nor the change's
+  own author can supply it.
 
   Coming back to owed work:
 
