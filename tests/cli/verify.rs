@@ -1767,3 +1767,102 @@ fn stdout_lines(cwd: &std::path::Path, prefix: &str) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
+
+/// A change opened with `--no-worktree` has nowhere to run its gates. Once the
+/// primary branch moves past it, evidence recorded from the primary checkout
+/// lands at the wrong revision, status ignores it, and `next_action` keeps
+/// advising a gate run that can never complete.
+#[test]
+fn a_gate_run_away_from_the_change_head_is_refused_with_the_step_that_fixes_it() {
+    let repo = Repo::new();
+    write_two_gates(&repo, "true", "true");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "checkoutless", "--no-worktree"]),
+    );
+    repo.commit(
+        &repo.root,
+        "moved.txt",
+        "primary moved on",
+        "chore: move on",
+    );
+
+    repo.arc(&repo.root)
+        .args(["verify", "checkoutless", "--gate", "alpha"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("has no checkout"))
+        .stderr(predicates::str::contains("git worktree add"))
+        .stderr(predicates::str::contains("--attest --tested-revision"));
+
+    // No evidence was recorded, so nothing landed at a revision status ignores.
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "checkoutless",
+        "--type",
+        "verification-recorded",
+    ]));
+    assert!(events.trim().is_empty(), "{events}");
+}
+
+/// The same refusal, when the change does have a checkout: the caller is
+/// simply standing in the wrong one, so the tip is a path rather than advice
+/// about creating a worktree.
+#[test]
+fn a_gate_run_from_the_wrong_checkout_names_the_change_worktree() {
+    let repo = Repo::new();
+    write_two_gates(&repo, "true", "true");
+    stdout(repo.arc(&repo.root).args(["begin", "elsewhere"]));
+    repo.commit(
+        &repo.root,
+        "moved.txt",
+        "primary moved on",
+        "chore: move on",
+    );
+
+    repo.arc(&repo.root)
+        .args(["verify", "elsewhere", "--all"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("would be recorded away from"))
+        .stderr(predicates::str::contains(".worktrees/repo-elsewhere"));
+}
+
+/// Attestation is the documented escape for evidence arc did not run, and it
+/// carries its own revision, so the refusal must not reach it.
+#[test]
+fn attested_evidence_is_exempt_from_the_change_head_check() {
+    let repo = Repo::new();
+    write_two_gates(&repo, "true", "true");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "attested", "--no-worktree"]),
+    );
+    let change_head = repo.head(&repo.root);
+    repo.commit(
+        &repo.root,
+        "moved.txt",
+        "primary moved on",
+        "chore: move on",
+    );
+
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "attested",
+            "--gate",
+            "alpha",
+            "--attest",
+            "--result",
+            "pass",
+            "--tested-revision",
+            &change_head,
+            "--execution-host",
+            "runner-1",
+            "--runner",
+            "ci",
+        ])
+        .assert()
+        .success();
+}

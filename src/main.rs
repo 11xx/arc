@@ -661,7 +661,10 @@ enum Cmd {
         #[arg(long)]
         findings_json: Option<String>,
     },
-    /// Run a declared gate (or ad hoc command) and record the evidence
+    /// Run a declared gate (or ad hoc command) and record the evidence. Gate
+    /// evidence only counts at the change's own head, so a gate run from
+    /// anywhere else is refused rather than recorded where status will ignore
+    /// it; `--attest` records evidence arc did not run
     Verify {
         change: Option<String>,
         /// Run every gate declared for the change profile

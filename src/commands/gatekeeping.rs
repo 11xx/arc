@@ -252,6 +252,13 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         };
         return Ok(if observed == expected { 0 } else { 1 });
     }
+    // Every path below records gate evidence, which status counts only at the
+    // change's head. A probe is exempt because it carries its own revision
+    // rule: a baseline probe must run at the brief's base revision, which is
+    // by design not the head.
+    if !attest {
+        ensure_at_change_head(ctx, &st)?;
+    }
     if all {
         let gates = gates::load(&toplevel)?;
         let required = gates.required_for(&st.profile);
@@ -363,6 +370,42 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             note,
         },
     )
+}
+
+/// Refuse to run a gate anywhere but at the change's own head.
+///
+/// Evidence is recorded at the head of whatever checkout the command ran in,
+/// and status only counts evidence at the change's head. Recording it
+/// elsewhere is therefore permanently ignored: `next_action` keeps answering
+/// `run_gate:<name>`, and following that advice changes nothing. Refusing
+/// before the command runs turns a loop that cannot be completed into one
+/// step that can — and for a change with no checkout at all, names the two
+/// ways to get one.
+///
+/// `--attest` is exempt: it exists to record evidence arc did not observe, and
+/// carries its own `--tested-revision`. So is a probe, which has its own
+/// revision rule.
+fn ensure_at_change_head(ctx: &Ctx, st: &state::ChangeState) -> Result<()> {
+    let change_head = gitio::branch_head(&ctx.cwd, &st.branch)?;
+    if gitio::head(&ctx.cwd)? == change_head {
+        return Ok(());
+    }
+    match gitio::worktree_for_branch(&ctx.cwd, &st.branch)? {
+        Some(worktree) => bail!(
+            "gate evidence would be recorded away from {}'s head, where status will never \
+             count it\ntip: run this from {}",
+            st.change_id,
+            worktree.display()
+        ),
+        None => bail!(
+            "{} has no checkout, so a gate run here would record evidence at the wrong \
+             revision and status would never count it\n\
+             tip: give it one with `git worktree add <path> {}`, or record evidence arc did \
+             not run with `arc verify --attest --tested-revision {change_head} ...`",
+            st.change_id,
+            st.branch
+        ),
+    }
 }
 
 /// Whether the change's latest brief declares an acceptance probe by this name.
