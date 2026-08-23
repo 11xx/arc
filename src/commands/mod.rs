@@ -18,6 +18,10 @@ mod observe;
 mod rescue;
 pub(crate) mod review;
 pub(crate) mod scaffold;
+pub(crate) use scaffold::{
+    available as scaffolds_available, default_for_kind as scaffold_default_for_kind,
+    resolve as scaffold_resolve, BUILT_IN as SCAFFOLD_BUILT_IN,
+};
 mod stats;
 mod timeline;
 mod workspace;

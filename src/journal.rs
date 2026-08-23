@@ -386,6 +386,18 @@ pub enum JournalCmd {
         #[arg(long)]
         body_file: String,
     },
+    /// List the scaffolds a write can prepend, and print one before using
+    /// it. A journal artifact is append-only, so choosing between
+    /// `--scaffold`, a kind's default, and `--no-scaffold` blind makes a
+    /// wrong guess permanent
+    Scaffolds {
+        /// Print this scaffold's body instead of listing the names
+        #[arg(long, value_name = "NAME")]
+        show: Option<String>,
+        /// Emit the machine-readable JSON view instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// Every question awaiting a person, across the journal. arc records
     /// what agents cannot settle; it does not ask. This is the view an agent
     /// reads to raise the question through its own harness prompt — file, id,
@@ -621,6 +633,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             other.as_deref(),
             &body_file,
         ),
+        JournalCmd::Scaffolds { show, json } => scaffolds(ctx, show.as_deref(), json),
         JournalCmd::Questions { json } => questions(ctx, json),
         JournalCmd::Events { limit } => events(ctx, limit),
         JournalCmd::Catchup {
@@ -1949,6 +1962,93 @@ fn question_text(path: &Path, question_id: &str) -> Option<String> {
     lines
         .find(|line| !line.trim().is_empty())
         .map(|line| line.trim().to_string())
+}
+
+/// List the scaffolds a write can prepend, or print one.
+///
+/// `--no-scaffold` implies kinds carry defaults and `--scaffold` names
+/// built-ins, but neither said which exist or what any contains. A journal
+/// artifact is append-only, so a caller choosing between them was guessing at
+/// something it could not undo.
+fn scaffolds(ctx: &Ctx, show: Option<&str>, json: bool) -> Result<i32> {
+    if let Some(name) = show {
+        let body = crate::commands::scaffold_resolve(ctx, name)?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema": "arc-journal-scaffolds/1",
+                    "scaffold": name,
+                    "body": body,
+                }))?
+            );
+        } else {
+            print!("{body}");
+        }
+        return Ok(0);
+    }
+
+    let defaults: Vec<(&str, &str)> = recognized_journal_kinds()
+        .filter_map(|kind| {
+            crate::commands::scaffold_default_for_kind(kind).map(|name| (kind, name))
+        })
+        .collect();
+    let available = crate::commands::scaffolds_available(ctx);
+    if json {
+        let rows: Vec<serde_json::Value> = available
+            .iter()
+            .map(|(name, from_repo)| {
+                serde_json::json!({
+                    "name": name,
+                    "source": if *from_repo { "repository" } else { "built-in" },
+                    "purpose": crate::commands::SCAFFOLD_BUILT_IN
+                        .iter()
+                        .find(|(known, _)| known == name)
+                        .map(|(_, purpose)| *purpose),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": "arc-journal-scaffolds/1",
+                "scaffolds": rows,
+                "kind_defaults": defaults
+                    .iter()
+                    .map(|(kind, name)| serde_json::json!({"kind": kind, "scaffold": name}))
+                    .collect::<Vec<_>>(),
+            }))?
+        );
+        return Ok(0);
+    }
+
+    println!("scaffolds (`--scaffold <name>` on any write):");
+    for (name, from_repo) in &available {
+        let purpose = crate::commands::SCAFFOLD_BUILT_IN
+            .iter()
+            .find(|(known, _)| known == name)
+            .map(|(_, purpose)| *purpose)
+            .unwrap_or("repository template");
+        let source = if *from_repo {
+            "  [.arc/templates, shadows any built-in of this name]"
+        } else {
+            ""
+        };
+        println!("  {name}  {purpose}{source}");
+    }
+    println!();
+    if defaults.is_empty() {
+        println!("no kind prepends one unless asked.");
+    } else {
+        println!("prepended unless `--no-scaffold`:");
+        for (kind, name) in &defaults {
+            println!("  --kind {kind}  {name}");
+        }
+        println!("  every other kind records the body alone.");
+    }
+    println!();
+    println!("read one before writing: `arc journal scaffolds --show <name>`");
+    Ok(0)
 }
 
 /// Every unanswered question in one journal, newest first.
