@@ -258,6 +258,9 @@ pub struct VerdictEntry {
     pub verdict: Verdict,
     pub causes: Vec<ReviewCause>,
     pub body: Option<String>,
+    /// Why this verdict is owed corroboration, when the caller said it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisional: Option<String>,
     pub actor: String,
     /// Subject the verdict was cast for, when a lead reviewed on behalf of one.
     pub on_behalf_of: Option<String>,
@@ -322,6 +325,12 @@ pub struct AuditVerdictEntry {
 impl AuditVerdictEntry {
     pub fn effective_author(&self) -> &str {
         self.on_behalf_of.as_deref().unwrap_or(&self.actor)
+    }
+
+    /// Whether arc invented the identity this audit is attributed to rather
+    /// than somebody declaring it.
+    pub fn author_assumed(&self) -> bool {
+        author_assumed(self.on_behalf_of.as_deref(), self.actor_source)
     }
 }
 
@@ -1137,6 +1146,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 patchset_id,
                 verdict,
                 causes,
+                provisional,
                 body,
                 findings,
             } => {
@@ -1165,6 +1175,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     verdict: *verdict,
                     causes: causes.clone(),
                     body: body.clone(),
+                    provisional: provisional.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
                     actor_source: ev.actor_source,
@@ -1772,6 +1783,71 @@ impl ChangeState {
     /// actionable: an audit reviews a revision that shipped, so a debt on an
     /// open change is a pending waiver rather than owed work. Queueing it
     /// earlier would offer a reviewer an item `arc audit` then refuses.
+    /// The provisional approval still gating this change, if one is.
+    ///
+    /// One derivation, so the JSON flag, `arc query --provisional`, and the
+    /// `check` advisory cannot disagree about the same obligation. Reading
+    /// the *latest* verdict instead would do both wrong things at once: a
+    /// later verdict of any kind would mask a provisional approval that still
+    /// gates, and a provisional approval left behind by a new patchset would
+    /// keep reporting an obligation that gates nothing.
+    ///
+    /// Independent of integration, unlike audit debt: a provisional approval
+    /// is an open obligation the moment it is recorded, because the point is
+    /// to see it before the merge rather than after.
+    pub fn outstanding_provisional_approval(&self) -> Option<&VerdictEntry> {
+        let latest = self.latest_patchset()?;
+        // Something must actually be gated by an approval before an approval
+        // can owe anything. arc gates on the newest verdict, so a later
+        // changes-requested or comment-only leaves nothing to corroborate.
+        self.latest_verdict().filter(|verdict| {
+            verdict.verdict == Verdict::Approved && verdict.patchset_id == latest.id
+        })?;
+        let provisional = self.verdicts.iter().rev().find(|verdict| {
+            verdict.verdict == Verdict::Approved
+                && verdict.provisional.is_some()
+                && verdict.patchset_id == latest.id
+        })?;
+        (!self.corroborates(latest, provisional)).then_some(provisional)
+    }
+
+    pub fn provisional_approval_outstanding(&self) -> bool {
+        self.outstanding_provisional_approval().is_some()
+    }
+
+    /// Whether anything since has supplied the corroboration a provisional
+    /// approval was owed.
+    ///
+    /// Either a later unqualified approval of the same patchset or a later
+    /// audit discharges it — the obligation is for a second judgment, not for
+    /// one particular command to supply it. Both must come from somebody
+    /// else: a reviewer confirming its own unproven verdict is the one thing
+    /// that cannot be corroboration.
+    fn corroborates(&self, patchset: &Patchset, provisional: &VerdictEntry) -> bool {
+        let reviewer = provisional.effective_author();
+        // Neither the reviewer being corroborated nor the change's own author
+        // can supply it. Excluding only the reviewer would let the author
+        // clear the obligation by approving their own change, which is the
+        // silent drop this whole surface exists to prevent — and an identity
+        // arc invented rather than one somebody declared corroborates
+        // nothing, exactly as it satisfies no independence check elsewhere.
+        let independent = |author: &str, assumed: bool| {
+            author != reviewer && author != patchset.effective_author() && !assumed
+        };
+        let later_clean_approval = self.verdicts.iter().any(|verdict| {
+            verdict.created_at > provisional.created_at
+                && verdict.verdict == Verdict::Approved
+                && verdict.provisional.is_none()
+                && verdict.patchset_id == provisional.patchset_id
+                && independent(verdict.effective_author(), verdict.author_assumed())
+        });
+        let later_audit = self.audit_verdicts.iter().any(|audit| {
+            audit.created_at > provisional.created_at
+                && independent(audit.effective_author(), audit.author_assumed())
+        });
+        later_clean_approval || later_audit
+    }
+
     pub fn audit_debt_outstanding(&self) -> bool {
         let Some(debt) = &self.audit_debt else {
             return false;

@@ -876,6 +876,7 @@ mod tests {
                     causes: Vec::new(),
                     body: None,
                     findings: Vec::new(),
+                    provisional: None,
                 },
             ),
         ];

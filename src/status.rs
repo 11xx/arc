@@ -414,6 +414,12 @@ pub struct StatusReport {
     /// A declared review obligation with no audit answering it. Additive in
     /// arc-status/6.
     pub audit_debt_outstanding: bool,
+    /// The change's gating approval was recorded as owed corroboration, and
+    /// no audit has supplied it. Reported beside `audit_debt_outstanding`
+    /// because it is the same obligation seen one step earlier: debt says a
+    /// review never happened, this says one happened and is not yet trusted.
+    /// Additive in `arc-status/9`.
+    pub provisional_approval_outstanding: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audit_debt: Option<crate::state::AuditDebt>,
     /// Reviews recorded after integration, never mixed into `verdict`.
@@ -448,6 +454,10 @@ pub struct VerdictStatus {
     pub patchset_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// Why this verdict is owed corroboration, when the reviewer said it is.
+    /// Additive in `arc-status/9`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provisional: Option<String>,
     pub actor: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_behalf_of: Option<String>,
@@ -755,6 +765,7 @@ fn build_report(
             verdict: v.verdict,
             patchset_id: v.patchset_id.clone(),
             body: v.body.clone(),
+            provisional: v.provisional.clone(),
             actor: v.actor.clone(),
             on_behalf_of: v.on_behalf_of.clone(),
             author_assumed: v.author_assumed(),
@@ -1152,6 +1163,7 @@ fn build_report(
         blockers,
         closure: state.closure.clone(),
         audit_debt_outstanding: state.audit_debt_outstanding(),
+        provisional_approval_outstanding: state.provisional_approval_outstanding(),
         audit_debt: state.audit_debt.clone(),
         audit_verdicts: state.audit_verdicts.clone(),
         forge,
@@ -1387,6 +1399,24 @@ pub fn advisories(
                 ),
             });
         }
+    }
+    // An unproven reviewer is still not the author, so a provisional verdict
+    // satisfies independence and is reported on its own axis. Collapsing the
+    // two would make "nobody independent read this" and "somebody read it
+    // whose judgment is not yet trusted" the same state, which is the
+    // conflation this advisory exists to end.
+    if let Some(reason) = state
+        .outstanding_provisional_approval()
+        .and_then(|verdict| verdict.provisional.as_deref())
+    {
+        warnings.push(Advisory {
+            code: "provisional-approval",
+            detail: format!(
+                "the verdict covering {} is owed corroboration: {reason}. Discharge it with an \
+                 independent review of this patchset, or `arc audit` after it lands",
+                final_patchset.id
+            ),
+        });
     }
     let independent = review_map
         .iter()
