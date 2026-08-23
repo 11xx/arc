@@ -20,9 +20,7 @@ SAY WHO YOU ARE (before the first write)
 
   Every event records who wrote it. Nothing refuses an undeclared identity by
   default — the write succeeds and arc records an actor nobody claimed, which
-  is discovered later by a reader who cannot tell whose work it was. Positions
-  in a discussion carry the model and harness that argued them, so an
-  undeclared one lands as `(unknown, …)` and needs a correction block to fix.
+  is discovered later by a reader who cannot tell whose work it was.
 
   `arc env` only detects a harness that exports its own session variable, and
   not every harness does; it exits non-zero and prints the export template
@@ -133,9 +131,7 @@ END A SESSION (what the next one reads)
   arc journal archive --consumed               Move the drained to cold storage.
 
   ORIENT above is fed entirely by these writes: `catchup` surfaces memories,
-  `journal open` lists what a handoff parked. A session that files none of
-  them leaves the next one to reconstruct from a transcript, which is the cost
-  this journal exists to avoid.
+  `journal open` lists what a handoff parked.
 
   Which one is decided by how the work ended, not by how much there is to say.
   Stopped midstream — a handoff, naming branch, worktree, current head, what

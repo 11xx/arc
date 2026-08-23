@@ -182,11 +182,16 @@ impl LaneOutcome {
 pub enum LaneCmd {
     /// Open or replace an advisory work lane
     Open {
+        /// Kebab-case topic slug naming the lane
         topic: String,
+        /// Journal topics this lane covers, so `journal open` can annotate
+        /// the items another session is already holding
         #[arg(long)]
         scope: Option<String>,
+        /// How long the lane stays live without activity (e.g. 30m, 2h)
         #[arg(long, default_value = "2h")]
         ttl: String,
+        /// What the lane is currently doing, shown beside it
         #[arg(long)]
         status: Option<String>,
         /// Read the lane status from a file ('-' for stdin)
@@ -195,9 +200,12 @@ pub enum LaneCmd {
     },
     /// Renew a lane owned by this session
     Renew {
+        /// The lane to renew
         topic: String,
+        /// Replace the liveness window (defaults to the lane's current one)
         #[arg(long)]
         ttl: Option<String>,
+        /// Replace what the lane is currently doing
         #[arg(long)]
         status: Option<String>,
         /// Read the lane status from a file ('-' for stdin)
@@ -206,14 +214,18 @@ pub enum LaneCmd {
     },
     /// Close a lane
     Close {
+        /// The lane to close
         topic: String,
+        /// How the lane ended
         #[arg(long, value_enum, default_value = "done")]
         outcome: LaneOutcome,
+        /// Free-text detail recorded with the closure
         #[arg(long)]
         note: Option<String>,
     },
     /// List current live and stale lanes
     List {
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
     },
