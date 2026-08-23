@@ -5520,3 +5520,56 @@ fn begin_from_journal_warns_about_an_unanswered_question_but_opens_the_change() 
         ))
         .stderr(predicates::prelude::predicate::str::contains(&question));
 }
+
+/// A stray closing fence — a lone ``` with no opener, which a model emits
+/// readily — opened a fence that never closed, so every position heading
+/// after it was skipped. The stance tally, which is what a reader uses to
+/// judge whether a question has been argued, quietly reported the smaller
+/// number. One participant's malformed Markdown must not hide another's.
+#[test]
+fn an_unclosed_fence_in_one_position_does_not_swallow_the_positions_after_it() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "fencing", "# Fencing\n");
+    for (actor, body) in [
+        (
+            "first",
+            "Position: for\n\nAn argument that ends with a stray fence.\n\n```\n",
+        ),
+        ("second", "Position: against\n\nA plain argument.\n"),
+        ("third", "Position: amend\n\nAnother plain argument.\n"),
+    ] {
+        repo.arc(&repo.root)
+            .env("ARC_ACTOR", actor)
+            .args(["journal", "position", &file, "--body-file", "-"])
+            .write_stdin(body)
+            .assert()
+            .success();
+    }
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
+    assert!(
+        text.contains("positions: 3 — for 1, against 1, amend 1"),
+        "{text}"
+    );
+    assert!(!text.contains("detached:"), "{text}");
+}
+
+/// The guard is narrow on purpose: a fenced block quoting the conventions is
+/// prose, and the scaffold that teaches the stance line is exactly such a
+/// quote. Only a heading carrying a recorded id ends a block early.
+#[test]
+fn a_fenced_example_position_heading_stays_prose() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "quoting", "# Quoting\n");
+    repo.arc(&repo.root)
+        .args(["journal", "position", &file, "--body-file", "-"])
+        .write_stdin(
+            "Position: for\n\nHow to file one:\n\n```\n### Position\nPosition: against\n```\n\nThat block is an example.\n",
+        )
+        .assert()
+        .success();
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
+    assert!(text.contains("positions: 1 — for 1, against 0"), "{text}");
+    assert!(!text.contains("detached:"), "{text}");
+}

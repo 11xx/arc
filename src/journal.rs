@@ -3996,6 +3996,17 @@ fn position_structure(body: &str) -> (usize, StanceTally, Vec<Option<String>>) {
                 fence = None;
                 continue;
             }
+            // An attributed heading ends the block it belongs to, fence or no
+            // fence. A body that opens a fence and never closes it — a stray
+            // closing marker with no opener is the common way — would
+            // otherwise swallow every position after it, and the tally would
+            // quietly report the smaller number. One participant's malformed
+            // Markdown must not hide another participant's stance.
+            //
+            // Only a heading carrying a recorded id does this, so a fenced
+            // example quoting the conventions stays prose: the scaffold that
+            // teaches the stance line is exactly such a quote.
+            (Some(_), _) if position_heading_id(line).is_some() => fence = None,
             (Some(_), _) => continue,
             (None, None) => {}
         }
