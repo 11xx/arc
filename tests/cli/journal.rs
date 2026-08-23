@@ -5808,3 +5808,124 @@ fn an_answer_needs_exactly_one_of_option_or_other() {
             .stderr(predicates::prelude::predicate::str::contains(expected));
     }
 }
+
+/// A kind's own verb and `note --kind` are the same write. The subcommand
+/// exists so the closed set is legible from `--help` rather than from a
+/// flag's value enum — not so a second code path can drift from the first.
+#[test]
+fn a_kind_subcommand_and_note_kind_produce_the_same_artifact_and_event() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "todo", "by-verb", "--body-file", "-"])
+        .write_stdin("Same body.\n")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "by-flag",
+            "--kind",
+            "todo",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Same body.\n")
+        .assert()
+        .success();
+
+    let dir = journal_dir(&repo);
+    let read = |topic: &str| {
+        let name = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .find(|name| name.contains(topic))
+            .unwrap_or_else(|| panic!("no artifact for {topic}"));
+        assert!(name.ends_with("-todo.md"), "{name}");
+        fs::read_to_string(dir.join(&name)).unwrap()
+    };
+    assert_eq!(read("by-verb"), read("by-flag"));
+
+    // Both writes emit the same event shape; the kind rides in the filename.
+    let events = journal_events(&dir);
+    let files: Vec<&str> = events
+        .iter()
+        .filter(|event| event["event"] == "note")
+        .filter_map(|event| event["file"].as_str())
+        .collect();
+    assert_eq!(files.len(), 2, "{events:?}");
+    assert!(
+        files.iter().all(|file| file.ends_with("-todo.md")),
+        "{files:?}"
+    );
+}
+
+/// `note` keeps working with no `--kind`, so the canonical form did not
+/// become mandatory when the verbs landed.
+#[test]
+fn note_without_a_kind_still_writes_a_note() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "note", "plain", "--body-file", "-"])
+        .write_stdin("A note.\n")
+        .assert()
+        .success();
+    let listed = stdout(repo.arc(&repo.root).args(["journal", "list"]));
+    assert!(listed.contains("plain  note"), "{listed}");
+}
+
+/// A discussion is argued and read far more often than created, so it keeps
+/// its verb family and takes no write subcommand. `--kind discussion` opens
+/// one and still brings the scaffold.
+#[test]
+fn discussion_has_no_write_subcommand_and_keeps_its_scaffold() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "discussion", "some-topic", "--body-file", "-"])
+        .write_stdin("body\n")
+        .assert()
+        .failure();
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "argued",
+            "--kind",
+            "discussion",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("The proposal.\n")
+        .assert()
+        .success();
+    let dir = journal_dir(&repo);
+    let name = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.contains("argued"))
+        .unwrap();
+    let body = fs::read_to_string(dir.join(name)).unwrap();
+    assert!(body.contains("Position:"), "scaffold missing: {body}");
+}
+
+/// `arc fr` forwards strictly, so the contract has one owner.
+#[test]
+fn the_fr_alias_matches_the_feature_request_verb() {
+    let repo = Repo::new();
+    for (topic, args) in [
+        ("via-alias", vec!["fr", "via-alias"]),
+        ("via-verb", vec!["journal", "feature-request", "via-verb"]),
+    ] {
+        let mut cmd = repo.arc(&repo.root);
+        cmd.args(&args);
+        cmd.args(["--body-file", "-"]);
+        cmd.write_stdin("A proposal.\n").assert().success();
+        let _ = topic;
+    }
+    let open = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(open.contains("via-alias  feature-request"), "{open}");
+    assert!(open.contains("via-verb  feature-request"), "{open}");
+}
