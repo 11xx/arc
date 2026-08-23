@@ -5573,3 +5573,238 @@ fn a_fenced_example_position_heading_stays_prose() {
     assert!(text.contains("positions: 1 — for 1, against 0"), "{text}");
     assert!(!text.contains("detached:"), "{text}");
 }
+
+/// arc records that a question is waiting; it never asks. The queue is what
+/// an agent reads to raise it through its own harness prompt, so it must
+/// carry the options and the branches already argued.
+#[test]
+fn journal_questions_lists_what_is_waiting_on_a_person_with_its_branches() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "shape", "# Which shape?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "paths",
+            "--option",
+            "properties",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Paths or properties?\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--body-file",
+            "-",
+            "--question",
+            &question,
+            "--option",
+            "paths",
+        ])
+        .write_stdin("Position: for\n\nPaths are declarable.\n")
+        .assert()
+        .success();
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "questions"]));
+    assert!(text.contains("questions waiting on a person (1)"), "{text}");
+    assert!(text.contains("- paths (1 argued)"), "{text}");
+    assert!(text.contains("- properties (0 argued)"), "{text}");
+
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert_eq!(value["schema"], "arc-journal-questions/1");
+    assert_eq!(value["questions"][0]["question"], question.as_str());
+    assert_eq!(value["questions"][0]["placement"], "opening");
+    assert_eq!(value["questions"][0]["heading"], "Paths or properties?");
+    assert_eq!(value["questions"][0]["options"][1]["option"], "properties");
+    assert_eq!(value["questions"][0]["options"][1]["positions"], 0);
+
+    // The one signal that needs a person is reported where a cold session
+    // orients, not only where somebody thought to look for it.
+    let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(catchup.contains("waiting on a person (1)"), "{catchup}");
+    assert!(catchup.contains(&question), "{catchup}");
+}
+
+/// Answered questions leave the queue, so it reports what is outstanding
+/// rather than what was ever asked.
+#[test]
+fn an_answered_question_leaves_the_waiting_queue() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "settled", "# Settled?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "yes",
+            "--option",
+            "no",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Well?\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "yes",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Yes.\n")
+        .assert()
+        .success();
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "questions"]));
+    assert!(
+        text.contains("no question is waiting on a person"),
+        "{text}"
+    );
+    assert!(!stdout(repo.arc(&repo.root).args(["catchup"])).contains("waiting on a person"));
+}
+
+/// Every harness prompt offers a free-text path, so an answer none of the
+/// options expressed has to be recordable — and recorded as one, because
+/// "the answerer rejected the menu" is a different fact from "the answerer
+/// chose an option", and it says the question was framed wrong.
+#[test]
+fn an_answer_outside_the_offered_options_settles_the_question_and_says_so() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "offmenu", "# Which one?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("A or B?\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+
+    // A typo in an option is refused, so it can never look like a decision.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "bb",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Typo.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::prelude::predicate::str::contains(
+            "pass --other to answer outside them",
+        ));
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--other",
+            "neither: do C instead",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Both options assume the wrong premise.\n")
+        .assert()
+        .success();
+
+    let recorded = journal_events(&journal_dir(&repo))
+        .into_iter()
+        .rfind(|event| event["event"] == "answer")
+        .unwrap();
+    assert_eq!(recorded["option"], "neither: do C instead");
+    assert_eq!(recorded["off_menu"], true);
+
+    let body = stdout(repo.arc(&repo.root).args(["journal", "show", &file]));
+    assert!(
+        body.contains("(none offered) neither: do C instead"),
+        "{body}"
+    );
+    // It settled the question like any other answer.
+    assert!(stdout(repo.arc(&repo.root).args(["journal", "questions"]))
+        .contains("no question is waiting on a person"));
+}
+
+/// Exactly one of the two paths, and an off-menu answer has to say something.
+#[test]
+fn an_answer_needs_exactly_one_of_option_or_other() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "exclusive", "# Which?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("A or B?\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+    for (args, expected) in [
+        (vec!["--option", "a", "--other", "c"], "cannot be used with"),
+        (vec!["--other", "   "], "must say what the answer is"),
+        (
+            vec!["--other", "first line\nsecond line"],
+            "must be a single line",
+        ),
+        (vec![], "required"),
+    ] {
+        let mut cmd = repo.arc(&repo.root);
+        cmd.args(["journal", "answer", &file, "--question", &question]);
+        cmd.args(&args);
+        cmd.args(["--body-file", "-"]);
+        cmd.write_stdin("Body.\n")
+            .assert()
+            .failure()
+            .stderr(predicates::prelude::predicate::str::contains(expected));
+    }
+}

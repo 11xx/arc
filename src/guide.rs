@@ -39,7 +39,9 @@ SETTLE A QUESTION (before it is work)
   arc journal note <topic> --kind discussion --body-file -
   arc journal position <file> --body-file -
   arc journal question <file> --placement opening|closing --option <a> --option <b> --body-file -
+  arc journal questions                Every question waiting on a person.
   arc journal answer <file> --question <id> --option <choice> --body-file -
+    --other "<answer>"                 Settle it outside the options offered.
   arc journal discussion <file>        Read stances, branches, and open questions.
   arc journal consume <file> --outcome done --decision <decision>
   arc fr <topic> --body-file -         File a proposal nobody is building yet.
@@ -65,7 +67,14 @@ SETTLE A QUESTION (before it is work)
   nothing was settled and the body travels onto the change. Both name the ids,
   and a question worth keeping past either is worth its own artifact.
 
-  A question is the part no model should settle. Placement decides when:
+  A question is the part no model should settle. arc records that one is
+  waiting; it never asks. Raising it is the agent's job, through whatever
+  prompt its harness offers — `arc journal questions --json` carries the
+  options and the branches already argued, which is everything a prompt needs
+  — and `answer` is where the reply comes back. When the answer is none of
+  the options, `--other "<answer>"` records it in the answerer's own words
+  and marks that the menu was stepped outside, because a menu somebody had to
+  leave was framed wrong and the next one should know. Placement decides when:
   `--placement opening` before anyone argues, so every participant starts from
   the same premise, or `closing` once the argument is in — never mid-argument,
   which would make you watch a run you delegated. Argue a closing question on
