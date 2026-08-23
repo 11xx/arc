@@ -812,7 +812,19 @@ enum Cmd {
         /// then from the worktree the command runs in
         change: Option<String>,
     },
-    /// Print shell exports for an explicitly detected harness session
+    /// Print shell exports for a detected harness session, for `eval`:
+    /// `eval "$(arc env)"`.
+    ///
+    /// Detection reads the session variable a harness exports for itself —
+    /// `CLAUDE_SESSION_ID`, `CODEX_THREAD_ID`, `OPENCODE_SESSION`, or
+    /// `PI_SESSION_ID` — and then that harness's own session store for the
+    /// model, and the effort where the store records one. Not every harness
+    /// exports one, and a harness that does may not in every mode.
+    ///
+    /// With nothing to detect it prints the export template as a comment and
+    /// exits non-zero, which is a report that identity must be set by hand
+    /// rather than a failure. Every value it emits can be set directly:
+    /// explicit identity always wins over a detected one
     Env,
     /// Print a shell completion script to stdout
     Completions {
