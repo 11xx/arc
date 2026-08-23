@@ -391,6 +391,7 @@ pub fn resolve(
 pub struct ReviewArgs {
     pub verdict: Verdict,
     pub body: Option<String>,
+    pub provisional: Option<String>,
     pub patchset: Option<String>,
     pub causes: Vec<ReviewCause>,
     pub findings_json: Option<String>,
@@ -401,6 +402,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     let ReviewArgs {
         verdict,
         body,
+        provisional,
         patchset,
         mut causes,
         findings_json,
@@ -408,6 +410,12 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     } = args;
     causes.sort_unstable();
     causes.dedup();
+    let provisional = match provisional {
+        Some(reason) if reason.trim().is_empty() => bail!(
+            "--provisional must say why this verdict is owed corroboration;              an empty reason records an obligation nobody can discharge knowingly"
+        ),
+        other => other.map(|reason| reason.trim().to_string()),
+    };
     match verdict {
         Verdict::ChangesRequested if causes.is_empty() => {
             bail!("--cause is required with --verdict changes-requested")
@@ -478,6 +486,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         causes,
         body,
         findings: inline,
+        provisional: provisional.clone(),
     };
     ensure_append_allowed(&st, &payload)?;
     let mut ev = ctx.event(&store, &change_id, payload);
@@ -489,6 +498,9 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     )?;
     store.append_event(&ev)?;
     println!("verdict: {verdict:?} on {patchset_id}");
+    if let Some(reason) = &provisional {
+        println!("provisional: {reason}");
+    }
     for id in finding_ids {
         println!("finding: {id}");
     }

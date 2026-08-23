@@ -262,6 +262,19 @@ pub enum Payload {
         /// Findings recorded atomically with the verdict (one review, one event).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         findings: Vec<InlineFinding>,
+        /// Why this verdict is owed corroboration, when the caller says it is.
+        ///
+        /// A verdict answers "what did the reviewer conclude". This answers a
+        /// different question — "should that conclusion be relied on yet" —
+        /// and the two were previously collapsed, so a reviewer whose
+        /// judgment had never been validated discharged the gate exactly as
+        /// one whose judgment had.
+        ///
+        /// The caller asserts it; arc never infers it. Deciding which
+        /// reviewers are proven would mean holding a roster, which is the
+        /// routing opinion arc does not have.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provisional: Option<String>,
     },
     /// A review obligation this change carries but has not discharged.
     ///
@@ -541,6 +554,15 @@ pub struct AuthorizationBasis {
     /// verdict: without it the merge would have been refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_debt_event_id: Option<String>,
+    /// Why the authorizing verdict was owed corroboration, when it was.
+    ///
+    /// Without it an auditor reading this basis sees a verdict event id and
+    /// concludes the merge was reviewed, with nothing to distinguish a
+    /// reviewer whose judgment had been validated from one whose had not.
+    /// The obligation must be legible from the record of the merge itself,
+    /// not only from the verdict it points at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_provisional: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

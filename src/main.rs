@@ -214,6 +214,10 @@ enum Cmd {
         /// Only changes that integrated owing a review nobody has recorded yet
         #[arg(long = "audit-debt")]
         audit_debt: bool,
+        /// Only changes whose gating approval was recorded as owed
+        /// corroboration and has not been audited since
+        #[arg(long)]
+        provisional: bool,
         #[arg(long)]
         json: bool,
     },
@@ -660,6 +664,16 @@ enum Cmd {
         /// JSON array of findings ('-' for stdin); IDs are assigned by arc
         #[arg(long)]
         findings_json: Option<String>,
+        /// Say this verdict is owed corroboration, and why. It gates like any
+        /// other verdict — independence and staleness are unchanged — but the
+        /// change carries a recorded obligation an `arc audit` discharges,
+        /// and `arc query --provisional` finds it. Use it when the reviewer's
+        /// judgment has not been validated: an unproven model, a rushed pass,
+        /// a reviewer outside their competence. arc never infers this; naming
+        /// which reviewers are proven would be a routing opinion it does not
+        /// hold
+        #[arg(long, value_name = "REASON")]
+        provisional: Option<String>,
     },
     /// Run a declared gate (or ad hoc command) and record the evidence. Gate
     /// evidence only counts at the change's own head, so a gate run from
@@ -1282,6 +1296,7 @@ fn run(cli: Cli) -> Result<i32> {
             harness,
             commit,
             audit_debt,
+            provisional,
             json,
         } => {
             if let Some(commit) = commit {
@@ -1297,6 +1312,7 @@ fn run(cli: Cli) -> Result<i32> {
                         actor,
                         harness,
                         audit_debt,
+                        provisional,
                         json,
                     },
                 )?;
@@ -1716,6 +1732,7 @@ fn run(cli: Cli) -> Result<i32> {
             patchset,
             cause,
             findings_json,
+            provisional,
         } => {
             let change = infer(change.as_deref())?;
             if let Some(verdict) = verdict {
@@ -1733,6 +1750,7 @@ fn run(cli: Cli) -> Result<i32> {
                         causes: cause,
                         findings_json,
                         snapshot_first: snapshot,
+                        provisional,
                     },
                 )?;
             } else {

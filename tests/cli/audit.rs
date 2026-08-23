@@ -1522,3 +1522,162 @@ fn a_ledger_only_report_resolves_the_danger_scope() {
     );
     assert_eq!(as_of["danger"]["dangerous"], false);
 }
+
+/// A verdict answers what the reviewer concluded. Whether that conclusion
+/// should be relied on yet is a different question, and collapsing the two
+/// let a reviewer nobody had validated discharge the gate exactly as one
+/// whose judgment had been.
+#[test]
+fn a_provisional_approval_gates_while_recording_what_it_still_owes() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "provisional");
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "unproven-reviewer")
+        .args([
+            "review",
+            "provisional",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "reviewer is an unmeasured model",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "provisional: reviewer is an unmeasured model",
+        ));
+
+    let status = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "provisional", "--json"]),
+    );
+    let report = &status;
+    assert_eq!(
+        report["verdict"]["provisional"],
+        "reviewer is an unmeasured model"
+    );
+    assert_eq!(report["provisional_approval_outstanding"], true);
+    // It gates: the obligation is recorded, not a blocker.
+    assert_eq!(report["integrate_ready"], true, "{report}");
+
+    let check = stdout(repo.arc(&worktree).args(["check", "provisional"]));
+    assert!(check.contains("provisional-approval"), "{check}");
+    assert!(check.contains("reviewer is an unmeasured model"), "{check}");
+
+    let owed = stdout(repo.arc(&repo.root).args(["query", "--provisional"]));
+    assert!(owed.contains(&change_id), "{owed}");
+}
+
+/// The obligation is legible from the record of the merge itself. An auditor
+/// reading an authorization basis that names a verdict event must be able to
+/// tell a validated reviewer from an unvalidated one without following the
+/// pointer.
+#[test]
+fn the_authorization_basis_records_that_the_merge_rested_on_a_provisional_verdict() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "basis-provisional");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "unproven-reviewer")
+        .args([
+            "review",
+            "basis-provisional",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "third-party benchmark only",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "basis-provisional"])
+        .assert()
+        .success();
+
+    let closed = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        &change_id,
+        "--type",
+        "change-integrated",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(closed.trim()).unwrap();
+    let basis = &event["authorization"];
+    assert!(basis["verdict_event_id"].is_string(), "{event}");
+    assert_eq!(basis["verdict_provisional"], "third-party benchmark only");
+}
+
+/// An ordinary verdict carries none of this, and the schema stays quiet about
+/// an obligation nobody declared.
+#[test]
+fn an_ordinary_verdict_records_no_obligation() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "ordinary");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "ordinary", "--verdict", "approved"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("provisional").not());
+
+    let status = json_stdout(repo.arc(&worktree).args(["status", "ordinary", "--json"]));
+    assert!(status["verdict"]["provisional"].is_null());
+    assert_eq!(status["provisional_approval_outstanding"], false);
+    assert!(!stdout(repo.arc(&repo.root).args(["query", "--provisional"])).contains(&change_id));
+}
+
+/// An audit discharges a provisional approval exactly as it discharges debt:
+/// one obligation, one discharge, so a caller never has to learn two.
+#[test]
+fn an_audit_discharges_a_provisional_approval() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "discharged");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "unproven-reviewer")
+        .args([
+            "review",
+            "discharged",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "unmeasured model",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "discharged"])
+        .assert()
+        .success();
+    assert!(stdout(repo.arc(&repo.root).args(["query", "--provisional"])).contains(&change_id));
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "proven-auditor")
+        .args(["audit", "discharged", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let owed = stdout(repo.arc(&repo.root).args(["query", "--provisional"]));
+    assert!(!owed.contains(&change_id), "{owed}");
+}
+
+/// An obligation nobody can knowingly discharge is worse than none: it reads
+/// as tracked while saying nothing about what is owed.
+#[test]
+fn a_provisional_verdict_must_say_why() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "empty-reason");
+    repo.arc(&worktree)
+        .args([
+            "review",
+            "empty-reason",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "   ",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "must say why this verdict is owed corroboration",
+        ));
+}

@@ -258,6 +258,9 @@ pub struct VerdictEntry {
     pub verdict: Verdict,
     pub causes: Vec<ReviewCause>,
     pub body: Option<String>,
+    /// Why this verdict is owed corroboration, when the caller said it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisional: Option<String>,
     pub actor: String,
     /// Subject the verdict was cast for, when a lead reviewed on behalf of one.
     pub on_behalf_of: Option<String>,
@@ -1137,6 +1140,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 patchset_id,
                 verdict,
                 causes,
+                provisional,
                 body,
                 findings,
             } => {
@@ -1165,6 +1169,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     verdict: *verdict,
                     causes: causes.clone(),
                     body: body.clone(),
+                    provisional: provisional.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
                     actor_source: ev.actor_source,
@@ -1772,6 +1777,30 @@ impl ChangeState {
     /// actionable: an audit reviews a revision that shipped, so a debt on an
     /// open change is a pending waiver rather than owed work. Queueing it
     /// earlier would offer a reviewer an item `arc audit` then refuses.
+    /// Whether a verdict the caller marked as owed corroboration is still
+    /// the change's gating approval, with no audit having supplied it.
+    ///
+    /// Independent of integration, unlike audit debt: a provisional approval
+    /// is an open obligation the moment it is recorded, because the whole
+    /// point is to see it before the merge rather than after.
+    pub fn provisional_approval_outstanding(&self) -> bool {
+        let Some(verdict) = self.latest_verdict() else {
+            return false;
+        };
+        if verdict.provisional.is_none() || verdict.verdict != Verdict::Approved {
+            return false;
+        }
+        !self.corroborated_after(verdict.created_at)
+    }
+
+    /// Whether an independent audit verdict was recorded after this instant.
+    /// An audit is the discharge for both obligations, so the two share it.
+    fn corroborated_after(&self, when: chrono::DateTime<chrono::Utc>) -> bool {
+        self.audit_verdicts
+            .iter()
+            .any(|audit| audit.created_at > when)
+    }
+
     pub fn audit_debt_outstanding(&self) -> bool {
         let Some(debt) = &self.audit_debt else {
             return false;

@@ -1525,6 +1525,7 @@ fn authorization_basis(
 
     Ok(crate::model::AuthorizationBasis {
         verdict_event_id: verdict.map(|verdict| verdict.event_id.clone()),
+        verdict_provisional: verdict.and_then(|verdict| verdict.provisional.clone()),
         gate_evidence,
         prerequisites,
         // Empty by construction: `integrate_ready` is false while either is

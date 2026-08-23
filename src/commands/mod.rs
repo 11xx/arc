@@ -594,6 +594,8 @@ pub struct QueryArgs {
     pub harness: Option<String>,
     /// Only changes carrying an undischarged review obligation.
     pub audit_debt: bool,
+    /// Only changes whose gating approval is still owed corroboration.
+    pub provisional: bool,
     pub json: bool,
 }
 

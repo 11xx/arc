@@ -82,6 +82,7 @@ RUN A CHANGE
   arc verify --command <cmd>         Same, for an ad hoc probe.
   arc done                           Snapshot, run every gate, print check state.
   arc review --verdict <v>           Record a verdict (+ --findings-json -).
+    --provisional <why>              The verdict gates, and is owed an audit.
   arc resolve                        Dispose of a finding.
   arc check                          Integration preflight; exit code names the blocker.
   arc integrate [--tag <t>]          Guarded --no-ff merge once the gates are green.
@@ -130,11 +131,26 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   binds to the exact patchset head declared, so new work needs a new
   declaration — it does not excuse the rest of the change's life.
 
+  A verdict can also be owed corroboration rather than absent. `arc review
+  --verdict approved --provisional "<why>"` records one that gates like any
+  other — independence and staleness are unchanged, because an unproven
+  reviewer is still not the author — while saying it should not be relied on
+  yet. Use it when the reviewer's judgment has not been validated: a model
+  nobody has measured, a pass made under time pressure, a reviewer outside
+  what they know. arc never infers this; deciding which reviewers are proven
+  would be a routing opinion, and arc holds none. Without the flag nothing
+  changes.
+
+  Debt and a provisional verdict are the same obligation at two distances:
+  debt says no review happened, provisional says one happened and is not yet
+  trusted. An audit discharges either.
+
   Coming back to owed work:
 
     arc inbox                       audit-owed bucket, including closed changes
     arc catchup                     the same, with each reason
     arc query --audit-debt          change IDs alone, for scripting
+    arc query --provisional         approvals still owed corroboration
     arc diff <change> --integrated  the exact range that landed, for an audit
     arc audit <change> --verdict <v>          record a post-integration review
     arc findings <change> --audit             what an audit raised
