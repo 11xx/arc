@@ -2359,3 +2359,44 @@ fn a_redirect_suppresses_the_similarity_guess_but_leaves_it_otherwise() {
         .failure()
         .stderr(predicates::str::contains("Usage: arc"));
 }
+
+/// The guide is a self-contained teaching surface, so the two halves a
+/// session needs but cannot infer — declaring identity before writing, and
+/// what to file when it ends — have to be in it. The orient section it
+/// already teaches is fed entirely by the session-end writes.
+#[test]
+fn the_guide_teaches_identity_and_how_a_session_ends() {
+    let repo = Repo::new();
+    let guide = stdout(&mut repo.arc(&repo.root));
+
+    assert!(guide.contains("SAY WHO YOU ARE"), "{guide}");
+    assert!(guide.contains("arc env"), "{guide}");
+    assert!(guide.contains("ARC_ACTOR"), "{guide}");
+    // The failure mode is the point: an undeclared write succeeds.
+    assert!(guide.contains("an actor nobody claimed"), "{guide}");
+
+    assert!(guide.contains("END A SESSION"), "{guide}");
+    for verb in ["journal handoff", "journal conclusion", "journal memory"] {
+        assert!(guide.contains(verb), "missing {verb}:\n{guide}");
+    }
+    // Ordering: identity comes before the orient verbs that write, and the
+    // session-end stanza sits before profiles rather than after the guide.
+    let identity = guide.find("SAY WHO YOU ARE").unwrap();
+    let orient = guide.find("ORIENT").unwrap();
+    let ending = guide.find("END A SESSION").unwrap();
+    let profiles = guide.find("PROFILES").unwrap();
+    assert!(identity < orient, "identity must precede orient");
+    assert!(ending < profiles, "session end must precede profiles");
+}
+
+/// `arc env` exits non-zero whenever the harness exports no session variable,
+/// which is ordinary rather than broken — so its help has to say which
+/// variables it reads and what the non-zero exit means.
+#[test]
+fn env_help_explains_detection_and_its_non_zero_exit() {
+    let repo = Repo::new();
+    let help = stdout(repo.arc(&repo.root).args(["env", "--help"]));
+    for expected in ["CLAUDE_SESSION_ID", "PI_SESSION_ID", "eval", "non-zero"] {
+        assert!(help.contains(expected), "missing {expected}:\n{help}");
+    }
+}

@@ -13,6 +13,23 @@ patchsets, findings, verdicts, verification evidence, claims, holds, and a
 guarded merge — one append-only JSON event per fact, under the repo's Git
 common dir. Every list, status, and inbox is derived; nothing is rewritten.
 
+SAY WHO YOU ARE (before the first write)
+  eval "$(arc env)"                    Detect harness, session, and model.
+  export ARC_ACTOR=<name> ARC_HARNESS=<claude|codex|opencode|pi> \
+         ARC_SESSION=<id> ARC_MODEL=<model[#effort]>
+
+  Every event records who wrote it. Nothing refuses an undeclared identity by
+  default — the write succeeds and arc records an actor nobody claimed, which
+  is discovered later by a reader who cannot tell whose work it was. Positions
+  in a discussion carry the model and harness that argued them, so an
+  undeclared one lands as `(unknown, …)` and needs a correction block to fix.
+
+  `arc env` only detects a harness that exports its own session variable, and
+  not every harness does; it exits non-zero and prints the export template
+  when it cannot. That is the normal path for setting them by hand, not a
+  failure. `[policy] require_declared_actor` makes an undeclared identity a
+  refusal instead of a record.
+
 ORIENT (start here, in this order)
   arc catchup            Live state: ledger queue, journal backlog, lanes.
   arc journal open       The actionable backlog — work waiting for a session.
@@ -106,6 +123,25 @@ RUN A CHANGE
   arc integrate [--tag <t>]          Guarded --no-ff merge once the gates are green.
   arc audit <change> --verdict <v>   Review an already-integrated revision.
   arc close                          Terminal outcome arc did not merge itself.
+
+END A SESSION (what the next one reads)
+  arc journal handoff <topic> --body-file -    Stopped midstream.
+  arc journal conclusion <topic> --body-file - Finished the thing.
+  arc journal memory <topic> --body-file -     Learned a durable fact.
+  arc journal consume <file> --outcome done    Drain what you resolved.
+  arc journal archive --consumed               Move the drained to cold storage.
+
+  ORIENT above is fed entirely by these writes: `catchup` surfaces memories,
+  `journal open` lists what a handoff parked. A session that files none of
+  them leaves the next one to reconstruct from a transcript, which is the cost
+  this journal exists to avoid.
+
+  Which one is decided by how the work ended, not by how much there is to say.
+  Stopped midstream — a handoff, naming branch, worktree, current head, what
+  is done, what is open, the next action, and the gate command. Finished — a
+  conclusion. Learned something that will be true next month and is not in the
+  code — a memory, which every later `catchup` shows. Never label unfinished
+  work a conclusion.
 
 PROFILES (--profile, default local)
   direct   Bounded, reversible, one session and checkout. Implement, verify,
