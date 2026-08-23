@@ -5279,3 +5279,25 @@ fn question_id(repo: &Repo, file: &str) -> String {
     );
     summary["questions"][0]["id"].as_str().unwrap().to_string()
 }
+
+#[test]
+fn fr_alias_files_the_same_artifact_as_journal_note() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["fr", "aliased-proposal", "--body-file", "-"])
+        .write_stdin("A proposal filed through the alias.\n")
+        .assert()
+        .success();
+
+    let dir = journal_dir(&repo);
+    let filed = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.contains("aliased-proposal"))
+        .expect("the alias writes an artifact");
+    assert!(filed.ends_with("-feature-request.md"), "{filed}");
+
+    let open = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(open.contains("aliased-proposal  feature-request"), "{open}");
+}

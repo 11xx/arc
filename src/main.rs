@@ -229,12 +229,17 @@ enum Cmd {
         at: Option<String>,
     },
     /// Print the change's recorded facts one line each, in ledger order. A
-    /// review batch records several, so it renders as several lines
+    /// review batch records several, so it renders as several lines. This is
+    /// the ledger, not Git history: for commits, use `git log`
     Log {
         change: Option<String>,
         /// Newest event first
         #[arg(long)]
         reverse: bool,
+        /// Accepted so the Git habit lands somewhere useful: arc log is
+        /// already one line per fact, so this changes nothing
+        #[arg(long, hide = true)]
+        oneline: bool,
     },
     /// Derived ledger analytics: stage, review, and gate durations
     Stats {
@@ -900,6 +905,26 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// File a feature request in the project journal: the discoverable alias
+    /// for `arc journal note --kind feature-request`. Read the queue back with
+    /// `arc journal open` or `arc journal list --kind feature-request`
+    Fr {
+        /// Kebab-case topic slug
+        topic: String,
+        /// Body source: a file path, or '-' for stdin (written verbatim)
+        #[arg(long)]
+        body_file: Option<String>,
+        /// Optional title; when set, a `# <title>` heading is prepended
+        #[arg(long)]
+        title: Option<String>,
+        /// Scaffold template prepended to the body (.arc/templates/<name>.md
+        /// or a built-in: sol-low, sol-high, reviewer, discussion)
+        #[arg(long, conflicts_with = "no_scaffold")]
+        scaffold: Option<String>,
+        /// Record the body alone, without any scaffold
+        #[arg(long)]
+        no_scaffold: bool,
+    },
     /// Cross-harness project journal mechanics (plain Markdown stays the contract)
     Journal {
         #[command(subcommand)]
@@ -1291,7 +1316,17 @@ fn run(cli: Cli) -> Result<i32> {
             commands::show_selection(&ctx, role, change.as_deref(), tag, json, at.as_deref())?;
             Ok(0)
         }
-        Cmd::Log { change, reverse } => {
+        Cmd::Log {
+            change,
+            reverse,
+            oneline,
+        } => {
+            if oneline {
+                eprintln!(
+                    "tip: arc log already prints one line per ledger fact; \
+                     for commits, use git log --oneline"
+                );
+            }
             let change = infer(change.as_deref())?;
             commands::log(&ctx, &change, reverse)?;
             Ok(0)
@@ -2025,6 +2060,20 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Catchup { limit, json } => commands::catchup(&ctx, limit, json),
+        Cmd::Fr {
+            topic,
+            body_file,
+            title,
+            scaffold,
+            no_scaffold,
+        } => journal::feature_request(
+            &ctx,
+            &topic,
+            body_file.as_deref(),
+            title.as_deref(),
+            scaffold.as_deref(),
+            no_scaffold,
+        ),
         Cmd::Journal { cmd } => journal::run(&ctx, cmd),
     }
 }

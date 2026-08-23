@@ -144,3 +144,18 @@ fn integrate_dry_run_reports_without_mutating() {
         .success();
     assert!(event_count(&repo, &change_id) > events_before);
 }
+
+#[test]
+fn log_oneline_is_accepted_and_says_where_git_log_lives() {
+    let repo = Repo::new();
+    let output = stdout(repo.arc(&repo.root).args(["begin", "oneline-habit"]));
+    let change_id = opened_change_id(&output);
+
+    repo.arc(&repo.root)
+        .args(["log", &change_id, "--oneline"])
+        .assert()
+        .success()
+        .stderr(predicates::prelude::predicate::str::contains(
+            "git log --oneline",
+        ));
+}

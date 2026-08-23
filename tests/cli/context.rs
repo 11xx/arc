@@ -482,3 +482,30 @@ fn optional_subcommand_still_rejects_usage_errors() {
         .assert()
         .code(2);
 }
+
+#[test]
+fn inference_failure_names_the_open_changes_and_their_worktrees() {
+    let repo = Repo::new();
+    let output = stdout(repo.arc(&repo.root).args(["begin", "elsewhere"]));
+    let change_id = opened_change_id(&output);
+
+    repo.arc(&repo.root)
+        .args(["status"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "name one of these, or cd to its worktree",
+        ))
+        .stderr(predicate::str::contains(change_id))
+        .stderr(predicate::str::contains(".worktrees/repo-elsewhere"));
+}
+
+#[test]
+fn inference_failure_with_nothing_open_points_at_the_backlog() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["status"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("arc catchup"));
+}
