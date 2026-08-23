@@ -451,6 +451,10 @@ pub enum JournalCmd {
         /// Decision artifact that records the verdict (valid with --outcome done)
         #[arg(long)]
         decision: Option<String>,
+        /// Consume anyway, leaving an unanswered question undecided. Say in
+        /// `--note` where the question went, or it goes nowhere
+        #[arg(long)]
+        drop_questions: bool,
     },
     /// Move artifacts to the cold sibling archive without deleting history
     Archive {
@@ -558,12 +562,14 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             outcome,
             note,
             decision,
+            drop_questions,
         } => consume(
             ctx,
             &filename,
             outcome,
             note.as_deref(),
             decision.as_deref(),
+            drop_questions,
         ),
         JournalCmd::Archive {
             filename,
@@ -4328,12 +4334,39 @@ fn stamp() -> Result<i32> {
     Ok(0)
 }
 
+/// Question ids posed on this artifact that no `answer` event has settled.
+///
+/// Only typed questions are visible here. A question written as prose is
+/// invisible to every derived view, which is the reason the guide asks for the
+/// verb rather than the paragraph.
+fn unanswered_questions(events: &[JournalEvent], filename: &str) -> Vec<String> {
+    let answered: HashSet<&str> = events
+        .iter()
+        .filter(|event| {
+            event.known() && event.event == "answer" && event.file.as_deref() == Some(filename)
+        })
+        .filter_map(|event| event.question_id.as_deref())
+        .collect();
+    let mut open = events
+        .iter()
+        .filter(|event| {
+            event.known() && event.event == "question" && event.file.as_deref() == Some(filename)
+        })
+        .filter_map(|event| event.question_id.clone())
+        .filter(|id| !answered.contains(id.as_str()))
+        .collect::<Vec<_>>();
+    open.sort();
+    open.dedup();
+    open
+}
+
 fn consume(
     ctx: &Ctx,
     filename: &str,
     outcome: ConsumeOutcome,
     note: Option<&str>,
     decision: Option<&str>,
+    drop_questions: bool,
 ) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&dir)?;
@@ -4366,8 +4399,25 @@ fn consume(
     if !dir.join(filename).is_file() {
         bail!("no such artifact {} in {}", filename, dir.display());
     }
-    if is_consumed(&read_events(&dir)?, filename) {
+    let events = read_events(&dir)?;
+    if is_consumed(&events, filename) {
         bail!("{filename} is already consumed (see the journal)");
+    }
+    // An artifact can carry two different things: work to do, and a question
+    // to settle. Consumption disposes of the work correctly, and would drop
+    // the question into a file no queue lists — a derived view that silently
+    // under-reports, which is the failure this whole surface exists to avoid.
+    let open = unanswered_questions(&events, filename);
+    if !open.is_empty() && !drop_questions {
+        bail!(
+            "{filename} holds {} unanswered question{}: {}\n\
+             tip: settle it with `arc journal answer {filename} --question <id> \
+             --option <choice> --body-file -`, re-file it as its own artifact, \
+             or pass --drop-questions and say in --note where it went",
+            open.len(),
+            if open.len() == 1 { "" } else { "s" },
+            open.join(", ")
+        );
     }
     let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "consumed");
     event.file = Some(filename.to_string());
@@ -4510,8 +4560,25 @@ pub fn require_open_actionable(ctx: &Ctx, filename: &str) -> Result<String> {
     if !dir.join(filename).is_file() {
         bail!("no such artifact {} in {}", filename, dir.display());
     }
-    if is_consumed(&read_events(&dir)?, filename) {
+    let events = read_events(&dir)?;
+    if is_consumed(&events, filename) {
         bail!("{filename} is already consumed (see the journal)");
+    }
+    // Promotion consumes the source as superseded, which never claims a
+    // question was settled — and the artifact's body travels onto the change
+    // as its seed brief, so the question goes with the work. That is why this
+    // warns where `consume` refuses: `consume` claims disposal, promotion does
+    // not. Either way the ids are named, because the artifact leaves the open
+    // queue in both.
+    let open = unanswered_questions(&events, filename);
+    if !open.is_empty() {
+        eprintln!(
+            "warning: {filename} holds {} unanswered question{} ({}) that this change does not \
+             settle; re-file it as its own artifact or it leaves the open queue undecided",
+            open.len(),
+            if open.len() == 1 { "" } else { "s" },
+            open.join(", ")
+        );
     }
     Ok(kind)
 }

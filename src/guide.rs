@@ -59,6 +59,12 @@ SETTLE A QUESTION (before it is work)
   never both. `consume --outcome done` cites a terminal decision; `begin
   --from-journal` consumes the open discussion as superseded by the change.
 
+  A question outlives the work that raised it. `consume` refuses while a typed
+  question is unanswered, because disposal would drop it into a file no queue
+  lists; `begin --from-journal` warns instead, since supersession claims
+  nothing was settled and the body travels onto the change. Both name the ids,
+  and a question worth keeping past either is worth its own artifact.
+
   A question is the part no model should settle. Placement decides when:
   `--placement opening` before anyone argues, so every participant starts from
   the same premise, or `closing` once the argument is in — never mid-argument,
