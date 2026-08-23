@@ -229,6 +229,29 @@ impl ConsumeOutcome {
     }
 }
 
+/// The arguments every kind-writing verb takes. `note --kind <k>` and the
+/// kind's own subcommand are the same write; the subcommand exists so the
+/// closed set is legible from `arc journal --help` rather than from a flag's
+/// value enum.
+#[derive(clap::Args)]
+pub struct KindWrite {
+    /// Kebab-case topic slug
+    pub topic: String,
+    /// Body source: a file path, or '-' for stdin (written verbatim)
+    #[arg(long)]
+    pub body_file: Option<String>,
+    /// Optional title; when set, a `# <title>` heading is prepended
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Scaffold template prepended to the body (.arc/templates/<name>.md or a
+    /// built-in: sol-low, sol-high, reviewer, discussion)
+    #[arg(long, conflicts_with = "no_scaffold")]
+    pub scaffold: Option<String>,
+    /// Record the body alone, without the kind's default scaffold
+    #[arg(long)]
+    pub no_scaffold: bool,
+}
+
 #[derive(Subcommand)]
 pub enum JournalCmd {
     /// Print the resolved journal directory (creates nothing)
@@ -248,27 +271,62 @@ pub enum JournalCmd {
     },
     /// Write a timestamped artifact and append its journal line
     Note {
-        /// Kebab-case topic slug
-        topic: String,
-        /// Artifact kind (closed set). `discussion` argues a proposal to a
-        /// decision and carries positions; `feature-request` is an unbuilt
-        /// proposal parked for later
-        #[arg(long, value_enum)]
+        #[command(flatten)]
+        write: KindWrite,
+        /// Artifact kind (closed set). Defaults to `note`; every other kind
+        /// has its own subcommand above, which is the same write said
+        /// plainly. `discussion` is the exception and has none: a discussion
+        /// is argued and read far more often than created, so its verbs are
+        /// `position`, `question`, `answer` and the `discussion` summary, and
+        /// `--kind discussion` stays the way to open one. It also brings the
+        /// `discussion` scaffold unless told otherwise
+        #[arg(long, value_enum, default_value = "note")]
         kind: JournalKind,
-        /// Body source: a file path, or '-' for stdin (written verbatim)
-        #[arg(long)]
-        body_file: Option<String>,
-        /// Optional title; when set, a `# <title>` heading is prepended
-        #[arg(long)]
-        title: Option<String>,
-        /// Scaffold template prepended to the body (.arc/templates/<name>.md or
-        /// a built-in: sol-low, sol-high, reviewer, discussion). `--kind
-        /// discussion` uses the `discussion` scaffold unless told otherwise
-        #[arg(long, conflicts_with = "no_scaffold")]
-        scaffold: Option<String>,
-        /// Record the body alone, without the kind's default scaffold
-        #[arg(long)]
-        no_scaffold: bool,
+    },
+    /// File a proposal nobody is building yet
+    FeatureRequest {
+        #[command(flatten)]
+        write: KindWrite,
+    },
+    /// Record work waiting for a session
+    Todo {
+        #[command(flatten)]
+        write: KindWrite,
+    },
+    /// Hand an unfinished thread to the next session
+    Handoff {
+        #[command(flatten)]
+        write: KindWrite,
+    },
+    /// Record a plan before it becomes work
+    Plan {
+        #[command(flatten)]
+        write: KindWrite,
+    },
+    /// Record what a piece of work concluded
+    Conclusion {
+        #[command(flatten)]
+        write: KindWrite,
+    },
+    /// Record a settled decision, which is what resolves a discussion
+    Decision {
+        #[command(flatten)]
+        write: KindWrite,
+    },
+    /// Record a durable project fact, surfaced by `catchup` every session
+    Memory {
+        #[command(flatten)]
+        write: KindWrite,
+    },
+    /// Park a proposal that is real but not now
+    Later {
+        #[command(flatten)]
+        write: KindWrite,
+    },
+    /// Record a review performed outside the ledger
+    Review {
+        #[command(flatten)]
+        write: KindWrite,
     },
     /// Append a log-only journal line (no artifact file is created)
     Log {
@@ -518,22 +576,16 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             Ok(0)
         }
         JournalCmd::Doctor { json } => doctor(ctx, json),
-        JournalCmd::Note {
-            topic,
-            kind,
-            body_file,
-            title,
-            scaffold,
-            no_scaffold,
-        } => note(
-            ctx,
-            &topic,
-            kind,
-            body_file.as_deref(),
-            title.as_deref(),
-            scaffold.as_deref(),
-            no_scaffold,
-        ),
+        JournalCmd::Note { write, kind } => write_kind(ctx, kind, write),
+        JournalCmd::FeatureRequest { write } => write_kind(ctx, JournalKind::FeatureRequest, write),
+        JournalCmd::Todo { write } => write_kind(ctx, JournalKind::Todo, write),
+        JournalCmd::Handoff { write } => write_kind(ctx, JournalKind::Handoff, write),
+        JournalCmd::Plan { write } => write_kind(ctx, JournalKind::Plan, write),
+        JournalCmd::Conclusion { write } => write_kind(ctx, JournalKind::Conclusion, write),
+        JournalCmd::Decision { write } => write_kind(ctx, JournalKind::Decision, write),
+        JournalCmd::Memory { write } => write_kind(ctx, JournalKind::Memory, write),
+        JournalCmd::Later { write } => write_kind(ctx, JournalKind::Later, write),
+        JournalCmd::Review { write } => write_kind(ctx, JournalKind::Review, write),
         JournalCmd::Log { topic, message } => log_line(ctx, &topic, &message),
         JournalCmd::Position {
             filename,
@@ -1326,10 +1378,24 @@ fn default_scaffold(kind: JournalKind) -> Option<&'static str> {
     }
 }
 
+/// One write, whichever verb named the kind.
+fn write_kind(ctx: &Ctx, kind: JournalKind, write: KindWrite) -> Result<i32> {
+    note(
+        ctx,
+        &write.topic,
+        kind,
+        write.body_file.as_deref(),
+        write.title.as_deref(),
+        write.scaffold.as_deref(),
+        write.no_scaffold,
+    )
+}
+
 /// File a feature request: the `arc fr` alias for
-/// `arc journal note --kind feature-request`. The alias exists because a
-/// proposal nobody can find the verb for is a proposal that gets written into
-/// a transcript instead of the journal.
+/// `arc journal feature-request`. The alias exists because a proposal nobody
+/// can find the verb for is a proposal that gets written into a transcript
+/// instead of the journal. It forwards strictly, so the contract has one
+/// owner and the alias can never drift from it.
 pub fn feature_request(
     ctx: &Ctx,
     topic: &str,

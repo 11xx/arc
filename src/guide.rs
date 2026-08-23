@@ -44,7 +44,9 @@ SETTLE A QUESTION (before it is work)
     --other "<answer>"                 Settle it outside the options offered.
   arc journal discussion <file>        Read stances, branches, and open questions.
   arc journal consume <file> --outcome done --decision <decision>
-  arc fr <topic> --body-file -         File a proposal nobody is building yet.
+  arc journal <kind> <topic> --body-file -   One verb per kind; `arc journal
+                                       --help` is the registry. `arc fr` is
+                                       the top-level alias for one of them.
   arc begin <slug> --from-journal <file>
 
   The ledger records what happened and what is allowed; the journal records
@@ -56,6 +58,13 @@ SETTLE A QUESTION (before it is work)
   A proposal with one defensible answer is not a discussion, it is a feature
   request: `arc fr` files it, `arc journal open` lists it back, and `begin
   --from-journal` turns it into work when its turn comes.
+
+  Every kind is a verb under `arc journal`, so the closed set is legible from
+  `--help` rather than from a flag's values; `note --kind <k>` remains the
+  same write underneath. `discussion` has no write verb on purpose — one is
+  argued and read far more often than created, so `position`, `question`,
+  `answer` and the `discussion` summary are its surface, and `note --kind
+  discussion` opens one.
 
   Resolve a discussion as done, or promote the still-open discussion to work —
   never both. `consume --outcome done` cites a terminal decision; `begin
