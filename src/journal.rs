@@ -1715,6 +1715,13 @@ fn answer(
         (None, Some(other)) if other.trim().is_empty() => {
             bail!("--other must say what the answer is")
         }
+        // It is interpolated into a single-line `### Answer` heading, so a
+        // newline would let the answer impersonate the next block heading at
+        // exactly the point a parser resumes. Reasoning belongs in the body,
+        // which is verbatim and unconstrained.
+        (None, Some(other)) if other.contains(['\n', '\r']) => {
+            bail!("--other must be a single line; put the reasoning in --body-file")
+        }
         (None, Some(other)) => Chosen::OffMenu(other.trim()),
         _ => bail!("pass exactly one of --option or --other"),
     };
@@ -1861,10 +1868,31 @@ fn questions(ctx: &Ctx, json: bool) -> Result<i32> {
 /// what was actually asked.
 fn question_text(path: &Path, question_id: &str) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
+    // A fenced block quoting the conventions is prose, exactly as it is for
+    // position headings; and the id must end at a boundary, or asking for
+    // `q-a` would answer with `q-a1`'s prose and prompt somebody with the
+    // wrong question.
+    let mut fence: Option<(u8, usize)> = None;
     let mut lines = text.lines().skip_while(|line| {
-        !line
-            .strip_prefix("### Question ")
-            .is_some_and(|rest| rest.starts_with(question_id))
+        let trimmed = line.trim_start();
+        match (fence, fence_marker(trimmed)) {
+            (None, Some((marker, run, _))) => {
+                fence = Some((marker, run));
+                return true;
+            }
+            (Some((marker, opened)), Some((closing, run, bare)))
+                if marker == closing && run >= opened && bare =>
+            {
+                fence = None;
+                return true;
+            }
+            (Some(_), _) => return true,
+            (None, None) => {}
+        }
+        !line.strip_prefix("### Question ").is_some_and(|rest| {
+            rest.strip_prefix(question_id)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        })
     });
     lines.next()?;
     lines
@@ -1892,11 +1920,15 @@ fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
         if answered.contains(&(file, question)) {
             continue;
         }
+        // The same `known()` gate the answered set and the question scan use.
+        // This is the number an agent shows a person to say whether a branch
+        // was argued, so a malformed event must not inflate it.
         let argued = |option: &str| {
             events
                 .iter()
                 .filter(|event| {
-                    event.event == "position"
+                    event.known()
+                        && event.event == "position"
                         && event.file.as_deref() == Some(file)
                         && event.question_id.as_deref() == Some(question)
                         && event.option.as_deref() == Some(option)
@@ -5070,6 +5102,59 @@ impl Orientation {
                 render_open_entry(entry);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod question_text_tests {
+    use super::question_text;
+    use std::io::Write;
+
+    fn fixture(body: &str) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(body.as_bytes()).unwrap();
+        file
+    }
+
+    /// The id must end at a boundary. Matching a prefix would answer a
+    /// request for `q-a` with `q-a1`'s prose, and prompt somebody with a
+    /// question they were not asked.
+    #[test]
+    fn a_longer_id_sharing_a_prefix_is_not_matched() {
+        let file = fixture(concat!(
+            "### Question q-a1 (opening, t) - x | y\n\nLonger.\n\n",
+            "### Question q-a (opening, t) - x | y\n\nShorter.\n",
+        ));
+        assert_eq!(
+            question_text(file.path(), "q-a").as_deref(),
+            Some("Shorter.")
+        );
+        assert_eq!(
+            question_text(file.path(), "q-a1").as_deref(),
+            Some("Longer.")
+        );
+    }
+
+    /// A fenced block quoting the conventions is prose, exactly as it is for
+    /// position headings.
+    #[test]
+    fn a_fenced_example_is_not_read_as_the_question() {
+        let file = fixture(concat!(
+            "```\n### Question q-a (opening, t) - x | y\n\nAn example.\n```\n\n",
+            "### Question q-a (opening, t) - x | y\n\nThe real one.\n",
+        ));
+        assert_eq!(
+            question_text(file.path(), "q-a").as_deref(),
+            Some("The real one.")
+        );
+    }
+
+    /// A block that was hand-edited away degrades to absent rather than to
+    /// the next block's prose.
+    #[test]
+    fn a_missing_block_yields_nothing() {
+        let file = fixture("# Title\n\nNo question blocks here.\n");
+        assert_eq!(question_text(file.path(), "q-a"), None);
     }
 }
 

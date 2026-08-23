@@ -5789,15 +5789,22 @@ fn an_answer_needs_exactly_one_of_option_or_other() {
         .assert()
         .success();
     let question = question_id(&repo, &file);
-    for args in [
-        vec!["--option", "a", "--other", "c"],
-        vec!["--other", "   "],
-        vec![],
+    for (args, expected) in [
+        (vec!["--option", "a", "--other", "c"], "cannot be used with"),
+        (vec!["--other", "   "], "must say what the answer is"),
+        (
+            vec!["--other", "first line\nsecond line"],
+            "must be a single line",
+        ),
+        (vec![], "required"),
     ] {
         let mut cmd = repo.arc(&repo.root);
         cmd.args(["journal", "answer", &file, "--question", &question]);
         cmd.args(&args);
         cmd.args(["--body-file", "-"]);
-        cmd.write_stdin("Body.\n").assert().failure();
+        cmd.write_stdin("Body.\n")
+            .assert()
+            .failure()
+            .stderr(predicates::prelude::predicate::str::contains(expected));
     }
 }
