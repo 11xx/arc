@@ -5929,3 +5929,53 @@ fn the_fr_alias_matches_the_feature_request_verb() {
     assert!(open.contains("via-alias  feature-request"), "{open}");
     assert!(open.contains("via-verb  feature-request"), "{open}");
 }
+
+/// Somebody holding a topic rather than a filename is one command from the
+/// answer, so `show` names it instead of teaching the grammar and stopping.
+#[test]
+fn journal_show_given_a_topic_points_at_latest() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "show", "some-topic"])
+        .assert()
+        .failure()
+        .stderr(predicates::prelude::predicate::str::contains(
+            "arc journal latest some-topic",
+        ));
+    // A string that is neither keeps the grammar error, which is the useful
+    // one when the argument was meant to be a filename.
+    repo.arc(&repo.root)
+        .args(["journal", "show", "Not A Topic.md"])
+        .assert()
+        .failure()
+        .stderr(predicates::prelude::predicate::str::contains(
+            "<timestamp>-<topic>-<kind>.md",
+        ));
+}
+
+/// The alias mounts the kind verb's arguments rather than restating them, so
+/// the help cannot drift. It already had, on `--no-scaffold`.
+#[test]
+fn the_fr_alias_and_the_kind_verb_share_one_help_source() {
+    let repo = Repo::new();
+    let flags = |help: String| -> Vec<String> {
+        help.lines()
+            .skip_while(|line| !line.starts_with("Options:"))
+            .filter(|line| {
+                let item = line.trim();
+                ["--body-file", "--title", "--scaffold", "--no-scaffold"]
+                    .iter()
+                    .any(|flag| item.starts_with(flag))
+            })
+            .map(|line| line.trim().to_string())
+            .collect()
+    };
+    let alias = flags(stdout(repo.arc(&repo.root).args(["fr", "--help"])));
+    let verb = flags(stdout(repo.arc(&repo.root).args([
+        "journal",
+        "feature-request",
+        "--help",
+    ])));
+    assert!(!alias.is_empty(), "expected the shared write flags");
+    assert_eq!(alias, verb);
+}
