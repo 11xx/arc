@@ -220,6 +220,16 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 }
             }
         }
+        // A baseline probe is the one kind of evidence that must NOT be at the
+        // change head: it runs at the brief's base revision, checked above.
+        // Every other phase is counted at the head like a gate, so it earns
+        // the same refusal.
+        if phase_counts_at_head(phase) {
+            match &tested_revision {
+                Some(revision) => warn_if_attested_off_head(ctx, &st, revision),
+                None => ensure_at_change_head(ctx, &st)?,
+            }
+        }
         let expected = match phase {
             ProbePhase::Baseline => VerifyResult::Fail,
             ProbePhase::Final => VerifyResult::Pass,
@@ -251,6 +261,12 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             VerifyResult::Fail
         };
         return Ok(if observed == expected { 0 } else { 1 });
+    }
+    // Every path below records gate evidence, which status counts only at the
+    // change's head.
+    match &tested_revision {
+        Some(revision) => warn_if_attested_off_head(ctx, &st, revision),
+        None => ensure_at_change_head(ctx, &st)?,
     }
     if all {
         let gates = gates::load(&toplevel)?;
@@ -363,6 +379,108 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             note,
         },
     )
+}
+
+/// Resolve a path for comparison, falling back to the path itself when it
+/// cannot be canonicalized — a recorded worktree may no longer exist, and a
+/// lexical comparison is still the right answer when it does not.
+fn canonical_or_owned(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether evidence from this probe phase is counted at the change's head.
+///
+/// A total match rather than a `!=`: a phase added later must be classified
+/// here deliberately instead of inheriting head treatment because it is not
+/// `Baseline`.
+fn phase_counts_at_head(phase: ProbePhase) -> bool {
+    match phase {
+        // Baseline evidence is counted at the brief's base revision, which is
+        // by design not the head.
+        ProbePhase::Baseline => false,
+        ProbePhase::Final => true,
+    }
+}
+
+/// Warn when attested evidence names a revision status will never count.
+///
+/// Attestation is the caller's assertion about a run arc did not observe, so
+/// arc takes the revision it is given rather than overruling it. But evidence
+/// off the change head is ignored exactly as it is for a gate arc ran itself,
+/// and saying nothing is what turns that into a trap.
+fn warn_if_attested_off_head(ctx: &Ctx, st: &state::ChangeState, tested_revision: &str) {
+    let Ok(change_head) = gitio::branch_head(&ctx.cwd, &st.branch) else {
+        eprintln!(
+            "warning: cannot resolve {}'s branch {}, so whether this evidence will be counted \
+             is unknown",
+            st.change_id, st.branch
+        );
+        return;
+    };
+    if tested_revision != change_head {
+        eprintln!(
+            "warning: attested at {tested_revision}, which is not {}'s head ({change_head}); \
+             status counts evidence only at the head, so this will not discharge the gate",
+            st.change_id
+        );
+    }
+}
+
+/// Refuse to run a gate anywhere but at the change's own head.
+///
+/// Evidence is recorded at the head of whatever checkout the command ran in,
+/// and status only counts evidence at the change's head. Recording it
+/// elsewhere is therefore permanently ignored: `next_action` keeps answering
+/// `run_gate:<name>`, and following that advice changes nothing. Refusing
+/// before the command runs turns a loop that cannot be completed into one
+/// step that can — and for a change with no checkout at all, names the two
+/// ways to get one.
+///
+/// This function implements no exemption: every caller that reaches it is
+/// recording evidence status counts at the head. Deciding what is exempt —
+/// attested evidence, and a baseline probe — belongs at the call sites, which
+/// know which kind of evidence they are about to record.
+fn ensure_at_change_head(ctx: &Ctx, st: &state::ChangeState) -> Result<()> {
+    let change_head = gitio::branch_head(&ctx.cwd, &st.branch)?;
+    if gitio::head(&ctx.cwd)? == change_head {
+        return Ok(());
+    }
+    // `worktree_for_branch` answers "who has the branch checked out", so a
+    // worktree sitting detached on this branch's history answers None. That is
+    // a checkout in the wrong state, not a missing one, and advising `worktree
+    // add` beside it would be advice that cannot be followed.
+    if st
+        .worktree
+        .as_deref()
+        .map(std::path::Path::new)
+        .is_some_and(|recorded| {
+            canonical_or_owned(&ctx.cwd).starts_with(canonical_or_owned(recorded))
+        })
+    {
+        bail!(
+            "{} is checked out here but HEAD is not its branch head ({change_head}), so gate \
+             evidence would be recorded where status will never count it\n\
+             tip: `git checkout {}` in this worktree",
+            st.change_id,
+            st.branch
+        );
+    }
+    match gitio::worktree_for_branch(&ctx.cwd, &st.branch)? {
+        Some(worktree) => bail!(
+            "gate evidence would be recorded away from {}'s head, where status will never \
+             count it\ntip: run this from {}",
+            st.change_id,
+            worktree.display()
+        ),
+        None => bail!(
+            "{} has no checkout, so a gate run here would record evidence at the wrong \
+             revision and status would never count it\n\
+             tip: give it one with `git worktree add <path> {}`, or record evidence arc did \
+             not run with `arc verify --attest --tested-revision {change_head} ...`",
+            st.change_id,
+            st.branch
+        ),
+    }
 }
 
 /// Whether the change's latest brief declares an acceptance probe by this name.
