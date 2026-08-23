@@ -2254,3 +2254,108 @@ fn piped_output_dies_on_sigpipe_without_panicking() {
         "arc must not panic on a broken pipe: {stderr}"
     );
 }
+
+/// Help copy is the teaching surface for an agent-facing CLI, so an
+/// undescribed flag or positional is a gap in the contract rather than a
+/// cosmetic one. This walks every command and fails naming what it found,
+/// so the class cannot come back one flag at a time.
+#[test]
+fn every_flag_and_positional_carries_a_description() {
+    let repo = Repo::new();
+    let root = stdout(repo.arc(&repo.root).arg("--help"));
+    let commands: Vec<String> = root
+        .lines()
+        .skip_while(|line| !line.starts_with("Commands:"))
+        .take_while(|line| !line.starts_with("Options:"))
+        .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_string)
+        .collect();
+    assert!(
+        commands.len() > 20,
+        "expected the full command list: {commands:?}"
+    );
+
+    let undescribed = |help: &str| -> Vec<String> {
+        let lines: Vec<&str> = help.lines().collect();
+        let mut found = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            let item = line.trim();
+            let is_flag = item.starts_with("--")
+                && item
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|flag| flag.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
+            // `[possible values: …]` and `[env: …]` are clap's annotations on
+            // the line above, not items of their own.
+            let is_annotation = item.contains(": ");
+            let is_positional = !is_annotation && (item.starts_with('[') || item.starts_with('<'));
+            if !(is_flag || is_positional) || item.contains("  ") {
+                continue;
+            }
+            let next = lines.get(index + 1).map(|line| line.trim()).unwrap_or("");
+            if next.is_empty()
+                || next.starts_with('-')
+                || next.ends_with(':')
+                || next.starts_with('[')
+                || next.starts_with('<')
+            {
+                found.push(item.to_string());
+            }
+        }
+        found
+    };
+
+    let mut gaps = Vec::new();
+    for command in &commands {
+        let help = stdout(repo.arc(&repo.root).args([command, "--help"]));
+        for item in undescribed(&help) {
+            gaps.push(format!("{command}: {item}"));
+        }
+    }
+    assert!(
+        gaps.is_empty(),
+        "undescribed help entries:\n  {}",
+        gaps.join("\n  ")
+    );
+}
+
+/// Every kind is a verb under `arc journal`, so typing the kind at the top
+/// level is the likeliest miss a cold session makes — and the error is the
+/// cheapest place to teach it.
+#[test]
+fn a_top_level_kind_name_is_redirected_to_its_journal_verb() {
+    let repo = Repo::new();
+    for (typed, expected) in [
+        ("todo", "arc journal todo"),
+        ("handoff", "arc journal handoff"),
+        ("decision", "arc journal decision"),
+        ("questions", "arc journal questions"),
+        ("feature-request", "arc journal feature-request"),
+    ] {
+        repo.arc(&repo.root)
+            .args([typed, "some-topic"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(expected));
+    }
+}
+
+/// The redirect replaces clap's spelling guess rather than printing beside
+/// it: clap answers `questions` with `completions`, and two tips would leave
+/// the caller choosing between a right one and a wrong one.
+#[test]
+fn a_redirect_suppresses_the_similarity_guess_but_leaves_it_otherwise() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["questions", "x"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("completions").not());
+    // An unrecognized name with no mapping keeps clap's own error and usage.
+    repo.arc(&repo.root)
+        .args(["nonsense", "x"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Usage: arc"));
+}

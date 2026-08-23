@@ -517,7 +517,7 @@ pub enum JournalCmd {
     },
     /// Mark an artifact consumed so it leaves the `open` queue
     Consume {
-        /// Artifact filename inside the archive dir (a name, not a path)
+        /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
         /// How it was discharged
         #[arg(long, value_enum, default_value = "done")]
@@ -1396,23 +1396,8 @@ fn write_kind(ctx: &Ctx, kind: JournalKind, write: KindWrite) -> Result<i32> {
 /// can find the verb for is a proposal that gets written into a transcript
 /// instead of the journal. It forwards strictly, so the contract has one
 /// owner and the alias can never drift from it.
-pub fn feature_request(
-    ctx: &Ctx,
-    topic: &str,
-    body_file: Option<&str>,
-    title: Option<&str>,
-    scaffold: Option<&str>,
-    no_scaffold: bool,
-) -> Result<i32> {
-    note(
-        ctx,
-        topic,
-        JournalKind::FeatureRequest,
-        body_file,
-        title,
-        scaffold,
-        no_scaffold,
-    )
+pub fn feature_request(ctx: &Ctx, write: KindWrite) -> Result<i32> {
+    write_kind(ctx, JournalKind::FeatureRequest, write)
 }
 
 fn note(
@@ -3858,6 +3843,16 @@ fn list(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
 /// the hot journal dir first, then the cold sibling archive.
 fn show(ctx: &Ctx, filename: &str) -> Result<i32> {
     if parse_artifact_name(filename).is_none() {
+        // Somebody holding a topic rather than a filename is one command from
+        // the answer, so the error names it. Teaching the grammar and stopping
+        // leaves the caller to guess which verb takes the other shape.
+        if valid_topic(filename) {
+            bail!(
+                "{filename:?} is a topic, not a journal artifact name\n\
+                 tip: `arc journal latest {filename}` resolves its newest artifact, \
+                 `arc journal list` browses them all"
+            );
+        }
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     }
     print!("{}", read_artifact_body(ctx, filename)?);

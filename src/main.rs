@@ -185,8 +185,10 @@ enum Cmd {
     },
     /// List changes
     List {
+        /// List only changes that are still open
         #[arg(long)]
         open: bool,
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
         #[arg(long, value_enum, default_value = "default")]
@@ -197,14 +199,19 @@ enum Cmd {
         /// open | closed | integrated | abandoned | superseded
         #[arg(long)]
         status: Option<String>,
+        /// Only changes whose integration target is this branch
         #[arg(long)]
         target: Option<String>,
+        /// Only changes carrying every tag given (repeatable)
         #[arg(long)]
         tag: Vec<String>,
+        /// Only changes whose latest verdict is this
         #[arg(long, value_enum)]
         verdict: Option<Verdict>,
+        /// Only changes opened by this actor
         #[arg(long)]
         actor: Option<String>,
+        /// Only changes opened from this harness
         #[arg(long)]
         harness: Option<String>,
         /// Report changes whose patchset, integration, or closure commit
@@ -219,14 +226,19 @@ enum Cmd {
         /// approval of the same patchset, or from an audit
         #[arg(long)]
         provisional: bool,
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
     },
     /// Render one change (Markdown, or full state with --json)
     Show {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
+        /// Render every change carrying this tag instead of one change
         #[arg(long)]
         tag: Vec<String>,
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
         /// Replay state as of this event ID ("what did the actor see?")
@@ -237,6 +249,8 @@ enum Cmd {
     /// review batch records several, so it renders as several lines. This is
     /// the ledger, not Git history: for commits, use `git log`
     Log {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
         /// Newest event first
         #[arg(long)]
@@ -261,11 +275,14 @@ enum Cmd {
         /// contributed, rework rounds they opened, verdicts issued
         #[arg(long = "by-model")]
         by_model: bool,
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
     },
     /// Render a recorded patchset using Git's native diff output
     Diff {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         #[arg(index = 1)]
         change: Option<String>,
         /// Patchset to render (defaults to the latest snapshot)
@@ -298,12 +315,16 @@ enum Cmd {
         /// List post-integration audit findings instead of the shipped ones
         #[arg(long)]
         audit: bool,
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
         #[arg(long, value_enum, default_value = "text")]
         format: commands::FindingsFormat,
     },
     /// Record or read a change-scoped implementation contract
     Brief {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
         /// Read a new brief body from a file ('-' for stdin)
         #[arg(long)]
@@ -341,6 +362,8 @@ enum Cmd {
     },
     /// Record, read, or project changelog entries
     Changelog {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
         /// Free-form category for a newly recorded changelog entry
         #[arg(long)]
@@ -363,6 +386,7 @@ enum Cmd {
     },
     /// Append a structured cross-change announcement (never policy input)
     Message {
+        /// Change the announcement is recorded against
         change: String,
         /// Announcement class
         #[arg(long = "type", value_enum)]
@@ -382,6 +406,7 @@ enum Cmd {
     },
     /// Scan messages across open and closed changes (newest first)
     Messages {
+        /// Only messages recorded against this change
         #[arg(long, id = "change_flag")]
         change: Option<String>,
         #[arg(long = "type", value_enum)]
@@ -391,6 +416,7 @@ enum Cmd {
         /// Only messages created at or after this ISO 8601 instant
         #[arg(long)]
         since: Option<String>,
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
     },
@@ -399,12 +425,15 @@ enum Cmd {
         /// Restrict to changes assigned to this harness
         #[arg(long = "assigned-to")]
         assigned_to: Option<String>,
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
     },
     /// Show a tagged program in dependency order (arc-chain/3 schema)
     Chain {
+        /// The tag naming the program to render
         tag: String,
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
         /// Include final-patchset review provenance
@@ -425,13 +454,18 @@ enum Cmd {
     },
     /// Append dependency, tag, or assignment metadata to an open change
     Metadata {
+        /// Change the metadata is appended to
         change: String,
+        /// Declare a change that must integrate before this one is ready (repeatable)
         #[arg(long = "blocked-by")]
         blocked_by: Vec<String>,
+        /// Withdraw a declared prerequisite (repeatable)
         #[arg(long = "remove-blocked-by")]
         remove_blocked_by: Vec<String>,
+        /// Add a batch/query tag (repeatable)
         #[arg(long)]
         tag: Vec<String>,
+        /// Withdraw a tag (repeatable)
         #[arg(long = "remove-tag")]
         remove_tag: Vec<String>,
         /// Assign to a harness (advisory; latest wins; "" clears)
@@ -446,6 +480,8 @@ enum Cmd {
     },
     /// Machine-readable status report (the versioned arc-status/9 schema)
     Status {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
         /// Accepted for compatibility; status output is always JSON
         #[arg(long)]
@@ -461,9 +497,17 @@ enum Cmd {
         at: Option<String>,
     },
     /// Report whether declared prerequisite changes have integrated
-    BlockerStatus { change: Option<String> },
+    BlockerStatus {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
+        change: Option<String>,
+    },
     /// Dependency probe: exit 0 ready, 1 blocked, 2 on lookup/ledger errors
-    IsBlocked { change: Option<String> },
+    IsBlocked {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
+        change: Option<String>,
+    },
     /// Replay raw ledger events as NDJSON, optionally following new events
     Events {
         /// Continue emitting matching events appended after the replay
@@ -490,6 +534,8 @@ enum Cmd {
     },
     /// Wait for a change, or a tagged series, to reach a ledger-derived condition
     Watch {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
         /// Watch every change carrying all supplied tags (repeatable)
         #[arg(long)]
@@ -515,6 +561,7 @@ enum Cmd {
     },
     /// Export one change as a deterministic, versioned JSON bundle
     Export {
+        /// Change to export as a versioned bundle
         change: String,
         /// Output file ('-' for stdout)
         #[arg(long)]
@@ -530,6 +577,8 @@ enum Cmd {
     },
     /// Integration preflight; exit code identifies the first blocker
     Check {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
         /// Check every change carrying all supplied tags
         #[arg(long)]
@@ -543,6 +592,8 @@ enum Cmd {
     },
     /// Acquire or renew an advisory executor claim
     Claim {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
         /// Lease duration (positive integer with s, m, or h suffix; default 2h)
         #[arg(long)]
@@ -555,16 +606,23 @@ enum Cmd {
         takeover: bool,
     },
     /// Release the current advisory executor claim
-    ReleaseClaim { change: Option<String> },
+    ReleaseClaim {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
+        change: Option<String>,
+    },
     /// Record typed executor progress (requires an owned live claim)
     #[command(allow_missing_positional = true)]
     Stage {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
         #[arg(value_enum)]
         stage: commands::StageArg,
         /// Acquire a default claim first when this session has no live claim
         #[arg(long)]
         claim: bool,
+        /// Free-text detail recorded with the stage
         #[arg(long)]
         note: Option<String>,
         /// Read the stage note from a file ('-' for stdin)
@@ -576,6 +634,8 @@ enum Cmd {
     },
     /// Record the current branch head as a new patchset
     Snapshot {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
         /// Override the recorded base revision
         #[arg(long)]
@@ -595,9 +655,12 @@ enum Cmd {
     },
     /// Add a discussion comment
     Comment {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
         #[command(flatten)]
         body: BodyOpts,
+        /// Patchset the comment is about (defaults to the latest)
         #[arg(long)]
         patchset: Option<String>,
         #[command(flatten)]
@@ -605,16 +668,20 @@ enum Cmd {
     },
     /// Record a standalone review finding
     Finding {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
         /// One-sentence statement of the defect
         #[arg(long)]
         summary: String,
         #[command(flatten)]
         body: BodyOpts,
+        /// Record it as blocking, so integration refuses until it is disposed of
         #[arg(long)]
         blocking: bool,
         #[arg(long, value_enum, default_value = "major")]
         severity: Severity,
+        /// Patchset the finding is against (defaults to the latest)
         #[arg(long)]
         patchset: Option<String>,
         #[command(flatten)]
@@ -623,7 +690,10 @@ enum Cmd {
     /// Reply to a comment or finding event
     #[command(allow_missing_positional = true)]
     Reply {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
+        /// The comment or finding event being replied to
         event_id: String,
         #[command(flatten)]
         body: BodyOpts,
@@ -631,19 +701,26 @@ enum Cmd {
     /// Record a shipped or audit finding disposition (supersedes current tips automatically)
     #[command(allow_missing_positional = true)]
     Resolve {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
+        /// The finding being disposed of
         finding: String,
         #[arg(long, value_enum)]
         status: DispositionStatus,
         /// Fixing commit, when one exists
         #[arg(long)]
         commit: Option<String>,
+        /// What supports the disposition: a probe, a command, or the reasoning
         #[arg(long)]
         evidence: Option<String>,
     },
     /// Read review state, or record a verdict with an optional findings batch
     Review {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
+        /// The conclusion recorded
         #[arg(long, value_enum)]
         verdict: Option<Verdict>,
         /// Emit the read view as a versioned JSON object
@@ -682,6 +759,8 @@ enum Cmd {
     /// anywhere else is refused rather than recorded where status will ignore
     /// it; `--attest` records evidence arc did not run
     Verify {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
         /// Run every gate declared for the change profile
         #[arg(long)]
@@ -728,7 +807,11 @@ enum Cmd {
         note: Option<String>,
     },
     /// Finish implementation: snapshot, verify all gates, then print check state
-    Done { change: Option<String> },
+    Done {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
+        change: Option<String>,
+    },
     /// Print shell exports for an explicitly detected harness session
     Env,
     /// Print a shell completion script to stdout
@@ -744,7 +827,10 @@ enum Cmd {
     },
     /// Resume one change with its brief, live state, and journal context
     Resume {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
         /// Print one dotted object-key/array-index path
@@ -756,7 +842,10 @@ enum Cmd {
     },
     /// Recover work abandoned by another session
     Rescue {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
         /// Include the claimed session's sensitive transcript
@@ -770,10 +859,16 @@ enum Cmd {
         take: bool,
     },
     /// Print one stable statusline summary for the current change
-    Prompt { change: Option<String> },
+    Prompt {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
+        change: Option<String>,
+    },
     /// Set an integration hold
     Hold {
+        /// Change whose integration is held
         change: String,
+        /// Why integration is being held, recorded with the hold
         #[arg(long, required_unless_present = "reason_file")]
         reason: Option<String>,
         /// Read the hold reason from a file ('-' for stdin)
@@ -782,8 +877,11 @@ enum Cmd {
     },
     /// Release one hold by the event that set it (a unique prefix is enough)
     ReleaseHold {
+        /// Change whose hold is released
         change: String,
+        /// The hold event to release (a unique prefix is enough)
         hold: String,
+        /// Why the hold is being released, recorded with the release
         #[arg(long)]
         reason: Option<String>,
     },
@@ -818,6 +916,7 @@ enum Cmd {
     },
     /// Record a review obligation this change carries but has not discharged
     AuditDebt {
+        /// Change that owes the review
         change: String,
         /// What review is owed, and why it could not run
         #[arg(long)]
@@ -825,6 +924,7 @@ enum Cmd {
     },
     /// Record a review performed after integration (never a late verdict)
     Audit {
+        /// Change whose integrated revision was reviewed
         change: String,
         #[arg(long, value_enum)]
         verdict: Verdict,
@@ -840,6 +940,7 @@ enum Cmd {
     },
     /// Close a change without arc performing the merge
     Close {
+        /// Change to close
         change: String,
         /// Assert an integration arc did not perform, at this revision. Carries
         /// no authorization: arc did not guard this merge
@@ -856,6 +957,7 @@ enum Cmd {
         /// records no base
         #[arg(long = "target-before", requires = "assert_integrated")]
         target_before: Option<String>,
+        /// Close as abandoned: the work stopped and nothing was merged
         #[arg(long)]
         abandoned: bool,
         /// Superseded by another change
@@ -883,6 +985,7 @@ enum Cmd {
     },
     /// Check the append-only ledger for malformed or stale state (read-only)
     Doctor {
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
         /// Show every item behind grouped advice
@@ -901,6 +1004,8 @@ enum Cmd {
     },
     /// Advise (never execute) rebases for open dependents of a change
     Restack {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
         change: Option<String>,
         /// Print the rebase commands without running them
         #[arg(long)]
@@ -921,6 +1026,7 @@ enum Cmd {
         /// always rendered in full, since finding it is the point
         #[arg(long, default_value = "10")]
         limit: usize,
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
     },
@@ -928,21 +1034,10 @@ enum Cmd {
     /// for `arc journal note --kind feature-request`. Read the queue back with
     /// `arc journal open` or `arc journal list --kind feature-request`
     Fr {
-        /// Kebab-case topic slug
-        topic: String,
-        /// Body source: a file path, or '-' for stdin (written verbatim)
-        #[arg(long)]
-        body_file: Option<String>,
-        /// Optional title; when set, a `# <title>` heading is prepended
-        #[arg(long)]
-        title: Option<String>,
-        /// Scaffold template prepended to the body (.arc/templates/<name>.md
-        /// or a built-in: sol-low, sol-high, reviewer, discussion)
-        #[arg(long, conflicts_with = "no_scaffold")]
-        scaffold: Option<String>,
-        /// Record the body alone, without any scaffold
-        #[arg(long)]
-        no_scaffold: bool,
+        /// The alias mounts the kind verb's own arguments rather than
+        /// restating them, so the two cannot drift apart.
+        #[command(flatten)]
+        write: journal::KindWrite,
     },
     /// Cross-harness project journal mechanics (plain Markdown stays the contract)
     Journal {
@@ -955,11 +1050,13 @@ enum Cmd {
 enum WorkspaceCmd {
     /// Per-repo open-change rows across the data_root
     List {
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
     },
     /// The inbox rollup for every repo under the data_root
     Inbox {
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
     },
@@ -973,6 +1070,7 @@ enum WorkspaceCmd {
         /// matters more the longer it has been one
         #[arg(long)]
         since: Option<String>,
+        /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
     },
@@ -1113,6 +1211,25 @@ fn nested_subcommand_path(typed: Option<&str>) -> Option<&'static str> {
         Some("stamp") => Some("journal stamp"),
         Some("lane") => Some("journal lane"),
         Some("discussion") => Some("journal discussion"),
+        // Every kind is a verb under `arc journal`, so typing the kind at the
+        // top level is the likeliest miss a cold session makes. The set is
+        // closed, which makes this a lookup rather than a guess. Names that
+        // are already top-level commands — `review`, `log`, `list`, `show` —
+        // are deliberately absent: they resolve, and redirecting them would
+        // be wrong.
+        Some("feature-request") => Some("journal feature-request"),
+        Some("todo") => Some("journal todo"),
+        Some("handoff") => Some("journal handoff"),
+        Some("plan") => Some("journal plan"),
+        Some("conclusion") => Some("journal conclusion"),
+        Some("decision") => Some("journal decision"),
+        Some("memory") => Some("journal memory"),
+        Some("later") => Some("journal later"),
+        Some("question") => Some("journal question"),
+        Some("questions") => Some("journal questions"),
+        Some("answer") => Some("journal answer"),
+        Some("position") => Some("journal position"),
+        Some("latest") => Some("journal latest"),
         Some("install") => Some("hooks install"),
         Some("uninstall") => Some("hooks uninstall"),
         _ => None,
@@ -1139,10 +1256,28 @@ fn main() {
         Err(error) => {
             let kind = error.kind();
             let typed = std::env::args().nth(1);
-            error.print().ok();
-            if kind == clap::error::ErrorKind::InvalidSubcommand {
-                if let Some(path) = nested_subcommand_path(typed.as_deref()) {
-                    eprintln!("  tip: a similar subcommand exists: '{path}'\n");
+            // An exact redirect replaces clap's guess rather than printing
+            // beside it. Its similarity search reaches for whatever is
+            // closest in spelling — it answers `questions` with
+            // `completions` — so two tips would leave the caller choosing
+            // between a right one and a wrong one.
+            let redirect = (kind == clap::error::ErrorKind::InvalidSubcommand)
+                .then(|| nested_subcommand_path(typed.as_deref()))
+                .flatten();
+            match redirect {
+                Some(path) => {
+                    eprintln!(
+                        concat!(
+                            "error: unrecognized subcommand '{}'\n\n",
+                            "  tip: it lives under another command: 'arc {}'\n\n",
+                            "For more information, try '--help'.\n"
+                        ),
+                        typed.as_deref().unwrap_or(""),
+                        path
+                    );
+                }
+                None => {
+                    error.print().ok();
                 }
             }
             std::process::exit(error.exit_code());
@@ -2083,20 +2218,7 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Catchup { limit, json } => commands::catchup(&ctx, limit, json),
-        Cmd::Fr {
-            topic,
-            body_file,
-            title,
-            scaffold,
-            no_scaffold,
-        } => journal::feature_request(
-            &ctx,
-            &topic,
-            body_file.as_deref(),
-            title.as_deref(),
-            scaffold.as_deref(),
-            no_scaffold,
-        ),
+        Cmd::Fr { write } => journal::feature_request(&ctx, write),
         Cmd::Journal { cmd } => journal::run(&ctx, cmd),
     }
 }
