@@ -1386,25 +1386,10 @@ fn journal_lane_close_owner_and_takeover_semantics() {
     // Age the fixture directly instead of sleeping across the one-minute
     // boundary. Parallel test execution must not decide whether this branch
     // exercises a live or stale lane.
-    let dir = journal_dir(&repo);
-    let stale_at = chrono::Utc::now() - chrono::Duration::minutes(2);
-    let mut events = journal_events(&dir);
-    assert!(events
+    assert!(journal_events(&journal_dir(&repo))
         .iter()
         .any(|event| event["event"] == "lane-opened" && event["topic"] == "takeover"));
-    let event_count = events.len();
-    for (index, event) in events.iter_mut().enumerate() {
-        // Keep timestamps increasing so replay sees the same append order;
-        // only the age changes.
-        let offset = chrono::Duration::seconds((event_count - index) as i64);
-        event["ts"] = (stale_at - offset).to_rfc3339().into();
-    }
-    let contents = events
-        .into_iter()
-        .map(|event| event.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(dir.join("events.jsonl"), format!("{contents}\n")).unwrap();
+    backdate_journal_events(&repo, chrono::Duration::minutes(2));
 
     repo.arc(&repo.root)
         .env("ARC_SESSION", "session-b")
@@ -1424,16 +1409,45 @@ fn journal_lane_close_owner_and_takeover_semantics() {
 fn journal_lane_liveness_refreshes_from_any_owner_journal_line() {
     let repo = Repo::new();
     repo.arc(&repo.root)
-        .args(["journal", "lane", "open", "work-a", "--ttl", "1s"])
+        .args(["journal", "lane", "open", "work-a", "--ttl", "1m"])
         .assert()
         .success();
-    thread::sleep(Duration::from_secs(2));
+
+    // Age the recorded lane past its TTL instead of sleeping through it. A
+    // sleep makes a scheduler delay indistinguishable from the staleness the
+    // assertion is about, so under load the test would report on how promptly
+    // the process was scheduled rather than on how liveness is derived.
+    backdate_journal_events(&repo, chrono::Duration::minutes(2));
+
+    let stale = stdout(repo.arc(&repo.root).args(["journal", "lane", "list"]));
+    assert!(stale.contains("work-a  test session-a  stale"), "{stale}");
+
+    // A line on an unrelated topic, from the same session, is the refresh.
     repo.arc(&repo.root)
         .args(["journal", "log", "other-topic", "still active"])
         .assert()
         .success();
     let text = stdout(repo.arc(&repo.root).args(["journal", "lane", "list"]));
     assert!(text.contains("work-a  test session-a  live"), "{text}");
+}
+
+/// Rewrite every recorded journal event to sit `age` in the past, preserving
+/// append order so replay is unchanged and only the age differs.
+fn backdate_journal_events(repo: &Repo, age: chrono::Duration) {
+    let dir = journal_dir(repo);
+    let mut events = journal_events(&dir);
+    let stale_at = chrono::Utc::now() - age;
+    let count = events.len();
+    for (index, event) in events.iter_mut().enumerate() {
+        let offset = chrono::Duration::seconds((count - index) as i64);
+        event["ts"] = (stale_at - offset).to_rfc3339().into();
+    }
+    let contents = events
+        .into_iter()
+        .map(|event| event.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(dir.join("events.jsonl"), format!("{contents}\n")).unwrap();
 }
 
 #[test]
