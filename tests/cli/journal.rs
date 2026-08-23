@@ -5315,3 +5315,83 @@ fn fr_alias_files_the_same_artifact_as_journal_note() {
     let open = stdout(repo.arc(&repo.root).args(["journal", "open"]));
     assert!(open.contains("aliased-proposal  feature-request"), "{open}");
 }
+
+#[test]
+fn journal_latest_resolves_newest_by_topic_and_honors_a_kind_filter() {
+    let repo = Repo::new();
+    let hot = journal_dir(&repo);
+    fs::create_dir_all(&hot).unwrap();
+    fs::write(
+        hot.join("20260101T000000Z-deploy-handoff.md"),
+        "# First handoff\n",
+    )
+    .unwrap();
+    fs::write(
+        hot.join("20260101T000100Z-deploy-handoff.md"),
+        "# Second handoff\n",
+    )
+    .unwrap();
+    fs::write(
+        hot.join("20260101T000200Z-deploy-conclusion.md"),
+        "# Deploy conclusion\n",
+    )
+    .unwrap();
+    // A neighbouring topic sharing the prefix must never be mistaken for it.
+    fs::write(
+        hot.join("20260101T000300Z-deploy-rollback-handoff.md"),
+        "# Rollback handoff\n",
+    )
+    .unwrap();
+
+    let newest = stdout(repo.arc(&repo.root).args(["journal", "latest", "deploy"]));
+    assert_eq!(newest, "# Deploy conclusion\n");
+
+    let handoff = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "latest", "deploy", "--kind", "handoff"]),
+    );
+    assert_eq!(handoff, "# Second handoff\n");
+
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "latest", "deploy", "--kind", "handoff", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(value["schema"], "arc-journal-latest/1");
+    assert_eq!(value["file"], "20260101T000100Z-deploy-handoff.md");
+    assert_eq!(value["topic"], "deploy");
+    assert_eq!(value["kind"], "handoff");
+    assert_eq!(value["timestamp"], "20260101T000100Z");
+    assert_eq!(value["storage"], "hot");
+    assert_eq!(value["heading"], "# Second handoff");
+    assert_eq!(value["body"], "# Second handoff\n");
+}
+
+#[test]
+fn journal_latest_falls_back_to_cold_storage_and_reports_a_missing_topic() {
+    let repo = Repo::new();
+    let hot = journal_dir(&repo);
+    fs::create_dir_all(&hot).unwrap();
+    let name = "20260101T000000Z-retired-note.md";
+    fs::write(hot.join(name), "# Retired\n").unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "archive", name])
+        .assert()
+        .success();
+
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "latest", "retired", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(value["storage"], "cold");
+    assert_eq!(value["file"], name);
+
+    repo.arc(&repo.root)
+        .args(["journal", "latest", "never-filed"])
+        .assert()
+        .failure()
+        .stderr(predicates::prelude::predicate::str::contains(
+            "no artifact under topic \"never-filed\"",
+        ));
+}

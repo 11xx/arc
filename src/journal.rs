@@ -394,6 +394,21 @@ pub enum JournalCmd {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
     },
+    /// Resolve the newest artifact filed under one topic and print it, so a
+    /// workflow that appends continuations under a stable topic can read its
+    /// own tail back without reproducing arc's ordering rules. The topic must
+    /// match exactly; a similarly prefixed topic never matches. The hot
+    /// journal wins over the cold archive whenever both hold a match
+    Latest {
+        /// Kebab-case topic slug, matched exactly
+        topic: String,
+        /// Restrict to one artifact kind, including kinds no longer written
+        #[arg(long)]
+        kind: Option<String>,
+        /// Emit the resolved identity alongside the body as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Derived summary of a discussion: stance tally, participants, replies,
     /// age, and resolution with a resolver-participation flag (read-only).
     /// The tally counts `Position: for | against | amend` lines inside
@@ -533,6 +548,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
         JournalCmd::Open { kind, json } => open(ctx, kind, json),
         JournalCmd::List { kind, json } => list(ctx, kind, json),
         JournalCmd::Show { filename } => show(ctx, &filename),
+        JournalCmd::Latest { topic, kind, json } => latest(ctx, &topic, kind.as_deref(), json),
         JournalCmd::Discussion { filename, json } => discussion_summary(ctx, &filename, json),
         JournalCmd::Rebind { from } => rebind(ctx, &from),
         JournalCmd::Stamp => stamp(),
@@ -3519,6 +3535,73 @@ fn show(ctx: &Ctx, filename: &str) -> Result<i32> {
     }
     print!("{}", read_artifact_body(ctx, filename)?);
     Ok(0)
+}
+
+#[derive(Serialize)]
+struct LatestArtifact {
+    schema: &'static str,
+    file: String,
+    dir: String,
+    storage: &'static str,
+    timestamp: String,
+    topic: String,
+    kind: String,
+    heading: Option<String>,
+    consumed: Option<String>,
+    body: String,
+}
+
+/// Resolve the newest artifact under one topic. Hot storage is searched
+/// before the cold archive and a hot match wins outright: an archived
+/// artifact is by definition older work, so a newer archived stamp would
+/// still be the wrong answer for "where did this topic get to".
+fn latest(ctx: &Ctx, topic: &str, kind: Option<&str>, json: bool) -> Result<i32> {
+    let hot = resolve_dir(&ctx.cwd)?;
+    let cold = archive_dir(&hot);
+    let events = read_events(&hot)?;
+
+    for (dir, storage) in [(&hot, "hot"), (&cold, "cold")] {
+        let found = sorted_artifact_names(dir)?.into_iter().find_map(|name| {
+            let (ts, file_topic, file_kind) = parse_artifact_name(&name)?;
+            (file_topic == topic && kind.is_none_or(|kind| file_kind == kind))
+                .then_some((name, ts, file_kind))
+        });
+        let Some((name, timestamp, file_kind)) = found else {
+            continue;
+        };
+        let path = dir.join(&name);
+        let body = std::fs::read_to_string(&path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        if !json {
+            print!("{body}");
+            return Ok(0);
+        }
+        let resolved = LatestArtifact {
+            schema: "arc-journal-latest/1",
+            heading: first_heading(&path),
+            consumed: consumption(&events, &name),
+            file: name,
+            dir: dir.display().to_string(),
+            storage,
+            timestamp,
+            topic: topic.to_string(),
+            kind: file_kind,
+            body,
+        };
+        println!("{}", serde_json::to_string_pretty(&resolved)?);
+        return Ok(0);
+    }
+
+    match kind {
+        Some(kind) => bail!(
+            "no {kind} artifact under topic {topic:?} in {} or its cold archive",
+            hot.display()
+        ),
+        None => bail!(
+            "no artifact under topic {topic:?} in {} or its cold archive",
+            hot.display()
+        ),
+    }
 }
 
 /// Read one artifact's raw body from the hot journal dir, then the cold
