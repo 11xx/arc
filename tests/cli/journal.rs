@@ -5395,3 +5395,128 @@ fn journal_latest_falls_back_to_cold_storage_and_reports_a_missing_topic() {
             "no artifact under topic \"never-filed\"",
         ));
 }
+
+#[test]
+fn consume_refuses_while_a_question_is_unanswered_and_relents_once_settled() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "shape", "# Which shape?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "paths",
+            "--option",
+            "properties",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Paths or properties?\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file, "--outcome", "discarded"])
+        .assert()
+        .failure()
+        .stderr(predicates::prelude::predicate::str::contains(
+            "1 unanswered question",
+        ))
+        .stderr(predicates::prelude::predicate::str::contains(&question));
+
+    // The escape exists, and says so.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "consume",
+            &file,
+            "--outcome",
+            "discarded",
+            "--drop-questions",
+            "--note",
+            "re-filed as its own discussion",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn consume_is_unaffected_by_a_question_that_was_answered() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "settled", "# Settled?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "yes",
+            "--option",
+            "no",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Well?\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "yes",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Yes.\n")
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file, "--outcome", "discarded"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn begin_from_journal_warns_about_an_unanswered_question_but_opens_the_change() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "promoted", "# Promote me\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("A or B?\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+
+    repo.arc(&repo.root)
+        .args(["begin", "promoted-work", "--from-journal", &file])
+        .assert()
+        .success()
+        .stderr(predicates::prelude::predicate::str::contains(
+            "unanswered question",
+        ))
+        .stderr(predicates::prelude::predicate::str::contains(&question));
+}
