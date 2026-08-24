@@ -123,6 +123,25 @@ RUN A CHANGE
   arc audit <change> --verdict <v>   Review an already-integrated revision.
   arc close                          Terminal outcome arc did not merge itself.
 
+KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)
+  arc keep --kind rejected   --body "<why it failed>" --evidence "<what showed it>"
+  arc keep --kind verified   --body "<the premise checked>"
+  arc keep --kind constraint --body "<what must be respected>"
+  arc keep --kind hypothesis --body "<believed, not established>"
+
+  Compaction is lossy compression chosen by something that does not know what
+  will be needed. The session doing the work does. A fact filed here is in the
+  ledger, so there is nothing for it to survive: `arc resume` hands it back to
+  a compacted or cold successor.
+
+  File the moment a premise is checked or an approach is abandoned. A rejected
+  approach is the highest-value kind and the least likely to be re-derived —
+  a cold session will cheerfully try it again. Keep the kinds honest: a
+  hypothesis recorded as verified is worse than not recording it.
+
+  Selectivity is the point. Filing everything rebuilds the transcript this
+  exists to replace, at higher cost and in an append-only record.
+
 END A SESSION (what the next one reads)
   arc journal handoff <topic> --body-file -    Stopped midstream.
   arc journal conclusion <topic> --body-file - Finished the thing.

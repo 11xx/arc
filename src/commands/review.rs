@@ -244,6 +244,34 @@ pub fn snapshot(
     Ok(())
 }
 
+/// Keep one fact the work discovered, so `resume` hands it back.
+///
+/// Deliberately cheap: one line, no artifact, no ceremony. Selectivity has to
+/// be cheaper than completeness, or this becomes a second transcript and
+/// reproduces the problem it exists to solve at higher cost.
+pub fn keep(
+    ctx: &Ctx,
+    reference: &str,
+    kind: crate::model::KeptKind,
+    body: String,
+    evidence: Option<String>,
+) -> Result<()> {
+    let store = ctx.store()?;
+    let (change_id, _st) = ctx.load_state(&store, reference)?;
+    let ev = ctx.event(
+        &store,
+        &change_id,
+        Payload::ContextKept {
+            kind,
+            body,
+            evidence,
+        },
+    );
+    store.append_event(&ev)?;
+    println!("kept: {} {}", kind.as_str(), ev.event_id);
+    Ok(())
+}
+
 pub fn comment(
     ctx: &Ctx,
     reference: &str,

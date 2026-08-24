@@ -139,6 +139,27 @@ struct BodyOpts {
     body_file: Option<String>,
 }
 
+/// CLI spelling of `KeptKind`, kept separate so clap's value names stay a
+/// surface decision rather than leaking the ledger's serde spelling.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum KeptKindArg {
+    Verified,
+    Rejected,
+    Constraint,
+    Hypothesis,
+}
+
+impl From<KeptKindArg> for model::KeptKind {
+    fn from(value: KeptKindArg) -> Self {
+        match value {
+            KeptKindArg::Verified => model::KeptKind::Verified,
+            KeptKindArg::Rejected => model::KeptKind::Rejected,
+            KeptKindArg::Constraint => model::KeptKind::Constraint,
+            KeptKindArg::Hypothesis => model::KeptKind::Hypothesis,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Open a change: create (or adopt) its branch and worktree
@@ -652,6 +673,22 @@ enum Cmd {
         /// Run every gate declared for the change profile
         #[arg(long)]
         all: bool,
+    },
+    /// Keep a fact this work discovered, so `arc resume` hands it back to a
+    /// compacted or cold session instead of it being re-derived
+    Keep {
+        /// What kind of fact: a premise checked, an approach abandoned, a
+        /// constraint discovered, or something believed but not established
+        #[arg(long, value_enum)]
+        kind: KeptKindArg,
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
+        change: Option<String>,
+        #[command(flatten)]
+        body: BodyOpts,
+        /// What established it. A fact with no evidence reads as a claim
+        #[arg(long)]
+        evidence: Option<String>,
     },
     /// Add a discussion comment
     Comment {
@@ -1837,6 +1874,17 @@ fn run(cli: Cli) -> Result<i32> {
         } => {
             let change = infer(change.as_deref())?;
             commands::snapshot_with_verify(&ctx, &change, base, brief_version, verify, gate, all)
+        }
+        Cmd::Keep {
+            kind,
+            change,
+            body,
+            evidence,
+        } => {
+            let change = infer(change.as_deref())?;
+            let text = commands::read_body(body.body, body.body_file)?;
+            commands::keep(&ctx, &change, kind.into(), text, evidence)?;
+            Ok(0)
         }
         Cmd::Comment {
             change,

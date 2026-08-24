@@ -306,6 +306,18 @@ pub struct AuditDebt {
     pub declared_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// One fact a session judged load-bearing mid-work.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeptContext {
+    pub event_id: String,
+    pub kind: KeptKind,
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    pub actor: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditVerdictEntry {
     pub event_id: String,
@@ -562,6 +574,12 @@ pub struct ChangeState {
     /// The latest declared review obligation, if one was ever declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_debt: Option<AuditDebt>,
+    /// Facts a session kept while the work was happening, oldest first, so
+    /// `resume` can hand them back to a compacted or cold successor. Skipped
+    /// when empty so outputs that serialize the state whole keep their shape
+    /// for changes that never kept anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<KeptContext>,
     /// Raised at `begin` to demand an independent verdict regardless of what
     /// the change touches. One-way: a change may raise itself, never lower
     /// itself below what the project declared.
@@ -745,6 +763,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     retired_claim_ids: BTreeSet::new(),
                     holds: BTreeMap::new(),
                     closure: None,
+                    kept: Vec::new(),
                     forge: crate::forge::ForgeState::default(),
                 },
                 ev,
@@ -1077,6 +1096,18 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     changed_at: ev.created_at,
                 });
             }
+            Payload::ContextKept {
+                kind,
+                body,
+                evidence,
+            } => state.kept.push(KeptContext {
+                event_id: ev.event_id.clone(),
+                kind: *kind,
+                body: body.clone(),
+                evidence: evidence.clone(),
+                actor: ev.actor.clone(),
+                created_at: ev.created_at,
+            }),
             Payload::CommentAdded {
                 body,
                 patchset_id,

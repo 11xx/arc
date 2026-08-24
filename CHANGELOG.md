@@ -12,6 +12,11 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `arc keep --kind verified|rejected|constraint|hypothesis` records a fact the
+  work discovered, and `arc resume` hands it back under `## Kept Context`, so a
+  compacted or cold session does not re-derive it or re-try an approach already
+  rejected. Carried on `arc status --json` as `kept` (`intentional-context`).
+
 - Each journal artifact kind has its own subcommand (`arc journal todo`, `arc journal handoff`, `arc journal decision`, …), making `arc journal --help` the kind registry; `note --kind` stays canonical underneath and now defaults to `note`.
 - `arc journal questions [--json]` lists every question waiting on a person, with its options and argued branches; `arc catchup` reports them first. `arc journal answer --other "<answer>"` settles a question outside the options it offered.
 - `arc review --verdict approved --provisional "<why>"` records a verdict that gates but is owed corroboration. Independence and approval staleness are unchanged; the change carries a recorded obligation until somebody else supplies a second judgment — an independent approval of the same patchset, or an audit — and neither the reviewer being corroborated nor the change's author can supply it. `arc query --provisional` lists the outstanding ones, `arc status` reports `provisional_approval_outstanding`, `arc check` names the reason, and the merge's authorization basis records that it rested on a provisional verdict.
