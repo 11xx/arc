@@ -124,10 +124,10 @@ RUN A CHANGE
   arc close                          Terminal outcome arc did not merge itself.
 
 KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)
-  arc keep --kind rejected   --body - --evidence <what showed it>
-  arc keep --kind verified   --body -
-  arc keep --kind constraint --body -
-  arc keep --kind hypothesis --body -
+  arc keep --kind rejected   --body "<why it failed>" --evidence <what showed it>
+  arc keep --kind verified   --body "<the premise checked>"
+  arc keep --kind constraint --body "<what must be respected>"
+  arc keep --kind hypothesis --body "<believed, not established>"
 
   Compaction is lossy compression chosen by something that does not know what
   will be needed. The session doing the work does. A fact filed here is in the

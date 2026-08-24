@@ -402,12 +402,12 @@ pub struct StatusReport {
     #[serde(skip_serializing_if = "is_false")]
     pub approval_waived_by_audit_debt: bool,
     pub next_action: String,
-    /// Whether this change is in scope for the independent-review rule, and
-    /// which declaration put it there.
     /// Facts sessions kept while working, oldest first. Carried on the report
     /// so `resume` and `status --json` hand them back without a second read.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub kept: Vec<crate::state::KeptContext>,
+    /// Whether this change is in scope for the independent-review rule, and
+    /// which declaration put it there.
     pub danger: DangerScope,
     pub ready_reason: String,
     pub ready_to_integrate: bool,

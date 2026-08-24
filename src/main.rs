@@ -674,7 +674,6 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// Add a discussion comment
     /// Keep a fact this work discovered, so `arc resume` hands it back to a
     /// compacted or cold session instead of it being re-derived
     Keep {
@@ -691,6 +690,7 @@ enum Cmd {
         #[arg(long)]
         evidence: Option<String>,
     },
+    /// Add a discussion comment
     Comment {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
