@@ -102,6 +102,35 @@ impl ActorSource {
     }
 }
 
+/// What kind of fact was kept. The distinction is the point: these decay
+/// differently and are worth different amounts on resume. A rejected approach
+/// is the highest-value one and the least likely to be re-derived, because a
+/// cold session will cheerfully try it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KeptKind {
+    /// A premise checked rather than assumed.
+    Verified,
+    /// An approach tried and abandoned, and why.
+    Rejected,
+    /// Something the work discovered it must respect.
+    Constraint,
+    /// Believed but not established. Recorded as a guess, so a later reader
+    /// cannot mistake it for a finding.
+    Hypothesis,
+}
+
+impl KeptKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KeptKind::Verified => "verified",
+            KeptKind::Rejected => "rejected",
+            KeptKind::Constraint => "constraint",
+            KeptKind::Hypothesis => "hypothesis",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", rename_all = "kebab-case")]
 pub enum Payload {
@@ -215,6 +244,20 @@ pub enum Payload {
         note: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocker: Option<BlockerRef>,
+    },
+    /// A fact a session judged load-bearing while the work was happening.
+    ///
+    /// Compaction is lossy compression chosen by something that does not know
+    /// what will be needed; the session doing the work does. `arc resume`
+    /// hands these back, so a compacted or cold session does not re-derive
+    /// them — or, worse, re-try an approach already rejected.
+    ContextKept {
+        kind: KeptKind,
+        body: String,
+        /// What established it. Absent when the caller offered none, which is
+        /// itself worth seeing: a fact with no evidence reads as a claim.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        evidence: Option<String>,
     },
     CommentAdded {
         body: String,
@@ -618,6 +661,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::ForgeProjection { .. } => AppendPermission::OpenOnly,
         Payload::Message { .. }
         | Payload::ClaimReleased { .. }
+        | Payload::ContextKept { .. }
         | Payload::CommentAdded { .. }
         | Payload::ReplyAdded { .. }
         | Payload::HoldReleased { .. }

@@ -409,6 +409,24 @@ pub fn resume(
             None => "unknown",
         }
     );
+    // Before findings: a rejected approach is worth more to a cold session
+    // than an open defect, because nothing else will stop it being re-tried.
+    println!("\n## Kept Context\n");
+    if status.report.kept.is_empty() {
+        println!("- (none kept)");
+    } else {
+        for kept in &status.report.kept {
+            println!(
+                "- **{}** — {}{}",
+                kept.kind.as_str(),
+                kept.body,
+                kept.evidence
+                    .as_deref()
+                    .map(|evidence| format!(" _(evidence: {evidence})_"))
+                    .unwrap_or_default()
+            );
+        }
+    }
     println!("\n## Open Findings\n");
     let findings = status
         .report

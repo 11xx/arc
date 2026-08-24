@@ -972,6 +972,9 @@ fn undischargeable_reason(probe: &crate::status::ProbeStatus) -> &'static str {
 fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
     match payload {
         Payload::ChangeOpened { slug, title, .. } => ("change-opened", format!("{slug}: {title}")),
+        Payload::ContextKept { kind, body, .. } => {
+            ("context-kept", format!("[{}] {body}", kind.as_str()))
+        }
         Payload::MetadataUpdated {
             add_blocked_by,
             remove_blocked_by,

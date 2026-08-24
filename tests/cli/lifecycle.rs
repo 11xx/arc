@@ -2458,3 +2458,79 @@ fn the_blocking_flag_names_which_dispositions_release_the_gate() {
     }
     assert!(!help.contains("until it is disposed of"), "{help}");
 }
+
+/// Compaction cannot rank what it has not been told matters. A session that
+/// knows a premise was checked, or an approach abandoned, can say so while it
+/// still knows — and `resume` is where a cold successor reads it back.
+#[test]
+fn kept_context_survives_into_a_cold_resume() {
+    let repo = Repo::new();
+    begin_change(&repo, "keeper", None);
+    repo.arc(&repo.root)
+        .args([
+            "keep",
+            "keeper",
+            "--kind",
+            "rejected",
+            "--body",
+            "Splicing both sides of a conflict cuts through function bodies.",
+            "--evidence",
+            "cargo fmt reported an unclosed delimiter",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "keep",
+            "keeper",
+            "--kind",
+            "hypothesis",
+            "--body",
+            "The meter may weight cached input near zero.",
+        ])
+        .assert()
+        .success();
+
+    let resume = repo
+        .arc(&repo.root)
+        .args(["resume", "keeper"])
+        .assert()
+        .success();
+    let text = String::from_utf8_lossy(&resume.get_output().stdout).to_string();
+    assert!(text.contains("## Kept Context"), "{text}");
+    assert!(
+        text.contains("**rejected**") && text.contains("function bodies"),
+        "a rejected approach is the fact a cold session most needs: {text}"
+    );
+    assert!(
+        text.contains("evidence: cargo fmt reported an unclosed delimiter"),
+        "{text}"
+    );
+    // A guess must not read back as a finding.
+    assert!(text.contains("**hypothesis**"), "{text}");
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "keeper", "--json"]));
+    assert_eq!(status["kept"].as_array().unwrap().len(), 2);
+    assert_eq!(status["kept"][0]["kind"], "rejected");
+    assert_eq!(status["kept"][1]["kind"], "hypothesis");
+    assert!(
+        status["kept"][1]["evidence"].is_null(),
+        "no evidence offered"
+    );
+}
+
+/// A change with nothing kept says so, rather than omitting the section and
+/// leaving a reader unsure whether it was empty or unsupported.
+#[test]
+fn resume_names_the_absence_of_kept_context() {
+    let repo = Repo::new();
+    begin_change(&repo, "bare", None);
+    let resume = repo
+        .arc(&repo.root)
+        .args(["resume", "bare"])
+        .assert()
+        .success();
+    let text = String::from_utf8_lossy(&resume.get_output().stdout).to_string();
+    assert!(text.contains("## Kept Context"), "{text}");
+    assert!(text.contains("(none kept)"), "{text}");
+}

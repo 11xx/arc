@@ -64,7 +64,7 @@ pub(crate) use lifecycle::{print_projected, status_output};
 pub use messaging::{catchup, inbox, message, messages};
 pub use observe::{events, watch, EventsArgs, WatchArgs, WatchQuorum};
 pub use rescue::rescue;
-pub use review::{comment, finding, read_review, reply, resolve, review, ReviewArgs};
+pub use review::{comment, finding, keep, read_review, reply, resolve, review, ReviewArgs};
 use serde::Serialize;
 pub use stats::{stats, StatsSelection};
 use std::collections::{BTreeMap, BTreeSet};
@@ -677,6 +677,7 @@ mod tests {
     fn change(id: &str, blocked_by: &[&str], closure: Option<Closure>) -> ChangeState {
         ChangeState {
             dangerous: false,
+            kept: Vec::new(),
             change_id: id.into(),
             slug: id.trim_end_matches("-id").into(),
             title: id.into(),
