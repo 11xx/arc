@@ -124,7 +124,7 @@ RUN A CHANGE
   arc close                          Terminal outcome arc did not merge itself.
 
 KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)
-  arc keep --kind rejected   --body "<why it failed>" --evidence <what showed it>
+  arc keep --kind rejected   --body "<why it failed>" --evidence "<what showed it>"
   arc keep --kind verified   --body "<the premise checked>"
   arc keep --kind constraint --body "<what must be respected>"
   arc keep --kind hypothesis --body "<believed, not established>"

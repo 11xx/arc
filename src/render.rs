@@ -968,13 +968,25 @@ fn undischargeable_reason(probe: &crate::status::ProbeStatus) -> &'static str {
     }
 }
 
+/// Flatten stored free text into one line, for surfaces whose structure a
+/// stray newline would break: a log row, a Markdown bullet, a section list.
+/// The ledger keeps the body verbatim; only the rendering is flattened.
+pub(crate) fn one_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Stable kebab event type plus a type-specific one-line summary.
 fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
     match payload {
         Payload::ChangeOpened { slug, title, .. } => ("change-opened", format!("{slug}: {title}")),
-        Payload::ContextKept { kind, body, .. } => {
-            ("context-kept", format!("[{}] {body}", kind.as_str()))
-        }
+        Payload::ContextKept { kind, body, .. } => (
+            "context-kept",
+            format!("[{}] {}", kind.as_str(), one_line(body)),
+        ),
         Payload::MetadataUpdated {
             add_blocked_by,
             remove_blocked_by,

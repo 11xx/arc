@@ -2534,3 +2534,44 @@ fn resume_names_the_absence_of_kept_context() {
     assert!(text.contains("## Kept Context"), "{text}");
     assert!(text.contains("(none kept)"), "{text}");
 }
+
+/// A stored newline must not break resume's bullet list or inject a heading
+/// into the section that follows: the ledger keeps the body verbatim and the
+/// rendering flattens it.
+#[test]
+fn kept_context_with_newlines_renders_as_one_bullet() {
+    let repo = Repo::new();
+    begin_change(&repo, "flat", None);
+    repo.arc(&repo.root)
+        .args([
+            "keep",
+            "flat",
+            "--kind",
+            "constraint",
+            "--body",
+            "first line\nsecond line\n## Not A Heading",
+        ])
+        .assert()
+        .success();
+    let resume = repo
+        .arc(&repo.root)
+        .args(["resume", "flat"])
+        .assert()
+        .success();
+    let text = String::from_utf8_lossy(&resume.get_output().stdout).to_string();
+    assert!(
+        text.contains("first line second line ## Not A Heading"),
+        "{text}"
+    );
+    assert!(!text.contains("\n## Not A Heading"), "{text}");
+}
+
+/// A change that never kept anything keeps its serialized shape: `show --json`
+/// carries no `kept` member, matching the status report's skip.
+#[test]
+fn unused_kept_context_is_absent_from_show_json() {
+    let repo = Repo::new();
+    begin_change(&repo, "bare-json", None);
+    let show = json_stdout(repo.arc(&repo.root).args(["show", "bare-json", "--json"]));
+    assert!(show.get("kept").is_none(), "{show}");
+}

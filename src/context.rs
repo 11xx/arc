@@ -416,13 +416,15 @@ pub fn resume(
         println!("- (none kept)");
     } else {
         for kept in &status.report.kept {
+            // Flattened: a stored newline must not break the bullet list or
+            // inject a heading into the section that follows.
             println!(
                 "- **{}** — {}{}",
                 kept.kind.as_str(),
-                kept.body,
+                crate::render::one_line(&kept.body),
                 kept.evidence
                     .as_deref()
-                    .map(|evidence| format!(" _(evidence: {evidence})_"))
+                    .map(|evidence| format!(" _(evidence: {})_", crate::render::one_line(evidence)))
                     .unwrap_or_default()
             );
         }

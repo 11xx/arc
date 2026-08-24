@@ -575,8 +575,10 @@ pub struct ChangeState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_debt: Option<AuditDebt>,
     /// Facts a session kept while the work was happening, oldest first, so
-    /// `resume` can hand them back to a compacted or cold successor.
-    #[serde(default)]
+    /// `resume` can hand them back to a compacted or cold successor. Skipped
+    /// when empty so outputs that serialize the state whole keep their shape
+    /// for changes that never kept anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kept: Vec<KeptContext>,
     /// Raised at `begin` to demand an independent verdict regardless of what
     /// the change touches. One-way: a change may raise itself, never lower
