@@ -801,7 +801,9 @@ standing in the project is how every other view starts. `--since <stamp>` turns
 the report into a delta, where the journal counts mean arrivals rather than
 outstanding work; blocked work is still reported in full. arc stores no
 previous-run marker — the boundary is supplied by the caller, so the command
-stays derived. JSON is versioned `arc-workspace-backlog/1`.
+stays derived. `--items` names every actionable artifact under each project in
+the same open, later, and feature-request tier order used by `journal open`.
+JSON is versioned `arc-workspace-backlog/2`.
 
 `arc brief <change> --scaffold <name>` prepends a template to the brief being
 recorded (`--scaffold` alone records the template). A repo-local

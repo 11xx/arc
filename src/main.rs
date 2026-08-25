@@ -1137,6 +1137,9 @@ enum WorkspaceCmd {
         /// matters more the longer it has been one
         #[arg(long)]
         since: Option<String>,
+        /// Name every actionable artifact, instead of counting them
+        #[arg(long)]
+        items: bool,
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
@@ -2308,8 +2311,8 @@ fn run(cli: Cli) -> Result<i32> {
             let (view, json) = match cmd {
                 WorkspaceCmd::List { json } => (commands::WorkspaceView::List, json),
                 WorkspaceCmd::Inbox { json } => (commands::WorkspaceView::Inbox, json),
-                WorkspaceCmd::Backlog { since, json } => {
-                    (commands::WorkspaceView::Backlog { since }, json)
+                WorkspaceCmd::Backlog { since, items, json } => {
+                    (commands::WorkspaceView::Backlog { since, items }, json)
                 }
             };
             commands::workspace(&ctx, view, json)?;
