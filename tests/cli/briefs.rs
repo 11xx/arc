@@ -618,6 +618,59 @@ fn brief_base_is_resolved_at_write_time_and_does_not_follow_head() {
 }
 
 #[test]
+fn brief_base_drift() {
+    let repo = Repo::new();
+    let base_revision = repo.head(&repo.root);
+    let change_id = opened_change_id(&stdout(
+        repo.arc(&repo.root).args(["begin", "brief-base-drift"]),
+    ));
+    let worktree = repo.home.join(".worktrees").join("repo-brief-base-drift");
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            &change_id,
+            "--body-file",
+            "-",
+            "--base",
+            &base_revision,
+        ])
+        .write_stdin("brief citations\n")
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args(["brief", &change_id])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("line citations").not());
+
+    repo.commit(
+        &worktree,
+        "brief-base-drift-one.txt",
+        "one\n",
+        "test: advance brief base drift once",
+    );
+    repo.commit(
+        &worktree,
+        "brief-base-drift-two.txt",
+        "two\n",
+        "test: advance brief base drift twice",
+    );
+
+    let annotation = "**2 commits behind the change head**; line citations may have decayed";
+    repo.arc(&repo.root)
+        .args(["brief", &change_id])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(annotation));
+    repo.arc(&repo.root)
+        .args(["resume", &change_id])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(annotation));
+}
+
+#[test]
 fn brief_closed_change_refuses_new_versions() {
     let repo = Repo::new();
     let base_revision = repo.head(&repo.root);

@@ -1,7 +1,7 @@
 use super::*;
 use crate::session_store::{self, Turn};
 use crate::state::{Brief, ClaimIdentity};
-use crate::status::{FindingSummary, GateStatus};
+use crate::status::{self, BriefBaseDrift, FindingSummary, GateStatus};
 use std::path::PathBuf;
 
 const RESCUE_SCHEMA: &str = "arc-rescue/1";
@@ -22,6 +22,8 @@ struct RescueOutput<'a> {
     abandoned: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     transcript: Option<RescueTranscript>,
+    #[serde(skip)]
+    base_drift: Option<BriefBaseDrift>,
 }
 
 #[derive(Serialize)]
@@ -157,6 +159,13 @@ pub fn rescue(
             })
         })
         .transpose()?;
+    let base_drift = state.latest_brief().and_then(|brief| {
+        status::brief_base_drift(
+            &ctx.cwd,
+            brief.base_revision.as_deref(),
+            report.current_head.as_deref(),
+        )
+    });
     let output = RescueOutput {
         schema: RESCUE_SCHEMA,
         change_id: &state.change_id,
@@ -171,6 +180,7 @@ pub fn rescue(
         claim,
         abandoned,
         transcript,
+        base_drift,
     };
 
     if json {
@@ -186,7 +196,12 @@ fn render(output: &RescueOutput<'_>) {
     if let Some(brief) = output.brief {
         println!("\n## Brief\n");
         if let Some(base_revision) = &brief.base_revision {
-            println!("- Base revision: `{base_revision}`\n");
+            let drift = output
+                .base_drift
+                .as_ref()
+                .and_then(BriefBaseDrift::annotation)
+                .unwrap_or_default();
+            println!("- Base revision: `{base_revision}`{drift}\n");
         }
         if !brief.acceptance_probes.is_empty() {
             println!("- Acceptance probes:");

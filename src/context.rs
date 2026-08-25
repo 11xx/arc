@@ -10,6 +10,7 @@ use crate::gitio;
 use crate::journal;
 use crate::session_store;
 use crate::state::{self, ChangeState};
+use crate::status::BriefBaseDrift;
 use crate::store::Store;
 use anyhow::{bail, Result};
 use serde::Serialize;
@@ -359,7 +360,14 @@ pub fn resume(
     if let Some(brief) = state.latest_brief() {
         println!("\n## Brief (v{})\n", state.briefs.len());
         if let Some(base_revision) = &brief.base_revision {
-            println!("- Base revision: `{base_revision}`\n");
+            let drift = status
+                .report
+                .brief
+                .as_ref()
+                .and_then(|brief| brief.base_drift.as_ref())
+                .and_then(BriefBaseDrift::annotation)
+                .unwrap_or_default();
+            println!("- Base revision: `{base_revision}`{drift}\n");
         }
         if !brief.acceptance_probes.is_empty() {
             println!("- Acceptance probes:");

@@ -1,7 +1,7 @@
 use crate::commands::ArcAlternative;
 use crate::model::{Event, Payload};
 use crate::state::ChangeState;
-use crate::status::{Blocker, GateStatus, StatusReport};
+use crate::status::{Blocker, BriefBaseDrift, GateStatus, StatusReport};
 use std::fmt::Write;
 
 /// Why a passing *gate* verification cannot be reused as evidence at its
@@ -321,7 +321,13 @@ pub fn markdown(
             let _ = writeln!(w, "### {title}\n");
         }
         if let Some(base_revision) = &brief.base_revision {
-            let _ = writeln!(w, "- Base revision: `{base_revision}`");
+            let drift = report
+                .brief
+                .as_ref()
+                .and_then(|brief| brief.base_drift.as_ref())
+                .and_then(BriefBaseDrift::annotation)
+                .unwrap_or_default();
+            let _ = writeln!(w, "- Base revision: `{base_revision}`{drift}");
         }
         if let (Some(plan_ref), Some(plan_slice)) = (&brief.plan_ref, &brief.plan_slice) {
             let _ = writeln!(w, "- Plan: `{plan_ref}`");
