@@ -955,7 +955,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
         .code(12);
 
     let status = json_stdout(repo.arc(&worktree).args(["status", "probe-readiness"]));
-    assert_eq!(status["schema"], "arc-status/9");
+    assert_eq!(status["schema"], "arc-status/10");
     assert_eq!(status["probes"][0]["name"], "marker-exists");
     assert_eq!(status["probes"][0]["brief_version"], 2);
     assert_eq!(status["probes"][0]["discriminating_at_head"], false);
@@ -1455,6 +1455,118 @@ fn evidence_from_a_dirty_worktree_is_recorded_and_not_green() {
         .success();
     let status = json_stdout(repo.arc(&wt).args(["status", "dirty", "--json"]));
     assert_eq!(status["gates"][0]["worktree_dirty"], true, "{status}");
+}
+
+/// Dirt stays fatal by default, so the exception is declared rather than
+/// assumed. The waiver binds the way the evidence it excuses binds — to one
+/// revision — so the next commit ends it instead of leaving a standing
+/// exemption with no principal and no expiry.
+#[test]
+fn a_dirty_tree_waiver_lets_evidence_count_and_dies_at_the_next_commit() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gate"]);
+    stdout(repo.arc(&repo.root).args(["begin", "waived"]));
+    let wt = repo.home.join(".worktrees/repo-waived");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+
+    // An untracked file nobody added: dirty, recorded, and not green.
+    fs::write(wt.join("scratch.rs"), "not committed\n").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "waived", "--gate", "unit"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&wt).args(["status", "waived", "--json"]));
+    assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
+
+    // A waiver must say why: excusing the gate with no stated reason records
+    // the exemption and loses the only thing a reviewer could disagree with.
+    repo.arc(&wt)
+        .args(["verify", "waived", "--gate", "unit", "--waive-dirty", "   "])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("must say why"));
+
+    // Declared: the same dirty evidence now counts, and the waiver is visible
+    // to whoever reviews the change.
+    repo.arc(&wt)
+        .args([
+            "verify",
+            "waived",
+            "--gate",
+            "unit",
+            "--waive-dirty",
+            "untracked fixture the build does not read",
+        ])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&wt).args(["status", "waived", "--json"]));
+    assert_eq!(status["gates"][0]["worktree_dirty"], true, "{status}");
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
+    assert_eq!(
+        status["dirty_tree_waiver"]["reason"], "untracked fixture the build does not read",
+        "{status}"
+    );
+
+    // The next commit ends it. Evidence recorded dirty at the new head is not
+    // excused by a waiver declared against the old one.
+    repo.commit(&wt, "more.rs", "more\n", "feat: more");
+    fs::write(wt.join("scratch2.rs"), "still not committed\n").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "waived", "--gate", "unit"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&wt).args(["status", "waived", "--json"]));
+    assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
+    assert!(status["dirty_tree_waiver"].is_null(), "{status}");
+}
+
+/// One bool could not say which kind of dirt wedged the gate, so the premise
+/// that this fires overwhelmingly on untracked-only dirt was unmeasurable and
+/// a waiver reason had to be written from memory.
+#[test]
+fn recorded_evidence_separates_tracked_dirt_from_untracked() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gate"]);
+    stdout(repo.arc(&repo.root).args(["begin", "split"]));
+    let wt = repo.home.join(".worktrees/repo-split");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+
+    // Untracked only.
+    fs::write(wt.join("scratch.rs"), "not committed\n").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "split", "--gate", "unit"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&wt).args(["status", "split", "--json"]));
+    let gate = &status["gates"][0];
+    assert_eq!(gate["worktree_dirty"], true, "{status}");
+    assert_eq!(gate["worktree_dirty_tracked"], false, "{status}");
+    assert_eq!(gate["worktree_dirty_untracked"], true, "{status}");
+
+    // Tracked as well.
+    fs::write(wt.join("work.rs"), "edited\n").unwrap();
+    repo.arc(&wt)
+        .args(["verify", "split", "--gate", "unit"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&wt).args(["status", "split", "--json"]));
+    let gate = &status["gates"][0];
+    assert_eq!(gate["worktree_dirty_tracked"], true, "{status}");
+    assert_eq!(gate["worktree_dirty_untracked"], true, "{status}");
 }
 
 /// A gate whose evidence cannot be reused reads `pass` in every raw result
