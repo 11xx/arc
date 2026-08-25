@@ -43,4 +43,65 @@ paths = [
   "src/render.rs",
   "src/config.rs",
   ".arc/policy.toml",
+  # Bundle import writes foreign events into the append-only store.
+  "src/commands/bundle_io.rs",
+  # Change and event identity: a collision merges two histories silently.
+  "src/ids.rs",
+  # The health report itself, including the classification check below. A
+  # doctor that stops checking reopens the closed world and says nothing.
+  "src/commands/doctor.rs",
+]
+
+# Roots inside which classification is closed: every tracked file under one of
+# these must appear in `paths` or in `acknowledged_safe`, and `arc doctor`
+# fails on one that appears in neither or in both.
+#
+# An open-world list fails in the permissive direction. A file nobody
+# classified matches no pattern, looks healthy, and lands on a self-verdict —
+# which is how both observed misses happened. Closing the world makes adding
+# or renaming a file fail loud instead.
+source_roots = ["src/"]
+
+# Files deliberately classified as not dangerous. Each entry is a claim
+# somebody made and a reviewer accepted, reviewed once when the boundary is
+# drawn rather than taxed on every later edit.
+#
+# No manual classification detects a file here acquiring dangerous
+# responsibility without being reclassified. That limit is real and is not
+# approximated with a different spelling of the same manual assertion.
+acknowledged_safe = [
+  # Read-only projections and rendering. They report state; they never decide
+  # it, and a defect shows up as a wrong screen rather than a wrong merge.
+  "src/commands/diff.rs",
+  "src/commands/findings.rs",
+  "src/commands/history.rs",
+  "src/commands/observe.rs",
+  "src/commands/stats.rs",
+  "src/commands/timeline.rs",
+  "src/commands/workspace.rs",
+  "src/context.rs",
+  "src/guide.rs",
+  # The journal and the liveness signals over it are advisory by construction:
+  # claims, lanes, and messages never gate, and the ledger stays authoritative.
+  "src/journal.rs",
+  "src/commands/claims.rs",
+  "src/commands/messaging.rs",
+  "src/commands/scaffold.rs",
+  "src/commands/scaffolds/*.md",
+  # Records carrying no gate authority. A forge fact mirrors what a forge said
+  # and authorizes nothing on its own.
+  "src/commands/changelog.rs",
+  "src/forge.rs",
+  "src/commands/forge_cmd.rs",
+  # Discovery and CLI wiring: which repository, which command, which flags.
+  "src/main.rs",
+  "src/commands/mod.rs",
+  "src/project.rs",
+  "src/registry.rs",
+  # Sandbox writability probes, despite the name: it reads no policy.
+  "src/commands/config_cmd.rs",
+  # Recovery and opt-in tooling. Installed only by explicit action, and every
+  # arc hook exits 0 unconditionally so it can never block a commit.
+  "src/commands/rescue.rs",
+  "src/commands/hooks.rs",
 ]

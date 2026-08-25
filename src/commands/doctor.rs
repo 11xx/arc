@@ -59,6 +59,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     inspect_dangling_revisions(&ctx.cwd, &Store::discover(&ctx.cwd)?, &states, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
     inspect_danger_paths(&ctx.cwd, &mut problems);
+    inspect_danger_classification(&ctx.cwd, &mut problems);
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
     inspect_audit_debt(&states, &mut advice);
     inspect_hold_releases(&Store::discover(&ctx.cwd)?, &states, &mut advice);
@@ -445,6 +446,57 @@ fn inspect_danger_paths(cwd: &Path, problems: &mut Vec<Finding>) {
                 detail: format!(
                     "{pattern} is a directory, and declared paths are matched \
                      against changed files; write {pattern}/ to cover its subtree"
+                ),
+            });
+        }
+    }
+}
+
+/// Every tracked file inside a declared source root must carry exactly one
+/// classification.
+///
+/// An open-world list fails permissively: a file nobody classified matches no
+/// pattern, looks healthy, and lands on a self-verdict. Closing the world over
+/// declared roots turns adding or renaming a file into a loud failure, which is
+/// the direction both observed misses failed in.
+fn inspect_danger_classification(cwd: &Path, problems: &mut Vec<Finding>) {
+    let Ok(toplevel) = crate::gitio::toplevel(cwd) else {
+        return;
+    };
+    let Ok(policy) = crate::policy::load(&toplevel) else {
+        return;
+    };
+    if policy.danger.source_roots.is_empty() {
+        return;
+    }
+    let Ok(tracked) = crate::gitio::git(cwd, &["ls-files"]) else {
+        return;
+    };
+    for path in tracked
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        if !policy.danger.within_source_root(path) {
+            continue;
+        }
+        let dangerous = policy.danger.is_dangerous(path);
+        let safe = policy.danger.acknowledged_safe(path);
+        if dangerous && safe {
+            problems.push(Finding {
+                code: "danger-classification-conflict",
+                detail: format!(
+                    "{path} is declared both dangerous and acknowledged-safe; \
+                     one of the two claims is wrong"
+                ),
+            });
+        } else if !dangerous && !safe {
+            problems.push(Finding {
+                code: "danger-unclassified",
+                detail: format!(
+                    "{path} is inside a declared source root and classified \
+                     neither dangerous nor acknowledged-safe, so it is gated \
+                     by a self-verdict nobody chose"
                 ),
             });
         }

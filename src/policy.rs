@@ -33,9 +33,42 @@ pub struct Danger {
     /// Path globs. `*` matches within a path segment, `**` across segments.
     #[serde(default)]
     pub paths: Vec<String>,
+    /// Files deliberately classified as not dangerous. An entry is a claim
+    /// somebody made and a reviewer accepted, not an absence of one.
+    #[serde(default)]
+    pub acknowledged_safe: Vec<String>,
+    /// Directory prefixes inside which classification is closed: every tracked
+    /// file must match `paths` or `acknowledged_safe`, and `arc doctor` fails
+    /// on one that matches neither.
+    ///
+    /// Without a declared root the list is open-world, which fails in the
+    /// permissive direction: a file nobody classified matches nothing, looks
+    /// safe, and lands on a self-verdict. Declaring the root turns adding or
+    /// renaming a file from a silent escalation into a loud one.
+    #[serde(default)]
+    pub source_roots: Vec<String>,
 }
 
 impl Danger {
+    /// Whether a path is inside a declared closed-world root.
+    pub fn within_source_root(&self, path: &str) -> bool {
+        self.source_roots
+            .iter()
+            .any(|root| path.starts_with(root.as_str()))
+    }
+
+    /// Whether a path carries an explicit not-dangerous classification.
+    pub fn acknowledged_safe(&self, path: &str) -> bool {
+        self.acknowledged_safe
+            .iter()
+            .any(|pattern| glob_match(pattern, path))
+    }
+
+    /// Whether a path is declared dangerous.
+    pub fn is_dangerous(&self, path: &str) -> bool {
+        self.paths.iter().any(|pattern| glob_match(pattern, path))
+    }
+
     /// Declared patterns every one of `changed` is checked against, returning
     /// the paths that matched. Empty means the change touched nothing the
     /// project called dangerous.
@@ -168,6 +201,7 @@ mod tests {
     fn matching_reports_only_declared_hits_once_and_sorted() {
         let danger = Danger {
             paths: vec!["src/state.rs".into(), "src/commands/".into()],
+            ..Danger::default()
         };
         let hits = danger.matching(vec![
             "README.md",
