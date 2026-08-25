@@ -50,6 +50,13 @@ paths = [
   # The health report itself, including the classification check below. A
   # doctor that stops checking reopens the closed world and says nothing.
   "src/commands/doctor.rs",
+  # Enforces which payloads may be appended in which lifecycle phase, and
+  # constructs the events themselves. A defect here lets a write policy
+  # forbids into an append-only history.
+  "src/commands/mod.rs",
+  # Records the rewrite facts that decide whether a recorded revision was
+  # moved or lost. A wrong mapping makes stranded evidence read as recovered.
+  "src/commands/history.rs",
 ]
 
 # Roots inside which classification is closed: every tracked file under one of
@@ -74,7 +81,6 @@ acknowledged_safe = [
   # it, and a defect shows up as a wrong screen rather than a wrong merge.
   "src/commands/diff.rs",
   "src/commands/findings.rs",
-  "src/commands/history.rs",
   "src/commands/observe.rs",
   "src/commands/stats.rs",
   "src/commands/timeline.rs",
@@ -95,7 +101,6 @@ acknowledged_safe = [
   "src/commands/forge_cmd.rs",
   # Discovery and CLI wiring: which repository, which command, which flags.
   "src/main.rs",
-  "src/commands/mod.rs",
   "src/project.rs",
   "src/registry.rs",
   # Sandbox writability probes, despite the name: it reads no policy.

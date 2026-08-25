@@ -469,7 +469,11 @@ fn inspect_danger_classification(cwd: &Path, problems: &mut Vec<Finding>) {
     if policy.danger.source_roots.is_empty() {
         return;
     }
-    let Ok(tracked) = crate::gitio::git(cwd, &["ls-files"]) else {
+    // From the toplevel, because `git ls-files` lists the subtree it is run
+    // from and names paths relative to it. Run from a subdirectory it returns
+    // a subset under names no declared root matches, so the whole closed world
+    // silently stops being checked and `doctor` reports nothing wrong.
+    let Ok(tracked) = crate::gitio::git(&toplevel, &["ls-files"]) else {
         return;
     };
     for path in tracked
