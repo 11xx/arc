@@ -1569,6 +1569,50 @@ fn a_provisional_approval_gates_while_recording_what_it_still_owes() {
     assert!(owed.contains(&change_id), "{owed}");
 }
 
+/// `arc review` is where a lead reads what the review state actually is, and a
+/// provisional approval that gates while owing corroboration must be
+/// distinguishable there from an unqualified one. Reported once when the
+/// verdict is recorded and never again, the qualification reaches only the
+/// person who already knew it.
+#[test]
+fn review_history_names_a_provisional_approval_and_its_outstanding_corroboration() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "provisional");
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "unproven-reviewer")
+        .args([
+            "review",
+            "provisional",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "reviewer is an unmeasured model",
+        ])
+        .assert()
+        .success();
+
+    let history = stdout(repo.arc(&worktree).args(["review", "provisional"]));
+    assert!(
+        history.contains("provisional, corroboration outstanding"),
+        "{history}"
+    );
+    assert!(
+        history.contains("reviewer is an unmeasured model"),
+        "{history}"
+    );
+
+    let view = json_stdout(
+        repo.arc(&worktree)
+            .args(["review", "provisional", "--json"]),
+    );
+    assert_eq!(
+        view["verdicts"][0]["provisional"],
+        "reviewer is an unmeasured model"
+    );
+    assert_eq!(view["verdicts"][0]["provisional_outstanding"], true);
+}
+
 /// The obligation is legible from the record of the merge itself. An auditor
 /// reading an authorization basis that names a verdict event must be able to
 /// tell a validated reviewer from an unvalidated one without following the

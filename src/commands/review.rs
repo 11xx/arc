@@ -17,6 +17,10 @@ struct ReviewView<'a> {
     next_action: &'a str,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Serialize)]
 struct ReviewVerdict<'a> {
     verdict: Verdict,
@@ -27,6 +31,18 @@ struct ReviewVerdict<'a> {
     on_behalf_of: Option<&'a str>,
     created_at: chrono::DateTime<chrono::Utc>,
     valid_for_current_head: bool,
+    /// Why this approval was recorded as owed corroboration, when it was.
+    /// An approval that gates while owing a second judgment is not the same
+    /// object as an unqualified one, and a reader deciding whether the change
+    /// is reviewed cannot tell them apart from the rest of this entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provisional: Option<&'a str>,
+    /// Whether this is the provisional approval whose corroboration is still
+    /// outstanding. Read from the one derivation of that fact rather than
+    /// recomputed, so this view cannot disagree with `arc query --provisional`
+    /// or the `check` advisory about the same obligation.
+    #[serde(skip_serializing_if = "is_false")]
+    provisional_outstanding: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,6 +104,17 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
                 "STALE for current head"
             }
         );
+        if let Some(reason) = verdict.provisional {
+            println!(
+                "  - provisional{}: {}",
+                if verdict.provisional_outstanding {
+                    ", corroboration outstanding"
+                } else {
+                    ""
+                },
+                crate::render::one_line(reason)
+            );
+        }
         if let Some(body) = verdict.body {
             println!("  {body}");
         }
@@ -152,6 +179,10 @@ fn review_verdict<'a>(
         on_behalf_of: verdict.on_behalf_of.as_deref(),
         created_at: verdict.created_at,
         valid_for_current_head,
+        provisional: verdict.provisional.as_deref(),
+        provisional_outstanding: state
+            .outstanding_provisional_approval()
+            .is_some_and(|outstanding| outstanding.event_id == verdict.event_id),
         body: verdict.body.as_deref(),
         brief_ref: patchset.and_then(|patchset| patchset.brief_ref.as_ref()),
         brief_version: patchset.and_then(|patchset| patchset.brief_version),
