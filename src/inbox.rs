@@ -3,7 +3,7 @@ use crate::state::{ChangeState, ClaimIdentity};
 use crate::status::{ClaimStatus, StatusReport};
 use serde::Serialize;
 
-pub const INBOX_SCHEMA: &str = "arc-inbox/4";
+pub const INBOX_SCHEMA: &str = "arc-inbox/5";
 
 /// The journal's actionable backlog, carried beside the ledger buckets.
 ///
@@ -59,7 +59,7 @@ pub struct InboxRow {
     pub reason: Option<String>,
 }
 
-/// The `arc-inbox/4` rollup: a lead-facing queue derived entirely from
+/// The `arc-inbox/5` rollup: a lead-facing queue derived entirely from
 /// existing ledger + Git state. A change may appear in more than one bucket
 /// when it is genuinely in more than one actionable state (e.g. blocked and
 /// awaiting review); each bucket is computed independently.
@@ -71,6 +71,7 @@ pub struct Inbox {
     pub assigned_to: Option<String>,
     #[serde(rename = "needs-review")]
     pub needs_review: Vec<InboxRow>,
+    pub iterating: Vec<InboxRow>,
     #[serde(rename = "changes-requested")]
     pub changes_requested: Vec<InboxRow>,
     #[serde(rename = "ready-to-integrate")]
@@ -108,6 +109,7 @@ impl Inbox {
             assigned_to,
             journal: None,
             needs_review: Vec::new(),
+            iterating: Vec::new(),
             changes_requested: Vec::new(),
             ready_to_integrate: Vec::new(),
             blocked: Vec::new(),
@@ -120,9 +122,10 @@ impl Inbox {
     }
 
     /// Bucket names paired with their rows, in rendering order.
-    pub fn sections(&self) -> [(&'static str, &Vec<InboxRow>); 9] {
+    pub fn sections(&self) -> [(&'static str, &Vec<InboxRow>); 10] {
         [
             ("needs-review", &self.needs_review),
+            ("iterating", &self.iterating),
             ("changes-requested", &self.changes_requested),
             ("ready-to-integrate", &self.ready_to_integrate),
             ("blocked", &self.blocked),
@@ -189,22 +192,27 @@ impl Inbox {
             }
             classified = true;
         }
-        if needs_review(state) {
-            let actor = if state.latest_patchset().is_none() {
-                "implementer"
-            } else {
-                "reviewer"
-            };
-            self.needs_review.push(row(actor));
+        if state.iterating {
+            self.iterating.push(row("implementer"));
             classified = true;
-        }
-        if changes_requested(state) {
-            self.changes_requested.push(row("implementer"));
-            classified = true;
-        }
-        if report.ready_to_integrate {
-            self.ready_to_integrate.push(row("lead"));
-            classified = true;
+        } else {
+            if needs_review(state) {
+                let actor = if state.latest_patchset().is_none() {
+                    "implementer"
+                } else {
+                    "reviewer"
+                };
+                self.needs_review.push(row(actor));
+                classified = true;
+            }
+            if changes_requested(state) {
+                self.changes_requested.push(row("implementer"));
+                classified = true;
+            }
+            if report.ready_to_integrate {
+                self.ready_to_integrate.push(row("lead"));
+                classified = true;
+            }
         }
         if !classified {
             // Reaching here means every predicate above declined an open
@@ -219,6 +227,8 @@ impl Inbox {
     /// Order every queue bucket by descending scheduling priority.
     pub fn sort_by_priority(&mut self) {
         self.needs_review
+            .sort_by_key(|row| std::cmp::Reverse(row.priority));
+        self.iterating
             .sort_by_key(|row| std::cmp::Reverse(row.priority));
         self.changes_requested
             .sort_by_key(|row| std::cmp::Reverse(row.priority));

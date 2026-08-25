@@ -12,6 +12,89 @@ fn commit_composed_gates(repo: &Repo) {
 }
 
 #[test]
+fn iterating_change() {
+    let repo = Repo::new();
+    commit_composed_gates(&repo);
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "iterating-change",
+        "--iterating",
+    ])));
+    let wt = repo.home.join(".worktrees/repo-iterating-change");
+    repo.commit(&wt, "change.txt", "change\n", "feat: iterate");
+    stdout(repo.arc(&wt).args(["snapshot", "iterating-change"]));
+    repo.arc(&wt)
+        .args(["verify", "iterating-change", "--all"])
+        .assert()
+        .success();
+
+    let check = repo
+        .arc(&wt)
+        .args(["check", "iterating-change"])
+        .output()
+        .unwrap();
+    assert_eq!(check.status.code(), Some(13));
+    let check_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&check.stdout),
+        String::from_utf8_lossy(&check.stderr)
+    );
+    assert!(check_output.contains("iterating"), "{check_output}");
+    assert!(
+        !check_output.contains("missing or stale approval"),
+        "{check_output}"
+    );
+
+    let integrate = repo
+        .arc(&repo.root)
+        .args(["integrate", "iterating-change"])
+        .output()
+        .unwrap();
+    assert_eq!(integrate.status.code(), Some(13));
+    let integrate_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&integrate.stdout),
+        String::from_utf8_lossy(&integrate.stderr)
+    );
+    assert!(
+        integrate_output.contains(&format!("arc iterating {change_id} --off")),
+        "{integrate_output}"
+    );
+
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    assert!(
+        inbox["iterating"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["change_id"] == change_id),
+        "{inbox}"
+    );
+    for bucket in ["needs-review", "ready-to-integrate", "unclassified"] {
+        assert!(
+            !inbox[bucket]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["change_id"] == change_id),
+            "{bucket}: {inbox}"
+        );
+    }
+
+    repo.arc(&repo.root)
+        .args(["iterating", "iterating-change", "--off"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("iterating: false"))
+        .stdout(predicates::str::contains("event: "));
+    repo.arc(&wt)
+        .args(["check", "iterating-change"])
+        .assert()
+        .code(3)
+        .stdout(predicates::str::contains("missing or stale approval"));
+}
+
+#[test]
 fn verdict_body_round_trips_through_show_status_and_log() {
     let repo = Repo::new();
     let (_change_id, wt, _head) = change_with_patchset(&repo, "review-body");
@@ -615,7 +698,7 @@ fn conflicting_target_movement_requires_rebase_before_integration() {
         .code(11);
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "conflict-r"]))).unwrap();
-    assert_eq!(status["schema"], "arc-status/11");
+    assert_eq!(status["schema"], "arc-status/12");
     assert_eq!(status["needs_rebase"], true);
     assert!(status["blockers"]
         .as_array()
@@ -1676,7 +1759,7 @@ fn status_projection_and_stage_note_file_read_stdin() {
         .args(["status", "projected", "--get", "schema"])
         .assert()
         .success()
-        .stdout("arc-status/11\n");
+        .stdout("arc-status/12\n");
 
     repo.arc(&wt)
         .args([

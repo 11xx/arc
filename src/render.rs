@@ -112,6 +112,12 @@ pub fn markdown(
     let _ = writeln!(w);
     let _ = writeln!(w, "- State: {}", report.state);
     let _ = writeln!(w, "- Profile: {}", state.profile);
+    if state.iterating {
+        let _ = writeln!(
+            w,
+            "- Iterating: integration is not the goal until this is cleared"
+        );
+    }
     let _ = writeln!(
         w,
         "- Branch: `{}` → `{}`",
@@ -784,6 +790,13 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
             Blocker::BranchMissing => {
                 let _ = writeln!(out, "  - Branch `{}` is missing", state.branch);
             }
+            Blocker::Iterating => {
+                let _ = writeln!(
+                    out,
+                    "  - change declares it is iterating; clear it with `arc iterating {} --off`",
+                    state.change_id
+                );
+            }
             Blocker::BlockedByChanges => {
                 for dependency in report
                     .blocker_status
@@ -891,6 +904,7 @@ fn blocker_title(blocker: Blocker) -> &'static str {
     match blocker {
         Blocker::Closed => "change closed",
         Blocker::BranchMissing => "branch missing",
+        Blocker::Iterating => "change is iterating",
         Blocker::BlockedByChanges => "prerequisite changes unresolved",
         Blocker::NeedsRebase => "target branch conflicts with change",
         Blocker::BlockingFindings => "open blocking findings",
@@ -1208,6 +1222,9 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             "integration-asserted",
             format!("{} into {target_branch}", short_sha(integrated_commit)),
         ),
+        Payload::IterationScopeSet { iterating } => {
+            ("iteration-scope-set", format!("iterating: {iterating}"))
+        }
         Payload::HistoryRewritten {
             mapping, reason, ..
         } => (
@@ -1274,6 +1291,15 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
         Blocker::BranchMissing,
         "branch present",
         format!("branch `{}` is missing", state.branch),
+    );
+    condition(
+        &mut out,
+        Blocker::Iterating,
+        "integration scope is cleared",
+        format!(
+            "change declares it is iterating; clear it with `arc iterating {} --off`",
+            state.change_id
+        ),
     );
     condition(
         &mut out,

@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/11";
+pub const STATUS_SCHEMA: &str = "arc-status/12";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// Two identities arc assumed cannot establish that two people acted. The
@@ -25,6 +25,7 @@ pub const UNDECLARED_APPROVAL_REASON: &str =
 pub enum Blocker {
     Closed,
     BranchMissing,
+    Iterating,
     BlockedByChanges,
     NeedsRebase,
     BlockingFindings,
@@ -38,6 +39,7 @@ impl Blocker {
     pub fn exit_code(self) -> i32 {
         match self {
             Blocker::Closed | Blocker::BranchMissing => 6,
+            Blocker::Iterating => 13,
             Blocker::BlockedByChanges => 7,
             Blocker::NeedsRebase => 11,
             Blocker::BlockingFindings => 2,
@@ -52,6 +54,7 @@ impl Blocker {
         match self {
             Blocker::Closed => "closed",
             Blocker::BranchMissing => "branch-missing",
+            Blocker::Iterating => "iterating",
             Blocker::BlockedByChanges => "blocked-by-changes",
             Blocker::NeedsRebase => "needs-rebase",
             Blocker::BlockingFindings => "blocking-findings",
@@ -367,6 +370,7 @@ pub struct StatusReport {
     pub slug: String,
     pub title: String,
     pub profile: String,
+    pub iterating: bool,
     pub state: String,
     pub target_branch: String,
     pub branch: String,
@@ -1067,6 +1071,9 @@ fn build_report(
     if current_head.is_none() {
         blockers.push(Blocker::BranchMissing);
     }
+    if state.iterating {
+        blockers.push(Blocker::Iterating);
+    }
     if dependency_status.blocked {
         blockers.push(Blocker::BlockedByChanges);
     }
@@ -1097,7 +1104,7 @@ fn build_report(
         .map(|v| v.valid_for_current_head)
         .unwrap_or(false);
     let waiver_satisfies_approval = debt_waives_current_head && !verdict_refuses_this_head;
-    if !approval_valid && !waiver_satisfies_approval {
+    if !state.iterating && !approval_valid && !waiver_satisfies_approval {
         blockers.push(Blocker::NoValidApproval);
     }
     if gate_statuses.iter().any(|g| !g.green_at_head) {
@@ -1164,6 +1171,16 @@ fn build_report(
         .find(|probe| !probe.discriminating_at_head)
     {
         format!("run_probe:{}", probe.name)
+    } else if state.iterating {
+        // An iterating change owes declared audit debt rather than a verdict,
+        // so it never reaches `request_review`. It reaches this arm only once
+        // findings, holds, gates and probes are clear, because those are real
+        // work whether or not integration is the goal.
+        if state.audit_debt.is_none() && state.latest_patchset().is_some() {
+            "declare_audit_debt".into()
+        } else {
+            "iterating:clear".into()
+        }
     } else if let Some(reason) = approval_rejection_reason.as_ref() {
         reason.clone()
     } else if !verdict
@@ -1202,6 +1219,7 @@ fn build_report(
         slug: state.slug.clone(),
         title: state.title.clone(),
         profile: state.profile.clone(),
+        iterating: state.iterating,
         state: if state.is_closed() {
             "closed".into()
         } else {
@@ -1322,6 +1340,7 @@ pub fn check_exit_code(report: &StatusReport) -> i32 {
     for blocker in [
         Blocker::Closed,
         Blocker::BranchMissing,
+        Blocker::Iterating,
         Blocker::BlockedByChanges,
         Blocker::NeedsRebase,
         Blocker::BlockingFindings,
@@ -1604,6 +1623,7 @@ mod tests {
         let blockers = [
             Blocker::Closed,
             Blocker::BranchMissing,
+            Blocker::Iterating,
             Blocker::BlockedByChanges,
             Blocker::NeedsRebase,
             Blocker::BlockingFindings,

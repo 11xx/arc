@@ -522,6 +522,13 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         target_before: Option<String>,
     },
+    /// The author declares whether this change is being iterated on rather
+    /// than driven to a merge. An iterating change records progress with
+    /// snapshots and declared audit debt, and integrates only once the
+    /// declaration is cleared.
+    IterationScopeSet {
+        iterating: bool,
+    },
     /// Declared forge projection: the explicit repository tuple plus policy
     /// a later observed link is validated against. Latest declaration wins.
     ForgeProjection {
@@ -702,7 +709,8 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         Payload::ChangeOpened { .. }
         | Payload::ChangeClosed { .. }
         | Payload::ChangeIntegrated { .. }
-        | Payload::IntegrationAsserted { .. } => AppendPermission::LifecycleOwned,
+        | Payload::IntegrationAsserted { .. }
+        | Payload::IterationScopeSet { .. } => AppendPermission::LifecycleOwned,
         // Repository-scoped: it is never appended to a change's log, so no
         // change-phase policy applies to it.
         Payload::HistoryRewritten { .. } => AppendPermission::AnyPhaseFact,

@@ -57,7 +57,7 @@ pub use hooks::{
     uninstall as hooks_uninstall,
 };
 pub use lifecycle::{
-    begin, blocker_status_cmd, brief, is_blocked, list, metadata, query, read_metadata,
+    begin, blocker_status_cmd, brief, is_blocked, iterating, list, metadata, query, read_metadata,
     show_selection, status_cmd,
 };
 pub(crate) use lifecycle::{print_projected, status_output};
@@ -685,6 +685,7 @@ mod tests {
             slug: id.trim_end_matches("-id").into(),
             title: id.into(),
             profile: "local".into(),
+            iterating: false,
             target_branch: "master".into(),
             branch: format!("arc/{id}"),
             base: "base".into(),

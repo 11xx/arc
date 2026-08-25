@@ -580,6 +580,8 @@ pub struct ChangeState {
     pub slug: String,
     pub title: String,
     pub profile: String,
+    #[serde(default)]
+    pub iterating: bool,
     pub target_branch: String,
     pub branch: String,
     pub base: String,
@@ -770,6 +772,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 ChangeState {
                     dangerous: *dangerous,
                     dirty_tree_waiver: None,
+                    iterating: false,
                     change_id: ev.change_id.clone(),
                     slug: slug.clone(),
                     title: title.clone(),
@@ -821,6 +824,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
         match &ev.payload {
             Payload::ChangeOpened { .. } => {
                 bail!("duplicate change-opened event {}", ev.event_id)
+            }
+            Payload::IterationScopeSet { iterating } => {
+                state.iterating = *iterating;
             }
             Payload::MetadataUpdated {
                 add_blocked_by,
