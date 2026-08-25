@@ -3083,6 +3083,140 @@ fn decision_can_resolve_discussion_with_different_topic() {
 }
 
 #[test]
+fn consume_cites_another_projects_conclusion() {
+    let repo = Repo::new();
+    let project_b = repo.home.join("project-b");
+    fs::create_dir_all(&project_b).unwrap();
+    git(&project_b, &["init", "-b", "master"]);
+    git(&project_b, &["config", "user.name", "Tester"]);
+    git(
+        &project_b,
+        &["config", "user.email", "tester@example.invalid"],
+    );
+    git(&project_b, &["config", "commit.gpgsign", "false"]);
+    fs::write(project_b.join("README.md"), "project b\n").unwrap();
+    git(&project_b, &["add", "."]);
+    git(&project_b, &["commit", "-m", "init"]);
+
+    let project_label = project_b.file_name().unwrap().to_string_lossy().to_string();
+    let conclusion = stdout(
+        repo.arc(&project_b)
+            .args([
+                "journal",
+                "note",
+                "finished-work",
+                "--kind",
+                "conclusion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Finished\n"),
+    );
+    let conclusion = PathBuf::from(conclusion.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let project_slug = PathBuf::from(stdout(repo.arc(&project_b).args(["journal", "dir"])).trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let handoff = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "cross-work",
+                "--kind",
+                "handoff",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Continue\n"),
+    );
+    let handoff = PathBuf::from(handoff.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let reference = format!("{project_label}::{conclusion}");
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "consume",
+            &handoff,
+            "--outcome",
+            "done",
+            "--decision",
+            &reference,
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "resolved by: {project_label}::{conclusion}   (conclusion)"
+        )));
+
+    let event = journal_events(&journal_dir(&repo))
+        .into_iter()
+        .find(|event| event["event"] == "consumed" && event["file"] == handoff)
+        .unwrap();
+    assert_eq!(event["decision"], conclusion);
+    assert_eq!(event["decision_project"], project_slug);
+    assert_eq!(event["decision_kind"], "conclusion");
+    let digest = event["decision_digest"].as_str().unwrap();
+    assert!(digest.starts_with("sha256:"), "{event}");
+
+    let unknown = format!("unknown-project::{conclusion}");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "consume",
+            &handoff,
+            "--outcome",
+            "done",
+            "--decision",
+            &unknown,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unknown-project"));
+
+    let discussion = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "still-question",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Which way?\n"),
+    );
+    let discussion = PathBuf::from(discussion.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "consume",
+            &discussion,
+            "--outcome",
+            "done",
+            "--decision",
+            &reference,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a decision"));
+}
+
+#[test]
 fn discussion_consumed_without_decision_still_reads() {
     let repo = Repo::new();
     let discussion = stdout(

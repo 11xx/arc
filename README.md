@@ -1196,6 +1196,11 @@ it, the way the surrounding fields are marked, and update every place the
 version is quoted in prose — a version quoted in three documents goes
 stale in three documents.
 
+A stored input format is the exception, and `journal-events/1` is the one
+that exists. Its version marks what a reader must accept, not what a writer
+emits, so a new optional field that leaves every older file valid keeps the
+version. Removing a field, or making one required, does not.
+
 **Record a behaviour change as a changelog entry on the change that made
 it.** The `[Unreleased]` block is projected from those entries at release
 time; a behaviour change with no entry is a behaviour change the release
@@ -1246,9 +1251,16 @@ long it has waited (for discussions, since the latest typed position; otherwise
 since creation), until an explicit
 `journal consume <filename> [--outcome done|superseded|discarded]
 [--decision <decision-file>] [--note <text>]` retires an item with a typed
-consumed event. A decision link is valid only with outcome `done` and may name
-a decision from a different topic. The journal is
-append-only; consumption never edits or deletes the artifact.
+consumed event. A decision link is valid only with outcome `done`.
+`<artifact>.md` names a local decision; `<project>::<artifact>.md` names one in
+another registered project's journal, matched against the registry by slug or
+label, and refused rather than guessed when the prefix is ambiguous. A
+conclusion resolves any non-discussion actionable artifact, since a conclusion
+is what finished work leaves behind; a discussion still requires a decision.
+The consumed event records the referenced artifact's project, kind, and a
+digest of its bytes, so a later reader can tell a resolution that still says
+what it said from one rewritten underneath. The journal is append-only;
+consumption never edits or deletes the artifact.
 
 A `discussion` is the answer-owed actionable kind: an open debate rides the
 same queue until someone resolves it, and `arc begin --from-journal` promotes
