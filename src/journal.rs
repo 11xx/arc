@@ -96,6 +96,7 @@ pub enum JournalKind {
     Later,
     Discussion,
     Decision,
+    Incident,
     FeatureRequest,
 }
 
@@ -112,6 +113,7 @@ impl JournalKind {
             JournalKind::Later => "later",
             JournalKind::Discussion => "discussion",
             JournalKind::Decision => "decision",
+            JournalKind::Incident => "incident",
             JournalKind::FeatureRequest => "feature-request",
         }
     }
@@ -323,6 +325,12 @@ pub enum JournalCmd {
     },
     /// Record a settled decision, which is what resolves a discussion
     Decision {
+        #[command(flatten)]
+        write: KindWrite,
+    },
+    /// Record something that went wrong in the running of work, not in the
+    /// code, so a decision's revisit trigger can fire on evidence
+    Incident {
         #[command(flatten)]
         write: KindWrite,
     },
@@ -608,6 +616,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
         JournalCmd::Plan { write } => write_kind(ctx, JournalKind::Plan, write),
         JournalCmd::Conclusion { write } => write_kind(ctx, JournalKind::Conclusion, write),
         JournalCmd::Decision { write } => write_kind(ctx, JournalKind::Decision, write),
+        JournalCmd::Incident { write } => write_kind(ctx, JournalKind::Incident, write),
         JournalCmd::Memory { write } => write_kind(ctx, JournalKind::Memory, write),
         JournalCmd::Later { write } => write_kind(ctx, JournalKind::Later, write),
         JournalCmd::Review { write } => write_kind(ctx, JournalKind::Review, write),

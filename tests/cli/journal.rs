@@ -782,6 +782,53 @@ fn journal_memory_never_actionable() {
 }
 
 #[test]
+fn incident_is_not_actionable() {
+    let repo = Repo::new();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "incident",
+                "quota-exhaustion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("The executor hit a quota.\n"),
+    );
+    let file = PathBuf::from(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(file.ends_with("-incident.md"), "{file}");
+
+    let listed = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "list", "--kind", "incident", "--json"]),
+    );
+    assert!(
+        listed["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|artifact| artifact["file"] == file),
+        "{listed}"
+    );
+
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    for tier in ["open", "later", "feature_requests"] {
+        assert!(
+            open[tier]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|artifact| artifact["file"] != file),
+            "{open}"
+        );
+    }
+}
+
+#[test]
 fn journal_log_is_append_only() {
     let repo = Repo::new();
     repo.arc(&repo.root)
