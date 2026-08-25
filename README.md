@@ -1245,7 +1245,14 @@ Work waiting for a future session uses the primary actionable kinds — `todo`,
 `handoff`, `plan`, `discussion` — plus lower-priority `later` and
 `feature-request`. A feature request describes a wanted capability without
 assigning execution priority. A `decision` records a settled question as a
-terminal, non-actionable artifact. `journal open` lists the primary queue first,
+terminal, non-actionable artifact. An `incident` records something that went
+wrong in the running of work rather than in the code — a quota exhaustion, a
+deadlocked tool, an executor blocked on a false premise. It is a record rather
+than work, so it is deliberately not an actionable tier: it exists to be
+counted and cited, and a decision whose revisit trigger reads "when X happens"
+can fire on evidence instead of never. An incident that implies work produces a
+separate artifact of the kind that work actually is.
+`journal open` lists the primary queue first,
 then separate later and feature-request sections, annotating each item with how
 long it has waited (for discussions, since the latest typed position; otherwise
 since creation), until an explicit
