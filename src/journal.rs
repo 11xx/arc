@@ -22,6 +22,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use clap::{Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -2195,6 +2196,25 @@ struct JournalEvent {
     note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     decision: Option<String>,
+    /// The project whose journal holds the artifact named in `decision`,
+    /// when it is not this one. Recorded as the registry slug, which is
+    /// stable against a label that follows a directory rename.
+    ///
+    /// Optional, like the fields below it, so an events file written before
+    /// cross-journal references existed remains valid `journal-events/1`
+    /// input. The schema version marks what a reader must accept, and a
+    /// reader that accepts everything it accepted before has not changed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision_project: Option<String>,
+    /// The kind of the artifact named in `decision`, so a reader knows what
+    /// resolved the work without opening another project's journal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision_kind: Option<String>,
+    /// A digest of the referenced artifact's bytes when it was cited, so a
+    /// later reader can tell a resolution that still says what it said from
+    /// one that has been rewritten underneath.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ttl_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2320,6 +2340,9 @@ impl JournalEvent {
             outcome: None,
             note: None,
             decision: None,
+            decision_project: None,
+            decision_kind: None,
+            decision_digest: None,
             ttl_seconds: None,
             scope: None,
             status: None,
@@ -4877,6 +4900,12 @@ fn consume(
 ) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&dir)?;
+    let target_kind = parse_artifact_name(filename).map(|(_, _, kind)| kind);
+    let mut decision_filename = None;
+    let mut decision_project = None;
+    let mut decision_kind = None;
+    let mut decision_digest = None;
+    let mut decision_project_label = None;
     if let Some(decision) = decision {
         if !matches!(outcome, ConsumeOutcome::Done) {
             bail!("--decision is valid only with --outcome done");
@@ -4884,18 +4913,72 @@ fn consume(
         if decision.contains(['/', '\\']) {
             bail!("--decision takes an artifact filename, not a path");
         }
-        let Some((_, _, kind)) = parse_artifact_name(decision) else {
-            bail!("{decision:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+        let (project_prefix, artifact) = match decision.split_once("::") {
+            Some((project, artifact)) => (Some(project), artifact),
+            None => (None, decision),
         };
-        if kind != JournalKind::Decision.as_str() {
-            bail!("{decision} is a {kind} artifact, not a decision");
+        let Some((_, _, kind)) = parse_artifact_name(artifact) else {
+            bail!("{artifact:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+        };
+        let conclusion_allowed = target_kind.as_deref().is_some_and(|target_kind| {
+            is_actionable_kind(target_kind) && target_kind != JournalKind::Discussion.as_str()
+        });
+        if kind != JournalKind::Decision.as_str()
+            && !(conclusion_allowed && kind == JournalKind::Conclusion.as_str())
+        {
+            bail!("{artifact} is a {kind} artifact, not a decision");
         }
-        if !dir.join(decision).is_file() && !archive_dir(&dir).join(decision).is_file() {
+
+        let (decision_dir, other_project, project_label) = match project_prefix {
+            Some(prefix) => {
+                let cfg = config::load()?;
+                let projects = crate::registry::projects(&cfg)?;
+                let matches: Vec<_> = projects
+                    .iter()
+                    .filter(|project| project.slug == prefix || project.label() == prefix)
+                    .collect();
+                match matches.as_slice() {
+                    [] => bail!("no registered project matched {prefix:?} by slug or label"),
+                    [project] => {
+                        let other = project.journal_dir != dir;
+                        (
+                            project.journal_dir.clone(),
+                            other.then(|| project.slug.clone()),
+                            other.then(|| project.label()),
+                        )
+                    }
+                    _ => {
+                        let candidates = matches
+                            .iter()
+                            .map(|project| format!("{} ({})", project.slug, project.label()))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        bail!(
+                            "project prefix {prefix:?} matched multiple registered projects: {candidates}"
+                        )
+                    }
+                }
+            }
+            None => (dir.clone(), None, None),
+        };
+        let decision_path = if decision_dir.join(artifact).is_file() {
+            decision_dir.join(artifact)
+        } else if archive_dir(&decision_dir).join(artifact).is_file() {
+            archive_dir(&decision_dir).join(artifact)
+        } else {
             bail!(
-                "no such decision artifact {decision} in {} or its cold archive",
-                dir.display()
+                "no such decision artifact {artifact} in {} or its cold archive",
+                decision_dir.display()
             );
-        }
+        };
+        let bytes = std::fs::read(&decision_path).with_context(|| {
+            format!("cannot read decision artifact {}", decision_path.display())
+        })?;
+        decision_filename = Some(artifact.to_string());
+        decision_project = other_project;
+        decision_project_label = project_label;
+        decision_kind = Some(kind);
+        decision_digest = Some(format!("sha256:{}", hex::encode(Sha256::digest(&bytes))));
     }
     if filename.contains(['/', '\\']) {
         bail!("consume takes an artifact filename inside the archive dir, not a path");
@@ -4930,9 +5013,21 @@ fn consume(
     event.file = Some(filename.to_string());
     event.outcome = Some(outcome.as_str().to_string());
     event.note = note.map(str::to_string);
-    event.decision = decision.map(str::to_string);
+    event.decision = decision_filename;
+    event.decision_project = decision_project;
+    event.decision_kind = decision_kind;
+    event.decision_digest = decision_digest;
     append_event(ctx, &dir, &event)?;
     println!("consumed: {filename} [{}]", outcome.as_str());
+    if let (Some(decision), Some(kind)) =
+        (event.decision.as_deref(), event.decision_kind.as_deref())
+    {
+        let project = decision_project_label
+            .as_deref()
+            .map(|label| format!("{label}::"))
+            .unwrap_or_default();
+        println!("resolved by: {project}{decision}   ({kind})");
+    }
     Ok(0)
 }
 
