@@ -1174,14 +1174,15 @@ change just replaced:
 cargo install --path . --locked
 ```
 
-**A breaking shape change bumps its schema version.** Every projection,
-report, and bundle is versioned so a consumer can program against it.
-Adding an optional field is additive and keeps the version; removing a
-field, renaming one, or changing what an existing one means is breaking
-and takes the next version. Mark an additive field with the version that
-introduced it, the way the surrounding fields are marked, and update every
-place the version is quoted in prose — a version quoted in three documents
-goes stale in three documents.
+**A shape change bumps its schema version.** Every projection, report,
+and bundle is versioned so a consumer can program against it, and any
+change to what one emits takes the next version — adding a field as much
+as removing, renaming, or redefining one. A reader that pinned a version
+can then tell from the version alone whether the shape it parsed is the
+shape it is holding. Mark the new field with the version that introduced
+it, the way the surrounding fields are marked, and update every place the
+version is quoted in prose — a version quoted in three documents goes
+stale in three documents.
 
 **Record a behaviour change as a changelog entry on the change that made
 it.** The `[Unreleased]` block is projected from those entries at release
