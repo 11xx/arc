@@ -2354,10 +2354,8 @@ fn journal_note_scaffold_records_template_and_prepends() {
     let path = PathBuf::from(out.trim());
     let body = fs::read_to_string(&path).unwrap();
     assert!(body.contains("## Positions"), "{body}");
-    assert!(
-        body.contains("### Position pos-<ulid> (<model[#effort]"),
-        "{body}"
-    );
+    assert!(body.contains("### Position pos-<ulid> (<who>"), "{body}");
+    assert!(body.contains("<model[#effort]> via <harness>"), "{body}");
     for command in [
         "arc journal question <this-file> --placement opening|closing --option A --option B --body-file -",
         "arc journal position <this-file> --body-file - --question <id> --option <opt>",
@@ -3273,7 +3271,9 @@ fn journal_position_writes_position_block_and_typed_event() {
             && body.contains("Because reasons."),
         "{body}"
     );
-    assert!(body.contains("(codex, 20"), "{body}");
+    // Without a model, the declared actor is who acted; the harness is the
+    // tool it was typed into and names nobody.
+    assert!(body.contains("(tester, 20"), "{body}");
     assert!(!body.contains("via codex"), "{body}");
 
     // The typed events are the machine-readable half; ref and model are
@@ -3301,6 +3301,149 @@ fn journal_position_writes_position_block_and_typed_event() {
         .assert()
         .success()
         .stdout(predicates::str::contains("unknown-jsonl-event").not());
+}
+
+/// A question posed as waiting on a person is settled by a person, and the
+/// record has to be able to say so. Attribution derived from model and harness
+/// alone rendered a person's answer as `unknown` and dropped the actor from the
+/// event, leaving an answer nobody is recorded as having given.
+#[test]
+fn a_declared_actor_authors_a_position_and_an_answer() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "debate",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Debate\n\n## Positions\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    // A person acting directly: an actor, and no model to speak for them.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--actor",
+            "A Person",
+            "--body-file",
+            "-",
+        ])
+        .env_remove("ARC_MODEL")
+        .env_remove("ARC_HARNESS")
+        .write_stdin("Position: for\nBecause a person says so.\n")
+        .assert()
+        .success();
+
+    let dir = journal_dir(&repo);
+    let body = fs::read_to_string(dir.join(&file)).unwrap();
+    assert!(body.contains("(A Person, 20"), "{body}");
+    assert!(!body.contains("(unknown,"), "{body}");
+
+    // A model acting under a named operator still leads with the model, which
+    // is the attribution the record exists to carry — but the operator is no
+    // longer lost.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--actor",
+            "A Person",
+            "--body-file",
+            "-",
+        ])
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_MODEL", "kimi-k3#high")
+        .write_stdin("Position: against\nBecause a model says so.\n")
+        .assert()
+        .success();
+
+    let body = fs::read_to_string(dir.join(&file)).unwrap();
+    assert!(body.contains("(kimi-k3#high via codex, 20"), "{body}");
+
+    let events = journal_events(&dir);
+    let positions: Vec<&serde_json::Value> =
+        events.iter().filter(|e| e["event"] == "position").collect();
+    assert_eq!(positions[0]["actor"], "A Person");
+    assert!(positions[0].get("model").is_none());
+    assert_eq!(positions[1]["actor"], "A Person");
+    assert_eq!(positions[1]["model"], "kimi-k3#high");
+
+    // And the answer, which is the step a question waiting on a person exists
+    // to reach.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "yes",
+            "--option",
+            "no",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Which way?\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+    for option in ["yes", "no"] {
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "position",
+                &file,
+                "--question",
+                &question,
+                "--option",
+                option,
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("Position: for\n\nArgued.\n")
+            .assert()
+            .success();
+    }
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "yes",
+            "--actor",
+            "A Person",
+            "--body-file",
+            "-",
+        ])
+        .env_remove("ARC_MODEL")
+        .env_remove("ARC_HARNESS")
+        .write_stdin("Because a person decided.\n")
+        .assert()
+        .success();
+
+    let body = fs::read_to_string(dir.join(&file)).unwrap();
+    assert!(body.contains("(A Person, 20"), "{body}");
+    let events = journal_events(&dir);
+    let answer = events.iter().find(|e| e["event"] == "answer").unwrap();
+    assert_eq!(answer["actor"], "A Person", "{answer}");
 }
 
 #[test]

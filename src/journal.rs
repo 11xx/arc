@@ -1380,6 +1380,34 @@ fn identity(ctx: &Ctx) -> (String, String) {
     (harness, session)
 }
 
+/// The acting identity when somebody declared one.
+///
+/// A fallback actor is `git config user.name` — the identity of whoever
+/// configured the checkout, not a claim that they acted — so it is left out
+/// rather than recorded as a person who did something.
+fn declared_actor(ctx: &Ctx) -> Option<String> {
+    ctx.actor_source
+        .declared()
+        .then(|| ctx.actor.trim().to_string())
+        .filter(|actor| !actor.is_empty())
+}
+
+/// How an appended block names who wrote it.
+///
+/// A model is the primary attribution wherever one is known, because the
+/// record exists to say which model argued what. Without one, a declared actor
+/// is a person acting directly and is named as such; with neither, only the
+/// harness is known.
+fn attribution(ctx: &Ctx, harness: &str) -> String {
+    match ctx.model.as_deref().filter(|value| !value.is_empty()) {
+        Some(model) => format!("{model} via {harness}"),
+        None => match declared_actor(ctx) {
+            Some(actor) => actor,
+            None => harness.to_string(),
+        },
+    }
+}
+
 fn read_body_verbatim(body_file: &str) -> Result<String> {
     if body_file == "-" {
         use std::io::Read;
@@ -1618,10 +1646,10 @@ fn position(
         Some((question, option)) => format!(" under {question}={option}"),
         None => String::new(),
     };
-    let heading = match ctx.model.as_deref().filter(|value| !value.is_empty()) {
-        Some(model) => format!("### Position {position_id} ({model} via {harness}, {ts}){under}"),
-        None => format!("### Position {position_id} ({harness}, {ts}){under}"),
-    };
+    let heading = format!(
+        "### Position {position_id} ({}, {ts}){under}",
+        attribution(ctx, &harness)
+    );
     let block = format!("\n{heading}\n\n{}\n", body.trim_end_matches('\n'));
 
     // Append-only write: O_APPEND places the block at the current end even if
@@ -1835,10 +1863,7 @@ fn answer(
     let now = Utc::now();
     let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
     let (harness, _) = identity(ctx);
-    let who = match ctx.model.as_deref().filter(|value| !value.is_empty()) {
-        Some(model) => format!("{model} via {harness}"),
-        None => harness.to_string(),
-    };
+    let who = attribution(ctx, &harness);
     let heading = match chosen {
         Chosen::Offered(option) => format!("### Answer {question_id} = {option} ({who}, {ts})"),
         Chosen::OffMenu(answer) => {
@@ -2147,6 +2172,13 @@ struct JournalEvent {
     ts: String,
     harness: String,
     session: String,
+    /// Who acted, when somebody declared it. A journal event records the
+    /// identity it was given rather than choosing among them: a person acting
+    /// directly has an actor and no model, and an event carrying neither says
+    /// so by omission instead of naming a person nobody named. An actor arc
+    /// fell back to is not a claim that anyone acted, so it is not recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     topic: String,
@@ -2272,6 +2304,7 @@ impl JournalEvent {
             ts: now.to_rfc3339_opts(SecondsFormat::Secs, true),
             harness,
             session,
+            actor: declared_actor(ctx),
             // Model identity is optional end to end: absent means absent,
             // never "unknown".
             model: ctx
