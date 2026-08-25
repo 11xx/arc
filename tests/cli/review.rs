@@ -217,3 +217,67 @@ fn an_unknown_revision_is_refused_not_defaulted() {
             "no patchset has that id or revision",
         ));
 }
+
+#[test]
+fn stacked_base_floor() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "first"]));
+    let first_worktree = repo.home.join(".worktrees/repo-first");
+    repo.commit(
+        &first_worktree,
+        "predecessor.txt",
+        "predecessor\n",
+        "test: add predecessor",
+    );
+    let predecessor_head = repo.head(&first_worktree);
+
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "second", "--base", "arc/first"]),
+    );
+    let second_worktree = repo.home.join(".worktrees/repo-second");
+    repo.commit(
+        &second_worktree,
+        "member.txt",
+        "member\n",
+        "test: add member",
+    );
+    stdout(repo.arc(&second_worktree).args(["snapshot", "second"]));
+
+    let state: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&second_worktree)
+            .args(["show", "second", "--json"]),
+    ))
+    .unwrap();
+    let patchset = state["patchsets"].as_array().unwrap().last().unwrap();
+    assert_eq!(patchset["base"], predecessor_head);
+    repo.arc(&second_worktree)
+        .args(["diff", "second", "--stat"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("member.txt"))
+        .stdout(predicates::str::contains("predecessor.txt").not());
+
+    stdout(repo.arc(&repo.root).args(["begin", "ordinary"]));
+    let ordinary_worktree = repo.home.join(".worktrees/repo-ordinary");
+    repo.commit(
+        &ordinary_worktree,
+        "ordinary.txt",
+        "ordinary\n",
+        "test: add ordinary change",
+    );
+    stdout(repo.arc(&ordinary_worktree).args(["snapshot", "ordinary"]));
+
+    let ordinary_state: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&ordinary_worktree)
+            .args(["show", "ordinary", "--json"]),
+    ))
+    .unwrap();
+    let ordinary_patchset = ordinary_state["patchsets"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap();
+    let ordinary_merge_base = git_out(&ordinary_worktree, &["merge-base", "HEAD", "master"]);
+    assert_eq!(ordinary_patchset["base"], ordinary_merge_base);
+}
