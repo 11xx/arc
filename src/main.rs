@@ -499,7 +499,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/10 schema)
+    /// Machine-readable status report (the versioned arc-status/11 schema)
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in

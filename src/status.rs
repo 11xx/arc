@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/10";
+pub const STATUS_SCHEMA: &str = "arc-status/11";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// Two identities arc assumed cannot establish that two people acted. The
@@ -455,6 +455,11 @@ pub struct BriefStatus {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_revision: Option<String>,
+    /// How far the brief's base revision sits from the change head, so a
+    /// reader knows whether the brief's citations still describe the tree.
+    /// Additive in `arc-status/11`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_drift: Option<BriefBaseDrift>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub acceptance_probes: Vec<crate::model::AcceptanceProbe>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -462,6 +467,56 @@ pub struct BriefStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_slice: Option<String>,
     pub recorded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum BriefBaseDrift {
+    /// The brief was checked against the revision the change now heads.
+    Current,
+    /// The head descends from the base by this many commits.
+    Behind { commits: usize },
+    /// The base is not in the change's history at all — rebased or rewound —
+    /// so it describes a tree this change no longer contains.
+    Detached,
+}
+
+impl BriefBaseDrift {
+    /// The clause a brief-printing surface appends after the base revision.
+    /// `None` when the base is the head and there is nothing to say. One
+    /// definition, because four surfaces print it and a wording that lived in
+    /// four places would go stale in three of them.
+    pub fn annotation(&self) -> Option<String> {
+        match self {
+            BriefBaseDrift::Current => None,
+            BriefBaseDrift::Behind { commits } => Some(format!(
+                " — **{commits} commits behind the change head**; line citations may have decayed"
+            )),
+            BriefBaseDrift::Detached => Some(
+                " — **not in this change's history** (rebased or rewound); line citations describe a tree this change no longer contains"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+pub fn brief_base_drift(
+    cwd: &Path,
+    base_revision: Option<&str>,
+    head: Option<&str>,
+) -> Option<BriefBaseDrift> {
+    let (Some(base), Some(head)) = (base_revision, head) else {
+        return None;
+    };
+    if base == head {
+        return Some(BriefBaseDrift::Current);
+    }
+    if !gitio::is_ancestor(cwd, base, head).ok()? {
+        return Some(BriefBaseDrift::Detached);
+    }
+    Some(BriefBaseDrift::Behind {
+        commits: gitio::commit_count(cwd, base, head).ok()?,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -670,6 +725,7 @@ pub fn build_at(
         dependency_status,
         blocks,
         now,
+        Some(cwd),
         current_head,
         needs_rebase,
         worktree_dirty,
@@ -705,6 +761,7 @@ pub fn build_as_of(
         dependency_status,
         blocks,
         now,
+        repo,
         current_head.clone(),
         false,
         None,
@@ -723,6 +780,7 @@ fn build_report(
     dependency_status: BlockerStatus,
     blocks: Vec<String>,
     now: DateTime<Utc>,
+    cwd: Option<&Path>,
     current_head: Option<String>,
     needs_rebase: bool,
     worktree_dirty: Option<bool>,
@@ -743,6 +801,11 @@ fn build_report(
         (Some(h), Some(p)) => *h == p.head,
         _ => false,
     };
+    let base_drift = cwd.and_then(|cwd| {
+        state.latest_brief().and_then(|brief| {
+            brief_base_drift(cwd, brief.base_revision.as_deref(), current_head.as_deref())
+        })
+    });
 
     let mut waiver_authorized_approval = false;
     let verdict = state.latest_verdict().map(|v| {
@@ -1165,6 +1228,7 @@ fn build_report(
             version: state.briefs.len(),
             title: brief.title.clone(),
             base_revision: brief.base_revision.clone(),
+            base_drift,
             acceptance_probes: brief.acceptance_probes.clone(),
             plan_ref: brief.plan_ref.clone(),
             plan_slice: brief.plan_slice.clone(),

@@ -498,6 +498,12 @@ pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool>
     Ok(out.status.success())
 }
 
+pub fn commit_count(cwd: &Path, base: &str, head: &str) -> Result<usize> {
+    git(cwd, &["rev-list", "--count", &format!("{base}..{head}")])?
+        .parse()
+        .context("git rev-list --count returned a non-numeric commit count")
+}
+
 /// The branch checked out in the primary worktree (the main checkout,
 /// always first in `git worktree list`). None when it is detached.
 pub fn primary_worktree_branch(cwd: &Path) -> Result<Option<String>> {

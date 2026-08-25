@@ -511,8 +511,18 @@ pub fn brief(
         Some(version) => anyhow::anyhow!("brief version {version} not found"),
         None => anyhow::anyhow!("no brief recorded for change {}", state.change_id),
     })?;
+    let current_head = gitio::branch_head(&ctx.cwd, &state.branch).ok();
+    let base_drift = status::brief_base_drift(
+        &ctx.cwd,
+        selected.base_revision.as_deref(),
+        current_head.as_deref(),
+    );
     if let Some(base_revision) = &selected.base_revision {
-        println!("base-revision: {base_revision}");
+        let drift = base_drift
+            .as_ref()
+            .and_then(status::BriefBaseDrift::annotation)
+            .unwrap_or_default();
+        println!("base-revision: {base_revision}{drift}");
     }
     if let (Some(plan_ref), Some(plan_slice)) = (&selected.plan_ref, &selected.plan_slice) {
         println!("plan-ref: {plan_ref}");
