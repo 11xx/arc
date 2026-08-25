@@ -41,3 +41,7 @@ daemon, no database, no network, no multi-machine ref sync.
   `cargo install --path . --locked`.
 - Record behavior changes on their arc change via `arc changelog`; the
   `[Unreleased]` block in `CHANGELOG.md` is generated at release time.
+- Classification under `src/` is closed: a new file goes in `danger.paths` or
+  `danger.acknowledged_safe` in `.arc/policy.toml`, and `arc doctor` fails
+  until it does. Calling a file safe is a claim, reviewed once when the
+  boundary is drawn.

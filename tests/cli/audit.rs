@@ -1339,6 +1339,94 @@ fn doctor_reports_a_declared_danger_path_that_matches_nothing() {
     );
 }
 
+/// Without a declared root the list is open-world, and a file nobody
+/// classified matches nothing, looks healthy, and lands on a self-verdict.
+/// Both observed misses failed in that direction, so `doctor` refuses a
+/// tracked file inside a declared root that carries no classification — and
+/// refuses one carrying both, where one of the two claims must be wrong.
+#[test]
+fn doctor_refuses_a_file_that_is_unclassified_or_classified_twice() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::create_dir_all(repo.root.join("src")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n\n[danger]\n\
+         paths = [\"src/gate.rs\", \"src/both.rs\"]\n\
+         source_roots = [\"src/\"]\n\
+         acknowledged_safe = [\"src/view.rs\", \"src/both.rs\"]\n",
+    )
+    .unwrap();
+    for name in ["gate.rs", "view.rs", "both.rs", "stray.rs"] {
+        fs::write(repo.root.join("src").join(name), "// file\n").unwrap();
+    }
+    // A file outside the declared root is not part of the closed world.
+    fs::write(repo.root.join("elsewhere.rs"), "// file\n").unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "policy and sources"]);
+
+    let out = repo
+        .arc(&repo.root)
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let problems = report["problems"].as_array().unwrap();
+
+    let unclassified: Vec<_> = problems
+        .iter()
+        .filter(|p| p["code"] == "danger-unclassified")
+        .collect();
+    assert_eq!(unclassified.len(), 1, "{problems:?}");
+    assert!(
+        unclassified[0]["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("src/stray.rs"),
+        "{:?}",
+        unclassified[0]
+    );
+
+    let conflicts: Vec<_> = problems
+        .iter()
+        .filter(|p| p["code"] == "danger-classification-conflict")
+        .collect();
+    assert_eq!(conflicts.len(), 1, "{problems:?}");
+    assert!(
+        conflicts[0]["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("src/both.rs"),
+        "{:?}",
+        conflicts[0]
+    );
+}
+
+/// Closing the world is opt-in: a project that declares no source root keeps
+/// the open-world list it had, and `doctor` says nothing about files nobody
+/// classified.
+#[test]
+fn an_undeclared_source_root_leaves_classification_open() {
+    let repo = repo_with_danger("\"src/gate.rs\"");
+    fs::create_dir_all(repo.root.join("src")).unwrap();
+    fs::write(repo.root.join("src/gate.rs"), "// file\n").unwrap();
+    fs::write(repo.root.join("src/stray.rs"), "// file\n").unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "sources"]);
+
+    let out = repo
+        .arc(&repo.root)
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let problems = report["problems"].as_array().unwrap();
+    assert!(
+        !problems.iter().any(|p| p["code"] == "danger-unclassified"),
+        "{problems:?}"
+    );
+}
+
 /// The debt records that no verdict existed, not that `arc audit`
 /// specifically must supply one. An operator who reviewed before merging
 /// otherwise had no honest move: leave a debt standing for a review that
