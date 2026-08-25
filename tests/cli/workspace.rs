@@ -126,7 +126,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/1");
+    assert_eq!(value["schema"], "arc-workspace-backlog/2");
     let project = value["projects"]
         .as_array()
         .unwrap()
@@ -363,6 +363,117 @@ fn workspace_backlog_since_counts_arrivals_only() {
         .find(|entry| entry["anchor"].as_str().unwrap().ends_with("repo"))
         .unwrap_or_else(|| panic!("project missing: {value}"));
     assert_eq!(mine["open_items"], 1);
+}
+
+#[test]
+fn workspace_backlog_items() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+    let journal = journal_dir_of(&repo);
+    for (file, body) in [
+        ("20260101T000000Z-old-open-todo.md", "# Old open\n\nbody\n"),
+        (
+            "20260101T120000Z-old-later-later.md",
+            "# Old later\n\nbody\n",
+        ),
+        (
+            "20260103T000000Z-new-open-handoff.md",
+            "# New open\n\nbody\n",
+        ),
+        (
+            "20260103T120000Z-new-feature-feature-request.md",
+            "# New feature\n\nbody\n",
+        ),
+    ] {
+        fs::write(journal.join(file), body).unwrap();
+    }
+
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "backlog", "--items", "--json"]);
+    let value = json_stdout(&mut report);
+    assert_eq!(value["schema"], "arc-workspace-backlog/2");
+    let project = value["projects"].as_array().unwrap().first().unwrap();
+    let items = &project["items"];
+    let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {
+        let entries = actual.as_array().unwrap();
+        assert_eq!(entries.len(), expected.len());
+        for (entry, (file, kind)) in entries.iter().zip(expected) {
+            assert_eq!(entry["file"], *file);
+            assert_eq!(entry["kind"], *kind);
+        }
+    };
+    assert_tier(
+        &items["open"],
+        &[
+            ("20260103T000000Z-new-open-handoff.md", "handoff"),
+            ("20260101T000000Z-old-open-todo.md", "todo"),
+        ],
+    );
+    assert_tier(
+        &items["later"],
+        &[("20260101T120000Z-old-later-later.md", "later")],
+    );
+    assert_tier(
+        &items["feature_requests"],
+        &[(
+            "20260103T120000Z-new-feature-feature-request.md",
+            "feature-request",
+        )],
+    );
+    for (count, tier) in [
+        ("open_items", "open"),
+        ("later_items", "later"),
+        ("feature_requests", "feature_requests"),
+    ] {
+        assert_eq!(
+            project[count].as_u64().unwrap() as usize,
+            items[tier].as_array().unwrap().len(),
+        );
+    }
+
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut report);
+    let project = value["projects"].as_array().unwrap().first().unwrap();
+    assert!(!project.as_object().unwrap().contains_key("items"));
+
+    let mut report = repo.arc(&repo.root);
+    report.args([
+        "workspace",
+        "backlog",
+        "--items",
+        "--json",
+        "--since",
+        "20260103T000000Z",
+    ]);
+    let value = json_stdout(&mut report);
+    let project = value["projects"].as_array().unwrap().first().unwrap();
+    let items = &project["items"];
+    assert_tier(
+        &items["open"],
+        &[("20260103T000000Z-new-open-handoff.md", "handoff")],
+    );
+    assert_tier(&items["later"], &[]);
+    assert_tier(
+        &items["feature_requests"],
+        &[(
+            "20260103T120000Z-new-feature-feature-request.md",
+            "feature-request",
+        )],
+    );
+    for (count, tier) in [
+        ("open_items", "open"),
+        ("later_items", "later"),
+        ("feature_requests", "feature_requests"),
+    ] {
+        assert_eq!(
+            project[count].as_u64().unwrap() as usize,
+            items[tier].as_array().unwrap().len(),
+        );
+    }
 }
 
 #[test]

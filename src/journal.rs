@@ -3264,27 +3264,27 @@ fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
     Ok(0)
 }
 
-#[derive(Serialize)]
-struct ArtifactEntry {
-    file: String,
-    timestamp: String,
-    topic: String,
+#[derive(Clone, Serialize)]
+pub(crate) struct ArtifactEntry {
+    pub(crate) file: String,
+    pub(crate) timestamp: String,
+    pub(crate) topic: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    kind: Option<String>,
-    heading: Option<String>,
+    pub(crate) kind: Option<String>,
+    pub(crate) heading: Option<String>,
     /// Seconds since the artifact's latest position event for discussions, or
     /// creation stamp for other kinds. Absent only if neither timestamp parses.
     #[serde(skip_serializing_if = "Option::is_none")]
-    age_seconds: Option<u64>,
+    pub(crate) age_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    lane: Option<ArtifactLane>,
+    pub(crate) lane: Option<ArtifactLane>,
     /// The open change that has taken this item up, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
-    change: Option<ChangeRef>,
+    pub(crate) change: Option<ChangeRef>,
 }
 
-#[derive(Serialize)]
-struct ChangeRef {
+#[derive(Clone, Serialize)]
+pub(crate) struct ChangeRef {
     id: String,
     status: String,
 }
@@ -3375,7 +3375,7 @@ pub(crate) fn context_for_change(ctx: &Ctx, slug: &str) -> Result<ContextJournal
 }
 
 #[derive(Clone, Serialize)]
-struct ArtifactLane {
+pub(crate) struct ArtifactLane {
     topic: String,
     owner_harness: String,
     owner_session: String,
@@ -3630,6 +3630,12 @@ impl OpenItems {
         &self.dir
     }
 
+    /// Every actionable artifact, by tier, for a caller that surfaces the
+    /// queue rather than its size.
+    pub(crate) fn tiers(&self) -> (&[ArtifactEntry], &[ArtifactEntry], &[ArtifactEntry]) {
+        (&self.open, &self.later, &self.feature_requests)
+    }
+
     pub(crate) fn tier_counts(&self) -> (usize, usize, usize) {
         (
             self.open.len(),
@@ -3659,15 +3665,39 @@ impl OpenItems {
         let count = |entries: &Vec<ArtifactEntry>| {
             entries
                 .iter()
-                .filter(|entry| {
-                    parse_artifact_timestamp(&entry.timestamp).is_none_or(|filed| filed >= cutoff)
-                })
+                .filter(|entry| artifact_is_since(entry, cutoff))
                 .count()
         };
         (
             count(&self.open),
             count(&self.later),
             count(&self.feature_requests),
+        )
+    }
+
+    /// The same three tiers restricted to artifacts filed at or after
+    /// `cutoff`, by the same rule `tier_counts_since` counts by.
+    pub(crate) fn tiers_since(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> (
+        Vec<&ArtifactEntry>,
+        Vec<&ArtifactEntry>,
+        Vec<&ArtifactEntry>,
+    ) {
+        (
+            self.open
+                .iter()
+                .filter(|entry| artifact_is_since(entry, cutoff))
+                .collect(),
+            self.later
+                .iter()
+                .filter(|entry| artifact_is_since(entry, cutoff))
+                .collect(),
+            self.feature_requests
+                .iter()
+                .filter(|entry| artifact_is_since(entry, cutoff))
+                .collect(),
         )
     }
 
@@ -3686,6 +3716,10 @@ impl OpenItems {
             })
             .collect()
     }
+}
+
+fn artifact_is_since(entry: &ArtifactEntry, cutoff: DateTime<Utc>) -> bool {
+    parse_artifact_timestamp(&entry.timestamp).is_none_or(|filed| filed >= cutoff)
 }
 
 /// The actionable journal queue, split into its three tiers. Shared by
@@ -3857,8 +3891,9 @@ a feature-request is the unbuilt proposal itself. \
 Take one up with `arc begin <slug> --from-journal <file>`.";
 
 /// One `journal open` line: the creation stamp and its age, then topic, kind,
-/// heading, and any change/lane annotations.
-fn render_open_entry(f: &ArtifactEntry) {
+/// heading, and any change/lane annotations. Shared with the workspace
+/// backlog, so a queue reads the same whichever command printed it.
+pub(crate) fn render_open_entry(f: &ArtifactEntry) {
     let age = f.age_seconds.map_or_else(String::new, |seconds| {
         format!(" ({} old)", format_age(seconds))
     });

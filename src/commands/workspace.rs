@@ -10,7 +10,7 @@ use serde::Serialize;
 pub enum WorkspaceView {
     List,
     Inbox,
-    Backlog { since: Option<String> },
+    Backlog { since: Option<String>, items: bool },
 }
 
 #[derive(Serialize)]
@@ -134,8 +134,8 @@ fn repo_states(store: &Store) -> Result<BTreeMap<String, ChangeState>> {
 }
 
 pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<()> {
-    if let WorkspaceView::Backlog { since } = view {
-        return workspace_backlog(ctx, since.as_deref(), json);
+    if let WorkspaceView::Backlog { since, items } = view {
+        return workspace_backlog(ctx, since.as_deref(), items, json);
     }
     let stores = workspace_stores()?;
     match view {
@@ -300,6 +300,18 @@ struct ProjectBacklog {
     /// The primary tier's oldest entry, in days. A one-item queue never looks
     /// like a backlog from inside the project; across projects it is visible.
     oldest_open_days: Option<u64>,
+    /// Every artifact behind the counts above, when `--items` asked for
+    /// them. The same artifacts the counts are taken over, so the two cannot
+    /// disagree. Additive in `arc-workspace-backlog/2`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    items: Option<BacklogItems>,
+}
+
+#[derive(Serialize)]
+struct BacklogItems {
+    open: Vec<crate::journal::ArtifactEntry>,
+    later: Vec<crate::journal::ArtifactEntry>,
+    feature_requests: Vec<crate::journal::ArtifactEntry>,
 }
 
 impl ProjectBacklog {
@@ -330,7 +342,7 @@ struct UnreachableProject {
 /// Ranked by what is blocked, never by comparing items across projects: arc
 /// records no priority that spans repositories, and inventing one here would
 /// be a routing opinion rather than a derived fact.
-fn workspace_backlog(ctx: &Ctx, since: Option<&str>, json: bool) -> Result<()> {
+fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: bool) -> Result<()> {
     let cfg = crate::config::load()?;
     let cutoff = match since {
         Some(raw) => Some(
@@ -369,13 +381,33 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, json: bool) -> Result<()> {
             None => (Vec::new(), Vec::new()),
         };
 
-        let items = crate::journal::collect_open_in(ctx, &project.journal_dir, &anchor, None)?;
+        let open_queue = crate::journal::collect_open_in(ctx, &project.journal_dir, &anchor, None)?;
         // Under --since the counts mean "filed since", not "outstanding": a
         // delta that reported the whole queue beside a delta heading would read
         // as a full report and be believed as one.
         let (open_items, later_items, feature_requests) = match cutoff {
-            Some(cutoff) => items.tier_counts_since(cutoff),
-            None => items.tier_counts(),
+            Some(cutoff) => open_queue.tier_counts_since(cutoff),
+            None => open_queue.tier_counts(),
+        };
+        let backlog_items = if show_items {
+            let (open, later, feature_requests) = match cutoff {
+                Some(cutoff) => open_queue.tiers_since(cutoff),
+                None => {
+                    let (open, later, feature_requests) = open_queue.tiers();
+                    (
+                        open.iter().collect(),
+                        later.iter().collect(),
+                        feature_requests.iter().collect(),
+                    )
+                }
+            };
+            Some(BacklogItems {
+                open: open.into_iter().cloned().collect(),
+                later: later.into_iter().cloned().collect(),
+                feature_requests: feature_requests.into_iter().cloned().collect(),
+            })
+        } else {
+            None
         };
         let entry = ProjectBacklog {
             project: project.label(),
@@ -387,7 +419,11 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, json: bool) -> Result<()> {
             feature_requests,
             // Age is a property of the whole queue, so it would contradict
             // counts that mean "filed since". A delta reports arrivals only.
-            oldest_open_days: cutoff.is_none().then(|| items.oldest_open_days()).flatten(),
+            oldest_open_days: cutoff
+                .is_none()
+                .then(|| open_queue.oldest_open_days())
+                .flatten(),
+            items: backlog_items,
         };
         if !entry.is_empty() {
             projects.push(entry);
@@ -404,7 +440,7 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, json: bool) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/1",
+                schema: "arc-workspace-backlog/2",
                 projects,
                 unreachable,
             })?
@@ -435,6 +471,18 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, json: bool) -> Result<()> {
             "  journal       {} open, {} later, {} feature-request{}",
             project.open_items, project.later_items, project.feature_requests, age
         );
+        if show_items {
+            if let Some(items) = &project.items {
+                for item in items
+                    .open
+                    .iter()
+                    .chain(items.later.iter())
+                    .chain(items.feature_requests.iter())
+                {
+                    crate::journal::render_open_entry(item);
+                }
+            }
+        }
     }
     if !unreachable.is_empty() {
         println!("unreachable:");
