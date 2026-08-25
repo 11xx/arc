@@ -413,13 +413,22 @@ pub fn missing_objects<'a>(
         .spawn()
         .context("cannot run git cat-file")?;
     let query = revisions.join("\n") + "\n";
-    child
-        .stdin
-        .take()
-        .context("git cat-file has no stdin")?
-        .write_all(query.as_bytes())
-        .context("cannot write to git cat-file")?;
+    let mut stdin = child.stdin.take().context("git cat-file has no stdin")?;
+    // The query goes out on its own thread so this one can drain stdout while
+    // it is still being written. `cat-file` blocks once its answer pipe fills,
+    // and a caller that only starts reading after the last query byte is sent
+    // deadlocks against it — both processes asleep writing to a full pipe.
+    let writer = std::thread::spawn(move || stdin.write_all(query.as_bytes()));
     let output = child.wait_with_output().context("git cat-file failed")?;
+    let wrote = writer
+        .join()
+        .map_err(|_| anyhow::anyhow!("the git cat-file writer thread panicked"))?;
+    // A git that died early makes the write fail with a broken pipe, and its
+    // own stderr says more about why than that symptom does. The write failure
+    // is worth reporting only when git itself was fine.
+    if output.status.success() {
+        wrote.context("cannot write to git cat-file")?;
+    }
     if !output.status.success() {
         // Reporting nothing missing because the probe failed would turn a
         // broken repository into a clean bill of health.
@@ -549,5 +558,29 @@ mod tests {
         })
         .unwrap();
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// A query larger than the pipe buffers on both sides must still answer.
+    ///
+    /// Sending the whole query before reading any of it deadlocks: `cat-file`
+    /// sleeps writing answers into a full pipe while the caller sleeps writing
+    /// queries into another one. Twenty thousand revisions puts both sides well
+    /// past the 64 KiB a pipe holds, so this fails by timing out rather than by
+    /// hanging the suite.
+    #[test]
+    fn a_query_larger_than_the_pipe_buffer_still_answers() {
+        let revisions: Vec<String> = (0..20_000).map(|n| format!("{n:040x}")).collect();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let answered = missing_objects(Path::new("."), revisions.iter().map(String::as_str))
+                .map(|missing| missing.len());
+            let _ = sender.send(answered);
+        });
+        let answered = receiver
+            .recv_timeout(Duration::from_secs(60))
+            .expect("missing_objects deadlocked against git cat-file")
+            .expect("missing_objects failed");
+        // Every one of them is fabricated, so every one is unresolvable.
+        assert_eq!(answered, 20_000);
     }
 }
