@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/9";
+pub const STATUS_SCHEMA: &str = "arc-status/10";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// Two identities arc assumed cannot establish that two people acted. The
@@ -102,6 +102,13 @@ pub struct GateStatus {
     pub tested_tree: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_dirty: Option<bool>,
+    /// Which kind of dirt, so a waiver reason is self-evident at the moment of
+    /// waiving. Absent on evidence recorded before the split, which is not the
+    /// same as clean. Additive in `arc-status/10`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_dirty_tracked: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_dirty_untracked: Option<bool>,
     /// The worktree changed while the command ran, so this evidence describes
     /// no single tree.
     #[serde(skip_serializing_if = "is_false")]
@@ -426,6 +433,11 @@ pub struct StatusReport {
     pub provisional_approval_outstanding: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audit_debt: Option<crate::state::AuditDebt>,
+    /// The dirty-tree waiver in force at the current head, if one is. A waiver
+    /// naming an earlier revision is spent, and is not reported as though it
+    /// still excused anything. Additive in `arc-status/10`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dirty_tree_waiver: Option<crate::state::DirtyTreeWaiver>,
     /// Reviews recorded after integration, never mixed into `verdict`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub audit_verdicts: Vec<crate::state::AuditVerdictEntry>,
@@ -779,6 +791,12 @@ fn build_report(
     // True whenever the waiver is load-bearing: it rescued a self-approval, or
     // it stood in for a verdict that was never recorded. Reporting it only in
     // the first case would let the second merge look independently approved.
+    // Computed before the report takes ownership of the head it is compared
+    // against. A waiver covers exactly the revision it names.
+    let dirty_tree_waiver_in_force = state
+        .dirty_tree_waiver
+        .clone()
+        .filter(|waiver| Some(&waiver.revision) == current_head.as_ref());
     let debt_waives_current_head = head_matches && state.audit_debt_waives_latest_patchset();
     let approval_waived_by_audit_debt = waiver_authorized_approval
         || (debt_waives_current_head
@@ -891,13 +909,19 @@ fn build_report(
                 // laxer timeout is not evidence for a stricter one, and a run
                 // whose declared timeout is unknown cannot be shown to satisfy
                 // a declaration that has one.
-                green_at_head: evidence
-                    .is_some_and(|e| e.green_at_head() && matches_declaration(e, gate)),
-                declaration_changed: evidence
-                    .is_some_and(|e| e.green_at_head() && !matches_declaration(e, gate)),
+                green_at_head: evidence.is_some_and(|e| {
+                    e.green_at_head(state.dirty_tree_waiver.as_ref())
+                        && matches_declaration(e, gate)
+                }),
+                declaration_changed: evidence.is_some_and(|e| {
+                    e.green_at_head(state.dirty_tree_waiver.as_ref())
+                        && !matches_declaration(e, gate)
+                }),
                 attested: evidence.is_some_and(|e| e.attested),
                 tested_tree: evidence.and_then(|e| e.tested_tree.clone()),
                 worktree_dirty: evidence.and_then(|e| e.worktree_dirty),
+                worktree_dirty_tracked: evidence.and_then(|e| e.worktree_dirty_tracked),
+                worktree_dirty_untracked: evidence.and_then(|e| e.worktree_dirty_untracked),
                 tree_moved: evidence.is_some_and(|e| e.tree_moved),
                 evidence_event_id: evidence.map(|e| e.event_id.clone()),
                 revision: evidence.map(|e| e.revision.clone()),
@@ -1170,6 +1194,7 @@ fn build_report(
         audit_debt_outstanding: state.audit_debt_outstanding(),
         provisional_approval_outstanding: state.provisional_approval_outstanding(),
         audit_debt: state.audit_debt.clone(),
+        dirty_tree_waiver: dirty_tree_waiver_in_force,
         audit_verdicts: state.audit_verdicts.clone(),
         forge,
         provenance_check_enabled,

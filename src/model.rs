@@ -334,6 +334,19 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         patchset_id: Option<String>,
     },
+    /// Dirty-tree evidence allowed to count, for one revision.
+    ///
+    /// Dirt stays fatal by default: evidence from a tree no checkout
+    /// reproduces is recorded and declines to count. The exception is declared
+    /// rather than assumed, and binds the way the thing it excuses binds —
+    /// gate evidence counts only at the change's own head, so the waiver
+    /// covers exactly that revision and dies at the next commit.
+    DirtyTreeWaived {
+        reason: String,
+        /// The revision whose evidence this waives, which is the head the
+        /// waiver was declared at.
+        revision: String,
+    },
     /// A review performed after integration.
     ///
     /// Deliberately not a late `VerdictRecorded`. Sharing the event would make
@@ -439,6 +452,15 @@ pub enum Payload {
         /// unknown for the same reasons.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worktree_dirty: Option<bool>,
+        /// Which kind of dirt, recorded separately from whether there was any.
+        /// One bool could not say, so the premise that this wedges
+        /// overwhelmingly on untracked-only dirt was unmeasurable and a waiver
+        /// reason had to be written from memory. Absent on evidence recorded
+        /// before the split, which is not the same as clean.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_dirty_tracked: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree_dirty_untracked: Option<bool>,
         /// The worktree changed while the command ran, so the evidence
         /// describes no single tree.
         #[serde(default, skip_serializing_if = "is_false")]
@@ -657,6 +679,9 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::VerificationRunStarted { .. }
         | Payload::VerificationRecorded { .. }
         | Payload::VerificationReused { .. }
+        // Waiving dirt excuses a gate, and a closed change has no gate left
+        // to excuse.
+        | Payload::DirtyTreeWaived { .. }
         | Payload::HoldSet { .. }
         | Payload::ForgeProjection { .. } => AppendPermission::OpenOnly,
         Payload::Message { .. }

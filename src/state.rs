@@ -306,6 +306,21 @@ pub struct AuditDebt {
     pub declared_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Permission for dirty evidence to count, at one revision.
+///
+/// Bound the way the thing it excuses is bound: gate evidence counts only at
+/// the change's own head, so the waiver covers that revision and dies at the
+/// next commit rather than standing as an open exemption.
+#[derive(Debug, Clone, Serialize)]
+pub struct DirtyTreeWaiver {
+    pub event_id: String,
+    pub reason: String,
+    /// The head this was declared at, and the only revision it covers.
+    pub revision: String,
+    pub actor: String,
+    pub declared_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// One fact a session judged load-bearing mid-work.
 #[derive(Debug, Clone, Serialize)]
 pub struct KeptContext {
@@ -371,6 +386,12 @@ pub struct VerificationEntry {
     pub tested_tree: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_dirty: Option<bool>,
+    /// Which kind of dirt the tree carried. Absent on evidence recorded
+    /// before the split, which is not the same as clean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_dirty_tracked: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_dirty_untracked: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false_ref")]
     pub tree_moved: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -383,10 +404,17 @@ impl VerificationEntry {
     /// changed while the command ran. Attested evidence carries an external
     /// execution context instead of local tree provenance, so a passing
     /// attestation remains eligible.
-    pub fn green_at_head(&self) -> bool {
+    ///
+    /// A dirty tree is excused only by a waiver naming this evidence's own
+    /// revision. A tree that moved mid-run is never excused: that evidence
+    /// describes no single tree, so there is nothing for a waiver to vouch
+    /// for.
+    pub fn green_at_head(&self, waiver: Option<&DirtyTreeWaiver>) -> bool {
+        let dirt_excused = self.worktree_dirty == Some(false)
+            || waiver.is_some_and(|waiver| waiver.revision == self.revision);
         self.result == VerifyResult::Pass
             && !self.tree_moved
-            && (self.attested || (self.tested_tree.is_some() && self.worktree_dirty == Some(false)))
+            && (self.attested || (self.tested_tree.is_some() && dirt_excused))
     }
 }
 
@@ -574,6 +602,10 @@ pub struct ChangeState {
     /// The latest declared review obligation, if one was ever declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_debt: Option<AuditDebt>,
+    /// The latest dirty-tree waiver, which counts only while it names the
+    /// current head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty_tree_waiver: Option<DirtyTreeWaiver>,
     /// Facts a session kept while the work was happening, oldest first, so
     /// `resume` can hand them back to a compacted or cold successor. Skipped
     /// when empty so outputs that serialize the state whole keep their shape
@@ -730,6 +762,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             } => (
                 ChangeState {
                     dangerous: *dangerous,
+                    dirty_tree_waiver: None,
                     change_id: ev.change_id.clone(),
                     slug: slug.clone(),
                     title: title.clone(),
@@ -1213,6 +1246,15 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     created_at: ev.created_at,
                 });
             }
+            Payload::DirtyTreeWaived { reason, revision } => {
+                state.dirty_tree_waiver = Some(DirtyTreeWaiver {
+                    event_id: ev.event_id.clone(),
+                    reason: reason.clone(),
+                    revision: revision.clone(),
+                    actor: ev.actor.clone(),
+                    declared_at: ev.created_at,
+                });
+            }
             Payload::AuditDebtDeclared {
                 reason,
                 patchset_id,
@@ -1352,6 +1394,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 timed_out,
                 tested_tree,
                 worktree_dirty,
+                worktree_dirty_tracked,
+                worktree_dirty_untracked,
                 tree_moved,
                 ..
             } => {
@@ -1415,6 +1459,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     timeout_seconds: *timeout_seconds,
                     tested_tree: tested_tree.clone(),
                     worktree_dirty: *worktree_dirty,
+                    worktree_dirty_tracked: *worktree_dirty_tracked,
+                    worktree_dirty_untracked: *worktree_dirty_untracked,
                     tree_moved: *tree_moved,
                     run_id: run_id.clone(),
                     probe: probe.clone(),
@@ -2162,6 +2208,8 @@ mod tests {
                 note: None,
                 tested_tree: Some("dirty-tree".into()),
                 worktree_dirty: Some(true),
+                worktree_dirty_tracked: None,
+                worktree_dirty_untracked: None,
                 tree_moved: true,
             },
         );

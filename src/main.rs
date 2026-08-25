@@ -499,7 +499,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/9 schema)
+    /// Machine-readable status report (the versioned arc-status/10 schema)
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -843,6 +843,15 @@ enum Cmd {
         /// Optional note recorded alongside the evidence
         #[arg(long)]
         note: Option<String>,
+        /// Let evidence from a dirty worktree count, saying why.
+        ///
+        /// Dirt is fatal by default: a passing run whose tree no checkout
+        /// reproduces is recorded and declines to satisfy the gate. The waiver
+        /// binds the way the evidence binds — to this head alone — so the next
+        /// commit ends it rather than leaving a standing exemption. It is
+        /// visible to a reviewer, who is free to disagree with it.
+        #[arg(long = "waive-dirty", value_name = "REASON")]
+        waive_dirty: Option<String>,
     },
     /// Finish implementation: snapshot, verify all gates, then print check state
     Done {
@@ -2004,6 +2013,7 @@ fn run(cli: Cli) -> Result<i32> {
             execution_host,
             runner,
             note,
+            waive_dirty,
         } => {
             let change = infer(change.as_deref())?;
             commands::verify(
@@ -2024,6 +2034,7 @@ fn run(cli: Cli) -> Result<i32> {
                     execution_host,
                     runner,
                     note,
+                    waive_dirty,
                 },
             )
         }

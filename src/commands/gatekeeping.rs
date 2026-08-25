@@ -68,6 +68,7 @@ pub struct VerifyArgs {
     pub execution_host: Option<String>,
     pub runner: Option<String>,
     pub note: Option<String>,
+    pub waive_dirty: Option<String>,
 }
 
 struct VerificationInput {
@@ -101,6 +102,8 @@ struct CompletedVerification {
     note: Option<String>,
     tested_tree: Option<String>,
     worktree_dirty: Option<bool>,
+    worktree_dirty_tracked: Option<bool>,
+    worktree_dirty_untracked: Option<bool>,
     tree_moved: bool,
 }
 
@@ -120,6 +123,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         execution_host,
         runner,
         note,
+        waive_dirty,
     } = args;
     if all
         && (gate.is_some()
@@ -180,6 +184,36 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     ctx.ensure_declared_actor(&store)?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
     let toplevel = gitio::toplevel(&ctx.cwd)?;
+    // Declared before anything runs, so the evidence this invocation records
+    // is judged under the waiver rather than needing a second pass to excuse
+    // it. It names the head it was declared at, which is the only revision it
+    // covers.
+    let st = if let Some(reason) = waive_dirty.as_deref() {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            bail!(
+                "--waive-dirty must say why dirty evidence should count;                  an empty reason waives the gate without recording a reason"
+            );
+        }
+        let revision = gitio::head(&ctx.cwd)?;
+        let ev = ctx.event(
+            &store,
+            &change_id,
+            Payload::DirtyTreeWaived {
+                reason: reason.to_string(),
+                revision: revision.clone(),
+            },
+        );
+        ensure_append_allowed(&st, &ev.payload)?;
+        store.append_event(&ev)?;
+        println!(
+            "dirty-tree waived at {}: {reason}",
+            &revision[..revision.len().min(8)]
+        );
+        state::reduce(&store.load_events(&change_id)?)?
+    } else {
+        st
+    };
     if let Some(probe_name) = probe {
         let (version, brief) = match brief_version {
             Some(0) => bail!("brief version 0 not found"),
@@ -293,7 +327,8 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 .then(|| st.gate_evidence_at(name, &head))
                 .flatten()
                 .filter(|evidence| {
-                    evidence.green_at_head() && status::matches_declaration(evidence, gate)
+                    evidence.green_at_head(st.dirty_tree_waiver.as_ref())
+                        && status::matches_declaration(evidence, gate)
                 });
             if let Some(evidence) = reusable {
                 println!("gate {name}: skipped (green at head)");
@@ -594,6 +629,7 @@ pub fn snapshot_with_verify(
                 execution_host: None,
                 runner: None,
                 note: None,
+                waive_dirty: None,
             },
         );
     }
@@ -673,6 +709,7 @@ pub fn snapshot_with_verify(
                 execution_host: None,
                 runner: None,
                 note: None,
+                waive_dirty: None,
             },
         )?;
         if code == 0 {
@@ -709,6 +746,7 @@ pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
             execution_host: None,
             runner: None,
             note: None,
+            waive_dirty: None,
         },
     )?;
     check(ctx, reference, false, false)
@@ -856,6 +894,12 @@ fn record_verification(
             let after = gitio::worktree_tree(&ctx.cwd)?;
             let commit_tree = gitio::commit_tree(&ctx.cwd, &revision).ok();
             completed.worktree_dirty = commit_tree.map(|tree| tree != before);
+            // Which kind of dirt, so the waiver reason is self-evident and the
+            // frequency premise is measurable rather than remembered.
+            if let Ok(dirt) = gitio::dirt(&ctx.cwd) {
+                completed.worktree_dirty_tracked = Some(dirt.tracked);
+                completed.worktree_dirty_untracked = Some(dirt.untracked);
+            }
             completed.tree_moved = after != before;
             if completed.tree_moved {
                 eprintln!(
@@ -933,6 +977,8 @@ fn execute_verification(
         // sides of the run.
         tested_tree: None,
         worktree_dirty: None,
+        worktree_dirty_tracked: None,
+        worktree_dirty_untracked: None,
         tree_moved: false,
     })
 }
@@ -980,6 +1026,8 @@ fn append_verifications(
             // Set below, once the tree is pinned.
             tested_tree: None,
             worktree_dirty: item.worktree_dirty,
+            worktree_dirty_tracked: item.worktree_dirty_tracked,
+            worktree_dirty_untracked: item.worktree_dirty_untracked,
             tree_moved: item.tree_moved,
         };
         // Whether this event may be appended at all is settled before any ref

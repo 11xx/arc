@@ -8,10 +8,13 @@ use std::fmt::Write;
 /// revision. `None` when it can, when it did not pass — a failure explains
 /// itself — or when it is not gate evidence: probe readiness is a different
 /// question, answered by the probe's own baseline and final results.
-fn unusable_gate_evidence_reason(entry: &crate::state::VerificationEntry) -> Option<&'static str> {
+fn unusable_gate_evidence_reason(
+    entry: &crate::state::VerificationEntry,
+    waiver: Option<&crate::state::DirtyTreeWaiver>,
+) -> Option<&'static str> {
     if entry.gate.is_none()
         || entry.probe.is_some()
-        || entry.green_at_head()
+        || entry.green_at_head(waiver)
         || entry.result != crate::model::VerifyResult::Pass
     {
         return None;
@@ -567,7 +570,8 @@ pub fn markdown(
             // A passing run that cannot be reused reads as `Pass` above, next
             // to a gate summary that says the same gate is not green. Saying
             // why here is what keeps the two from contradicting each other.
-            if let Some(reason) = unusable_gate_evidence_reason(v) {
+            if let Some(reason) = unusable_gate_evidence_reason(v, state.dirty_tree_waiver.as_ref())
+            {
                 let _ = writeln!(w, "  - not reusable as evidence: {reason}");
             }
         }
@@ -1072,6 +1076,14 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
         } => (
             "disposition-recorded",
             format!("{finding_id} {}", format!("{status:?}").to_lowercase()),
+        ),
+        Payload::DirtyTreeWaived { reason, revision } => (
+            "dirty-tree-waived",
+            format!(
+                "{}: {}",
+                &revision[..revision.len().min(8)],
+                one_line(reason)
+            ),
         ),
         Payload::AuditDebtDeclared {
             reason,

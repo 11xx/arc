@@ -265,6 +265,35 @@ pub fn is_clean(cwd: &Path) -> Result<bool> {
     Ok(git(cwd, &["status", "--porcelain"])?.is_empty())
 }
 
+/// Tracked and untracked dirt, recorded separately so a waiver reason is
+/// self-evident at the moment of waiving and the frequency premise becomes
+/// measurable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Dirt {
+    pub tracked: bool,
+    pub untracked: bool,
+}
+
+/// What kind of dirt a worktree carries.
+///
+/// One bool cannot say which, so the claim that this wedges overwhelmingly on
+/// untracked-only dirt could not be checked. `git status --porcelain` already
+/// exempts ignored paths, so what it reports as untracked is versionable
+/// content nobody added — most often the forgotten `git add` the build may
+/// already be reading.
+pub fn dirt(cwd: &Path) -> Result<Dirt> {
+    let status = git(cwd, &["status", "--porcelain"])?;
+    let mut dirt = Dirt::default();
+    for line in status.lines().filter(|line| !line.trim().is_empty()) {
+        if line.starts_with("??") {
+            dirt.untracked = true;
+        } else {
+            dirt.tracked = true;
+        }
+    }
+    Ok(dirt)
+}
+
 pub fn branch_exists(cwd: &Path, branch: &str) -> bool {
     git(
         cwd,

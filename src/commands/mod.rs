@@ -676,6 +676,7 @@ mod tests {
 
     fn change(id: &str, blocked_by: &[&str], closure: Option<Closure>) -> ChangeState {
         ChangeState {
+            dirty_tree_waiver: None,
             dangerous: false,
             kept: Vec::new(),
             change_id: id.into(),
