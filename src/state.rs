@@ -405,13 +405,20 @@ impl VerificationEntry {
     /// execution context instead of local tree provenance, so a passing
     /// attestation remains eligible.
     ///
-    /// A dirty tree is excused only by a waiver naming this evidence's own
-    /// revision. A tree that moved mid-run is never excused: that evidence
-    /// describes no single tree, so there is nothing for a waiver to vouch
-    /// for.
+    /// A waiver excuses dirt that was *observed*, and only at the revision it
+    /// names. Cleanliness recorded as unknown is not dirt somebody looked at
+    /// and accepted — the parallel path records it that way precisely because
+    /// a shared batch cannot tell whether a gate changed and restored a file
+    /// while another was still running. Letting a waiver cover that would
+    /// vouch for a tree nobody saw. A tree that moved mid-run is never
+    /// excused either: that evidence describes no single tree, so there is
+    /// nothing to vouch for.
     pub fn green_at_head(&self, waiver: Option<&DirtyTreeWaiver>) -> bool {
-        let dirt_excused = self.worktree_dirty == Some(false)
-            || waiver.is_some_and(|waiver| waiver.revision == self.revision);
+        let dirt_excused = match self.worktree_dirty {
+            Some(false) => true,
+            Some(true) => waiver.is_some_and(|waiver| waiver.revision == self.revision),
+            None => false,
+        };
         self.result == VerifyResult::Pass
             && !self.tree_moved
             && (self.attested || (self.tested_tree.is_some() && dirt_excused))

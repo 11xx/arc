@@ -1527,6 +1527,66 @@ fn a_dirty_tree_waiver_lets_evidence_count_and_dies_at_the_next_commit() {
     assert!(status["dirty_tree_waiver"].is_null(), "{status}");
 }
 
+/// A waiver excuses dirt somebody observed. A parallel batch records
+/// cleanliness as unknown on purpose — a shared batch cannot tell whether one
+/// gate changed and restored a file while another was still running — and a
+/// waiver that covered that would vouch for a tree nobody saw.
+#[test]
+fn a_waiver_cannot_green_evidence_whose_cleanliness_is_unknown() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gate"]);
+    stdout(repo.arc(&repo.root).args(["begin", "unknown-prov"]));
+    let wt = repo.home.join(".worktrees/repo-unknown-prov");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    fs::write(wt.join("scratch.rs"), "not committed\n").unwrap();
+
+    // Asking for both is refused rather than silently recording a waiver that
+    // could never make anything green.
+    repo.arc(&wt)
+        .args([
+            "verify",
+            "unknown-prov",
+            "--all",
+            "--parallel",
+            "--waive-dirty",
+            "untracked fixture",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--waive-dirty cannot be combined with --parallel",
+        ));
+
+    // And a waiver already standing at this revision does not rescue evidence
+    // the parallel path recorded with unknown provenance.
+    repo.arc(&wt)
+        .args([
+            "verify",
+            "unknown-prov",
+            "--gate",
+            "unit",
+            "--waive-dirty",
+            "untracked fixture",
+        ])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["verify", "unknown-prov", "--all", "--parallel"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&wt).args(["status", "unknown-prov", "--json"]));
+    let gate = &status["gates"][0];
+    assert!(gate["worktree_dirty"].is_null(), "{status}");
+    assert_eq!(gate["green_at_head"], false, "{status}");
+}
+
 /// One bool could not say which kind of dirt wedged the gate, so the premise
 /// that this fires overwhelmingly on untracked-only dirt was unmeasurable and
 /// a waiver reason had to be written from memory.

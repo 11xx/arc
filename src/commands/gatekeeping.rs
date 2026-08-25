@@ -145,6 +145,17 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     if parallel && !all {
         bail!("--parallel requires --all");
     }
+    // A parallel batch records cleanliness as unknown, and a waiver excuses
+    // only dirt somebody observed. Accepting the pair would record a waiver
+    // that can never make anything green, which reads as permission granted.
+    if parallel && waive_dirty.is_some() {
+        bail!(
+            "--waive-dirty cannot be combined with --parallel: a parallel batch \
+             records worktree cleanliness as unknown, and a waiver excuses \
+             observed dirt rather than a tree nobody could see. Run the gates \
+             sequentially to waive."
+        );
+    }
     if skip_green && !all {
         bail!("--skip-green requires --all");
     }
