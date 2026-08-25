@@ -1402,6 +1402,64 @@ fn doctor_refuses_a_file_that_is_unclassified_or_classified_twice() {
     );
 }
 
+/// `git ls-files` lists the subtree it runs from, under names relative to it,
+/// so a scan run from anywhere but the toplevel checks a subset against roots
+/// that match nothing — and reports a clean bill of health for a world it
+/// never looked at. The failure is silent by construction, so the regression
+/// runs `doctor` from a subdirectory rather than asserting the call site.
+#[test]
+fn classification_is_checked_from_a_subdirectory_too() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::create_dir_all(repo.root.join("src/commands")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n\n[danger]\n\
+         paths = [\"src/gate.rs\"]\n\
+         source_roots = [\"src/\"]\n\
+         acknowledged_safe = [\"src/view.rs\"]\n",
+    )
+    .unwrap();
+    for path in ["src/gate.rs", "src/view.rs", "src/stray.rs"] {
+        fs::write(repo.root.join(path), "// file\n").unwrap();
+    }
+    fs::write(repo.root.join("src/commands/deep.rs"), "// file\n").unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "policy and sources"]);
+
+    for dir in [
+        repo.root.clone(),
+        repo.root.join("src"),
+        repo.root.join("src/commands"),
+    ] {
+        let out = repo.arc(&dir).args(["doctor", "--json"]).output().unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let unclassified: Vec<&str> = report["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["code"] == "danger-unclassified")
+            .map(|p| p["detail"].as_str().unwrap())
+            .collect();
+        // The same two unclassified files, wherever the command was run.
+        assert_eq!(unclassified.len(), 2, "from {}: {report}", dir.display());
+        assert!(
+            unclassified
+                .iter()
+                .any(|detail| detail.starts_with("src/stray.rs")),
+            "from {}: {report}",
+            dir.display()
+        );
+        assert!(
+            unclassified
+                .iter()
+                .any(|detail| detail.starts_with("src/commands/deep.rs")),
+            "from {}: {report}",
+            dir.display()
+        );
+    }
+}
+
 /// Closing the world is opt-in: a project that declares no source root keeps
 /// the open-world list it had, and `doctor` says nothing about files nobody
 /// classified.
