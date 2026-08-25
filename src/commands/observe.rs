@@ -424,6 +424,24 @@ fn watch_reached(
             .as_ref()
             .is_some_and(|claim| state::claim_timing_at(claim, chrono::Utc::now()).stale)
             .then_some(None),
+        // Any verdict against the patchset under review, whatever it concluded.
+        // `ready` cannot express this: a review returning changes-requested or
+        // comment-only never satisfies it, so the watch runs to its timeout and
+        // leaves *still working*, *changes requested*, and *reviewer died*
+        // indistinguishable from each other. The caller reads the verdict named
+        // here to learn which.
+        //
+        // Bound to the latest patchset, because a verdict on an earlier one was
+        // answered by a commit since: satisfying the wait with it would report a
+        // review of code the reviewer never saw.
+        WatchUntil::Reviewed => state.latest_patchset().and_then(|latest| {
+            state
+                .verdicts
+                .iter()
+                .rev()
+                .find(|verdict| verdict.patchset_id == latest.id)
+                .map(|verdict| Some(verdict.event_id.clone()))
+        }),
         WatchUntil::Ready => ctx.report(store, &state)?.integrate_ready.then_some(None),
         WatchUntil::Integrated => state
             .closure
