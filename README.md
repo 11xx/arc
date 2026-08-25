@@ -161,6 +161,9 @@ everything not yet opened as a change. `arc inbox` therefore reports the
 journal's tier counts and newest primary items beside its own buckets, and
 `arc begin <slug> --from-journal <file>` turns a queued artifact into a change,
 consuming it.
+`arc inbox --json` uses `arc-inbox/5`; a change opened with `--iterating` is
+classified in the separate `iterating` bucket rather than in review or ready
+queues.
 
 ## Quick tour
 
@@ -216,6 +219,12 @@ arc integrate radio-refill-fix --cleanup
 # allowed here; --into and --message are intentionally per-change only.
 arc integrate --tag '#radio-series' --cleanup
 ```
+
+`--profile` selects the change's workflow (`direct`, `local`, `forge`, or
+`release`). Add `--iterating` when integration is not yet the goal; `arc check`
+then reports the typed `iterating` blocker instead of requesting a review, and
+`arc iterating <change> --off` clears the declaration when the change is ready
+to return to the integration path.
 
 Every `changes-requested` round classifies its root cause with one or more
 `--cause` values. `brief` means the patchset faithfully exposed a missing,
@@ -343,7 +352,7 @@ condition is reached, with a JSON diagnostic containing the winning
 watch conditions are checked in their supplied order and the first reached
 condition wins.
 
-`arc status <change>` prints the versioned `arc-status/11` JSON report —
+`arc status <change>` prints the versioned `arc-status/12` JSON report —
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, claim owner/activity/stage timing, snapshot
 provenance, a blocker summary, a machine-readable `next_action`, an additive
@@ -652,6 +661,7 @@ reported for separate transfer.
 | 8 | claim or stage ownership/liveness conflict |
 | 9 | execution role refused the command |
 | 10 | forge link refused: observed tuple or policy mismatch |
+| 13 | change declares it is iterating; clear it before integrating |
 
 ## Build and gate declaration
 
@@ -729,7 +739,7 @@ worktree, the advice is the rerun. Once the tree is clean the advice
 becomes `run_gate:<gate>`, since
 evidence already recorded cannot be repaired by cleaning; only a fresh run
 replaces it. The `clean_worktree:<gate>` action arrived in `arc-status/7`;
-the current schema is `arc-status/11`.
+the current schema is `arc-status/12`.
 
 Executed gates capture combined stdout and stderr, retaining only the final
 4096 bytes. Failed-gate tails appear in `arc show` and `arc status`; successful

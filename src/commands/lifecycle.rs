@@ -18,6 +18,7 @@ pub fn begin(
     tags: Vec<String>,
     from_journal: Option<String>,
     dangerous: bool,
+    iterating: bool,
 ) -> Result<()> {
     ids::validate_slug(slug)?;
     // Promotion is one journal transition from the open preflight through the
@@ -140,6 +141,15 @@ pub fn begin(
         },
     );
     store.append_event(&ev)?;
+    if iterating {
+        let mut event = ctx.event(
+            &store,
+            &change_id,
+            Payload::IterationScopeSet { iterating: true },
+        );
+        event.event_id = event_id_after(&ev.event_id)?;
+        store.append_event(&event)?;
+    }
 
     // Advisory bridge to the journal, both best-effort: mark the source item
     // consumed, and narrate the opening if auto-log is enabled. Neither can
@@ -204,6 +214,21 @@ pub fn begin(
     if let Some(wt) = worktree_path {
         println!("worktree: {wt}");
     }
+    Ok(())
+}
+
+pub fn iterating(ctx: &Ctx, reference: &str, off: bool) -> Result<()> {
+    let store = ctx.store()?;
+    let (change_id, _transition, state) = locked_state(&store, reference)?;
+    let iterating = !off;
+    if state.iterating == iterating {
+        println!("iterating: {iterating} (unchanged)");
+        return Ok(());
+    }
+    let event = ctx.event(&store, &change_id, Payload::IterationScopeSet { iterating });
+    store.append_event(&event)?;
+    println!("iterating: {iterating}");
+    println!("event: {}", event.event_id);
     Ok(())
 }
 

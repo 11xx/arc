@@ -172,7 +172,7 @@ fn claim_lifecycle_reports_defaults_renewal_conflict_release_and_expiry() {
         .success();
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "claim-life"]))).unwrap();
-    assert_eq!(status["schema"], "arc-status/11");
+    assert_eq!(status["schema"], "arc-status/12");
     assert_eq!(status["claim"]["owner"]["actor"], "tester");
     assert_eq!(status["claim"]["owner"]["harness"], "test");
     assert_eq!(status["claim"]["owner"]["session"], "session-a");

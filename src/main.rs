@@ -203,6 +203,9 @@ enum Cmd {
         /// touch. One-way: nothing lowers it afterwards
         #[arg(long)]
         dangerous: bool,
+        /// Open the change declaring that integration is not yet the goal
+        #[arg(long)]
+        iterating: bool,
     },
     /// List changes
     List {
@@ -441,7 +444,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Lead-facing queue rollup: open changes, active claims, and outstanding audit debt (arc-inbox/4 schema)
+    /// Lead-facing queue rollup: open changes, active claims, and outstanding audit debt (arc-inbox/5 schema)
     Inbox {
         /// Restrict to changes assigned to this harness
         #[arg(long = "assigned-to")]
@@ -499,7 +502,15 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/11 schema)
+    /// Declare that this change is being iterated on, or clear the declaration
+    Iterating {
+        /// Change whose iteration declaration is changed
+        change: String,
+        /// Clear the iteration declaration
+        #[arg(long)]
+        off: bool,
+    },
+    /// Machine-readable status report (the versioned arc-status/12 schema)
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1494,6 +1505,7 @@ fn run(cli: Cli) -> Result<i32> {
             tag,
             from_journal,
             dangerous,
+            iterating,
         } => {
             commands::begin(
                 &ctx,
@@ -1510,6 +1522,7 @@ fn run(cli: Cli) -> Result<i32> {
                 tag,
                 from_journal,
                 dangerous,
+                iterating,
             )?;
             Ok(0)
         }
@@ -1752,6 +1765,10 @@ fn run(cli: Cli) -> Result<i32> {
             } else {
                 commands::read_metadata(&ctx, &change, json)?;
             }
+            Ok(0)
+        }
+        Cmd::Iterating { change, off } => {
+            commands::iterating(&ctx, &change, off)?;
             Ok(0)
         }
         Cmd::Status {

@@ -760,7 +760,7 @@ fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
         .success();
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/4");
+    assert_eq!(inbox["schema"], "arc-inbox/5");
     let owed = inbox["audit-owed"].as_array().unwrap();
     assert_eq!(owed.len(), 1, "{owed:?}");
     assert_eq!(owed[0]["next_actor"], "reviewer");

@@ -1348,6 +1348,13 @@ fn integrate_one(
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let initial = state::reduce(&store.load_events(&change_id)?)?;
+    if initial.iterating {
+        eprintln!(
+            "change declares it is iterating; clear it with arc iterating {} --off",
+            initial.change_id
+        );
+        return Ok(status::Blocker::Iterating.exit_code());
+    }
     let target = into.unwrap_or_else(|| initial.target_branch.clone());
     if dry_run {
         // A dry run promises to write nothing, so there is no record for the
