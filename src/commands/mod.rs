@@ -103,6 +103,7 @@ const POLL_MAX: Duration = Duration::from_secs(1);
 pub enum WatchUntil {
     Snapshot,
     Stalled,
+    Reviewed,
     Ready,
     Integrated,
     Closed,
@@ -113,6 +114,7 @@ impl WatchUntil {
         match self {
             WatchUntil::Snapshot => "snapshot",
             WatchUntil::Stalled => "stalled",
+            WatchUntil::Reviewed => "reviewed",
             WatchUntil::Ready => "ready",
             WatchUntil::Integrated => "integrated",
             WatchUntil::Closed => "closed",

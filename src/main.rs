@@ -567,6 +567,14 @@ enum Cmd {
         /// With --tag: return when every member has reached a condition
         #[arg(long)]
         all: bool,
+        /// Condition to wait for (repeatable, comma-separated).
+        ///
+        /// `reviewed` returns on any verdict against the patchset under
+        /// review, whatever it concluded, and names the verdict event so the
+        /// caller can read which. `ready` is stricter and different: approved,
+        /// gates green, no blockers — a review asking for changes never
+        /// satisfies it, so waiting on `ready` for a dispatched review cannot
+        /// tell a reviewer still working from one that answered.
         #[arg(long, value_enum, value_delimiter = ',', required = true)]
         until: Vec<commands::WatchUntil>,
         /// Fail with exit 2 after this many seconds

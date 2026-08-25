@@ -303,6 +303,117 @@ fn watch_normalises_tags_like_every_other_tag_reader() {
         .stdout("timeout: ready\n");
 }
 
+/// A lead waiting on a dispatched review wants to resume when a verdict lands,
+/// whatever it concluded. `ready` cannot express that — a review asking for
+/// changes never satisfies it, so the wait runs to timeout and *still
+/// working*, *changes requested*, and *reviewer died* all look identical from
+/// outside.
+#[test]
+fn watch_reviewed_returns_on_any_verdict_including_changes_requested() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "watch-reviewed");
+
+    // Nothing recorded yet: the wait is genuinely waiting.
+    repo.arc(&worktree)
+        .args([
+            "watch",
+            "watch-reviewed",
+            "--until",
+            "reviewed",
+            "--timeout",
+            "1",
+        ])
+        .assert()
+        .code(2)
+        .stdout("timeout: reviewed\n");
+
+    // A verdict that refuses the change still ends the wait: the caller reads
+    // the verdict to learn which way it went.
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args([
+            "review",
+            "watch-reviewed",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+            "--body",
+            "not yet",
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args([
+            "watch",
+            "watch-reviewed",
+            "--until",
+            "reviewed",
+            "--timeout",
+            "4",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("reached: reviewed"));
+
+    // `ready` remains the stricter, different question, and this change does
+    // not satisfy it.
+    repo.arc(&worktree)
+        .args([
+            "watch",
+            "watch-reviewed",
+            "--until",
+            "ready",
+            "--timeout",
+            "1",
+        ])
+        .assert()
+        .code(2);
+}
+
+/// A verdict answered by a commit since is not a review of what is there now.
+/// Satisfying the wait with it would report a review of code the reviewer
+/// never saw.
+#[test]
+fn watch_reviewed_ignores_a_verdict_on_an_earlier_patchset() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "watch-stale-verdict");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args([
+            "review",
+            "watch-stale-verdict",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+            "--body",
+            "fix this",
+        ])
+        .assert()
+        .success();
+
+    // The change moves on, and the verdict now describes an older tree.
+    repo.commit(&worktree, "next.rs", "more\n", "feat: more");
+    repo.arc(&worktree)
+        .args(["snapshot", "watch-stale-verdict"])
+        .assert()
+        .success();
+
+    repo.arc(&worktree)
+        .args([
+            "watch",
+            "watch-stale-verdict",
+            "--until",
+            "reviewed",
+            "--timeout",
+            "1",
+        ])
+        .assert()
+        .code(2)
+        .stdout("timeout: reviewed\n");
+}
+
 #[test]
 fn watch_ready_times_out_when_check_is_not_green() {
     let repo = Repo::new();
