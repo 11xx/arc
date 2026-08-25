@@ -211,7 +211,21 @@ pub fn snapshot(
         .and_then(|target_head| gitio::merge_base(&ctx.cwd, &target_head, &head).ok());
     let base_rev = match base {
         Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
-        None => merge_base.clone().unwrap_or_else(|| st.base.clone()),
+        None => match merge_base.as_ref() {
+            Some(merge_base) => {
+                // A stacked change's opening base is a floor: use it only while it lies
+                // between the target merge base and the branch head.
+                let opening_base_is_floor = merge_base != &st.base
+                    && gitio::is_ancestor(&ctx.cwd, merge_base, &st.base)?
+                    && gitio::is_ancestor(&ctx.cwd, &st.base, &head)?;
+                if opening_base_is_floor {
+                    st.base.clone()
+                } else {
+                    merge_base.clone()
+                }
+            }
+            None => st.base.clone(),
+        },
     };
     let brief_ref = match brief_version {
         Some(0) => bail!("brief version 0 not found"),
