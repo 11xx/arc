@@ -1148,11 +1148,50 @@ pipe-friendly IDs, a scannable orchestration table, or structured rows.
 
 ## Non-goals
 
-Not a forge or forge clone, no hosted-PR parity claim, no daemon or web
-UI, and no automatic multi-machine synchronization. Export/import moves
-the ledger as one file; Git objects still travel separately. A forge-PR
-projection is planned, while shared Git-ref sync remains deferred until
-a real concurrent multi-machine need exists.
+Not a forge or forge clone, no hosted-PR parity claim, no daemon, no web
+UI, no database, and no automatic multi-machine synchronization. arc makes
+no network call anywhere: every command reads and writes the local
+repository and nothing else, and `git` is the only program it invokes on
+its own behalf — a declared gate command is the project's, not arc's.
+Export/import moves the ledger as one file; Git objects still travel
+separately. A forge-PR projection is planned, while shared Git-ref
+sync remains deferred until a real concurrent multi-machine need exists.
+
+## Changing arc
+
+Rules for working on arc itself, as distinct from working with it.
+
+**Drive non-trivial work through arc.** The tool is its own first
+consumer, and a lifecycle nobody runs is a lifecycle nobody tests. Open a
+change, record a brief, snapshot, verify, review, and integrate through
+the guarded path. Only a one-line, self-evident fix is worth exempting.
+
+**Reinstall after integrating a CLI change.** The binary on `PATH` is not
+the tree; until it is replaced, arc reports the ledger with the code the
+change just replaced:
+
+```sh
+cargo install --path . --locked
+```
+
+**A breaking shape change bumps its schema version.** Every projection,
+report, and bundle is versioned so a consumer can program against it.
+Adding an optional field is additive and keeps the version; removing a
+field, renaming one, or changing what an existing one means is breaking
+and takes the next version. Mark an additive field with the version that
+introduced it, the way the surrounding fields are marked, and update every
+place the version is quoted in prose — a version quoted in three documents
+goes stale in three documents.
+
+**Record a behaviour change as a changelog entry on the change that made
+it.** The `[Unreleased]` block is projected from those entries at release
+time; a behaviour change with no entry is a behaviour change the release
+notes cannot mention.
+
+**Keep the instruction surfaces accurate.** arc teaches its own use, so
+the guide `arc` prints with no arguments, each command's `--help`, and this
+README are load-bearing rather than decorative. A change that alters
+behaviour updates them in the same change.
 
 ## Project journal mechanics
 
