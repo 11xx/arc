@@ -292,10 +292,13 @@ it joins the ledger state with worktree divergence and assesses a stale or
 expired foreign claim as abandoned. Rescue is read-only unless `--take` is
 given; takeover follows the same stale-claim rules as `arc claim --takeover`,
 records the displaced owner, and narrates the handover to journal auto-log.
-`--json` emits the versioned `arc-rescue/1` object.
+`--json` emits the versioned `arc-rescue/2` object.
 `--transcript [--tail N]` includes the claimed session's latest operator turns;
-arc prints what the transcript contains and performs no redaction, so the
-option is opt-in and its output should be treated as sensitive.
+it tries `tapes` when that CLI is installed and falls back to arc's own readers
+otherwise. `tapes` is what covers OpenCode sessions, while arc continues to
+work without `tapes` for its native readers. Arc names the reader that supplied
+the turns, prints what the transcript contains, and performs no redaction, so
+the option is opt-in and its output should be treated as sensitive.
 
 Observe a change without scraping status views, or wait for one condition for
 shell orchestration:

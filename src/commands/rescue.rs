@@ -4,7 +4,7 @@ use crate::state::{Brief, ClaimIdentity};
 use crate::status::{self, BriefBaseDrift, FindingSummary, GateStatus};
 use std::path::PathBuf;
 
-const RESCUE_SCHEMA: &str = "arc-rescue/1";
+const RESCUE_SCHEMA: &str = "arc-rescue/2";
 
 #[derive(Serialize)]
 struct RescueOutput<'a> {
@@ -41,6 +41,10 @@ struct RescueTranscript {
     path: Option<PathBuf>,
     count: usize,
     turns: Vec<Turn>,
+    /// Which reader answered: `tapes` or `native`. A reader who cannot tell
+    /// where turns came from cannot tell what a missing turn means.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'static str>,
     #[serde(skip)]
     unavailable: Option<&'static str>,
 }
@@ -136,16 +140,35 @@ pub fn rescue(
                         "claude" | "codex" | "opencode" | "pi"
                     )
             });
-            let path = transcript_owner
+            let tapes_attempted = identity_known;
+            // An empty answer from tapes falls through rather than winning:
+            // a session it knows nothing about and one whose turns it cannot
+            // read look alike from here, and the file on disk may still have
+            // them.
+            let tapes = transcript_owner
                 .filter(|_| identity_known)
-                .and_then(|owner| session_store::transcript_path(&owner.harness, &owner.session));
-            let turns = path
-                .as_deref()
-                .map(|path| session_store::operator_turns(path, tail))
-                .transpose()?
-                .unwrap_or_default();
+                .and_then(|owner| session_store::tapes_turns(&owner.session, tail))
+                .filter(|turns| !turns.is_empty());
+            let (path, turns, source) = if let Some(turns) = tapes {
+                (None, turns, Some("tapes"))
+            } else {
+                let path = transcript_owner
+                    .filter(|_| identity_known)
+                    .and_then(|owner| {
+                        session_store::transcript_path(&owner.harness, &owner.session)
+                    });
+                let turns = path
+                    .as_deref()
+                    .map(|path| session_store::operator_turns(path, tail))
+                    .transpose()?
+                    .unwrap_or_default();
+                let source = path.as_ref().map(|_| "native");
+                (path, turns, source)
+            };
             let unavailable = if !identity_known {
                 Some("claim harness/session is unknown")
+            } else if tapes_attempted && source.is_none() {
+                Some("no transcript for the claimed session in tapes or on disk")
             } else if path.is_none() {
                 Some("no transcript file exists for the claimed session")
             } else {
@@ -155,6 +178,7 @@ pub fn rescue(
                 path,
                 count: turns.len(),
                 turns,
+                source,
                 unavailable,
             })
         })
@@ -239,23 +263,22 @@ fn render(output: &RescueOutput<'_>) {
     }
     if let Some(transcript) = &output.transcript {
         println!("\n## Transcript\n");
-        match &transcript.path {
-            Some(path) => {
-                println!("- Path: `{}`", path.display());
-                println!("- Turns: {}", transcript.count);
-                for turn in &transcript.turns {
-                    match &turn.ts {
-                        Some(ts) => println!("\n### {} ({ts})\n\n{}", turn.role, turn.text),
-                        None => println!("\n### {}\n\n{}", turn.role, turn.text),
-                    }
+        if let Some(path) = &transcript.path {
+            println!("- Path: `{}`", path.display());
+        }
+        if let Some(unavailable) = transcript.unavailable {
+            println!("- Unavailable: {unavailable}");
+        } else {
+            println!("- Turns: {}", transcript.count);
+            if let Some(source) = transcript.source {
+                println!("- Source: {source}");
+            }
+            for turn in &transcript.turns {
+                match &turn.ts {
+                    Some(ts) => println!("\n### {} ({ts})\n\n{}", turn.role, turn.text),
+                    None => println!("\n### {}\n\n{}", turn.role, turn.text),
                 }
             }
-            None => println!(
-                "- Unavailable: {}",
-                transcript
-                    .unavailable
-                    .expect("missing transcript should carry an explanation")
-            ),
         }
     }
     println!("\n## Worktree\n");
