@@ -1,8 +1,9 @@
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const TRANSCRIPT_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -11,6 +12,18 @@ pub struct Turn {
     pub role: String,
     pub text: String,
     pub ts: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TapesResponse {
+    turns: Vec<TapesTurn>,
+}
+
+#[derive(Deserialize)]
+struct TapesTurn {
+    role: String,
+    text: String,
+    ts: Option<String>,
 }
 
 pub fn transcript_path(harness: &str, session: &str) -> Option<PathBuf> {
@@ -42,6 +55,58 @@ pub fn transcript_path(harness: &str, session: &str) -> Option<PathBuf> {
     }
 }
 
+/// A session's turns as `tapes` reports them, or `None` when tapes cannot
+/// answer — absent binary, non-zero exit, unparseable output. Every one of
+/// those is a fall-back signal rather than an error: this is the preferred
+/// path, not the only one.
+pub fn tapes_turns(session: &str, limit: usize) -> Option<Vec<Turn>> {
+    if limit == 0 {
+        return Some(Vec::new());
+    }
+    let output = Command::new("tapes")
+        .args(["show", session, "--json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let response = serde_json::from_slice::<TapesResponse>(&output.stdout).ok()?;
+    // No `--tail`: tapes' own default window is the analogue of the byte
+    // window the file reader takes, and the curation below is what decides how
+    // many turns come back. Bounding tapes first would make `--tail` mean the
+    // last N turns of any role here and the last N operator turns there.
+    let turns = response
+        .turns
+        .into_iter()
+        .filter(|turn| matches!(turn.role.as_str(), "user" | "assistant"))
+        .map(|turn| Turn {
+            role: turn.role,
+            text: turn.text,
+            ts: turn.ts,
+        })
+        .collect();
+    Some(operator_view(turns, limit))
+}
+
+/// The operator's view of a transcript: what they asked, plus where the
+/// assistant got to. Shared by both readers, so `--tail` counts the same thing
+/// whichever one answered.
+fn operator_view(turns: Vec<Turn>, limit: usize) -> Vec<Turn> {
+    let mut users = Vec::new();
+    let mut last_message = None;
+    for turn in turns {
+        if turn.role == "user" {
+            users.push(turn.clone());
+        }
+        last_message = Some(turn);
+    }
+    if let Some(turn) = last_message.filter(|turn| turn.role == "assistant") {
+        users.push(turn);
+    }
+    let keep_from = users.len().saturating_sub(limit);
+    users.drain(keep_from..).collect()
+}
+
 pub fn opencode_databases() -> Option<[PathBuf; 2]> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     let data_home = std::env::var_os("XDG_DATA_HOME")
@@ -71,26 +136,12 @@ pub fn operator_turns(path: &Path, limit: usize) -> Result<Vec<Turn>> {
     }
 
     let text = String::from_utf8_lossy(&bytes);
-    let mut users = Vec::new();
-    let mut last_message = None;
-    for line in text.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let Some(turn) = parse_turn(&value) else {
-            continue;
-        };
-        if turn.role == "user" {
-            users.push(turn.clone());
-        }
-        last_message = Some(turn);
-    }
-    if let Some(turn) = last_message.filter(|turn| turn.role == "assistant") {
-        users.push(turn);
-    }
-
-    let keep_from = users.len().saturating_sub(limit);
-    Ok(users.drain(keep_from..).collect())
+    let turns = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|value| parse_turn(&value))
+        .collect();
+    Ok(operator_view(turns, limit))
 }
 
 fn parse_turn(value: &serde_json::Value) -> Option<Turn> {

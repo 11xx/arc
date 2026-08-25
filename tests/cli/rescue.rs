@@ -1,5 +1,6 @@
 use super::common::*;
 use predicates::prelude::*;
+use std::os::unix::fs::PermissionsExt;
 
 fn begin(repo: &Repo, slug: &str) -> (String, PathBuf) {
     let output = stdout(repo.arc(&repo.root).args(["begin", slug]));
@@ -172,8 +173,81 @@ fn rescue_json_uses_versioned_schema() {
     let output = stdout(repo.arc(&worktree).args(["rescue", "--json"]));
     let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 
-    assert_eq!(value["schema"], "arc-rescue/1");
+    assert_eq!(value["schema"], "arc-rescue/2");
     assert!(value.get("transcript").is_none());
+}
+
+#[test]
+fn rescue_transcript_prefers_tapes() {
+    let repo = Repo::new();
+    let session = "opencode-dead-session";
+    let (change_id, worktree) = begin(&repo, "tapes-transcript");
+    claim_from_session(&repo, "tapes-transcript", "opencode", session);
+
+    let tapes_bin = repo.home.join("tapes-bin");
+    fs::create_dir_all(&tapes_bin).unwrap();
+    let tapes = tapes_bin.join("tapes");
+    fs::write(
+        &tapes,
+        concat!(
+            "#!/bin/sh\n",
+            "printf '%s\\n' '",
+            "{\"schema\":\"tapes-session/1\",\"session\":{},\"turns\":[",
+            "{\"role\":\"user\",\"text\":\"fake question\",\"ts\":\"1\"},",
+            "{\"role\":\"system\",\"text\":\"ignored\",\"ts\":\"2\"},",
+            "{\"role\":\"assistant\",\"text\":\"fake answer\",\"ts\":\"3\"}",
+            "],\"truncated\":false}'\n",
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&tapes, fs::Permissions::from_mode(0o755)).unwrap();
+    let path_with_tapes = format!(
+        "{}:{}",
+        tapes_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let output = stdout(repo.arc(&worktree).env("PATH", path_with_tapes).args([
+        "rescue",
+        change_id.as_str(),
+        "--transcript",
+        "--json",
+    ]));
+    let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["transcript"]["source"], "tapes");
+    assert_eq!(value["transcript"]["count"], 2);
+    assert_eq!(value["transcript"]["turns"][0]["text"], "fake question");
+    assert_eq!(value["transcript"]["turns"][1]["text"], "fake answer");
+
+    let git = std::env::split_paths(&std::env::var_os("PATH").expect("PATH is set"))
+        .map(|dir| dir.join("git"))
+        .find_map(|path| path.is_file().then(|| fs::canonicalize(path).unwrap()))
+        .expect("git must be available on PATH");
+    let path_without_tapes = repo.home.join("without-tapes-bin");
+    fs::create_dir_all(&path_without_tapes).unwrap();
+    std::os::unix::fs::symlink(git, path_without_tapes.join("git")).unwrap();
+
+    let output = repo
+        .arc(&worktree)
+        .env("PATH", &path_without_tapes)
+        .args(["rescue", change_id.as_str(), "--transcript", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["transcript"]["count"], 0);
+    assert!(value["transcript"]["turns"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+
+    repo.arc(&worktree)
+        .env("PATH", &path_without_tapes)
+        .args(["rescue", change_id.as_str(), "--transcript"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Unavailable: no transcript for the claimed session in tapes or on disk",
+        ));
 }
 
 #[test]
@@ -248,7 +322,7 @@ fn missing_transcript_is_reported_without_failure() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Unavailable: no transcript file exists for the claimed session",
+            "Unavailable: no transcript for the claimed session in tapes or on disk",
         ));
 }
 
