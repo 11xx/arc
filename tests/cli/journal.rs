@@ -2105,10 +2105,7 @@ fn begin_from_journal_plan_opens_multiple_changes_with_ref() {
         .to_string();
 
     for slug in ["roadmap-one", "roadmap-two"] {
-        repo.arc(&repo.root)
-            .args(["begin", slug, "--no-worktree", "--from-journal", &file])
-            .assert()
-            .success();
+        begin_no_worktree(&repo, slug, &["--from-journal", &file]);
         let show = json_stdout(repo.arc(&repo.root).args(["show", slug, "--json"]));
         assert_eq!(show["journal_ref"], file);
     }
@@ -5031,10 +5028,7 @@ fn a_dead_anchor_is_restated_only_while_there_is_no_history_to_inherit() {
     let repo = Repo::new();
     let dir = journal_dir(&repo);
     // Registered by opening a change: a binding and nothing else.
-    repo.arc(&repo.root)
-        .args(["begin", "feat-collided", "--no-worktree"])
-        .assert()
-        .success();
+    begin_no_worktree(&repo, "feat-collided", &[]);
     fs::write(
         dir.join("bindings.jsonl"),
         "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
@@ -5049,10 +5043,7 @@ fn a_dead_anchor_is_restated_only_while_there_is_no_history_to_inherit() {
 
     // Opening another change registers the project again, and this time finds
     // a binding that names somewhere gone.
-    repo.arc(&repo.root)
-        .args(["begin", "feat-second", "--no-worktree"])
-        .assert()
-        .success();
+    begin_no_worktree(&repo, "feat-second", &[]);
 
     let bindings = fs::read_to_string(dir.join("bindings.jsonl")).unwrap();
     let last: serde_json::Value = serde_json::from_str(bindings.lines().last().unwrap()).unwrap();

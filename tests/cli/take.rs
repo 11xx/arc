@@ -3,37 +3,15 @@ use super::common::*;
 #[test]
 fn take_claims_ready_work_by_priority_and_skips_blocked_or_held_changes() {
     let repo = Repo::new();
-    let low = stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "take-low", "--no-worktree"]),
-    );
-    let low_id = opened_change_id(&low);
-    let high = stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "take-high", "--no-worktree"]),
-    );
-    let high_id = opened_change_id(&high);
-    let prerequisite =
-        stdout(
-            repo.arc(&repo.root)
-                .args(["begin", "take-prerequisite", "--no-worktree"]),
-        );
-    let prerequisite_id = opened_change_id(&prerequisite);
-    stdout(repo.arc(&repo.root).args([
-        "begin",
-        "take-blocked",
-        "--no-worktree",
-        "--blocked-by",
-        &prerequisite_id,
-    ]));
+    let low_id = begin_no_worktree(&repo, "take-low", &[]);
+    let high_id = begin_no_worktree(&repo, "take-high", &[]);
+    let prerequisite_id = begin_no_worktree(&repo, "take-prerequisite", &[]);
+    begin_no_worktree(&repo, "take-blocked", &["--blocked-by", &prerequisite_id]);
     repo.arc(&repo.root)
         .args(["hold", "take-prerequisite", "--reason", "wait"])
         .assert()
         .success();
-    stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "take-held", "--no-worktree"]),
-    );
+    begin_no_worktree(&repo, "take-held", &[]);
     repo.arc(&repo.root)
         .args(["hold", "take-held", "--reason", "wait"])
         .assert()
@@ -69,22 +47,8 @@ fn take_claims_ready_work_by_priority_and_skips_blocked_or_held_changes() {
 #[test]
 fn tagged_take_selects_the_chain_views_next_ready_member() {
     let repo = Repo::new();
-    let low = stdout(repo.arc(&repo.root).args([
-        "begin",
-        "take-tag-low",
-        "--no-worktree",
-        "--tag",
-        "program",
-    ]));
-    let low_id = opened_change_id(&low);
-    let high = stdout(repo.arc(&repo.root).args([
-        "begin",
-        "take-tag-high",
-        "--no-worktree",
-        "--tag",
-        "program",
-    ]));
-    let high_id = opened_change_id(&high);
+    let low_id = begin_no_worktree(&repo, "take-tag-low", &["--tag", "program"]);
+    let high_id = begin_no_worktree(&repo, "take-tag-high", &["--tag", "program"]);
     repo.arc(&repo.root)
         .args(["metadata", &low_id, "--priority", "10"])
         .assert()

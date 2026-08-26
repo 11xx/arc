@@ -117,6 +117,7 @@ RUN A CHANGE
   arc begin <slug> --profile <p>     Open a change: branch + worktree + record.
     --from-journal <file>            Open it from a journal item, consuming it.
     --blocked-by <change> --tag <t>  Declare a chain up front, at planning time.
+    --no-worktree                    Take over this checkout, if it can be taken.
   arc claim / stage / release-claim  Advisory liveness while implementing.
   arc snapshot                       Record the current head as a patchset.
   arc verify --gate <name>           Run a declared gate; record the evidence.
@@ -130,6 +131,12 @@ RUN A CHANGE
   arc integrate [--tag <t>]          Guarded --no-ff merge once the gates are green.
   arc audit <change> --verdict <v>   Review an already-integrated revision.
   arc close                          Terminal outcome arc did not merge itself.
+
+  `--no-worktree` means in place, not nowhere: a clean checkout already on the
+  target is checked out onto the new branch and recorded as the change's
+  worktree, so the next command infers the change without being told. A dirty
+  checkout, or one standing elsewhere, is left exactly as it was — the change
+  still opens, and arc prints the Git command that finishes the switch.
 
 KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)
   arc keep --kind rejected   --body "<why it failed>" --evidence "<what showed it>"
@@ -168,8 +175,9 @@ END A SESSION (what the next one reads)
   work a conclusion.
 
 PROFILES (--profile, default local)
-  direct   Bounded, reversible, one session and checkout. Implement, verify,
-           review the diff, commit. No worktree or journal topic for uniformity.
+  direct   Bounded, reversible, one session and checkout. `--no-worktree` uses
+           a clean target checkout in place; otherwise it remains untouched.
+           Implement, verify, review the diff, commit. No journal topic.
   local    Spans sessions or roles, or needs host-local evidence CI cannot
            reproduce. Dedicated branch/worktree, fresh review where possible,
            --no-ff merge.

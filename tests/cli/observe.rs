@@ -977,14 +977,8 @@ fn watch_json_omits_the_event_id_for_a_derived_condition() {
 #[test]
 fn events_can_follow_a_tagged_program() {
     let repo = Repo::new();
-    stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "member", "--tag", "program", "--no-worktree"]),
-    );
-    stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "outsider", "--no-worktree"]),
-    );
+    begin_no_worktree(&repo, "member", &["--tag", "program"]);
+    begin_no_worktree(&repo, "outsider", &[]);
 
     let tagged = stdout(repo.arc(&repo.root).args(["events", "--tag", "program"]));
     assert!(tagged.contains("member"), "{tagged}");

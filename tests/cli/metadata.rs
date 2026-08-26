@@ -19,15 +19,9 @@ fn reading_empty_metadata_prints_empty_fields() {
 #[test]
 fn populated_metadata_reads_back_as_text() {
     let repo = Repo::new();
-    let dependency = stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "dependency", "--no-worktree"]),
-    );
-    let dependency_id = opened_change_id(&dependency);
-    stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "populated", "--no-worktree"]),
-    );
+    let dependency = begin_no_worktree(&repo, "dependency", &[]);
+    let dependency_id = dependency;
+    begin_no_worktree(&repo, "populated", &[]);
     repo.arc(&repo.root)
         .args([
             "metadata",
@@ -56,16 +50,10 @@ fn populated_metadata_reads_back_as_text() {
 #[test]
 fn json_metadata_has_exact_schema_and_values() {
     let repo = Repo::new();
-    let dependency = stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "json-dep", "--no-worktree"]),
-    );
-    let dependency_id = opened_change_id(&dependency);
-    let target = stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "json-target", "--no-worktree"]),
-    );
-    let target_id = opened_change_id(&target);
+    let dependency = begin_no_worktree(&repo, "json-dep", &[]);
+    let dependency_id = dependency;
+    let target = begin_no_worktree(&repo, "json-target", &[]);
+    let target_id = target;
     repo.arc(&repo.root)
         .args([
             "metadata",

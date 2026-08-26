@@ -416,6 +416,148 @@ fn begin_creates_change_branch_and_worktree() {
         .failure();
 }
 
+#[test]
+fn no_worktree_uses_a_clean_target_checkout_and_infers_the_change() {
+    let repo = Repo::new();
+    let output = repo
+        .arc(&repo.root)
+        .args(["begin", "in-place", "--no-worktree"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let output = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(
+        git_out(&repo.root, &["branch", "--show-current"]),
+        "arc/in-place"
+    );
+    assert!(output.contains(&format!("worktree: {}", repo.root.display())));
+
+    let state = json_stdout(repo.arc(&repo.root).args(["show", "in-place", "--json"]));
+    assert_eq!(state["target_branch"], "master");
+    assert_eq!(state["branch"], "arc/in-place");
+    assert_eq!(
+        state["worktree"],
+        serde_json::Value::String(repo.root.display().to_string())
+    );
+
+    repo.arc(&repo.root)
+        .args(["brief", "--body-file", "-"])
+        .write_stdin("Use the invoking checkout.\n")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("brief: v1"));
+}
+
+#[test]
+fn no_worktree_leaves_dirty_target_checkout_and_preserves_the_next_command() {
+    let repo = Repo::new();
+    let tracked_before = b"uncommitted tracked bytes\n\0";
+    let untracked_before = b"uncommitted untracked bytes\n\xff";
+    fs::write(repo.root.join("README.md"), tracked_before).unwrap();
+    fs::write(repo.root.join("scratch.bin"), untracked_before).unwrap();
+
+    let output = repo
+        .arc(&repo.root)
+        .args(["begin", "dirty-in-place", "--no-worktree"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let output = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(git_out(&repo.root, &["branch", "--show-current"]), "master");
+    assert_eq!(
+        fs::read(repo.root.join("README.md")).unwrap(),
+        tracked_before
+    );
+    assert_eq!(
+        fs::read(repo.root.join("scratch.bin")).unwrap(),
+        untracked_before
+    );
+    let state = json_stdout(
+        repo.arc(&repo.root)
+            .args(["show", "dirty-in-place", "--json"]),
+    );
+    assert!(state["worktree"].is_null(), "{state}");
+    assert!(
+        output.contains("invoking working tree is dirty"),
+        "{output}"
+    );
+    assert!(
+        output.contains("git stash push --include-untracked && git checkout arc/dirty-in-place"),
+        "{output}"
+    );
+}
+
+#[test]
+fn no_worktree_leaves_a_clean_checkout_on_another_branch_and_names_the_checkout_command() {
+    let repo = Repo::new();
+    git(&repo.root, &["checkout", "-b", "other"]);
+
+    let output = repo
+        .arc(&repo.root)
+        .args([
+            "begin",
+            "elsewhere-in-place",
+            "--no-worktree",
+            "--target",
+            "master",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let output = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(git_out(&repo.root, &["branch", "--show-current"]), "other");
+    let state = json_stdout(
+        repo.arc(&repo.root)
+            .args(["show", "elsewhere-in-place", "--json"]),
+    );
+    assert!(state["worktree"].is_null(), "{state}");
+    assert!(
+        output
+            .contains("invoking checkout is on branch \"other\", not requested target \"master\""),
+        "{output}"
+    );
+    assert!(
+        output.contains("next: `git checkout arc/elsewhere-in-place`"),
+        "{output}"
+    );
+}
+
+#[test]
+fn direct_change_adopts_a_branch_already_checked_out_here() {
+    let repo = Repo::new();
+    git(&repo.root, &["branch", "arc/already-checked-out"]);
+    git(&repo.root, &["checkout", "arc/already-checked-out"]);
+
+    let output = stdout(repo.arc(&repo.root).args([
+        "begin",
+        "already-checked-out",
+        "--profile",
+        "direct",
+        "--no-worktree",
+        "--adopt",
+        "arc/already-checked-out",
+    ]));
+    assert!(output.contains("worktree: "), "{output}");
+    assert_eq!(
+        git_out(&repo.root, &["branch", "--show-current"]),
+        "arc/already-checked-out"
+    );
+
+    let state = json_stdout(
+        repo.arc(&repo.root)
+            .args(["show", "already-checked-out", "--json"]),
+    );
+    assert_eq!(state["profile"], "direct");
+    assert_eq!(state["branch"], "arc/already-checked-out");
+    assert_eq!(
+        state["worktree"],
+        serde_json::Value::String(repo.root.display().to_string())
+    );
+}
+
 /// The full green path: implement → snapshot → verify gate → approve →
 /// check ok → integrate produces a --no-ff merge with correct parents.
 #[test]
@@ -1098,11 +1240,7 @@ fn guarded_integration_records_exact_authorization_basis() {
     git(&repo.root, &["add", ".arc/gates.toml"]);
     git(&repo.root, &["commit", "-m", "test: declare a gate"]);
 
-    let prerequisite = opened_change_id(&stdout(repo.arc(&repo.root).args([
-        "begin",
-        "first",
-        "--no-worktree",
-    ])));
+    let prerequisite = begin_no_worktree(&repo, "first", &[]);
     let dependent = opened_change_id(&stdout(repo.arc(&repo.root).args([
         "begin",
         "second",
@@ -2287,10 +2425,7 @@ fn piped_output_dies_on_sigpipe_without_panicking() {
     // pipe buffer, so the child is guaranteed to still be writing when the
     // reader goes away.
     for i in 0..250 {
-        repo.arc(&repo.root)
-            .args(["begin", &format!("ch{i}"), "--no-worktree"])
-            .assert()
-            .success();
+        begin_no_worktree(&repo, &format!("ch{i}"), &[]);
     }
 
     let binary = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo should provide arc binary");
