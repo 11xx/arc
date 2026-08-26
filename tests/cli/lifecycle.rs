@@ -1333,6 +1333,7 @@ fn guarded_integration_records_exact_authorization_basis() {
         dry.contains("authorization basis it would record"),
         "dry run output was: {dry}"
     );
+    assert!(dry.contains("danger: dangerous —"), "{dry}");
     assert!(dry.contains(&verdict_event), "{dry}");
     assert!(dry.contains("git_identity=shared"), "{dry}");
 
@@ -1389,6 +1390,44 @@ fn guarded_integration_records_exact_authorization_basis() {
     assert!(!dependent.is_empty());
     // No waiver was involved, so none is claimed.
     assert!(basis.get("audit_debt_event_id").is_none(), "{event}");
+}
+
+/// A guarded integration recorded before the danger determination existed
+/// remains readable, and its missing value is not interpreted as safe.
+#[test]
+fn an_old_authorization_basis_reads_without_a_danger_determination() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "legacy-danger");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "legacy-danger", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "legacy-danger"])
+        .assert()
+        .success();
+
+    rewrite_event(&repo, &change_id, "change-integrated", |event| {
+        event["authorization"]
+            .as_object_mut()
+            .unwrap()
+            .remove("danger");
+    });
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "legacy-danger", "--json"]),
+    );
+    let authorization = status["closure"]["authorization"].as_object().unwrap();
+    assert!(!authorization.contains_key("danger"), "{status}");
+    assert!(
+        status["closure"]["authorization"]["danger"].is_null(),
+        "{status}"
+    );
+
+    let shown = stdout(repo.arc(&repo.root).args(["show", "legacy-danger"]));
+    assert!(shown.contains("guarded by arc"), "{shown}");
 }
 
 /// The basis records what authorized the merge. Editing a gate's declaration

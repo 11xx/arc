@@ -575,39 +575,7 @@ fn undeclared_or_self(
 
 /// Build the status report: replayed ledger state joined with live Git
 /// facts, dependency state, and the declared gate policy.
-/// Whether a change touches a surface the project declared dangerous, and
-/// therefore whether its verdict must come from somebody other than its
-/// author.
-///
-/// A change may raise itself to dangerous and may never lower itself below
-/// what config declares: escalation is a judgement anyone may make, while
-/// de-escalation would let the party under shipping pressure decide its own
-/// gate, which is the pressure the declaration exists to resist.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct DangerScope {
-    /// Whether an independent verdict is required for this change.
-    pub dangerous: bool,
-    /// Why, in a form `arc check` can name.
-    pub rule: DangerRule,
-    /// The touched paths that matched a declared pattern.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub paths: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum DangerRule {
-    /// The project declared no dangerous surfaces, so the gate is uniform.
-    NotDeclared,
-    /// Touched paths matched a declared pattern.
-    DeclaredPath,
-    /// The change raised itself at `begin`.
-    Escalated,
-    /// Nothing the project declared was touched.
-    Untouched,
-    /// The touched set could not be established; assumed dangerous.
-    Undetermined,
-}
+pub use crate::model::{DangerRule, DangerScope};
 
 impl DangerScope {
     /// Independent review is owed when the repository forbids self-approval

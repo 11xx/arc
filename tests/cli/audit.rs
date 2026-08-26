@@ -1207,6 +1207,80 @@ fn repo_with_danger(paths: &str) -> Repo {
     repo
 }
 
+/// The integration keeps the danger determination that made its review gate
+/// necessary, even after the repository changes its declaration.
+#[test]
+fn integration_records_and_preserves_its_danger_determination() {
+    let repo = repo_with_danger("\"dangerous.txt\"");
+    stdout(repo.arc(&repo.root).args(["begin", "dangerous-change"]));
+    let worktree = repo.home.join(".worktrees").join("repo-dangerous-change");
+    repo.commit(
+        &worktree,
+        "dangerous.txt",
+        "dangerous\n",
+        "feat: dangerous change",
+    );
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "author")
+            .args(["snapshot", "dangerous-change"]),
+    );
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "dangerous-change", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "dangerous-change"])
+        .assert()
+        .success();
+
+    let integrated = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "dangerous-change",
+        "--type",
+        "change-integrated",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(integrated.trim()).unwrap();
+    assert_eq!(
+        event["authorization"]["danger"],
+        serde_json::json!({
+            "dangerous": true,
+            "rule": "declared-path",
+            "paths": ["dangerous.txt"]
+        }),
+        "{event}"
+    );
+
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n\n[danger]\npaths = [\"other.txt\"]\n",
+    )
+    .unwrap();
+    let reread = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "dangerous-change",
+        "--type",
+        "change-integrated",
+    ]));
+    let reread: serde_json::Value = serde_json::from_str(reread.trim()).unwrap();
+    assert_eq!(
+        reread["authorization"]["danger"]["paths"],
+        serde_json::json!(["dangerous.txt"]),
+        "{reread}"
+    );
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "dangerous-change", "--json"]),
+    );
+    assert_eq!(
+        status["closure"]["authorization"]["danger"]["rule"], "declared-path",
+        "{status}"
+    );
+}
+
 /// A uniform gate over non-uniform risk produces a uniform workaround, used
 /// most where it matters least. A change touching nothing the project called
 /// dangerous ships on a self-recorded verdict.
@@ -1238,6 +1312,25 @@ fn a_change_touching_no_declared_surface_ships_on_a_self_verdict() {
         .args(["integrate", "docs-only"])
         .assert()
         .success();
+    let event: serde_json::Value = serde_json::from_str(
+        stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "docs-only",
+            "--type",
+            "change-integrated",
+        ]))
+        .trim(),
+    )
+    .unwrap();
+    assert_eq!(
+        event["authorization"]["danger"]["dangerous"], false,
+        "{event}"
+    );
+    assert_eq!(
+        event["authorization"]["danger"]["rule"], "untouched",
+        "{event}"
+    );
 }
 
 /// On a declared surface the rule still binds, and the advisory names which

@@ -1609,6 +1609,7 @@ fn authorization_basis(
             require_declared_actor: policy.policy.require_declared_actor,
             provenance_git_identity: policy.provenance.git_identity.as_str().to_string(),
         },
+        danger: Some(report.danger.clone()),
         // Only when the waiver is what let the approval stand. A debt declared
         // beside an approval that needed no waiver authorized nothing, and
         // recording it would claim the merge rested on something it did not.

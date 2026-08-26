@@ -48,6 +48,19 @@ pub fn authorization_basis(basis: &crate::model::AuthorizationBasis) -> String {
         Some(verdict) => writeln!(out, "    verdict: {verdict}"),
         None => writeln!(out, "    verdict: none — authorized by declared audit debt"),
     };
+    let _ = match &basis.danger {
+        Some(danger) => writeln!(
+            out,
+            "    danger: {} — {}",
+            if danger.dangerous {
+                "dangerous"
+            } else {
+                "not dangerous"
+            },
+            danger.explain()
+        ),
+        None => writeln!(out, "    danger: not recorded"),
+    };
     for (gate, evidence) in &basis.gate_evidence {
         let _ = writeln!(out, "    gate {gate}: {evidence}");
     }
