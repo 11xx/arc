@@ -2041,6 +2041,7 @@ fn answer(
     }) {
         bail!("{question_id} is already answered; open a successor question to revisit it");
     }
+    let mut unargued: Vec<String> = Vec::new();
     if posed.placement.as_deref() == Some("closing") {
         let argued: HashSet<&str> = events
             .iter()
@@ -2056,11 +2057,16 @@ fn answer(
             .map(String::as_str)
             .filter(|offered| !argued.contains(offered))
             .collect();
+        // A warning, like every other thing this surface says about
+        // participation. Enforcing it would measure the typed binding rather
+        // than the arguing: a discussion whose positions argue every branch on
+        // the merits without carrying the two flags would be refused, while a
+        // thin position filed under each losing branch would satisfy it —
+        // which is the choice-between-labels the requirement exists to
+        // prevent. The answerer is told what was never argued and decides
+        // whether that matters.
         if !missing.is_empty() {
-            bail!(
-                "closing question {question_id} still has unargued options: {}",
-                missing.join(", ")
-            );
+            unargued = missing.iter().map(|option| option.to_string()).collect();
         }
     }
 
@@ -2088,6 +2094,17 @@ fn answer(
     }
     append_event(ctx, &dir, &event)?;
     println!("{}", path.display());
+    if !unargued.is_empty() {
+        let branches = if unargued.len() == 1 {
+            "one branch"
+        } else {
+            "branches"
+        };
+        println!(
+            "warning: {question_id} was answered with {branches} never argued ({})",
+            unargued.join(", ")
+        );
+    }
     Ok(0)
 }
 
@@ -2670,9 +2687,13 @@ fn valid_question_options(values: &[String]) -> bool {
             .all(|value| !value.trim().is_empty() && seen.insert(value.as_str()))
 }
 
+/// One question's replay state. Branch coverage is not tracked here: whether
+/// every option was argued is advice at answer time, not a condition on the
+/// answer being real, so the reader must not discard an answer for lacking it.
 struct QuestionProgress {
-    placement: String,
     options: Vec<String>,
+    /// Options a position has argued under, so a repeated branch position does
+    /// not count twice.
     argued: HashSet<String>,
     answered: bool,
 }
@@ -2703,10 +2724,6 @@ impl QuestionMachine {
                 self.questions.insert(
                     key,
                     QuestionProgress {
-                        placement: event
-                            .placement
-                            .clone()
-                            .expect("known question has placement"),
                         options: event.options.clone().expect("known question has options"),
                         argued: HashSet::new(),
                         answered: false,
@@ -2748,14 +2765,6 @@ impl QuestionMachine {
                 let off_menu = event.off_menu.unwrap_or(false);
                 if progress.answered
                     || (!off_menu && !progress.options.iter().any(|offered| offered == option))
-                {
-                    return false;
-                }
-                if progress.placement == "closing"
-                    && progress
-                        .options
-                        .iter()
-                        .any(|offered| !progress.argued.contains(offered))
                 {
                     return false;
                 }
