@@ -602,6 +602,7 @@ fn append_reuses(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn snapshot_with_verify(
     ctx: &Ctx,
     reference: &str,
@@ -610,6 +611,8 @@ pub fn snapshot_with_verify(
     verify_requested: bool,
     gates: Vec<String>,
     all: bool,
+    contributors: Option<Vec<String>>,
+    solo: bool,
 ) -> Result<i32> {
     if !verify_requested && (!gates.is_empty() || all) {
         bail!("--gate and --all require --verify");
@@ -617,7 +620,7 @@ pub fn snapshot_with_verify(
     if all && !gates.is_empty() {
         bail!("--all cannot be combined with --gate");
     }
-    super::review::snapshot(ctx, reference, base, brief_version)?;
+    super::review::snapshot(ctx, reference, base, brief_version, contributors, solo)?;
     if !verify_requested {
         return Ok(0);
     }
@@ -738,7 +741,7 @@ pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
             return Ok(code);
         }
     }
-    super::review::snapshot(ctx, reference, None, None)?;
+    super::review::snapshot(ctx, reference, None, None, None, false)?;
     let _ = verify(
         ctx,
         reference,

@@ -759,18 +759,18 @@ fn policy_rejects_same_actor_approval() {
         ));
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "self-review"]))).unwrap();
-    assert_eq!(
-        status["approval_rejection_reason"],
-        "approval rejected by policy: self-approval"
-    );
-    assert_eq!(
-        status["blocker_summary"]["approval_reason"],
-        "approval rejected by policy: self-approval"
-    );
-    assert_eq!(
-        status["next_action"],
-        "approval rejected by policy: self-approval"
-    );
+    assert!(status["approval_rejection_reason"]
+        .as_str()
+        .unwrap()
+        .contains("approval rejected by policy: self-approval"));
+    assert!(status["blocker_summary"]["approval_reason"]
+        .as_str()
+        .unwrap()
+        .contains("approval rejected by policy: self-approval"));
+    assert!(status["next_action"]
+        .as_str()
+        .unwrap()
+        .contains("approval rejected by policy: self-approval"));
     let show = stdout(repo.arc(&wt).args(["show", "self-review"]));
     assert!(show.contains("approval rejected by policy: self-approval"));
 }

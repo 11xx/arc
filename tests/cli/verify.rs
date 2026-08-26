@@ -1070,7 +1070,7 @@ fn provenance_email_match_suppresses_name_only_false_positive() {
         .success();
     repo.commit(&wt, "prov.txt", "prov\n", "feat: prov");
     repo.arc(&wt)
-        .args(["snapshot", "prov-eml"])
+        .args(["snapshot", "prov-eml", "--solo"])
         .assert()
         .success();
 
