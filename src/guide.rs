@@ -31,6 +31,8 @@ SAY WHO YOU ARE (before the first write)
 ORIENT (start here, in this order)
   arc catchup            Live state: ledger queue, journal backlog, lanes.
   arc journal open       The actionable backlog — work waiting for a session.
+  arc journal verified <file> [--note <text>]
+                         Record a source check at the project's anchor head.
   arc resume <change>    One change's brief, live state, and journal context.
   arc inbox              Lead-facing queue across open changes.
   arc workspace backlog  The same question asked of every project at once.
@@ -49,6 +51,11 @@ ORIENT (start here, in this order)
   questions are comparisons — which project to open next, what has waited
   longest, where a verdict is the only thing missing — and those are answerable
   only across projects, which is what `workspace backlog` is for.
+
+  A source check is worth keeping only with the revision it checked: `journal
+  verified <file>` records that fact, and the open queue says so on the row.
+  Nothing more is said while the stamp holds — that is what verified means;
+  the row speaks up once the anchor head has moved past it.
 
 SETTLE A QUESTION (before it is work)
   arc journal note <topic> --kind discussion --body-file -

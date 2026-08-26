@@ -431,6 +431,7 @@ fn bare_arc_prints_the_workflow_guide() {
     for expected in [
         "arc catchup",
         "arc journal open",
+        "arc journal verified <file> [--note <text>]",
         "SETTLE A QUESTION",
         "arc journal note <topic> --kind discussion --body-file -",
         "arc journal position <file> --body-file -",

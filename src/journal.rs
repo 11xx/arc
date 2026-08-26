@@ -382,6 +382,17 @@ pub enum JournalCmd {
         #[arg(long)]
         option: Option<String>,
     },
+    /// Record that an artifact was checked against the project's source at the
+    /// current anchor revision. The revision is omitted when the anchor has no
+    /// Git head; the stamp appears on the open queue until the artifact is
+    /// consumed or the anchor moves.
+    Verified {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// Optional context for what the source check established
+        #[arg(long)]
+        note: Option<String>,
+    },
     /// Pose a question on a discussion that only a person can settle, and emit
     /// a typed `question` event. Placement is the design: `opening` is answered
     /// before any position is filed, so everyone argues from the same premise;
@@ -635,6 +646,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             question.as_deref(),
             option.as_deref(),
         ),
+        JournalCmd::Verified { filename, note } => verified(ctx, &filename, note.as_deref()),
         JournalCmd::Question {
             filename,
             placement,
@@ -1659,15 +1671,10 @@ fn position(
             bail!("--option needs --question: name the question the branch belongs to")
         }
     };
-    if filename.contains(['/', '\\']) {
-        bail!("journal position takes an artifact filename inside the journal dir, not a path");
-    }
-    let Some((_, topic, kind)) = parse_artifact_name(filename) else {
-        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
-    };
-    if branch.is_some() && kind != JournalKind::Discussion.as_str() {
-        bail!("{filename} is a {kind}, not a discussion");
-    }
+    // Refuse a malformed name before the body is read: with `--body-file -`
+    // the read waits on stdin, and a caller who mistyped the filename would
+    // wait with it rather than being told.
+    check_artifact_name(filename)?;
     // Read the body before touching the filesystem so a bad source path leaves
     // the artifact untouched.
     let body = read_body_verbatim(body_file)?;
@@ -1676,14 +1683,11 @@ fn position(
     // artifact is a closed record, not an append target.
     let dir = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&dir)?;
-    let path = dir.join(filename);
-    if !path.is_file() {
-        bail!("no such artifact {} in {}", filename, dir.display());
+    let (dir, path, topic, kind) = open_artifact(ctx, filename)?;
+    if branch.is_some() && kind != JournalKind::Discussion.as_str() {
+        bail!("{filename} is a {kind}, not a discussion");
     }
     let existing = read_events(&dir)?;
-    if is_consumed(&existing, filename) {
-        bail!("cannot append to consumed artifact {filename}; open a successor discussion");
-    }
     // A branch naming a question that was never posed, or an option it never
     // offered, is an orphan: it renders under nothing and silently drops out of
     // every branch count. Refuse it rather than record it.
@@ -1763,19 +1767,24 @@ fn position(
     Ok(0)
 }
 
-/// Shared preflight for an append to an open discussion: the filename is a
-/// name, the artifact exists, and it has not been consumed. A consumed
-/// artifact is a closed record, so appending to one would edit history.
-fn open_discussion(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String)> {
+/// The syntactic half of the artifact preflight, separable because it costs
+/// nothing and touches nothing: a caller who mistyped a name learns so before
+/// a body is read from stdin.
+fn check_artifact_name(filename: &str) -> Result<(String, String)> {
     if filename.contains(['/', '\\']) {
         bail!("journal takes an artifact filename inside the journal dir, not a path");
     }
     let Some((_, topic, kind)) = parse_artifact_name(filename) else {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     };
-    if kind != JournalKind::Discussion.as_str() {
-        bail!("{filename} is a {kind}, not a discussion");
-    }
+    Ok((topic, kind))
+}
+
+/// Shared preflight for an operation on an open artifact: the filename is a
+/// name, the artifact exists, and it has not been consumed. A consumed
+/// artifact is a closed record, so a later operation must not edit its history.
+fn open_artifact(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String, String)> {
+    let (topic, kind) = check_artifact_name(filename)?;
     let dir = resolve_dir(&ctx.cwd)?;
     let path = dir.join(filename);
     if !path.is_file() {
@@ -1784,7 +1793,45 @@ fn open_discussion(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, Strin
     if is_consumed(&read_events(&dir)?, filename) {
         bail!("cannot append to consumed artifact {filename}; open a successor discussion");
     }
+    Ok((dir, path, topic, kind))
+}
+
+/// Shared preflight for appending to an open discussion, including the
+/// discussion-only kind check.
+fn open_discussion(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String)> {
+    let (dir, path, topic, kind) = open_artifact(ctx, filename)?;
+    if kind != JournalKind::Discussion.as_str() {
+        bail!("{filename} is a {kind}, not a discussion");
+    }
     Ok((dir, path, topic))
+}
+
+/// Record that an open artifact was checked against the source at the
+/// project's current anchor head. An unborn or otherwise headless anchor still
+/// gets the verification fact; it simply has no revision to compare later.
+fn verified(ctx: &Ctx, filename: &str, note: Option<&str>) -> Result<i32> {
+    let resolution = resolve(&ctx.cwd)?;
+    let dir = resolution.directory.clone();
+    let _transition = lock_journal_transition(&dir)?;
+    let (dir, _path, topic, _kind) = open_artifact(ctx, filename)?;
+    let verified_revision = match resolution.anchor.as_deref() {
+        Some(anchor) => gitio::head_if_present(anchor)?,
+        None => None,
+    };
+    let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "verified");
+    event.file = Some(filename.to_string());
+    event.verified_revision = verified_revision;
+    event.note = note.map(str::to_string);
+    append_event(ctx, &dir, &event)?;
+    println!(
+        "verified: {filename}{}",
+        event
+            .verified_revision
+            .as_deref()
+            .map(|revision| format!(" at {revision}"))
+            .unwrap_or_default()
+    );
+    Ok(0)
 }
 
 fn append_block(path: &Path, heading: &str, body: &str) -> Result<()> {
@@ -2280,6 +2327,11 @@ struct JournalEvent {
     note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     decision: Option<String>,
+    /// The project-anchor revision checked by a `verified` event. Optional so
+    /// an event written before verification stamps existed, or on an unborn
+    /// anchor, remains valid `journal-events/1` input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verified_revision: Option<String>,
     /// The project whose journal holds the artifact named in `decision`,
     /// when it is not this one. Recorded as the registry slug, which is
     /// stable against a label that follows a directory rename.
@@ -2424,6 +2476,7 @@ impl JournalEvent {
             outcome: None,
             note: None,
             decision: None,
+            verified_revision: None,
             decision_project: None,
             decision_kind: None,
             decision_digest: None,
@@ -2454,6 +2507,7 @@ impl JournalEvent {
         match self.event.as_str() {
             "log" => self.message.is_some(),
             "note" => self.file.is_some(),
+            "verified" => self.file.is_some(),
             "position" => {
                 self.file.is_some()
                     && self.placement.is_none()
@@ -2912,6 +2966,20 @@ fn event_message(event: &JournalEvent) -> String {
             .title
             .clone()
             .unwrap_or_else(|| "wrote artifact".into()),
+        "verified" => format!(
+            "verified {}{}{}",
+            event.file.as_deref().unwrap_or_default(),
+            event
+                .verified_revision
+                .as_deref()
+                .map(|revision| format!(" at {revision}"))
+                .unwrap_or_default(),
+            event
+                .note
+                .as_deref()
+                .map(|value| format!(": {value}"))
+                .unwrap_or_default()
+        ),
         "question" => format!(
             "asked {} [{}] ({}) on {}",
             event.question_id.as_deref().unwrap_or_default(),
@@ -3388,6 +3456,23 @@ pub(crate) struct ArtifactEntry {
     /// The open change that has taken this item up, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) change: Option<ChangeRef>,
+    /// The latest source check for this artifact, if one was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) verification: Option<VerificationStamp>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct VerificationStamp {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) revision: Option<String>,
+    pub(crate) timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) actor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model: Option<String>,
+    pub(crate) harness: String,
+    pub(crate) session: String,
+    pub(crate) moved: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -3582,6 +3667,7 @@ fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
                 age_seconds: None,
                 lane: None,
                 change: None,
+                verification: None,
             })
         })
         .collect())
@@ -3645,6 +3731,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
                     age_seconds: None,
                     lane: None,
                     change: None,
+                    verification: None,
                 });
             }
         }
@@ -3722,6 +3809,30 @@ fn consumption(events: &[JournalEvent], filename: &str) -> Option<String> {
 
 fn is_consumed(events: &[JournalEvent], filename: &str) -> bool {
     consumption(events, filename).is_some()
+}
+
+fn verification_stamp(
+    events: &[JournalEvent],
+    filename: &str,
+    current_revision: Option<&str>,
+) -> Option<VerificationStamp> {
+    let event = events
+        .iter()
+        .rev()
+        .find(|event| event.event == "verified" && event.file.as_deref() == Some(filename))?;
+    let moved = match (event.verified_revision.as_deref(), current_revision) {
+        (Some(verified), Some(current)) => verified != current,
+        _ => false,
+    };
+    Some(VerificationStamp {
+        revision: event.verified_revision.clone(),
+        timestamp: event.ts.clone(),
+        actor: event.actor.clone(),
+        model: event.model.clone(),
+        harness: event.harness.clone(),
+        session: event.session.clone(),
+        moved,
+    })
 }
 
 #[derive(Serialize)]
@@ -3833,8 +3944,9 @@ fn artifact_is_since(entry: &ArtifactEntry, cutoff: DateTime<Utc>) -> bool {
 /// `journal open` and by every view that surfaces the backlog beside
 /// ledger state.
 pub(crate) fn collect_open(ctx: &Ctx, kind: Option<&str>) -> Result<OpenItems> {
-    let dir = resolve_dir(&ctx.cwd)?;
-    collect_open_in(ctx, &dir, &ctx.cwd, kind)
+    let resolution = resolve(&ctx.cwd)?;
+    let project = resolution.anchor.unwrap_or_else(|| ctx.cwd.clone());
+    collect_open_in(ctx, &resolution.directory, &project, kind)
 }
 
 /// The same queue for an explicitly named journal directory and project, so a
@@ -3867,6 +3979,13 @@ pub(crate) fn collect_open_in(
     let now = Utc::now();
     let journal = read_events(&dir)?;
     let lanes = lanes_from_journal(&journal, now);
+    // Queue rendering is advisory. If a configured journal has no reachable
+    // Git anchor, retain its stamp and leave the movement comparison unknown.
+    let current_revision = if journal.iter().any(|event| event.event == "verified") {
+        gitio::head_if_present(project).ok().flatten()
+    } else {
+        None
+    };
     let changes = open_changes_for_annotation(project);
     let (_, caller_session) = identity(ctx);
     if dir.is_dir() {
@@ -3895,6 +4014,7 @@ pub(crate) fn collect_open_in(
             if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
                 let heading = first_heading(&dir.join(&name));
                 let change = change_annotation(&changes, &topic, &name);
+                let verification = verification_stamp(&journal, &name, current_revision.as_deref());
                 open.push(ArtifactEntry {
                     lane: lane_for_topic(&lanes, &topic, &caller_session),
                     change,
@@ -3908,6 +4028,7 @@ pub(crate) fn collect_open_in(
                     topic,
                     kind: Some(file_kind),
                     heading,
+                    verification,
                 });
             }
         }
@@ -3915,6 +4036,7 @@ pub(crate) fn collect_open_in(
             if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
                 let heading = first_heading(&dir.join(&name));
                 let change = change_annotation(&changes, &topic, &name);
+                let verification = verification_stamp(&journal, &name, current_revision.as_deref());
                 later.push(ArtifactEntry {
                     lane: lane_for_topic(&lanes, &topic, &caller_session),
                     change,
@@ -3924,6 +4046,7 @@ pub(crate) fn collect_open_in(
                     topic,
                     kind: Some(file_kind),
                     heading,
+                    verification,
                 });
             }
         }
@@ -3931,6 +4054,7 @@ pub(crate) fn collect_open_in(
             if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
                 let heading = first_heading(&dir.join(&name));
                 let change = change_annotation(&changes, &topic, &name);
+                let verification = verification_stamp(&journal, &name, current_revision.as_deref());
                 feature_requests.push(ArtifactEntry {
                     lane: lane_for_topic(&lanes, &topic, &caller_session),
                     change,
@@ -3940,6 +4064,7 @@ pub(crate) fn collect_open_in(
                     topic,
                     kind: Some(file_kind),
                     heading,
+                    verification,
                 });
             }
         }
@@ -3998,21 +4123,22 @@ a feature-request is the unbuilt proposal itself. \
 Take one up with `arc begin <slug> --from-journal <file>`.";
 
 /// One `journal open` line: the creation stamp and its age, then topic, kind,
-/// heading, and any change/lane annotations. Shared with the workspace
-/// backlog, so a queue reads the same whichever command printed it.
+/// heading, and any change/lane/verification annotations. Shared with the
+/// workspace backlog, so a queue reads the same whichever command printed it.
 pub(crate) fn render_open_entry(f: &ArtifactEntry) {
     let age = f.age_seconds.map_or_else(String::new, |seconds| {
         format!(" ({} old)", format_age(seconds))
     });
     println!(
-        "  {}{}  {}  {}  {}{}{}",
+        "  {}{}  {}  {}  {}{}{}{}",
         f.timestamp,
         age,
         f.topic,
         f.kind.as_deref().unwrap_or(""),
         f.heading.as_deref().unwrap_or(""),
         render_change(f.change.as_ref()),
-        render_artifact_lane(f.lane.as_ref())
+        render_artifact_lane(f.lane.as_ref()),
+        render_verification(f.verification.as_ref())
     );
 }
 
@@ -4051,6 +4177,50 @@ fn render_artifact_lane(lane: Option<&ArtifactLane>) -> String {
             lane.topic, lane.owner_harness, short_session
         )
     }
+}
+
+/// The stamp as a queue row reads it: who checked this, how long ago, and
+/// whether the answer still holds. A row is scanned, not studied, so the
+/// revision is abbreviated and the session is left to `--json` — a line long
+/// enough to wrap costs more than the identifiers it carries are worth.
+fn render_verification(verification: Option<&VerificationStamp>) -> String {
+    let Some(verification) = verification else {
+        return String::new();
+    };
+    let age = DateTime::parse_from_rfc3339(&verification.timestamp)
+        .ok()
+        .map(|timestamp| {
+            Utc::now()
+                .signed_duration_since(timestamp.with_timezone(&Utc))
+                .num_seconds()
+                .max(0) as u64
+        })
+        .map(format_age)
+        .map(|age| format!(" {age} ago"))
+        .unwrap_or_default();
+    let checker = verification
+        .actor
+        .clone()
+        .or_else(|| verification.model.clone())
+        .unwrap_or_else(|| verification.harness.clone());
+    // Only a stamp that has stopped holding needs saying. A current one is
+    // already what "verified" means, and an unrevisioned one cannot be
+    // compared at all — the missing revision says so without a second word.
+    match (&verification.revision, verification.moved) {
+        (None, _) => format!(" [verified by {checker}{age}, no revision]"),
+        (Some(revision), false) => format!(
+            " [verified at {}{age} by {checker}]",
+            short_revision(revision)
+        ),
+        (Some(revision), true) => format!(
+            " [verified at {}{age} by {checker}; anchor moved since]",
+            short_revision(revision)
+        ),
+    }
+}
+
+fn short_revision(revision: &str) -> &str {
+    &revision[..revision.len().min(8)]
 }
 
 #[derive(Serialize)]

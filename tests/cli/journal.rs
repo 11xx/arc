@@ -2648,6 +2648,14 @@ fn journal_note_scaffold_records_template_and_prepends() {
 fn journal_help_prints_complete_question_workflow_commands() {
     let repo = Repo::new();
     let help = stdout(repo.arc(&repo.root).args(["journal", "--help"]));
+    assert!(
+        help.contains("verified"),
+        "help missing verified command:\n{help}"
+    );
+    assert!(
+        help.contains("current anchor revision"),
+        "help missing verification description:\n{help}"
+    );
     for command in [
         "arc journal question <file> --placement opening|closing --option A --option B --body-file -",
         "arc journal position <file> --body-file - --question <id> --option <opt>",
@@ -3927,6 +3935,246 @@ fn journal_position_rejects_consumed_artifact() {
             .count(),
         0
     );
+}
+
+#[test]
+fn journal_verified_records_anchor_revision_and_provenance() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "source-check",
+                "--kind",
+                "todo",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Source check\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let revision = repo.head(&repo.root);
+
+    repo.arc(&repo.root)
+        .args(["journal", "verified", &file, "--note", "matched source"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "verified: {file} at {revision}"
+        )));
+
+    let events = journal_events(&journal_dir(&repo));
+    let event = events
+        .iter()
+        .find(|event| event["event"] == "verified")
+        .unwrap();
+    assert_eq!(event["file"], file);
+    assert_eq!(event["verified_revision"], revision);
+    assert_eq!(event["note"], "matched source");
+
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let item = open["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file"] == file)
+        .unwrap();
+    let stamp = &item["verification"];
+    assert_eq!(stamp["revision"], revision);
+    assert_eq!(stamp["timestamp"], event["ts"]);
+    assert_eq!(stamp["actor"], "tester");
+    assert_eq!(stamp["harness"], "test");
+    assert_eq!(stamp["session"], "session-a");
+    assert_eq!(stamp["moved"], false);
+}
+
+#[test]
+fn journal_verified_marks_current_and_older_stamps() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "moving-source",
+                "--kind",
+                "todo",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Moving source\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let initial = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args(["journal", "verified", &file])
+        .assert()
+        .success();
+
+    let current = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let current_item = current["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file"] == file)
+        .unwrap();
+    assert_eq!(current_item["verification"]["revision"], initial);
+    assert_eq!(current_item["verification"]["moved"], false);
+    let current_text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    // A current stamp says nothing extra: "verified" already means it holds.
+    assert!(
+        current_text.contains(&format!("[verified at {}", &initial[..8])),
+        "{current_text}"
+    );
+    assert!(!current_text.contains("anchor moved"), "{current_text}");
+
+    repo.commit(
+        &repo.root,
+        "source-change.txt",
+        "changed\n",
+        "test: move source head",
+    );
+    let moved = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let moved_item = moved["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file"] == file)
+        .unwrap();
+    assert_eq!(moved_item["verification"]["revision"], initial);
+    assert_eq!(moved_item["verification"]["moved"], true);
+    let moved_text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(moved_text.contains("; anchor moved since]"), "{moved_text}");
+}
+
+#[test]
+fn journal_open_preserves_legacy_rows_without_verification_events() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    let file = "20990101T000000Z-legacy-todo.md";
+    fs::write(dir.join(file), "# Legacy\n").unwrap();
+    fs::write(
+        dir.join("events.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "schema": "journal-events/1",
+                "ts": "2026-01-01T00:00:00Z",
+                "harness": "test",
+                "session": "session-a",
+                "topic": "legacy",
+                "event": "note",
+                "file": file,
+            })
+        ),
+    )
+    .unwrap();
+
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let item = &open["open"][0];
+    assert_eq!(item["file"], file);
+    assert!(!item.as_object().unwrap().contains_key("verification"));
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    let row = text
+        .lines()
+        .find(|line| line.contains("legacy  todo  # Legacy"))
+        .unwrap();
+    assert_eq!(row, "  20990101T000000Z (0s old)  legacy  todo  # Legacy");
+}
+
+#[test]
+fn journal_verified_refuses_consumed_or_nonexistent_artifacts() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "closed-check",
+                "--kind",
+                "todo",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Closed check\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file])
+        .assert()
+        .success();
+    let before = journal_events(&journal_dir(&repo)).len();
+
+    repo.arc(&repo.root)
+        .args(["journal", "verified", &file])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "cannot append to consumed artifact",
+        ));
+    assert_eq!(journal_events(&journal_dir(&repo)).len(), before);
+
+    repo.arc(&repo.root)
+        .args(["journal", "verified", "sub/check.md"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a path"));
+    repo.arc(&repo.root)
+        .args(["journal", "verified", "check.md"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a journal artifact name"));
+    assert_eq!(journal_events(&journal_dir(&repo)).len(), before);
+
+    repo.arc(&repo.root)
+        .args(["journal", "verified", "20990101T000000Z-missing-todo.md"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no such artifact"));
+    assert_eq!(journal_events(&journal_dir(&repo)).len(), before);
+}
+
+#[test]
+fn journal_verified_records_a_stamp_without_revision_for_an_unborn_anchor() {
+    let repo = Repo::new();
+    let headless = repo.home.join("headless");
+    fs::create_dir_all(&headless).unwrap();
+    git(&headless, &["init", "-b", "master"]);
+    let dir = PathBuf::from(stdout(repo.arc(&headless).args(["journal", "dir"])).trim());
+    fs::create_dir_all(&dir).unwrap();
+    let file = "20990101T000000Z-headless-todo.md";
+    fs::write(dir.join(file), "# Headless\n").unwrap();
+
+    repo.arc(&headless)
+        .args(["journal", "verified", file])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!("verified: {file}")));
+
+    let event = journal_events(&dir)
+        .into_iter()
+        .find(|event| event["event"] == "verified")
+        .unwrap();
+    assert!(!event.as_object().unwrap().contains_key("verified_revision"));
+    let open = json_stdout(repo.arc(&headless).args(["journal", "open", "--json"]));
+    let stamp = &open["open"][0]["verification"];
+    assert!(!stamp.as_object().unwrap().contains_key("revision"));
+    assert_eq!(stamp["moved"], false);
 }
 
 #[test]
