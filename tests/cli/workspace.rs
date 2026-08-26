@@ -126,7 +126,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/2");
+    assert_eq!(value["schema"], "arc-workspace-backlog/3");
     let project = value["projects"]
         .as_array()
         .unwrap()
@@ -394,7 +394,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/2");
+    assert_eq!(value["schema"], "arc-workspace-backlog/3");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {
@@ -474,6 +474,56 @@ fn workspace_backlog_items() {
             items[tier].as_array().unwrap().len(),
         );
     }
+}
+
+#[test]
+fn workspace_backlog_items_surface_the_same_verification_annotation() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "workspace-check",
+                "--kind",
+                "todo",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Workspace check\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let revision = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args(["journal", "verified", &file])
+        .assert()
+        .success();
+
+    let journal_text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    let expected = format!("[verified at {}", &revision[..8]);
+    assert!(journal_text.contains(&expected), "{journal_text}");
+
+    // The two queues share one renderer, so a row reads the same whichever
+    // command printed it.
+    let workspace_text = stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "backlog", "--items"]),
+    );
+    assert!(workspace_text.contains(&expected), "{workspace_text}");
+
+    let value =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "backlog", "--items", "--json"]),
+        );
+    let item = &value["projects"][0]["items"]["open"][0];
+    assert_eq!(item["file"], file);
+    assert_eq!(item["verification"]["revision"], revision);
+    assert_eq!(item["verification"]["moved"], false);
 }
 
 #[test]

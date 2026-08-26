@@ -816,7 +816,8 @@ outstanding work; blocked work is still reported in full. arc stores no
 previous-run marker — the boundary is supplied by the caller, so the command
 stays derived. `--items` names every actionable artifact under each project in
 the same open, later, and feature-request tier order used by `journal open`.
-JSON is versioned `arc-workspace-backlog/2`.
+Each item can include its `verification` stamp, and the text rows use the same
+renderer as `journal open`. JSON is versioned `arc-workspace-backlog/3`.
 
 `arc brief <change> --scaffold <name>` prepends a template to the brief being
 recorded (`--scaffold` alone records the template). A repo-local
@@ -1231,7 +1232,9 @@ stable anchor, and directory; resolution refuses to guess outside Git when no
 configured prefix matches. `note`
 writes a timestamped `<ts>-<topic>-<kind>.md` artifact and its journal event;
 `log` appends a log-only event; `journal position` adds a position to an
-existing artifact; `catchup` lists newest-first.
+existing artifact; `journal verified <filename> [--note <text>]` records that
+an open artifact was checked against the source at the project's anchor head;
+`catchup` lists newest-first.
 `list [--kind <k>] [--json]` enumerates every live artifact in the hot
 directory newest-first —
 including the non-actionable kinds `open` and `memories` do not show —
@@ -1261,7 +1264,13 @@ long it has waited (for discussions, since the latest typed position; otherwise
 since creation), until an explicit
 `journal consume <filename> [--outcome done|superseded|discarded]
 [--decision <decision-file>] [--note <text>]` retires an item with a typed
-consumed event. A decision link is valid only with outcome `done`.
+consumed event. A `verified` event records the checked anchor revision in
+`verified_revision` when the anchor has a Git head; an unborn or headless
+anchor still records the check without a revision. Open rows and
+`workspace backlog --items` name the checked revision, its age, and who
+checked it, and say that the anchor moved once it no longer matches — a stamp
+that still holds needs no further word. `--json` carries the whole stamp,
+including the session. A decision link is valid only with outcome `done`.
 `<artifact>.md` names a local decision; `<project>::<artifact>.md` names one in
 another registered project's journal, matched against the registry by slug or
 label, and refused rather than guessed when the prefix is ambiguous. A
