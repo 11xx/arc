@@ -28,9 +28,24 @@ pub fn declare_audit_debt(ctx: &Ctx, reference: &str, reason: String) -> Result<
     } else {
         st.latest_patchset().map(|patchset| patchset.id.clone())
     };
-    let payload = Payload::AuditDebtDeclared {
+    let coverage = patchset_id
+        .as_deref()
+        .map(|patchset_id| {
+            st.verdicts
+                .iter()
+                .filter(|verdict| verdict.patchset_id == patchset_id)
+                .map(|verdict| DebtCoverage {
+                    reviewer: verdict.effective_author().to_string(),
+                    model: verdict.model.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let payload = Payload::DebtDeclared {
         reason: reason.to_string(),
         patchset_id: patchset_id.clone(),
+        missing: DebtMissing::IndependentReview,
+        coverage,
     };
     ensure_append_allowed(&st, &payload)?;
     let event = ctx.event(&store, &change_id, payload);

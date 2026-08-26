@@ -1,5 +1,5 @@
 use crate::commands::ArcAlternative;
-use crate::model::{Event, Payload};
+use crate::model::{DebtCoverage, Event, Payload};
 use crate::state::ChangeState;
 use crate::status::{Blocker, BriefBaseDrift, GateStatus, StatusReport};
 use std::fmt::Write;
@@ -747,14 +747,41 @@ pub fn markdown(
                 debt.reason,
                 debt.actor
             );
+            if let Some(missing) = debt.missing {
+                let _ = writeln!(w, "  - Missing: {}", missing.as_str());
+            } else {
+                let _ = writeln!(w, "  - Record: legacy");
+            }
+            if let Some(coverage) = &debt.coverage {
+                if coverage.is_empty() {
+                    let _ = writeln!(w, "  - Coverage: none");
+                } else {
+                    let _ = writeln!(w, "  - Coverage:");
+                    for reviewer in coverage {
+                        let _ = writeln!(w, "    - {}", audit_debt_coverage_label(reviewer));
+                    }
+                }
+            }
+            if let Some(discharged_by) = &debt.discharged_by {
+                let _ = writeln!(
+                    w,
+                    "  - Discharged by: {}",
+                    audit_debt_coverage_label(discharged_by)
+                );
+            }
         }
         for audit in &report.audit_verdicts {
             let _ = writeln!(
                 w,
-                "- {:?} at `{}` by {}{}",
+                "- {:?} at `{}` by {}{}{}",
                 audit.verdict,
                 &audit.revision[..audit.revision.len().min(8)],
                 audit.effective_author(),
+                audit
+                    .model
+                    .as_deref()
+                    .map(|model| format!(" ({model})"))
+                    .unwrap_or_default(),
                 audit
                     .body
                     .as_deref()
@@ -930,6 +957,13 @@ fn blocker_title(blocker: Blocker) -> &'static str {
         Blocker::GatesNotGreen => "required gates not green",
         Blocker::AcceptanceProbesNotGreen => "acceptance probes not discriminating",
         Blocker::HoldActive => "hold active",
+    }
+}
+
+fn audit_debt_coverage_label(coverage: &DebtCoverage) -> String {
+    match coverage.model.as_deref() {
+        Some(model) => format!("{} ({model})", coverage.reviewer),
+        None => format!("{} (model unrecorded)", coverage.reviewer),
     }
 }
 
@@ -1163,6 +1197,31 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                 Some(id) => format!("{id}: {reason}"),
                 None => reason.clone(),
             },
+        ),
+        Payload::DebtDeclared {
+            reason,
+            patchset_id,
+            missing,
+            coverage,
+        } => (
+            "debt-declared",
+            format!(
+                "{}; missing {}; coverage: {}",
+                match patchset_id {
+                    Some(id) => format!("{id}: {reason}"),
+                    None => reason.clone(),
+                },
+                missing.as_str(),
+                if coverage.is_empty() {
+                    "none".to_string()
+                } else {
+                    coverage
+                        .iter()
+                        .map(audit_debt_coverage_label)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ),
         ),
         Payload::AuditVerdictRecorded {
             revision,

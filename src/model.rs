@@ -136,6 +136,32 @@ impl KeptKind {
     }
 }
 
+/// What a declared debt says was missing. New members add a new kind of
+/// obligation without changing the meaning of existing events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DebtMissing {
+    IndependentReview,
+}
+
+impl DebtMissing {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IndependentReview => "independent-review",
+        }
+    }
+}
+
+/// One verdict's recorded review identity and optional model attribution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebtCoverage {
+    pub reviewer: String,
+    /// Absent when the verdict event recorded no model. No routing tier is
+    /// derived from the identity or from any configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", rename_all = "kebab-case")]
 pub enum Payload {
@@ -358,6 +384,24 @@ pub enum Payload {
         /// where there is no gate left to waive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         patchset_id: Option<String>,
+    },
+    /// A debt: what review a change was missing when it shipped, and what
+    /// review it did have. Named for what it records rather than for the
+    /// ceremony that discharges it — an audit is one of two things that can,
+    /// and the record is ordinary rather than an exception. The untyped
+    /// `AuditDebtDeclared` above is what earlier builds wrote, and keeps its
+    /// event type forever so nothing already recorded is lost.
+    #[serde(rename = "debt-declared")]
+    DebtDeclared {
+        reason: String,
+        /// The patchset the waiver applies to, when it was declared before
+        /// integration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        patchset_id: Option<String>,
+        missing: DebtMissing,
+        /// Every verdict recorded on the bound patchset at declaration time.
+        #[serde(default)]
+        coverage: Vec<DebtCoverage>,
     },
     /// Dirty-tree evidence allowed to count, for one revision.
     ///
@@ -728,7 +772,9 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::ForgeLink { .. }
         | Payload::ForgeChecks { .. }
         | Payload::ForgePrState { .. } => AppendPermission::AnyPhaseFact,
-        Payload::ChangelogRecorded { .. } | Payload::AuditDebtDeclared { .. } => {
+        Payload::ChangelogRecorded { .. }
+        | Payload::AuditDebtDeclared { .. }
+        | Payload::DebtDeclared { .. } => {
             AppendPermission::OpenOrIntegratedFact
         }
         Payload::AuditVerdictRecorded { .. }
