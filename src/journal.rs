@@ -1719,10 +1719,13 @@ fn position(
             bail!("--option needs --question: name the question the branch belongs to")
         }
     };
-    // Refuse a malformed name before the body is read: with `--body-file -`
-    // the read waits on stdin, and a caller who mistyped the filename would
-    // wait with it rather than being told.
-    check_artifact_name(filename)?;
+    // Refuse a malformed name or a branch on a non-discussion before the body
+    // is read: with `--body-file -` the read waits on stdin, and a caller who
+    // mistyped the filename would wait with it rather than being told.
+    let (_, kind) = check_artifact_name(filename)?;
+    if branch.is_some() && kind != JournalKind::Discussion.as_str() {
+        bail!("{filename} is a {kind}, not a discussion");
+    }
     // Read the body before touching the filesystem so a bad source path leaves
     // the artifact untouched.
     let body = read_body_verbatim(body_file)?;
@@ -1750,10 +1753,7 @@ fn position(
     // artifact is a closed record, not an append target.
     let dir = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&dir)?;
-    let (dir, path, topic, kind) = open_artifact(ctx, filename)?;
-    if branch.is_some() && kind != JournalKind::Discussion.as_str() {
-        bail!("{filename} is a {kind}, not a discussion");
-    }
+    let (dir, path, topic, _kind) = open_artifact(ctx, filename)?;
     let existing = read_events(&dir)?;
     // A branch naming a question that was never posed, or an option it never
     // offered, is an orphan: it renders under nothing and silently drops out of
@@ -3554,7 +3554,8 @@ pub(crate) struct VerificationStamp {
     pub(crate) model: Option<String>,
     pub(crate) harness: String,
     pub(crate) session: String,
-    pub(crate) moved: bool,
+    /// `Some(false)` is current, `Some(true)` is moved, and `None` is unknown.
+    pub(crate) moved: Option<bool>,
 }
 
 #[derive(Clone, Serialize)]
@@ -3903,8 +3904,8 @@ fn verification_stamp(
         .rev()
         .find(|event| event.event == "verified" && event.file.as_deref() == Some(filename))?;
     let moved = match (event.verified_revision.as_deref(), current_revision) {
-        (Some(verified), Some(current)) => verified != current,
-        _ => false,
+        (Some(verified), Some(current)) => Some(verified != current),
+        _ => None,
     };
     Some(VerificationStamp {
         revision: event.verified_revision.clone(),
@@ -4290,12 +4291,16 @@ fn render_verification(verification: Option<&VerificationStamp>) -> String {
     // compared at all — the missing revision says so without a second word.
     match (&verification.revision, verification.moved) {
         (None, _) => format!(" [verified by {checker}{age}, no revision]"),
-        (Some(revision), false) => format!(
+        (Some(revision), Some(false)) => format!(
             " [verified at {}{age} by {checker}]",
             short_revision(revision)
         ),
-        (Some(revision), true) => format!(
+        (Some(revision), Some(true)) => format!(
             " [verified at {}{age} by {checker}; anchor moved since]",
+            short_revision(revision)
+        ),
+        (Some(revision), None) => format!(
+            " [verified at {}{age} by {checker}; anchor comparison unknown]",
             short_revision(revision)
         ),
     }
@@ -4726,7 +4731,7 @@ fn discussion_participants(positions: &[&JournalEvent]) -> Vec<String> {
 }
 
 /// The two facts that say a decision was never actually tested: one voice
-/// argued it, and the last thing said went unanswered.
+/// argued it, and no position answered another position.
 ///
 /// Derived here rather than at each caller so the warning `consume` prints and
 /// the view `discussion` renders cannot drift apart — a warning that disagreed
@@ -4744,19 +4749,16 @@ fn untested_discussion(events: &[JournalEvent], filename: &str) -> Vec<String> {
             participants[0]
         ));
     }
-    let (_, unanswered) = discussion_rounds(&positions);
-    if let Some(last) = positions
-        .last()
-        .and_then(|event| event.position_id.as_deref())
-    {
-        if unanswered.iter().any(|id| id == last) {
-            warnings.push(format!("nobody answered the last position ({last})"));
-        }
+    let (_, _, answered) = discussion_rounds(&positions);
+    if answered.is_empty() {
+        warnings.push("no position answered another position".to_string());
     }
     warnings
 }
 
-fn discussion_rounds(positions: &[&JournalEvent]) -> (Vec<DiscussionRound>, Vec<String>) {
+fn discussion_rounds(
+    positions: &[&JournalEvent],
+) -> (Vec<DiscussionRound>, Vec<String>, HashSet<String>) {
     let positions_by_id: HashMap<&str, usize> = positions
         .iter()
         .enumerate()
@@ -4804,7 +4806,12 @@ fn discussion_rounds(positions: &[&JournalEvent]) -> (Vec<DiscussionRound>, Vec<
         .cloned()
         .collect();
 
-    (rounds, unanswered)
+    let answered = answered
+        .into_iter()
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+
+    (rounds, unanswered, answered)
 }
 
 /// A thematic break, or the underline of a setext heading. Either one ends the
@@ -4985,7 +4992,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         .iter()
         .filter(|event| event.reference.is_some())
         .count();
-    let (rounds, unanswered) = discussion_rounds(&position_events);
+    let (rounds, unanswered, _) = discussion_rounds(&position_events);
     // The tally reads the file and the graph reads the event log, so they can
     // disagree about how many positions exist. The difference is the honest
     // denominator gap, and reporting it is what keeps `unanswered` from reading
