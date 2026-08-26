@@ -254,6 +254,14 @@ groups conventional categories in Keep a Changelog order, case-insensitively,
 then emits other categories verbatim in bytewise order. `--since <revision>`
 overrides the boundary, `--json` emits the versioned derived projection, and
 `--write` replaces only the generated `[Unreleased]` block in `CHANGELOG.md`.
+The human-readable renderer turns bare entries into list items, wraps every
+entry at 75 columns including its marker, indents continuation lines under the
+text the marker introduces, preserves paragraph breaks, and separates entries
+with blank lines. A body that already leads with a list marker keeps the
+markers and nesting its author chose — only the bullet arc would otherwise
+have added is withheld — and whitespace-free tokens longer than the width
+overflow rather than split. Wrapping is a rendering decision alone: the
+recorded entry keeps exactly the text it was written with.
 Projects can commit `.arc/changelog.toml` to select another repository-relative
 target while retaining the built-in renderer:
 

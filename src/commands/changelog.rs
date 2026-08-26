@@ -261,6 +261,7 @@ const CANONICAL_CATEGORIES: [(&str, &str); 6] = [
     ("fixed", "Fixed"),
     ("security", "Security"),
 ];
+const CHANGELOG_LINE_WIDTH: usize = 75;
 
 fn canonical_category(category: &str) -> Option<&'static str> {
     CANONICAL_CATEGORIES
@@ -272,30 +273,105 @@ fn canonical_category(category: &str) -> Option<&'static str> {
         })
 }
 
+fn wrap_words(line: &str, width: usize) -> Vec<String> {
+    let mut wrapped = Vec::new();
+    let mut current = String::new();
+    for word in line.split_whitespace() {
+        let word_width = word.chars().count();
+        let candidate_width =
+            current.chars().count() + usize::from(!current.is_empty()) + word_width;
+        if !current.is_empty() && candidate_width > width {
+            wrapped.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        wrapped.push(current);
+    }
+    wrapped
+}
+
+/// The marker a line already carries: its indent plus a `-`, `*`, or `+`
+/// bullet. An author who wrote their own list chose the markers and the
+/// nesting; they did not choose the column the file wraps at, so the prefix
+/// survives and the text after it is still wrapped.
+fn line_marker(line: &str) -> Option<&str> {
+    let indent = line.len() - line.trim_start().len();
+    let rest = &line[indent..];
+    ["- ", "* ", "+ "]
+        .iter()
+        .any(|marker| rest.starts_with(marker))
+        .then(|| &line[..indent + 2])
+}
+
 /// Recorded bodies are free text and predate any convention about list
 /// markers, so a release block would otherwise mix bulleted and bare entries.
 /// Normalise at render time rather than at write time: the event keeps exactly
 /// what its author recorded, and the projection decides how a release reads.
-/// A body that already leads with a marker, or that spans multiple blocks, is
-/// left alone — the author formatted it deliberately.
+/// A body that already leads with a marker keeps the markers and nesting its
+/// author chose; only the bullet arc would otherwise have added is withheld.
 fn as_list_item(body: &str) -> String {
     let body = body.trim_end();
     let Some(first) = body.lines().next() else {
         return String::new();
     };
-    let leading = first.trim_start();
-    if leading.starts_with("- ") || leading.starts_with("* ") || leading.starts_with("+ ") {
-        return body.to_string();
+    if line_marker(first).is_some() {
+        return wrap_authored_list(body);
     }
-    // Indent continuation lines so the entry stays one list item.
-    let mut out = format!("- {}", first.trim());
-    for line in body.lines().skip(1) {
-        out.push('\n');
+
+    let content_width = CHANGELOG_LINE_WIDTH - 2;
+    let mut out = String::new();
+    let mut first_line = true;
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            out.push('\n');
+            continue;
+        }
+        for wrapped in wrap_words(line.trim(), content_width) {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(if first_line { "- " } else { "  " });
+            out.push_str(&wrapped);
+            first_line = false;
+        }
+    }
+    out
+}
+
+/// Wrap a body whose author already formatted it as a list, keeping each
+/// line's own marker and indent and aligning continuations under the text
+/// the marker introduces.
+fn wrap_authored_list(body: &str) -> String {
+    let mut out = String::new();
+    for line in body.lines() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
         if line.trim().is_empty() {
             continue;
         }
-        out.push_str("  ");
-        out.push_str(line.trim_end());
+        let (prefix, text) = match line_marker(line) {
+            Some(marker) => (marker.to_string(), line[marker.len()..].trim()),
+            None => {
+                let indent = line.len() - line.trim_start().len();
+                (" ".repeat(indent), line.trim())
+            }
+        };
+        let continuation = " ".repeat(prefix.chars().count());
+        let width = CHANGELOG_LINE_WIDTH.saturating_sub(prefix.chars().count());
+        for (index, wrapped) in wrap_words(text, width).into_iter().enumerate() {
+            if index > 0 {
+                out.push('\n');
+                out.push_str(&continuation);
+            } else {
+                out.push_str(&prefix);
+            }
+            out.push_str(&wrapped);
+        }
     }
     out
 }
@@ -313,11 +389,14 @@ fn render_category<'a>(
     rendered.push_str("\n### ");
     rendered.push_str(heading);
     rendered.push_str("\n\n");
-    for entry in entries {
+    for (index, entry) in entries.iter().enumerate() {
         rendered.push_str(&as_list_item(entry.body));
         rendered.push('\n');
         if provenance {
             rendered.push_str(&provenance_line(entry));
+            rendered.push('\n');
+        }
+        if index + 1 < entries.len() {
             rendered.push('\n');
         }
     }
@@ -475,7 +554,7 @@ fn write_changelog(ctx: &Ctx, config: &ChangelogConfig, rendered: &str) -> Resul
 
 #[cfg(test)]
 mod tests {
-    use super::as_list_item;
+    use super::{as_list_item, render_category, ProjectedEntry, RecordedProvenance};
 
     #[test]
     fn bare_bodies_become_list_items_and_authored_markers_survive() {
@@ -483,11 +562,96 @@ mod tests {
         // An author who already formatted a list keeps their exact markers.
         assert_eq!(as_list_item("- Did a thing.\n"), "- Did a thing.");
         assert_eq!(as_list_item("* Did a thing."), "* Did a thing.");
-        // A wrapped entry stays one item: continuations indent, blanks stay blank.
+        // An explicitly multi-line body stays one item with indented continuations.
         assert_eq!(
             as_list_item("Did a thing,\nacross lines.\n"),
             "- Did a thing,\n  across lines."
         );
         assert_eq!(as_list_item("   "), "");
+    }
+
+    #[test]
+    fn authored_markers_keep_their_nesting_and_still_wrap() {
+        let rendered = as_list_item(
+            "- A top-level item whose text is long enough that the renderer has to wrap it somewhere.\n  - A nested item, also long enough that it cannot fit on one line of the file.",
+        );
+        assert_eq!(
+            rendered,
+            "- A top-level item whose text is long enough that the renderer has to wrap\n  it somewhere.\n  - A nested item, also long enough that it cannot fit on one line of the\n    file."
+        );
+        assert!(rendered.lines().all(|line| line.chars().count() <= 75));
+    }
+
+    #[test]
+    fn long_bare_bodies_wrap_with_two_space_continuations() {
+        let rendered = as_list_item(
+            "This release entry contains enough words to prove that the renderer wraps a long line at the configured width.",
+        );
+        assert_eq!(
+            rendered,
+            "- This release entry contains enough words to prove that the renderer wraps\n  a long line at the configured width."
+        );
+        assert_eq!(rendered.lines().next().unwrap().chars().count(), 75);
+        assert!(rendered.lines().nth(1).unwrap().starts_with("  "));
+    }
+
+    #[test]
+    fn overlong_tokens_are_not_split() {
+        let token = format!("https://example.com/{}", "x".repeat(70));
+        let rendered = as_list_item(&format!("See {token} now."));
+        assert_eq!(rendered, format!("- See\n  {token}\n  now."));
+        assert!(rendered.lines().any(|line| line.chars().count() > 75));
+    }
+
+    #[test]
+    fn blank_lines_remain_paragraph_breaks_within_an_item() {
+        assert_eq!(
+            as_list_item("First paragraph.\n\nSecond paragraph."),
+            "- First paragraph.\n\n  Second paragraph."
+        );
+    }
+
+    #[test]
+    fn category_entries_are_separated_by_blank_lines() {
+        let created_at = chrono::Utc::now();
+        let entries = [
+            ProjectedEntry {
+                change_id: "first",
+                change: "first",
+                category: "added",
+                body: "first entry",
+                integrated_commit: None,
+                integrated_at: None,
+                recorded: RecordedProvenance {
+                    event_id: "event-first",
+                    actor: "actor",
+                    on_behalf_of: None,
+                    effective_author: "actor",
+                    harness: None,
+                    session: None,
+                    created_at: &created_at,
+                },
+            },
+            ProjectedEntry {
+                change_id: "second",
+                change: "second",
+                category: "added",
+                body: "second entry",
+                integrated_commit: None,
+                integrated_at: None,
+                recorded: RecordedProvenance {
+                    event_id: "event-second",
+                    actor: "actor",
+                    on_behalf_of: None,
+                    effective_author: "actor",
+                    harness: None,
+                    session: None,
+                    created_at: &created_at,
+                },
+            },
+        ];
+        let mut rendered = String::new();
+        render_category(&mut rendered, "Added", entries.iter(), false);
+        assert_eq!(rendered, "\n### Added\n\n- first entry\n\n- second entry\n");
     }
 }
