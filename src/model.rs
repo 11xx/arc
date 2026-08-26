@@ -205,6 +205,10 @@ pub enum Payload {
         #[serde(alias = "section")]
         category: String,
         body: String,
+        /// The changelog entry this one replaces, when it supersedes an
+        /// earlier projection.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supersedes: Option<String>,
     },
     PatchsetAdded {
         patchset_id: String,
@@ -307,6 +311,11 @@ pub enum Payload {
         /// Findings recorded atomically with the verdict (one review, one event).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         findings: Vec<InlineFinding>,
+        /// How this verdict relates to the verdict tips it observed. A
+        /// corroboration leaves those tips authoritative; a supersession
+        /// replaces them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relation: Option<VerdictRelation>,
         /// Why this verdict is owed corroboration, when the caller says it is.
         ///
         /// A verdict answers "what did the reviewer conclude". This answers a
@@ -909,6 +918,64 @@ pub enum Verdict {
     Approved,
     ChangesRequested,
     CommentOnly,
+}
+
+/// The relationship between a verdict and the verdicts it observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerdictRelationKind {
+    /// Supports the observed verdicts without replacing them.
+    Corroborates,
+    /// Replaces the observed verdict tips.
+    Supersedes,
+}
+
+/// A typed verdict edge that records both its meaning and the events it saw.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum VerdictRelation {
+    Corroborates { observed: Vec<String> },
+    Supersedes { observed: Vec<String> },
+}
+
+impl VerdictRelationKind {
+    pub fn with_observed(self, observed: Vec<String>) -> VerdictRelation {
+        match self {
+            Self::Corroborates => VerdictRelation::Corroborates { observed },
+            Self::Supersedes => VerdictRelation::Supersedes { observed },
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Corroborates => "corroborates",
+            Self::Supersedes => "supersedes",
+        }
+    }
+}
+
+impl VerdictRelation {
+    pub fn kind(&self) -> VerdictRelationKind {
+        match self {
+            Self::Corroborates { .. } => VerdictRelationKind::Corroborates,
+            Self::Supersedes { .. } => VerdictRelationKind::Supersedes,
+        }
+    }
+
+    pub fn observed(&self) -> &[String] {
+        match self {
+            Self::Corroborates { observed } | Self::Supersedes { observed } => observed,
+        }
+    }
+
+    pub fn description(&self) -> String {
+        let observed = self.observed();
+        if observed.is_empty() {
+            self.kind().as_str().to_string()
+        } else {
+            format!("{} {}", self.kind().as_str(), observed.join(", "))
+        }
+    }
 }
 
 /// Reviewer-classified root causes for a requested-rework round.

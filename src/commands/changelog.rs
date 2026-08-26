@@ -90,14 +90,24 @@ pub fn changelog(
         let category = validate_category(&category)?;
         let store = ctx.store()?;
         let (change_id, _transition, state) = locked_state(&store, reference)?;
+        // Recording a second entry replaced the first with no event saying
+        // it did, an identical success message both times, and no way to see
+        // what was lost. The edge is what makes the replacement inspectable;
+        // the projection still emits one entry, which is a granularity
+        // question this deliberately leaves where it is.
+        let superseded = state.changelog.as_ref().map(|entry| entry.event_id.clone());
         let payload = Payload::ChangelogRecorded {
             category: category.clone(),
             body,
+            supersedes: superseded.clone(),
         };
         ensure_append_allowed(&state, &payload)?;
         let event = ctx.event(&store, &change_id, payload);
         store.append_event(&event)?;
-        println!("changelog: {category}");
+        match superseded {
+            Some(superseded) => println!("changelog: {category} (supersedes {superseded})"),
+            None => println!("changelog: {category}"),
+        }
         println!("event: {}", event.event_id);
         return Ok(0);
     }

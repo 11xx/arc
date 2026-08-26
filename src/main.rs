@@ -26,7 +26,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use commands::{AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{
     ActorSource, DispositionStatus, MessageSeverity, MessageType, ProbePhase, ReviewCause,
-    Severity, Side, Verdict, VerifyResult,
+    Severity, Side, Verdict, VerdictRelationKind, VerifyResult,
 };
 
 /// Change, review, and integration state over plain Git for agentic
@@ -811,6 +811,12 @@ enum Cmd {
         /// JSON array of findings ('-' for stdin); IDs are assigned by arc
         #[arg(long)]
         findings_json: Option<String>,
+        /// What this verdict does to the verdicts already standing on the
+        /// change. `supersedes` replaces them; `corroborates` supports one
+        /// without becoming a second authority, which is what discharging a
+        /// provisional approval is. Ignored when no verdict stands yet
+        #[arg(long, value_enum, default_value = "supersedes")]
+        relation: VerdictRelationKind,
         /// Say this verdict is owed corroboration, and why. It gates like any
         /// other verdict — independence and staleness are unchanged — but the
         /// change carries a recorded obligation until somebody else supplies
@@ -2005,6 +2011,7 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Review {
             change,
             verdict,
+            relation,
             json,
             body,
             snapshot,
@@ -2024,6 +2031,7 @@ fn run(cli: Cli) -> Result<i32> {
                     &change,
                     commands::ReviewArgs {
                         verdict,
+                        relation,
                         body,
                         patchset,
                         causes: cause,

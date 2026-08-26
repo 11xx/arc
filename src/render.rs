@@ -1055,9 +1055,20 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             "brief-recorded",
             title.clone().unwrap_or_else(|| "brief".into()),
         ),
-        Payload::ChangelogRecorded { category, body } => (
+        Payload::ChangelogRecorded {
+            category,
+            body,
+            supersedes,
+        } => (
             "changelog-recorded",
-            format!("{}: {}", category, first_line(body)),
+            match supersedes {
+                Some(superseded) => format!(
+                    "{}: {} (supersedes {superseded})",
+                    category,
+                    first_line(body)
+                ),
+                None => format!("{}: {}", category, first_line(body)),
+            },
         ),
         Payload::PatchsetAdded {
             patchset_id, head, ..
