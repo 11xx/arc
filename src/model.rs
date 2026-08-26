@@ -599,6 +599,26 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         tool: Option<String>,
     },
+    /// A caller-declared review pass over exact change and patchset members.
+    /// The declaration records coverage only; it grants no authority to any
+    /// gate and arc does not observe the review itself.
+    ReviewPassOpened {
+        pass_id: String,
+        members: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// A caller-declared successful ending for a review pass.
+    ReviewPassCompleted {
+        pass_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// A caller-declared abandoned ending for a review pass.
+    ReviewPassAbandoned {
+        pass_id: String,
+        reason: String,
+    },
     /// An event whose `event_type` this build does not recognize (e.g. one
     /// imported from a newer arc). Typed loading skips these entries; the
     /// underlying files and raw export preserve their original bytes intact.
@@ -726,7 +746,10 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::IterationScopeSet { .. } => AppendPermission::LifecycleOwned,
         // Repository-scoped: it is never appended to a change's log, so no
         // change-phase policy applies to it.
-        Payload::HistoryRewritten { .. } => AppendPermission::AnyPhaseFact,
+        Payload::HistoryRewritten { .. }
+        | Payload::ReviewPassOpened { .. }
+        | Payload::ReviewPassCompleted { .. }
+        | Payload::ReviewPassAbandoned { .. } => AppendPermission::AnyPhaseFact,
         Payload::Unknown => AppendPermission::OpaqueImported,
     }
 }

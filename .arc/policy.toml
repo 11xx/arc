@@ -99,6 +99,8 @@ acknowledged_safe = [
   "src/commands/changelog.rs",
   "src/forge.rs",
   "src/commands/forge_cmd.rs",
+  # A pass records what a caller says it opened and nothing reads it to decide whether work ships.
+  "src/commands/pass.rs",
   # Discovery and CLI wiring: which repository, which command, which flags.
   "src/main.rs",
   "src/project.rs",

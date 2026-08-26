@@ -1065,6 +1065,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: HistoryCmd,
     },
+    /// Record and list caller-declared review passes
+    Pass {
+        #[command(subcommand)]
+        cmd: PassCmd,
+    },
     /// Record and validate observed forge (hosted-PR) facts
     Forge {
         #[command(subcommand)]
@@ -1291,6 +1296,41 @@ enum HistoryCmd {
     Resolve {
         /// A revision a rewrite may have moved; the surviving one is printed
         revision: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PassCmd {
+    /// Declare the exact change and patchset members of a review pass
+    Open {
+        /// Exact change and patchset reference, repeated for every member
+        #[arg(long = "member", required = true)]
+        member: Vec<String>,
+        /// Optional note about the declared pass
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Declare that a review pass ended successfully
+    Complete {
+        /// Pass ID printed by arc pass open
+        pass_id: String,
+        /// Optional note about the completed pass
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Declare that a review pass ended without completion
+    Abandon {
+        /// Pass ID printed by arc pass open
+        pass_id: String,
+        /// Why the pass was abandoned
+        #[arg(long, required = true)]
+        reason: String,
+    },
+    /// List every recorded review pass, newest first
+    List {
+        /// Emit the machine-readable JSON view instead of text
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -2312,6 +2352,21 @@ fn run(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             HistoryCmd::Resolve { revision } => commands::resolve_rewritten(&ctx, &revision),
+        },
+        Cmd::Pass { cmd } => match cmd {
+            PassCmd::Open { member, note } => {
+                commands::open_pass(&ctx, member, note)?;
+                Ok(0)
+            }
+            PassCmd::Complete { pass_id, note } => {
+                commands::complete_pass(&ctx, pass_id, note)?;
+                Ok(0)
+            }
+            PassCmd::Abandon { pass_id, reason } => {
+                commands::abandon_pass(&ctx, pass_id, reason)?;
+                Ok(0)
+            }
+            PassCmd::List { json } => commands::list_passes(&ctx, json).map(|_| 0),
         },
         Cmd::Config {
             check_writable,
