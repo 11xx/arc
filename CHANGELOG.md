@@ -12,6 +12,17 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- A verdict says what it does to the verdicts already standing: `arc review
+  --relation supersedes` (the default) replaces the tips it observed, and
+  `--relation corroborates` supports one without becoming a second
+  authority — which is what discharging a provisional approval is.
+  `latest_verdict` is now the sole tip of that graph rather than whichever
+  verdict arrived last, so event order no longer decides authority; two
+  verdicts replacing one tip leave the change contested, `arc check` blocks
+  and names which forked, and `verdict_contested` is carried on the status
+  and review views. A changelog entry likewise names the entry it replaces,
+  and `arc changelog` says so instead of printing the same message twice.
+
 - `arc journal position --stance <for|against|amend>` writes the stance
   line above the body and records the stance on the typed `position` event,
   so a tally cannot undercount because an author opened with a heading. A
