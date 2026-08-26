@@ -12,6 +12,24 @@ fn journal_dir(repo: &Repo) -> PathBuf {
     PathBuf::from(out.trim())
 }
 
+fn recorded_journal(repo: &Repo, slug: &str, anchor: &Path) -> PathBuf {
+    let dir = repo.home.join(".local/ai/journals").join(slug);
+    fs::create_dir_all(&dir).unwrap();
+    let binding = serde_json::json!({
+        "schema": "journal-binding/1",
+        "ts": "2026-01-01T00:00:00Z",
+        "event": "bound",
+        "anchor": anchor.display().to_string(),
+    });
+    fs::write(dir.join("bindings.jsonl"), format!("{binding}\n")).unwrap();
+    fs::write(
+        dir.join(format!("20260101T000000Z-{slug}-todo.md")),
+        "# Queued work\n",
+    )
+    .unwrap();
+    dir
+}
+
 fn journal_events(dir: &Path) -> Vec<serde_json::Value> {
     fs::read_to_string(dir.join("events.jsonl"))
         .unwrap()
@@ -251,6 +269,199 @@ pub(crate) fn journal_dir_longest_prefix_and_git_identity_preserve_existing_slug
             env_journal.display()
         )
     );
+}
+
+#[test]
+fn journal_open_resolves_a_non_repository_recorded_anchor() {
+    let repo = Repo::new();
+    let cwd = repo.home.join("non-repository");
+    fs::create_dir_all(&cwd).unwrap();
+    let anchor = fs::canonicalize(&cwd).unwrap();
+    let journal = recorded_journal(&repo, "recorded-non-repo", &anchor);
+
+    let mut command = repo.arc(&cwd);
+    command.args(["workspace", "backlog", "--json"]);
+    let backlog = json_stdout(&mut command);
+    let anchor_text = anchor.display().to_string();
+    let project = backlog["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["anchor"].as_str() == Some(anchor_text.as_str()))
+        .unwrap_or_else(|| panic!("project missing from backlog: {backlog}"));
+    assert_eq!(project["open_items"], 1);
+
+    let mut command = repo.arc(&cwd);
+    command.args(["journal", "open", "--json"]);
+    let open = json_stdout(&mut command);
+    assert_eq!(open["dir"], journal.display().to_string());
+    assert_eq!(open["open"][0]["topic"], "recorded-non-repo");
+
+    let explain = stdout(repo.arc(&cwd).args(["journal", "dir", "--explain"]));
+    assert_eq!(
+        explain,
+        format!(
+            "source: recorded-anchor\nanchor: {}\ndirectory: {}\n",
+            anchor.display(),
+            journal.display()
+        )
+    );
+}
+
+#[test]
+fn journal_open_resolves_a_binding_less_journal_by_its_slugged_path() {
+    // A journal written before bindings existed states nothing about who owns
+    // it, and no arc command can give it one: recording a binding needs a
+    // resolution, which is the thing that fails. The directory this path slugs
+    // to is the journal arc would itself create here, so it is the answer.
+    let repo = Repo::new();
+    let cwd = repo.home.join("binding-less");
+    fs::create_dir_all(&cwd).unwrap();
+    let anchor = fs::canonicalize(&cwd).unwrap();
+    let journal = repo
+        .home
+        .join(".local/ai/journals")
+        .join(journal_slug(&anchor));
+    fs::create_dir_all(&journal).unwrap();
+    fs::write(
+        journal.join("20260101T000000Z-binding-less-todo.md"),
+        "# Queued work\n",
+    )
+    .unwrap();
+
+    let explain = stdout(repo.arc(&cwd).args(["journal", "dir", "--explain"]));
+    assert_eq!(
+        explain,
+        format!(
+            "source: slugged-path\nanchor: {}\ndirectory: {}\n",
+            anchor.display(),
+            journal.display()
+        )
+    );
+
+    let open = json_stdout(repo.arc(&cwd).args(["journal", "open", "--json"]));
+    assert_eq!(open["open"][0]["topic"], "binding-less");
+}
+
+#[test]
+fn journal_slugged_path_yields_to_a_journal_that_names_another_anchor() {
+    // A journal carrying a binding has already answered who owns it. That the
+    // answer names somebody else is exactly why the slug must not override it.
+    let repo = Repo::new();
+    let cwd = repo.home.join("collides");
+    fs::create_dir_all(&cwd).unwrap();
+    let anchor = fs::canonicalize(&cwd).unwrap();
+    let elsewhere = repo.home.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let journal = repo
+        .home
+        .join(".local/ai/journals")
+        .join(journal_slug(&anchor));
+    fs::create_dir_all(&journal).unwrap();
+    let binding = serde_json::json!({
+        "schema": "journal-binding/1",
+        "ts": "2026-01-01T00:00:00Z",
+        "event": "bound",
+        "anchor": fs::canonicalize(&elsewhere).unwrap().display().to_string(),
+    });
+    fs::write(journal.join("bindings.jsonl"), format!("{binding}\n")).unwrap();
+
+    repo.arc(&cwd)
+        .args(["journal", "dir", "--explain"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no source matched"));
+}
+
+#[test]
+fn journal_git_discovery_wins_over_a_recorded_anchor() {
+    let repo = Repo::new();
+    let anchor = fs::canonicalize(&repo.root).unwrap();
+    let competing = recorded_journal(&repo, "recorded-git-project", &anchor);
+    let expected = repo
+        .home
+        .join(".local/ai/journals")
+        .join(journal_slug(&anchor));
+
+    let explain = stdout(repo.arc(&repo.root).args(["journal", "dir", "--explain"]));
+    assert_eq!(
+        explain,
+        format!(
+            "source: git\nanchor: {}\ndirectory: {}\n",
+            anchor.display(),
+            expected.display()
+        )
+    );
+    assert_ne!(competing, expected);
+}
+
+#[test]
+fn journal_config_prefix_wins_over_a_recorded_anchor() {
+    let repo = Repo::new();
+    let cwd = repo.home.join("configured/non-repository");
+    fs::create_dir_all(&cwd).unwrap();
+    let anchor = fs::canonicalize(&cwd).unwrap();
+    let recorded = recorded_journal(&repo, "recorded-config-project", &anchor);
+    let configured = repo.home.join("configured-journal");
+    let config_dir = repo.home.join(".local/ai/arc");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "[journals.dirs]\n\"{}\" = \"{}\"\n",
+            anchor.display(),
+            configured.display()
+        ),
+    )
+    .unwrap();
+
+    let explain = stdout(repo.arc(&cwd).args(["journal", "dir", "--explain"]));
+    assert_eq!(
+        explain,
+        format!(
+            "source: config-prefix\nanchor: {}\ndirectory: {}\n",
+            anchor.display(),
+            configured.display()
+        )
+    );
+    assert_ne!(recorded, configured);
+}
+
+#[test]
+fn journal_recorded_anchor_ambiguity_names_both_journals() {
+    let repo = Repo::new();
+    let cwd = repo.home.join("ambiguous/non-repository");
+    fs::create_dir_all(&cwd).unwrap();
+    let anchor = fs::canonicalize(&cwd).unwrap();
+    let first = recorded_journal(&repo, "first-recorded", &anchor);
+    let second = recorded_journal(&repo, "second-recorded", &anchor);
+
+    repo.arc(&cwd)
+        .args(["journal", "dir"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("multiple journals record"))
+        .stderr(predicates::str::contains(first.display().to_string()))
+        .stderr(predicates::str::contains(second.display().to_string()));
+}
+
+#[test]
+fn journal_resolution_failure_names_every_checked_source() {
+    let repo = Repo::new();
+    let cwd = repo.home.join("unresolved/non-repository");
+    fs::create_dir_all(&cwd).unwrap();
+
+    repo.arc(&cwd)
+        .args(["journal", "dir"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("checked ARC_JOURNAL_DIR"))
+        .stderr(predicates::str::contains("[journals.dirs] path prefixes"))
+        .stderr(predicates::str::contains("Git discovery"))
+        .stderr(predicates::str::contains("recorded anchors"))
+        .stderr(predicates::str::contains(
+            "a path-prefix entry covering a directory with repositories beneath it will shadow their Git discovery",
+        ));
 }
 
 #[test]

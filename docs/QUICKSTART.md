@@ -75,6 +75,13 @@ arc journal dir                     # prints the resolved directory
 export ARC_JOURNAL_DIR=/path/to/journal   # or set [journals] in the config
 ```
 
+Resolution checks `ARC_JOURNAL_DIR`, the longest `[journals.dirs]` path
+prefix, Git discovery, a default-root journal whose `bindings.jsonl` records
+the canonical current directory, and finally the default-root journal this
+directory's own slug names. `arc journal dir --explain` shows which source
+won. A path prefix covering directories with repositories beneath it shadows
+their Git discovery, and duplicate recorded anchors are refused.
+
 ## 6. Run one change
 
 ```sh
