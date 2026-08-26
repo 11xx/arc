@@ -5989,7 +5989,7 @@ fn questions_belong_only_to_discussions() {
 }
 
 #[test]
-fn a_closing_answer_requires_every_option_to_be_argued() {
+fn a_closing_answer_over_unargued_branches_warns_and_still_counts() {
     let repo = Repo::new();
     let file = discussion_named(&repo, "coverage", "# Which branch?\n");
     repo.arc(&repo.root)
@@ -6025,9 +6025,47 @@ fn a_closing_answer_requires_every_option_to_be_argued() {
         ])
         .write_stdin("Premature.\n")
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("unargued options"));
+        .success()
+        .stdout(predicates::str::contains(
+            "was answered with branches never argued (a, b)",
+        ));
 
+    // The answer is real: the reader must not discard it for the same reason
+    // the write declined to refuse it. An answer recorded and then dropped on
+    // replay is worse than one refused outright, because nothing says so.
+    let waiting = stdout(repo.arc(&repo.root).args(["journal", "questions"]));
+    assert!(
+        waiting.contains("no question is waiting on a person"),
+        "{waiting}"
+    );
+    let summary = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
+    assert!(summary.contains("answered a"), "{summary}");
+}
+
+/// A closing question whose branches were all argued is answered without the
+/// warning: the advice fires on what was skipped, not on every answer.
+#[test]
+fn a_closing_answer_over_argued_branches_says_nothing() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "explored", "# Which way?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Choose after both branches are explored.\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
     for option in ["a", "b"] {
         repo.arc(&repo.root)
             .args([
@@ -6045,21 +6083,18 @@ fn a_closing_answer_requires_every_option_to_be_argued() {
             .assert()
             .success();
     }
-    repo.arc(&repo.root)
-        .args([
-            "journal",
-            "answer",
-            &file,
-            "--question",
-            &question,
-            "--option",
-            "a",
-            "--body-file",
-            "-",
-        ])
-        .write_stdin("Now informed.\n")
-        .assert()
-        .success();
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "answer",
+        &file,
+        "--question",
+        &question,
+        "--option",
+        "a",
+        "--body-file",
+        "-",
+    ]));
+    assert!(!out.contains("never argued"), "{out}");
 }
 
 /// An opening question exists so every participant argues from the same
