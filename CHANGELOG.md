@@ -12,6 +12,13 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Consuming a discussion reports the two facts `arc journal discussion`
+  renders that say a decision was never tested: every position came from
+  one participant, and nobody answered the last position. Warnings rather
+  than refusals — one voice is a legitimate way to settle something — and
+  `--outcome discarded` earns them as much as `done`. Both facts are
+  derived once and shared with the view, so the two cannot disagree.
+
 - A verdict says what it does to the verdicts already standing: `arc review
   --relation supersedes` (the default) replaces the tips it observed, and
   `--relation corroborates` supports one without becoming a second
