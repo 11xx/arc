@@ -469,6 +469,76 @@ fn watch_approved_returns_on_approval_but_not_changes_requested() {
     assert_eq!(reached["event_id"], approval_event, "{reached}");
 }
 
+/// Authority is necessary and not sufficient. A self-approval the repository
+/// forbids is the sole tip and is still not something `check` will integrate
+/// on, so a wait that returned on it would report ready for a change that
+/// cannot merge.
+#[test]
+fn watch_approved_does_not_return_on_an_approval_policy_refuses() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    let (_, worktree, _) = change_with_patchset(&repo, "watch-selfapproved");
+    // The default actor is the one that recorded the patchset, so this is the
+    // author approving its own work.
+    repo.arc(&worktree)
+        .args([
+            "review",
+            "watch-selfapproved",
+            "--verdict",
+            "approved",
+            "--body",
+            "my own work",
+        ])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args(["check", "watch-selfapproved"])
+        .assert()
+        .code(3);
+    let out = stdout(repo.arc(&repo.root).args([
+        "watch",
+        "watch-selfapproved",
+        "--until",
+        "approved",
+        "--timeout",
+        "1",
+    ]));
+    assert!(out.contains("timeout"), "{out}");
+
+    // Somebody else approving the same patchset satisfies both.
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args([
+            "review",
+            "watch-selfapproved",
+            "--verdict",
+            "approved",
+            "--body",
+            "independent",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["check", "watch-selfapproved"])
+        .assert()
+        .code(0);
+    let out = stdout(repo.arc(&repo.root).args([
+        "watch",
+        "watch-selfapproved",
+        "--until",
+        "approved",
+        "--timeout",
+        "1",
+    ]));
+    assert!(out.contains("reached: approved"), "{out}");
+}
+
 #[test]
 fn watch_approved_ignores_a_corroborating_approval() {
     let repo = Repo::new();

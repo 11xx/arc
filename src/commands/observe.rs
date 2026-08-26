@@ -499,16 +499,30 @@ fn watch_reached(
         //
         // A provisional approval gates checks and integration, so it satisfies
         // this wait; its reason is carried into the diagnostic for the caller.
-        WatchUntil::Approved => state.latest_patchset().and_then(|latest| {
-            state
-                .latest_verdict()
+        WatchUntil::Approved => {
+            // Authority is necessary and not sufficient: an approval the
+            // repository's policy refuses — a self-approval where one is
+            // forbidden, or one resting on an identity arc assumed — is a
+            // verdict `check` will not integrate on. The status layer already
+            // decides that, so read its answer instead of asking a narrower
+            // question here and reporting reached on a change that cannot
+            // merge.
+            let report = ctx.report(store, &state)?;
+            report
+                .verdict
+                .as_ref()
+                .filter(|verdict| verdict.valid_for_current_head)
                 .filter(|verdict| verdict.verdict == Verdict::Approved)
-                .filter(|verdict| verdict.patchset_id == latest.id)
-                .map(|verdict| WatchReached {
-                    event_id: Some(verdict.event_id.clone()),
-                    provisional: verdict.provisional.clone(),
+                .and_then(|verdict| {
+                    state
+                        .latest_verdict()
+                        .filter(|authoritative| authoritative.patchset_id == verdict.patchset_id)
+                        .map(|authoritative| WatchReached {
+                            event_id: Some(authoritative.event_id.clone()),
+                            provisional: authoritative.provisional.clone(),
+                        })
                 })
-        }),
+        }
         WatchUntil::GatesGreen => ctx
             .report(store, &state)?
             .gates
