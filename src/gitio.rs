@@ -312,6 +312,11 @@ pub fn create_branch(cwd: &Path, branch: &str, base: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn checkout(cwd: &Path, branch: &str) -> Result<()> {
+    git(cwd, &["checkout", branch])?;
+    Ok(())
+}
+
 pub fn add_worktree(cwd: &Path, path: &Path, branch: &str) -> Result<()> {
     git(
         cwd,

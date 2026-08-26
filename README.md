@@ -225,6 +225,12 @@ arc integrate --tag '#radio-series' --cleanup
 be a `verification-recorded` or `verification-reused` event; event-ID prefixes
 are not resolved. Both options may be supplied together.
 
+For a one-checkout change, `arc begin <slug> --no-worktree` checks the new
+branch out in the invoking checkout when that checkout is clean and already on
+the target branch, and records it as the change worktree. A dirty checkout or
+one on another branch is left unchanged; the opening still succeeds and prints
+the next Git command.
+
 `--profile` selects the change's workflow (`direct`, `local`, `forge`, or
 `release`). Add `--iterating` when integration is not yet the goal; `arc check`
 then reports the typed `iterating` blocker instead of requesting a review, and
@@ -249,6 +255,11 @@ path. An explicit change always wins. Commands that integrate, close, hold,
 export, or otherwise act destructively or across changes still require an
 explicit change. Ambiguous or absent context fails with the candidate list and
 asks for `CHANGE`.
+
+When `--no-worktree` opens a change from a clean checkout already on its target,
+that checkout is recorded and the new branch supplies the first inference path
+immediately. If the checkout is dirty or stands on another branch, no worktree
+is recorded and the checkout remains unchanged.
 
 `arc changelog <change>` reads the latest entry for one change; adding
 `--category <category> --body-file <file>` records replacement release copy as

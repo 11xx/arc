@@ -81,6 +81,7 @@ pub fn begin(
 
     let change_id = ids::new_change_id(slug);
     let title = title.unwrap_or_else(|| slug.replace('-', " "));
+    let mut no_worktree_advice: Option<(String, String)> = None;
 
     let (branch_name, base_rev, worktree_path) = if let Some(adopted) = adopt {
         if !gitio::branch_exists(&ctx.cwd, &adopted) {
@@ -102,9 +103,45 @@ pub fn begin(
             Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
             None => target_head.clone(),
         };
-        gitio::create_branch(&ctx.cwd, &branch_name, &base_rev)?;
-        let wt = if no_worktree {
+        // Check the invoking checkout before creating the branch. A clean
+        // checkout already on the target can become the change's worktree;
+        // every other checkout stays untouched.
+        let in_place = if no_worktree {
+            Some((
+                gitio::current_branch(&ctx.cwd)?,
+                gitio::is_clean(&ctx.cwd)?,
+                gitio::toplevel(&ctx.cwd)?,
+            ))
+        } else {
             None
+        };
+        gitio::create_branch(&ctx.cwd, &branch_name, &base_rev)?;
+        let wt = if let Some((current, clean, path)) = in_place {
+            match (current, clean) {
+                (Some(current), true) if current == target_branch => {
+                    gitio::checkout(&ctx.cwd, &branch_name)?;
+                    Some(path.display().to_string())
+                }
+                (_, false) => {
+                    no_worktree_advice = Some((
+                        "in-place checkout declined: the invoking working tree is dirty"
+                            .to_string(),
+                        format!("git stash push --include-untracked && git checkout {branch_name}"),
+                    ));
+                    None
+                }
+                (current, true) => {
+                    let current = current.unwrap_or_else(|| "(detached HEAD)".to_string());
+                    no_worktree_advice = Some((
+                        format!(
+                            "in-place checkout declined: the invoking checkout is on branch \
+                             {current:?}, not requested target {target_branch:?}"
+                        ),
+                        format!("git checkout {branch_name}"),
+                    ));
+                    None
+                }
+            }
         } else {
             let path = match worktree {
                 Some(p) => PathBuf::from(p),
@@ -213,6 +250,10 @@ pub fn begin(
     println!("branch: {branch_name}");
     if let Some(wt) = worktree_path {
         println!("worktree: {wt}");
+    }
+    if let Some((reason, command)) = no_worktree_advice {
+        println!("{reason}");
+        println!("next: `{command}`");
     }
     Ok(())
 }

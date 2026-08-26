@@ -287,17 +287,40 @@ pub(crate) fn child_stdout(child: &mut Child) -> String {
     output
 }
 
-pub(crate) fn begin_change(repo: &Repo, slug: &str, blocked_by: Option<&str>) -> String {
-    let mut command = repo.arc(&repo.root);
-    command.args(["begin", slug, "--no-worktree"]);
-    if let Some(blocker) = blocked_by {
-        command.args(["--blocked-by", blocker]);
-    }
-    let out = stdout(&mut command);
+/// Open a change with `--no-worktree` and no checkout of its own.
+///
+/// `--no-worktree` takes over a clean checkout standing on the target, which
+/// is what it is for and what the lifecycle tests cover directly. A test that
+/// opens several changes in one repository wants none of them checked out, so
+/// it holds the tree dirty for the duration — the same decline a caller with
+/// unrelated work in progress gets.
+pub(crate) fn with_uncommitted_worktree<T>(repo: &Repo, f: impl FnOnce() -> T) -> T {
+    let path = repo.root.join(".arc-test-uncommitted");
+    assert!(!path.exists(), "test fixture path already exists: {path:?}");
+    fs::write(&path, b"temporary uncommitted fixture\n").unwrap();
+    let result = f();
+    fs::remove_file(path).unwrap();
+    result
+}
+
+pub(crate) fn begin_no_worktree(repo: &Repo, slug: &str, extra: &[&str]) -> String {
+    let out = with_uncommitted_worktree(repo, || {
+        let mut command = repo.arc(&repo.root);
+        command.args(["begin", slug, "--no-worktree"]);
+        command.args(extra);
+        stdout(&mut command)
+    });
     out.lines()
         .find_map(|line| line.strip_prefix("change: "))
         .unwrap()
         .to_string()
+}
+
+pub(crate) fn begin_change(repo: &Repo, slug: &str, blocked_by: Option<&str>) -> String {
+    let extra = blocked_by
+        .map(|blocker| vec!["--blocked-by", blocker])
+        .unwrap_or_default();
+    begin_no_worktree(repo, slug, &extra)
 }
 
 pub(crate) fn json_stdout(cmd: &mut AssertCommand) -> serde_json::Value {

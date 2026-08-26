@@ -122,12 +122,21 @@ fn claims_match_ownership_by_invoker_not_subject() {
 #[test]
 fn an_assumed_actor_is_announced_and_recorded_as_assumed() {
     let repo = Repo::new();
-    let opened = repo
-        .arc(&repo.root)
-        .env_remove("ARC_ACTOR")
-        .args(["begin", "assumed", "--no-worktree"])
-        .output()
-        .unwrap();
+    let (opened, declared) = with_uncommitted_worktree(&repo, || {
+        let opened = repo
+            .arc(&repo.root)
+            .env_remove("ARC_ACTOR")
+            .args(["begin", "assumed", "--no-worktree"])
+            .output()
+            .unwrap();
+        // A declared identity records as declared and says nothing.
+        let declared = repo
+            .arc(&repo.root)
+            .args(["begin", "declared", "--no-worktree"])
+            .output()
+            .unwrap();
+        (opened, declared)
+    });
     assert!(opened.status.success());
     let stderr = String::from_utf8_lossy(&opened.stderr);
     assert!(stderr.contains("nobody declared one"), "{stderr}");
@@ -143,12 +152,6 @@ fn an_assumed_actor_is_announced_and_recorded_as_assumed() {
     let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
     assert_eq!(event["actor_source"], "git-fallback", "{event}");
 
-    // A declared identity records as declared and says nothing.
-    let declared = repo
-        .arc(&repo.root)
-        .args(["begin", "declared", "--no-worktree"])
-        .output()
-        .unwrap();
     assert!(declared.status.success());
     assert!(
         !String::from_utf8_lossy(&declared.stderr).contains("nobody declared one"),
@@ -205,24 +208,26 @@ fn require_declared_actor_refuses_the_git_fallback() {
         .args(["journal", "list"])
         .assert()
         .success();
-    repo.arc(&repo.root)
-        .env_remove("ARC_ACTOR")
-        .args(["--actor", "someone", "begin", "allowed", "--no-worktree"])
-        .assert()
-        .success();
-    // A delegated subject is somebody's claim, so a lead running ceremony for
-    // one satisfies the policy.
-    repo.arc(&repo.root)
-        .env_remove("ARC_ACTOR")
-        .args([
-            "--on-behalf-of",
-            "executor",
-            "begin",
-            "delegated",
-            "--no-worktree",
-        ])
-        .assert()
-        .success();
+    with_uncommitted_worktree(&repo, || {
+        repo.arc(&repo.root)
+            .env_remove("ARC_ACTOR")
+            .args(["--actor", "someone", "begin", "allowed", "--no-worktree"])
+            .assert()
+            .success();
+        // A delegated subject is somebody's claim, so a lead running ceremony for
+        // one satisfies the policy.
+        repo.arc(&repo.root)
+            .env_remove("ARC_ACTOR")
+            .args([
+                "--on-behalf-of",
+                "executor",
+                "begin",
+                "delegated",
+                "--no-worktree",
+            ])
+            .assert()
+            .success();
+    });
 }
 
 /// A refusal after the Git work has happened is worse than either answer on

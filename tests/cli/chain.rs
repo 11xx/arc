@@ -1,9 +1,7 @@
 use super::common::*;
 
 fn begin(repo: &Repo, slug: &str, extra: &[&str]) -> String {
-    let mut args = vec!["begin", slug, "--no-worktree"];
-    args.extend_from_slice(extra);
-    opened_change_id(&stdout(repo.arc(&repo.root).args(args)))
+    begin_no_worktree(repo, slug, extra)
 }
 
 fn chain_json(repo: &Repo, tag: &str) -> serde_json::Value {

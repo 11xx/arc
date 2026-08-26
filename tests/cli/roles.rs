@@ -161,14 +161,8 @@ fn role_flag_and_environment_binding_are_equivalent() {
 #[test]
 fn lead_and_unset_roles_retain_full_access() {
     let repo = Repo::new();
-    stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "explicit-lead", "--no-worktree"]),
-    );
-    stdout(
-        repo.arc(&repo.root)
-            .args(["begin", "unset-role", "--no-worktree"]),
-    );
+    begin_no_worktree(&repo, "explicit-lead", &[]);
+    begin_no_worktree(&repo, "unset-role", &[]);
 
     repo.arc(&repo.root)
         .env("ARC_ROLE", "lead")

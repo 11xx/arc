@@ -98,8 +98,7 @@ fn doctor_reports_orphaned_tmp_as_advice_without_failing() {
 pub(crate) fn doctor_groups_advice_and_ignores_closed_claims() {
     let repo = Repo::new();
     let expired_claim = |slug: &str| {
-        let opened = stdout(repo.arc(&repo.root).args(["begin", slug, "--no-worktree"]));
-        let change_id = opened_change_id(&opened);
+        let change_id = begin_no_worktree(&repo, slug, &[]);
         repo.arc(&repo.root)
             .args(["claim", slug, "--ttl", "1s"])
             .assert()

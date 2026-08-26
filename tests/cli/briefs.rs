@@ -1,11 +1,7 @@
 use super::common::*;
 
 fn begin(repo: &Repo, slug: &str) -> String {
-    opened_change_id(&stdout(repo.arc(&repo.root).args([
-        "begin",
-        slug,
-        "--no-worktree",
-    ])))
+    begin_change(repo, slug, None)
 }
 
 fn record(repo: &Repo, slug: &str, body: &str, title: Option<&str>) {
@@ -597,18 +593,11 @@ fn brief_base_is_resolved_at_write_time_and_does_not_follow_head() {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    repo.arc(&repo.root)
-        .args([
-            "begin",
-            "seed-anchor",
-            "--no-worktree",
-            "--base",
-            "HEAD~2",
-            "--from-journal",
-            &artifact,
-        ])
-        .assert()
-        .success();
+    begin_no_worktree(
+        &repo,
+        "seed-anchor",
+        &["--base", "HEAD~2", "--from-journal", &artifact],
+    );
     let seeded = json_stdout(
         repo.arc(&repo.root)
             .args(["status", "seed-anchor", "--json"]),

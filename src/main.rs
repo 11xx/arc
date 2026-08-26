@@ -184,7 +184,7 @@ enum Cmd {
         /// Worktree path (defaults to ~/.worktrees/<repo>-<slug>)
         #[arg(long)]
         worktree: Option<String>,
-        /// Do not create a worktree
+        /// Use a clean checkout on the target branch in place; otherwise do not switch
         #[arg(long)]
         no_worktree: bool,
         /// Track an existing branch instead of creating one
