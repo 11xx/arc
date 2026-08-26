@@ -404,7 +404,8 @@ enum Cmd {
         /// Override the latest-tag release boundary
         #[arg(long)]
         since: Option<String>,
-        /// Replace the generated [Unreleased] block in CHANGELOG.md
+        /// Replace the generated [Unreleased] block in CHANGELOG.md; entries
+        /// wrap at 75 columns, continuations indented under their marker
         #[arg(long)]
         write: bool,
     },
