@@ -2154,11 +2154,28 @@ impl ChangeState {
     /// The verdict or audit that satisfies the existing discharge predicate.
     /// The returned model is copied from that event and is never inferred.
     fn audit_debt_discharge(&self, debt: &AuditDebt) -> Option<DebtCoverage> {
-        if let Some(audit) = self
-            .audit_verdicts
-            .iter()
-            .find(|audit| audit.created_at >= debt.declared_at)
-        {
+        // A debt that names an independent review as the thing missing cannot
+        // be settled by the people who wrote the patchset. The shipped
+        // patchset's contributor set is the same one the pre-merge gate reads,
+        // so both paths answer independence the same way; where no set was
+        // recorded, membership falls back to the patchset's author.
+        let shipped_patchset = self
+            .closure
+            .as_ref()
+            .and_then(|closure| closure.source_patchset_id.as_deref())
+            .and_then(|shipped| {
+                self.patchsets
+                    .iter()
+                    .find(|patchset| patchset.id == shipped)
+            });
+        if let Some(audit) = self.audit_verdicts.iter().find(|audit| {
+            audit.created_at >= debt.declared_at
+                && shipped_patchset.is_none_or(|patchset| {
+                    patchset
+                        .contributor_match(audit.effective_author())
+                        .is_none()
+                })
+        }) {
             return Some(DebtCoverage {
                 reviewer: audit.effective_author().to_string(),
                 model: audit.model.clone(),
@@ -2166,14 +2183,8 @@ impl ChangeState {
         }
         // Only a verdict on the revision that actually shipped counts; a
         // verdict on an earlier draft judged something else.
-        let shipped = self
-            .closure
-            .as_ref()
-            .and_then(|closure| closure.source_patchset_id.as_deref())?;
-        let patchset = self
-            .patchsets
-            .iter()
-            .find(|patchset| patchset.id == shipped)?;
+        let patchset = shipped_patchset?;
+        let shipped = patchset.id.as_str();
         self.verdicts
             .iter()
             .find(|verdict| {
