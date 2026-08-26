@@ -170,6 +170,33 @@ pub enum LaneOutcome {
     Expired,
 }
 
+/// The stances a position can record when the tool writes its first body line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum PositionStance {
+    For,
+    Against,
+    Amend,
+}
+
+impl PositionStance {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::For => "for",
+            Self::Against => "against",
+            Self::Amend => "amend",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "for" => Some(Self::For),
+            "against" => Some(Self::Against),
+            "amend" => Some(Self::Amend),
+            _ => None,
+        }
+    }
+}
+
 impl LaneOutcome {
     fn as_str(self) -> &'static str {
         match self {
@@ -357,8 +384,8 @@ pub enum JournalCmd {
         message: String,
     },
     /// Add a position block to an artifact and emit a typed `position` event.
-    /// The body's first line states the stance the tally counts:
-    /// `Position: for | against | amend`
+    /// `--stance` writes the `Position: for | against | amend` line above the
+    /// body; without it, the body can provide that line itself.
     /// Use `arc journal position <file> --body-file - --question <id> --option
     /// <opt>` to argue under one branch of an open question instead of
     /// unconditionally
@@ -371,9 +398,12 @@ pub enum JournalCmd {
         reference: Option<String>,
         /// Body source: a file path, or '-' for stdin (the position argument,
         /// written verbatim below a tool-computed `### Position` heading).
-        /// Its first line states the stance: `Position: for | against | amend`
         #[arg(long)]
         body_file: String,
+        /// Stance to write above the body and record on the typed event. Omit
+        /// this when the body already opens with its own `Position:` line.
+        #[arg(long, value_enum)]
+        stance: Option<PositionStance>,
         /// Argue under one option of an open question, rather than
         /// unconditionally. Pass the question ID; `--option` names the branch
         #[arg(long)]
@@ -636,6 +666,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             filename,
             reference,
             body_file,
+            stance,
             question,
             option,
         } => position(
@@ -643,6 +674,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             &filename,
             reference.as_deref(),
             &body_file,
+            stance,
             question.as_deref(),
             option.as_deref(),
         ),
@@ -1519,6 +1551,21 @@ fn read_body_verbatim(body_file: &str) -> Result<String> {
     }
 }
 
+fn position_stance_text(line: &str) -> Option<&str> {
+    line.trim_start().strip_prefix("Position:")
+}
+
+fn opening_position_stance(body: &str) -> Option<String> {
+    let line = body.lines().find(|line| !line.trim().is_empty())?;
+    let rest = position_stance_text(line)?;
+    Some(
+        rest.split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
+    )
+}
+
 /// The scaffold a kind carries by default, for kinds whose conventions live in
 /// a template rather than in the reader's head.
 fn default_scaffold(kind: JournalKind) -> Option<&'static str> {
@@ -1657,6 +1704,7 @@ fn position(
     filename: &str,
     reference: Option<&str>,
     body_file: &str,
+    stance: Option<PositionStance>,
     question: Option<&str>,
     option: Option<&str>,
 ) -> Result<i32> {
@@ -1678,6 +1726,25 @@ fn position(
     // Read the body before touching the filesystem so a bad source path leaves
     // the artifact untouched.
     let body = read_body_verbatim(body_file)?;
+    if let Some(requested) = stance {
+        if let Some(body_stance) = opening_position_stance(&body) {
+            let body_label = if body_stance.is_empty() {
+                "<empty>"
+            } else {
+                body_stance.as_str()
+            };
+            if body_stance == requested.as_str() {
+                bail!(
+                    "body already opens with stance {body_label}; --stance {} would emit a duplicate stance line",
+                    requested.as_str()
+                );
+            }
+            bail!(
+                "body opens with stance {body_label}, but --stance {} requests a different stance",
+                requested.as_str()
+            );
+        }
+    }
 
     // Positions ride an open discussion in the hot directory; a cold archived
     // artifact is a closed record, not an append target.
@@ -1739,7 +1806,11 @@ fn position(
         "### Position {position_id} ({}, {ts}){under}",
         attribution(ctx, &harness)
     );
-    let block = format!("\n{heading}\n\n{}\n", body.trim_end_matches('\n'));
+    let position_body = match stance {
+        Some(stance) => format!("Position: {}\n{body}", stance.as_str()),
+        None => body,
+    };
+    let block = format!("\n{heading}\n\n{}\n", position_body.trim_end_matches('\n'));
 
     // Append-only write: O_APPEND places the block at the current end even if
     // another writer added a position since, so concurrent appends never clobber
@@ -1758,6 +1829,7 @@ fn position(
     event.file = Some(filename.to_string());
     event.position_id = Some(position_id);
     event.reference = reference.map(str::to_string);
+    event.stance = stance.map(|stance| stance.as_str().to_string());
     if let Some((question, option)) = branch {
         event.question_id = Some(question);
         event.option = Some(option);
@@ -2361,6 +2433,11 @@ struct JournalEvent {
     /// remain valid `journal-events/1` input.
     #[serde(skip_serializing_if = "Option::is_none")]
     position_id: Option<String>,
+    /// Stance explicitly written by `journal position --stance`. Optional so
+    /// position events written before the flag remain valid `journal-events/1`
+    /// input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stance: Option<String>,
     /// The position or item a `position` event answers (`--ref`): a position
     /// ID, a legacy timestamp, or an item slug. The machine-readable half of
     /// the reply-to convention; optional, and never authored for non-position
@@ -2484,6 +2561,7 @@ impl JournalEvent {
             scope: None,
             status: None,
             position_id: None,
+            stance: None,
             reference: None,
             question_id: None,
             placement: None,
@@ -2510,6 +2588,10 @@ impl JournalEvent {
             "verified" => self.file.is_some(),
             "position" => {
                 self.file.is_some()
+                    && self
+                        .stance
+                        .as_deref()
+                        .is_none_or(|stance| PositionStance::parse(stance).is_some())
                     && self.placement.is_none()
                     && self.options.is_none()
                     && match (self.question_id.as_deref(), self.option.as_deref()) {
@@ -4726,13 +4808,18 @@ fn position_heading_id(line: &str) -> Option<String> {
         .then(|| token.to_string())
 }
 
+fn position_stance_value(line: &str) -> Option<&str> {
+    position_stance_text(line).and_then(|rest| rest.split_whitespace().next())
+}
+
 /// Count position blocks, and the stance each one states.
 ///
 /// A block's stance is the first non-blank line under its heading, which is
-/// what the convention asks for and what every surface documents. A block whose
-/// first line argues instead of voting is counted as `unstated`, so a tally
-/// that undercounts says so instead of reading as a settled result — and a
-/// `Position:` line anywhere else, including inside a fenced example, is prose.
+/// where `journal position --stance` writes it and where a hand-written body
+/// can provide it. A block whose first line argues instead of voting is counted
+/// as `unstated`, so a tally that undercounts says so instead of reading as a
+/// settled result — and a `Position:` line anywhere else, including inside a
+/// fenced example, is prose.
 fn position_structure(body: &str) -> (usize, StanceTally, Vec<Option<String>>) {
     let mut heading_ids: Vec<Option<String>> = Vec::new();
     let mut positions = 0;
@@ -4803,23 +4890,16 @@ fn position_structure(body: &str) -> (usize, StanceTally, Vec<Option<String>>) {
             continue;
         }
         decided = true;
-        let Some(rest) = trimmed.strip_prefix("Position:") else {
+        let Some(value) = position_stance_value(trimmed) else {
             // The block opens by arguing rather than voting.
             tally.unstated += 1;
             continue;
         };
-        match rest
-            .split_whitespace()
-            .next()
-            .map(str::to_ascii_lowercase)
-            .as_deref()
-        {
-            Some("for") => tally.in_favor += 1,
-            Some("against") => tally.against += 1,
-            Some("amend") => tally.amend += 1,
-            Some(_) => tally.other += 1,
-            // `Position:` with nothing after it states no stance either.
-            None => tally.unstated += 1,
+        match PositionStance::parse(value) {
+            Some(PositionStance::For) => tally.in_favor += 1,
+            Some(PositionStance::Against) => tally.against += 1,
+            Some(PositionStance::Amend) => tally.amend += 1,
+            None => tally.other += 1,
         }
     }
     close_block(&mut open_block, decided, &mut tally);
@@ -4995,15 +5075,16 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         summary.stances.other
     );
     if summary.stances.unstated > 0 {
+        let (blocks, verb) = if summary.stances.unstated == 1 {
+            ("block", "states")
+        } else {
+            ("blocks", "state")
+        };
         println!(
-            "unstated: {} position block{} state no stance, so the tally undercounts \
-             (a position's first body line reads `Position: for | against | amend`)",
+            "unstated: {} position {blocks} {verb} no stance, so the tally undercounts \
+             (`journal position --stance <for|against|amend>` writes the line; a body \
+             edited by hand opens with it)",
             summary.stances.unstated,
-            if summary.stances.unstated == 1 {
-                ""
-            } else {
-                "s"
-            }
         );
     }
     let participants = if summary.participants.is_empty() {

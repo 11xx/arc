@@ -2660,6 +2660,11 @@ fn journal_help_prints_complete_question_workflow_commands() {
     ] {
         assert!(help.contains(command), "help missing {command:?}:\n{help}");
     }
+    let position_help = stdout(repo.arc(&repo.root).args(["journal", "position", "--help"]));
+    assert!(
+        position_help.contains("--stance <STANCE>"),
+        "{position_help}"
+    );
 }
 
 #[test]
@@ -3698,6 +3703,178 @@ fn journal_position_writes_position_block_and_typed_event() {
         .assert()
         .success()
         .stdout(predicates::str::contains("unknown-jsonl-event").not());
+}
+
+#[test]
+fn journal_position_stance_flag_writes_tallies_and_records_the_stance() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "flagged", "# Debate\n");
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--stance",
+            "for",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("The option is simpler.\n")
+        .assert()
+        .success();
+
+    let dir = journal_dir(&repo);
+    let body = fs::read_to_string(dir.join(&file)).unwrap();
+    let position = &body[body.rfind("### Position pos-").unwrap()..];
+    assert!(
+        position.contains("\n\nPosition: for\nThe option is simpler.\n"),
+        "{body}"
+    );
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["stances"]["for"], 1, "{summary}");
+    assert_eq!(summary["stances"]["unstated"], 0, "{summary}");
+
+    let event = journal_events(&dir)
+        .into_iter()
+        .find(|event| event["event"] == "position")
+        .unwrap();
+    assert_eq!(event["stance"], "for");
+}
+
+#[test]
+fn journal_position_without_stance_preserves_a_handwritten_stance() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "handwritten", "# Debate\n");
+    let body_file = repo.home.join("position.md");
+    fs::write(&body_file, "Position: against\n\nHandwritten stance.\n").unwrap();
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--body-file",
+            body_file.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let dir = journal_dir(&repo);
+    let body = fs::read_to_string(dir.join(&file)).unwrap();
+    let position = &body[body.rfind("### Position pos-").unwrap()..];
+    assert!(
+        position.contains("\n\nPosition: against\n\nHandwritten stance.\n"),
+        "{body}"
+    );
+    assert_eq!(position.matches("Position: against").count(), 1, "{body}");
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["stances"]["against"], 1, "{summary}");
+    assert_eq!(summary["stances"]["unstated"], 0, "{summary}");
+    let event = journal_events(&dir)
+        .into_iter()
+        .find(|event| event["event"] == "position")
+        .unwrap();
+    assert!(event.get("stance").is_none(), "{event}");
+}
+
+#[test]
+fn journal_position_without_stance_keeps_an_unstated_block() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "unstated", "# Debate\n");
+
+    repo.arc(&repo.root)
+        .args(["journal", "position", &file, "--body-file", "-"])
+        .write_stdin("No stance was supplied.\n")
+        .assert()
+        .success();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["stances"]["for"], 0, "{summary}");
+    assert_eq!(summary["stances"]["against"], 0, "{summary}");
+    assert_eq!(summary["stances"]["unstated"], 1, "{summary}");
+}
+
+#[test]
+fn journal_position_stance_refuses_a_duplicate_body_stance_before_writing() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "conflict", "# Debate\n");
+    let dir = journal_dir(&repo);
+    let artifact = fs::read_to_string(dir.join(&file)).unwrap();
+    let events = fs::read(dir.join("events.jsonl")).unwrap();
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--stance",
+            "for",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Position: against\n\nA conflicting argument.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("for").and(predicates::str::contains("against")));
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--stance",
+            "against",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Position: against\n\nA duplicate argument.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("duplicate stance line"));
+
+    assert_eq!(fs::read_to_string(dir.join(&file)).unwrap(), artifact);
+    assert_eq!(fs::read(dir.join("events.jsonl")).unwrap(), events);
+}
+
+#[test]
+fn journal_events_accept_a_position_without_the_optional_stance_field() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "legacy-event", "# Debate\n");
+    let dir = journal_dir(&repo);
+    let event = serde_json::json!({
+        "schema": "journal-events/1",
+        "ts": "2026-01-01T00:00:00Z",
+        "harness": "test",
+        "session": "session-a",
+        "topic": "legacy-event",
+        "event": "position",
+        "file": file,
+        "position_id": "pos-legacy"
+    });
+    fs::write(dir.join("events.jsonl"), format!("{event}\n")).unwrap();
+
+    let events: Vec<serde_json::Value> = stdout(repo.arc(&repo.root).args(["journal", "events"]))
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event"], "position");
+    assert!(events[0].get("stance").is_none(), "{}", events[0]);
 }
 
 /// A question posed as waiting on a person is settled by a person, and the

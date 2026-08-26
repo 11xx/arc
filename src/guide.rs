@@ -59,7 +59,7 @@ ORIENT (start here, in this order)
 
 SETTLE A QUESTION (before it is work)
   arc journal note <topic> --kind discussion --body-file -
-  arc journal position <file> --body-file -
+  arc journal position <file> --body-file - [--stance <for|against|amend>]
   arc journal question <file> --placement opening|closing --option <a> --option <b> --body-file -
   arc journal questions                Every question waiting on a person.
   arc journal scaffolds [--show <n>]   What a write prepends, before it does.
