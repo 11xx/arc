@@ -414,12 +414,16 @@ pub fn markdown(
             for d in &f.dispositions {
                 let _ = writeln!(
                     w,
-                    "  - disposition: {:?} by {}{}",
+                    "  - disposition: {:?} by {}{}{}",
                     d.status,
                     d.actor,
                     d.commit
                         .as_deref()
                         .map(|c| format!(" (commit `{c}`)"))
+                        .unwrap_or_default(),
+                    d.evidence_event_id
+                        .as_deref()
+                        .map(|id| format!(" (evidence event `{id}`)"))
                         .unwrap_or_default()
                 );
             }
@@ -1004,7 +1008,7 @@ pub(crate) fn one_line(text: &str) -> String {
 }
 
 /// Stable kebab event type plus a type-specific one-line summary.
-fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
+pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
     match payload {
         Payload::ChangeOpened { slug, title, .. } => ("change-opened", format!("{slug}: {title}")),
         Payload::ContextKept { kind, body, .. } => (
@@ -1092,10 +1096,13 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
         ),
         Payload::ReplyAdded { body, .. } => ("reply-added", first_line(body)),
         Payload::DispositionRecorded {
-            finding_id, status, ..
+            finding_id,
+            status,
+            evidence_event_id,
+            ..
         } => (
             "disposition-recorded",
-            format!("{finding_id} {}", format!("{status:?}").to_lowercase()),
+            disposition_summary(finding_id, status, evidence_event_id.as_deref()),
         ),
         Payload::DirtyTreeWaived { reason, revision } => (
             "dirty-tree-waived",
@@ -1142,10 +1149,13 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             format!("{finding_id} [{severity:?}] {summary}"),
         ),
         Payload::AuditDispositionRecorded {
-            finding_id, status, ..
+            finding_id,
+            status,
+            evidence_event_id,
+            ..
         } => (
             "audit-disposition-recorded",
-            format!("{finding_id} {}", format!("{status:?}").to_lowercase()),
+            disposition_summary(finding_id, status, evidence_event_id.as_deref()),
         ),
         Payload::VerdictRecorded {
             patchset_id,
@@ -1253,6 +1263,18 @@ fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
         }
         Payload::Unknown => ("unknown", String::new()),
     }
+}
+
+fn disposition_summary(
+    finding_id: &str,
+    status: &crate::model::DispositionStatus,
+    evidence_event_id: Option<&str>,
+) -> String {
+    let mut summary = format!("{finding_id} {}", format!("{status:?}").to_lowercase());
+    if let Some(evidence_event_id) = evidence_event_id {
+        summary.push_str(&format!(" (evidence event {evidence_event_id})"));
+    }
+    summary
 }
 
 fn short_sha(sha: &str) -> String {

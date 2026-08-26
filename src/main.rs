@@ -771,6 +771,11 @@ enum Cmd {
         /// What supports the disposition: a probe, a command, or the reasoning
         #[arg(long)]
         evidence: Option<String>,
+        /// The verification event that justifies it: a full event ID on this
+        /// change, recorded or reused. Prefixes are not resolved, and this
+        /// neither implies nor is implied by --evidence
+        #[arg(long, value_name = "ID")]
+        evidence_event: Option<String>,
     },
     /// Read review state, or record a verdict with an optional findings batch
     Review {
@@ -1976,9 +1981,18 @@ fn run(cli: Cli) -> Result<i32> {
             status,
             commit,
             evidence,
+            evidence_event,
         } => {
             let change = infer(change.as_deref())?;
-            commands::resolve(&ctx, &change, finding, status, commit, evidence)?;
+            commands::resolve(
+                &ctx,
+                &change,
+                finding,
+                status,
+                commit,
+                evidence,
+                evidence_event,
+            )?;
             Ok(0)
         }
         Cmd::Review {

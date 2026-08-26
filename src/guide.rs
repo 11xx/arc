@@ -118,6 +118,7 @@ RUN A CHANGE
   arc review --verdict <v>           Record a verdict (+ --findings-json -).
     --provisional <why>              It gates, and owes a second judgment.
   arc resolve                        Dispose of a finding.
+    --evidence-event <id>            Cite the verification run that justifies it.
   arc check                          Integration preflight; exit code names the blocker.
   arc integrate [--tag <t>]          Guarded --no-ff merge once the gates are green.
   arc audit <change> --verdict <v>   Review an already-integrated revision.
