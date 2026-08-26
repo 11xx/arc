@@ -390,6 +390,7 @@ mod tests {
             harness: None,
             session: None,
             on_behalf_of: None,
+            model: None,
             created_at: chrono::Utc::now(),
             payload: Payload::HistoryRewritten {
                 mapping: BTreeMap::from([(old.to_string(), Some(new.to_string()))]),

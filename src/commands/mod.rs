@@ -289,6 +289,7 @@ impl Ctx {
             actor: self.actor.clone(),
             actor_source: Some(self.actor_source),
             on_behalf_of: self.on_behalf_of.clone(),
+            model: self.model.clone(),
             harness: self.harness.clone(),
             session: self.session.clone(),
             created_at,

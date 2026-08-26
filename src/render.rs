@@ -920,7 +920,8 @@ fn blocker_title(blocker: Blocker) -> &'static str {
 }
 
 /// One chronological log line for a ledger event:
-/// `<ts>  <actor>@<harness>  <event-type>  <summary>`.
+/// `<ts>  <actor>@<harness> (<model>)  <event-type>  <summary>`, with the
+/// parenthesized model omitted when no model was recorded.
 pub fn event_line(event: &Event) -> String {
     let (kind, summary) = event_kind_summary(&event.payload);
     if summary.is_empty() {
@@ -930,15 +931,24 @@ pub fn event_line(event: &Event) -> String {
     }
 }
 
-/// The `<ts>  <actor>@<harness>` half of a log line, shared by events and by
-/// the facts an event carries inside it.
+/// The `<ts>  <actor>@<harness> (<model>)` half of a log line, shared by
+/// events and by the facts an event carries inside it. The model annotation is
+/// present only when the event recorded one.
 fn event_prefix(event: &Event) -> String {
     let ts = event.created_at.format("%Y-%m-%dT%H:%M:%SZ");
     let actor = match &event.on_behalf_of {
         Some(subject) => format!("{} (for {subject})", event.actor),
         None => event.actor.clone(),
     };
-    format!("{ts}  {actor}@{}", event.harness.as_deref().unwrap_or("-"))
+    let model = event
+        .model
+        .as_deref()
+        .map(|model| format!(" ({model})"))
+        .unwrap_or_default();
+    format!(
+        "{ts}  {actor}@{}{model}",
+        event.harness.as_deref().unwrap_or("-")
+    )
 }
 
 /// Which patchset a finding predates, when it is not the one under review.

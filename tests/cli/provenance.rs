@@ -32,6 +32,81 @@ fn on_behalf_of_round_trips_through_status_json() {
 }
 
 #[test]
+fn ledger_events_record_optional_model_identity_and_render_it_in_log() {
+    let repo = Repo::new();
+    let output = stdout(repo.arc(&repo.root).args([
+        "--model",
+        "gpt-5.6-sol#high",
+        "begin",
+        "model-identity",
+        "--no-worktree",
+    ]));
+    let change_id = opened_change_id(&output);
+
+    repo.arc(&repo.root)
+        .args(["comment", &change_id, "--body", "no model declared"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_MODEL", "gpt-5.6-sol#medium")
+        .args(["comment", &change_id, "--body", "model from environment"])
+        .assert()
+        .success();
+
+    let event_values = fs::read_dir(event_dir(&repo, &change_id))
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let raw = fs::read_to_string(&path).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            (
+                value["event_type"].as_str().unwrap().to_string(),
+                raw,
+                value,
+            )
+        })
+        .collect::<Vec<_>>();
+    let event = |event_type: &str| {
+        event_values
+            .iter()
+            .find(|(kind, _, _)| kind == event_type)
+            .unwrap_or_else(|| panic!("missing {event_type} event"))
+    };
+
+    let (kind, raw, value) = event("change-opened");
+    assert_eq!(kind, "change-opened");
+    assert!(raw.contains("\"model\""), "{raw}");
+    assert_eq!(value["model"], "gpt-5.6-sol#high", "{value}");
+
+    let comment = |body: &str| {
+        event_values
+            .iter()
+            .find(|(_, _, value)| value["body"] == body)
+            .unwrap_or_else(|| panic!("missing comment {body:?}"))
+    };
+    let (_, raw, value) = comment("no model declared");
+    assert!(!raw.contains("\"model\""), "{raw}");
+    assert!(value.get("model").is_none(), "{value}");
+
+    let (_, _, value) = comment("model from environment");
+    assert_eq!(value["model"], "gpt-5.6-sol#medium", "{value}");
+
+    let comment_count = event_values
+        .iter()
+        .filter(|(kind, _, _)| kind == "comment-added")
+        .count();
+    assert_eq!(comment_count, 2);
+
+    let log = stdout(repo.arc(&repo.root).args(["log", &change_id]));
+    assert!(log.contains("tester@test (gpt-5.6-sol#high)"), "{log}");
+    assert!(
+        log.contains("tester@test  comment-added  no model declared"),
+        "{log}"
+    );
+    assert!(log.contains("tester@test (gpt-5.6-sol#medium)"), "{log}");
+}
+
+#[test]
 fn lead_snapshot_then_lead_approval_is_not_self_approval() {
     let repo = repo_with_self_approval_policy();
     stdout(repo.arc(&repo.root).args(["begin", "feat-x"]));
