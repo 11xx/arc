@@ -12,6 +12,30 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `arc journal verified <file> [--note <text>]` records that an open
+  artifact was checked against source at the project anchor's head, as a
+  typed event in the journal's log rather than in the prose a person edits.
+  `journal open` and `workspace backlog --items` name the checked revision,
+  its age, and who checked it, and speak up only once the anchor has moved
+  past the stamp. JSON moves to `arc-workspace-backlog/3`.
+
+- `arc watch --until` accepts `approved`, `gates-green`, `blocked`, and
+  `brief-recorded`. `approved` returns on the latest approving verdict
+  against the latest patchset — including a provisional approval, whose
+  reason it carries into both renderings, because a provisional approval
+  gates and a watcher refusing to return on one would wait for a state the
+  change may never reach. `gates-green` is every required gate at the
+  change head, which is when a lead can start reviewing rather than when a
+  reviewer is done.
+
+- `arc resolve --evidence-event <id>` cites the verification event that
+  justifies a disposition, beside the free-text `--evidence` rather than
+  instead of it. The id must name a `verification-recorded` or
+  `verification-reused` event on the same change; an id naming something
+  else and an id naming nothing are separate refusals. Carried on
+  `DispositionRecorded` and `AuditDispositionRecorded`, and named in the
+  timeline, the finding markdown, and JSON.
+
 - `arc rescue --transcript` reads a session through the `tapes` CLI when it
   is installed, falling back to arc's own claude/codex/pi readers
   otherwise, and names which reader answered (`arc-rescue/2`). This is what
@@ -296,6 +320,20 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- `arc begin --no-worktree` means in place, not nowhere: a clean checkout
+  already on the requested target is checked out onto the new branch and
+  recorded as the change's worktree, so the next command infers the change
+  without being told. A dirty checkout, or one standing on another branch,
+  is left exactly as it was — the change still opens, and arc prints the
+  Git command that finishes the switch, naming which of the two situations
+  it found.
+
+- The `reviewer` scaffold says that a change with a runtime surface is
+  reviewed by running it, and that a diff review of one is not a review. It
+  names what a diff cannot show — wording, ordering, filtering, the sign of
+  a computed signal, and the volume of what is printed — and asks for both
+  the human and `--json` renderings against a real ledger.
+
 - Bare `arc` teaches identity before the first write (`SAY WHO YOU ARE`)
   and what to file when a session ends (`END A SESSION`); `arc env --help`
   names the session variables it detects and explains that its non-zero
@@ -378,6 +416,25 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   file, and expose it in show, log, and status output.
 
 ### Fixed
+
+- A project the workspace rollup counts can now be opened by `arc journal
+  open`. After Git discovery and a `[journals.dirs]` prefix both fail, the
+  resolver takes a journal whose recorded binding names this canonical
+  directory — two such bindings are refused as ambiguous — and otherwise
+  the journal this directory's own slug names, which is the one arc would
+  itself create here and the only way to reach journals written before
+  bindings existed. A journal already bound elsewhere is never taken. The
+  failure now names every source it checked, and says that a path-prefix
+  entry covering a directory with repositories beneath it shadows their
+  discovery.
+
+- `arc changelog --write` wraps the block it generates at 75 columns, the
+  width the rest of the file uses, with continuations indented under their
+  marker, blank lines between entries, and paragraph breaks inside an entry
+  preserved. A body that already leads with a list marker keeps the markers
+  and nesting its author chose, and an over-long token overflows rather
+  than being split. Entries ran to several hundred columns before, so the
+  block was rewrapped by hand and the next projection undid it.
 
 - A stacked change's patchset now records its declared opening base rather
   than the merge base against the integration target, so a stacked member's
