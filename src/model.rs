@@ -599,6 +599,27 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         tool: Option<String>,
     },
+    /// A caller told arc that a delegated run was dispatched through a
+    /// resolved route. arc records the dispatch context but does not choose,
+    /// start, or supervise the run.
+    RunDispatched {
+        route: String,
+        worktree: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        change: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        brief_event_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// A caller told arc that a dispatched run reached a terminal outcome.
+    /// `unknown` records that no more specific outcome is known.
+    RunEnded {
+        dispatch_event_id: String,
+        outcome: RunOutcome,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     /// An event whose `event_type` this build does not recognize (e.g. one
     /// imported from a newer arc). Typed loading skips these entries; the
     /// underlying files and raw export preserve their original bytes intact.
@@ -726,7 +747,9 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::IterationScopeSet { .. } => AppendPermission::LifecycleOwned,
         // Repository-scoped: it is never appended to a change's log, so no
         // change-phase policy applies to it.
-        Payload::HistoryRewritten { .. } => AppendPermission::AnyPhaseFact,
+        Payload::HistoryRewritten { .. }
+        | Payload::RunDispatched { .. }
+        | Payload::RunEnded { .. } => AppendPermission::AnyPhaseFact,
         Payload::Unknown => AppendPermission::OpaqueImported,
     }
 }
@@ -1020,6 +1043,26 @@ pub enum Closure {
     Integrated,
     Abandoned,
     Superseded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunOutcome {
+    Completed,
+    RefusedOnPremise,
+    Stopped,
+    Unknown,
+}
+
+impl RunOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::RefusedOnPremise => "refused-on-premise",
+            Self::Stopped => "stopped",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]

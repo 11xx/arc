@@ -1252,6 +1252,35 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             "history-rewritten",
             format!("{} revisions: {reason}", mapping.len()),
         ),
+        Payload::RunDispatched {
+            route,
+            worktree,
+            change,
+            note,
+            ..
+        } => {
+            let mut summary = format!("route={} worktree={}", one_line(route), one_line(worktree));
+            if let Some(change) = change {
+                summary.push_str(&format!(" change={}", one_line(change)));
+            }
+            if let Some(note) = note {
+                summary.push_str(" — ");
+                summary.push_str(&one_line(note));
+            }
+            ("run-dispatched", summary)
+        }
+        Payload::RunEnded {
+            dispatch_event_id,
+            outcome,
+            note,
+        } => {
+            let mut summary = format!("{} for {dispatch_event_id}", outcome.as_str());
+            if let Some(note) = note {
+                summary.push_str(" — ");
+                summary.push_str(&one_line(note));
+            }
+            ("run-ended", summary)
+        }
         Payload::ChangeClosed {
             outcome,
             integrated_commit,

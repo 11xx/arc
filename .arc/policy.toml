@@ -95,8 +95,10 @@ acknowledged_safe = [
   "src/commands/scaffold.rs",
   "src/commands/scaffolds/*.md",
   # Records carrying no gate authority. A forge fact mirrors what a forge said
-  # and authorizes nothing on its own.
+  # and authorizes nothing on its own, and a delegated run record asserts what a
+  # caller says it launched: nothing reads either to decide whether work ships.
   "src/commands/changelog.rs",
+  "src/commands/run.rs",
   "src/forge.rs",
   "src/commands/forge_cmd.rs",
   # Discovery and CLI wiring: which repository, which command, which flags.
