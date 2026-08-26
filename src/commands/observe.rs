@@ -284,7 +284,7 @@ fn report_reached(selection: &WatchSelection, hits: &[WatchHit], until: &[WatchU
         WatchSelection::Tagged(change_ids, WatchQuorum::All) => {
             let reasons = hits
                 .iter()
-                .filter_map(|hit| hit.provisional.as_deref())
+                .filter_map(|hit| hit.provisional.as_deref().map(render::one_line))
                 .collect::<Vec<_>>();
             if reasons.is_empty() {
                 println!(
@@ -307,7 +307,7 @@ fn report_reached(selection: &WatchSelection, hits: &[WatchHit], until: &[WatchU
 fn provisional_suffix(reason: &Option<String>) -> String {
     reason
         .as_deref()
-        .map(|reason| format!(" (provisional: {reason})"))
+        .map(|reason| format!(" (provisional: {})", render::one_line(reason)))
         .unwrap_or_default()
 }
 
@@ -491,15 +491,19 @@ fn watch_reached(
                     provisional: None,
                 })
         }),
+        // The sole authoritative verdict, which is the same question the
+        // approval gate asks. Recency is not that question: a corroborating
+        // approval is never a tip, and a contested graph has no authority at
+        // all, so a watch reading the newest event would report reached on
+        // exactly the changes `check` refuses.
+        //
         // A provisional approval gates checks and integration, so it satisfies
         // this wait; its reason is carried into the diagnostic for the caller.
         WatchUntil::Approved => state.latest_patchset().and_then(|latest| {
             state
-                .verdicts
-                .iter()
-                .rev()
-                .find(|verdict| verdict.patchset_id == latest.id)
+                .latest_verdict()
                 .filter(|verdict| verdict.verdict == Verdict::Approved)
+                .filter(|verdict| verdict.patchset_id == latest.id)
                 .map(|verdict| WatchReached {
                     event_id: Some(verdict.event_id.clone()),
                     provisional: verdict.provisional.clone(),
