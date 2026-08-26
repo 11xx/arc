@@ -4407,6 +4407,143 @@ fn journal_open_uses_latest_position_activity_for_discussion_age() {
 }
 
 #[test]
+fn consume_names_a_discussion_nobody_tested() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "solo",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Solo\n\n## Positions\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--stance",
+            "for",
+            "--body-file",
+            "-",
+        ])
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_SESSION", "s1")
+        .env("ARC_MODEL", "kimi-k3#high")
+        .write_stdin("One voice, one round.\n")
+        .assert()
+        .success();
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "consume",
+        &file,
+        "--outcome",
+        "discarded",
+        "--note",
+        "resolved by the only participant",
+    ]));
+    assert!(
+        out.contains("every position came from one participant"),
+        "{out}"
+    );
+    assert!(out.contains("nobody answered the last position"), "{out}");
+}
+
+#[test]
+fn consume_is_quiet_about_a_discussion_that_was_answered_by_someone_else() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "answered",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Answered\n\n## Positions\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let first = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "position",
+                &file,
+                "--stance",
+                "for",
+                "--body-file",
+                "-",
+            ])
+            .env("ARC_HARNESS", "codex")
+            .env("ARC_SESSION", "s1")
+            .env("ARC_MODEL", "kimi-k3#high")
+            .write_stdin("Opening argument.\n"),
+    );
+    let _ = first;
+    let body = fs::read_to_string(journal_dir(&repo).join(&file)).unwrap();
+    let first_id = body
+        .lines()
+        .find_map(position_heading_id_for_test)
+        .expect("a position heading with an id");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--ref",
+            &first_id,
+            "--stance",
+            "against",
+            "--body-file",
+            "-",
+        ])
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_SESSION", "s2")
+        .env("ARC_MODEL", "opus-5#high")
+        .write_stdin("Answering it.\n")
+        .assert()
+        .success();
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "consume",
+        &file,
+        "--outcome",
+        "discarded",
+        "--note",
+        "done",
+    ]));
+    assert!(
+        !out.contains("every position came from one participant"),
+        "{out}"
+    );
+}
+
+fn position_heading_id_for_test(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("### Position ")?;
+    let token = rest.split_whitespace().next()?;
+    token.starts_with("pos-").then(|| token.to_string())
+}
+
+#[test]
 fn journal_discussion_summarizes_stances_participants_and_resolution() {
     let repo = Repo::new();
     let seed = stdout(
