@@ -67,6 +67,8 @@ pub struct ChangelogEntry {
     pub event_id: String,
     pub category: String,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
     pub actor: String,
     pub on_behalf_of: Option<String>,
     pub harness: Option<String>,
@@ -218,15 +220,7 @@ impl FindingState {
     /// Disposition tips: dispositions not superseded by any later one.
     /// One tip = its status governs; several = contested.
     pub fn tips(&self) -> Vec<&DispositionEntry> {
-        let superseded: Vec<&str> = self
-            .dispositions
-            .iter()
-            .flat_map(|d| d.supersedes.iter().map(String::as_str))
-            .collect();
-        self.dispositions
-            .iter()
-            .filter(|d| !superseded.contains(&d.event_id.as_str()))
-            .collect()
+        observed_tips(&self.dispositions)
     }
 
     pub fn contested(&self) -> bool {
@@ -270,6 +264,9 @@ pub struct VerdictEntry {
     /// the provenance, which is unknown rather than declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_source: Option<ActorSource>,
+    /// How this verdict relates to the verdict tips it observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation: Option<VerdictRelation>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -285,6 +282,55 @@ impl VerdictEntry {
     /// only when arc took it from git config with nobody offering one.
     pub fn author_assumed(&self) -> bool {
         author_assumed(self.on_behalf_of.as_deref(), self.actor_source)
+    }
+}
+
+trait TipEntry {
+    fn event_id(&self) -> &str;
+    fn supersedes(&self) -> &[String];
+    fn counts_as_tip(&self) -> bool {
+        true
+    }
+}
+
+fn observed_tips<T: TipEntry>(entries: &[T]) -> Vec<&T> {
+    let superseded: Vec<&str> = entries
+        .iter()
+        .flat_map(|entry| entry.supersedes().iter().map(String::as_str))
+        .collect();
+    entries
+        .iter()
+        .filter(|entry| entry.counts_as_tip() && !superseded.contains(&entry.event_id()))
+        .collect()
+}
+
+impl TipEntry for DispositionEntry {
+    fn event_id(&self) -> &str {
+        &self.event_id
+    }
+
+    fn supersedes(&self) -> &[String] {
+        &self.supersedes
+    }
+}
+
+impl TipEntry for VerdictEntry {
+    fn event_id(&self) -> &str {
+        &self.event_id
+    }
+
+    fn supersedes(&self) -> &[String] {
+        match self.relation.as_ref() {
+            Some(VerdictRelation::Supersedes { observed }) => observed,
+            _ => &[],
+        }
+    }
+
+    fn counts_as_tip(&self) -> bool {
+        !matches!(
+            self.relation.as_ref(),
+            Some(VerdictRelation::Corroborates { .. })
+        )
     }
 }
 
@@ -693,10 +739,32 @@ impl ChangeState {
         Some(identities.all(|identity| identity == author))
     }
 
-    /// The latest verdict overall; validity against the current head is
-    /// a Git-time question answered by the status layer.
+    /// Verdict tips: corroborations support the observed tip without becoming
+    /// another authority, while supersessions replace the observed tips.
+    /// A legacy verdict without a relation replaces the earlier verdict
+    /// history for compatibility with the former latest-wins projection.
+    pub fn verdict_tips(&self) -> Vec<&VerdictEntry> {
+        let start = self
+            .verdicts
+            .iter()
+            .rposition(|verdict| verdict.relation.is_none())
+            .unwrap_or(0);
+        observed_tips(&self.verdicts[start..])
+    }
+
+    pub fn verdict_contested(&self) -> bool {
+        self.verdict_tips().len() > 1
+    }
+
+    /// The sole authoritative verdict, when the observed verdict graph has
+    /// one tip. Validity against the current head is a Git-time question
+    /// answered by the status layer.
     pub fn latest_verdict(&self) -> Option<&VerdictEntry> {
-        self.verdicts.last()
+        let tips = self.verdict_tips();
+        match tips.as_slice() {
+            [tip] => Some(*tip),
+            _ => None,
+        }
     }
 
     pub fn open_blocking_findings(&self) -> Vec<&FindingState> {
@@ -906,11 +974,16 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 plan_ref: plan_ref.clone(),
                 plan_slice: plan_slice.clone(),
             }),
-            Payload::ChangelogRecorded { category, body } => {
+            Payload::ChangelogRecorded {
+                category,
+                body,
+                supersedes,
+            } => {
                 state.changelog = Some(ChangelogEntry {
                     event_id: ev.event_id.clone(),
                     category: category.clone(),
                     body: body.clone(),
+                    supersedes: supersedes.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
                     harness: ev.harness.clone(),
@@ -1230,6 +1303,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 provisional,
                 body,
                 findings,
+                relation,
             } => {
                 for inline in findings {
                     state.findings.insert(
@@ -1260,6 +1334,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
                     actor_source: ev.actor_source,
+                    relation: relation.clone(),
                     created_at: ev.created_at,
                 });
             }
@@ -2038,6 +2113,168 @@ mod tests {
                 journal_ref: None,
             },
         )
+    }
+
+    fn verdict(change: &str, patchset: &str, relation: Option<VerdictRelation>) -> Event {
+        ev(
+            change,
+            Payload::VerdictRecorded {
+                patchset_id: patchset.into(),
+                verdict: Verdict::Approved,
+                causes: Vec::new(),
+                body: None,
+                findings: Vec::new(),
+                relation,
+                provisional: None,
+            },
+        )
+    }
+
+    /// A corroboration supports the verdict it observed without becoming a
+    /// second authority — which is what discharging a provisional approval is,
+    /// and why a bare `supersedes` could not express it.
+    #[test]
+    fn a_corroborating_verdict_leaves_the_observed_one_authoritative() {
+        let first = verdict("fix", "ps-01", None);
+        let first_id = first.event_id.clone();
+        let second = verdict(
+            "fix",
+            "ps-01",
+            Some(VerdictRelation::Corroborates {
+                observed: vec![first_id.clone()],
+            }),
+        );
+        let state = reduce(&[opened("fix"), first, second]).unwrap();
+        assert!(!state.verdict_contested());
+        assert_eq!(state.latest_verdict().unwrap().event_id, first_id);
+    }
+
+    #[test]
+    fn a_superseding_verdict_replaces_the_observed_one() {
+        let first = verdict("fix", "ps-01", None);
+        let first_id = first.event_id.clone();
+        let second = verdict(
+            "fix",
+            "ps-01",
+            Some(VerdictRelation::Supersedes {
+                observed: vec![first_id],
+            }),
+        );
+        let second_id = second.event_id.clone();
+        let state = reduce(&[opened("fix"), first, second]).unwrap();
+        assert!(!state.verdict_contested());
+        assert_eq!(state.latest_verdict().unwrap().event_id, second_id);
+    }
+
+    /// Two verdicts replacing the same tip fork the chain, exactly as two
+    /// dispositions superseding one tip do. Neither wins by arriving later:
+    /// the change is contested until a verdict supersedes both.
+    #[test]
+    fn verdicts_replacing_one_tip_leave_the_change_contested() {
+        let first = verdict("fix", "ps-01", None);
+        let first_id = first.event_id.clone();
+        let fork_a = verdict(
+            "fix",
+            "ps-01",
+            Some(VerdictRelation::Supersedes {
+                observed: vec![first_id.clone()],
+            }),
+        );
+        let fork_b = verdict(
+            "fix",
+            "ps-01",
+            Some(VerdictRelation::Supersedes {
+                observed: vec![first_id],
+            }),
+        );
+        let (a_id, b_id) = (fork_a.event_id.clone(), fork_b.event_id.clone());
+        let state = reduce(&[opened("fix"), first, fork_a, fork_b]).unwrap();
+        assert!(state.verdict_contested());
+        assert!(state.latest_verdict().is_none());
+        let tips: Vec<&str> = state
+            .verdict_tips()
+            .iter()
+            .map(|tip| tip.event_id.as_str())
+            .collect();
+        assert_eq!(tips.len(), 2);
+        assert!(tips.contains(&a_id.as_str()));
+        assert!(tips.contains(&b_id.as_str()));
+    }
+
+    /// Every verdict recorded before the relation existed carries none, and a
+    /// ledger of them must keep reading exactly as it did: latest wins.
+    #[test]
+    fn relationless_verdicts_still_resolve_to_the_latest() {
+        let first = verdict("fix", "ps-01", None);
+        let second = verdict("fix", "ps-01", None);
+        let second_id = second.event_id.clone();
+        let state = reduce(&[opened("fix"), first, second]).unwrap();
+        assert!(!state.verdict_contested());
+        assert_eq!(state.latest_verdict().unwrap().event_id, second_id);
+    }
+
+    #[test]
+    fn a_changelog_entry_records_the_entry_it_replaced() {
+        let first = ev(
+            "fix",
+            Payload::ChangelogRecorded {
+                category: "added".into(),
+                body: "first".into(),
+                supersedes: None,
+            },
+        );
+        let first_id = first.event_id.clone();
+        let second = ev(
+            "fix",
+            Payload::ChangelogRecorded {
+                category: "added".into(),
+                body: "second".into(),
+                supersedes: Some(first_id.clone()),
+            },
+        );
+        let state = reduce(&[opened("fix"), first, second]).unwrap();
+        let entry = state.changelog.unwrap();
+        assert_eq!(entry.body, "second");
+        assert_eq!(entry.supersedes.as_deref(), Some(first_id.as_str()));
+    }
+
+    /// A verdict and a changelog entry recorded before either edge existed
+    /// must deserialize and replay unchanged.
+    #[test]
+    fn events_without_the_supersession_edges_replay_unchanged() {
+        let verdict_event: Event = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "event_id": "event-verdict-old",
+            "repository_id": "repo",
+            "change_id": "fix",
+            "actor": "tester",
+            "created_at": "2026-07-16T00:00:00Z",
+            "event_type": "verdict-recorded",
+            "patchset_id": "ps-01",
+            "verdict": "approved"
+        }))
+        .unwrap();
+        let changelog_event: Event = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "event_id": "event-changelog-old",
+            "repository_id": "repo",
+            "change_id": "fix",
+            "actor": "tester",
+            "created_at": "2026-07-16T00:00:00Z",
+            "event_type": "changelog-recorded",
+            "category": "added",
+            "body": "old"
+        }))
+        .unwrap();
+        let state = reduce(&[opened("fix"), verdict_event, changelog_event]).unwrap();
+        assert_eq!(
+            state.latest_verdict().unwrap().event_id,
+            "event-verdict-old"
+        );
+        assert!(state.latest_verdict().unwrap().relation.is_none());
+        let entry = state.changelog.unwrap();
+        assert_eq!(entry.body, "old");
+        assert!(entry.supersedes.is_none());
     }
 
     #[test]

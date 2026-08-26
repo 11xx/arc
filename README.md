@@ -245,6 +245,17 @@ implementation that were correct at their base. Other verdicts do not accept
 causes. `arc review --json` and `arc stats --json` expose these classifications
 without inferring them from verdict prose.
 
+Each verdict says what it does to the verdicts already standing on the change.
+`--relation supersedes`, the default, replaces the tips it observed;
+`--relation corroborates` supports one without becoming a second authority,
+which is what discharging a provisional approval is — a bare supersession
+could not express the difference, and event order was deciding it. Two
+verdicts replacing the same earlier verdict fork the chain and leave the
+change contested: no verdict is authoritative until one supersedes them all,
+`arc check` blocks and names that rather than reporting nobody reviewed, and
+`arc review` and `arc status --json` carry `verdict_contested`. This is the
+shape `DispositionRecorded.supersedes` already gives a contested finding.
+
 ## Context awareness
 
 Inside an open change's recorded worktree, `show`, `status`, `check`,
@@ -263,8 +274,10 @@ is recorded and the checkout remains unchanged.
 
 `arc changelog <change>` reads the latest entry for one change; adding
 `--category <category> --body-file <file>` records replacement release copy as
-a new append-only event. Categories are non-empty single-line strings; their
-case and spelling are preserved. `arc changelog` projects entries from
+a new append-only event that names the entry it replaces, and says so when it
+does. One entry per change still projects — the edge makes the replacement
+inspectable rather than different. Categories are non-empty single-line
+strings; their case and spelling are preserved. `arc changelog` projects entries from
 integrated changes newer than the latest reachable tag. The built-in renderer
 groups conventional categories in Keep a Changelog order, case-insensitively,
 then emits other categories verbatim in bytewise order. `--since <revision>`

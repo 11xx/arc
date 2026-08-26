@@ -125,6 +125,7 @@ RUN A CHANGE
   arc done                           Snapshot, run every gate, print check state.
   arc review --verdict <v>           Record a verdict (+ --findings-json -).
     --provisional <why>              It gates, and owes a second judgment.
+    --relation corroborates          Support the standing verdict, not replace it.
   arc resolve                        Dispose of a finding.
     --evidence-event <id>            Cite the verification run that justifies it.
   arc check                          Integration preflight; exit code names the blocker.
@@ -226,6 +227,14 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   what they know. arc never infers this; deciding which reviewers are proven
   would be a routing opinion, and arc holds none. Without the flag nothing
   changes.
+
+  A verdict says what it does to the verdicts already standing. `supersedes`,
+  the default, replaces them; `corroborates` supports one without becoming a
+  second authority, which is what discharging a provisional approval is. Two
+  verdicts replacing the same earlier verdict fork the chain and leave the
+  change contested — no verdict is authoritative until one supersedes them
+  all, and `arc check` says so rather than reporting that nobody reviewed it.
+  The same shape a contested finding has, for the same reason.
 
   Debt and a provisional verdict are the same obligation at two distances:
   debt says no review happened, provisional says one happened and is not yet

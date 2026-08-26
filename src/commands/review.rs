@@ -14,6 +14,8 @@ struct ReviewView<'a> {
     verdicts: Vec<ReviewVerdict<'a>>,
     open_findings: Vec<&'a FindingSummary>,
     has_valid_approval: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    verdict_contested: bool,
     next_action: &'a str,
 }
 
@@ -29,6 +31,8 @@ struct ReviewVerdict<'a> {
     actor: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     on_behalf_of: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relation: Option<&'a VerdictRelation>,
     created_at: chrono::DateTime<chrono::Utc>,
     valid_for_current_head: bool,
     /// Why this approval was recorded as owed corroboration, when it was.
@@ -74,6 +78,7 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
             .verdict
             .as_ref()
             .is_some_and(|verdict| verdict.valid_for_current_head),
+        verdict_contested: state.verdict_contested(),
         next_action: &report.next_action,
     };
 
@@ -98,6 +103,11 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
             verdict.patchset_id,
             reviewer,
             verdict.created_at.to_rfc3339(),
+            // Head validity and what a verdict does to its neighbours are
+            // independent facts. Reporting the relation here instead would
+            // let a stale corroboration read as though it still covered the
+            // head; the relation gets its own line below, and a contested
+            // change says so once, about the change.
             if verdict.valid_for_current_head {
                 "valid for current head"
             } else {
@@ -114,6 +124,9 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
                 },
                 crate::render::one_line(reason)
             );
+        }
+        if let Some(relation) = verdict.relation {
+            println!("  - relation: {}", relation.description());
         }
         if let Some(body) = verdict.body {
             println!("  {body}");
@@ -132,6 +145,9 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
         }
     }
 
+    if view.verdict_contested {
+        println!("\nVerdict state: CONTESTED");
+    }
     println!("\n## Open findings\n");
     if view.open_findings.is_empty() {
         println!("No open findings.");
@@ -177,6 +193,7 @@ fn review_verdict<'a>(
         patchset_id: &verdict.patchset_id,
         actor: &verdict.actor,
         on_behalf_of: verdict.on_behalf_of.as_deref(),
+        relation: verdict.relation.as_ref(),
         created_at: verdict.created_at,
         valid_for_current_head,
         provisional: verdict.provisional.as_deref(),
@@ -491,6 +508,7 @@ pub fn resolve(
 
 pub struct ReviewArgs {
     pub verdict: Verdict,
+    pub relation: VerdictRelationKind,
     pub body: Option<String>,
     pub provisional: Option<String>,
     pub patchset: Option<String>,
@@ -502,6 +520,7 @@ pub struct ReviewArgs {
 pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     let ReviewArgs {
         verdict,
+        relation,
         body,
         provisional,
         patchset,
@@ -555,6 +574,12 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     let st = state::reduce(&events)?;
     let patchset_id = resolve_patchset_id(&st, patchset)?
         .context("no patchset to review; run `arc snapshot` first")?;
+    let observed: Vec<String> = st
+        .verdict_tips()
+        .into_iter()
+        .map(|verdict| verdict.event_id.clone())
+        .collect();
+    let relation = (!observed.is_empty()).then(|| relation.with_observed(observed));
 
     let inline: Vec<InlineFinding> = match findings_json {
         None => Vec::new(),
@@ -590,12 +615,16 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     }
 
     let finding_ids: Vec<String> = inline.iter().map(|f| f.finding_id.clone()).collect();
+    if let Some(relation) = relation.as_ref() {
+        println!("relation: {}", relation.description());
+    }
     let payload = Payload::VerdictRecorded {
         patchset_id: patchset_id.clone(),
         verdict,
         causes,
         body,
         findings: inline,
+        relation,
         provisional: provisional.clone(),
     };
     ensure_append_allowed(&st, &payload)?;

@@ -15,6 +15,12 @@ pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approv
 /// Two identities arc assumed cannot establish that two people acted. The
 /// self-approval guard compares effective authors, so an assumed identity on
 /// both sides makes the comparison meaningless rather than passing.
+/// A verdict graph with several tips has no authority to report, so the
+/// change reads as unreviewed unless the blocker says which it is: nobody
+/// reviewed, or several reviewers each replaced the same verdict.
+pub const CONTESTED_VERDICT_REASON: &str =
+    "verdicts replace the same earlier verdict, so none is authoritative; record a verdict \
+     superseding all of them";
 pub const UNDECLARED_APPROVAL_REASON: &str =
     "approval rejected by policy: arc assumed the reviewing or the authoring identity from \
      git config, so independence is unproven (pass --actor or set ARC_ACTOR)";
@@ -408,6 +414,12 @@ pub struct StatusReport {
     pub blocker_summary: BlockerSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_rejection_reason: Option<String>,
+    /// Several verdicts replace the same earlier verdict, so none of them is
+    /// authoritative and the change carries no usable verdict until one
+    /// supersedes them all. Reported because the alternative reads as though
+    /// nobody reviewed the change.
+    #[serde(skip_serializing_if = "is_false")]
+    pub verdict_contested: bool,
     /// A declared audit debt supplied a missing verdict or let a self-approval
     /// stand. Only then is the waiver an authorization input.
     #[serde(skip_serializing_if = "is_false")]
@@ -909,6 +921,15 @@ fn build_report(
             }
         })
     });
+    // A contested verdict graph has no single authority, so `latest_verdict`
+    // reports none and the change reads as unreviewed. Without this the
+    // blocker would say nobody reviewed it, which is the opposite of what
+    // happened: two reviewers did, and each replaced the same verdict.
+    let verdict_contested = state.verdict_contested();
+    let approval_rejection_reason = approval_rejection_reason.or_else(|| {
+        verdict_contested
+            .then(|| format!("{} {CONTESTED_VERDICT_REASON}", state.verdict_tips().len()))
+    });
 
     let review_map = reviewer_coverage(state);
     let advisories = advisories(&review_map, latest_patchset.as_ref(), state, &danger);
@@ -1264,6 +1285,7 @@ fn build_report(
         probes: probe_statuses,
         blocker_summary,
         approval_rejection_reason,
+        verdict_contested,
         approval_waived_by_audit_debt,
         next_action,
         kept: state.kept.clone(),
