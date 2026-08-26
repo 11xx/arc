@@ -435,6 +435,7 @@ fn bare_arc_prints_the_workflow_guide() {
         "SETTLE A QUESTION",
         "arc journal note <topic> --kind discussion --body-file -",
         "arc journal position <file> --body-file -",
+        "--stance <for|against|amend>",
         "arc journal question <file> --placement opening|closing --option <a> --option <b> --body-file -",
         "arc journal answer <file> --question <id> --option <choice> --body-file -",
         "arc journal discussion",

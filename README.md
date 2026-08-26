@@ -1321,16 +1321,20 @@ consumption never edits or deletes the artifact.
 A `discussion` is the answer-owed actionable kind: an open debate rides the
 same queue until someone resolves it, and `arc begin --from-journal` promotes
 one straight into a change. `journal position <filename> [--ref <target>]
---body-file <src>` adds one position: it writes a
+[--stance <for|against|amend>] --body-file <src>` adds one position: it writes a
 `### Position pos-<ulid> (<model[#effort]> via <harness>, <utc-ts>)` block —
 the heading tool-computed so its stable reply target and timestamp are never
 hand-authored — below the file's existing content, and emits a typed `position`
 journal event carrying the same ID and identity plus the optional `--ref` (a
-position ID, legacy timestamp, or item slug it answers). Consumed artifacts
-reject late appends; re-litigation starts a successor discussion. The Markdown
-is for people and block-scoped stance parsing; the event supplies activity,
-identity, resolver-participation, and reply edges. The file stays hand-writable,
-and the append is advisory and fail-open like every journal write.
+position ID, legacy timestamp, or item slug it answers) and, when supplied,
+the explicit stance.
+When `--stance` is supplied, arc writes `Position: <stance>` above the body
+and records it on the event; without the flag, a hand-written first body line
+can provide the stance. Consumed artifacts reject late appends; re-litigation
+starts a successor discussion. The Markdown is for people and block-scoped
+stance parsing; the event supplies activity, identity,
+resolver-participation, and reply edges. The file stays hand-writable, and the
+append is advisory and fail-open like every journal write.
 `journal note --kind discussion` seeds the conventions at birth by default
 (the `Position: for|against|amend` stance line, reply-to quoting, the
 resolution vocabulary, and the norm that a contested discussion is resolved by

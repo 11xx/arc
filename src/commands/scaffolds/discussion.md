@@ -4,15 +4,18 @@
 
 ## How to append a position
 
-- Add a position with `arc journal position <this-file> --body-file -`: it
-  writes the `### Position pos-<ulid> (<who>, <utc-ts>)` heading for you
-  (timestamp tool-computed, never hand-authored) and emits the typed
-  `position` event. Pass your argument as the body, below the heading.
+- Add a position with
+  `arc journal position <this-file> --stance for --body-file -`: it writes the
+  `### Position pos-<ulid> (<who>, <utc-ts>)` heading and `Position: for` line
+  for you (timestamps are tool-computed, never hand-authored) and emits the
+  typed `position` event. Pass your argument as the body, below the stance
+  line.
 - `<who>` is `<model[#effort]> via <harness>` when a model argued, and the
   declared `--actor` when a person argued directly. The event records both, so
   an argument is never attributed to nobody.
-- First line of the body states your stance: `Position: for | against | amend`.
-  It is what the `arc journal discussion` tally counts; a block that states no
+- For an artifact edited by hand, omit `--stance` and put
+  `Position: for | against | amend` at the start of the body yourself. It is
+  what the `arc journal discussion` tally counts; a block that states no
   stance is reported as unstated rather than silently uncounted.
 - Answer a specific claim with `--ref <position id>` (the machine-readable
   half) and a quoting line directly under the stance:
