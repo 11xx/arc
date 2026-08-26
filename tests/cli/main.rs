@@ -23,6 +23,7 @@ mod release;
 mod rescue;
 mod review;
 mod roles;
+mod run;
 mod skip_green;
 mod stats;
 mod take;

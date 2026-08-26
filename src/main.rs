@@ -26,7 +26,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use commands::{AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{
     ActorSource, DispositionStatus, MessageSeverity, MessageType, ProbePhase, ReviewCause,
-    Severity, Side, Verdict, VerdictRelationKind, VerifyResult,
+    RunOutcome, Severity, Side, Verdict, VerdictRelationKind, VerifyResult,
 };
 
 /// Change, review, and integration state over plain Git for agentic
@@ -1065,6 +1065,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: HistoryCmd,
     },
+    /// Record delegated run dispatches and their terminal outcomes
+    Run {
+        #[command(subcommand)]
+        cmd: RunCmd,
+    },
     /// Record and validate observed forge (hosted-PR) facts
     Forge {
         #[command(subcommand)]
@@ -1291,6 +1296,45 @@ enum HistoryCmd {
     Resolve {
         /// A revision a rewrite may have moved; the surviving one is printed
         revision: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunCmd {
+    /// Record that a caller dispatched a run through a resolved route
+    Dispatch {
+        /// Resolved route used for dispatch
+        #[arg(long)]
+        route: String,
+        /// Worktree path given to the run
+        #[arg(long)]
+        worktree: String,
+        /// Change the run belongs to, when one exists
+        #[arg(long, id = "change_flag")]
+        change: Option<String>,
+        /// Brief event given to the run, when one exists
+        #[arg(long = "brief-event")]
+        brief_event_id: Option<String>,
+        /// Free-text dispatch note
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Record the terminal outcome of a dispatched run
+    End {
+        /// RunDispatched event ID being closed
+        dispatch_event_id: String,
+        /// Terminal outcome supplied by the caller
+        #[arg(long, value_enum)]
+        outcome: RunOutcome,
+        /// Free-text ending note
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// List every dispatched run, including open runs
+    List {
+        /// Emit the machine-readable JSON view instead of text
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -2312,6 +2356,30 @@ fn run(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             HistoryCmd::Resolve { revision } => commands::resolve_rewritten(&ctx, &revision),
+        },
+        Cmd::Run { cmd } => match cmd {
+            RunCmd::Dispatch {
+                route,
+                worktree,
+                change,
+                brief_event_id,
+                note,
+            } => {
+                commands::dispatch_run(&ctx, route, worktree, change, brief_event_id, note)?;
+                Ok(0)
+            }
+            RunCmd::End {
+                dispatch_event_id,
+                outcome,
+                note,
+            } => {
+                commands::end_run(&ctx, &dispatch_event_id, outcome, note)?;
+                Ok(0)
+            }
+            RunCmd::List { json } => {
+                commands::list_runs(&ctx, json)?;
+                Ok(0)
+            }
         },
         Cmd::Config {
             check_writable,
