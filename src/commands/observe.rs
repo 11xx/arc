@@ -142,6 +142,15 @@ struct WatchHit {
     change_id: String,
     condition: WatchUntil,
     event_id: Option<String>,
+    provisional: Option<String>,
+}
+
+/// One condition that holds, with the event that made it hold when one can be
+/// named. The provisional reason travels with an approving verdict so the
+/// watch diagnostic does not have to replay the selection a second time.
+struct WatchReached {
+    event_id: Option<String>,
+    provisional: Option<String>,
 }
 
 pub struct WatchArgs<'a> {
@@ -259,20 +268,47 @@ fn report_timeout(until: &[WatchUntil], json: bool) -> Result<()> {
 
 fn report_reached(selection: &WatchSelection, hits: &[WatchHit], until: &[WatchUntil]) {
     match selection {
-        WatchSelection::Single(_) => println!("reached: {}", hits[0].condition.label()),
+        WatchSelection::Single(_) => println!(
+            "reached: {}{}",
+            hits[0].condition.label(),
+            provisional_suffix(&hits[0].provisional)
+        ),
         WatchSelection::Tagged(_, WatchQuorum::Any) => {
             println!(
-                "reached: {} ({})",
+                "reached: {} ({}){}",
                 hits[0].condition.label(),
-                hits[0].change_id
+                hits[0].change_id,
+                provisional_suffix(&hits[0].provisional)
             )
         }
-        WatchSelection::Tagged(change_ids, WatchQuorum::All) => println!(
-            "reached: {} ({} changes)",
-            until_labels(until),
-            change_ids.len()
-        ),
+        WatchSelection::Tagged(change_ids, WatchQuorum::All) => {
+            let reasons = hits
+                .iter()
+                .filter_map(|hit| hit.provisional.as_deref())
+                .collect::<Vec<_>>();
+            if reasons.is_empty() {
+                println!(
+                    "reached: {} ({} changes)",
+                    until_labels(until),
+                    change_ids.len()
+                );
+            } else {
+                println!(
+                    "reached: {} ({} changes; provisional: {})",
+                    until_labels(until),
+                    change_ids.len(),
+                    reasons.join(", ")
+                );
+            }
+        }
     }
+}
+
+fn provisional_suffix(reason: &Option<String>) -> String {
+    reason
+        .as_deref()
+        .map(|reason| format!(" (provisional: {reason})"))
+        .unwrap_or_default()
 }
 
 fn watch_hook_payload(
@@ -308,6 +344,9 @@ fn watch_hit_object(hit: &WatchHit) -> serde_json::Value {
     if let Some(event_id) = &hit.event_id {
         value["event_id"] = event_id.clone().into();
     }
+    if let Some(reason) = &hit.provisional {
+        value["provisional"] = reason.clone().into();
+    }
     value
 }
 
@@ -328,11 +367,12 @@ fn watch_until_reached(
         let mut hits = Vec::new();
         for change_id in change_ids {
             for condition in until {
-                if let Some(event_id) = watch_reached(ctx, &store, change_id, *condition)? {
+                if let Some(reached) = watch_reached(ctx, &store, change_id, *condition)? {
                     hits.push(WatchHit {
                         change_id: change_id.clone(),
                         condition: *condition,
-                        event_id,
+                        event_id: reached.event_id,
+                        provisional: reached.provisional,
                     });
                     break;
                 }
@@ -400,14 +440,14 @@ fn run_hook(command: &str, input: &[u8], value: &serde_json::Value) {
 }
 
 /// Whether a condition holds, and the event that made it hold when one did.
-/// The outer `Option` is the answer; the inner one is whether an event can be
+/// The outer `Option` is the answer; `event_id` is whether an event can be
 /// named for it.
 fn watch_reached(
     ctx: &Ctx,
     store: &Store,
     change_id: &str,
     until: WatchUntil,
-) -> Result<Option<Option<String>>> {
+) -> Result<Option<WatchReached>> {
     let events = store.load_events(change_id)?;
     let state = state::reduce(&events)?;
     let snapshot_event = || {
@@ -418,12 +458,18 @@ fn watch_reached(
             .map(|event| event.event_id.clone())
     };
     Ok(match until {
-        WatchUntil::Snapshot => state.latest_patchset().is_some().then(snapshot_event),
+        WatchUntil::Snapshot => state.latest_patchset().is_some().then(|| WatchReached {
+            event_id: snapshot_event(),
+            provisional: None,
+        }),
         WatchUntil::Stalled => state
             .claim
             .as_ref()
             .is_some_and(|claim| state::claim_timing_at(claim, chrono::Utc::now()).stale)
-            .then_some(None),
+            .then_some(WatchReached {
+                event_id: None,
+                provisional: None,
+            }),
         // Any verdict against the patchset under review, whatever it concluded.
         // `ready` cannot express this: a review returning changes-requested or
         // comment-only never satisfies it, so the watch runs to its timeout and
@@ -440,17 +486,68 @@ fn watch_reached(
                 .iter()
                 .rev()
                 .find(|verdict| verdict.patchset_id == latest.id)
-                .map(|verdict| Some(verdict.event_id.clone()))
+                .map(|verdict| WatchReached {
+                    event_id: Some(verdict.event_id.clone()),
+                    provisional: None,
+                })
         }),
-        WatchUntil::Ready => ctx.report(store, &state)?.integrate_ready.then_some(None),
+        // A provisional approval gates checks and integration, so it satisfies
+        // this wait; its reason is carried into the diagnostic for the caller.
+        WatchUntil::Approved => state.latest_patchset().and_then(|latest| {
+            state
+                .verdicts
+                .iter()
+                .rev()
+                .find(|verdict| verdict.patchset_id == latest.id)
+                .filter(|verdict| verdict.verdict == Verdict::Approved)
+                .map(|verdict| WatchReached {
+                    event_id: Some(verdict.event_id.clone()),
+                    provisional: verdict.provisional.clone(),
+                })
+        }),
+        WatchUntil::GatesGreen => ctx
+            .report(store, &state)?
+            .gates
+            .iter()
+            // No required gates is already the universal predicate: no
+            // required gate is ungreen, so the condition is satisfied.
+            .all(|gate| gate.green_at_head)
+            .then_some(WatchReached {
+                event_id: None,
+                provisional: None,
+            }),
+        WatchUntil::Ready => ctx
+            .report(store, &state)?
+            .integrate_ready
+            .then_some(WatchReached {
+                event_id: None,
+                provisional: None,
+            }),
+        WatchUntil::Blocked => {
+            state
+                .blocked_on_stages
+                .last()
+                .cloned()
+                .map(|event_id| WatchReached {
+                    event_id: Some(event_id),
+                    provisional: None,
+                })
+        }
+        WatchUntil::BriefRecorded => state.latest_brief().map(|brief| WatchReached {
+            event_id: Some(brief.event_id.clone()),
+            provisional: None,
+        }),
         WatchUntil::Integrated => state
             .closure
             .as_ref()
             .filter(|closure| closure.outcome == Closure::Integrated)
-            .map(|closure| Some(closure.event_id.clone())),
-        WatchUntil::Closed => state
-            .closure
-            .as_ref()
-            .map(|closure| Some(closure.event_id.clone())),
+            .map(|closure| WatchReached {
+                event_id: Some(closure.event_id.clone()),
+                provisional: None,
+            }),
+        WatchUntil::Closed => state.closure.as_ref().map(|closure| WatchReached {
+            event_id: Some(closure.event_id.clone()),
+            provisional: None,
+        }),
     })
 }
