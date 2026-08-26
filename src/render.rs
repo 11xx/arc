@@ -278,6 +278,15 @@ pub fn markdown(
             if let (Some(brief_ref), Some(version)) = (&p.brief_ref, p.brief_version) {
                 let _ = writeln!(w, "  - brief: v{version} (`{}`)", brief_ref.event_id);
             }
+            if p.contributors.is_empty() {
+                let _ = writeln!(
+                    w,
+                    "  - contributors: {} (declared-by-invoker)",
+                    p.effective_author()
+                );
+            } else {
+                let _ = writeln!(w, "  - contributors: {}", p.contributors.join(", "));
+            }
             if let Some(subject) = &p.on_behalf_of {
                 let _ = writeln!(w, "  - snapshot by: {} (for {subject})", p.actor);
             }
@@ -693,12 +702,17 @@ pub fn markdown(
     if !report.review_map.is_empty() {
         let _ = writeln!(w, "\n## Review coverage\n");
         for row in &report.review_map {
-            let attribution = if row.attribution_unknown {
-                " — attribution unknown, no `--on-behalf-of` recorded"
+            let attribution = if let Some(contributor) = &row.matched_contributor {
+                format!(
+                    " — non-independent: matches contributor {contributor} ({})",
+                    row.contributors_source
+                )
+            } else if row.attribution_unknown {
+                " — attribution unknown, no `--on-behalf-of` recorded".to_string()
             } else if row.is_author {
-                " — same identity as the patchset author"
+                " — non-independent".to_string()
             } else {
-                ""
+                String::new()
             };
             let _ = writeln!(
                 w,
@@ -1085,6 +1099,13 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
         } => (
             "patchset-added",
             format!("{patchset_id} {}", short_sha(head)),
+        ),
+        Payload::PatchsetAttributionAmended {
+            patchset_id,
+            contributors,
+        } => (
+            "patchset-attribution-amended",
+            format!("{patchset_id}: {}", contributors.join(", ")),
         ),
         Payload::ClaimSet {
             claim_id,

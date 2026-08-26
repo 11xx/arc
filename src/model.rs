@@ -231,10 +231,19 @@ pub enum Payload {
         committer_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         committer_email: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        contributors: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         claim_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         claim_actor: Option<String>,
+    },
+    /// An explicit contributor declaration for one patchset. The patchset's
+    /// contributor set may change only before its first verdict.
+    #[serde(alias = "patchset-contributors-amended")]
+    PatchsetAttributionAmended {
+        patchset_id: String,
+        contributors: Vec<String>,
     },
     ClaimSet {
         claim_id: String,
@@ -696,6 +705,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         Payload::MetadataUpdated { .. }
         | Payload::BriefRecorded { .. }
         | Payload::PatchsetAdded { .. }
+        | Payload::PatchsetAttributionAmended { .. }
         | Payload::ClaimSet { .. }
         | Payload::StageSet { .. }
         | Payload::FindingAdded { .. }

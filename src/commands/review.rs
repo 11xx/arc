@@ -6,6 +6,7 @@ use super::*;
 use crate::state::{FindingState, VerdictEntry};
 use crate::status::{FindingSummary, StatusReport};
 use serde::Serialize;
+use std::collections::BTreeSet;
 
 #[derive(Serialize)]
 struct ReviewView<'a> {
@@ -211,12 +212,80 @@ fn review_verdict<'a>(
     }
 }
 
+fn contributor_declaration(
+    ctx: &Ctx,
+    contributors: Option<Vec<String>>,
+    solo: bool,
+) -> Result<Option<Vec<String>>> {
+    if solo && contributors.is_some() {
+        bail!("--solo cannot be combined with --contributors");
+    }
+    if solo {
+        let actor = ctx.actor.trim();
+        if actor.is_empty() {
+            bail!("--solo requires a nonempty invoking actor");
+        }
+        return Ok(Some(vec![actor.to_string()]));
+    }
+    let Some(contributors) = contributors else {
+        return Ok(None);
+    };
+    let mut normalized = BTreeSet::new();
+    for contributor in contributors {
+        let contributor = contributor.trim();
+        if contributor.is_empty() {
+            bail!("--contributors must name nonempty actors");
+        }
+        normalized.insert(contributor.to_string());
+    }
+    if normalized.is_empty() {
+        bail!("--contributors must name at least one actor");
+    }
+    Ok(Some(normalized.into_iter().collect()))
+}
+
+/// Say when the commits carry more distinct hands than the declaration does.
+///
+/// Names are not comparable across the two: a contributor is a declared actor
+/// and a Git author is whatever a checkout's config holds, so `codex-luna` and
+/// `Ada Lovelace` are the same hand under two namings and no equality test can
+/// know it. Comparing them by name warns on every honest snapshot, which is
+/// the same as not warning at all.
+///
+/// Cardinality survives the mismatch. Three Git authors behind one declared
+/// contributor means somebody who touched this patchset is not in the set that
+/// decides who may review it, and that is worth saying whatever the names are.
+fn warn_fewer_contributors_than_hands(ctx: &Ctx, base: &str, head: &str, contributors: &[String]) {
+    let range = format!("{base}..{head}");
+    let Ok(output) = gitio::git(&ctx.cwd, &["log", "--format=%an <%ae>", &range]) else {
+        return;
+    };
+    let git_authors = output
+        .lines()
+        .map(str::trim)
+        .filter(|author| !author.is_empty())
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    if git_authors.len() > contributors.len() {
+        eprintln!(
+            "warning: {} distinct Git authors wrote {range} and {} contributor(s) were declared ({}); \
+             somebody who touched this patchset is not in the set that decides who may review it",
+            git_authors.len(),
+            contributors.len(),
+            contributors.join(", ")
+        );
+    }
+}
+
 pub fn snapshot(
     ctx: &Ctx,
     reference: &str,
     base: Option<String>,
     brief_version: Option<usize>,
+    contributors: Option<Vec<String>>,
+    solo: bool,
 ) -> Result<()> {
+    let requested_contributors = contributor_declaration(ctx, contributors, solo)?;
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
@@ -266,7 +335,28 @@ pub fn snapshot(
         .claim
         .as_ref()
         .filter(|claim| state::claim_timing_at(claim, now).active);
+    if let Some(claim) = snapshot_claim.filter(|claim| claim.owner.actor != ctx.actor.trim()) {
+        if requested_contributors.is_none() {
+            bail!(
+                "active claim {} is owned by {}; snapshot requires --contributors or --solo",
+                claim.claim_id,
+                claim.owner.actor
+            );
+        }
+    }
+    let contributors = requested_contributors.clone().unwrap_or_default();
     let patchset_id = format!("ps-{:02}", st.patchsets.len() + 1);
+    let unchanged_patchset = unchanged_patchset.filter(|patchset_id| {
+        requested_contributors.as_ref().is_none_or(|requested| {
+            st.patchsets
+                .iter()
+                .find(|patchset| patchset.id == *patchset_id)
+                .is_some_and(|patchset| patchset.contributors == *requested)
+        })
+    });
+    if let Some(contributors) = requested_contributors.as_deref() {
+        warn_fewer_contributors_than_hands(ctx, &base_rev, &head, contributors);
+    }
     let payload = Payload::PatchsetAdded {
         patchset_id: patchset_id.clone(),
         base: base_rev,
@@ -277,6 +367,7 @@ pub fn snapshot(
         author_email: Some(identity.author_email),
         committer_name: Some(identity.committer_name),
         committer_email: Some(identity.committer_email),
+        contributors,
         claim_id: snapshot_claim.map(|claim| claim.claim_id.clone()),
         claim_actor: snapshot_claim.map(|claim| claim.owner.actor.clone()),
     };
@@ -302,7 +393,71 @@ pub fn snapshot(
     )?;
     println!("patchset: {patchset_id}");
     println!("head: {head}");
+    if !payload_contributors(&ev.payload).is_empty() {
+        println!(
+            "contributors: {}",
+            payload_contributors(&ev.payload).join(",")
+        );
+    }
     println!("event: {}", ev.event_id);
+    Ok(())
+}
+
+fn payload_contributors(payload: &Payload) -> &[String] {
+    match payload {
+        Payload::PatchsetAdded { contributors, .. } => contributors,
+        _ => &[],
+    }
+}
+
+pub fn amend_attribution(
+    ctx: &Ctx,
+    reference: &str,
+    patchset: String,
+    contributors: Option<Vec<String>>,
+    solo: bool,
+) -> Result<()> {
+    let contributors = contributor_declaration(ctx, contributors, solo)?
+        .context("--amend requires --contributors or --solo")?;
+    let store = ctx.store()?;
+    let change_id = store.resolve_change(reference)?;
+    let _transition = store.lock_transition(&change_id)?;
+    let events = store.load_events(&change_id)?;
+    let st = state::reduce(&events)?;
+    let patchset_id = resolve_patchset_id(&st, Some(patchset))?
+        .context("no patchset to amend; run `arc snapshot` first")?;
+    let patchset = st
+        .patchsets
+        .iter()
+        .find(|patchset| patchset.id == patchset_id)
+        .with_context(|| format!("unknown patchset {patchset_id}"))?;
+    if let Some(verdict) = st
+        .verdicts
+        .iter()
+        .find(|verdict| verdict.patchset_id == patchset_id)
+    {
+        bail!(
+            "patchset {patchset_id} attribution cannot be amended after verdict {}",
+            verdict.event_id
+        );
+    }
+    warn_fewer_contributors_than_hands(ctx, &patchset.base, &patchset.head, &contributors);
+    let payload = Payload::PatchsetAttributionAmended {
+        patchset_id: patchset_id.clone(),
+        contributors: contributors.clone(),
+    };
+    ensure_append_allowed(&st, &payload)?;
+    let mut event = ctx.event(&store, &change_id, payload);
+    event.event_id = event_id_after(
+        &events
+            .last()
+            .context("change has no opening event")?
+            .event_id,
+    )?;
+    store.append_event(&event)?;
+    println!("patchset: {patchset_id}");
+    println!("contributors: {}", contributors.join(","));
+    println!("event: {}", event.event_id);
     Ok(())
 }
 
@@ -565,7 +720,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         {
             bail!("review --snapshot requires the change branch checked out in a clean worktree");
         }
-        snapshot(ctx, reference, None, None)?;
+        snapshot(ctx, reference, None, None, None, false)?;
     }
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;

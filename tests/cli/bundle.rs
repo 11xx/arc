@@ -212,7 +212,7 @@ fn bundle_roundtrip_preserves_claim_stage_and_snapshot_provenance_events() {
     source.commit(&worktree, "move.txt", "move\n", "feat: move claimed work");
     source
         .arc(&worktree)
-        .args(["snapshot", "move-claim"])
+        .args(["snapshot", "move-claim", "--solo"])
         .assert()
         .success();
 
@@ -772,7 +772,7 @@ fn stale_imported_release_stage_and_snapshot_cannot_mutate_a_replacement_claim()
     );
     source
         .arc(&worktree)
-        .args(["snapshot", "move-stale-claim"])
+        .args(["snapshot", "move-stale-claim", "--solo"])
         .assert()
         .success();
     source

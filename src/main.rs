@@ -699,6 +699,24 @@ enum Cmd {
         /// Run every gate declared for the change profile
         #[arg(long)]
         all: bool,
+        /// Explicitly set the contributors for this patchset
+        #[arg(
+            long = "contributors",
+            value_name = "ACTOR[,ACTOR...]",
+            value_delimiter = ',',
+            conflicts_with = "solo"
+        )]
+        contributors: Option<Vec<String>>,
+        /// Record the invoking actor as the sole contributor
+        #[arg(long, conflicts_with = "contributors")]
+        solo: bool,
+        /// Amend one patchset's contributors before any verdict exists
+        #[arg(
+            long,
+            value_name = "PATCHSET",
+            conflicts_with_all = ["base", "brief_version", "verify", "gate", "all"]
+        )]
+        amend: Option<String>,
     },
     /// Keep a fact this work discovered, so `arc resume` hands it back to a
     /// compacted or cold session instead of it being re-derived
@@ -1926,9 +1944,27 @@ fn run(cli: Cli) -> Result<i32> {
             verify,
             gate,
             all,
+            contributors,
+            solo,
+            amend,
         } => {
             let change = infer(change.as_deref())?;
-            commands::snapshot_with_verify(&ctx, &change, base, brief_version, verify, gate, all)
+            if let Some(patchset) = amend {
+                commands::review::amend_attribution(&ctx, &change, patchset, contributors, solo)?;
+                Ok(0)
+            } else {
+                commands::snapshot_with_verify(
+                    &ctx,
+                    &change,
+                    base,
+                    brief_version,
+                    verify,
+                    gate,
+                    all,
+                    contributors,
+                    solo,
+                )
+            }
         }
         Cmd::Keep {
             kind,
