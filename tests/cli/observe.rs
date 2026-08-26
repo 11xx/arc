@@ -415,6 +415,257 @@ fn watch_reviewed_ignores_a_verdict_on_an_earlier_patchset() {
 }
 
 #[test]
+fn watch_approved_returns_on_approval_but_not_changes_requested() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "watch-approved");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args([
+            "review",
+            "watch-approved",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+            "--body",
+            "fix this first",
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args([
+            "watch",
+            "watch-approved",
+            "--until",
+            "approved",
+            "--timeout",
+            "1",
+        ])
+        .assert()
+        .code(2)
+        .stdout("timeout: approved\n");
+
+    let approval = repo
+        .arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "watch-approved", "--verdict", "approved"])
+        .output()
+        .unwrap();
+    assert!(approval.status.success());
+    let approval_event = String::from_utf8_lossy(&approval.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+
+    let reached = json_stdout(repo.arc(&worktree).args([
+        "watch",
+        "watch-approved",
+        "--until",
+        "approved",
+        "--json",
+    ]));
+    assert_eq!(reached["condition"], "approved", "{reached}");
+    assert_eq!(reached["event_id"], approval_event, "{reached}");
+}
+
+#[test]
+fn watch_approved_reports_provisional_reason_in_human_and_json() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "watch-provisional");
+    let reason = "reviewer is an unmeasured model";
+    let approval = repo
+        .arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args([
+            "review",
+            "watch-provisional",
+            "--verdict",
+            "approved",
+            "--provisional",
+            reason,
+        ])
+        .output()
+        .unwrap();
+    assert!(approval.status.success());
+    let approval_event = String::from_utf8_lossy(&approval.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+
+    let human =
+        stdout(
+            repo.arc(&worktree)
+                .args(["watch", "watch-provisional", "--until", "approved"]),
+        );
+    assert_eq!(
+        human,
+        format!("reached: approved (provisional: {reason})\n")
+    );
+
+    let reached = json_stdout(repo.arc(&worktree).args([
+        "watch",
+        "watch-provisional",
+        "--until",
+        "approved",
+        "--json",
+    ]));
+    assert_eq!(reached["event_id"], approval_event, "{reached}");
+    assert_eq!(reached["provisional"], reason, "{reached}");
+}
+
+#[test]
+fn watch_approved_ignores_approval_on_a_superseded_patchset() {
+    let repo = Repo::new();
+    let (_, worktree, _) = change_with_patchset(&repo, "watch-stale-approval");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "watch-stale-approval", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    repo.commit(&worktree, "later.rs", "more\n", "feat: more");
+    repo.arc(&worktree)
+        .args(["snapshot", "watch-stale-approval"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args([
+            "watch",
+            "watch-stale-approval",
+            "--until",
+            "approved",
+            "--timeout",
+            "1",
+        ])
+        .assert()
+        .code(2)
+        .stdout("timeout: approved\n");
+}
+
+#[test]
+fn watch_gates_green_waits_for_every_required_gate() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.alpha]\ncommand = \"true\"\n[gates.beta]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: declare watch gates"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "watch-gates", "--no-worktree"]),
+    );
+
+    repo.arc(&repo.root)
+        .args(["verify", "watch-gates", "--gate", "alpha"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "watch",
+            "watch-gates",
+            "--until",
+            "gates-green",
+            "--timeout",
+            "1",
+        ])
+        .assert()
+        .code(2)
+        .stdout("timeout: gates-green\n");
+
+    repo.arc(&repo.root)
+        .args(["verify", "watch-gates", "--gate", "beta"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["watch", "watch-gates", "--until", "gates-green"])
+        .assert()
+        .success()
+        .stdout("reached: gates-green\n");
+}
+
+#[test]
+fn watch_blocked_names_the_latest_blocked_on_event() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "watch-blocked", "--no-worktree"]),
+    );
+    repo.arc(&repo.root)
+        .args(["claim", "watch-blocked"])
+        .assert()
+        .success();
+    let first = stdout(repo.arc(&repo.root).args([
+        "stage",
+        "watch-blocked",
+        "blocked-on",
+        "--note",
+        "waiting for input",
+        "--blocker",
+        "external",
+    ]));
+    assert!(first.contains("event: "), "{first}");
+    let latest = stdout(repo.arc(&repo.root).args([
+        "stage",
+        "watch-blocked",
+        "blocked-on",
+        "--note",
+        "still waiting",
+        "--blocker",
+        "external",
+    ]));
+    let latest_event = latest
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap();
+
+    let reached = json_stdout(repo.arc(&repo.root).args([
+        "watch",
+        "watch-blocked",
+        "--until",
+        "blocked",
+        "--json",
+    ]));
+    assert_eq!(reached["condition"], "blocked", "{reached}");
+    assert_eq!(reached["event_id"], latest_event, "{reached}");
+}
+
+#[test]
+fn watch_brief_recorded_names_the_brief_event() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "watch-brief", "--no-worktree"]),
+    );
+    let brief = repo
+        .arc(&repo.root)
+        .args(["brief", "watch-brief", "--body-file", "-"])
+        .write_stdin("record the contract\n")
+        .output()
+        .unwrap();
+    assert!(brief.status.success());
+    let brief_event = String::from_utf8_lossy(&brief.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+
+    let reached = json_stdout(repo.arc(&repo.root).args([
+        "watch",
+        "watch-brief",
+        "--until",
+        "brief-recorded",
+        "--json",
+    ]));
+    assert_eq!(reached["condition"], "brief-recorded", "{reached}");
+    assert_eq!(reached["event_id"], brief_event, "{reached}");
+}
+
+#[test]
 fn watch_ready_times_out_when_check_is_not_green() {
     let repo = Repo::new();
     stdout(repo.arc(&repo.root).args(["begin", "watch-ready"]));

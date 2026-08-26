@@ -252,6 +252,12 @@ RULES THAT CHANGE WHAT YOU DO
   - An executor that hangs never reaches its own release. Before leaving a
     delegated run unattended, arm `arc watch <change> --until stalled`; silence
     is unknown, not healthy. `arc rescue <change> --take` recovers it.
+  - `arc watch <change> --until` accepts `snapshot`, `stalled`, `reviewed`,
+    `approved`, `gates-green`, `ready`, `blocked`, `brief-recorded`,
+    `integrated`, and `closed`. `approved` returns on the latest approving
+    verdict, including a provisional approval and its recorded reason;
+    `gates-green` checks every required gate at the current head; `blocked`
+    and `brief-recorded` name the events that recorded those facts.
   - The journal lives outside the repo, so worktrees stay clean. Cross-session
     context goes there, never into tracked files.
   - arc holds no routing opinion. It records the --actor, --harness, and --model

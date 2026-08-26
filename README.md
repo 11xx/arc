@@ -319,10 +319,14 @@ arc watch --tag arrears --all --until integrated --json
 each observed follow batch are sorted by `event_id`; strict total ordering
 across concurrent cross-change appends is not promised. `arc watch` emits a
 single diagnostic and exits 0 when its condition is reached, or exits 2 on a
-timeout. `snapshot` waits for a patchset, `ready` matches `arc check` success,
-`stalled` reaches only when a live claim is stale, `integrated` requires that
-closure outcome, and `closed` accepts integrated, abandoned, or superseded
-changes.
+timeout. `snapshot` waits for a patchset, `reviewed` waits for any verdict on
+the latest patchset, and `approved` waits for the latest verdict on that
+patchset to approve, including a provisional approval. `gates-green` waits for
+every required gate to be green at head, `ready` matches `arc check` success,
+`stalled` reaches only when a live claim is stale, `blocked` waits for a
+`blocked-on` claim stage, and `brief-recorded` waits for a recorded brief.
+`integrated` requires that closure outcome, and `closed` accepts integrated,
+abandoned, or superseded changes.
 
 `events --tag` follows a whole tagged program as one stream rather than one
 follower per member, which is what keeps the interleaving readable. Membership
@@ -331,11 +335,12 @@ joins it. `--change` and `--tag` select different scopes and cannot be combined.
 
 `watch --json` emits one object instead of prose, naming the change, the
 condition, and the event that satisfied it — `event_id` is present only when an
-event did, because `ready` and `stalled` are derived from policy and elapsed
-time rather than from something somebody recorded. A timeout emits
-`watch-timeout` and still exits 2, so a script branches on the object rather
-than on the text. Under `--tag --all` the object carries one entry per member
-and no top-level placeholders.
+event did, because `ready`, `gates-green`, and `stalled` are derived from
+policy, head evidence, and elapsed time rather than from one originating event.
+Approving verdicts also carry `provisional` when the approval records a reason
+it is owed corroboration. A timeout emits `watch-timeout` and still exits 2, so
+a script branches on the object rather than on the text. Under `--tag --all`
+the object carries one entry per member and no top-level placeholders.
 
 `arc doctor` reports a `dangling-revision` for any revision the ledger records
 that Git can no longer resolve — patchset heads and bases, brief bases, merge

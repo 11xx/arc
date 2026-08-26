@@ -104,7 +104,11 @@ pub enum WatchUntil {
     Snapshot,
     Stalled,
     Reviewed,
+    Approved,
+    GatesGreen,
     Ready,
+    Blocked,
+    BriefRecorded,
     Integrated,
     Closed,
 }
@@ -115,7 +119,11 @@ impl WatchUntil {
             WatchUntil::Snapshot => "snapshot",
             WatchUntil::Stalled => "stalled",
             WatchUntil::Reviewed => "reviewed",
+            WatchUntil::Approved => "approved",
+            WatchUntil::GatesGreen => "gates-green",
             WatchUntil::Ready => "ready",
+            WatchUntil::Blocked => "blocked",
+            WatchUntil::BriefRecorded => "brief-recorded",
             WatchUntil::Integrated => "integrated",
             WatchUntil::Closed => "closed",
         }
