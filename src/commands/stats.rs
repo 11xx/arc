@@ -863,6 +863,7 @@ mod tests {
                     author_email: None,
                     committer_name: None,
                     committer_email: None,
+                    contributors: Vec::new(),
                     claim_id: None,
                     claim_actor: None,
                 },

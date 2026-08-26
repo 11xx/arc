@@ -1,4 +1,5 @@
 use crate::common::*;
+use predicates::prelude::PredicateBooleanExt;
 
 fn repo_with_self_approval_policy() -> Repo {
     let repo = Repo::new();
@@ -516,5 +517,344 @@ fn self_approval_fails_closed_on_an_assumed_identity() {
             .unwrap()
             .contains("self-approval"),
         "{status}"
+    );
+}
+
+fn claimed_work(repo: &Repo, slug: &str, dangerous: bool) -> (String, PathBuf, String) {
+    let mut begin = vec!["begin", slug];
+    if dangerous {
+        begin.push("--dangerous");
+    }
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args(begin)));
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "codex-luna")
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_SESSION", "codex-session")
+        .args(["claim", slug])
+        .assert()
+        .success();
+    let claim_id = json_stdout(repo.arc(&repo.root).args(["status", slug]))["claim"]["claim_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    repo.commit(&worktree, "work.txt", "work\n", "feat: claimed work");
+    (change_id, worktree, claim_id)
+}
+
+#[test]
+fn foreign_claim_requires_contributors_and_then_accepts_an_independent_lead_review() {
+    let repo = repo_with_self_approval_policy();
+    let (change_id, worktree, claim_id) = claimed_work(&repo, "claimed-attribution", true);
+    let before = event_count(&repo, &change_id);
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_SESSION", "lead-session")
+        .args(["snapshot", "claimed-attribution"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("active claim"))
+        .stderr(predicates::str::contains(&claim_id))
+        .stderr(predicates::str::contains("--contributors"));
+    assert_eq!(event_count(&repo, &change_id), before);
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_SESSION", "lead-session")
+        .args([
+            "snapshot",
+            "claimed-attribution",
+            "--contributors",
+            "codex-luna",
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .args(["review", "claimed-attribution", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "claimed-attribution"]));
+    assert_eq!(
+        status["latest_patchset"]["contributors"],
+        serde_json::json!(["codex-luna"]),
+        "{status}"
+    );
+    let row = status["review_map"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["reviewer"] == "claude-lead")
+        .unwrap();
+    assert_eq!(row["is_author"], false, "{status}");
+    assert!(row["matched_contributor"].is_null(), "{status}");
+    repo.arc(&repo.root)
+        .args(["check", "claimed-attribution"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn a_reviewer_matching_a_declared_contributor_is_reported_by_name() {
+    let repo = repo_with_self_approval_policy();
+    let (_, worktree, _) = claimed_work(&repo, "claimed-self", true);
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .args([
+            "snapshot",
+            "claimed-self",
+            "--contributors",
+            "claude-lead,codex-luna",
+        ])
+        .assert()
+        .success();
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .args(["review", "claimed-self", "--verdict", "approved"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("claude-lead"));
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "claimed-self"]));
+    let row = &status["review_map"][0];
+    assert_eq!(row["is_author"], true, "{status}");
+    assert_eq!(row["matched_contributor"], "claude-lead", "{status}");
+    assert!(
+        status["approval_rejection_reason"]
+            .as_str()
+            .unwrap()
+            .contains("claude-lead"),
+        "{status}"
+    );
+    repo.arc(&repo.root)
+        .args(["check", "claimed-self"])
+        .assert()
+        .code(3)
+        .stdout(predicates::str::contains("claude-lead"));
+}
+
+#[test]
+fn solo_declares_the_invoker_on_a_foreign_claim() {
+    let repo = Repo::new();
+    let (_, worktree, _) = claimed_work(&repo, "claimed-solo", false);
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .args(["snapshot", "claimed-solo", "--solo"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "claimed-solo"]));
+    assert_eq!(
+        status["latest_patchset"]["contributors"],
+        serde_json::json!(["claude-lead"]),
+        "{status}"
+    );
+}
+
+#[test]
+fn an_unclaimed_snapshot_keeps_the_legacy_invoker_attribution() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "unclaimed-attribution"]),
+    );
+    let worktree = repo.home.join(".worktrees/repo-unclaimed-attribution");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: unclaimed work");
+    repo.arc(&worktree)
+        .args(["snapshot", "unclaimed-attribution"])
+        .assert()
+        .success();
+
+    let event = serde_json::from_str::<serde_json::Value>(
+        stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "unclaimed-attribution",
+            "--type",
+            "patchset-added",
+        ]))
+        .trim(),
+    )
+    .unwrap();
+    assert!(event.get("contributors").is_none(), "{event}");
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "unclaimed-attribution"]),
+    );
+    assert!(
+        status["latest_patchset"].get("contributors").is_none(),
+        "{status}"
+    );
+}
+
+/// Names are not comparable across the two namespaces — a contributor is a
+/// declared actor and a Git author is whatever a checkout's config holds — so
+/// an honest snapshot must say nothing. What is comparable is how many hands
+/// the commits carry against how many the declaration names.
+#[test]
+fn one_declared_contributor_over_one_git_author_says_nothing() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "author-agreement"]));
+    let worktree = repo.home.join(".worktrees/repo-author-agreement");
+    git(&worktree, &["config", "user.name", "Git Committer"]);
+    git(
+        &worktree,
+        &["config", "user.email", "git-committer@example.invalid"],
+    );
+    repo.commit(&worktree, "work.txt", "work\n", "feat: one hand");
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "declared-contributor")
+        .args([
+            "snapshot",
+            "author-agreement",
+            "--contributors",
+            "declared-contributor",
+        ])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("warning:").not());
+}
+
+/// More hands in the range than the declaration names means somebody who
+/// touched the patchset is outside the set that decides who may review it.
+#[test]
+fn more_git_authors_than_declared_contributors_warns_without_blocking() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "author-disagreement"]));
+    let worktree = repo.home.join(".worktrees/repo-author-disagreement");
+    git(&worktree, &["config", "user.name", "First Hand"]);
+    git(
+        &worktree,
+        &["config", "user.email", "first@example.invalid"],
+    );
+    repo.commit(&worktree, "work.txt", "work\n", "feat: first hand");
+    git(&worktree, &["config", "user.name", "Second Hand"]);
+    git(
+        &worktree,
+        &["config", "user.email", "second@example.invalid"],
+    );
+    repo.commit(&worktree, "more.txt", "more\n", "feat: second hand");
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "declared-contributor")
+        .args([
+            "snapshot",
+            "author-disagreement",
+            "--contributors",
+            "declared-contributor",
+        ])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("2 distinct Git authors"))
+        .stderr(predicates::str::contains("1 contributor(s) were declared"));
+}
+
+#[test]
+fn attribution_amendment_is_append_only_and_stops_after_a_verdict() {
+    let repo = Repo::new();
+    let change_id = opened_change_id(&stdout(
+        repo.arc(&repo.root).args(["begin", "amend-attribution"]),
+    ));
+    let worktree = repo.home.join(".worktrees/repo-amend-attribution");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: amend attribution");
+    repo.arc(&worktree)
+        .args([
+            "snapshot",
+            "amend-attribution",
+            "--contributors",
+            "first-contributor",
+        ])
+        .assert()
+        .success();
+    let before = event_count(&repo, &change_id);
+    repo.arc(&worktree)
+        .args([
+            "snapshot",
+            "amend-attribution",
+            "--amend",
+            "ps-01",
+            "--contributors",
+            "corrected-contributor",
+        ])
+        .assert()
+        .success();
+    assert_eq!(event_count(&repo, &change_id), before + 1);
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "amend-attribution"]));
+    assert_eq!(
+        status["latest_patchset"]["contributors"],
+        serde_json::json!(["corrected-contributor"]),
+        "{status}"
+    );
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "amend-attribution", "--verdict", "approved"])
+        .assert()
+        .success();
+    let before = event_count(&repo, &change_id);
+    repo.arc(&worktree)
+        .args([
+            "snapshot",
+            "amend-attribution",
+            "--amend",
+            "ps-01",
+            "--contributors",
+            "late-contributor",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("after verdict"));
+    assert_eq!(event_count(&repo, &change_id), before);
+}
+
+#[test]
+fn a_legacy_patchset_without_contributors_keeps_the_same_gate_decision() {
+    let repo = repo_with_self_approval_policy();
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "legacy-contributors",
+        "--dangerous",
+    ])));
+    let worktree = repo.home.join(".worktrees/repo-legacy-contributors");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: legacy shape");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "legacy-author")
+        .args(["snapshot", "legacy-contributors", "--solo"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "legacy-author")
+        .args(["review", "legacy-contributors", "--verdict", "approved"])
+        .assert()
+        .success();
+    let before = repo
+        .arc(&repo.root)
+        .args(["check", "legacy-contributors"])
+        .output()
+        .unwrap();
+    assert_eq!(before.status.code(), Some(3), "{before:?}");
+
+    rewrite_event(&repo, &change_id, "patchset-added", |event| {
+        event.as_object_mut().unwrap().remove("contributors");
+    });
+    let after = repo
+        .arc(&repo.root)
+        .args(["check", "legacy-contributors"])
+        .output()
+        .unwrap();
+    assert_eq!(after.status.code(), Some(3), "{after:?}");
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "legacy-contributors"]));
+    assert!(
+        status["latest_patchset"].get("contributors").is_none(),
+        "{status}"
+    );
+    assert_eq!(
+        status["review_map"][0]["matched_contributor"],
+        "legacy-author"
     );
 }
