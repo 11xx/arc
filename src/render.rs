@@ -1296,6 +1296,17 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             "history-rewritten",
             format!("{} revisions: {reason}", mapping.len()),
         ),
+        Payload::ReviewPassOpened {
+            pass_id, members, ..
+        } => (
+            "review-pass-opened",
+            format!("{pass_id}: {} members", members.len()),
+        ),
+        Payload::ReviewPassCompleted { pass_id, .. } => ("review-pass-completed", pass_id.clone()),
+        Payload::ReviewPassAbandoned { pass_id, reason } => (
+            "review-pass-abandoned",
+            format!("{pass_id}: {}", one_line(reason)),
+        ),
         Payload::RunDispatched {
             route,
             worktree,

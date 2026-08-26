@@ -17,6 +17,7 @@ mod messaging;
 mod metadata;
 mod observe;
 mod orchestrate;
+mod pass;
 mod paths;
 mod provenance;
 mod release;

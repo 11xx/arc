@@ -613,6 +613,26 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         tool: Option<String>,
     },
+    /// A caller-declared review pass over exact change and patchset members.
+    /// The declaration records coverage only; it grants no authority to any
+    /// gate and arc does not observe the review itself.
+    ReviewPassOpened {
+        pass_id: String,
+        members: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// A caller-declared successful ending for a review pass.
+    ReviewPassCompleted {
+        pass_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// A caller-declared abandoned ending for a review pass.
+    ReviewPassAbandoned {
+        pass_id: String,
+        reason: String,
+    },
     /// A caller told arc that a delegated run was dispatched through a
     /// resolved route. arc records the dispatch context but does not choose,
     /// start, or supervise the run.
@@ -801,6 +821,9 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         // Repository-scoped: it is never appended to a change's log, so no
         // change-phase policy applies to it.
         Payload::HistoryRewritten { .. }
+        | Payload::ReviewPassOpened { .. }
+        | Payload::ReviewPassCompleted { .. }
+        | Payload::ReviewPassAbandoned { .. } => AppendPermission::AnyPhaseFact,
         | Payload::RunDispatched { .. }
         | Payload::RunEnded { .. } => AppendPermission::AnyPhaseFact,
         Payload::Unknown => AppendPermission::OpaqueImported,

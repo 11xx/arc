@@ -1831,9 +1831,12 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                         unresolved_binding,
                     });
             }
-            // Repository-scoped, so it is never in a change's log; if one
+            // Repository-scoped, so none is ever in a change's log; if one
             // arrives by import it says nothing about this change.
             Payload::HistoryRewritten { .. }
+            | Payload::ReviewPassOpened { .. }
+            | Payload::ReviewPassCompleted { .. }
+            | Payload::ReviewPassAbandoned { .. }
             | Payload::RunDispatched { .. }
             | Payload::RunEnded { .. } => {}
             // An event this build does not recognize. Typed loading skips
