@@ -1260,6 +1260,8 @@ enum ResolutionSource {
     Env,
     ConfigPrefix,
     Git,
+    RecordedAnchor,
+    SluggedPath,
 }
 
 impl ResolutionSource {
@@ -1268,6 +1270,8 @@ impl ResolutionSource {
             ResolutionSource::Env => "env",
             ResolutionSource::ConfigPrefix => "config-prefix",
             ResolutionSource::Git => "git",
+            ResolutionSource::RecordedAnchor => "recorded-anchor",
+            ResolutionSource::SluggedPath => "slugged-path",
         }
     }
 }
@@ -1279,7 +1283,8 @@ struct JournalResolution {
 }
 
 /// Resolve the journal directory from an explicit directory, a configured
-/// stable path scope, or Git repository identity.
+/// stable path scope, Git repository identity, or a recorded root-journal
+/// binding.
 pub fn resolve_dir(cwd: &Path) -> Result<PathBuf> {
     Ok(resolve(cwd)?.directory)
 }
@@ -1322,20 +1327,90 @@ fn resolve(cwd: &Path) -> Result<JournalResolution> {
             anchor: Some(anchor),
         });
     }
-    let root = repo_root(&canonical_cwd).with_context(|| {
-        format!(
-            "cannot resolve a stable journal anchor from {}: Git discovery failed and no \
-             [journals.dirs] path scope matched; set ARC_JOURNAL_DIR or add an absolute \
-             path-prefix entry to {}",
-            canonical_cwd.display(),
-            cfg.config_path.display()
-        )
-    })?;
-    Ok(JournalResolution {
-        directory: cfg.ai_home.join("journals").join(config::path_slug(&root)),
-        source: ResolutionSource::Git,
-        anchor: Some(root),
-    })
+    if let Ok(root) = repo_root(&canonical_cwd) {
+        return Ok(JournalResolution {
+            directory: cfg.ai_home.join("journals").join(config::path_slug(&root)),
+            source: ResolutionSource::Git,
+            anchor: Some(root),
+        });
+    }
+
+    if let Some((directory, source)) = rootless_journal(&cfg, &canonical_cwd)? {
+        return Ok(JournalResolution {
+            directory,
+            source,
+            anchor: Some(canonical_cwd),
+        });
+    }
+
+    bail!(
+        "cannot resolve a stable journal anchor from {}: checked ARC_JOURNAL_DIR \
+         (environment), [journals.dirs] path prefixes (config), Git discovery, recorded \
+         anchors, and the journal this path would slug to; no source matched; set ARC_JOURNAL_DIR or add an absolute path-prefix entry \
+         to {}; a path-prefix entry covering a directory with repositories beneath it will \
+         shadow their Git discovery",
+        canonical_cwd.display(),
+        cfg.config_path.display()
+    )
+}
+
+/// The journal for a directory Git and config cannot anchor, in order of how
+/// much the answer is stated rather than derived.
+///
+/// A binding is the journal's own statement of which project it belongs to,
+/// so it is consulted first and an ambiguous one is refused. Failing that, the
+/// journal named by slugging this very directory is the one arc would itself
+/// create here, which is a forward computation rather than a guess — but only
+/// while that journal states nothing about who owns it. A journal that names
+/// some other anchor has already answered the question, and answered it `no`.
+///
+/// `unslug`'s reverse direction is deliberately absent: reversing a lossy slug
+/// into a path by walking the filesystem is an inference, and a resolver
+/// acting on one could open another project's journal.
+fn rootless_journal(
+    cfg: &config::Config,
+    canonical_cwd: &Path,
+) -> Result<Option<(PathBuf, ResolutionSource)>> {
+    if let Some(directory) = recorded_anchor_journal(cfg, canonical_cwd)? {
+        return Ok(Some((directory, ResolutionSource::RecordedAnchor)));
+    }
+    let slugged = crate::registry::journals_root(cfg).join(config::path_slug(canonical_cwd));
+    if slugged.is_dir() && recorded_anchor(&slugged)?.is_none() {
+        return Ok(Some((slugged, ResolutionSource::SluggedPath)));
+    }
+    Ok(None)
+}
+
+/// Find the one root journal whose binding names `canonical_cwd`.
+///
+/// More than one matching statement is unsafe to resolve.
+fn recorded_anchor_journal(cfg: &config::Config, canonical_cwd: &Path) -> Result<Option<PathBuf>> {
+    let mut matches = Vec::new();
+    for (_, directory) in crate::registry::journal_directories(cfg)? {
+        let Some(recorded) = recorded_anchor(&directory)? else {
+            continue;
+        };
+        if Path::new(&recorded) == canonical_cwd {
+            matches.push(directory);
+        }
+    }
+
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => {
+            let journals = matches
+                .iter()
+                .map(|directory| directory.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "cannot resolve journal for {}: multiple journals record this anchor: {}",
+                canonical_cwd.display(),
+                journals
+            )
+        }
+    }
 }
 
 /// The main repository root, shared by every worktree. Keying the archive

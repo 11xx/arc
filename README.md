@@ -784,6 +784,12 @@ per project, keyed by its anchor — is what knows they exist. A journal records
 its anchor in `bindings.jsonl`; one written before that is reconstructed from
 its directory name and confirmed against the filesystem, and a name that
 resolves to no single existing path stays unresolved rather than guessed at.
+When Git and configured path-prefix discovery do not apply, a journal in the
+default root is reopened by its recorded anchor when one exactly matches the
+canonical current directory — two such bindings are refused as ambiguous — and
+otherwise by slugging that directory, which names the journal arc would itself
+create there. A journal already carrying a binding for somebody else is never
+taken by the slug: it has answered who owns it.
 `arc begin` registers the project, so opening a change is enough to make a
 repository discoverable even if nothing is ever written to its journal. A
 `[journals] dirs` scope registers its project too, which is how a directory
@@ -1226,9 +1232,11 @@ write. The canonical agent-written event log is the append-only
 NDJSON with `journal events [--limit N]`. `dir` prints the resolved journal
 directory (`ARC_JOURNAL_DIR`, then the longest matching absolute path prefix
 in `[journals.dirs]`, then Git identity and
-`<ai_home>/journals/<repo-slug>`). `dir --explain` prints the selected source,
-stable anchor, and directory; resolution refuses to guess outside Git when no
-configured prefix matches. `note`
+`<ai_home>/journals/<repo-slug>`, then a recorded anchor in the default
+journal root, then that root's directory for this path's own slug). `dir
+--explain` prints the selected source, stable anchor, and directory;
+resolution refuses to guess when no source matches, and refuses ambiguous
+recorded bindings. `note`
 writes a timestamped `<ts>-<topic>-<kind>.md` artifact and its journal event;
 `log` appends a log-only event; `journal position` adds a position to an
 existing artifact; `catchup` lists newest-first.

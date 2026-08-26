@@ -17,7 +17,9 @@ pub struct ConfigFile {
     #[serde(default)]
     pub data_root: Option<String>,
     /// Stable absolute path scopes for project-journal directories. The
-    /// longest matching component prefix wins; values may use a leading `~`.
+    /// longest matching component prefix wins before Git discovery; a prefix
+    /// covering repositories shadows their Git journals. Values may use a
+    /// leading `~`.
     #[serde(default)]
     pub journals: JournalsConfig,
     /// Journal behavior toggles (distinct from the per-project `[journals]`

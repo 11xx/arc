@@ -97,13 +97,9 @@ pub fn journals_root(cfg: &Config) -> PathBuf {
     cfg.ai_home.join("journals")
 }
 
-/// Every project arc knows about, sorted by journal directory.
-///
-/// The default root holds one directory per project; `[journals] dirs` may
-/// route a project's journal elsewhere, and those are registered too — that
-/// config is the documented way to give a non-repository project a journal, so
-/// a registry that ignored it would miss exactly the projects that need it.
-pub fn projects(cfg: &Config) -> Result<Vec<Project>> {
+/// The hot journal directories under the default journal root, excluding cold
+/// archives that still have their hot sibling.
+pub(crate) fn journal_directories(cfg: &Config) -> Result<Vec<(String, PathBuf)>> {
     let root = journals_root(cfg);
     let mut dirs: Vec<(String, PathBuf)> = Vec::new();
     if root.is_dir() {
@@ -121,6 +117,18 @@ pub fn projects(cfg: &Config) -> Result<Vec<Project>> {
             dirs.push((name.clone(), root.join(name)));
         }
     }
+    dirs.sort();
+    Ok(dirs)
+}
+
+/// Every project arc knows about, sorted by journal directory.
+///
+/// The default root holds one directory per project; `[journals] dirs` may
+/// route a project's journal elsewhere, and those are registered too — that
+/// config is the documented way to give a non-repository project a journal, so
+/// a registry that ignored it would miss exactly the projects that need it.
+pub fn projects(cfg: &Config) -> Result<Vec<Project>> {
+    let mut dirs = journal_directories(cfg)?;
     for directory in cfg.journal_dirs.values() {
         let path = crate::config::expand_tilde(directory)?;
         if dirs.iter().any(|(_, known)| known == &path) {
