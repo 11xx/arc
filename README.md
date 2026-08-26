@@ -1312,6 +1312,13 @@ separate artifact of the kind that work actually is.
 then separate later and feature-request sections, annotating each item with how
 long it has waited (for discussions, since the latest typed position; otherwise
 since creation), until an explicit
+Consuming a discussion reports the two facts `journal discussion` renders that
+say a decision was never tested: every position came from one participant, and
+nobody answered the last position. They are warnings — a one-participant
+discussion is a legitimate way to settle something — and `discarded` earns them
+as much as `done`. Both are derived once and shared, so the warning and the
+view cannot disagree.
+
 `journal consume <filename> [--outcome done|superseded|discarded]
 [--decision <decision-file>] [--note <text>]` retires an item with a typed
 consumed event. A `verified` event records the checked anchor revision in

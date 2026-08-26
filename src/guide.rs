@@ -89,6 +89,11 @@ SETTLE A QUESTION (before it is work)
   `answer` and the `discussion` summary are its surface, and `note --kind
   discussion` opens one.
 
+  Consuming a discussion names what it shows: every position from one
+  participant, or a last position nobody answered. Warnings, never refusals —
+  one voice is a legitimate way to settle something, and the point is that
+  whoever resolves it is told which they are resolving.
+
   Resolve a discussion as done, or promote the still-open discussion to work —
   never both. `consume --outcome done` cites a terminal decision; `begin
   --from-journal` consumes the open discussion as superseded by the change.

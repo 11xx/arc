@@ -4703,6 +4703,59 @@ fn position_depth(
     }
 }
 
+/// Typed `position` events for one artifact, in ledger order.
+fn position_events<'a>(events: &'a [JournalEvent], filename: &str) -> Vec<&'a JournalEvent> {
+    events
+        .iter()
+        .filter(|event| {
+            event.known() && event.event == "position" && event.file.as_deref() == Some(filename)
+        })
+        .collect()
+}
+
+/// Distinct identities that filed a position, first appearance first.
+fn discussion_participants(positions: &[&JournalEvent]) -> Vec<String> {
+    let mut participants: Vec<String> = Vec::new();
+    for event in positions {
+        let label = event_identity_label(event);
+        if !participants.contains(&label) {
+            participants.push(label);
+        }
+    }
+    participants
+}
+
+/// The two facts that say a decision was never actually tested: one voice
+/// argued it, and the last thing said went unanswered.
+///
+/// Derived here rather than at each caller so the warning `consume` prints and
+/// the view `discussion` renders cannot drift apart — a warning that disagreed
+/// with the view a resolver just read would be worse than none.
+fn untested_discussion(events: &[JournalEvent], filename: &str) -> Vec<String> {
+    let positions = position_events(events, filename);
+    if positions.is_empty() {
+        return Vec::new();
+    }
+    let mut warnings = Vec::new();
+    let participants = discussion_participants(&positions);
+    if participants.len() == 1 {
+        warnings.push(format!(
+            "every position came from one participant ({})",
+            participants[0]
+        ));
+    }
+    let (_, unanswered) = discussion_rounds(&positions);
+    if let Some(last) = positions
+        .last()
+        .and_then(|event| event.position_id.as_deref())
+    {
+        if unanswered.iter().any(|id| id == last) {
+            warnings.push(format!("nobody answered the last position ({last})"));
+        }
+    }
+    warnings
+}
+
 fn discussion_rounds(positions: &[&JournalEvent]) -> (Vec<DiscussionRound>, Vec<String>) {
     let positions_by_id: HashMap<&str, usize> = positions
         .iter()
@@ -4926,20 +4979,8 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     let (unrecorded_question_blocks, unrecorded_answer_blocks) =
         unrecorded_question_blocks(&body, &events, filename);
 
-    // Typed position events for this file, in ledger order.
-    let position_events: Vec<&JournalEvent> = events
-        .iter()
-        .filter(|event| {
-            event.known() && event.event == "position" && event.file.as_deref() == Some(filename)
-        })
-        .collect();
-    let mut participants: Vec<String> = Vec::new();
-    for event in &position_events {
-        let label = event_identity_label(event);
-        if !participants.contains(&label) {
-            participants.push(label);
-        }
-    }
+    let position_events = position_events(&events, filename);
+    let participants = discussion_participants(&position_events);
     let reply_refs = position_events
         .iter()
         .filter(|event| event.reference.is_some())
@@ -5354,6 +5395,18 @@ fn consume(
     event.decision_digest = decision_digest;
     append_event(ctx, &dir, &event)?;
     println!("consumed: {filename} [{}]", outcome.as_str());
+    // A one-participant discussion is a legitimate way to settle something,
+    // and the resolver is already required to be a person or a lead. What the
+    // resolver should not do is resolve one without being told which it was:
+    // `discussion` renders these two facts, and until now `consume` read
+    // neither, so one round by one model was disposed of with exactly the
+    // ceremony a reversal survived. Discarding earns the warning too — more
+    // so, since nothing at all is kept.
+    if target_kind.as_deref() == Some(JournalKind::Discussion.as_str()) {
+        for warning in untested_discussion(&events, filename) {
+            println!("warning: {warning}");
+        }
+    }
     if let (Some(decision), Some(kind)) =
         (event.decision.as_deref(), event.decision_kind.as_deref())
     {
