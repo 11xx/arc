@@ -178,6 +178,8 @@ pub struct DispositionEntry {
     pub status: DispositionStatus,
     pub commit: Option<String>,
     pub evidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_event_id: Option<String>,
     pub actor: String,
     pub supersedes: Vec<String>,
 }
@@ -1202,6 +1204,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 status,
                 commit,
                 evidence,
+                evidence_event_id,
                 supersedes,
             } => {
                 let Some(f) = state.findings.get_mut(finding_id) else {
@@ -1215,6 +1218,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     status: *status,
                     commit: commit.clone(),
                     evidence: evidence.clone(),
+                    evidence_event_id: evidence_event_id.clone(),
                     actor: ev.actor.clone(),
                     supersedes: supersedes.clone(),
                 });
@@ -1347,6 +1351,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 status,
                 commit,
                 evidence,
+                evidence_event_id,
                 supersedes,
             } => {
                 let Some(finding) = state.audit_findings.get_mut(finding_id) else {
@@ -1360,6 +1365,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     status: *status,
                     commit: commit.clone(),
                     evidence: evidence.clone(),
+                    evidence_event_id: evidence_event_id.clone(),
                     actor: ev.actor.clone(),
                     supersedes: supersedes.clone(),
                 });
@@ -2081,6 +2087,7 @@ mod tests {
                 status: DispositionStatus::Resolved,
                 commit: None,
                 evidence: None,
+                evidence_event_id: None,
                 supersedes: vec![],
             },
         ));
@@ -2091,6 +2098,7 @@ mod tests {
                 status: DispositionStatus::StillOpen,
                 commit: None,
                 evidence: None,
+                evidence_event_id: None,
                 supersedes: vec![],
             },
         ));
@@ -2109,6 +2117,7 @@ mod tests {
                 status: DispositionStatus::Resolved,
                 commit: Some("c9".into()),
                 evidence: None,
+                evidence_event_id: None,
                 supersedes: tips,
             },
         ));

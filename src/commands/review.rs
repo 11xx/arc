@@ -394,6 +394,27 @@ pub fn reply(ctx: &Ctx, reference: &str, parent_event_id: String, body: String) 
     Ok(())
 }
 
+fn validate_evidence_event_id(store: &Store, change_id: &str, requested: &str) -> Result<String> {
+    crate::ids::validate_id_component(requested)?;
+    let event = store
+        .load_events(change_id)?
+        .into_iter()
+        .find(|event| event.event_id == requested)
+        .with_context(|| {
+            format!(
+                "no event {requested:?} on change {change_id:?}; --evidence-event must name an event on this change"
+            )
+        })?;
+    if !matches!(
+        &event.payload,
+        Payload::VerificationRecorded { .. } | Payload::VerificationReused { .. }
+    ) {
+        let actual = crate::render::event_kind_summary(&event.payload).0;
+        bail!("event {requested} is a {actual}, not a verification");
+    }
+    Ok(event.event_id)
+}
+
 pub fn resolve(
     ctx: &Ctx,
     reference: &str,
@@ -401,6 +422,7 @@ pub fn resolve(
     disposition: DispositionStatus,
     commit: Option<String>,
     evidence: Option<String>,
+    evidence_event_id: Option<String>,
 ) -> Result<()> {
     let store = ctx.store()?;
     let (change_id, _transition, st) = locked_state(&store, reference)?;
@@ -426,6 +448,10 @@ pub fn resolve(
         ),
         Err(error) => return Err(error),
     };
+    let evidence_event_id = evidence_event_id
+        .as_deref()
+        .map(|requested| validate_evidence_event_id(&store, &change_id, requested))
+        .transpose()?;
     let commit = match commit {
         Some(c) => Some(gitio::rev_parse(&ctx.cwd, &c)?),
         None => None,
@@ -442,6 +468,7 @@ pub fn resolve(
             status: disposition,
             commit,
             evidence,
+            evidence_event_id,
             supersedes,
         }
     } else {
@@ -450,6 +477,7 @@ pub fn resolve(
             status: disposition,
             commit,
             evidence,
+            evidence_event_id,
             supersedes,
         }
     };

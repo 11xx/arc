@@ -289,6 +289,8 @@ pub enum Payload {
         commit: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         evidence: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence_event_id: Option<String>,
         /// Event IDs of the disposition tips this one observed and replaces.
         /// Two dispositions superseding the same tip fork the chain; the
         /// finding is contested until a later disposition supersedes all tips.
@@ -387,6 +389,8 @@ pub enum Payload {
         commit: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         evidence: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence_event_id: Option<String>,
         #[serde(default)]
         supersedes: Vec<String>,
     },
@@ -985,4 +989,40 @@ pub struct ProbeEvidenceRef {
     pub brief_event_id: String,
     pub name: String,
     pub phase: ProbePhase,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispositions_without_evidence_event_id_still_deserialize() {
+        for event_type in ["disposition-recorded", "audit-disposition-recorded"] {
+            let event: Event = serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "event_id": "01J00000000000000000000000",
+                "repository_id": "repo",
+                "change_id": "change",
+                "actor": "tester",
+                "created_at": "2026-08-26T00:00:00Z",
+                "event_type": event_type,
+                "finding_id": "f1",
+                "status": "resolved",
+                "commit": null,
+                "evidence": null,
+                "supersedes": []
+            }))
+            .unwrap();
+            assert!(matches!(
+                event.payload,
+                Payload::DispositionRecorded {
+                    evidence_event_id: None,
+                    ..
+                } | Payload::AuditDispositionRecorded {
+                    evidence_event_id: None,
+                    ..
+                }
+            ));
+        }
+    }
 }

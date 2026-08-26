@@ -1,5 +1,153 @@
 use super::common::*;
 
+fn disposition_change(repo: &Repo, slug: &str) -> String {
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add verification gate"]);
+    opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        slug,
+        "--no-worktree",
+    ])))
+}
+
+fn finding_target(repo: &Repo, slug: &str) -> (String, String) {
+    let output =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["finding", slug, "--summary", "the recorded finding"]),
+        );
+    let finding_id = output
+        .lines()
+        .find_map(|line| line.strip_prefix("finding: "))
+        .unwrap()
+        .to_string();
+    let finding_event_id = output
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+    (finding_id, finding_event_id)
+}
+
+fn verification_event_id(repo: &Repo, slug: &str) -> String {
+    repo.arc(&repo.root)
+        .args(["verify", slug, "--gate", "unit"])
+        .assert()
+        .success();
+    let event = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        slug,
+        "--type",
+        "verification-recorded",
+    ]))
+    .lines()
+    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+    .next()
+    .unwrap();
+    event["event_id"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn disposition_evidence_event_round_trips_through_replay_and_timeline() {
+    let repo = Repo::new();
+    let slug = "disposition-evidence";
+    disposition_change(&repo, slug);
+    let (finding_id, _) = finding_target(&repo, slug);
+    let evidence_event_id = verification_event_id(&repo, slug);
+
+    repo.arc(&repo.root)
+        .args([
+            "resolve",
+            slug,
+            &finding_id,
+            "--status",
+            "resolved",
+            "--evidence",
+            "the passing gate supports this disposition",
+            "--evidence-event",
+            &evidence_event_id,
+        ])
+        .assert()
+        .success();
+
+    let state = json_stdout(repo.arc(&repo.root).args(["show", slug, "--json"]));
+    assert_eq!(
+        state["findings"][finding_id.as_str()]["dispositions"][0]["evidence_event_id"],
+        evidence_event_id
+    );
+    assert_eq!(
+        state["findings"][finding_id.as_str()]["dispositions"][0]["evidence"],
+        "the passing gate supports this disposition"
+    );
+
+    let timeline = stdout(repo.arc(&repo.root).args(["log", slug]));
+    assert!(
+        timeline.contains(&format!("evidence event {evidence_event_id}")),
+        "{timeline}"
+    );
+}
+
+#[test]
+fn disposition_refuses_a_nonverification_evidence_event() {
+    let repo = Repo::new();
+    let slug = "disposition-bad-kind";
+    let change_id = disposition_change(&repo, slug);
+    let (finding_id, finding_event_id) = finding_target(&repo, slug);
+    let before = event_count(&repo, &change_id);
+
+    repo.arc(&repo.root)
+        .args([
+            "resolve",
+            slug,
+            &finding_id,
+            "--status",
+            "resolved",
+            "--evidence-event",
+            &finding_event_id,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("finding-added"))
+        .stderr(predicates::str::contains("not a verification"));
+
+    assert_eq!(event_count(&repo, &change_id), before);
+}
+
+#[test]
+fn disposition_refuses_an_evidence_event_absent_from_the_change() {
+    let repo = Repo::new();
+    let slug = "disposition-missing-event";
+    let change_id = disposition_change(&repo, slug);
+    let (finding_id, _) = finding_target(&repo, slug);
+    let before = event_count(&repo, &change_id);
+    let absent_event_id = "01J00000000000000000000000";
+
+    repo.arc(&repo.root)
+        .args([
+            "resolve",
+            slug,
+            &finding_id,
+            "--status",
+            "resolved",
+            "--evidence-event",
+            absent_event_id,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no event"))
+        .stderr(predicates::str::contains("on change"))
+        .stderr(predicates::str::contains("--evidence-event"));
+
+    assert_eq!(event_count(&repo, &change_id), before);
+}
+
 #[test]
 fn read_view_prints_verdict_history_and_body() {
     let repo = Repo::new();

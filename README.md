@@ -220,6 +220,11 @@ arc integrate radio-refill-fix --cleanup
 arc integrate --tag '#radio-series' --cleanup
 ```
 
+`arc resolve` accepts `--evidence` for a free-form explanation and, independently,
+`--evidence-event <ID>` for a full event ID from the same change. The event must
+be a `verification-recorded` or `verification-reused` event; event-ID prefixes
+are not resolved. Both options may be supplied together.
+
 `--profile` selects the change's workflow (`direct`, `local`, `forge`, or
 `release`). Add `--iterating` when integration is not yet the goal; `arc check`
 then reports the typed `iterating` blocker instead of requesting a review, and
