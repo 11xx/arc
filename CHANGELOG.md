@@ -12,6 +12,13 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `arc journal position --stance <for|against|amend>` writes the stance
+  line above the body and records the stance on the typed `position` event,
+  so a tally cannot undercount because an author opened with a heading. A
+  hand-written stance line still works, and passing both is refused before
+  anything is written. The `discussion` scaffold teaches the flag, and the
+  undercount message names it.
+
 - `arc journal verified <file> [--note <text>]` records that an open
   artifact was checked against source at the project anchor's head, as a
   typed event in the journal's log rather than in the prose a person edits.
