@@ -1,4 +1,5 @@
 use super::*;
+use crate::context::shell_quote;
 use crate::policy;
 use crate::ExecutionRole;
 
@@ -44,11 +45,34 @@ pub fn begin(
         .collect::<Vec<_>>();
     let tags = normalize_tags(tags)?;
 
+    let explicit_target = target.is_some();
+    let primary_branch = if explicit_target {
+        None
+    } else {
+        gitio::primary_worktree_branch(&ctx.cwd)?
+    };
+    let primary_worktree = if primary_branch.is_some() {
+        Some(gitio::primary_worktree(&ctx.cwd)?)
+    } else {
+        None
+    };
     let mut open_change_branches: Vec<String> = Vec::new();
+    let mut closed_in_place_target: Option<(String, String)> = None;
     for existing in store.list_change_ids()? {
         let events = store.load_events(&existing)?;
         let st = state::reduce(&events)?;
         if st.is_closed() {
+            let belongs_to_primary_in_place_change = primary_branch
+                .as_deref()
+                .is_some_and(|branch| st.branch == branch)
+                && primary_worktree.as_deref().is_some_and(|worktree| {
+                    st.worktree
+                        .as_deref()
+                        .is_some_and(|recorded| Path::new(recorded) == worktree)
+                });
+            if belongs_to_primary_in_place_change {
+                closed_in_place_target = Some((existing, st.target_branch));
+            }
             continue;
         }
         if st.slug == slug {
@@ -59,17 +83,25 @@ pub fn begin(
         open_change_branches.push(st.branch);
     }
 
-    // Changes derive from the branch they intend to merge into. The
-    // default is the primary worktree's branch (the main checkout,
-    // normally master/main) — never whatever branch happens to be
-    // checked out here, which may itself be work in progress. Stacking
-    // on another open change requires an explicit --target.
-    let explicit_target = target.is_some();
+    // Changes derive from the branch they intend to merge into. The default
+    // is the primary worktree's branch, unless that checkout belongs to a
+    // closed in-place change, whose recorded target remains authoritative.
+    // Stacking on another open change requires an explicit --target.
     let target_branch = match target {
         Some(t) => t,
-        None => gitio::primary_worktree_branch(&ctx.cwd)?
-            .or(gitio::current_branch(&ctx.cwd)?)
-            .context("cannot determine a target branch (detached?); pass --target")?,
+        None => match closed_in_place_target {
+            Some((change_id, recorded_target)) => {
+                if !gitio::branch_exists(&ctx.cwd, &recorded_target) {
+                    bail!(
+                        "closed in-place change {change_id} records target branch \
+                         {recorded_target:?}, but it no longer exists; pass --target explicitly"
+                    );
+                }
+                Some(recorded_target)
+            }
+            None => primary_branch.or(gitio::current_branch(&ctx.cwd)?),
+        }
+        .context("cannot determine a target branch (detached?); pass --target")?,
     };
     if !explicit_target && open_change_branches.contains(&target_branch) {
         bail!(
@@ -126,7 +158,10 @@ pub fn begin(
                     no_worktree_advice = Some((
                         "in-place checkout declined: the invoking working tree is dirty"
                             .to_string(),
-                        format!("git stash push --include-untracked && git checkout {branch_name}"),
+                        format!(
+                            "git stash push --include-untracked && git checkout {}",
+                            shell_quote(&branch_name)
+                        ),
                     ));
                     None
                 }
@@ -137,7 +172,7 @@ pub fn begin(
                             "in-place checkout declined: the invoking checkout is on branch \
                              {current:?}, not requested target {target_branch:?}"
                         ),
-                        format!("git checkout {branch_name}"),
+                        format!("git checkout {}", shell_quote(&branch_name)),
                     ));
                     None
                 }

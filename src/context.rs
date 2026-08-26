@@ -319,7 +319,7 @@ fn detect_pi_model(session: &str) -> Option<String> {
     })
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
