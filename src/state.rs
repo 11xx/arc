@@ -2091,6 +2091,7 @@ mod tests {
             actor: "tester".into(),
             actor_source: Some(ActorSource::Flag),
             on_behalf_of: None,
+            model: None,
             harness: None,
             session: None,
             created_at: Utc::now(),

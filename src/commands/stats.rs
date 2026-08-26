@@ -766,6 +766,7 @@ mod tests {
             actor: "tester".into(),
             actor_source: Some(ActorSource::Flag),
             on_behalf_of: None,
+            model: None,
             harness: Some("test".into()),
             session: Some("s".into()),
             created_at: DateTime::<Utc>::from_timestamp(1_000_000 + seconds, 0).unwrap(),

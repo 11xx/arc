@@ -71,6 +71,11 @@ pub struct Event {
     /// serialized only when set, so old events and bundles round-trip intact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_behalf_of: Option<String>,
+    /// Model identity declared for the invocation. Missing on events written
+    /// before model identity was recorded, which remains unrecorded rather
+    /// than becoming an inferred value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
