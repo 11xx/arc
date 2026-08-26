@@ -32,6 +32,29 @@ fn self_approved_change(repo: &Repo, slug: &str) -> PathBuf {
     worktree
 }
 
+fn integrated_audit_debt(
+    repo: &Repo,
+    slug: &str,
+    path: &str,
+    content: &str,
+    reason: &str,
+) -> String {
+    let opened = stdout(repo.arc(&repo.root).args(["begin", slug]));
+    let change_id = opened_change_id(&opened);
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(&worktree, path, content, &format!("feat: {slug}"));
+    stdout(repo.arc(&worktree).args(["snapshot", slug]));
+    repo.arc(&repo.root)
+        .args(["review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", slug, "--audit-debt", reason])
+        .assert()
+        .success();
+    change_id
+}
+
 /// The write path evaluates the same policy `check` does, so an approval that
 /// cannot gate says so when it is recorded rather than one command later.
 /// An import is the one path that does not go through the CLI's refusals, so
@@ -782,7 +805,8 @@ fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
 
     let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
     assert!(catchup.contains("audit-owed (1):"), "{catchup}");
-    assert!(catchup.contains("quota exhausted"), "{catchup}");
+    assert!(catchup.contains("1 outstanding"), "{catchup}");
+    assert!(catchup.contains("surfaces (1): work.txt"), "{catchup}");
     assert!(catchup.contains("arc audit"), "{catchup}");
 
     // Discharging it empties the queue.
@@ -811,6 +835,187 @@ fn doctor_reports_an_undischarged_obligation() {
         .map(|item| item["code"].as_str().unwrap())
         .collect();
     assert!(codes.contains(&"audit-debt-outstanding"), "{codes:?}");
+}
+
+#[test]
+fn catchup_and_doctor_aggregate_outstanding_debt() {
+    let repo = Repo::new();
+    for index in 1..=10 {
+        integrated_audit_debt(
+            &repo,
+            &format!("summary-{index}"),
+            &format!("surface-{index}.rs"),
+            &format!("surface {index}\n"),
+            &format!("reason {index}"),
+        );
+    }
+
+    let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert_eq!(
+        catchup
+            .lines()
+            .filter(|line| line.starts_with("audit-owed ("))
+            .count(),
+        1,
+        "{catchup}"
+    );
+    assert!(catchup.contains("10 outstanding"), "{catchup}");
+    assert!(catchup.contains("oldest"), "{catchup}");
+    assert!(catchup.contains("surfaces (10)"), "{catchup}");
+    assert!(!catchup.contains("reason 1"), "{catchup}");
+
+    let report = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
+    let debts = report["advice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["code"] == "audit-debt-outstanding")
+        .collect::<Vec<_>>();
+    assert_eq!(debts.len(), 1, "{report}");
+    assert!(debts[0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("10 outstanding"));
+}
+
+#[test]
+fn debt_summary_threshold_is_strict_and_opt_in() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\ndebt_count_threshold = 5\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy"]);
+
+    for index in 1..=5 {
+        integrated_audit_debt(
+            &repo,
+            &format!("threshold-{index}"),
+            &format!("threshold-{index}.rs"),
+            &format!("threshold {index}\n"),
+            "threshold debt",
+        );
+    }
+    let at_limit = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(!at_limit.contains("priority: advisory"), "{at_limit}");
+    let at_limit_doctor = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
+    assert!(!at_limit_doctor.to_string().contains("priority: advisory"));
+
+    integrated_audit_debt(
+        &repo,
+        "threshold-6",
+        "threshold-6.rs",
+        "threshold 6\n",
+        "threshold debt",
+    );
+    let over_limit = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(over_limit.contains("priority: advisory"), "{over_limit}");
+    let over_limit_doctor = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
+    assert!(over_limit_doctor.to_string().contains("priority: advisory"));
+
+    let no_threshold = Repo::new();
+    integrated_audit_debt(
+        &no_threshold,
+        "no-threshold",
+        "no-threshold.rs",
+        "no threshold\n",
+        "ordinary debt",
+    );
+    let ordinary = stdout(no_threshold.arc(&no_threshold.root).args(["catchup"]));
+    assert!(!ordinary.contains("priority: advisory"), "{ordinary}");
+
+    let age_threshold = Repo::new();
+    fs::create_dir_all(age_threshold.root.join(".arc")).unwrap();
+    fs::write(
+        age_threshold.root.join(".arc/policy.toml"),
+        "[policy]\ndebt_age_threshold_seconds = 5\n",
+    )
+    .unwrap();
+    git(&age_threshold.root, &["add", ".arc/policy.toml"]);
+    git(&age_threshold.root, &["commit", "-m", "policy"]);
+    let aged = integrated_audit_debt(
+        &age_threshold,
+        "age-threshold",
+        "age-threshold.rs",
+        "aged\n",
+        "aged debt",
+    );
+    age_event(&age_threshold, &aged, "audit-debt-declared", 10);
+    let over_age = stdout(age_threshold.arc(&age_threshold.root).args(["catchup"]));
+    assert!(over_age.contains("priority: advisory"), "{over_age}");
+}
+
+#[test]
+fn touched_debt_is_named_on_check_and_catchup_only_for_intersecting_diffs() {
+    let repo = Repo::new();
+    let debt = integrated_audit_debt(
+        &repo,
+        "debt-source",
+        "shared.rs",
+        "source\n",
+        "deferred shared invariant",
+    );
+
+    let touched = opened_change_id(&stdout(
+        repo.arc(&repo.root).args(["begin", "touches-debt"]),
+    ));
+    let touched_worktree = repo.home.join(".worktrees/repo-touches-debt");
+    repo.commit(
+        &touched_worktree,
+        "shared.rs",
+        "source\ncandidate\n",
+        "feat: touches debt",
+    );
+    stdout(
+        repo.arc(&touched_worktree)
+            .args(["snapshot", "touches-debt"]),
+    );
+    let touched_check = stdout(repo.arc(&touched_worktree).args(["check", "touches-debt"]));
+    assert!(touched_check.contains(&touched), "{touched_check}");
+    assert!(
+        touched_check.contains("deferred shared invariant"),
+        "{touched_check}"
+    );
+    assert!(touched_check.contains(&debt), "{touched_check}");
+
+    let untouched = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "untouched"])));
+    let untouched_worktree = repo.home.join(".worktrees/repo-untouched");
+    repo.commit(
+        &untouched_worktree,
+        "other.rs",
+        "unrelated\n",
+        "feat: untouched",
+    );
+    stdout(
+        repo.arc(&untouched_worktree)
+            .args(["snapshot", "untouched"]),
+    );
+    let untouched_check = stdout(repo.arc(&untouched_worktree).args(["check", "untouched"]));
+    assert!(
+        untouched_check.contains("1 outstanding"),
+        "{untouched_check}"
+    );
+    assert!(
+        !untouched_check.contains("deferred shared invariant"),
+        "{untouched_check}"
+    );
+    assert!(!untouched_check.contains(&debt), "{untouched_check}");
+
+    let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(catchup.contains(&format!("audit debt {debt}")), "{catchup}");
+    assert!(catchup.contains("deferred shared invariant"), "{catchup}");
+    let untouched_line = catchup
+        .lines()
+        .position(|line| line.contains(&untouched))
+        .expect("untouched change should be listed");
+    assert!(!catchup
+        .lines()
+        .skip(untouched_line)
+        .take(2)
+        .any(|line| line.contains("deferred shared invariant")));
 }
 
 /// Audit findings must be readable, or an audit that raises them is

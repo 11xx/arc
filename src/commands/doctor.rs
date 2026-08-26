@@ -61,7 +61,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     inspect_danger_paths(&ctx.cwd, &mut problems);
     inspect_danger_classification(&ctx.cwd, &mut problems);
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
-    inspect_audit_debt(&states, &mut advice);
+    inspect_audit_debt(ctx, &states, &mut advice)?;
     inspect_hold_releases(&Store::discover(&ctx.cwd)?, &states, &mut advice);
 
     let open_states = states
@@ -507,21 +507,19 @@ fn inspect_danger_classification(cwd: &Path, problems: &mut Vec<Finding>) {
     }
 }
 
-fn inspect_audit_debt(states: &BTreeMap<String, ChangeState>, advice: &mut Vec<Finding>) {
-    for (change_id, state) in states {
-        if !state.audit_debt_outstanding() {
-            continue;
-        }
-        let reason = state
-            .audit_debt
-            .as_ref()
-            .map(|debt| debt.reason.as_str())
-            .unwrap_or_default();
+fn inspect_audit_debt(
+    ctx: &Ctx,
+    states: &BTreeMap<String, ChangeState>,
+    advice: &mut Vec<Finding>,
+) -> Result<()> {
+    let summary = crate::commands::messaging::collect_audit_debts(ctx, states)?;
+    if !summary.is_empty() {
         advice.push(Finding {
             code: "audit-debt-outstanding",
-            detail: format!("{change_id}: {reason}"),
+            detail: summary.detail(),
         });
     }
+    Ok(())
 }
 
 /// A release that names no active hold. Replay ignores it so the ledger stays

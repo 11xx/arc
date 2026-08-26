@@ -567,6 +567,65 @@ fn catchup_reports_ledger_and_journal_together() {
     assert!(text.contains("later (1):"), "{text}");
 }
 
+#[test]
+fn review_queue_groups_uncovered_changes_and_names_an_open_pass() {
+    let repo = Repo::new();
+    let changes = (1..=4)
+        .map(|index| change_with_patchset(&repo, &format!("queue-pass-{index}")))
+        .collect::<Vec<_>>();
+
+    let uncovered = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(
+        uncovered.contains("review queue: 4 changes, 1 pass; 4 changes coverable by one pass"),
+        "{uncovered}"
+    );
+    assert!(
+        uncovered.contains("coverable by one pass (4 changes):"),
+        "{uncovered}"
+    );
+
+    let opened = stdout(repo.arc(&repo.root).args([
+        "pass",
+        "open",
+        "--member",
+        &format!("{}:ps-01", changes[0].0),
+        "--member",
+        &format!("{}:ps-01", changes[1].0),
+    ]));
+    let pass = opened
+        .lines()
+        .find_map(|line| line.strip_prefix("pass: "))
+        .expect("pass output should contain an id");
+
+    let grouped = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(
+        grouped.contains(&format!("review queue: 4 changes, 2 passes; pass {pass} covers 2 changes; 2 changes coverable by one pass")),
+        "{grouped}"
+    );
+    assert!(
+        grouped.contains(&format!("pass {pass} (2 changes):")),
+        "{grouped}"
+    );
+    assert!(
+        grouped.contains("coverable by one pass (2 changes):"),
+        "{grouped}"
+    );
+    assert!(grouped.contains(&changes[0].0), "{grouped}");
+    assert!(grouped.contains(&changes[1].0), "{grouped}");
+    assert!(grouped.contains(&changes[2].0), "{grouped}");
+    assert!(grouped.contains(&changes[3].0), "{grouped}");
+
+    let check = stdout(repo.arc(&changes[0].1).args(["check", "queue-pass-1"]));
+    assert!(
+        check.contains(&format!("pass {pass} (2 changes):")),
+        "{check}"
+    );
+    assert!(
+        check.contains("coverable by one pass (2 changes):"),
+        "{check}"
+    );
+}
+
 /// The bucket predicates are independent, so a state none of them anticipates
 /// lands in no bucket at all and the queue reports empty while work waits. A
 /// comment-only verdict on the newest patchset is exactly such a state: it is

@@ -1,4 +1,394 @@
 use super::*;
+use chrono::{DateTime, Utc};
+
+#[derive(Debug)]
+struct AuditDebtEntry {
+    change_id: String,
+    title: String,
+    reason: String,
+    declared_at: DateTime<Utc>,
+    surfaces: Vec<String>,
+}
+
+impl AuditDebtEntry {
+    fn surface_detail(&self) -> String {
+        if self.surfaces.is_empty() {
+            "unknown".to_string()
+        } else {
+            self.surfaces.join(", ")
+        }
+    }
+
+    fn detail(&self) -> String {
+        format!(
+            "{} ({}): owed: {}; surfaces: {}",
+            self.change_id,
+            crate::render::one_line(&self.title),
+            crate::render::one_line(&self.reason),
+            self.surface_detail()
+        )
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct AuditDebtSummary {
+    entries: Vec<AuditDebtEntry>,
+    oldest_age_seconds: u64,
+    surfaces: Vec<String>,
+    priority_advisory: bool,
+}
+
+impl AuditDebtSummary {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub(crate) fn detail(&self) -> String {
+        let surfaces = if self.surfaces.is_empty() {
+            "unknown".to_string()
+        } else {
+            self.surfaces.join(", ")
+        };
+        format!(
+            "{} outstanding; oldest {}; surfaces ({}): {}{}",
+            self.entries.len(),
+            crate::journal::format_age(self.oldest_age_seconds),
+            self.surfaces.len(),
+            surfaces,
+            if self.priority_advisory {
+                "; priority: advisory"
+            } else {
+                ""
+            }
+        )
+    }
+
+    pub(crate) fn render_summary(&self) {
+        if !self.is_empty() {
+            println!(
+                "audit-owed ({}): {}; discharge with: arc audit <change> --verdict <v>",
+                self.entries.len(),
+                self.detail()
+            );
+        }
+    }
+
+    fn touching<'a>(&'a self, ctx: &Ctx, state: &ChangeState) -> Vec<&'a AuditDebtEntry> {
+        let changed = change_surfaces(ctx, state);
+        if changed.is_empty() {
+            return Vec::new();
+        }
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .surfaces
+                    .iter()
+                    .any(|surface| changed.contains(surface))
+            })
+            .collect()
+    }
+
+    pub(crate) fn render_touched(&self, ctx: &Ctx, state: &ChangeState) {
+        for entry in self.touching(ctx, state) {
+            println!("    audit debt {}", entry.detail());
+        }
+    }
+
+    pub(crate) fn advisories_for(
+        &self,
+        ctx: &Ctx,
+        state: &ChangeState,
+    ) -> Vec<crate::status::Advisory> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+        let mut advisories = vec![crate::status::Advisory {
+            code: "audit-debt-summary",
+            detail: self.detail(),
+        }];
+        for entry in self.touching(ctx, state) {
+            advisories.push(crate::status::Advisory {
+                code: "audit-debt-touched",
+                detail: entry.detail(),
+            });
+        }
+        advisories
+    }
+}
+
+pub(crate) fn collect_audit_debts(
+    ctx: &Ctx,
+    states: &BTreeMap<String, ChangeState>,
+) -> Result<AuditDebtSummary> {
+    let mut entries = Vec::new();
+    for state in states.values() {
+        let Some(debt) = state
+            .audit_debt
+            .as_ref()
+            .filter(|_| state.audit_debt_outstanding())
+        else {
+            continue;
+        };
+        entries.push(AuditDebtEntry {
+            change_id: state.change_id.clone(),
+            title: state.title.clone(),
+            reason: debt.reason.clone(),
+            declared_at: debt.declared_at,
+            surfaces: audit_debt_surfaces(ctx, state, debt),
+        });
+    }
+    entries.sort_by(|a, b| a.change_id.cmp(&b.change_id));
+    let oldest = entries
+        .iter()
+        .map(|entry| entry.declared_at)
+        .min()
+        .unwrap_or_else(Utc::now);
+    let oldest_age_seconds = Utc::now()
+        .signed_duration_since(oldest)
+        .num_seconds()
+        .max(0) as u64;
+    let mut surfaces = BTreeSet::new();
+    for entry in &entries {
+        surfaces.extend(entry.surfaces.iter().cloned());
+    }
+    let priority_advisory = if entries.is_empty() {
+        false
+    } else {
+        let policy = crate::policy::load(&crate::gitio::toplevel(&ctx.cwd)?)?;
+        policy
+            .policy
+            .debt_count_threshold
+            .is_some_and(|threshold| entries.len() > threshold)
+            || policy
+                .policy
+                .debt_age_threshold_seconds
+                .is_some_and(|threshold| oldest_age_seconds > threshold)
+    };
+    Ok(AuditDebtSummary {
+        entries,
+        oldest_age_seconds,
+        surfaces: surfaces.into_iter().collect(),
+        priority_advisory,
+    })
+}
+
+fn audit_debt_surfaces(
+    ctx: &Ctx,
+    state: &ChangeState,
+    debt: &crate::state::AuditDebt,
+) -> Vec<String> {
+    let range = state
+        .closure
+        .as_ref()
+        .and_then(|closure| {
+            closure
+                .target_before
+                .as_deref()
+                .zip(closure.integrated_commit.as_deref())
+        })
+        .or_else(|| {
+            debt.patchset_id.as_deref().and_then(|patchset_id| {
+                state
+                    .patchsets
+                    .iter()
+                    .find(|patchset| patchset.id == patchset_id)
+                    .map(|patchset| (patchset.base.as_str(), patchset.head.as_str()))
+            })
+        })
+        .or_else(|| {
+            state
+                .latest_patchset()
+                .map(|patchset| (patchset.base.as_str(), patchset.head.as_str()))
+        });
+    range
+        .and_then(|(base, head)| crate::gitio::changed_paths(&ctx.cwd, base, head).ok())
+        .unwrap_or_default()
+}
+
+fn change_surfaces(ctx: &Ctx, state: &ChangeState) -> BTreeSet<String> {
+    let Some(head) = crate::gitio::branch_head(&ctx.cwd, &state.branch)
+        .ok()
+        .or_else(|| {
+            state
+                .latest_patchset()
+                .map(|patchset| patchset.head.clone())
+        })
+    else {
+        return BTreeSet::new();
+    };
+    crate::gitio::changed_paths(&ctx.cwd, &state.base, &head)
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
+#[derive(Debug)]
+struct PassMembers {
+    members: BTreeSet<String>,
+    ended: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct ReviewQueue {
+    covered: BTreeMap<String, Vec<String>>,
+    uncovered: Vec<String>,
+}
+
+impl ReviewQueue {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.covered.is_empty() && self.uncovered.is_empty()
+    }
+
+    fn pass_count(&self) -> usize {
+        self.covered.len() + usize::from(!self.uncovered.is_empty())
+    }
+
+    pub(crate) fn detail(&self) -> String {
+        let changes = self.covered.values().map(Vec::len).sum::<usize>() + self.uncovered.len();
+        let passes = self.pass_count();
+        let pass_word = if passes == 1 { "pass" } else { "passes" };
+        let mut groups = self
+            .covered
+            .iter()
+            .map(|(pass, members)| format!("pass {pass} covers {} changes", members.len()))
+            .collect::<Vec<_>>();
+        if !self.uncovered.is_empty() {
+            groups.push(format!(
+                "{} changes coverable by one pass",
+                self.uncovered.len()
+            ));
+        }
+        format!(
+            "review queue: {changes} changes, {passes} {pass_word}; {}",
+            groups.join("; ")
+        )
+    }
+
+    pub(crate) fn render(&self) {
+        if self.is_empty() {
+            return;
+        }
+        println!("{}", self.detail());
+        for (pass, members) in &self.covered {
+            println!("  pass {pass} ({} changes):", members.len());
+            for change_id in members {
+                println!("    {change_id}");
+            }
+        }
+        if !self.uncovered.is_empty() {
+            println!(
+                "  coverable by one pass ({} changes):",
+                self.uncovered.len()
+            );
+            for change_id in &self.uncovered {
+                println!("    {change_id}");
+            }
+        }
+    }
+}
+
+pub(crate) fn collect_review_queue(
+    store: &crate::store::Store,
+    states: &BTreeMap<String, ChangeState>,
+) -> Result<ReviewQueue> {
+    let passes = open_review_passes(store)?;
+    let mut covered = BTreeMap::<String, Vec<String>>::new();
+    let mut uncovered = Vec::new();
+    for state in states.values().filter(|state| {
+        state.closure.is_none()
+            && crate::inbox::needs_review(state)
+            && state.latest_patchset().is_some()
+    }) {
+        let patchset = state.latest_patchset().expect("filtered above");
+        let member = format!("{}:{}", state.change_id, patchset.id);
+        if let Some(pass_id) = passes
+            .iter()
+            .find(|(_, members)| members.contains(&member))
+            .map(|(pass_id, _)| pass_id)
+        {
+            covered
+                .entry(pass_id.clone())
+                .or_default()
+                .push(state.change_id.clone());
+        } else {
+            uncovered.push(state.change_id.clone());
+        }
+    }
+    Ok(ReviewQueue { covered, uncovered })
+}
+
+fn open_review_passes(store: &crate::store::Store) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    let mut passes = BTreeMap::<String, PassMembers>::new();
+    for event in store.load_repository_events()? {
+        match event.payload {
+            Payload::ReviewPassOpened {
+                pass_id, members, ..
+            } => {
+                crate::ids::validate_id_component(&pass_id).with_context(|| {
+                    format!(
+                        "review pass event {} has an invalid pass id",
+                        event.event_id
+                    )
+                })?;
+                if members.is_empty() {
+                    bail!("review pass {pass_id} has no members");
+                }
+                let mut unique = BTreeSet::new();
+                for member in members {
+                    validate_pass_member(&member).with_context(|| {
+                        format!("review pass {pass_id} has invalid member {member:?}")
+                    })?;
+                    if !unique.insert(member.clone()) {
+                        bail!("review pass {pass_id} repeats member {member}");
+                    }
+                }
+                if passes
+                    .insert(
+                        pass_id.clone(),
+                        PassMembers {
+                            members: unique,
+                            ended: false,
+                        },
+                    )
+                    .is_some()
+                {
+                    bail!("review pass {pass_id} was opened more than once");
+                }
+            }
+            Payload::ReviewPassCompleted { pass_id, .. }
+            | Payload::ReviewPassAbandoned { pass_id, .. } => {
+                let pass = passes.get_mut(&pass_id).with_context(|| {
+                    format!("review pass ending event references unknown pass {pass_id:?}")
+                })?;
+                if pass.ended {
+                    bail!("review pass {pass_id} has more than one ending");
+                }
+                pass.ended = true;
+            }
+            _ => {}
+        }
+    }
+    Ok(passes
+        .into_iter()
+        .filter_map(|(pass_id, pass)| (!pass.ended).then_some((pass_id, pass.members)))
+        .collect())
+}
+
+fn validate_pass_member(member: &str) -> Result<()> {
+    if member.trim() != member {
+        bail!("member has surrounding whitespace");
+    }
+    let (change_id, patchset_id) = member
+        .split_once(':')
+        .context("expected one ':' between change and patchset")?;
+    if patchset_id.contains(':') {
+        bail!("member contains more than one ':'");
+    }
+    crate::ids::validate_id_component(change_id)?;
+    crate::ids::validate_id_component(patchset_id)?;
+    Ok(())
+}
 
 pub fn message(
     ctx: &Ctx,
@@ -212,32 +602,9 @@ pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Outstanding review obligations, with the reason each was taken on.
-///
-/// `inbox` lists them as rows; here they carry their reasons, because the
-/// question when picking one up is what review is owed, not merely that one is.
-fn render_audit_debts(ctx: &Ctx, store: &crate::store::Store) -> Result<()> {
-    let states = ctx.load_all_states(store)?;
-    let mut owed: Vec<_> = states
-        .values()
-        .filter(|state| state.audit_debt_outstanding())
-        .collect();
-    if owed.is_empty() {
-        return Ok(());
-    }
-    owed.sort_by(|a, b| a.change_id.cmp(&b.change_id));
-    println!("audit-owed ({}):", owed.len());
-    for state in owed {
-        let reason = state
-            .audit_debt
-            .as_ref()
-            .map(|debt| debt.reason.as_str())
-            .unwrap_or_default();
-        println!("  {}  {}", state.change_id, state.title);
-        println!("    owed: {reason}");
-    }
-    println!("  discharge with: arc audit <change> --verdict <v>");
-    Ok(())
+/// Outstanding review obligations as one actionable summary row.
+fn render_audit_debts(summary: &AuditDebtSummary) {
+    summary.render_summary();
 }
 
 /// The journal's actionable queue, summarized for the inbox. A journal that
@@ -303,24 +670,36 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         return Ok(0);
     }
 
+    let states = ctx.load_all_states(&store)?;
+    let debts = collect_audit_debts(ctx, &states)?;
+    let review_queue = collect_review_queue(&store, &states)?;
     println!("ledger: {}", store.root.display());
     let mut any = false;
+    let mut rendered_debt_details = BTreeSet::new();
     for (name, rows) in inbox.sections() {
-        // Owed audits are rendered below with their reasons, which is the
-        // detail that matters when picking one up.
+        // Owed audits are rendered below as one summary, while touched debts
+        // are attached to the change whose diff can carry them forward.
         if rows.is_empty() || name == "audit-owed" {
             continue;
         }
         any = true;
+        if name == "needs-review" {
+            review_queue.render();
+        }
         println!("{name} ({}):", rows.len());
         for row in rows.iter().take(limit) {
             println!("  {}  {} → {}", row.change_id, row.title, row.next_actor);
+            if rendered_debt_details.insert(row.change_id.clone()) {
+                if let Some(state) = states.get(&row.change_id) {
+                    debts.render_touched(ctx, state);
+                }
+            }
         }
     }
     if !any {
         println!("  no open changes");
     }
-    render_audit_debts(ctx, &store)?;
+    render_audit_debts(&debts);
     match journal {
         Ok(journal) => journal.render(),
         Err(error) => println!("journal: unavailable ({error:#})"),

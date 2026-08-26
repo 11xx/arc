@@ -13,7 +13,7 @@ mod gatekeeping;
 mod history;
 mod hooks;
 mod lifecycle;
-mod messaging;
+pub(crate) mod messaging;
 mod observe;
 mod pass;
 mod rescue;
