@@ -921,7 +921,7 @@ fn integration_warns_for_foreign_claim_but_still_succeeds_when_green() {
         .assert()
         .success();
     repo.arc(&worktree)
-        .args(["snapshot", "claimed-green"])
+        .args(["snapshot", "claimed-green", "--solo"])
         .assert()
         .success();
     repo.arc(&worktree)
@@ -1075,7 +1075,7 @@ fn snapshot_captures_git_identities_and_renders_claim_actor_mismatch() {
         .success();
     repo.commit(&worktree, "who.txt", "who\n", "feat: record identity");
     repo.arc(&worktree)
-        .args(["snapshot", "snapshot-who"])
+        .args(["snapshot", "snapshot-who", "--solo"])
         .assert()
         .success();
 
@@ -1121,7 +1121,7 @@ fn shared_git_identity_omits_inapplicable_provenance_mismatch() {
         .success();
     repo.commit(&worktree, "who.txt", "who\n", "feat: record identity");
     repo.arc(&worktree)
-        .args(["snapshot", "snapshot-shared"])
+        .args(["snapshot", "snapshot-shared", "--solo"])
         .assert()
         .success();
 
@@ -1169,7 +1169,7 @@ fn matching_git_identity_is_unaffected_by_shared_mode() {
         .success();
     repo.commit(&worktree, "who.txt", "who\n", "feat: record identity");
     repo.arc(&worktree)
-        .args(["snapshot", "snapshot-shared-match"])
+        .args(["snapshot", "snapshot-shared-match", "--solo"])
         .assert()
         .success();
 

@@ -23,6 +23,8 @@ pub struct Patchset {
     pub brief_version: Option<usize>,
     pub author: Option<GitIdentity>,
     pub committer: Option<GitIdentity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contributors: Vec<String>,
     pub claim_id: Option<String>,
     pub claim_actor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -37,9 +39,32 @@ impl Patchset {
         self.on_behalf_of.as_deref().unwrap_or(&self.actor)
     }
 
-    /// Whether arc invented the identity this patchset is attributed to.
+    /// The contributor that matches a reviewer, using the effective author as
+    /// the compatibility fallback for patchsets without a contributor set.
+    pub fn contributor_match(&self, reviewer: &str) -> Option<&str> {
+        if self.contributors.is_empty() {
+            (self.effective_author() == reviewer).then_some(self.effective_author())
+        } else {
+            self.contributors
+                .iter()
+                .find(|contributor| contributor == &reviewer)
+                .map(String::as_str)
+        }
+    }
+
+    /// Whether the identity used by the compatibility fallback was invented
+    /// from Git configuration rather than declared by the caller.
     pub fn author_assumed(&self) -> bool {
-        author_assumed(self.on_behalf_of.as_deref(), self.actor_source)
+        self.contributors.is_empty()
+            && author_assumed(self.on_behalf_of.as_deref(), self.actor_source)
+    }
+
+    pub fn contributors_source(&self) -> &'static str {
+        if self.contributors.is_empty() {
+            "declared-by-invoker"
+        } else {
+            "declared"
+        }
     }
 }
 
@@ -1001,6 +1026,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 author_email,
                 committer_name,
                 committer_email,
+                contributors,
                 claim_id,
                 claim_actor,
             } => {
@@ -1056,11 +1082,45 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     brief_version,
                     author,
                     committer,
+                    contributors: contributors.clone(),
                     claim_id: claim_id.clone(),
                     claim_actor: claim_actor.clone(),
                     provenance_mismatch,
                     created_at: ev.created_at,
                 });
+            }
+            Payload::PatchsetAttributionAmended {
+                patchset_id,
+                contributors,
+            } => {
+                crate::ids::validate_id_component(patchset_id)?;
+                if contributors.is_empty() {
+                    bail!(
+                        "patchset attribution amendment {} must name at least one contributor",
+                        ev.event_id
+                    );
+                }
+                let Some(patchset) = state
+                    .patchsets
+                    .iter_mut()
+                    .find(|patchset| patchset.id == *patchset_id)
+                else {
+                    bail!(
+                        "patchset attribution amendment {} references unknown patchset {patchset_id}",
+                        ev.event_id
+                    );
+                };
+                if let Some(verdict) = state
+                    .verdicts
+                    .iter()
+                    .find(|verdict| verdict.patchset_id == *patchset_id)
+                {
+                    bail!(
+                        "patchset {patchset_id} attribution cannot be amended after verdict {}",
+                        verdict.event_id
+                    );
+                }
+                patchset.contributors = contributors.clone();
             }
             Payload::ClaimSet {
                 claim_id,
@@ -1771,14 +1831,14 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                         unresolved_binding,
                     });
             }
-            // Repository-scoped, so it is never in a change's log; if one
+            // Repository-scoped, so none is ever in a change's log; if one
             // arrives by import it says nothing about this change.
-            Payload::HistoryRewritten { .. } => {}
-            // Review-pass events are repository-scoped, so they carry no
-            // state for an individual change if one arrives by import.
-            Payload::ReviewPassOpened { .. }
+            Payload::HistoryRewritten { .. }
+            | Payload::ReviewPassOpened { .. }
             | Payload::ReviewPassCompleted { .. }
-            | Payload::ReviewPassAbandoned { .. } => {}
+            | Payload::ReviewPassAbandoned { .. }
+            | Payload::RunDispatched { .. }
+            | Payload::RunEnded { .. } => {}
             // An event this build does not recognize. Typed loading skips
             // unknown events before replay, so this arm is defensive: keep the
             // raw history intact without mutating the derived view.
@@ -2001,14 +2061,11 @@ impl ChangeState {
     /// that cannot be corroboration.
     fn corroborates(&self, patchset: &Patchset, provisional: &VerdictEntry) -> bool {
         let reviewer = provisional.effective_author();
-        // Neither the reviewer being corroborated nor the change's own author
-        // can supply it. Excluding only the reviewer would let the author
-        // clear the obligation by approving their own change, which is the
-        // silent drop this whole surface exists to prevent — and an identity
-        // arc invented rather than one somebody declared corroborates
-        // nothing, exactly as it satisfies no independence check elsewhere.
+        // Neither the reviewer being corroborated nor any contributor can
+        // supply it. Excluding only the reviewer would let a contributor clear
+        // the obligation by approving their own change.
         let independent = |author: &str, assumed: bool| {
-            author != reviewer && author != patchset.effective_author() && !assumed
+            author != reviewer && patchset.contributor_match(author).is_none() && !assumed
         };
         let later_clean_approval = self.verdicts.iter().any(|verdict| {
             verdict.created_at > provisional.created_at
@@ -2064,18 +2121,19 @@ impl ChangeState {
         else {
             return false;
         };
-        let Some(author) = self
+        let Some(patchset) = self
             .patchsets
             .iter()
             .find(|patchset| patchset.id == shipped)
-            .map(Patchset::effective_author)
         else {
             return false;
         };
         self.verdicts.iter().any(|verdict| {
             verdict.created_at >= debt.declared_at
                 && verdict.patchset_id == shipped
-                && verdict.effective_author() != author
+                && patchset
+                    .contributor_match(verdict.effective_author())
+                    .is_none()
         })
     }
 }
@@ -2094,6 +2152,7 @@ mod tests {
             actor: "tester".into(),
             actor_source: Some(ActorSource::Flag),
             on_behalf_of: None,
+            model: None,
             harness: None,
             session: None,
             created_at: Utc::now(),

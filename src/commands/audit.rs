@@ -116,7 +116,6 @@ fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result
     let Some(patchset) = state.latest_patchset() else {
         return Ok(());
     };
-    let author = patchset.effective_author().to_string();
     let auditor = ctx.on_behalf_of.as_deref().unwrap_or(&ctx.actor);
     // An identity arc invented names nobody in particular, so two of them that
     // happen to differ do not show that two people acted. The same rule the
@@ -140,10 +139,10 @@ anyone independent looked at {}.\n\
             state.change_id
         );
     }
-    if auditor == author {
+    if let Some(contributor) = patchset.contributor_match(auditor) {
         bail!(
-            "{auditor} authored the audited work, so this audit would discharge its \
-own obligation.\n\
+            "{auditor} matches contributor {contributor} on the audited work, so this audit \
+             would discharge its own obligation.\n\
   If another reviewer did the pass, record it as theirs:\n\
     arc audit {} --verdict approved --actor '<reviewer>' --harness '<harness>' --model '<model>'\n\
   If you are reporting problems rather than clearing the change, \

@@ -116,7 +116,11 @@ SETTLE A QUESTION (before it is work)
   the same premise, or `closing` once the argument is in — never mid-argument,
   which would make you watch a run you delegated. Argue a closing question on
   both sides first (`position <file> --body-file - --question <id> --option <opt>`)
-  and the answer picks between explored branches instead of labels.
+  and the answer picks between explored branches instead of labels. Advice, not
+  a condition: an answer over a branch nobody argued records and says which
+  branch was skipped. Refusing it would measure the typed binding rather than
+  the arguing, and is satisfied most cheaply by a thin position under each
+  losing branch — the labels this exists to avoid.
 
 RUN A CHANGE
   arc begin <slug> --profile <p>     Open a change: branch + worktree + record.

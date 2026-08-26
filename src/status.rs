@@ -358,9 +358,16 @@ pub struct ReviewerCoverage {
     pub findings: usize,
     /// This reviewer saw the patchset that is about to ship.
     pub covers_final: bool,
-    /// This reviewer is also the final patchset's effective author, so its
+    /// This reviewer matches a contributor on the patchset it last saw, so its
     /// verdict carries no independence.
     pub is_author: bool,
+    /// The contributor matched by this reviewer, when the review is
+    /// non-independent for that patchset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_contributor: Option<String>,
+    /// Whether the patchset used its compatibility attribution or an explicit
+    /// contributor declaration.
+    pub contributors_source: &'static str,
     /// The reviewer is indistinguishable from the snapshot actor because no
     /// `--on-behalf-of` was recorded on either side. Reported as unknown
     /// rather than as self-review, which it may or may not be.
@@ -554,9 +561,8 @@ pub struct VerdictStatus {
     pub valid_for_current_head: bool,
 }
 
-/// Whether an approval fails the self-approval guard: the same effective
-/// author on both sides, or an identity arc assumed rather than one somebody
-/// declared.
+/// Whether an approval fails the self-approval guard: the reviewer matches a
+/// contributor, or an identity arc assumed rather than one somebody declared.
 ///
 /// An assumed identity is one arc invented from `git config user.name`. Two of
 /// those, or one of those beside a declared name, do not establish that two
@@ -568,46 +574,14 @@ fn undeclared_or_self(
     verdict_author: &str,
     verdict: &crate::state::VerdictEntry,
 ) -> bool {
-    patchset.effective_author() == verdict_author
+    patchset.contributor_match(verdict_author).is_some()
         || patchset.author_assumed()
         || verdict.author_assumed()
 }
 
 /// Build the status report: replayed ledger state joined with live Git
 /// facts, dependency state, and the declared gate policy.
-/// Whether a change touches a surface the project declared dangerous, and
-/// therefore whether its verdict must come from somebody other than its
-/// author.
-///
-/// A change may raise itself to dangerous and may never lower itself below
-/// what config declares: escalation is a judgement anyone may make, while
-/// de-escalation would let the party under shipping pressure decide its own
-/// gate, which is the pressure the declaration exists to resist.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct DangerScope {
-    /// Whether an independent verdict is required for this change.
-    pub dangerous: bool,
-    /// Why, in a form `arc check` can name.
-    pub rule: DangerRule,
-    /// The touched paths that matched a declared pattern.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub paths: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum DangerRule {
-    /// The project declared no dangerous surfaces, so the gate is uniform.
-    NotDeclared,
-    /// Touched paths matched a declared pattern.
-    DeclaredPath,
-    /// The change raised itself at `begin`.
-    Escalated,
-    /// Nothing the project declared was touched.
-    Untouched,
-    /// The touched set could not be established; assumed dangerous.
-    Undetermined,
-}
+pub use crate::model::{DangerRule, DangerScope};
 
 impl DangerScope {
     /// Independent review is owed when the repository forbids self-approval
@@ -828,9 +802,9 @@ fn build_report(
         let approved_patchset = latest_patchset
             .as_ref()
             .filter(|patchset| patchset.id == v.patchset_id);
-        // Self-approval compares effective authors, so a lead snapshotting for
-        // an executor and then approving as itself is not self-approval, while
-        // approving --on-behalf-of that executor is.
+        // Self-approval compares the reviewer with every contributor on the
+        // patchset, so a lead may review work recorded for an executor unless
+        // the lead is also in the declared contributor set.
         // A declared audit debt converts the absent or policy-rejected review
         // into a recorded obligation. The requirement is carried forward where
         // a query can find it when no independent reviewer is reachable.
@@ -900,22 +874,20 @@ fn build_report(
                 danger.requires_independent_review(policy)
                     && !debt_waives_current_head
                     && patchset.id == verdict.patchset_id
-                    && (patchset.effective_author() == verdict_author
+                    && (patchset.contributor_match(verdict_author).is_some()
                         || patchset.author_assumed()
                         || verdict.author_assumed)
             }))
         .then(|| {
-            // Naming the same author is the more specific fact, so it is the
-            // one reported when both are true.
-            let same_author = latest_patchset.as_ref().is_some_and(|patchset| {
-                patchset.effective_author()
-                    == verdict
-                        .on_behalf_of
-                        .as_deref()
-                        .unwrap_or(verdict.actor.as_str())
+            let matched_contributor = latest_patchset.as_ref().and_then(|patchset| {
+                let verdict_author = verdict
+                    .on_behalf_of
+                    .as_deref()
+                    .unwrap_or(verdict.actor.as_str());
+                patchset.contributor_match(verdict_author)
             });
-            if same_author {
-                SELF_APPROVAL_REASON.to_string()
+            if let Some(contributor) = matched_contributor {
+                format!("{SELF_APPROVAL_REASON}: reviewer matches contributor {contributor}")
             } else {
                 UNDECLARED_APPROVAL_REASON.to_string()
             }
@@ -1466,16 +1438,24 @@ pub fn reviewer_coverage(state: &ChangeState) -> Vec<ReviewerCoverage> {
                 .patchsets
                 .iter()
                 .find(|patchset| patchset.id == tally.best_id);
-            let is_author =
-                reviewed.is_some_and(|patchset| patchset.effective_author() == reviewer);
+            let matched_contributor = reviewed
+                .and_then(|patchset| patchset.contributor_match(&reviewer))
+                .map(str::to_string);
+            let is_author = matched_contributor.is_some();
             ReviewerCoverage {
                 covers_final: final_patchset.is_some_and(|patchset| patchset.id == tally.best_id),
                 // Indistinguishable rather than independent: the identity
                 // matches the snapshot's and neither side declared a subject.
                 attribution_unknown: is_author
                     && !tally.attributed
-                    && reviewed.is_some_and(|patchset| patchset.on_behalf_of.is_none()),
+                    && reviewed.is_some_and(|patchset| {
+                        patchset.on_behalf_of.is_none() && patchset.contributors.is_empty()
+                    }),
                 is_author,
+                matched_contributor,
+                contributors_source: reviewed
+                    .map(crate::state::Patchset::contributors_source)
+                    .unwrap_or("unknown"),
                 reviewer,
                 last_patchset: tally.best_id,
                 verdicts: tally.verdicts,
@@ -1556,14 +1536,33 @@ pub fn advisories(
     let independent = review_map
         .iter()
         .any(|row| row.covers_final && !row.is_author && !row.attribution_unknown);
+    let matched = review_map
+        .iter()
+        .filter(|row| row.covers_final)
+        .filter_map(|row| {
+            row.matched_contributor
+                .as_deref()
+                .map(|contributor| format!("{} matches contributor {contributor}", row.reviewer))
+        })
+        .collect::<Vec<_>>();
     if !independent && !danger.dangerous {
-        warnings.push(Advisory {
-            code: "self-verdict-permitted",
-            detail: format!(
+        let detail = if matched.is_empty() {
+            format!(
                 "no independent reviewer covers {}, and none is required: {}",
                 final_patchset.id,
                 danger.explain()
-            ),
+            )
+        } else {
+            format!(
+                "no independent reviewer covers {}; {}; none is required: {}",
+                final_patchset.id,
+                matched.join(", "),
+                danger.explain()
+            )
+        };
+        warnings.push(Advisory {
+            code: "self-verdict-permitted",
+            detail,
         });
     }
     if !independent && danger.dangerous {
@@ -1575,14 +1574,28 @@ pub fn advisories(
                 code: "reviewer-attribution-unknown",
                 detail: format!(
                     "no reviewer of {} is distinguishable from its author; \
-                     record --on-behalf-of to make attribution legible",
-                    final_patchset.id
+                     record --on-behalf-of to make attribution legible{}",
+                    final_patchset.id,
+                    if matched.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; {}", matched.join(", "))
+                    }
                 ),
             }
         } else {
+            let detail = if matched.is_empty() {
+                format!("no independent reviewer covers {}", final_patchset.id)
+            } else {
+                format!(
+                    "no independent reviewer covers {}; {}",
+                    final_patchset.id,
+                    matched.join(", ")
+                )
+            };
             Advisory {
                 code: "no-independent-reviewer",
-                detail: format!("no independent reviewer covers {}", final_patchset.id),
+                detail,
             }
         });
     }
