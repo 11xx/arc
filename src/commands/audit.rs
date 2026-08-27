@@ -28,9 +28,24 @@ pub fn declare_audit_debt(ctx: &Ctx, reference: &str, reason: String) -> Result<
     } else {
         st.latest_patchset().map(|patchset| patchset.id.clone())
     };
-    let payload = Payload::AuditDebtDeclared {
+    let coverage = patchset_id
+        .as_deref()
+        .map(|patchset_id| {
+            st.verdicts
+                .iter()
+                .filter(|verdict| verdict.patchset_id == patchset_id)
+                .map(|verdict| DebtCoverage {
+                    reviewer: verdict.effective_author().to_string(),
+                    model: verdict.model.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let payload = Payload::DebtDeclared {
         reason: reason.to_string(),
         patchset_id: patchset_id.clone(),
+        missing: DebtMissing::IndependentReview,
+        coverage,
     };
     ensure_append_allowed(&st, &payload)?;
     let event = ctx.event(&store, &change_id, payload);
@@ -90,8 +105,17 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
              shows that a review happened and not that it was independent of whoever wrote it."
         );
     }
+    // Recomputed from the ledger this audit just joined, rather than assumed
+    // from the debt merely existing: an audit by somebody who wrote the work
+    // is a legitimate record and does not settle a debt owed an independent
+    // review, and saying otherwise would be the one claim a reader acts on.
     if st.audit_debt.is_some() {
-        println!("audit debt discharged");
+        let (_, after) = ctx.load_state(&store, &change_id)?;
+        if after.audit_debt_outstanding() {
+            println!("audit recorded; the debt still owes an independent review");
+        } else {
+            println!("audit debt discharged");
+        }
     }
     Ok(())
 }

@@ -279,6 +279,9 @@ pub struct VerdictEntry {
     pub verdict: Verdict,
     pub causes: Vec<ReviewCause>,
     pub body: Option<String>,
+    /// Model identity recorded on the verdict event, when one was declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Why this verdict is owed corroboration, when the caller said it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisional: Option<String>,
@@ -377,6 +380,20 @@ pub struct AuditDebt {
     pub patchset_id: Option<String>,
     pub actor: String,
     pub declared_at: chrono::DateTime<chrono::Utc>,
+    /// What the versioned obligation says was missing. Absent on the
+    /// pre-versioned obligation, whose meaning is legacy independent-review
+    /// debt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing: Option<DebtMissing>,
+    /// Verdict coverage captured when the versioned obligation was declared.
+    /// An empty array means the bound patchset had no verdicts; absence is the
+    /// legacy shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<Vec<DebtCoverage>>,
+    /// The first verdict or audit that satisfies the existing discharge
+    /// predicate, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discharged_by: Option<DebtCoverage>,
 }
 
 /// Permission for dirty evidence to count, at one revision.
@@ -413,6 +430,9 @@ pub struct AuditVerdictEntry {
     pub revision: String,
     pub verdict: Verdict,
     pub body: Option<String>,
+    /// Model identity recorded on the audit event, when one was declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub actor: String,
     pub on_behalf_of: Option<String>,
     /// Where `actor` came from. `None` on audits recorded before arc kept the
@@ -1390,6 +1410,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     verdict: *verdict,
                     causes: causes.clone(),
                     body: body.clone(),
+                    model: ev.model.clone(),
                     provisional: provisional.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
@@ -1417,6 +1438,26 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     patchset_id: patchset_id.clone(),
                     actor: ev.actor.clone(),
                     declared_at: ev.created_at,
+                    missing: None,
+                    coverage: None,
+                    discharged_by: None,
+                });
+            }
+            Payload::DebtDeclared {
+                reason,
+                patchset_id,
+                missing,
+                coverage,
+            } => {
+                state.audit_debt = Some(AuditDebt {
+                    event_id: ev.event_id.clone(),
+                    reason: reason.clone(),
+                    patchset_id: patchset_id.clone(),
+                    actor: ev.actor.clone(),
+                    declared_at: ev.created_at,
+                    missing: Some(*missing),
+                    coverage: Some(coverage.clone()),
+                    discharged_by: None,
                 });
             }
             Payload::AuditVerdictRecorded {
@@ -1449,6 +1490,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     revision: revision.clone(),
                     verdict: *verdict,
                     body: body.clone(),
+                    model: ev.model.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
                     actor_source: ev.actor_source,
@@ -1848,6 +1890,12 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
     for reply in replies {
         attach_reply(&mut state, reply);
     }
+    if let Some(debt) = state.audit_debt.clone() {
+        let discharged_by = state.audit_debt_discharge(&debt);
+        if let Some(current) = state.audit_debt.as_mut() {
+            current.discharged_by = discharged_by;
+        }
+    }
     Ok(state)
 }
 
@@ -2105,36 +2153,62 @@ impl ChangeState {
     /// audit that did not. The verdict's outcome, and anything it found, live
     /// in the verdict and its findings rather than in the debt.
     fn audit_debt_discharged(&self, debt: &AuditDebt) -> bool {
-        if self
-            .audit_verdicts
-            .iter()
-            .any(|audit| audit.created_at >= debt.declared_at)
-        {
-            return true;
-        }
-        // Only a verdict on the revision that actually shipped counts; a
-        // verdict on an earlier draft judged something else.
-        let Some(shipped) = self
+        self.audit_debt_discharge(debt).is_some()
+    }
+
+    /// The verdict or audit that satisfies the existing discharge predicate.
+    /// The returned model is copied from that event and is never inferred.
+    fn audit_debt_discharge(&self, debt: &AuditDebt) -> Option<DebtCoverage> {
+        // A debt that names an independent review as the thing missing cannot
+        // be settled by the people who wrote the patchset, nor by an identity
+        // arc invented. A name taken from `git config` is not a claim anybody
+        // made: it cannot be compared against the contributor set with any
+        // meaning, so it fails the independence question rather than passing
+        // it by not matching. The shipped
+        // patchset's contributor set is the same one the pre-merge gate reads,
+        // so both paths answer independence the same way; where no set was
+        // recorded, membership falls back to the patchset's author.
+        let shipped_patchset = self
             .closure
             .as_ref()
             .and_then(|closure| closure.source_patchset_id.as_deref())
-        else {
-            return false;
-        };
-        let Some(patchset) = self
-            .patchsets
+            .and_then(|shipped| {
+                self.patchsets
+                    .iter()
+                    .find(|patchset| patchset.id == shipped)
+            });
+        if let Some(audit) = self.audit_verdicts.iter().find(|audit| {
+            audit.created_at >= debt.declared_at
+                && !audit.author_assumed()
+                && shipped_patchset.is_none_or(|patchset| {
+                    patchset
+                        .contributor_match(audit.effective_author())
+                        .is_none()
+                })
+        }) {
+            return Some(DebtCoverage {
+                reviewer: audit.effective_author().to_string(),
+                model: audit.model.clone(),
+            });
+        }
+        // Only a verdict on the revision that actually shipped counts; a
+        // verdict on an earlier draft judged something else.
+        let patchset = shipped_patchset?;
+        let shipped = patchset.id.as_str();
+        self.verdicts
             .iter()
-            .find(|patchset| patchset.id == shipped)
-        else {
-            return false;
-        };
-        self.verdicts.iter().any(|verdict| {
-            verdict.created_at >= debt.declared_at
-                && verdict.patchset_id == shipped
-                && patchset
-                    .contributor_match(verdict.effective_author())
-                    .is_none()
-        })
+            .find(|verdict| {
+                verdict.created_at >= debt.declared_at
+                    && verdict.patchset_id == shipped
+                    && !verdict.author_assumed()
+                    && patchset
+                        .contributor_match(verdict.effective_author())
+                        .is_none()
+            })
+            .map(|verdict| DebtCoverage {
+                reviewer: verdict.effective_author().to_string(),
+                model: verdict.model.clone(),
+            })
     }
 }
 
