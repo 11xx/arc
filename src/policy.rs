@@ -136,6 +136,16 @@ pub struct Policy {
     /// an actor claims to be, but it can decline to invent one.
     #[serde(default)]
     pub require_declared_actor: bool,
+    /// Raise debt summaries to advisory priority when more than this many
+    /// obligations are outstanding. The comparison is strict so the declared
+    /// limit itself remains ordinary.
+    #[serde(default)]
+    pub debt_count_threshold: Option<usize>,
+    /// Raise debt summaries to advisory priority when the oldest obligation is
+    /// older than this many seconds. The comparison is strict so the declared
+    /// age itself remains ordinary.
+    #[serde(default)]
+    pub debt_age_threshold_seconds: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

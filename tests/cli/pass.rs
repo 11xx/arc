@@ -192,7 +192,7 @@ fn abandoned_pass_json_keeps_reason_and_event_ids() {
 }
 
 #[test]
-fn open_pass_does_not_change_an_unrelated_check() {
+fn open_pass_does_not_change_an_unrelated_check_decision() {
     let repo = Repo::new();
     let (change_id, _worktree, _) = change_with_patchset(&repo, "pass-unrelated");
     let before = repo
@@ -202,10 +202,11 @@ fn open_pass_does_not_change_an_unrelated_check() {
         .unwrap();
 
     let member = format!("{change_id}:ps-01");
-    repo.arc(&repo.root)
-        .args(["pass", "open", "--member", &member])
-        .assert()
-        .success();
+    let opened = stdout(
+        repo.arc(&repo.root)
+            .args(["pass", "open", "--member", &member]),
+    );
+    let pass = pass_id(&opened);
 
     let after = repo
         .arc(&repo.root)
@@ -213,6 +214,11 @@ fn open_pass_does_not_change_an_unrelated_check() {
         .output()
         .unwrap();
     assert_eq!(before.status.code(), after.status.code());
-    assert_eq!(before.stdout, after.stdout);
+    assert_ne!(before.stdout, after.stdout);
+    assert!(
+        String::from_utf8_lossy(&after.stdout).contains(&format!("pass {pass}")),
+        "{}",
+        String::from_utf8_lossy(&after.stdout)
+    );
     assert_eq!(before.stderr, after.stderr);
 }

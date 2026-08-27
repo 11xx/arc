@@ -1907,9 +1907,25 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
 fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
     let store = ctx.store()?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
-    let report = ctx.report(&store, &st)?;
+    let mut report = ctx.report(&store, &st)?;
     let code = status::check_exit_code(&report);
+    let states = ctx.load_all_states(&store)?;
+    let debts = super::messaging::collect_audit_debts(ctx, &states)?;
+    report.advisories.extend(debts.advisories_for(ctx, &st));
+    let review_queue = if report.next_action == "request_review" {
+        Some(super::messaging::collect_review_queue(&store, &states)?)
+    } else {
+        None
+    };
     if json {
+        if let Some(queue) = &review_queue {
+            if !queue.is_empty() {
+                report.advisories.push(crate::status::Advisory {
+                    code: "review-queue",
+                    detail: queue.detail(),
+                });
+            }
+        }
         let output = CheckOutput {
             schema: "arc-check/2",
             change_id: &change_id,
@@ -1934,6 +1950,9 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
         println!("ready: all integration gates pass");
     } else {
         print!("{}", render::blocker_explanation(&st, &report));
+    }
+    if let Some(queue) = &review_queue {
+        queue.render();
     }
     render::advisories(&report);
     Ok(code)
