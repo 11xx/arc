@@ -469,11 +469,131 @@ fn watch_approved_returns_on_approval_but_not_changes_requested() {
     assert_eq!(reached["event_id"], approval_event, "{reached}");
 }
 
+/// Authority is necessary and not sufficient. A self-approval the repository
+/// forbids is the sole tip and is still not something `check` will integrate
+/// on, so a wait that returned on it would report ready for a change that
+/// cannot merge.
+#[test]
+fn watch_approved_does_not_return_on_an_approval_policy_refuses() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    let (_, worktree, _) = change_with_patchset(&repo, "watch-selfapproved");
+    // The default actor is the one that recorded the patchset, so this is the
+    // author approving its own work.
+    repo.arc(&worktree)
+        .args([
+            "review",
+            "watch-selfapproved",
+            "--verdict",
+            "approved",
+            "--body",
+            "my own work",
+        ])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args(["check", "watch-selfapproved"])
+        .assert()
+        .code(3);
+    let out = stdout(repo.arc(&repo.root).args([
+        "watch",
+        "watch-selfapproved",
+        "--until",
+        "approved",
+        "--timeout",
+        "1",
+    ]));
+    assert!(out.contains("timeout"), "{out}");
+
+    // Somebody else approving the same patchset satisfies both.
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args([
+            "review",
+            "watch-selfapproved",
+            "--verdict",
+            "approved",
+            "--body",
+            "independent",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["check", "watch-selfapproved"])
+        .assert()
+        .code(0);
+    let out = stdout(repo.arc(&repo.root).args([
+        "watch",
+        "watch-selfapproved",
+        "--until",
+        "approved",
+        "--timeout",
+        "1",
+    ]));
+    assert!(out.contains("reached: approved"), "{out}");
+}
+
+#[test]
+fn watch_approved_ignores_a_corroborating_approval() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "watch-corroborated");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args([
+            "review",
+            "watch-corroborated",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+            "--body",
+            "fix this first",
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args([
+            "review",
+            "watch-corroborated",
+            "--verdict",
+            "approved",
+            "--relation",
+            "corroborates",
+        ])
+        .assert()
+        .success();
+
+    repo.arc(&worktree)
+        .args([
+            "watch",
+            "watch-corroborated",
+            "--until",
+            "approved",
+            "--timeout",
+            "1",
+        ])
+        .assert()
+        .code(2)
+        .stdout("timeout: approved\n");
+    repo.arc(&worktree)
+        .args(["check", &change_id, "--json"])
+        .assert()
+        .code(3)
+        .stdout(predicates::str::contains("no-valid-approval"));
+}
+
 #[test]
 fn watch_approved_reports_provisional_reason_in_human_and_json() {
     let repo = Repo::new();
     let (_, worktree, _) = change_with_patchset(&repo, "watch-provisional");
-    let reason = "reviewer is an unmeasured model";
+    let reason = "reviewer is an unmeasured\nmodel";
     let approval = repo
         .arc(&worktree)
         .env("ARC_ACTOR", "reviewer")
@@ -501,7 +621,7 @@ fn watch_approved_reports_provisional_reason_in_human_and_json() {
         );
     assert_eq!(
         human,
-        format!("reached: approved (provisional: {reason})\n")
+        "reached: approved (provisional: reviewer is an unmeasured model)\n"
     );
 
     let reached = json_stdout(repo.arc(&worktree).args([
@@ -513,6 +633,109 @@ fn watch_approved_reports_provisional_reason_in_human_and_json() {
     ]));
     assert_eq!(reached["event_id"], approval_event, "{reached}");
     assert_eq!(reached["provisional"], reason, "{reached}");
+}
+
+#[test]
+fn watch_approved_does_not_reach_on_a_contested_verdict_graph() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "watch-contested");
+    let first = stdout(repo.arc(&worktree).args([
+        "review",
+        "watch-contested",
+        "--verdict",
+        "changes-requested",
+        "--cause",
+        "executor",
+        "--body",
+        "fix this first",
+    ]));
+    let first_event = first
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+    repo.arc(&worktree)
+        .args(["review", "watch-contested", "--verdict", "approved"])
+        .assert()
+        .success();
+    let third =
+        stdout(
+            repo.arc(&worktree)
+                .args(["review", "watch-contested", "--verdict", "approved"]),
+        );
+    let third_event = third
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+
+    let third_path = event_dir(&repo, &change_id).join(format!("{third_event}.json"));
+    let mut event: serde_json::Value =
+        serde_json::from_slice(&fs::read(&third_path).unwrap()).unwrap();
+    event["relation"] = serde_json::json!({
+        "kind": "supersedes",
+        "observed": [first_event],
+    });
+    fs::write(third_path, json_file_bytes(&event)).unwrap();
+
+    repo.arc(&worktree)
+        .args(["check", &change_id])
+        .assert()
+        .code(3)
+        .stdout(predicates::str::contains("none is authoritative"));
+    repo.arc(&worktree)
+        .args([
+            "watch",
+            "watch-contested",
+            "--until",
+            "approved",
+            "--timeout",
+            "1",
+        ])
+        .assert()
+        .code(2)
+        .stdout("timeout: approved\n");
+}
+
+#[test]
+fn watch_tag_all_flattens_multiline_provisional_reasons() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "watch-tag-provisional", "--tag", "series"]),
+    );
+    let worktree = repo.home.join(".worktrees/repo-watch-tag-provisional");
+    repo.commit(
+        &worktree,
+        "watch-tag-provisional.txt",
+        "watch-tag-provisional\n",
+        "test: add tagged provisional change",
+    );
+    repo.arc(&worktree)
+        .args(["snapshot", "watch-tag-provisional"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args([
+            "review",
+            "watch-tag-provisional",
+            "--verdict",
+            "approved",
+            "--provisional",
+            "first line\nsecond line",
+        ])
+        .assert()
+        .success();
+
+    let human = stdout(
+        repo.arc(&repo.root)
+            .args(["watch", "--tag", "series", "--all", "--until", "approved"]),
+    );
+    assert_eq!(
+        human,
+        "reached: approved (1 changes; provisional: first line second line)\n"
+    );
 }
 
 #[test]
