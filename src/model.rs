@@ -71,6 +71,11 @@ pub struct Event {
     /// serialized only when set, so old events and bundles round-trip intact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_behalf_of: Option<String>,
+    /// Model identity declared for the invocation. Missing on events written
+    /// before model identity was recorded, which remains unrecorded rather
+    /// than becoming an inferred value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -129,6 +134,32 @@ impl KeptKind {
             KeptKind::Hypothesis => "hypothesis",
         }
     }
+}
+
+/// What a declared debt says was missing. New members add a new kind of
+/// obligation without changing the meaning of existing events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DebtMissing {
+    IndependentReview,
+}
+
+impl DebtMissing {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IndependentReview => "independent-review",
+        }
+    }
+}
+
+/// One verdict's recorded review identity and optional model attribution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebtCoverage {
+    pub reviewer: String,
+    /// Absent when the verdict event recorded no model. No routing tier is
+    /// derived from the identity or from any configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,10 +257,19 @@ pub enum Payload {
         committer_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         committer_email: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        contributors: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         claim_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         claim_actor: Option<String>,
+    },
+    /// An explicit contributor declaration for one patchset. The patchset's
+    /// contributor set may change only before its first verdict.
+    #[serde(alias = "patchset-contributors-amended")]
+    PatchsetAttributionAmended {
+        patchset_id: String,
+        contributors: Vec<String>,
     },
     ClaimSet {
         claim_id: String,
@@ -344,6 +384,24 @@ pub enum Payload {
         /// where there is no gate left to waive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         patchset_id: Option<String>,
+    },
+    /// A debt: what review a change was missing when it shipped, and what
+    /// review it did have. Named for what it records rather than for the
+    /// ceremony that discharges it — an audit is one of two things that can,
+    /// and the record is ordinary rather than an exception. The untyped
+    /// `AuditDebtDeclared` above is what earlier builds wrote, and keeps its
+    /// event type forever so nothing already recorded is lost.
+    #[serde(rename = "debt-declared")]
+    DebtDeclared {
+        reason: String,
+        /// The patchset the waiver applies to, when it was declared before
+        /// integration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        patchset_id: Option<String>,
+        missing: DebtMissing,
+        /// Every verdict recorded on the bound patchset at declaration time.
+        #[serde(default)]
+        coverage: Vec<DebtCoverage>,
     },
     /// Dirty-tree evidence allowed to count, for one revision.
     ///
@@ -619,6 +677,27 @@ pub enum Payload {
         pass_id: String,
         reason: String,
     },
+    /// A caller told arc that a delegated run was dispatched through a
+    /// resolved route. arc records the dispatch context but does not choose,
+    /// start, or supervise the run.
+    RunDispatched {
+        route: String,
+        worktree: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        change: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        brief_event_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// A caller told arc that a dispatched run reached a terminal outcome.
+    /// `unknown` records that no more specific outcome is known.
+    RunEnded {
+        dispatch_event_id: String,
+        outcome: RunOutcome,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     /// An event whose `event_type` this build does not recognize (e.g. one
     /// imported from a newer arc). Typed loading skips these entries; the
     /// underlying files and raw export preserve their original bytes intact.
@@ -654,6 +733,10 @@ pub struct AuthorizationBasis {
     pub gates: std::collections::BTreeMap<String, NormalizedGate>,
     /// The normalized policy values consumed.
     pub policy: NormalizedPolicy,
+    /// The danger determination consumed by the guard. Absent on events
+    /// written before this fact was recorded; absence is not a safe result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub danger: Option<DangerScope>,
     /// The audit-debt declaration that stood in for an absent verdict or made
     /// a self-approved merge eligible. It is an authorization input like the
     /// verdict: without it the merge would have been refused.
@@ -676,6 +759,40 @@ pub struct PrerequisiteClosure {
     pub closure_event_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integrated_commit: Option<String>,
+}
+
+/// Whether a change touches a surface the project declared dangerous, and
+/// therefore whether its verdict must come from somebody other than its
+/// author.
+///
+/// A change may raise itself to dangerous and may never lower itself below
+/// what config declares: escalation is a judgement anyone may make, while
+/// de-escalation would let the party under shipping pressure decide its own
+/// gate, which is the pressure the declaration exists to resist.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DangerScope {
+    /// Whether an independent verdict is required for this change.
+    pub dangerous: bool,
+    /// Why, in a form `arc check` can name.
+    pub rule: DangerRule,
+    /// The touched paths that matched a declared pattern.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DangerRule {
+    /// The project declared no dangerous surfaces, so the gate is uniform.
+    NotDeclared,
+    /// Touched paths matched a declared pattern.
+    DeclaredPath,
+    /// The change raised itself at `begin`.
+    Escalated,
+    /// Nothing the project declared was touched.
+    Untouched,
+    /// The touched set could not be established; assumed dangerous.
+    Undetermined,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -711,6 +828,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         Payload::MetadataUpdated { .. }
         | Payload::BriefRecorded { .. }
         | Payload::PatchsetAdded { .. }
+        | Payload::PatchsetAttributionAmended { .. }
         | Payload::ClaimSet { .. }
         | Payload::StageSet { .. }
         | Payload::FindingAdded { .. }
@@ -733,7 +851,9 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::ForgeLink { .. }
         | Payload::ForgeChecks { .. }
         | Payload::ForgePrState { .. } => AppendPermission::AnyPhaseFact,
-        Payload::ChangelogRecorded { .. } | Payload::AuditDebtDeclared { .. } => {
+        Payload::ChangelogRecorded { .. }
+        | Payload::AuditDebtDeclared { .. }
+        | Payload::DebtDeclared { .. } => {
             AppendPermission::OpenOrIntegratedFact
         }
         Payload::AuditVerdictRecorded { .. }
@@ -750,6 +870,8 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::ReviewPassOpened { .. }
         | Payload::ReviewPassCompleted { .. }
         | Payload::ReviewPassAbandoned { .. } => AppendPermission::AnyPhaseFact,
+        | Payload::RunDispatched { .. }
+        | Payload::RunEnded { .. } => AppendPermission::AnyPhaseFact,
         Payload::Unknown => AppendPermission::OpaqueImported,
     }
 }
@@ -1043,6 +1165,26 @@ pub enum Closure {
     Integrated,
     Abandoned,
     Superseded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunOutcome {
+    Completed,
+    RefusedOnPremise,
+    Stopped,
+    Unknown,
+}
+
+impl RunOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::RefusedOnPremise => "refused-on-premise",
+            Self::Stopped => "stopped",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]

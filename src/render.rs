@@ -1,5 +1,5 @@
 use crate::commands::ArcAlternative;
-use crate::model::{Event, Payload};
+use crate::model::{DebtCoverage, Event, Payload};
 use crate::state::ChangeState;
 use crate::status::{Blocker, BriefBaseDrift, GateStatus, StatusReport};
 use std::fmt::Write;
@@ -47,6 +47,19 @@ pub fn authorization_basis(basis: &crate::model::AuthorizationBasis) -> String {
     let _ = match &basis.verdict_event_id {
         Some(verdict) => writeln!(out, "    verdict: {verdict}"),
         None => writeln!(out, "    verdict: none — authorized by declared audit debt"),
+    };
+    let _ = match &basis.danger {
+        Some(danger) => writeln!(
+            out,
+            "    danger: {} — {}",
+            if danger.dangerous {
+                "dangerous"
+            } else {
+                "not dangerous"
+            },
+            danger.explain()
+        ),
+        None => writeln!(out, "    danger: not recorded"),
     };
     for (gate, evidence) in &basis.gate_evidence {
         let _ = writeln!(out, "    gate {gate}: {evidence}");
@@ -277,6 +290,15 @@ pub fn markdown(
             let _ = writeln!(w, "- `{}`: `{}` → `{}`", p.id, p.base, p.head);
             if let (Some(brief_ref), Some(version)) = (&p.brief_ref, p.brief_version) {
                 let _ = writeln!(w, "  - brief: v{version} (`{}`)", brief_ref.event_id);
+            }
+            if p.contributors.is_empty() {
+                let _ = writeln!(
+                    w,
+                    "  - contributors: {} (declared-by-invoker)",
+                    p.effective_author()
+                );
+            } else {
+                let _ = writeln!(w, "  - contributors: {}", p.contributors.join(", "));
             }
             if let Some(subject) = &p.on_behalf_of {
                 let _ = writeln!(w, "  - snapshot by: {} (for {subject})", p.actor);
@@ -693,12 +715,17 @@ pub fn markdown(
     if !report.review_map.is_empty() {
         let _ = writeln!(w, "\n## Review coverage\n");
         for row in &report.review_map {
-            let attribution = if row.attribution_unknown {
-                " — attribution unknown, no `--on-behalf-of` recorded"
+            let attribution = if let Some(contributor) = &row.matched_contributor {
+                format!(
+                    " — non-independent: matches contributor {contributor} ({})",
+                    row.contributors_source
+                )
+            } else if row.attribution_unknown {
+                " — attribution unknown, no `--on-behalf-of` recorded".to_string()
             } else if row.is_author {
-                " — same identity as the patchset author"
+                " — non-independent".to_string()
             } else {
-                ""
+                String::new()
             };
             let _ = writeln!(
                 w,
@@ -733,14 +760,41 @@ pub fn markdown(
                 debt.reason,
                 debt.actor
             );
+            if let Some(missing) = debt.missing {
+                let _ = writeln!(w, "  - Missing: {}", missing.as_str());
+            } else {
+                let _ = writeln!(w, "  - Record: legacy");
+            }
+            if let Some(coverage) = &debt.coverage {
+                if coverage.is_empty() {
+                    let _ = writeln!(w, "  - Coverage: none");
+                } else {
+                    let _ = writeln!(w, "  - Coverage:");
+                    for reviewer in coverage {
+                        let _ = writeln!(w, "    - {}", audit_debt_coverage_label(reviewer));
+                    }
+                }
+            }
+            if let Some(discharged_by) = &debt.discharged_by {
+                let _ = writeln!(
+                    w,
+                    "  - Discharged by: {}",
+                    audit_debt_coverage_label(discharged_by)
+                );
+            }
         }
         for audit in &report.audit_verdicts {
             let _ = writeln!(
                 w,
-                "- {:?} at `{}` by {}{}",
+                "- {:?} at `{}` by {}{}{}",
                 audit.verdict,
                 &audit.revision[..audit.revision.len().min(8)],
                 audit.effective_author(),
+                audit
+                    .model
+                    .as_deref()
+                    .map(|model| format!(" ({model})"))
+                    .unwrap_or_default(),
                 audit
                     .body
                     .as_deref()
@@ -919,8 +973,16 @@ fn blocker_title(blocker: Blocker) -> &'static str {
     }
 }
 
+fn audit_debt_coverage_label(coverage: &DebtCoverage) -> String {
+    match coverage.model.as_deref() {
+        Some(model) => format!("{} ({model})", coverage.reviewer),
+        None => format!("{} (model unrecorded)", coverage.reviewer),
+    }
+}
+
 /// One chronological log line for a ledger event:
-/// `<ts>  <actor>@<harness>  <event-type>  <summary>`.
+/// `<ts>  <actor>@<harness> (<model>)  <event-type>  <summary>`, with the
+/// parenthesized model omitted when no model was recorded.
 pub fn event_line(event: &Event) -> String {
     let (kind, summary) = event_kind_summary(&event.payload);
     if summary.is_empty() {
@@ -930,15 +992,24 @@ pub fn event_line(event: &Event) -> String {
     }
 }
 
-/// The `<ts>  <actor>@<harness>` half of a log line, shared by events and by
-/// the facts an event carries inside it.
+/// The `<ts>  <actor>@<harness> (<model>)` half of a log line, shared by
+/// events and by the facts an event carries inside it. The model annotation is
+/// present only when the event recorded one.
 fn event_prefix(event: &Event) -> String {
     let ts = event.created_at.format("%Y-%m-%dT%H:%M:%SZ");
     let actor = match &event.on_behalf_of {
         Some(subject) => format!("{} (for {subject})", event.actor),
         None => event.actor.clone(),
     };
-    format!("{ts}  {actor}@{}", event.harness.as_deref().unwrap_or("-"))
+    let model = event
+        .model
+        .as_deref()
+        .map(|model| format!(" ({model})"))
+        .unwrap_or_default();
+    format!(
+        "{ts}  {actor}@{}{model}",
+        event.harness.as_deref().unwrap_or("-")
+    )
 }
 
 /// Which patchset a finding predates, when it is not the one under review.
@@ -1076,6 +1147,13 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             "patchset-added",
             format!("{patchset_id} {}", short_sha(head)),
         ),
+        Payload::PatchsetAttributionAmended {
+            patchset_id,
+            contributors,
+        } => (
+            "patchset-attribution-amended",
+            format!("{patchset_id}: {}", contributors.join(", ")),
+        ),
         Payload::ClaimSet {
             claim_id,
             displaced,
@@ -1132,6 +1210,31 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                 Some(id) => format!("{id}: {reason}"),
                 None => reason.clone(),
             },
+        ),
+        Payload::DebtDeclared {
+            reason,
+            patchset_id,
+            missing,
+            coverage,
+        } => (
+            "debt-declared",
+            format!(
+                "{}; missing {}; coverage: {}",
+                match patchset_id {
+                    Some(id) => format!("{id}: {reason}"),
+                    None => reason.clone(),
+                },
+                missing.as_str(),
+                if coverage.is_empty() {
+                    "none".to_string()
+                } else {
+                    coverage
+                        .iter()
+                        .map(audit_debt_coverage_label)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ),
         ),
         Payload::AuditVerdictRecorded {
             revision,
@@ -1263,6 +1366,35 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             "review-pass-abandoned",
             format!("{pass_id}: {}", one_line(reason)),
         ),
+        Payload::RunDispatched {
+            route,
+            worktree,
+            change,
+            note,
+            ..
+        } => {
+            let mut summary = format!("route={} worktree={}", one_line(route), one_line(worktree));
+            if let Some(change) = change {
+                summary.push_str(&format!(" change={}", one_line(change)));
+            }
+            if let Some(note) = note {
+                summary.push_str(" — ");
+                summary.push_str(&one_line(note));
+            }
+            ("run-dispatched", summary)
+        }
+        Payload::RunEnded {
+            dispatch_event_id,
+            outcome,
+            note,
+        } => {
+            let mut summary = format!("{} for {dispatch_event_id}", outcome.as_str());
+            if let Some(note) = note {
+                summary.push_str(" — ");
+                summary.push_str(&one_line(note));
+            }
+            ("run-ended", summary)
+        }
         Payload::ChangeClosed {
             outcome,
             integrated_commit,

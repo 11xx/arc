@@ -4065,6 +4065,75 @@ fn journal_position_rejects_paths_missing_files_and_non_artifacts() {
 }
 
 #[test]
+fn journal_position_refuses_a_branch_on_a_todo_before_reading_stdin() {
+    let repo = Repo::new();
+    let file = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "branch-on-todo",
+                "--kind",
+                "todo",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Todo\n"),
+    );
+    let file = PathBuf::from(file.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let journal = journal_dir(&repo);
+    let binary = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo should provide arc binary");
+    let mut child = Command::new(binary)
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--question",
+            "q",
+            "--option",
+            "yes",
+            "--body-file",
+            "-",
+        ])
+        .current_dir(&repo.root)
+        .env("HOME", &repo.home)
+        .env("XDG_CONFIG_HOME", repo.home.join(".config"))
+        .env("ARC_JOURNAL_DIR", &journal)
+        .env("ARC_ACTOR", "tester")
+        .env("ARC_HARNESS", "test")
+        .env("ARC_SESSION", "session-a")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "position waited for stdin: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!status.success(), "{output:?}");
+    assert!(stderr.contains("is a todo, not a discussion"), "{stderr}");
+    assert!(String::from_utf8_lossy(&output.stdout).is_empty());
+}
+
+#[test]
 fn journal_position_rejects_consumed_artifact() {
     let repo = Repo::new();
     let seed = stdout(
@@ -4231,6 +4300,58 @@ fn journal_verified_marks_current_and_older_stamps() {
 }
 
 #[test]
+fn journal_verified_marks_unknown_when_anchor_head_is_unreachable() {
+    let repo = Repo::new();
+    let file = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "unreachable-anchor",
+                "--kind",
+                "todo",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Unreachable anchor\n"),
+    );
+    let file = PathBuf::from(file.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    repo.arc(&repo.root)
+        .args(["journal", "verified", &file])
+        .assert()
+        .success();
+
+    fs::rename(repo.root.join(".git"), repo.root.join(".git-unreachable")).unwrap();
+
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let stamp = &open["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file"] == file)
+        .unwrap()["verification"];
+    assert!(stamp["moved"].is_null(), "{stamp}");
+    assert_eq!(stamp["revision"].as_str().unwrap().len(), 40);
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(text.contains("anchor comparison unknown"), "{text}");
+    assert!(!text.contains("anchor moved since"), "{text}");
+
+    let workspace = stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "backlog", "--items"]),
+    );
+    assert!(
+        workspace.contains("anchor comparison unknown"),
+        "{workspace}"
+    );
+}
+
+#[test]
 fn journal_open_preserves_legacy_rows_without_verification_events() {
     let repo = Repo::new();
     let dir = journal_dir(&repo);
@@ -4348,7 +4469,7 @@ fn journal_verified_records_a_stamp_without_revision_for_an_unborn_anchor() {
     let open = json_stdout(repo.arc(&headless).args(["journal", "open", "--json"]));
     let stamp = &open["open"][0]["verification"];
     assert!(!stamp.as_object().unwrap().contains_key("revision"));
-    assert_eq!(stamp["moved"], false);
+    assert!(stamp["moved"].is_null(), "{stamp}");
 }
 
 #[test]
@@ -4457,7 +4578,10 @@ fn consume_names_a_discussion_nobody_tested() {
         out.contains("every position came from one participant"),
         "{out}"
     );
-    assert!(out.contains("nobody answered the last position"), "{out}");
+    assert!(
+        out.contains("no position answered another position"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -4533,6 +4657,42 @@ fn consume_is_quiet_about_a_discussion_that_was_answered_by_someone_else() {
     ]));
     assert!(
         !out.contains("every position came from one participant"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("no position answered another position"),
+        "{out}"
+    );
+}
+
+#[test]
+fn consume_warns_when_no_position_answers_another_position() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "no-reply-edge", "# No reply edge\n");
+    for ((session, harness), body) in [
+        (("s1", "codex"), "First position.\n"),
+        (("s2", "claude"), "Second position.\n"),
+    ] {
+        repo.arc(&repo.root)
+            .args(["journal", "position", &file, "--body-file", "-"])
+            .env("ARC_SESSION", session)
+            .env("ARC_HARNESS", harness)
+            .write_stdin(body)
+            .assert()
+            .success();
+    }
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "consume",
+        &file,
+        "--outcome",
+        "discarded",
+        "--note",
+        "no reply was recorded",
+    ]));
+    assert!(
+        out.contains("no position answered another position"),
         "{out}"
     );
 }
@@ -5989,7 +6149,7 @@ fn questions_belong_only_to_discussions() {
 }
 
 #[test]
-fn a_closing_answer_requires_every_option_to_be_argued() {
+fn a_closing_answer_over_unargued_branches_warns_and_still_counts() {
     let repo = Repo::new();
     let file = discussion_named(&repo, "coverage", "# Which branch?\n");
     repo.arc(&repo.root)
@@ -6025,9 +6185,47 @@ fn a_closing_answer_requires_every_option_to_be_argued() {
         ])
         .write_stdin("Premature.\n")
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("unargued options"));
+        .success()
+        .stdout(predicates::str::contains(
+            "was answered with branches never argued (a, b)",
+        ));
 
+    // The answer is real: the reader must not discard it for the same reason
+    // the write declined to refuse it. An answer recorded and then dropped on
+    // replay is worse than one refused outright, because nothing says so.
+    let waiting = stdout(repo.arc(&repo.root).args(["journal", "questions"]));
+    assert!(
+        waiting.contains("no question is waiting on a person"),
+        "{waiting}"
+    );
+    let summary = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
+    assert!(summary.contains("answered a"), "{summary}");
+}
+
+/// A closing question whose branches were all argued is answered without the
+/// warning: the advice fires on what was skipped, not on every answer.
+#[test]
+fn a_closing_answer_over_argued_branches_says_nothing() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "explored", "# Which way?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Choose after both branches are explored.\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
     for option in ["a", "b"] {
         repo.arc(&repo.root)
             .args([
@@ -6045,21 +6243,18 @@ fn a_closing_answer_requires_every_option_to_be_argued() {
             .assert()
             .success();
     }
-    repo.arc(&repo.root)
-        .args([
-            "journal",
-            "answer",
-            &file,
-            "--question",
-            &question,
-            "--option",
-            "a",
-            "--body-file",
-            "-",
-        ])
-        .write_stdin("Now informed.\n")
-        .assert()
-        .success();
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "answer",
+        &file,
+        "--question",
+        &question,
+        "--option",
+        "a",
+        "--body-file",
+        "-",
+    ]));
+    assert!(!out.contains("never argued"), "{out}");
 }
 
 /// An opening question exists so every participant argues from the same

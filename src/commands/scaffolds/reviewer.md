@@ -11,13 +11,15 @@ is not a review: rendering, ordering, filters, advice volume, and the sign of a
 computed signal all read as correct in a diff and wrong on a screen, and each
 of those has shipped that way.
 
-Run every command the change touches, in both renderings — the human output and
-`--json` — against a real ledger with real history rather than a fixture. Read
-the output for what a diff cannot show: whether the wording says what the
+Run every command the change touches against a real ledger with real history
+rather than a fixture, and read every rendering it offers: the human output
+always, and `--json` wherever the command has one — several have none, and
+asking one of those for JSON is an error rather than a second reading. Read
+that output for what a diff cannot show: whether the wording says what the
 change claims, whether a list is ordered and filtered as the brief describes,
-whether a count or a flag points the way the code says it does, and whether the
-volume of what is printed is what a reader can act on. A text-rendering path
-with no test is the ordinary case, not the exception.
+whether a count or a flag points the way the code says it does, and whether
+the volume of what is printed is what a reader can act on. A text-rendering
+path with no test is the ordinary case, not the exception.
 
 ## Review contract
 

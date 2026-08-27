@@ -450,6 +450,40 @@ fn no_worktree_uses_a_clean_target_checkout_and_infers_the_change() {
 }
 
 #[test]
+fn no_worktree_after_a_closed_change_uses_its_recorded_target() {
+    let repo = Repo::new();
+    let master_head = repo.head(&repo.root);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "one", "--profile", "direct", "--no-worktree"]),
+    );
+    repo.commit(
+        &repo.root,
+        "abandoned.txt",
+        "abandoned\n",
+        "test: abandon one",
+    );
+    let abandoned_head = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args(["close", "one", "--abandoned"])
+        .assert()
+        .success();
+
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "two", "--profile", "direct", "--no-worktree"]),
+    );
+    let state = json_stdout(repo.arc(&repo.root).args(["show", "two", "--json"]));
+    assert_eq!(state["target_branch"], "master");
+    assert_eq!(state["base"], master_head);
+    assert_ne!(state["base"], abandoned_head);
+    assert_eq!(
+        git_out(&repo.root, &["rev-list", "--count", "arc/two..arc/one"],),
+        "1"
+    );
+}
+
+#[test]
 fn no_worktree_leaves_dirty_target_checkout_and_preserves_the_next_command() {
     let repo = Repo::new();
     let tracked_before = b"uncommitted tracked bytes\n\0";
@@ -484,7 +518,7 @@ fn no_worktree_leaves_dirty_target_checkout_and_preserves_the_next_command() {
         "{output}"
     );
     assert!(
-        output.contains("git stash push --include-untracked && git checkout arc/dirty-in-place"),
+        output.contains("git stash push --include-untracked && git checkout 'arc/dirty-in-place'"),
         "{output}"
     );
 }
@@ -520,8 +554,86 @@ fn no_worktree_leaves_a_clean_checkout_on_another_branch_and_names_the_checkout_
         "{output}"
     );
     assert!(
-        output.contains("next: `git checkout arc/elsewhere-in-place`"),
+        output.contains("next: `git checkout 'arc/elsewhere-in-place'`"),
         "{output}"
+    );
+}
+
+#[test]
+fn explicit_target_overrides_a_closed_in_place_change() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "one", "--profile", "direct", "--no-worktree"]),
+    );
+    git(&repo.root, &["branch", "chosen-target", "master"]);
+    git(&repo.root, &["checkout", "chosen-target"]);
+    repo.commit(
+        &repo.root,
+        "target.txt",
+        "target\n",
+        "test: advance chosen target",
+    );
+    let chosen_target_head = repo.head(&repo.root);
+    git(&repo.root, &["checkout", "arc/one"]);
+    repo.arc(&repo.root)
+        .args(["close", "one", "--abandoned"])
+        .assert()
+        .success();
+
+    stdout(repo.arc(&repo.root).args([
+        "begin",
+        "explicit",
+        "--profile",
+        "direct",
+        "--no-worktree",
+        "--target",
+        "chosen-target",
+    ]));
+    let state = json_stdout(repo.arc(&repo.root).args(["show", "explicit", "--json"]));
+    assert_eq!(state["target_branch"], "chosen-target");
+    assert_eq!(state["base"], chosen_target_head);
+    assert_eq!(
+        git_out(&repo.root, &["branch", "--show-current"]),
+        "arc/one"
+    );
+}
+
+#[test]
+fn no_worktree_quotes_a_branch_advice_that_is_safe_to_run() {
+    let repo = Repo::new();
+    git(&repo.root, &["checkout", "-b", "other"]);
+    let output = stdout(repo.arc(&repo.root).args([
+        "begin",
+        "quoted",
+        "--no-worktree",
+        "--target",
+        "master",
+        "--branch",
+        "arc/topic;true",
+    ]));
+    assert!(
+        output.contains("next: `git checkout 'arc/topic;true'`"),
+        "{output}"
+    );
+
+    let next = output
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("next: `")
+                .and_then(|command| command.strip_suffix('`'))
+        })
+        .expect("begin should print a next command")
+        .to_string();
+    assert!(Command::new("sh")
+        .args(["-c", &next])
+        .current_dir(&repo.root)
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(
+        git_out(&repo.root, &["branch", "--show-current"]),
+        "arc/topic;true"
     );
 }
 
@@ -647,18 +759,18 @@ fn policy_rejects_same_actor_approval() {
         ));
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "self-review"]))).unwrap();
-    assert_eq!(
-        status["approval_rejection_reason"],
-        "approval rejected by policy: self-approval"
-    );
-    assert_eq!(
-        status["blocker_summary"]["approval_reason"],
-        "approval rejected by policy: self-approval"
-    );
-    assert_eq!(
-        status["next_action"],
-        "approval rejected by policy: self-approval"
-    );
+    assert!(status["approval_rejection_reason"]
+        .as_str()
+        .unwrap()
+        .contains("approval rejected by policy: self-approval"));
+    assert!(status["blocker_summary"]["approval_reason"]
+        .as_str()
+        .unwrap()
+        .contains("approval rejected by policy: self-approval"));
+    assert!(status["next_action"]
+        .as_str()
+        .unwrap()
+        .contains("approval rejected by policy: self-approval"));
     let show = stdout(repo.arc(&wt).args(["show", "self-review"]));
     assert!(show.contains("approval rejected by policy: self-approval"));
 }
@@ -1333,6 +1445,7 @@ fn guarded_integration_records_exact_authorization_basis() {
         dry.contains("authorization basis it would record"),
         "dry run output was: {dry}"
     );
+    assert!(dry.contains("danger: dangerous —"), "{dry}");
     assert!(dry.contains(&verdict_event), "{dry}");
     assert!(dry.contains("git_identity=shared"), "{dry}");
 
@@ -1389,6 +1502,44 @@ fn guarded_integration_records_exact_authorization_basis() {
     assert!(!dependent.is_empty());
     // No waiver was involved, so none is claimed.
     assert!(basis.get("audit_debt_event_id").is_none(), "{event}");
+}
+
+/// A guarded integration recorded before the danger determination existed
+/// remains readable, and its missing value is not interpreted as safe.
+#[test]
+fn an_old_authorization_basis_reads_without_a_danger_determination() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "legacy-danger");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "legacy-danger", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "legacy-danger"])
+        .assert()
+        .success();
+
+    rewrite_event(&repo, &change_id, "change-integrated", |event| {
+        event["authorization"]
+            .as_object_mut()
+            .unwrap()
+            .remove("danger");
+    });
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "legacy-danger", "--json"]),
+    );
+    let authorization = status["closure"]["authorization"].as_object().unwrap();
+    assert!(!authorization.contains_key("danger"), "{status}");
+    assert!(
+        status["closure"]["authorization"]["danger"].is_null(),
+        "{status}"
+    );
+
+    let shown = stdout(repo.arc(&repo.root).args(["show", "legacy-danger"]));
+    assert!(shown.contains("guarded by arc"), "{shown}");
 }
 
 /// The basis records what authorized the merge. Editing a gate's declaration

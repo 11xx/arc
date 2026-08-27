@@ -55,6 +55,18 @@ fn integrated_audit_debt(
     change_id
 }
 
+fn snapshotted_change(repo: &Repo, slug: &str) -> PathBuf {
+    snapshotted_change_with_id(repo, slug).1
+}
+
+fn snapshotted_change_with_id(repo: &Repo, slug: &str) -> (String, PathBuf) {
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", slug])));
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    stdout(repo.arc(&worktree).args(["snapshot", slug]));
+    (change_id, worktree)
+}
+
 /// The write path evaluates the same policy `check` does, so an approval that
 /// cannot gate says so when it is recorded rather than one command later.
 /// An import is the one path that does not go through the CLI's refusals, so
@@ -943,7 +955,9 @@ fn debt_summary_threshold_is_strict_and_opt_in() {
         "aged\n",
         "aged debt",
     );
-    age_event(&age_threshold, &aged, "audit-debt-declared", 10);
+    // Integration writes the typed record; the untyped one is only what
+    // earlier builds left behind.
+    age_event(&age_threshold, &aged, "debt-declared", 10);
     let over_age = stdout(age_threshold.arc(&age_threshold.root).args(["catchup"]));
     assert!(over_age.contains("priority: advisory"), "{over_age}");
 }
@@ -1214,12 +1228,15 @@ fn audit_events_survive_a_bundle_round_trip() {
     assert_eq!(status["audit_debt_outstanding"], true);
     assert_eq!(status["audit_debt"]["reason"], "quota");
     assert_eq!(status["audit_debt"]["patchset_id"], "ps-01");
-    assert!(stdout(
+    // A debt written today round-trips as the typed record, not as the
+    // untyped one earlier builds wrote.
+    let log = stdout(
         destination
             .arc(&destination.root)
-            .args(["log", "roundtrip"])
-    )
-    .contains("audit-debt-declared"));
+            .args(["log", "roundtrip"]),
+    );
+    assert!(log.contains("debt-declared"), "{log}");
+    assert!(!log.contains("audit-debt-declared"), "{log}");
 }
 
 /// A debt on an open change is a pending waiver, not owed work: `arc audit`
@@ -1412,6 +1429,80 @@ fn repo_with_danger(paths: &str) -> Repo {
     repo
 }
 
+/// The integration keeps the danger determination that made its review gate
+/// necessary, even after the repository changes its declaration.
+#[test]
+fn integration_records_and_preserves_its_danger_determination() {
+    let repo = repo_with_danger("\"dangerous.txt\"");
+    stdout(repo.arc(&repo.root).args(["begin", "dangerous-change"]));
+    let worktree = repo.home.join(".worktrees").join("repo-dangerous-change");
+    repo.commit(
+        &worktree,
+        "dangerous.txt",
+        "dangerous\n",
+        "feat: dangerous change",
+    );
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "author")
+            .args(["snapshot", "dangerous-change"]),
+    );
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "dangerous-change", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "dangerous-change"])
+        .assert()
+        .success();
+
+    let integrated = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "dangerous-change",
+        "--type",
+        "change-integrated",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(integrated.trim()).unwrap();
+    assert_eq!(
+        event["authorization"]["danger"],
+        serde_json::json!({
+            "dangerous": true,
+            "rule": "declared-path",
+            "paths": ["dangerous.txt"]
+        }),
+        "{event}"
+    );
+
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n\n[danger]\npaths = [\"other.txt\"]\n",
+    )
+    .unwrap();
+    let reread = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "dangerous-change",
+        "--type",
+        "change-integrated",
+    ]));
+    let reread: serde_json::Value = serde_json::from_str(reread.trim()).unwrap();
+    assert_eq!(
+        reread["authorization"]["danger"]["paths"],
+        serde_json::json!(["dangerous.txt"]),
+        "{reread}"
+    );
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "dangerous-change", "--json"]),
+    );
+    assert_eq!(
+        status["closure"]["authorization"]["danger"]["rule"], "declared-path",
+        "{status}"
+    );
+}
+
 /// A uniform gate over non-uniform risk produces a uniform workaround, used
 /// most where it matters least. A change touching nothing the project called
 /// dangerous ships on a self-recorded verdict.
@@ -1443,6 +1534,25 @@ fn a_change_touching_no_declared_surface_ships_on_a_self_verdict() {
         .args(["integrate", "docs-only"])
         .assert()
         .success();
+    let event: serde_json::Value = serde_json::from_str(
+        stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "docs-only",
+            "--type",
+            "change-integrated",
+        ]))
+        .trim(),
+    )
+    .unwrap();
+    assert_eq!(
+        event["authorization"]["danger"]["dangerous"], false,
+        "{event}"
+    );
+    assert_eq!(
+        event["authorization"]["danger"]["rule"], "untouched",
+        "{event}"
+    );
 }
 
 /// On a declared surface the rule still binds, and the advisory names which
@@ -1708,7 +1818,14 @@ fn an_independent_verdict_on_the_shipped_patchset_discharges_the_debt() {
     // One then becomes reachable and reviews the same patchset, before merge.
     repo.arc(&worktree)
         .env("ARC_ACTOR", "Reviewer")
-        .args(["review", "reviewed-early", "--verdict", "approved"])
+        .args([
+            "--model",
+            "gpt-5.6-premerge#high",
+            "review",
+            "reviewed-early",
+            "--verdict",
+            "approved",
+        ])
         .assert()
         .success();
     repo.arc(&repo.root)
@@ -1723,6 +1840,14 @@ fn an_independent_verdict_on_the_shipped_patchset_discharges_the_debt() {
     assert_eq!(
         status["audit_debt_outstanding"], false,
         "an independent verdict on the shipped patchset is the review the debt owed"
+    );
+    assert_eq!(
+        status["audit_debt"]["discharged_by"]["model"], "gpt-5.6-premerge#high",
+        "{status}"
+    );
+    assert!(
+        stdout(repo.arc(&repo.root).args(["show", "reviewed-early"]))
+            .contains("Discharged by: Reviewer (gpt-5.6-premerge#high)")
     );
     let remaining = stdout(repo.arc(&repo.root).args(["query", "--audit-debt"]));
     assert!(!remaining.contains("reviewed-early"), "{remaining}");
@@ -1744,6 +1869,65 @@ fn the_authors_own_verdict_does_not_discharge_the_debt() {
         status["audit_debt_outstanding"], true,
         "the author's approval is precisely what the debt stands in for"
     );
+}
+
+/// A name arc took from `git config` is not a claim anybody made, so it cannot
+/// answer the independence question either way. It has to fail it rather than
+/// pass by happening not to match a contributor.
+#[test]
+fn an_assumed_identity_does_not_discharge_the_debt() {
+    let repo = repo_forbidding_self_approval();
+    self_approved_change(&repo, "assumed-auditor");
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "assumed-auditor",
+            "--audit-debt",
+            "none reachable",
+        ])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args([
+            "audit",
+            "assumed-auditor",
+            "--verdict",
+            "changes-requested",
+            "--body",
+            "found a problem",
+        ])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "assumed-auditor", "--json"]),
+    );
+    assert_eq!(
+        status["audit_debt_outstanding"], true,
+        "an identity arc invented cannot settle a debt owed an independent review"
+    );
+
+    // A declared identity from outside the contributor set still can.
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "outsider")
+        .args([
+            "audit",
+            "assumed-auditor",
+            "--verdict",
+            "approved",
+            "--body",
+            "read it",
+        ])
+        .assert()
+        .success();
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "assumed-auditor", "--json"]),
+    );
+    assert_eq!(status["audit_debt_outstanding"], false, "{status}");
 }
 
 /// A verdict on an earlier draft judged something other than what shipped.
@@ -2444,4 +2628,236 @@ fn an_approval_of_another_patchset_does_not_corroborate() {
     );
     assert_eq!(status["provisional_approval_outstanding"], true, "{status}");
     assert!(stdout(repo.arc(&repo.root).args(["query", "--provisional"])).contains(&change_id));
+}
+
+#[test]
+fn integrate_audit_debt_records_missing_review_and_model_coverage() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = snapshotted_change(&repo, "typed-coverage");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Solo")
+        .args([
+            "--model",
+            "gpt-5.6-luna#max",
+            "review",
+            "typed-coverage",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "typed-coverage",
+            "--audit-debt",
+            "reviewer unavailable",
+        ])
+        .assert()
+        .success();
+
+    let event: serde_json::Value = serde_json::from_str(
+        stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "typed-coverage",
+            "--type",
+            "debt-declared",
+        ]))
+        .trim(),
+    )
+    .unwrap();
+    assert_eq!(event["missing"], "independent-review", "{event}");
+    assert_eq!(event["coverage"][0]["reviewer"], "Solo", "{event}");
+    assert_eq!(event["coverage"][0]["model"], "gpt-5.6-luna#max", "{event}");
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "typed-coverage", "--json"]),
+    );
+    assert_eq!(
+        status["audit_debt"]["coverage"][0]["model"], "gpt-5.6-luna#max",
+        "{status}"
+    );
+    let human = stdout(repo.arc(&repo.root).args(["show", "typed-coverage"]));
+    assert!(human.contains("Missing: independent-review"), "{human}");
+    assert!(human.contains("Solo (gpt-5.6-luna#max)"), "{human}");
+}
+
+#[test]
+fn audit_debt_coverage_preserves_an_unrecorded_model() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = snapshotted_change(&repo, "unrecorded-model");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Solo")
+        .args(["review", "unrecorded-model", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "unrecorded-model",
+            "--audit-debt",
+            "reviewer unavailable",
+        ])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "unrecorded-model", "--json"]),
+    );
+    let coverage = status["audit_debt"]["coverage"].as_array().unwrap();
+    assert_eq!(coverage.len(), 1, "{status}");
+    assert_eq!(coverage[0]["reviewer"], "Solo", "{status}");
+    assert!(coverage[0].get("model").is_none(), "{status}");
+    let human = stdout(repo.arc(&repo.root).args(["show", "unrecorded-model"]));
+    assert!(human.contains("Solo (model unrecorded)"), "{human}");
+    assert!(!human.contains("Coverage: none"), "{human}");
+}
+
+#[test]
+fn audit_debt_without_verdicts_has_empty_coverage() {
+    let repo = repo_forbidding_self_approval();
+    snapshotted_change(&repo, "empty-coverage");
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "empty-coverage",
+            "--audit-debt",
+            "no reviewer reached the change",
+        ])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "empty-coverage", "--json"]),
+    );
+    assert_eq!(
+        status["audit_debt"]["missing"], "independent-review",
+        "{status}"
+    );
+    assert!(
+        status["audit_debt"]["coverage"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "{status}"
+    );
+    let human = stdout(repo.arc(&repo.root).args(["show", "empty-coverage"]));
+    assert!(human.contains("Coverage: none"), "{human}");
+}
+
+#[test]
+fn a_later_audit_discharge_records_its_model_beside_the_debt() {
+    let repo = repo_forbidding_self_approval();
+    snapshotted_change(&repo, "model-discharge");
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "model-discharge",
+            "--audit-debt",
+            "reviewer unavailable",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args([
+            "--model",
+            "gpt-5.6-auditor#high",
+            "audit",
+            "model-discharge",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "model-discharge", "--json"]),
+    );
+    assert_eq!(status["audit_debt_outstanding"], false, "{status}");
+    assert_eq!(
+        status["audit_debt"]["discharged_by"]["reviewer"], "Reviewer",
+        "{status}"
+    );
+    assert_eq!(
+        status["audit_debt"]["discharged_by"]["model"], "gpt-5.6-auditor#high",
+        "{status}"
+    );
+    assert_eq!(
+        status["audit_verdicts"][0]["model"], "gpt-5.6-auditor#high",
+        "{status}"
+    );
+    let human = stdout(repo.arc(&repo.root).args(["show", "model-discharge"]));
+    assert!(
+        human.contains("Discharged by: Reviewer (gpt-5.6-auditor#high)"),
+        "{human}"
+    );
+}
+
+#[test]
+fn a_legacy_audit_debt_event_still_discharge_and_render_without_typed_fields() {
+    let repo = repo_forbidding_self_approval();
+    let (change_id, _) = snapshotted_change_with_id(&repo, "legacy-debt");
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "legacy-debt",
+            "--audit-debt",
+            "reviewer unavailable",
+        ])
+        .assert()
+        .success();
+
+    rewrite_event(&repo, &change_id, "debt-declared", |event| {
+        event["event_type"] = serde_json::json!("audit-debt-declared");
+        event.as_object_mut().unwrap().remove("missing");
+        event.as_object_mut().unwrap().remove("coverage");
+    });
+
+    let before = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "legacy-debt", "--json"]),
+    );
+    assert_eq!(before["audit_debt_outstanding"], true, "{before}");
+    assert!(before["audit_debt"].get("missing").is_none(), "{before}");
+    assert!(before["audit_debt"].get("coverage").is_none(), "{before}");
+    let human_before = stdout(repo.arc(&repo.root).args(["show", "legacy-debt"]));
+    assert!(human_before.contains("Record: legacy"), "{human_before}");
+    assert!(!human_before.contains("Missing:"), "{human_before}");
+    assert!(!human_before.contains("Coverage:"), "{human_before}");
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args([
+            "--model",
+            "gpt-5.6-legacy-auditor",
+            "audit",
+            "legacy-debt",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+
+    let after = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "legacy-debt", "--json"]),
+    );
+    assert_eq!(after["audit_debt_outstanding"], false, "{after}");
+    assert!(after["audit_debt"].get("missing").is_none(), "{after}");
+    assert!(after["audit_debt"].get("coverage").is_none(), "{after}");
+    assert_eq!(
+        after["audit_debt"]["discharged_by"]["model"], "gpt-5.6-legacy-auditor",
+        "{after}"
+    );
+    let human_after = stdout(repo.arc(&repo.root).args(["show", "legacy-debt"]));
+    assert!(human_after.contains("Record: legacy"), "{human_after}");
+    assert!(
+        human_after.contains("Discharged by: Reviewer (gpt-5.6-legacy-auditor)"),
+        "{human_after}"
+    );
 }
