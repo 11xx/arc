@@ -2155,7 +2155,11 @@ impl ChangeState {
     /// The returned model is copied from that event and is never inferred.
     fn audit_debt_discharge(&self, debt: &AuditDebt) -> Option<DebtCoverage> {
         // A debt that names an independent review as the thing missing cannot
-        // be settled by the people who wrote the patchset. The shipped
+        // be settled by the people who wrote the patchset, nor by an identity
+        // arc invented. A name taken from `git config` is not a claim anybody
+        // made: it cannot be compared against the contributor set with any
+        // meaning, so it fails the independence question rather than passing
+        // it by not matching. The shipped
         // patchset's contributor set is the same one the pre-merge gate reads,
         // so both paths answer independence the same way; where no set was
         // recorded, membership falls back to the patchset's author.
@@ -2170,6 +2174,7 @@ impl ChangeState {
             });
         if let Some(audit) = self.audit_verdicts.iter().find(|audit| {
             audit.created_at >= debt.declared_at
+                && !audit.author_assumed()
                 && shipped_patchset.is_none_or(|patchset| {
                     patchset
                         .contributor_match(audit.effective_author())
@@ -2190,6 +2195,7 @@ impl ChangeState {
             .find(|verdict| {
                 verdict.created_at >= debt.declared_at
                     && verdict.patchset_id == shipped
+                    && !verdict.author_assumed()
                     && patchset
                         .contributor_match(verdict.effective_author())
                         .is_none()

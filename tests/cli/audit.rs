@@ -1571,6 +1571,65 @@ fn the_authors_own_verdict_does_not_discharge_the_debt() {
     );
 }
 
+/// A name arc took from `git config` is not a claim anybody made, so it cannot
+/// answer the independence question either way. It has to fail it rather than
+/// pass by happening not to match a contributor.
+#[test]
+fn an_assumed_identity_does_not_discharge_the_debt() {
+    let repo = repo_forbidding_self_approval();
+    self_approved_change(&repo, "assumed-auditor");
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "assumed-auditor",
+            "--audit-debt",
+            "none reachable",
+        ])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args([
+            "audit",
+            "assumed-auditor",
+            "--verdict",
+            "changes-requested",
+            "--body",
+            "found a problem",
+        ])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "assumed-auditor", "--json"]),
+    );
+    assert_eq!(
+        status["audit_debt_outstanding"], true,
+        "an identity arc invented cannot settle a debt owed an independent review"
+    );
+
+    // A declared identity from outside the contributor set still can.
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "outsider")
+        .args([
+            "audit",
+            "assumed-auditor",
+            "--verdict",
+            "approved",
+            "--body",
+            "read it",
+        ])
+        .assert()
+        .success();
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "assumed-auditor", "--json"]),
+    );
+    assert_eq!(status["audit_debt_outstanding"], false, "{status}");
+}
+
 /// A verdict on an earlier draft judged something other than what shipped.
 #[test]
 fn a_verdict_on_a_superseded_patchset_does_not_discharge_the_debt() {
