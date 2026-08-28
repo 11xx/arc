@@ -656,9 +656,13 @@ fn render_forks(forks: &[crate::commands::fork::ForkEntry]) {
                 .as_deref()
                 .map(|path| format!(" ({path})"))
                 .unwrap_or_default();
+            let ahead = fork
+                .ahead
+                .map(|count| format!("+{count}"))
+                .unwrap_or_else(|| "+?".to_string());
             println!(
-                "  {}  {}  +{} over {}{}",
-                fork.slug, fork.branch, fork.ahead, fork.base_branch, place
+                "  {}  {}  {} over {}{}",
+                fork.slug, fork.branch, ahead, fork.base_branch, place
             );
         }
     }

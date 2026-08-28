@@ -366,6 +366,19 @@ pub fn remove_worktree(cwd: &Path, path: &Path, force: bool) -> Result<()> {
 
 /// How many commits `branch` carries that `base` does not. Either side
 /// failing to resolve is an error, not a zero a reader would sum.
+///
+/// The default branch a comparison falls back to, when no marker recorded
+/// the fork's base: the repository's HEAD branch when discoverable, else
+/// the configured init default. A guess, and the ahead count that rides on
+/// it is advice measured against a guess.
+pub fn default_branch(cwd: &Path) -> String {
+    current_branch(cwd)
+        .ok()
+        .flatten()
+        .filter(|branch| !branch.is_empty())
+        .unwrap_or_else(|| "master".to_string())
+}
+
 pub fn ahead_count(cwd: &Path, base: &str, branch: &str) -> Result<usize> {
     let out = git(cwd, &["rev-list", "--count", &format!("{base}..{branch}")])?;
     out.trim()

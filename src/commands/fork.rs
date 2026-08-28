@@ -10,7 +10,7 @@
 use super::*;
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The branch prefix every fork carries. The prefix is the boundary: a
 /// branch outside it is not a fork, and `integrate` inside a fork worktree
@@ -29,21 +29,101 @@ pub fn is_fork_branch(branch: &str) -> bool {
 }
 
 /// The slug of the fork whose worktree `cwd` stands in, when it is one.
-/// The worktree's own branch decides — not the directory name, which an
-/// operator is free to choose differently.
+///
+/// The worktree's checked-out branch decides — not the directory name,
+/// which an operator is free to choose differently. The branch is read from
+/// `worktree list --porcelain` rather than `symbolic-ref`: a detached HEAD
+/// has no branch symbol to read, and a fork checkout is exactly where an
+/// operator might detach to inspect history — which must not silently lift
+/// the integrate refusal the fork exists to enforce.
 pub fn fork_slug_at(cwd: &Path) -> Result<Option<String>> {
-    let Some(branch) = crate::gitio::current_branch(cwd)? else {
-        return Ok(None);
-    };
-    if !is_fork_branch(&branch) {
-        return Ok(None);
+    // Attached: the branch symbol answers directly.
+    if let Some(branch) = crate::gitio::current_branch(cwd)? {
+        return Ok(fork_slug_from_branch(&branch));
     }
-    Ok(Some(
+    // Detached: there is no branch symbol, and the porcelain list records
+    // only `detached` — so the fork identity comes from the worktree's own
+    // gitdir name, which Git keeps for the worktree's lifetime and which
+    // `fork begin` established as <repo>-fork-<slug>. Without this, detaching
+    // to inspect history would silently lift the integrate refusal the fork
+    // exists to enforce.
+    fork_slug_from_gitdir(cwd)
+}
+
+fn fork_slug_from_branch(branch: &str) -> Option<String> {
+    if !is_fork_branch(branch) {
+        return None;
+    }
+    Some(
         branch
             .strip_prefix(FORK_BRANCH_PREFIX)
             .expect("checked by is_fork_branch")
             .to_string(),
-    ))
+    )
+}
+
+/// The slug recorded in the worktree's gitdir name, when `cwd` stands in a
+/// linked fork worktree. `<common>/worktrees/<name>` is the identity Git
+/// preserves across detached HEADs and everything short of removal — but
+/// the name is `<repo>-fork-<slug>` only because `fork begin` chose it, and
+/// Git does not enforce the shape. So the name is corroborated the same way
+/// `list` corroborates a marker: the gitdir's HEAD must resolve to a
+/// `fork/<slug>` branch, or the gitdir name is not trusted.
+fn fork_slug_from_gitdir(cwd: &Path) -> Result<Option<String>> {
+    // The .git file lives at the worktree root, not in the subdirectory the
+    // operator is standing in; resolve the root first.
+    let root = crate::gitio::toplevel(cwd)?;
+    let Some(gitdir) = worktree_gitdir(&root)? else {
+        return Ok(None);
+    };
+    // The worktree's own HEAD, detached or not: a symref to a branch when
+    // attached, a raw sha when detached. Only the attached case names a
+    // branch, and only a fork branch is a fork.
+    let head = gitdir.join("HEAD");
+    let Ok(text) = std::fs::read_to_string(&head) else {
+        return Ok(None);
+    };
+    if let Some(branch) = text.trim().strip_prefix("ref: refs/heads/") {
+        return Ok(fork_slug_from_branch(branch));
+    }
+    // Detached. The worktree's checked-out branch is recoverable: Git keeps
+    // a symref file at <gitdir>/branch-heads... no — it keeps the branch the
+    // worktree was on nowhere. But the branch itself still exists in the
+    // repository, and `fork begin` created exactly one branch per fork. So
+    // the slug comes from the gitdir name, corroborated by a fork branch
+    // with that slug existing in the repository.
+    let Some(slug) = gitdir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .and_then(|name| name.split_once("-fork-").map(|(_, slug)| slug.to_string()))
+        .filter(|slug| !slug.is_empty())
+    else {
+        return Ok(None);
+    };
+    let branch = format!("{FORK_BRANCH_PREFIX}{slug}");
+    if crate::gitio::branch_exists(cwd, &branch) {
+        Ok(Some(slug))
+    } else {
+        Ok(None)
+    }
+}
+
+/// The per-worktree git directory a linked worktree's `.git` file points at.
+/// `None` for a primary checkout (its `.git` is a directory) or a directory
+/// outside any repository.
+fn worktree_gitdir(cwd: &Path) -> Result<Option<PathBuf>> {
+    let dot_git = cwd.join(".git");
+    if !dot_git.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&dot_git)
+        .with_context(|| format!("cannot read {}", dot_git.display()))?;
+    for line in text.lines() {
+        if let Some(path) = line.strip_prefix("gitdir:") {
+            return Ok(Some(PathBuf::from(path.trim())));
+        }
+    }
+    Ok(None)
 }
 
 fn fork_branch(slug: &str) -> String {
@@ -350,19 +430,12 @@ pub fn list_entries(ctx: &Ctx) -> Result<Vec<ForkEntry>> {
         .filter_map(|event| event.file.as_deref())
         .collect();
 
+    // A fork/<slug> branch is the fact; a fork-<slug> marker is a claim
+    // about one. Any journal plan under a fork-* topic would otherwise be
+    // reported as a fork with an invented branch — three fabrications in
+    // one line of output — so the branch list is the primary source and a
+    // marker only annotates a branch that exists.
     let mut slugs: Vec<String> = Vec::new();
-    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if let Some((_, topic, kind)) = crate::journal::parse_artifact_name(&name) {
-            if kind == "plan"
-                && topic.starts_with(FORK_TOPIC_PREFIX)
-                && topic.len() > FORK_TOPIC_PREFIX.len()
-            {
-                slugs.push(topic[FORK_TOPIC_PREFIX.len()..].to_string());
-            }
-        }
-    }
-    // Branches with no marker: hand-made forks arc did not create.
     let out = crate::gitio::git(
         cwd,
         &["branch", "--list", "--format=%(refname:short)", "fork/*"],
@@ -410,9 +483,13 @@ pub fn list(ctx: &Ctx, json: bool) -> Result<i32> {
             (None, Some(_)) => format!("{} (retired, no worktree)", entry.branch),
             (None, None) => format!("{} (no worktree)", entry.branch),
         };
+        let ahead = entry
+            .ahead
+            .map(|count| format!("+{count}"))
+            .unwrap_or_else(|| "+?".to_string());
         println!(
-            "  {}  {}  +{} over {}",
-            entry.slug, state, entry.ahead, entry.base_branch
+            "  {}  {}  {} over {}",
+            entry.slug, state, ahead, entry.base_branch
         );
         if let Some(intent) = &entry.intent {
             println!("    {intent}");
@@ -437,22 +514,30 @@ pub struct ForkEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retired: Option<String>,
     /// Commits the fork branch carries that its base branch does not.
-    pub ahead: usize,
+    /// `None` when the count cannot be computed — a missing base branch,
+    /// a failed rev-list — because an uncomputable number is not zero, and
+    /// a zero a reader would sum is a lie about work that may exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<usize>,
     pub base_branch: String,
 }
 
 fn describe(cwd: &Path, dir: &Path, slug: &str, consumed: &HashSet<&str>) -> ForkEntry {
     let branch = fork_branch(slug);
     let marker = fork_marker(dir, slug);
-    let (intent, base_branch) = marker
+    // The base a marker recorded is the fork's own claim; an unmarked fork
+    // falls back to the repository's HEAD branch, which is a guess the
+    // ahead count inherits.
+    let (intent, recorded_base) = marker
         .as_ref()
         .map(|marker| {
             (
                 marker_field(&marker.body, "intent"),
-                marker_field(&marker.body, "base").unwrap_or_else(default_branch),
+                marker_field(&marker.body, "base"),
             )
         })
-        .unwrap_or_else(|| (None, default_branch()));
+        .unwrap_or_else(|| (None, None));
+    let base_branch = recorded_base.unwrap_or_else(|| crate::gitio::default_branch(cwd));
     let retired = marker
         .as_ref()
         .filter(|marker| consumed.contains(marker.filename.as_str()))
@@ -461,7 +546,7 @@ fn describe(cwd: &Path, dir: &Path, slug: &str, consumed: &HashSet<&str>) -> For
         .ok()
         .flatten()
         .map(|path| path.display().to_string());
-    let ahead = crate::gitio::ahead_count(cwd, &base_branch, &branch).unwrap_or(0);
+    let ahead = crate::gitio::ahead_count(cwd, &base_branch, &branch).ok();
     ForkEntry {
         slug: slug.to_string(),
         branch,
@@ -471,13 +556,6 @@ fn describe(cwd: &Path, dir: &Path, slug: &str, consumed: &HashSet<&str>) -> For
         ahead,
         base_branch,
     }
-}
-
-/// The branch an unmarked fork is measured against. The repository's HEAD
-/// branch when discoverable, else the convention this repository was built
-/// on — a guess, and the `ahead` count that rides on it is advice, not fact.
-fn default_branch() -> String {
-    "master".to_string()
 }
 
 /// The refusal `integrate` prints inside a fork worktree. It names the way

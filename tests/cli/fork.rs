@@ -344,3 +344,79 @@ fn fork_views_agree_about_retirement_and_catchup_json_carries_forks() {
     let catchup_text = stdout(repo.arc(&repo.root).arg("catchup"));
     assert!(catchup_text.contains("open-now"), "{catchup_text}");
 }
+
+/// A journal plan under a fork-* topic is prose, not a fork: the branch is
+/// the fact, the marker only annotates one. A phantom fork invented a
+/// branch, a hardcoded base, and an ahead count all at once.
+#[test]
+fn fork_list_requires_a_branch_not_just_a_topic() {
+    let repo = Repo::new();
+    let plan = repo.home.join("fork-etiquette.md");
+    fs::write(&plan, "A plan about fork etiquette.\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "plan",
+            "fork-etiquette",
+            "--title",
+            "Fork etiquette",
+            "--body-file",
+            plan.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let text = stdout(repo.arc(&repo.root).args(["fork", "list"]));
+    assert_eq!(
+        text, "no forks\n",
+        "a marker with no branch must not be a fork: {text}"
+    );
+    let catchup = stdout(repo.arc(&repo.root).arg("catchup"));
+    assert!(
+        !catchup.contains("fork/etiquette"),
+        "phantom fork leaked into catchup: {catchup}"
+    );
+}
+
+/// An uncomputable ahead count reads as unknown, not zero: the +? is advice
+/// a reader cannot mistake for "no work".
+#[test]
+fn fork_list_shows_unknown_ahead_as_plus_question() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["fork", "begin", "counted", "--from", "master"]),
+    );
+    // The marker records the true base, so the count is computable.
+    let text = stdout(repo.arc(&repo.root).args(["fork", "list"]));
+    assert!(text.contains("+0 over master"), "{text}");
+    let value = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(value["forks"][0]["ahead"], 0);
+}
+
+/// The integrate refusal holds on a detached HEAD. Detaching has no branch
+/// symbol and the porcelain list records only `detached`, so the fork
+/// identity comes from the worktree's gitdir name — corroborated by the
+/// fork branch existing, the same way list corroborates a marker.
+#[test]
+fn fork_refusal_holds_on_detached_head() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "detachable"]));
+    let worktree = fork_worktree(&repo, "detachable");
+    git(&worktree, &["checkout", "--detach", "HEAD"]);
+
+    repo.arc(&worktree)
+        .args(["integrate"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("fork worktree detachable"))
+        .stderr(predicates::str::contains("unintegrated by intent"));
+
+    // The refusal also holds in a subdirectory, where the operator works.
+    fs::create_dir_all(worktree.join("src")).unwrap();
+    repo.arc(&worktree.join("src"))
+        .args(["integrate"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("fork worktree detachable"));
+}
