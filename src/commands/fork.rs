@@ -158,8 +158,8 @@ pub fn begin(ctx: &Ctx, slug: &str, base_branch: Option<&str>) -> Result<i32> {
     let branch = fork_branch(slug);
     if crate::gitio::branch_exists(cwd, &branch) {
         bail!(
-            "branch {branch} already exists; continue it with `arc fork {slug} --adopt` \
-             or pick another slug"
+            "branch {branch} already exists; continue it with \
+             `arc fork adopt {slug}` or pick another slug"
         );
     }
 
@@ -244,7 +244,7 @@ pub fn adopt(ctx: &Ctx, slug: &str, intent: Option<&str>) -> Result<i32> {
 pub fn retire(ctx: &Ctx, slug: &str, outcome: &str, keep_worktree: bool) -> Result<i32> {
     crate::ids::validate_slug(slug)?;
     if outcome.trim().is_empty() {
-        bail!("--retire needs a disposition: merged, dropped, or kept, with a word of why");
+        bail!("retire needs a disposition: merged, dropped, or kept, with a word of why");
     }
     let branch = fork_branch(slug);
     let dir = crate::journal::resolve_dir(&ctx.cwd)?;
@@ -452,6 +452,6 @@ pub fn integrate_refusal(slug: &str) -> String {
         "this is fork worktree {slug}: unintegrated by intent, so arc does not \
          gate or merge it. Move the work onto a change from the base branch \
          (or `git merge` from the target) when it is ready, and record the \
-         disposition with `arc fork {slug} --retire <outcome>`."
+         disposition with `arc fork retire {slug} <outcome>`."
     )
 }

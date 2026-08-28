@@ -16,7 +16,7 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   instead of a hand-assembled worktree, branch, and unspoken contract.
   `begin` creates a `fork/<slug>` worktree outside the change lifecycle
   and journals its marker; `adopt` journals a hand-made fork rather than
-  leaving it invisible; `retire <outcome>` records the disposition
+  leaving it invisible; `retire <slug> <outcome>` records the disposition
   (merged, dropped, kept), removes the worktree, and keeps the branch;
   `list` reports every fork from markers and branches together, with the
   ahead-count over its base. `catchup` lists open forks beside the

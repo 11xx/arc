@@ -189,3 +189,43 @@ fn fork_retire_of_unmarked_fork_consumes_its_marker() {
     assert_eq!(forks["forks"][0]["retired"], "retired");
     assert!(forks["forks"][0].get("worktree").is_none());
 }
+
+/// Every printed way out of a fork names a command that exists. The refusal
+/// and the begin-collision advice are hand-formatted strings, so the actual
+/// clap spellings are what they must be checked against — the flag-shaped
+/// forms this replaces were believed correct by three surfaces at once.
+#[test]
+fn fork_advice_names_commands_clap_actually_defines() {
+    // Refuse a nonexistent subcommand shape through the real parser: clap
+    // itself is the authority on what the commands are called.
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["fork", "demo", "--retire", "dropped"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("unrecognized subcommand"));
+
+    // The refusal text names the positional form.
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "named"]));
+    let worktree = fork_worktree(&repo, "named");
+    repo.arc(&worktree)
+        .args(["integrate", "anything"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("arc fork retire named <outcome>"));
+
+    // The slug-collision advice names the adopt subcommand.
+    repo.arc(&repo.root)
+        .args(["fork", "begin", "named"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("arc fork adopt named"));
+
+    // Retire without an outcome is a usage error naming the real command
+    // shape, which is the drift guard: the usage line comes from clap.
+    repo.arc(&repo.root)
+        .args(["fork", "retire", "named"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("Usage: arc fork retire"));
+}

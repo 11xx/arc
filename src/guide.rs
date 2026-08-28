@@ -37,7 +37,7 @@ ORIENT (start here, in this order)
                          outside the change lifecycle — unintegrated by
                          intent; the operator decides what to merge, rebase,
                          or discard. `arc integrate` refuses inside a fork;
-                         `arc fork <slug> --retire <outcome>` records the
+                         `arc fork retire <slug> <outcome>` records the
                          disposition and removes the worktree.
   arc journal open       The actionable backlog — work waiting for a session.
   arc journal verified <file> [--note <text>]
