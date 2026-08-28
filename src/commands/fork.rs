@@ -239,9 +239,27 @@ pub fn adopt(ctx: &Ctx, slug: &str, intent: Option<&str>) -> Result<i32> {
 
 /// Record the fork's disposition and remove the worktree. The branch is kept:
 /// a merge or a discard happened somewhere else, and the commits are the
-/// operator's to keep or delete with Git. Retiring twice is refused — the
-/// disposition is a decision, and one decision is what the record holds.
-pub fn retire(ctx: &Ctx, slug: &str, outcome: &str, keep_worktree: bool) -> Result<i32> {
+/// operator's to keep or delete with Git.
+///
+/// The worktree is removed before the marker is consumed. Retirement is a
+/// claim about the fork; the disk has to have acted before the record says
+/// so, or a failed removal leaves a record that says retired above a
+/// worktree still on disk — invisible in every surface that filters retired
+/// forks, which is exactly where worktree cost goes to hide. A removal that
+/// fails (untracked files are Git's own refusal) leaves nothing recorded,
+/// so the retry is ordinary rather than a workaround; `--force` is the
+/// operator's deliberate discard of work arc cannot see, never arc's.
+///
+/// A retire that ran with `--keep-worktree` can be finished later: the
+/// record already stands, and removing the leftover worktree is not a
+/// second decision.
+pub fn retire(
+    ctx: &Ctx,
+    slug: &str,
+    outcome: &str,
+    keep_worktree: bool,
+    force: bool,
+) -> Result<i32> {
     crate::ids::validate_slug(slug)?;
     if outcome.trim().is_empty() {
         bail!("retire needs a disposition: merged, dropped, or kept, with a word of why");
@@ -254,9 +272,28 @@ pub fn retire(ctx: &Ctx, slug: &str, outcome: &str, keep_worktree: bool) -> Resu
     if let Some(marker) = &marker {
         let events = crate::journal::read_events(&dir)?;
         if crate::journal::is_consumed(&events, &marker.filename) {
+            if !keep_worktree {
+                if let Some(worktree) = crate::gitio::worktree_for_branch(&ctx.cwd, &branch)? {
+                    crate::gitio::remove_worktree(&ctx.cwd, &worktree, force)?;
+                    println!("worktree removed: {}", worktree.display());
+                }
+            }
             bail!("fork {slug} is already retired; the record stands");
         }
     }
+    if !keep_worktree {
+        if let Some(worktree) = crate::gitio::worktree_for_branch(&ctx.cwd, &branch)? {
+            crate::gitio::remove_worktree(&ctx.cwd, &worktree, force).with_context(|| {
+                format!(
+                    "cannot remove {}; it holds work arc cannot see — move or delete it, \
+                     or pass --force to discard it",
+                    worktree.display()
+                )
+            })?;
+            println!("worktree removed: {}", worktree.display());
+        }
+    }
+    let note = format!("fork {slug} retired: {outcome}");
     match marker {
         None => {
             // Retiring an unjournaled fork is legitimate: a hand-made fork
@@ -274,7 +311,6 @@ pub fn retire(ctx: &Ctx, slug: &str, outcome: &str, keep_worktree: bool) -> Resu
             )?;
             let marker =
                 fork_marker(&dir, slug).expect("the marker just written for {slug} must resolve");
-            let note = format!("fork {slug} retired: {outcome}");
             crate::journal::consume(
                 ctx,
                 &marker.filename,
@@ -285,7 +321,6 @@ pub fn retire(ctx: &Ctx, slug: &str, outcome: &str, keep_worktree: bool) -> Resu
             )?;
         }
         Some(marker) => {
-            let note = format!("fork {slug} retired: {outcome}");
             crate::journal::consume(
                 ctx,
                 &marker.filename,
@@ -294,12 +329,6 @@ pub fn retire(ctx: &Ctx, slug: &str, outcome: &str, keep_worktree: bool) -> Resu
                 None,
                 false,
             )?;
-        }
-    }
-    if !keep_worktree {
-        if let Some(worktree) = crate::gitio::worktree_for_branch(&ctx.cwd, &branch)? {
-            crate::gitio::remove_worktree(&ctx.cwd, &worktree)?;
-            println!("worktree removed: {}", worktree.display());
         }
     }
     println!("retired: {slug} [{outcome}]");

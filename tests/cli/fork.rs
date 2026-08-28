@@ -229,3 +229,77 @@ fn fork_advice_names_commands_clap_actually_defines() {
         .code(2)
         .stderr(predicates::str::contains("Usage: arc fork retire"));
 }
+
+/// Retirement must not claim a disposition the disk has not acted on: a
+/// worktree Git refuses to remove (untracked files) leaves nothing
+/// recorded, so the retry is ordinary. `--force` is the operator's
+/// deliberate discard, which goes through — and only then does the marker
+/// get consumed.
+#[test]
+fn fork_retire_with_untracked_files_records_nothing_until_the_worktree_moves() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "dirty"]));
+    let worktree = fork_worktree(&repo, "dirty");
+    fs::write(worktree.join("untracked.txt"), "operator's local state\n").unwrap();
+
+    // The removal fails and nothing is recorded: not consumed, not retired.
+    repo.arc(&repo.root)
+        .args(["fork", "retire", "dirty", "merged: too soon"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot remove"))
+        .stderr(predicates::str::contains("--force"));
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert!(
+        open["open"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["file"]
+                .as_str()
+                .is_some_and(|file| file.contains("fork-dirty-plan"))),
+        "the marker must still be live: {open}"
+    );
+
+    // The operator forces the discard; the record follows the disk.
+    let out = stdout(repo.arc(&repo.root).args([
+        "fork",
+        "retire",
+        "dirty",
+        "merged: for real",
+        "--force",
+    ]));
+    assert!(out.contains("retired: dirty"), "{out}");
+    assert!(!worktree.exists(), "worktree must be gone after --force");
+    let forks = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(forks["forks"][0]["retired"], "retired");
+    let untracked = fs::read_to_string(worktree.join("untracked.txt"));
+    assert!(untracked.is_err(), "forced discard removes the files");
+}
+
+/// A retire that ran with --keep-worktree can be finished later: the record
+/// stands, and removing the leftover worktree is not a second decision.
+#[test]
+fn fork_retire_keep_worktree_leaves_a_finishable_leftover() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "kept"]));
+    let worktree = fork_worktree(&repo, "kept");
+
+    stdout(
+        repo.arc(&repo.root)
+            .args(["fork", "retire", "kept", "merged", "--keep-worktree"]),
+    );
+    assert!(worktree.exists());
+
+    // Re-retiring still refuses the second decision on stderr, but finishes
+    // the worktree removal on stdout: the removal is finishing the first
+    // retire, not a second one.
+    let mut recommit = repo.arc(&repo.root);
+    recommit
+        .args(["fork", "retire", "kept", "again"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already retired"))
+        .stdout(predicates::str::contains("worktree removed"));
+    assert!(!worktree.exists());
+}

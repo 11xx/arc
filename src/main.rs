@@ -1210,6 +1210,10 @@ enum ForkCmd {
         /// always stays
         #[arg(long)]
         keep_worktree: bool,
+        /// Discard untracked work the removal refuses to destroy. The
+        /// operator's decision, never arc's
+        #[arg(long)]
+        force: bool,
     },
     /// List every fork this repository knows about
     List {
@@ -2326,7 +2330,8 @@ fn run(cli: Cli) -> Result<i32> {
                 slug,
                 outcome,
                 keep_worktree,
-            } => fork::retire(&ctx, &slug, &outcome, keep_worktree),
+                force,
+            } => fork::retire(&ctx, &slug, &outcome, keep_worktree, force),
             ForkCmd::List { json } => fork::list(&ctx, json),
         },
         Cmd::Hold {

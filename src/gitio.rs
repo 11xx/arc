@@ -349,17 +349,18 @@ pub fn add_worktree_new_branch(cwd: &Path, path: &Path, branch: &str, start: &st
     Ok(())
 }
 
-/// Remove a worktree. Fails loudly when Git refuses: a fork worktree with
-/// uncommitted work is the operator's call, not arc's.
-pub fn remove_worktree(cwd: &Path, path: &Path) -> Result<()> {
-    git(
-        cwd,
-        &[
-            "worktree",
-            "remove",
-            path.to_str().context("non-UTF8 worktree path")?,
-        ],
-    )?;
+/// Remove a worktree. Fails loudly when Git refuses — uncommitted or
+/// untracked files make it refuse — so a fork worktree holding work arc
+/// cannot see is never destroyed silently. The operator's `--force` is the
+/// decision that gets past this, not a flag arc reaches for itself.
+pub fn remove_worktree(cwd: &Path, path: &Path, force: bool) -> Result<()> {
+    let mut args = vec!["worktree".to_string(), "remove".to_string()];
+    if force {
+        args.push("--force".to_string());
+    }
+    args.push(path.to_str().context("non-UTF8 worktree path")?.to_string());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    git(cwd, &refs)?;
     Ok(())
 }
 
