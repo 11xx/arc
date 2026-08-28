@@ -5186,8 +5186,12 @@ fn resolver_participation_requires_matching_harness_and_session() {
     assert_eq!(summary["resolution"]["resolver_participated"], false);
 }
 
+/// The discussion view reads what the write allows: a non-discussion
+/// artifact opens as a (so far empty) summary, because a feature request
+/// that collected stances is legible as what it became rather than a file
+/// nobody's tool will read.
 #[test]
-fn journal_discussion_rejects_non_discussion_kinds() {
+fn journal_discussion_reads_any_artifact_the_write_side_allows() {
     let repo = Repo::new();
     let seed = stdout(
         repo.arc(&repo.root)
@@ -5210,8 +5214,8 @@ fn journal_discussion_rejects_non_discussion_kinds() {
     repo.arc(&repo.root)
         .args(["journal", "discussion", &file])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("not a discussion"));
+        .success()
+        .stdout(predicates::str::contains("positions: 0"));
 }
 
 #[test]
@@ -7551,4 +7555,183 @@ fn journal_transition_refusals_leave_the_journal_untouched() {
         .assert()
         .success()
         .stdout(predicates::str::contains("problems:\n  (none)"));
+}
+
+/// A question carries who may settle it. A question marks what this session
+/// should not settle alone — an operator who delegated the call names the
+/// delegate — so `delegate:<name>` and `anyone` are first-class values, and
+/// the view carries the fact an agent needs to know whether it may answer.
+#[test]
+fn a_question_names_who_can_settle_it() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "settle-by", "# Who decides?\n");
+
+    // Delegate spelled through its own flag; the heading records the fact
+    // where the prose reads.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "keep",
+            "--option",
+            "drop",
+            "--settle-by",
+            "delegate",
+            "--delegate",
+            "second-opinion",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Who reviews the reviewer?\n")
+        .assert()
+        .success();
+
+    let artifact = stdout(repo.arc(&repo.root).args(["journal", "dir"]));
+    let artifact = PathBuf::from(artifact.trim()).join(&file);
+    let text = fs::read_to_string(&artifact).unwrap();
+    assert!(text.contains("settle by delegate:second-opinion"), "{text}");
+
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert_eq!(
+        value["questions"][0]["settle_by"],
+        "delegate:second-opinion"
+    );
+    let waiting = stdout(repo.arc(&repo.root).args(["journal", "questions"]));
+    assert!(
+        waiting.contains("settle by: delegate:second-opinion"),
+        "{waiting}"
+    );
+
+    // The delegate's answer settles it like any other: the field records who
+    // may answer, it does not gate the write.
+    let question = value["questions"][0]["question"].as_str().unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            question,
+            "--option",
+            "keep",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("The delegated call.\n")
+        .assert()
+        .success();
+
+    // `anyone` opens the question to any session; the default stays person.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "paths",
+            "--option",
+            "properties",
+            "--settle-by",
+            "anyone",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("What shape?\n")
+        .assert()
+        .success();
+    // A question posed without the flag stays on the classic default: the
+    // field is omitted, which reads as person.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "ledger",
+            "--option",
+            "journal",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Where does it land?\n")
+        .assert()
+        .success();
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    let settle_bys: Vec<&serde_json::Value> = value["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|q| &q["settle_by"])
+        .collect();
+    assert!(settle_bys.contains(&&serde_json::json!("anyone")));
+    assert!(
+        settle_bys.iter().any(|v| v.is_null()),
+        "default stays unset (person)"
+    );
+}
+
+/// The settle-by flags refuse the combinations that would record nothing or
+/// mislead: a delegate without a name, a name without delegate mode.
+#[test]
+fn settle_by_flag_combinations_are_guarded() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "settle-guard", "# Who decides?\n");
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--settle-by",
+            "delegate",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("No delegate named.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--delegate <name>"));
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--settle-by",
+            "person",
+            "--delegate",
+            "bob",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Name without delegate mode.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--delegate is valid only with"));
 }

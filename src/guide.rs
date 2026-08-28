@@ -111,11 +111,16 @@ SETTLE A QUESTION (before it is work)
   nothing was settled and the body travels onto the change. Both name the ids,
   and a question worth keeping past either is worth its own artifact.
 
-  A question is the part no model should settle. arc records that one is
-  waiting; it never asks. Raising it is the agent's job, through whatever
-  prompt its harness offers — `arc journal questions --json` carries the
-  options and the branches already argued, which is everything a prompt needs
-  — and `answer` is where the reply comes back. When the answer is none of
+  A question says what this session should not settle alone. arc records that
+  one is waiting, and who may settle it: a person by default, `anyone` with
+  `--settle-by anyone`, or a named delegate with `--settle-by delegate
+  --delegate <name>` — an operator who handed the call to a stronger model
+  records exactly that, instead of a question holding open against a person
+  who was never the only possible answerer. Raising it is still the agent's
+  job, through whatever prompt its harness offers — `arc journal questions
+  --json` carries the settle-by, the options, and the branches already
+  argued, which is everything a prompt needs — and `answer` is where the
+  reply comes back. When the answer is none of
   the options, `--other "<answer>"` records it in the answerer's own words
   and marks that the menu was stepped outside, because a menu somebody had to
   leave was framed wrong and the next one should know. Placement decides when:

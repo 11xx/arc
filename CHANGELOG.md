@@ -12,7 +12,25 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- `arc journal transition <file> --to <kind>` changes a live artifact's
+- A question carries who may settle it: `--settle-by anyone` opens it to
+  any session, `--settle-by delegate --delegate <name>` records the
+  session or actor delegated the call, and the absence of the flag stays
+  the classic default — a person. The prose claimed no model may ever
+  answer, while nothing in the mechanism enforced it and delegating the
+  call was the ordinary way it got settled; the field records what
+  actually decides. `journal questions` (text and JSON) and the catchup
+  orientation carry the fact, so an agent knows whether it may answer or
+  must prompt, and a delegate knows the question waits on it.
+
+- The discussion view reads what the write allows. `journal position`
+  accepts any live artifact — only branch positions need a discussion —
+  but `journal discussion` refused to open the very files positions were
+  landing on, leaving a recorded, attributed stance with no reader.
+  Positions, participants, and rounds now render for any artifact;
+  question and resolution sections stay empty where the write side never
+  created them.
+
+- `arc journal transition <file> --to <kind>` changes a live artifact's <file> --to <kind>` changes a live artifact's
   workflow kind as one guarded operation instead of a hand-composed
   sequence: a typed successor is written carrying a machine-readable
   `supersedes` link (and the inherited body, unless `--body-file` says

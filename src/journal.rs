@@ -447,6 +447,17 @@ pub enum JournalCmd {
         /// written verbatim below a tool-computed `### Question` heading)
         #[arg(long)]
         body_file: String,
+        /// Who may settle it: `person` (the default, what the prose always
+        /// meant), `anyone`, or `delegate` with --delegate <name>. A question
+        /// marks what this session should not settle alone, not that no
+        /// model may answer — an operator who delegated the call names the
+        /// delegate
+        #[arg(long, value_parser = ["person", "anyone", "delegate"])]
+        settle_by: Option<String>,
+        /// Settle-by delegate, as the name allowed to answer (use with
+        /// --settle-by delegate)
+        #[arg(long, requires = "settle_by")]
+        delegate: Option<String>,
     },
     /// List the scaffolds a write can prepend, and print one before using
     /// it. A journal artifact is append-only, so choosing between
@@ -712,7 +723,17 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             placement,
             options,
             body_file,
-        } => question(ctx, &filename, &placement, &options, &body_file),
+            settle_by,
+            delegate,
+        } => question(
+            ctx,
+            &filename,
+            &placement,
+            &options,
+            &body_file,
+            settle_by.as_deref(),
+            delegate.as_deref(),
+        ),
         JournalCmd::Answer {
             filename,
             question,
@@ -1975,6 +1996,8 @@ fn question(
     placement: &str,
     options: &[String],
     body_file: &str,
+    settle_by: Option<&str>,
+    delegate: Option<&str>,
 ) -> Result<i32> {
     let mut seen = HashSet::new();
     for option in options {
@@ -1996,8 +2019,26 @@ fn question(
     let now = Utc::now();
     let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
     let question_id = format!("q-{}", ulid::Ulid::new().to_string().to_ascii_lowercase());
+    let settle_by = match (settle_by, delegate) {
+        (Some("person"), None) | (None, None) => None,
+        (Some("anyone"), None) => Some("anyone".to_string()),
+        (Some("delegate"), Some(name)) => Some(format!("delegate:{name}")),
+        (Some("delegate"), None) => {
+            bail!("--settle-by delegate needs --delegate <name>: name who may answer")
+        }
+        (Some(other), _) if other != "person" && other != "anyone" => {
+            bail!("unknown --settle-by value {other:?}; expected person, anyone, or delegate")
+        }
+        _ => bail!("--delegate is valid only with --settle-by delegate"),
+    };
+    // The heading carries the settle-by when it is not the default, so the
+    // artifact itself answers "who may settle this" where the prose reads.
+    let settle_label = match &settle_by {
+        Some(value) if value != "person" => format!(" — settle by {value}"),
+        _ => String::new(),
+    };
     let heading = format!(
-        "### Question {question_id} ({placement}, {ts}) — {}",
+        "### Question {question_id} ({placement}, {ts}){settle_label} — {}",
         options.join(" | ")
     );
     append_block(&path, &heading, &body)?;
@@ -2007,6 +2048,9 @@ fn question(
     event.question_id = Some(question_id);
     event.placement = Some(placement.to_string());
     event.options = Some(options.to_vec());
+    // Absent means the classic default: a person. Recording it explicitly
+    // would rewrite the meaning of every event already on disk.
+    event.settle_by = settle_by;
     append_event(ctx, &dir, &event)?;
     println!("{}", path.display());
     Ok(0)
@@ -2158,6 +2202,12 @@ struct OpenQuestion {
     topic: String,
     question: String,
     placement: String,
+    /// Who may settle it: `person` when absent (the classic default),
+    /// `anyone`, or `delegate:<name>`. An agent reading this view knows
+    /// whether it may answer or must prompt; a delegate knows the question
+    /// is waiting on it specifically.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settle_by: Option<String>,
     /// The prose the question was posed with, so a prompt can show what is
     /// being asked without the caller opening the artifact.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2207,12 +2257,17 @@ fn questions(ctx: &Ctx, json: bool) -> Result<i32> {
     }
     println!("questions waiting on a person ({}):", open.len());
     for question in &open {
+        let settle_by = match &question.settle_by {
+            None => "person".to_string(),
+            Some(value) => value.clone(),
+        };
         println!(
-            "  {}  {}  {}  {}",
+            "  {}  {}  {}  {}  settle by: {}",
             question.asked_at,
             question.topic,
             question.placement,
-            question.heading.as_deref().unwrap_or("")
+            question.heading.as_deref().unwrap_or(""),
+            settle_by
         );
         println!("    {} in {}", question.question, question.file);
         for option in &question.options {
@@ -2394,6 +2449,7 @@ fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
             topic: event.topic.clone(),
             question: question.to_string(),
             placement: event.placement.clone().unwrap_or_default(),
+            settle_by: event.settle_by.clone(),
             asked_at: event.ts.clone(),
             options: event
                 .options
@@ -2537,6 +2593,14 @@ struct JournalEvent {
     /// the branch an `answer` chose.
     #[serde(skip_serializing_if = "Option::is_none")]
     option: Option<String>,
+    /// Who may settle the question: absent (or `person`) means a person,
+    /// `anyone` lets any session answer, `delegate:<name>` names the session
+    /// or actor delegated the call. A question marks what this session
+    /// should not settle alone; the prose that claimed no model may answer
+    /// was a narrower rule than the mechanism ever enforced. Optional, so
+    /// every question written before the field existed keeps its meaning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settle_by: Option<String>,
 }
 
 /// Which project a journal belongs to, recorded append-only in `bindings.jsonl`
@@ -2629,6 +2693,7 @@ impl JournalEvent {
             scope: None,
             status: None,
             supersedes: None,
+            settle_by: None,
             position_id: None,
             stance: None,
             reference: None,
@@ -2696,6 +2761,10 @@ impl JournalEvent {
                         .as_ref()
                         .is_some_and(|values| valid_question_options(values))
                     && self.option.is_none()
+                    && self
+                        .settle_by
+                        .as_deref()
+                        .is_none_or(|value| value == "anyone" || value.starts_with("delegate:"))
             }
             "answer" => {
                 self.file_is_discussion()
@@ -5042,12 +5111,14 @@ fn position_structure(body: &str) -> (usize, StanceTally, Vec<Option<String>>) {
 /// resolver-participation flag come from the consumed event correlated against
 /// those position events. Read-only.
 fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
-    let Some((ts, topic, kind)) = parse_artifact_name(filename) else {
+    let Some((ts, topic, _kind)) = parse_artifact_name(filename) else {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     };
-    if kind != JournalKind::Discussion.as_str() {
-        bail!("{filename} is a {kind}, not a discussion");
-    }
+    // The view reads what the write allows: `journal position` accepts any
+    // live artifact (only branch positions need a discussion), so the view
+    // renders any artifact too. A feature request that collected stances is
+    // legible as what it became; question and resolution sections simply
+    // stay empty where the write side never created them.
     let body = read_artifact_body(ctx, filename)?;
     let dir = resolve_dir(&ctx.cwd)?;
     let events = read_events(&dir)?;
@@ -6054,12 +6125,25 @@ impl Orientation {
         if !self.open_questions.is_empty() {
             println!("waiting on a person ({}):", self.open_questions.len());
             for question in &self.open_questions {
-                println!(
-                    "  {}  {}  {}",
-                    question.question,
-                    question.topic,
-                    question.heading.as_deref().unwrap_or("")
-                );
+                let settle_by = match &question.settle_by {
+                    None => "person",
+                    Some(value) => value.as_str(),
+                };
+                if settle_by == "person" {
+                    println!(
+                        "  {}  {}  {}",
+                        question.question,
+                        question.topic,
+                        question.heading.as_deref().unwrap_or("")
+                    );
+                } else {
+                    println!(
+                        "  {}  {}  {}  (settle by: {settle_by})",
+                        question.question,
+                        question.topic,
+                        question.heading.as_deref().unwrap_or("")
+                    );
+                }
             }
             println!("  `arc journal questions` for the options, `journal answer` to settle one");
         }
