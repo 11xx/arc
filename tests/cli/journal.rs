@@ -7343,3 +7343,212 @@ fn a_repository_template_shadows_a_built_in_and_the_listing_says_so() {
     );
     assert_eq!(shown, "> House discussion rules.\n");
 }
+
+/// A kind transition is the safe manual sequence — successor, back-reference,
+/// source retirement — performed as one guarded operation. The queue lists
+/// only the successor, the discussion view resolves it, and the source is
+/// neither deleted nor left actionable.
+#[test]
+fn journal_transition_moves_a_feature_request_into_a_discussion() {
+    let repo = Repo::new();
+    let body = repo.home.join("transition-body.md");
+    fs::write(&body, "A proposal body.\n\nSecond paragraph.\n").unwrap();
+    let write_out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "feature-request",
+                "transition-me",
+                "--title",
+                "The proposal",
+            ])
+            .args(["--body-file", body.to_str().unwrap()]),
+    );
+    // The write prints the artifact's full path; keep the bare filename.
+    let source = Path::new(write_out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(source.ends_with("-feature-request.md"), "{source}");
+
+    // Dry run shows the effects and writes nothing.
+    let dry = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "transition",
+        &source,
+        "--to",
+        "discussion",
+        "--dry-run",
+    ]));
+    assert!(dry.contains("effects:"), "{dry}");
+    assert!(dry.contains("superseded"), "{dry}");
+    assert!(dry.contains(&source), "{dry}");
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "transition",
+        &source,
+        "--to",
+        "discussion",
+        "--reason",
+        "needs positions",
+    ]));
+    let successor = out
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("transitioned: ")?
+                .split(" → ")
+                .nth(1)?
+                .split(" (")
+                .next()
+        })
+        .expect("transition output should name the successor")
+        .to_string();
+    assert_ne!(successor, source);
+
+    // The successor carries the machine-readable back-reference and the
+    // inherited body.
+    let successor_path = stdout(repo.arc(&repo.root).args(["journal", "dir"]))
+        .trim()
+        .to_string();
+    let text = fs::read_to_string(Path::new(&successor_path).join(&successor)).unwrap();
+    assert!(
+        text.starts_with(&format!("supersedes: {source}\n")),
+        "{text}"
+    );
+    assert!(text.contains("A proposal body."), "{text}");
+    assert!(
+        text.contains(&format!("Transitioned from `{source}`")),
+        "{text}"
+    );
+
+    // Exactly one successor, one typed relation, one source retirement.
+    let events = fs::read_to_string(Path::new(&successor_path).join("events.jsonl")).unwrap();
+    assert_eq!(
+        events
+            .lines()
+            .filter(|l| l.contains("\"event\":\"transition\""))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .lines()
+            .filter(|l| l.contains("\"outcome\":\"superseded\"") && l.contains(&source))
+            .count(),
+        1
+    );
+
+    // The queue exposes only the successor; the discussion view resolves it.
+    // The text view prints columns rather than filenames, so the JSON view
+    // carries the comparison.
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let listed = open["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["file"] == successor.as_str());
+    assert!(listed, "{open}");
+    assert!(
+        !open["feature_requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["file"] == source.as_str()),
+        "{open}"
+    );
+    repo.arc(&repo.root)
+        .args(["journal", "discussion", &successor])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("topic transition-me"));
+}
+
+#[test]
+fn journal_transition_refusals_leave_the_journal_untouched() {
+    let repo = Repo::new();
+    let body = repo.home.join("transition-refusal-body.md");
+    fs::write(&body, "Refusal body.\n").unwrap();
+    let write_out = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "feature-request", "transition-refusal"])
+            .args(["--body-file", body.to_str().unwrap()]),
+    );
+    let dir = Path::new(write_out.trim()).parent().unwrap().to_path_buf();
+    // The write prints the artifact's full path; keep the bare filename.
+    let source = Path::new(write_out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(source.ends_with("-feature-request.md"), "{source}");
+
+    // A decision is how a discussion ends, not what it becomes; promotion to
+    // work is `begin --from-journal`, never a kind conversion.
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &source, "--to", "decision"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a transition target"));
+
+    // Same kind, nothing to transition.
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &source, "--to", "feature-request"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already a feature-request"));
+
+    // A repeated transition reports the existing relation instead of
+    // duplicating artifacts.
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &source, "--to", "plan"])
+        .assert()
+        .success();
+    let after_out =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "transition", &source, "--to", "todo"]),
+        );
+    let _ = after_out;
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &source, "--to", "todo"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already consumed"));
+    let after = {
+        let names: Vec<String> = fs::read_dir(Path::new(&dir))
+            .unwrap()
+            .filter_map(|e| {
+                let name = e.as_ref().ok()?.file_name().to_string_lossy().to_string();
+                name.contains("transition-refusal").then_some(name)
+            })
+            .collect();
+        names
+            .iter()
+            .find(|n| n.ends_with("-plan.md"))
+            .cloned()
+            .expect("plan successor should exist")
+    };
+    assert_eq!(
+        fs::read_dir(Path::new(&dir))
+            .unwrap()
+            .filter(|e| {
+                let name = e.as_ref().unwrap().file_name();
+                let name = name.to_string_lossy();
+                name.contains("transition-refusal") && name != "events.jsonl"
+            })
+            .count(),
+        2
+    );
+    assert_ne!(after, source);
+    assert!(after.ends_with("-plan.md"), "{after}");
+
+    // Doctor stays clean: the transition event is known state, not garbage.
+    repo.arc(&repo.root)
+        .arg("journal")
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("problems:\n  (none)"));
+}

@@ -10,6 +10,21 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- `arc journal transition <file> --to <kind>` changes a live artifact's
+  workflow kind as one guarded operation instead of a hand-composed
+  sequence: a typed successor is written carrying a machine-readable
+  `supersedes` link (and the inherited body, unless `--body-file` says
+  otherwise), a `transition` event records source, successor, and
+  provenance, and the source is consumed as superseded. Closed,
+  consumed, same-kind, and same-second-collision sources are refused;
+  `--dry-run` prints the successor and every lifecycle effect without
+  writing; `journal doctor` treats the new event as known state. The
+  transition matrix is deliberately narrow — a decision is how a
+  discussion ends, not what it becomes, and promotion to a code change
+  remains `begin --from-journal`.
+
 ### Changed
 
 - The review-obligation surface is named `debt` end to end: the

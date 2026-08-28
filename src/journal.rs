@@ -607,6 +607,34 @@ pub enum JournalCmd {
         #[arg(long)]
         drop_questions: bool,
     },
+    /// Change a live artifact's workflow kind without rewriting history: a
+    /// typed successor is written, linked back with `supersedes`, and the
+    /// source is retired as superseded. The safe manual sequence, performed
+    /// as one guarded operation rather than hand-composed by every caller.
+    /// Promotion to a code change stays with `begin --from-journal`, which
+    /// is implementation authorization and never a kind conversion.
+    Transition {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// The successor's kind
+        #[arg(long, value_enum)]
+        to: JournalKind,
+        /// Body source for the successor: a file path, or '-' for stdin.
+        /// Omitted, the successor carries the source body verbatim under a
+        /// heading naming what changed
+        #[arg(long)]
+        body_file: Option<String>,
+        /// Optional title; when set, a `# <title>` heading is prepended
+        #[arg(long)]
+        title: Option<String>,
+        /// Why the kind is changing, recorded in the transition event
+        #[arg(long)]
+        reason: Option<String>,
+        /// Print the successor and the lifecycle effects without writing
+        /// anything
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Move artifacts to the cold sibling archive without deleting history
     Archive {
         /// Artifact filename inside the hot dir (a name, not a path)
@@ -729,6 +757,22 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             note.as_deref(),
             decision.as_deref(),
             drop_questions,
+        ),
+        JournalCmd::Transition {
+            filename,
+            to,
+            body_file,
+            title,
+            reason,
+            dry_run,
+        } => transition(
+            ctx,
+            &filename,
+            to,
+            body_file.as_deref(),
+            title.as_deref(),
+            reason.as_deref(),
+            dry_run,
         ),
         JournalCmd::Archive {
             filename,
@@ -2473,6 +2517,13 @@ struct JournalEvent {
     /// blocks in the middle makes the caller monitor a run they delegated.
     #[serde(skip_serializing_if = "Option::is_none")]
     placement: Option<String>,
+    /// Typed link from a kind-transition successor to the artifact it
+    /// supersedes. The successor's first line carries the same fact in
+    /// prose; this is the machine-readable half, so a reader can resolve the
+    /// relationship without parsing Markdown. Optional, so events written
+    /// before transitions existed remain valid input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supersedes: Option<String>,
     /// The answers a question offers, in the order it offered them.
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<Vec<String>>,
@@ -2577,6 +2628,7 @@ impl JournalEvent {
             ttl_seconds: None,
             scope: None,
             status: None,
+            supersedes: None,
             position_id: None,
             stance: None,
             reference: None,
@@ -2661,6 +2713,15 @@ impl JournalEvent {
                 .outcome
                 .as_deref()
                 .is_some_and(|value| ["done", "handoff", "abandoned", "expired"].contains(&value)),
+            "transition" => {
+                self.file.is_some()
+                    && self
+                        .supersedes
+                        .as_deref()
+                        .is_some_and(|source| parse_artifact_name(source).is_some())
+                    && parse_artifact_name(self.file.as_deref().unwrap_or_default()).is_some()
+                    && self.supersedes.as_deref() != self.file.as_deref()
+            }
             _ => false,
         }
     }
@@ -5587,6 +5648,182 @@ pub fn require_open_actionable(ctx: &Ctx, filename: &str) -> Result<String> {
         );
     }
     Ok(kind)
+}
+
+/// The kinds a transition may produce. A transition retires one live
+/// workflow artifact and opens its successor; a `decision` is how a
+/// discussion *ends*, not what it becomes, and a `note`/`memory`/`review`
+/// are records rather than work — so the matrix admits exactly the
+/// actionable kinds plus the record kinds a proposal turns into.
+fn transition_allowed_target(kind: JournalKind) -> bool {
+    matches!(
+        kind,
+        JournalKind::Todo
+            | JournalKind::Plan
+            | JournalKind::Handoff
+            | JournalKind::Later
+            | JournalKind::FeatureRequest
+            | JournalKind::Discussion
+    )
+}
+
+/// Change a live artifact's kind as one guarded operation: write the typed
+/// successor, link it back, retire the source as superseded. A caller can
+/// hand-compose this sequence, and incompletely — the failures this guards
+/// against are the forgotten back-reference, the duplicate body, the two
+/// artifacts both left actionable.
+#[allow(clippy::too_many_arguments)]
+fn transition(
+    ctx: &Ctx,
+    filename: &str,
+    to: JournalKind,
+    body_file: Option<&str>,
+    title: Option<&str>,
+    reason: Option<&str>,
+    dry_run: bool,
+) -> Result<i32> {
+    if !transition_allowed_target(to) {
+        bail!(
+            "--to {} is not a transition target; a decision is how a discussion ends, \
+             not what it becomes, and note/memory/review are records rather than work",
+            to.as_str()
+        );
+    }
+    if filename.contains(['/', '\\']) {
+        bail!("transition takes an artifact filename inside the journal dir, not a path");
+    }
+    let Some((_, topic, from_kind)) = parse_artifact_name(filename) else {
+        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+    };
+    if !is_actionable_kind(&from_kind) {
+        bail!(
+            "{filename} is a {from_kind} artifact, not an actionable item ({})",
+            PRIMARY_ACTIONABLE_KINDS
+                .iter()
+                .copied()
+                .chain(std::iter::once(LATER_KIND))
+                .chain(std::iter::once(FEATURE_REQUEST_KIND))
+                .collect::<Vec<_>>()
+                .join("|")
+        );
+    }
+    if from_kind == to.as_str() {
+        bail!("{} is already a {} artifact", filename, from_kind);
+    }
+    let dir = resolve_dir(&ctx.cwd)?;
+    let source_path = dir.join(filename);
+    if !source_path.is_file() {
+        bail!("no such artifact {} in {}", filename, dir.display());
+    }
+    let events = read_events(&dir)?;
+    if is_consumed(&events, filename) {
+        bail!("{filename} is already consumed (see the journal)");
+    }
+    // Unanswered questions are work nobody did. The successor inherits them
+    // by naming the source, and every view that reads the source for
+    // questions still does; but the caller should say so, not discover it.
+    let open = unanswered_questions(&events, filename);
+    if !open.is_empty() && !dry_run {
+        eprintln!(
+            "warning: {filename} holds {} unanswered question{} ({}) that the successor \
+             does not settle; settle, re-file, or consume the source instead",
+            open.len(),
+            if open.len() == 1 { "" } else { "s" },
+            open.join(", ")
+        );
+    }
+
+    // The successor's body: the caller's body when given, otherwise the
+    // source's own body under a heading that names what changed. Same-second
+    // same-topic collisions are impossible against the source (kinds
+    // differ), but a same-second sibling could collide — exclusive create
+    // fails loudly rather than overwriting.
+    let now = Utc::now();
+    let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let successor_name = format!("{stamp}-{topic}-{}.md", to.as_str());
+    let successor_path = dir.join(&successor_name);
+    let source_bytes = std::fs::read(&source_path)
+        .with_context(|| format!("cannot read {}", source_path.display()))?;
+    let inherited = String::from_utf8_lossy(&source_bytes).into_owned();
+    let body = match body_file {
+        Some(source) => read_body_verbatim(source)?,
+        None => {
+            let heading = format!(
+                "\nTransitioned from `{filename}`: kind {} → {}.",
+                from_kind,
+                to.as_str()
+            );
+            format!("{inherited}{heading}\n")
+        }
+    };
+    let contents = match title {
+        Some(t) => format!("# {t}\n\n{body}"),
+        None => body,
+    };
+    let supersession = format!("supersedes: {filename}\n\n",);
+    if dry_run {
+        println!("successor: {}", successor_path.display());
+        println!("first lines:");
+        for line in format!(
+            "{supersession}{}",
+            contents.lines().next().unwrap_or_default()
+        )
+        .lines()
+        {
+            println!("  {line}");
+        }
+        println!(
+            "effects: write {} · transition event {} → {} · consume {} [superseded]",
+            successor_path.display(),
+            from_kind,
+            to.as_str(),
+            filename
+        );
+        return Ok(0);
+    }
+    if successor_path.exists() {
+        bail!(
+            "cannot create {} (an artifact with this second's timestamp already exists)",
+            successor_path.display()
+        );
+    }
+    let _transition = lock_journal_transition(&dir)?;
+    // Re-read under the lock: a concurrent consumer of the source must turn
+    // this into a refusal rather than a second disposition of the same
+    // artifact.
+    if is_consumed(&read_events(&dir)?, filename) {
+        bail!("{filename} is already consumed (see the journal)");
+    }
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&successor_path)
+            .with_context(|| {
+                format!(
+                    "cannot create {} (an artifact with this second's timestamp already exists)",
+                    successor_path.display()
+                )
+            })?;
+        f.write_all(format!("{supersession}{contents}").as_bytes())
+            .with_context(|| format!("cannot write {}", successor_path.display()))?;
+    }
+    let mut event = JournalEvent::base(ctx, now, &topic, "transition");
+    event.file = Some(successor_name.clone());
+    event.supersedes = Some(filename.to_string());
+    event.note = reason.map(str::to_string);
+    append_event(ctx, &dir, &event)?;
+    let mut consumed = JournalEvent::base(ctx, now, &topic, "consumed");
+    consumed.file = Some(filename.to_string());
+    consumed.outcome = Some(ConsumeOutcome::Superseded.as_str().to_string());
+    consumed.note = Some(format!("transitioned to {successor_name}"));
+    append_event(ctx, &dir, &consumed)?;
+    println!(
+        "transitioned: {filename} → {successor_name} ({} superseded)",
+        from_kind
+    );
+    Ok(0)
 }
 
 /// Append a journal `consumed` event marking an artifact superseded by the

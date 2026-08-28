@@ -70,6 +70,10 @@ SETTLE A QUESTION (before it is work)
     --other "<answer>"                 Settle it outside the options offered.
   arc journal discussion <file>        Read stances, branches, and open questions.
   arc journal consume <file> --outcome done --decision <decision>
+  arc journal transition <file> --to discussion [--dry-run]
+    Change a live artifact's kind as one guarded operation: a typed successor
+    with a `supersedes` link, the source retired. Promotion to a code change
+    stays with `begin --from-journal`, never a kind conversion.
   arc journal <kind> <topic> --body-file -   One verb per kind; `arc journal
                                        --help` is the registry. `arc fr` is
                                        the top-level alias for one of them.
