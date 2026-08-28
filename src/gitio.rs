@@ -330,6 +330,48 @@ pub fn add_worktree(cwd: &Path, path: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Create `branch` at HEAD (or `start`) and check it out in a new worktree,
+/// as one Git call. The `-b` must precede the path: `worktree add <path>
+/// <new-branch>` treats the branch as an existing commit-ish and fails with
+/// `invalid reference`, so a branch cannot be minted positionally.
+pub fn add_worktree_new_branch(cwd: &Path, path: &Path, branch: &str, start: &str) -> Result<()> {
+    git(
+        cwd,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            path.to_str().context("non-UTF8 worktree path")?,
+            start,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Remove a worktree. Fails loudly when Git refuses: a fork worktree with
+/// uncommitted work is the operator's call, not arc's.
+pub fn remove_worktree(cwd: &Path, path: &Path) -> Result<()> {
+    git(
+        cwd,
+        &[
+            "worktree",
+            "remove",
+            path.to_str().context("non-UTF8 worktree path")?,
+        ],
+    )?;
+    Ok(())
+}
+
+/// How many commits `branch` carries that `base` does not. Either side
+/// failing to resolve is an error, not a zero a reader would sum.
+pub fn ahead_count(cwd: &Path, base: &str, branch: &str) -> Result<usize> {
+    let out = git(cwd, &["rev-list", "--count", &format!("{base}..{branch}")])?;
+    out.trim()
+        .parse::<usize>()
+        .with_context(|| format!("cannot parse rev-list count {out:?}"))
+}
+
 /// The worktree (if any) that has `branch` checked out.
 pub fn worktree_for_branch(cwd: &Path, branch: &str) -> Result<Option<PathBuf>> {
     let out = git(cwd, &["worktree", "list", "--porcelain"])?;

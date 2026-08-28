@@ -1641,7 +1641,7 @@ fn default_scaffold(kind: JournalKind) -> Option<&'static str> {
 }
 
 /// One write, whichever verb named the kind.
-fn write_kind(ctx: &Ctx, kind: JournalKind, write: KindWrite) -> Result<i32> {
+pub(crate) fn write_kind(ctx: &Ctx, kind: JournalKind, write: KindWrite) -> Result<i32> {
     note(
         ctx,
         &write.topic,
@@ -2488,7 +2488,7 @@ fn events(ctx: &Ctx, limit: Option<usize>) -> Result<i32> {
 const JOURNAL_SCHEMA: &str = "journal-events/1";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct JournalEvent {
+pub(crate) struct JournalEvent {
     schema: String,
     ts: String,
     harness: String,
@@ -2503,11 +2503,11 @@ struct JournalEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     topic: String,
-    event: String,
+    pub(crate) event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    file: Option<String>,
+    pub(crate) file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3161,7 +3161,7 @@ fn parse_lane_marker(message: &str) -> Option<LaneMarker> {
     None
 }
 
-fn read_events(dir: &Path) -> Result<Vec<JournalEvent>> {
+pub(crate) fn read_events(dir: &Path) -> Result<Vec<JournalEvent>> {
     let mut events = Vec::new();
     let jsonl = dir.join("events.jsonl");
     if jsonl.is_file() {
@@ -3806,7 +3806,7 @@ struct Catchup {
 }
 
 /// Split `<ts>-<topic>-<kind>.md` into its parts.
-fn parse_artifact_name(name: &str) -> Option<(String, String, String)> {
+pub(crate) fn parse_artifact_name(name: &str) -> Option<(String, String, String)> {
     let stem = name.strip_suffix(".md")?;
     let first = stem.find('-')?;
     let ts = &stem[..first];
@@ -4029,7 +4029,7 @@ fn consumption(events: &[JournalEvent], filename: &str) -> Option<String> {
         .and_then(|event| event.outcome.clone())
 }
 
-fn is_consumed(events: &[JournalEvent], filename: &str) -> bool {
+pub(crate) fn is_consumed(events: &[JournalEvent], filename: &str) -> bool {
     consumption(events, filename).is_some()
 }
 
@@ -5414,7 +5414,7 @@ fn unanswered_questions(events: &[JournalEvent], filename: &str) -> Vec<String> 
     open
 }
 
-fn consume(
+pub(crate) fn consume(
     ctx: &Ctx,
     filename: &str,
     outcome: ConsumeOutcome,

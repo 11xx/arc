@@ -644,6 +644,31 @@ pub(crate) fn render_journal_backlog(backlog: Option<&crate::inbox::JournalBackl
 /// What the open changes' worktrees occupy, measured read-only. Build
 /// output is reproducible, so this is cost, not content — the fact a session
 /// of parallel changes fills a filesystem without any command reporting it.
+/// Forks this repository holds, from the journal's `fork-<slug>` markers
+/// plus any `fork/*` branch. They are listed because `catchup` answers what
+/// is waiting: a fork is work in progress by intent, and the operator's
+/// next session should know it exists without finding the worktree by hand.
+/// Arc does not gate forks, so this is orientation, not obligation.
+fn render_forks(ctx: &Ctx) {
+    if let Ok(forks) = crate::commands::fork::list_entries(ctx) {
+        let open: Vec<_> = forks.iter().filter(|fork| fork.retired.is_none()).collect();
+        if !open.is_empty() {
+            println!("forks ({}):", open.len());
+            for fork in &open {
+                let place = fork
+                    .worktree
+                    .as_deref()
+                    .map(|path| format!(" ({path})"))
+                    .unwrap_or_default();
+                println!(
+                    "  {}  {}  +{} over {}{}",
+                    fork.slug, fork.branch, fork.ahead, fork.base_branch, place
+                );
+            }
+        }
+    }
+}
+
 fn render_worktree_accounting(accounting: &crate::worktree_usage::WorktreeAccounting) {
     if accounting.is_empty() {
         return;
@@ -719,6 +744,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     if !any {
         println!("  no open changes");
     }
+    render_forks(ctx);
     render_worktree_accounting(&worktrees);
     render_debts(&debts);
     match journal {

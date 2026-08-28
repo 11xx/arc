@@ -24,7 +24,7 @@ mod worktree_usage;
 
 use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
-use commands::{AnchorArgs, Ctx, ListFormat, QueryArgs};
+use commands::{fork, AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{
     ActorSource, DispositionStatus, MessageSeverity, MessageType, ProbePhase, ReviewCause,
     RunOutcome, Severity, Side, Verdict, VerdictRelationKind, VerifyResult,
@@ -982,6 +982,13 @@ enum Cmd {
         /// then from the worktree the command runs in
         change: Option<String>,
     },
+    /// Fork this repository: a worktree on a fork/<slug> branch, outside
+    /// the change lifecycle. Unintegrated by intent; the operator decides
+    /// what to merge, rebase, or discard
+    Fork {
+        #[command(subcommand)]
+        command: ForkCmd,
+    },
     /// Set an integration hold
     Hold {
         /// Change whose integration is held
@@ -1171,6 +1178,44 @@ enum Cmd {
     Journal {
         #[command(subcommand)]
         cmd: journal::JournalCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ForkCmd {
+    /// Create the fork worktree and journal its marker
+    Begin {
+        /// Kebab-case slug naming the fork (and the fork/<slug> branch)
+        slug: String,
+        /// Branch to fork from; omitted, the current branch (master when
+        /// standing on a fork, which is not a base)
+        #[arg(long)]
+        from: Option<String>,
+    },
+    /// Journal a marker for a hand-made fork/<slug> worktree
+    Adopt {
+        /// The fork slug — the part of the branch name after fork/
+        slug: String,
+        /// What the fork is for, recorded in the marker
+        #[arg(long)]
+        intent: Option<String>,
+    },
+    /// Record the fork's disposition and remove its worktree
+    Retire {
+        /// The fork slug
+        slug: String,
+        /// The disposition: merged, dropped, kept — with a word of why
+        outcome: String,
+        /// Keep the worktree on disk; the default removes it, the branch
+        /// always stays
+        #[arg(long)]
+        keep_worktree: bool,
+    },
+    /// List every fork this repository knows about
+    List {
+        /// Emit the machine-readable JSON view instead of text
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -2274,6 +2319,16 @@ fn run(cli: Cli) -> Result<i32> {
             context::prompt(&ctx, select(change)?.as_deref())?;
             Ok(0)
         }
+        Cmd::Fork { command } => match command {
+            ForkCmd::Begin { slug, from } => fork::begin(&ctx, &slug, from.as_deref()),
+            ForkCmd::Adopt { slug, intent } => fork::adopt(&ctx, &slug, intent.as_deref()),
+            ForkCmd::Retire {
+                slug,
+                outcome,
+                keep_worktree,
+            } => fork::retire(&ctx, &slug, &outcome, keep_worktree),
+            ForkCmd::List { json } => fork::list(&ctx, json),
+        },
         Cmd::Hold {
             change,
             reason,

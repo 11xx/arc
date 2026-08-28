@@ -9,6 +9,7 @@ mod diff;
 mod doctor;
 mod findings;
 mod forge_cmd;
+pub(crate) mod fork;
 mod gatekeeping;
 mod history;
 mod hooks;
