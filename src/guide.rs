@@ -22,11 +22,14 @@ SAY WHO YOU ARE (before the first write)
   default — the write succeeds and arc records an actor nobody claimed, which
   is discovered later by a reader who cannot tell whose work it was.
 
-  `arc env` only detects a harness that exports its own session variable, and
-  not every harness does; it exits non-zero and prints the export template
-  when it cannot. That is the normal path for setting them by hand, not a
-  failure. `[policy] require_declared_actor` makes an undeclared identity a
-  refusal instead of a record.
+  `arc env` detects a harness by the session variable it exports; not every
+  harness exports one. OpenCode v2 (`opencode2`) is recognized without one —
+  by `OPENCODE_TERMINAL` or its process ancestry — and prints the harness
+  export with the session left as a comment to set by hand. With nothing to
+  detect at all it exits non-zero and prints the export template, which is
+  the normal path for setting identity manually, not a failure.
+  `[policy] require_declared_actor` makes an undeclared identity a refusal
+  instead of a record.
 
 ORIENT (start here, in this order)
   arc catchup            Live state: ledger queue, journal backlog, lanes.

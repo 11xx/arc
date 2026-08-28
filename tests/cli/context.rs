@@ -299,6 +299,61 @@ fn env_detects_pi_model_and_thinking_level_from_session_store() {
 }
 
 #[test]
+fn env_detects_opencode2_by_terminal_variable_and_leaves_the_session_unset() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .arg("env")
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
+        .env_remove("OPENCODE_TERMINAL")
+        .env("OPENCODE_TERMINAL", "1")
+        .assert()
+        .success()
+        .stdout("export ARC_HARNESS='opencode'\n# export ARC_SESSION=<session-id>  # unavailable: opencode does not export a session variable; set it by hand\n");
+}
+
+#[test]
+fn env_detects_opencode2_by_process_ancestry() {
+    let repo = Repo::new();
+    // A shell whose comm is `opencode2` playing the harness, so the binary
+    // under test descends from a matching PPID chain in /proc.
+    let shell = repo.home.join("bin");
+    fs::create_dir_all(&shell).unwrap();
+    let harness = shell.join("opencode2");
+    // No exec: the wrapper must survive as arc's parent for the comm to
+    // appear in the PPID chain the detection walks. The trailing no-op stops
+    // dash from exec-optimizing the last command into the wrapper's own
+    // process, which would leave arc parented to the test runner instead.
+    fs::write(&harness, "#!/bin/sh\n\"$@\"\n:\n").unwrap();
+    fs::set_permissions(&harness, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // assert_cmd execs the binary directly, which would leave the test runner
+    // as the parent; spawn through the wrapper so the ancestry is real.
+    let output = Command::new(&harness)
+        .current_dir(&repo.root)
+        .arg(assert_cmd::cargo_bin!("arc"))
+        .arg("env")
+        .env("HOME", &repo.home)
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
+        .env_remove("OPENCODE_TERMINAL")
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION")
+        .env_remove("ARC_MODEL")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "export ARC_HARNESS='opencode'\n# export ARC_SESSION=<session-id>  # unavailable: opencode does not export a session variable; set it by hand\n"
+    );
+}
+
+#[test]
 fn env_omits_model_when_no_session_store_matches() {
     let repo = Repo::new();
     // A codex session id with no rollout file: harness/session exports only.

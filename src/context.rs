@@ -26,6 +26,57 @@ const HARNESS_ENV: [(&str, &str); 4] = [
     ("PI_SESSION_ID", "pi"),
 ];
 
+/// A harness whose session id reaches its tool children only through the
+/// prompt. The v1 CLI exports `OPENCODE_SESSION` and is handled by the env
+/// ladder; the v2 beta (`opencode2`) exports none, so it is recognized by the
+/// witnesses it cannot help carrying: `OPENCODE_TERMINAL` in every tool-shell
+/// environment, and its own process name in the PPID chain. One label covers
+/// both versions — v2 is the same project — and the session id stays unset,
+/// which is the honest report rather than a guessed one.
+const OPENCODE_COMMS: [&str; 2] = ["opencode", "opencode2"];
+
+/// How far up the PPID chain ancestry detection looks. A harness sits within
+/// a few steps of its tool children; the cap keeps a pathological chain
+/// bounded rather than trusting it to terminate.
+const ANCESTRY_DEPTH: usize = 32;
+
+/// Whether the process ancestry carries an OpenCode marker. Reads `/proc`
+/// directly, so this is a Linux witness: anywhere else it finds nothing.
+fn detect_opencode_ancestry() -> bool {
+    let mut pid = std::process::id();
+    for _ in 0..ANCESTRY_DEPTH {
+        let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else {
+            return false;
+        };
+        if OPENCODE_COMMS.contains(&comm.trim()) {
+            return true;
+        }
+        let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+            return false;
+        };
+        let ppid = status
+            .lines()
+            .find_map(|line| line.strip_prefix("PPid:"))
+            .and_then(|rest| rest.trim().parse::<u32>().ok());
+        match ppid {
+            Some(parent) if parent != pid && parent != 0 => pid = parent,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Whether OpenCode is detectable without a session variable: positive env
+/// evidence first, then ancestry. `OPENCODE_TERMINAL` names a terminal, not a
+/// session, and may be absent in headless runs — that is why ancestry exists
+/// beside it rather than instead of it.
+fn detect_opencode_harness() -> bool {
+    if std::env::var("OPENCODE_TERMINAL").is_ok_and(|value| value == "1") {
+        return true;
+    }
+    detect_opencode_ancestry()
+}
+
 /// Resolve an explicit change reference or infer one from the current branch
 /// and, as a fallback, the current directory's recorded change worktree.
 pub fn resolve_change_or_infer(
@@ -133,7 +184,10 @@ fn ambiguous<T>(cwd: &Path, matches: &[&ChangeState]) -> Result<T> {
 
 pub struct DetectedIdentity {
     pub harness: String,
-    pub session: String,
+    /// A harness recognized without its cooperation carries no session id;
+    /// `None` reports that honestly where an empty string would fabricate a
+    /// record.
+    pub session: Option<String>,
     pub model: Option<String>,
 }
 
@@ -147,36 +201,55 @@ pub fn detect_identity() -> Option<DetectedIdentity> {
             let model = detect_model(harness, &session);
             return Some(DetectedIdentity {
                 harness: harness.to_string(),
-                session: session.into_owned(),
+                session: Some(session.into_owned()),
                 model,
             });
         }
+    }
+    if detect_opencode_harness() {
+        return Some(DetectedIdentity {
+            harness: "opencode".to_string(),
+            session: None,
+            model: None,
+        });
     }
     None
 }
 
 pub fn print_env() -> i32 {
-    if let Some(identity) = detect_identity() {
-        match identity.model {
-            Some(model) => println!(
-                "export ARC_HARNESS={} ARC_SESSION={} ARC_MODEL={}",
-                shell_quote(&identity.harness),
-                shell_quote(&identity.session),
-                shell_quote(&model)
-            ),
-            None => println!(
-                "export ARC_HARNESS={} ARC_SESSION={}",
-                shell_quote(&identity.harness),
-                shell_quote(&identity.session)
-            ),
-        }
+    let Some(identity) = detect_identity() else {
+        println!(
+            "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id> \
+             ARC_MODEL=<model[#effort]>"
+        );
+        return 1;
+    };
+    let Some(session) = identity.session else {
+        // The harness resolved without its cooperation, so the session id was
+        // never reachable. The export line is real and eval-able; the comment
+        // carries the report a full-detection run would not need.
+        println!("export ARC_HARNESS={}", shell_quote(&identity.harness));
+        println!(
+            "# export ARC_SESSION=<session-id>  # unavailable: {} does not \
+             export a session variable; set it by hand",
+            identity.harness
+        );
         return 0;
+    };
+    match identity.model {
+        Some(model) => println!(
+            "export ARC_HARNESS={} ARC_SESSION={} ARC_MODEL={}",
+            shell_quote(&identity.harness),
+            shell_quote(&session),
+            shell_quote(&model)
+        ),
+        None => println!(
+            "export ARC_HARNESS={} ARC_SESSION={}",
+            shell_quote(&identity.harness),
+            shell_quote(&session)
+        ),
     }
-    println!(
-        "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id> \
-         ARC_MODEL=<model[#effort]>"
-    );
-    1
+    0
 }
 
 /// Best-effort model detection for `arc env`: read the harness's own session

@@ -921,12 +921,15 @@ enum Cmd {
     /// `CLAUDE_SESSION_ID`, `CODEX_THREAD_ID`, `OPENCODE_SESSION`, or
     /// `PI_SESSION_ID` — and then that harness's own session store for the
     /// model, and the effort where the store records one. Not every harness
-    /// exports one, and a harness that does may not in every mode.
+    /// exports one, and a harness that does may not in every mode. OpenCode
+    /// v2 exports none and is recognized by `OPENCODE_TERMINAL` or its
+    /// process ancestry, printing the harness export with the session left
+    /// as a comment to set by hand.
     ///
-    /// With nothing to detect it prints the export template as a comment and
-    /// exits non-zero, which is a report that identity must be set by hand
-    /// rather than a failure. Every value it emits can be set directly:
-    /// explicit identity always wins over a detected one
+    /// With nothing to detect at all it prints the export template as a
+    /// comment and exits non-zero, which is a report that identity must be
+    /// set by hand rather than a failure. Every value it emits can be set
+    /// directly: explicit identity always wins over a detected one
     Env,
     /// Print a shell completion script to stdout
     Completions {
@@ -1563,7 +1566,12 @@ fn run(cli: Cli) -> Result<i32> {
                 .is_none_or(|explicit| explicit == detected.harness)
             {
                 harness.get_or_insert(detected.harness);
-                session.get_or_insert(detected.session);
+                // A harness recognized without its cooperation carries no
+                // session id; recording the harness alone is the honest half
+                // of the detection, not a partial failure.
+                if let Some(detected_session) = detected.session {
+                    session.get_or_insert(detected_session);
+                }
                 if model.is_none() {
                     model = detected.model;
                 }
