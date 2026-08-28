@@ -2944,3 +2944,35 @@ fn unused_kept_context_is_absent_from_show_json() {
     let show = json_stdout(repo.arc(&repo.root).args(["show", "bare-json", "--json"]));
     assert!(show.get("kept").is_none(), "{show}");
 }
+
+/// A worktree floor is a warning, never a refusal: with free space below the
+/// declared floor, `begin` still succeeds and says what the disk holds.
+#[test]
+fn begin_warns_below_declared_worktree_floor_and_still_creates_the_worktree() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nworktree_free_floor_bytes = 999999999999\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy"]);
+
+    let out = stdout(repo.arc(&repo.root).args(["begin", "floor-warn"]));
+    let change_id = opened_change_id(&out);
+    assert!(out.contains("warning:"), "{out}");
+    assert!(out.contains("worktree floor"), "{out}");
+    let wt = repo.home.join(".worktrees/repo-floor-warn");
+    assert!(wt.is_dir(), "worktree must still be created");
+    assert!(stdout(repo.arc(&wt).args(["status", &change_id])).contains(&change_id));
+}
+
+/// No floor declared, no opinion: an absent key prints nothing about space,
+/// and the warning is opt-in per project rather than guessed by arc.
+#[test]
+fn begin_prints_no_space_warning_without_a_declared_floor() {
+    let repo = Repo::new();
+    let out = stdout(repo.arc(&repo.root).args(["begin", "no-floor"]));
+    assert!(!out.contains("warning:"), "{out}");
+}

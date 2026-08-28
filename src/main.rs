@@ -20,6 +20,7 @@ mod session_store;
 mod state;
 mod status;
 mod store;
+mod worktree_usage;
 
 use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};

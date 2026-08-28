@@ -160,6 +160,37 @@ pub(crate) fn doctor_groups_advice_and_ignores_closed_claims() {
         .code(2);
 }
 
+/// What the open changes' worktrees occupy is reported by `catchup` and
+/// `doctor` without being asked: disk is the resource `begin` spends and
+/// nothing reported, and a full filesystem fails as exit 0 elsewhere.
+#[test]
+fn catchup_and_doctor_report_open_worktree_usage() {
+    let repo = Repo::new();
+    // The shared begin_change helper runs --no-worktree; this surface needs
+    // real worktrees to account for.
+    begin_change_no_helper(&repo, "usage-one");
+    begin_change_no_helper(&repo, "usage-two");
+
+    let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(catchup.contains("worktrees: "), "{catchup}");
+    assert!(catchup.contains("2 open worktree(s)"), "{catchup}");
+    assert!(catchup.contains("usage-one"), "{catchup}");
+    assert!(catchup.contains("repo-usage-two"), "{catchup}");
+
+    let doctor = stdout(repo.arc(&repo.root).args(["doctor", "--verbose"]));
+    assert!(doctor.contains("open-worktree-usage: "), "{doctor}");
+    assert!(doctor.contains("open-worktree-usage-total"), "{doctor}");
+
+    // A ledger with no open worktrees stays silent on the subject.
+    let cleaned = Repo::new();
+    let quiet = stdout(cleaned.arc(&cleaned.root).args(["catchup"]));
+    assert!(!quiet.contains("worktrees: "), "{quiet}");
+}
+
+fn begin_change_no_helper(repo: &Repo, slug: &str) {
+    repo.arc(&repo.root).args(["begin", slug]).assert().success();
+}
+
 pub(crate) fn doctor_reports_closed_registered_worktrees_without_removing_them() {
     let repo = Repo::new();
     let close_with_worktree = |slug: &str| {

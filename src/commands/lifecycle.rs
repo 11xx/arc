@@ -2,6 +2,7 @@ use super::*;
 use crate::context::shell_quote;
 use crate::policy;
 use crate::ExecutionRole;
+use std::process::Command;
 
 #[allow(clippy::too_many_arguments)]
 pub fn begin(
@@ -189,11 +190,68 @@ pub fn begin(
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("cannot create {}", parent.display()))?;
             }
+            warn_below_worktree_floor(&ctx.cwd, &path);
             gitio::add_worktree(&ctx.cwd, &path, &branch_name)?;
             Some(path.display().to_string())
         };
         (branch_name, base_rev, wt)
     };
+
+    /// Warn that creating this worktree adds to a filesystem running out of
+    /// space, when the project declared a floor. A full disk does not announce
+    /// itself: it fails as exit 0 elsewhere — empty reports, bare exit codes —
+    /// which reads as nothing-to-do. The floor is advice, never a refusal; a
+    /// project that declares none gets no warning and no opinion.
+    fn warn_below_worktree_floor(cwd: &Path, worktree: &Path) {
+        let floor = match gitio::toplevel(cwd)
+            .ok()
+            .and_then(|t| policy::load(&t).ok())
+        {
+            Some(policy) => policy.policy.worktree_free_floor_bytes,
+            None => None,
+        };
+        let Some(floor) = floor else { return };
+        let Some(free) = free_bytes(worktree) else {
+            return;
+        };
+        if free >= floor {
+            return;
+        }
+        println!(
+            "warning: {} free below the declared worktree floor of {}; \
+         adding a worktree adds a full build to it — \
+         existing ones are listed by `arc doctor`",
+            crate::worktree_usage::human(free),
+            crate::worktree_usage::human(floor)
+        );
+    }
+
+    /// Bytes available on the filesystem holding `path`, via `df -kP`
+    /// (portable, and correct on the mount that matters rather than the one
+    /// that is free). The path may not exist yet — `begin` warns before
+    /// creating the worktree — so the query lands on the nearest existing
+    /// ancestor, which sits on the same mount unless an operator mounted into
+    /// the worktree about to be created. A failed read is a silent omission:
+    /// a convenience warning must never invent a number, and never block the
+    /// worktree it reports on.
+    fn free_bytes(path: &Path) -> Option<u64> {
+        let probe = path.ancestors().find(|candidate| candidate.exists())?;
+        let output = Command::new("df")
+            .arg("-kP")
+            .arg(probe)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let line = text.lines().nth(1)?;
+        let columns: Vec<&str> = line.split_whitespace().collect();
+        // POSIX df: Filesystem 512-blocks... with -P; column 4 is Available.
+        columns
+            .get(3)?
+            .parse::<u64>()
+            .ok()
+            .map(|blocks| blocks * 1024)
+    }
 
     let ev = ctx.event(
         &store,

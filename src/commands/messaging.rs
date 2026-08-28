@@ -649,6 +649,33 @@ pub(crate) fn render_journal_backlog(backlog: Option<&crate::inbox::JournalBackl
     println!("  full queue: arc journal open");
 }
 
+/// What the open changes' worktrees occupy, measured read-only. Build
+/// output is reproducible, so this is cost, not content — the fact a session
+/// of parallel changes fills a filesystem without any command reporting it.
+fn render_worktree_accounting(accounting: &crate::worktree_usage::WorktreeAccounting) {
+    if accounting.is_empty() {
+        return;
+    }
+    match accounting.total_bytes {
+        Some(total) => println!(
+            "worktrees: {} across {} open worktree(s)",
+            crate::worktree_usage::human(total),
+            accounting.changes.len()
+        ),
+        None => println!(
+            "worktrees: {} open, size unavailable",
+            accounting.changes.len()
+        ),
+    }
+    for usage in &accounting.changes {
+        let size = usage
+            .bytes
+            .map(crate::worktree_usage::human)
+            .unwrap_or_else(|| "size unknown".to_string());
+        println!("  {}  {}  {}", usage.change_id, size, usage.path);
+    }
+}
+
 /// Orient a session in one call: the ledger's actionable buckets, then the
 /// journal's lanes, memories, and backlog. `inbox` answers what is already
 /// open; this answers what is waiting, which is the larger question and the
@@ -673,6 +700,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     let states = ctx.load_all_states(&store)?;
     let debts = collect_audit_debts(ctx, &states)?;
     let review_queue = collect_review_queue(&store, &states)?;
+    let worktrees = crate::worktree_usage::measure(&ctx.cwd, &states);
     println!("ledger: {}", store.root.display());
     let mut any = false;
     let mut rendered_debt_details = BTreeSet::new();
@@ -699,6 +727,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     if !any {
         println!("  no open changes");
     }
+    render_worktree_accounting(&worktrees);
     render_audit_debts(&debts);
     match journal {
         Ok(journal) => journal.render(),
