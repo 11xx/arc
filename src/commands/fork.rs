@@ -260,8 +260,9 @@ pub fn retire(ctx: &Ctx, slug: &str, outcome: &str, keep_worktree: bool) -> Resu
     match marker {
         None => {
             // Retiring an unjournaled fork is legitimate: a hand-made fork
-            // wound down straight to a record. The marker is written already
-            // retired so it never claims to be live.
+            // wound down straight to a record. The marker is written and
+            // consumed in the same breath — a retirement must not leave the
+            // open queue claiming a retired fork is live work.
             journal_marker(
                 ctx,
                 slug,
@@ -270,6 +271,17 @@ pub fn retire(ctx: &Ctx, slug: &str, outcome: &str, keep_worktree: bool) -> Resu
                     "branch: {branch}\nstatus: retired\noutcome: {outcome}\n\n\
                      Retired before it was ever journaled.\n"
                 ),
+            )?;
+            let marker =
+                fork_marker(&dir, slug).expect("the marker just written for {slug} must resolve");
+            let note = format!("fork {slug} retired: {outcome}");
+            crate::journal::consume(
+                ctx,
+                &marker.filename,
+                crate::journal::ConsumeOutcome::Done,
+                Some(&note),
+                None,
+                false,
             )?;
         }
         Some(marker) => {

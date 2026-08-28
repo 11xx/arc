@@ -126,7 +126,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/3");
+    assert_eq!(value["schema"], "arc-workspace-backlog/4");
     let project = value["projects"]
         .as_array()
         .unwrap()
@@ -394,7 +394,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/3");
+    assert_eq!(value["schema"], "arc-workspace-backlog/4");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {

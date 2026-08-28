@@ -149,3 +149,43 @@ fn fork_begin_refuses_a_fork_base() {
         .failure()
         .stderr(predicates::str::contains("is itself a fork"));
 }
+
+/// Retiring a fork that was never journaled must not leave the fresh marker
+/// sitting in the open queue: a retired fork is a record, not live work.
+#[test]
+fn fork_retire_of_unmarked_fork_consumes_its_marker() {
+    let repo = Repo::new();
+    let worktree = fork_worktree(&repo, "ghost");
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fork/ghost",
+            worktree.to_str().unwrap(),
+            "master",
+        ],
+    );
+
+    stdout(
+        repo.arc(&repo.root)
+            .args(["fork", "retire", "ghost", "dropped: never journaled"]),
+    );
+
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert!(
+        !open["open"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["file"]
+                .as_str()
+                .is_some_and(|file| file.contains("fork-ghost-plan"))),
+        "retired fork must not be live: {open}"
+    );
+    let forks = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(forks["forks"][0]["retired"], "retired");
+    assert!(forks["forks"][0].get("worktree").is_none());
+}
