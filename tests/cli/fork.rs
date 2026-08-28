@@ -303,3 +303,44 @@ fn fork_retire_keep_worktree_leaves_a_finishable_leftover() {
         .stdout(predicates::str::contains("worktree removed"));
     assert!(!worktree.exists());
 }
+
+/// Retirement is visible in text whenever --json reports it, including the
+/// recoverable state where a worktree survives its retirement; and catchup
+/// --json carries the same forks the text section lists, because two views
+/// of one derivation must not disagree about what exists.
+#[test]
+fn fork_views_agree_about_retirement_and_catchup_json_carries_forks() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "agreed"]));
+
+    // Text and JSON agree on a live fork.
+    let text = stdout(repo.arc(&repo.root).args(["fork", "list"]));
+    assert!(text.contains("agreed  fork/agreed ("), "{text}");
+    let value = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert!(value["forks"][0]["retired"].is_null(), "{value}");
+
+    stdout(
+        repo.arc(&repo.root)
+            .args(["fork", "retire", "agreed", "merged", "--keep-worktree"]),
+    );
+
+    // The recoverable half-state reads as retired in both views.
+    let text = stdout(repo.arc(&repo.root).args(["fork", "list"]));
+    assert!(text.contains("retired, worktree remains:"), "{text}");
+    let value = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(value["forks"][0]["retired"], "retired");
+    assert!(value["forks"][0]["worktree"].is_string());
+
+    // Retired forks leave the catchup surfaces; open ones appear in both.
+    let catchup_text = stdout(repo.arc(&repo.root).arg("catchup"));
+    assert!(!catchup_text.contains("agreed"), "{catchup_text}");
+    let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    assert_eq!(catchup["schema"], "arc-catchup/2");
+    assert!(catchup["forks"].as_array().unwrap().is_empty(), "{catchup}");
+
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "open-now"]));
+    let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    assert_eq!(catchup["forks"][0]["slug"], "open-now", "{catchup}");
+    let catchup_text = stdout(repo.arc(&repo.root).arg("catchup"));
+    assert!(catchup_text.contains("open-now"), "{catchup_text}");
+}

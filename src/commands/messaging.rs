@@ -641,34 +641,32 @@ pub(crate) fn render_journal_backlog(backlog: Option<&crate::inbox::JournalBackl
     println!("  full queue: arc journal open");
 }
 
-/// What the open changes' worktrees occupy, measured read-only. Build
-/// output is reproducible, so this is cost, not content — the fact a session
-/// of parallel changes fills a filesystem without any command reporting it.
 /// Forks this repository holds, from the journal's `fork-<slug>` markers
 /// plus any `fork/*` branch. They are listed because `catchup` answers what
 /// is waiting: a fork is work in progress by intent, and the operator's
 /// next session should know it exists without finding the worktree by hand.
 /// Arc does not gate forks, so this is orientation, not obligation.
-fn render_forks(ctx: &Ctx) {
-    if let Ok(forks) = crate::commands::fork::list_entries(ctx) {
-        let open: Vec<_> = forks.iter().filter(|fork| fork.retired.is_none()).collect();
-        if !open.is_empty() {
-            println!("forks ({}):", open.len());
-            for fork in &open {
-                let place = fork
-                    .worktree
-                    .as_deref()
-                    .map(|path| format!(" ({path})"))
-                    .unwrap_or_default();
-                println!(
-                    "  {}  {}  +{} over {}{}",
-                    fork.slug, fork.branch, fork.ahead, fork.base_branch, place
-                );
-            }
+fn render_forks(forks: &[crate::commands::fork::ForkEntry]) {
+    let open: Vec<_> = forks.iter().filter(|fork| fork.retired.is_none()).collect();
+    if !open.is_empty() {
+        println!("forks ({}):", open.len());
+        for fork in &open {
+            let place = fork
+                .worktree
+                .as_deref()
+                .map(|path| format!(" ({path})"))
+                .unwrap_or_default();
+            println!(
+                "  {}  {}  +{} over {}{}",
+                fork.slug, fork.branch, fork.ahead, fork.base_branch, place
+            );
         }
     }
 }
 
+/// What the open changes' worktrees occupy, measured read-only. Build
+/// output is reproducible, so this is cost, not content — the fact a session
+/// of parallel changes fills a filesystem without any command reporting it.
 fn render_worktree_accounting(accounting: &crate::worktree_usage::WorktreeAccounting) {
     if accounting.is_empty() {
         return;
@@ -701,14 +699,21 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     let store = ctx.store()?;
     let inbox = collect_inbox(ctx, &store, None)?;
     let journal = crate::journal::orientation(ctx);
+    let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
 
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-catchup/1",
+                "schema": "arc-catchup/2",
                 "ledger": inbox,
                 "journal": journal.as_ref().ok(),
+                // Open forks only: retired ones are history, and the JSON
+                // view answers the same question the text section does.
+                "forks": forks
+                    .iter()
+                    .filter(|fork| fork.retired.is_none())
+                    .collect::<Vec<_>>(),
             }))?
         );
         return Ok(0);
@@ -744,7 +749,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     if !any {
         println!("  no open changes");
     }
-    render_forks(ctx);
+    render_forks(&forks);
     render_worktree_accounting(&worktrees);
     render_debts(&debts);
     match journal {

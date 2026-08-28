@@ -398,8 +398,15 @@ pub fn list(ctx: &Ctx, json: bool) -> Result<i32> {
     }
     println!("forks ({}):", entries.len());
     for entry in &entries {
+        // The same fact --json carries: retirement is visible even when a
+        // worktree survives it, or text and JSON would disagree about one
+        // fork — and the surviving worktree is exactly the half-state an
+        // operator needs to know is still on disk.
         let state = match (&entry.worktree, &entry.retired) {
-            (Some(path), _) => format!("{} ({path})", entry.branch),
+            (Some(path), Some(_)) => {
+                format!("{} (retired, worktree remains: {path})", entry.branch)
+            }
+            (Some(path), None) => format!("{} ({path})", entry.branch),
             (None, Some(_)) => format!("{} (retired, no worktree)", entry.branch),
             (None, None) => format!("{} (no worktree)", entry.branch),
         };
