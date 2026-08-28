@@ -61,7 +61,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     inspect_danger_paths(&ctx.cwd, &mut problems);
     inspect_danger_classification(&ctx.cwd, &mut problems);
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
-    inspect_audit_debt(ctx, &states, &mut advice)?;
+    inspect_debt(ctx, &states, &mut advice)?;
     inspect_hold_releases(&Store::discover(&ctx.cwd)?, &states, &mut advice);
     inspect_worktree_accounting(&ctx.cwd, &states, &mut advice);
 
@@ -508,15 +508,15 @@ fn inspect_danger_classification(cwd: &Path, problems: &mut Vec<Finding>) {
     }
 }
 
-fn inspect_audit_debt(
+fn inspect_debt(
     ctx: &Ctx,
     states: &BTreeMap<String, ChangeState>,
     advice: &mut Vec<Finding>,
 ) -> Result<()> {
-    let summary = crate::commands::messaging::collect_audit_debts(ctx, states)?;
+    let summary = crate::commands::messaging::collect_debts(ctx, states)?;
     if !summary.is_empty() {
         advice.push(Finding {
-            code: "audit-debt-outstanding",
+            code: "debt-outstanding",
             detail: summary.detail(),
         });
     }

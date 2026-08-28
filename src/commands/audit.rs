@@ -10,7 +10,7 @@ use crate::state::ChangeState;
 
 /// Record the obligation. Allowed while open (declared at integration time)
 /// and after integration (discovered later).
-pub fn declare_audit_debt(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {
+pub fn declare_debt(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {
     let reason = reason.trim();
     if reason.is_empty() {
         bail!("--reason must say what review is owed and why it could not run");
@@ -51,8 +51,8 @@ pub fn declare_audit_debt(ctx: &Ctx, reference: &str, reason: String) -> Result<
     let event = ctx.event(&store, &change_id, payload);
     store.append_event(&event)?;
     match &patchset_id {
-        Some(id) => println!("audit debt declared for {id}: {reason}"),
-        None => println!("audit debt declared: {reason}"),
+        Some(id) => println!("debt declared for {id}: {reason}"),
+        None => println!("debt declared: {reason}"),
     }
     println!("event: {}", event.event_id);
     Ok(())
@@ -96,7 +96,7 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
     // Said once the audit exists, and only then: an assumed authoring identity
     // is not refused, because it cannot be corrected after integration and
     // refusing would leave the debt undischargeable. But it is said out loud,
-    // or audit debt would look like a way around the independence rule rather
+    // or debt would look like a way around the independence rule rather
     // than a way of carrying it.
     if args.verdict == Verdict::Approved && st.latest_patchset().is_some_and(|p| p.author_assumed())
     {
@@ -109,12 +109,12 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
     // from the debt merely existing: an audit by somebody who wrote the work
     // is a legitimate record and does not settle a debt owed an independent
     // review, and saying otherwise would be the one claim a reader acts on.
-    if st.audit_debt.is_some() {
+    if st.debt.is_some() {
         let (_, after) = ctx.load_state(&store, &change_id)?;
-        if after.audit_debt_outstanding() {
+        if after.debt_outstanding() {
             println!("audit recorded; the debt still owes an independent review");
         } else {
-            println!("audit debt discharged");
+            println!("debt discharged");
         }
     }
     Ok(())

@@ -818,7 +818,7 @@ fn report_inert_approval(ctx: &Ctx, store: &Store, change_id: &str) -> Result<()
     println!("note: this approval does not gate — {reason}.");
     println!(
         "      integration will still refuse. Record the review this change owes with \
-`arc integrate {change_id} --audit-debt <reason>`, or obtain a verdict from a \
+`arc integrate {change_id} --debt <reason>`, or obtain a verdict from a \
 different actor."
     );
     Ok(())

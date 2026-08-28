@@ -188,7 +188,10 @@ fn catchup_and_doctor_report_open_worktree_usage() {
 }
 
 fn begin_change_no_helper(repo: &Repo, slug: &str) {
-    repo.arc(&repo.root).args(["begin", slug]).assert().success();
+    repo.arc(&repo.root)
+        .args(["begin", slug])
+        .assert()
+        .success();
 }
 
 pub(crate) fn doctor_reports_closed_registered_worktrees_without_removing_them() {

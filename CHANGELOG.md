@@ -10,6 +10,18 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- The review-obligation surface is named `debt` end to end: the
+  `--debt` flag on `integrate` and `query`, the `arc debt` subcommand,
+  the `debt` status fields, the `debt-outstanding`/`debt-summary`/
+  `debt-touched` advisory codes, the `debt-owed` inbox bucket, and the
+  Rust types. The tool stops using two words for one thing. Wire formats
+  that moved carry schema bumps (`arc-status/13`, `arc-chain/4`,
+  `arc-inbox/6`); the untyped `audit-debt-declared` event type is what
+  earlier builds wrote and keeps its serialized name forever, so
+  nothing already recorded is lost.
+
 ### Added
 
 - Consuming a discussion reports the two facts `arc journal discussion`

@@ -248,7 +248,7 @@ fn status_lists_messages_and_assignment_without_changing_schema() {
         .success();
 
     let status = json_stdout(repo.arc(&repo.root).args(["status", "msg-status"]));
-    assert_eq!(status["schema"], "arc-status/12");
+    assert_eq!(status["schema"], "arc-status/13");
     assert_eq!(status["assigned_to"], "codex");
     let messages = status["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 2);
@@ -320,7 +320,7 @@ fn inbox_buckets_classify_open_changes() {
     age_event(&repo, &stalled_id, "claim-set", 120);
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/5");
+    assert_eq!(inbox["schema"], "arc-inbox/6");
     assert!(bucket_has(&inbox, "needs-review", &review_id));
     assert!(bucket_has(&inbox, "changes-requested", &cr_id));
     assert!(bucket_has(&inbox, "ready-to-integrate", &ready_id));
@@ -746,7 +746,7 @@ fn every_inbox_bucket_key_is_present_when_empty() {
         "held",
         "in-progress",
         "stalled",
-        "audit-owed",
+        "debt-owed",
         "unclassified",
     ] {
         assert!(

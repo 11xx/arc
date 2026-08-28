@@ -1,7 +1,7 @@
 use super::common::*;
 
 /// The policy fixture every test here needs: self-approval refused, so the
-/// audit-debt path is the only way a single actor can ship.
+/// debt path is the only way a single actor can ship.
 fn repo_forbidding_self_approval() -> Repo {
     let repo = Repo::new();
     fs::create_dir_all(repo.root.join(".arc")).unwrap();
@@ -32,13 +32,7 @@ fn self_approved_change(repo: &Repo, slug: &str) -> PathBuf {
     worktree
 }
 
-fn integrated_audit_debt(
-    repo: &Repo,
-    slug: &str,
-    path: &str,
-    content: &str,
-    reason: &str,
-) -> String {
+fn integrated_debt(repo: &Repo, slug: &str, path: &str, content: &str, reason: &str) -> String {
     let opened = stdout(repo.arc(&repo.root).args(["begin", slug]));
     let change_id = opened_change_id(&opened);
     let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
@@ -49,7 +43,7 @@ fn integrated_audit_debt(
         .assert()
         .success();
     repo.arc(&repo.root)
-        .args(["integrate", slug, "--audit-debt", reason])
+        .args(["integrate", slug, "--debt", reason])
         .assert()
         .success();
     change_id
@@ -261,25 +255,20 @@ fn review_reports_an_approval_that_cannot_gate() {
         .assert()
         .success()
         .stdout(predicates::str::contains("does not gate"))
-        .stdout(predicates::str::contains("--audit-debt"));
+        .stdout(predicates::str::contains("--debt"));
 }
 
 /// Declaring the obligation is what unblocks integration. The requirement is
 /// carried forward, not waived.
 #[test]
-fn declared_audit_debt_lets_a_self_approved_change_integrate() {
+fn declared_debt_lets_a_self_approved_change_integrate() {
     let repo = repo_forbidding_self_approval();
     let worktree = self_approved_change(&repo, "owed");
 
     repo.arc(&worktree).args(["check", "owed"]).assert().code(3);
 
     repo.arc(&worktree)
-        .args([
-            "audit-debt",
-            "owed",
-            "--reason",
-            "no second actor reachable",
-        ])
+        .args(["debt", "owed", "--reason", "no second actor reachable"])
         .assert()
         .success();
     repo.arc(&worktree).args(["check", "owed"]).assert().code(0);
@@ -289,8 +278,8 @@ fn declared_audit_debt_lets_a_self_approved_change_integrate() {
         .success();
 
     let status = json_stdout(repo.arc(&repo.root).args(["status", "owed", "--json"]));
-    assert_eq!(status["audit_debt_outstanding"], true);
-    assert_eq!(status["audit_debt"]["reason"], "no second actor reachable");
+    assert_eq!(status["debt_outstanding"], true);
+    assert_eq!(status["debt"]["reason"], "no second actor reachable");
 }
 
 /// A waiver authorizes a merge only when it is what let the approval stand.
@@ -301,12 +290,7 @@ fn the_basis_records_a_waiver_only_when_it_authorized_the_merge() {
     let repo = repo_forbidding_self_approval();
     self_approved_change(&repo, "owed-basis");
     repo.arc(&repo.root)
-        .args([
-            "integrate",
-            "owed-basis",
-            "--audit-debt",
-            "no reviewer reachable",
-        ])
+        .args(["integrate", "owed-basis", "--debt", "no reviewer reachable"])
         .assert()
         .success();
     let event: serde_json::Value = serde_json::from_str(
@@ -339,7 +323,7 @@ fn a_waiver_beside_a_non_approval_authorizes_nothing() {
             .args(["review", "not-approved", "--verdict", "comment-only"]),
     );
     repo.arc(&repo.root)
-        .args(["audit-debt", "not-approved", "--reason", "none reachable"])
+        .args(["debt", "not-approved", "--reason", "none reachable"])
         .assert()
         .success();
     let status = json_stdout(
@@ -348,7 +332,7 @@ fn a_waiver_beside_a_non_approval_authorizes_nothing() {
     );
     assert!(
         status
-            .get("approval_waived_by_audit_debt")
+            .get("approval_waived_by_debt")
             .is_none_or(|waived| waived == false),
         "{status}"
     );
@@ -359,10 +343,10 @@ fn integrate_declares_the_debt_in_one_step() {
     let repo = repo_forbidding_self_approval();
     self_approved_change(&repo, "onestep");
     repo.arc(&repo.root)
-        .args(["integrate", "onestep", "--audit-debt", "quota exhausted"])
+        .args(["integrate", "onestep", "--debt", "quota exhausted"])
         .assert()
         .success();
-    let ids = stdout(repo.arc(&repo.root).args(["query", "--audit-debt"]));
+    let ids = stdout(repo.arc(&repo.root).args(["query", "--debt"]));
     assert!(ids.contains("onestep"), "{ids}");
 }
 
@@ -370,7 +354,7 @@ fn integrate_declares_the_debt_in_one_step() {
 /// A refused command that leaves the self-approval gate open is worse than a
 /// partial merge because its side effect is easy to miss.
 #[test]
-fn invalid_integrate_selection_does_not_declare_audit_debt() {
+fn invalid_integrate_selection_does_not_declare_debt() {
     let repo = repo_forbidding_self_approval();
     self_approved_change(&repo, "bad-selection");
 
@@ -380,7 +364,7 @@ fn invalid_integrate_selection_does_not_declare_audit_debt() {
             "bad-selection",
             "--tag",
             "#bad-selection",
-            "--audit-debt",
+            "--debt",
             "must not persist",
         ])
         .assert()
@@ -391,7 +375,7 @@ fn invalid_integrate_selection_does_not_declare_audit_debt() {
         repo.arc(&repo.root)
             .args(["status", "bad-selection", "--json"]),
     );
-    assert!(status["audit_debt"].is_null(), "{}", status["audit_debt"]);
+    assert!(status["debt"].is_null(), "{}", status["debt"]);
     repo.arc(&repo.root)
         .args(["check", "bad-selection"])
         .assert()
@@ -405,22 +389,17 @@ fn execution_roles_protect_audit_waivers_and_verdicts() {
 
     repo.arc(&worktree)
         .env("ARC_ROLE", "implementer")
-        .args([
-            "audit-debt",
-            "role-boundary",
-            "--reason",
-            "implementer waiver",
-        ])
+        .args(["debt", "role-boundary", "--reason", "implementer waiver"])
         .assert()
         .code(9);
     repo.arc(&worktree)
         .env("ARC_ROLE", "reviewer")
-        .args(["audit-debt", "role-boundary", "--reason", "reviewer waiver"])
+        .args(["debt", "role-boundary", "--reason", "reviewer waiver"])
         .assert()
         .code(9);
 
     repo.arc(&repo.root)
-        .args(["integrate", "role-boundary", "--audit-debt", "lead waiver"])
+        .args(["integrate", "role-boundary", "--debt", "lead waiver"])
         .assert()
         .success();
     repo.arc(&repo.root)
@@ -434,7 +413,7 @@ fn execution_roles_protect_audit_waivers_and_verdicts() {
         repo.arc(&repo.root)
             .args(["status", "role-boundary", "--json"]),
     );
-    assert_eq!(status["audit_debt_outstanding"], true);
+    assert_eq!(status["debt_outstanding"], true);
 }
 
 /// An audit is a distinct event, so it never rewrites what shipped with what
@@ -444,7 +423,7 @@ fn audit_discharges_the_debt_without_rewriting_the_shipped_verdict() {
     let repo = repo_forbidding_self_approval();
     self_approved_change(&repo, "audited");
     repo.arc(&repo.root)
-        .args(["integrate", "audited", "--audit-debt", "quota exhausted"])
+        .args(["integrate", "audited", "--debt", "quota exhausted"])
         .assert()
         .success();
 
@@ -462,14 +441,14 @@ fn audit_discharges_the_debt_without_rewriting_the_shipped_verdict() {
         .success();
 
     let status = json_stdout(repo.arc(&repo.root).args(["status", "audited", "--json"]));
-    assert_eq!(status["audit_debt_outstanding"], false);
+    assert_eq!(status["debt_outstanding"], false);
     assert_eq!(status["audit_verdicts"][0]["actor"], "Reviewer");
     assert_eq!(status["audit_verdicts"][0]["verdict"], "approved");
     // The shipped verdict is untouched: it is still the author's, on a patchset.
     assert_eq!(status["verdict"]["actor"], "Solo");
     assert!(status["verdict"]["patchset_id"].is_string());
 
-    let remaining = stdout(repo.arc(&repo.root).args(["query", "--audit-debt"]));
+    let remaining = stdout(repo.arc(&repo.root).args(["query", "--debt"]));
     assert!(!remaining.contains("audited"), "{remaining}");
 }
 
@@ -491,7 +470,7 @@ fn audit_findings_are_recorded_and_kept_out_of_the_shipped_findings() {
     let repo = repo_forbidding_self_approval();
     self_approved_change(&repo, "withfindings");
     repo.arc(&repo.root)
-        .args(["integrate", "withfindings", "--audit-debt", "quota"])
+        .args(["integrate", "withfindings", "--debt", "quota"])
         .assert()
         .success();
 
@@ -702,12 +681,12 @@ fn dry_run_integrate_declares_no_debt() {
     self_approved_change(&repo, "dry");
     // Blocked, because the debt that would have unblocked it was not written.
     repo.arc(&repo.root)
-        .args(["integrate", "dry", "--dry-run", "--audit-debt", "quota"])
+        .args(["integrate", "dry", "--dry-run", "--debt", "quota"])
         .assert()
         .code(3);
     let status = json_stdout(repo.arc(&repo.root).args(["status", "dry", "--json"]));
-    assert_eq!(status["audit_debt_outstanding"], false);
-    assert!(status["audit_debt"].is_null(), "{}", status["audit_debt"]);
+    assert_eq!(status["debt_outstanding"], false);
+    assert!(status["debt"].is_null(), "{}", status["debt"]);
 }
 
 /// The waiver expires the way an approval expires.
@@ -716,11 +695,11 @@ fn dry_run_integrate_declares_no_debt() {
 /// next one; otherwise a single declaration disables the policy for the rest
 /// of the change's life, and nothing about the second integration looks wrong.
 #[test]
-fn audit_debt_stops_waiving_once_a_new_patchset_lands() {
+fn debt_stops_waiving_once_a_new_patchset_lands() {
     let repo = repo_forbidding_self_approval();
     let worktree = self_approved_change(&repo, "expiring");
     repo.arc(&worktree)
-        .args(["audit-debt", "expiring", "--reason", "no reviewer"])
+        .args(["debt", "expiring", "--reason", "no reviewer"])
         .assert()
         .success()
         .stdout(predicates::str::contains("declared for ps-01"));
@@ -749,7 +728,7 @@ fn audit_debt_stops_waiving_once_a_new_patchset_lands() {
 
     // Re-declaring against the new patchset is a deliberate act, and works.
     repo.arc(&worktree)
-        .args(["audit-debt", "expiring", "--reason", "still no reviewer"])
+        .args(["debt", "expiring", "--reason", "still no reviewer"])
         .assert()
         .success()
         .stdout(predicates::str::contains("declared for ps-02"));
@@ -767,18 +746,18 @@ fn debt_declared_after_integration_carries_no_patchset() {
     stdout(repo.arc(&repo.root).args(["begin", "afterwards"]));
     complete_change(&repo, "afterwards");
     repo.arc(&repo.root)
-        .args(["audit-debt", "afterwards", "--reason", "found later"])
+        .args(["debt", "afterwards", "--reason", "found later"])
         .assert()
         .success();
     let status = json_stdout(
         repo.arc(&repo.root)
             .args(["status", "afterwards", "--json"]),
     );
-    assert_eq!(status["audit_debt_outstanding"], true);
+    assert_eq!(status["debt_outstanding"], true);
     assert!(
-        status["audit_debt"]["patchset_id"].is_null(),
+        status["debt"]["patchset_id"].is_null(),
         "{}",
-        status["audit_debt"]
+        status["debt"]
     );
 }
 
@@ -790,18 +769,18 @@ fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
     let repo = repo_forbidding_self_approval();
     self_approved_change(&repo, "queued");
     repo.arc(&repo.root)
-        .args(["integrate", "queued", "--audit-debt", "quota exhausted"])
+        .args(["integrate", "queued", "--debt", "quota exhausted"])
         .assert()
         .success();
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/5");
-    let owed = inbox["audit-owed"].as_array().unwrap();
+    assert_eq!(inbox["schema"], "arc-inbox/6");
+    let owed = inbox["debt-owed"].as_array().unwrap();
     assert_eq!(owed.len(), 1, "{owed:?}");
     assert_eq!(owed[0]["next_actor"], "reviewer");
 
     let text = stdout(repo.arc(&repo.root).args(["inbox"]));
-    assert!(text.contains("## audit-owed"), "{text}");
+    assert!(text.contains("## debt-owed"), "{text}");
 
     let filtered = json_stdout(repo.arc(&repo.root).args([
         "inbox",
@@ -810,13 +789,13 @@ fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
         "--json",
     ]));
     assert!(
-        filtered["audit-owed"].as_array().unwrap().is_empty(),
+        filtered["debt-owed"].as_array().unwrap().is_empty(),
         "{}",
-        filtered["audit-owed"]
+        filtered["debt-owed"]
     );
 
     let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
-    assert!(catchup.contains("audit-owed (1):"), "{catchup}");
+    assert!(catchup.contains("debt-owed (1):"), "{catchup}");
     assert!(catchup.contains("1 outstanding"), "{catchup}");
     assert!(catchup.contains("surfaces (1): work.txt"), "{catchup}");
     assert!(catchup.contains("arc audit"), "{catchup}");
@@ -828,7 +807,7 @@ fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
         .assert()
         .success();
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert!(inbox["audit-owed"].as_array().unwrap().is_empty());
+    assert!(inbox["debt-owed"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -836,7 +815,7 @@ fn doctor_reports_an_undischarged_obligation() {
     let repo = repo_forbidding_self_approval();
     self_approved_change(&repo, "unaudited");
     repo.arc(&repo.root)
-        .args(["integrate", "unaudited", "--audit-debt", "no reviewer"])
+        .args(["integrate", "unaudited", "--debt", "no reviewer"])
         .assert()
         .success();
     let report = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
@@ -846,14 +825,14 @@ fn doctor_reports_an_undischarged_obligation() {
         .iter()
         .map(|item| item["code"].as_str().unwrap())
         .collect();
-    assert!(codes.contains(&"audit-debt-outstanding"), "{codes:?}");
+    assert!(codes.contains(&"debt-outstanding"), "{codes:?}");
 }
 
 #[test]
 fn catchup_and_doctor_aggregate_outstanding_debt() {
     let repo = Repo::new();
     for index in 1..=10 {
-        integrated_audit_debt(
+        integrated_debt(
             &repo,
             &format!("summary-{index}"),
             &format!("surface-{index}.rs"),
@@ -866,7 +845,7 @@ fn catchup_and_doctor_aggregate_outstanding_debt() {
     assert_eq!(
         catchup
             .lines()
-            .filter(|line| line.starts_with("audit-owed ("))
+            .filter(|line| line.starts_with("debt-owed ("))
             .count(),
         1,
         "{catchup}"
@@ -881,7 +860,7 @@ fn catchup_and_doctor_aggregate_outstanding_debt() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|finding| finding["code"] == "audit-debt-outstanding")
+        .filter(|finding| finding["code"] == "debt-outstanding")
         .collect::<Vec<_>>();
     assert_eq!(debts.len(), 1, "{report}");
     assert!(debts[0]["detail"]
@@ -903,7 +882,7 @@ fn debt_summary_threshold_is_strict_and_opt_in() {
     git(&repo.root, &["commit", "-m", "policy"]);
 
     for index in 1..=5 {
-        integrated_audit_debt(
+        integrated_debt(
             &repo,
             &format!("threshold-{index}"),
             &format!("threshold-{index}.rs"),
@@ -916,7 +895,7 @@ fn debt_summary_threshold_is_strict_and_opt_in() {
     let at_limit_doctor = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
     assert!(!at_limit_doctor.to_string().contains("priority: advisory"));
 
-    integrated_audit_debt(
+    integrated_debt(
         &repo,
         "threshold-6",
         "threshold-6.rs",
@@ -929,7 +908,7 @@ fn debt_summary_threshold_is_strict_and_opt_in() {
     assert!(over_limit_doctor.to_string().contains("priority: advisory"));
 
     let no_threshold = Repo::new();
-    integrated_audit_debt(
+    integrated_debt(
         &no_threshold,
         "no-threshold",
         "no-threshold.rs",
@@ -948,7 +927,7 @@ fn debt_summary_threshold_is_strict_and_opt_in() {
     .unwrap();
     git(&age_threshold.root, &["add", ".arc/policy.toml"]);
     git(&age_threshold.root, &["commit", "-m", "policy"]);
-    let aged = integrated_audit_debt(
+    let aged = integrated_debt(
         &age_threshold,
         "age-threshold",
         "age-threshold.rs",
@@ -965,7 +944,7 @@ fn debt_summary_threshold_is_strict_and_opt_in() {
 #[test]
 fn touched_debt_is_named_on_check_and_catchup_only_for_intersecting_diffs() {
     let repo = Repo::new();
-    let debt = integrated_audit_debt(
+    let debt = integrated_debt(
         &repo,
         "debt-source",
         "shared.rs",
@@ -1019,7 +998,7 @@ fn touched_debt_is_named_on_check_and_catchup_only_for_intersecting_diffs() {
     assert!(!untouched_check.contains(&debt), "{untouched_check}");
 
     let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
-    assert!(catchup.contains(&format!("audit debt {debt}")), "{catchup}");
+    assert!(catchup.contains(&format!("debt {debt}")), "{catchup}");
     assert!(catchup.contains("deferred shared invariant"), "{catchup}");
     let untouched_line = catchup
         .lines()
@@ -1039,7 +1018,7 @@ fn audit_findings_are_listed_separately_and_pointed_at() {
     let repo = repo_forbidding_self_approval();
     self_approved_change(&repo, "readable");
     repo.arc(&repo.root)
-        .args(["integrate", "readable", "--audit-debt", "quota"])
+        .args(["integrate", "readable", "--debt", "quota"])
         .assert()
         .success();
     let path = repo.home.join("f.json");
@@ -1132,7 +1111,7 @@ fn audit_dispositions_do_not_reopen_shipped_findings_after_integration() {
         .find_map(|line| line.strip_prefix("finding: "))
         .unwrap();
     repo.arc(&repo.root)
-        .args(["integrate", "shipped-finding", "--audit-debt", "quota"])
+        .args(["integrate", "shipped-finding", "--debt", "quota"])
         .assert()
         .success();
 
@@ -1152,11 +1131,11 @@ fn audit_dispositions_do_not_reopen_shipped_findings_after_integration() {
 /// Without this the mechanism is decorative: a change ships on a
 /// self-approval and then clears its own obligation.
 #[test]
-fn an_author_cannot_discharge_its_own_audit_debt_by_approving() {
+fn an_author_cannot_discharge_its_own_debt_by_approving() {
     let repo = repo_forbidding_self_approval();
     self_approved_change(&repo, "selfaudit");
     repo.arc(&repo.root)
-        .args(["integrate", "selfaudit", "--audit-debt", "quota"])
+        .args(["integrate", "selfaudit", "--debt", "quota"])
         .assert()
         .success();
 
@@ -1172,7 +1151,7 @@ fn an_author_cannot_discharge_its_own_audit_debt_by_approving() {
 
     // The obligation survives the refusal.
     let status = json_stdout(repo.arc(&repo.root).args(["status", "selfaudit", "--json"]));
-    assert_eq!(status["audit_debt_outstanding"], true);
+    assert_eq!(status["debt_outstanding"], true);
 
     // Raising problems needs no independence.
     repo.arc(&repo.root)
@@ -1188,7 +1167,7 @@ fn an_author_cannot_discharge_its_own_audit_debt_by_approving() {
         .assert()
         .success();
     let status = json_stdout(repo.arc(&repo.root).args(["status", "selfaudit", "--json"]));
-    assert_eq!(status["audit_debt_outstanding"], false);
+    assert_eq!(status["debt_outstanding"], false);
 }
 
 /// Bundle import must classify audit events as typed so replay validation
@@ -1198,7 +1177,7 @@ fn audit_events_survive_a_bundle_round_trip() {
     let repo = repo_forbidding_self_approval();
     self_approved_change(&repo, "roundtrip");
     repo.arc(&repo.root)
-        .args(["integrate", "roundtrip", "--audit-debt", "quota"])
+        .args(["integrate", "roundtrip", "--debt", "quota"])
         .assert()
         .success();
     let bundle = repo.home.join("bundle.json");
@@ -1225,9 +1204,9 @@ fn audit_events_survive_a_bundle_round_trip() {
                 .arc(&destination.root)
                 .args(["status", "roundtrip", "--json"]),
         );
-    assert_eq!(status["audit_debt_outstanding"], true);
-    assert_eq!(status["audit_debt"]["reason"], "quota");
-    assert_eq!(status["audit_debt"]["patchset_id"], "ps-01");
+    assert_eq!(status["debt_outstanding"], true);
+    assert_eq!(status["debt"]["reason"], "quota");
+    assert_eq!(status["debt"]["patchset_id"], "ps-01");
     // A debt written today round-trips as the typed record, not as the
     // untyped one earlier builds wrote.
     let log = stdout(
@@ -1247,23 +1226,23 @@ fn an_open_change_with_a_debt_is_not_yet_owed_work() {
     let repo = repo_forbidding_self_approval();
     let worktree = self_approved_change(&repo, "pending");
     repo.arc(&worktree)
-        .args(["audit-debt", "pending", "--reason", "no reviewer"])
+        .args(["debt", "pending", "--reason", "no reviewer"])
         .assert()
         .success();
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
     assert!(
-        inbox["audit-owed"].as_array().unwrap().is_empty(),
+        inbox["debt-owed"].as_array().unwrap().is_empty(),
         "{}",
-        inbox["audit-owed"]
+        inbox["debt-owed"]
     );
-    assert!(stdout(repo.arc(&repo.root).args(["query", "--audit-debt"]))
+    assert!(stdout(repo.arc(&repo.root).args(["query", "--debt"]))
         .trim()
         .is_empty());
 
     // The waiver is still visible where it matters: it is why check passes.
     let status = json_stdout(repo.arc(&worktree).args(["status", "pending", "--json"]));
-    assert_eq!(status["audit_debt"]["patchset_id"], "ps-01");
+    assert_eq!(status["debt"]["patchset_id"], "ps-01");
     repo.arc(&worktree)
         .args(["check", "pending"])
         .assert()
@@ -1275,7 +1254,7 @@ fn an_open_change_with_a_debt_is_not_yet_owed_work() {
         .assert()
         .success();
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["audit-owed"].as_array().unwrap().len(), 1);
+    assert_eq!(inbox["debt-owed"].as_array().unwrap().len(), 1);
 }
 
 /// A change with no verdict at all, so the gate is unmet for want of a review
@@ -1293,7 +1272,7 @@ fn unreviewed_change(repo: &Repo, slug: &str) -> PathBuf {
 }
 
 /// The waiver stands in for a verdict nobody recorded, in the same invocation
-/// that declares it. Before this, `integrate --audit-debt` recorded the
+/// that declares it. Before this, `integrate --debt` recorded the
 /// obligation and refused anyway, so the only way through was to first record a
 /// self-approval nobody believed and waive that — a worse record than none.
 #[test]
@@ -1309,12 +1288,7 @@ fn a_declared_debt_stands_in_for_a_verdict_nobody_recorded() {
 
     // One invocation: the merge happens and the obligation is recorded.
     repo.arc(&repo.root)
-        .args([
-            "integrate",
-            "unreviewed",
-            "--audit-debt",
-            "no reviewer reachable",
-        ])
+        .args(["integrate", "unreviewed", "--debt", "no reviewer reachable"])
         .assert()
         .success();
 
@@ -1322,14 +1296,14 @@ fn a_declared_debt_stands_in_for_a_verdict_nobody_recorded() {
         repo.arc(&repo.root)
             .args(["status", "unreviewed", "--json"]),
     );
-    assert_eq!(status["audit_debt_outstanding"], true, "{status}");
+    assert_eq!(status["debt_outstanding"], true, "{status}");
     assert_eq!(
-        status["audit_debt"]["reason"], "no reviewer reachable",
+        status["debt"]["reason"], "no reviewer reachable",
         "{status}"
     );
     // The merge rested on the waiver and the status says so, so a reader cannot
     // mistake it for a change that was independently approved.
-    assert_eq!(status["approval_waived_by_audit_debt"], true, "{status}");
+    assert_eq!(status["approval_waived_by_debt"], true, "{status}");
 }
 
 /// A waiver defers a review nobody has done. It does not overrule one that was
@@ -1354,7 +1328,7 @@ fn a_declared_debt_does_not_overrule_a_reviewer_who_refused() {
         .success();
 
     repo.arc(&repo.root)
-        .args(["audit-debt", "refused", "--reason", "shipping anyway"])
+        .args(["debt", "refused", "--reason", "shipping anyway"])
         .assert()
         .success();
 
@@ -1371,7 +1345,7 @@ fn a_declared_debt_does_not_overrule_a_reviewer_who_refused() {
 
     let status = json_stdout(repo.arc(&repo.root).args(["status", "refused", "--json"]));
     // Absent or false — either way the waiver authorized nothing here.
-    assert_ne!(status["approval_waived_by_audit_debt"], true, "{status}");
+    assert_ne!(status["approval_waived_by_debt"], true, "{status}");
     assert_eq!(status["ready_reason"], "no-valid-approval", "{status}");
 }
 
@@ -1384,7 +1358,7 @@ fn a_declared_debt_does_not_overrule_a_stale_approval() {
     let worktree = self_approved_change(&repo, "stale-waiver");
     repo.arc(&repo.root)
         .args([
-            "audit-debt",
+            "debt",
             "stale-waiver",
             "--reason",
             "review the recorded patchset later",
@@ -1404,7 +1378,7 @@ fn a_declared_debt_does_not_overrule_a_stale_approval() {
             .args(["status", "stale-waiver", "--json"]),
     );
     assert_eq!(status["head_matches_latest_patchset"], false, "{status}");
-    assert_ne!(status["approval_waived_by_audit_debt"], true, "{status}");
+    assert_ne!(status["approval_waived_by_debt"], true, "{status}");
     assert_eq!(status["ready_reason"], "no-valid-approval", "{status}");
     repo.arc(&worktree)
         .args(["check", "stale-waiver"])
@@ -1811,7 +1785,7 @@ fn an_independent_verdict_on_the_shipped_patchset_discharges_the_debt() {
 
     // The debt is declared while no reviewer is reachable.
     repo.arc(&repo.root)
-        .args(["audit-debt", "reviewed-early", "--reason", "none reachable"])
+        .args(["debt", "reviewed-early", "--reason", "none reachable"])
         .assert()
         .success();
 
@@ -1838,18 +1812,18 @@ fn an_independent_verdict_on_the_shipped_patchset_discharges_the_debt() {
             .args(["status", "reviewed-early", "--json"]),
     );
     assert_eq!(
-        status["audit_debt_outstanding"], false,
+        status["debt_outstanding"], false,
         "an independent verdict on the shipped patchset is the review the debt owed"
     );
     assert_eq!(
-        status["audit_debt"]["discharged_by"]["model"], "gpt-5.6-premerge#high",
+        status["debt"]["discharged_by"]["model"], "gpt-5.6-premerge#high",
         "{status}"
     );
     assert!(
         stdout(repo.arc(&repo.root).args(["show", "reviewed-early"]))
             .contains("Discharged by: Reviewer (gpt-5.6-premerge#high)")
     );
-    let remaining = stdout(repo.arc(&repo.root).args(["query", "--audit-debt"]));
+    let remaining = stdout(repo.arc(&repo.root).args(["query", "--debt"]));
     assert!(!remaining.contains("reviewed-early"), "{remaining}");
 }
 
@@ -1860,13 +1834,13 @@ fn the_authors_own_verdict_does_not_discharge_the_debt() {
     let repo = repo_forbidding_self_approval();
     self_approved_change(&repo, "self-only");
     repo.arc(&repo.root)
-        .args(["integrate", "self-only", "--audit-debt", "none reachable"])
+        .args(["integrate", "self-only", "--debt", "none reachable"])
         .assert()
         .success();
 
     let status = json_stdout(repo.arc(&repo.root).args(["status", "self-only", "--json"]));
     assert_eq!(
-        status["audit_debt_outstanding"], true,
+        status["debt_outstanding"], true,
         "the author's approval is precisely what the debt stands in for"
     );
 }
@@ -1879,12 +1853,7 @@ fn an_assumed_identity_does_not_discharge_the_debt() {
     let repo = repo_forbidding_self_approval();
     self_approved_change(&repo, "assumed-auditor");
     repo.arc(&repo.root)
-        .args([
-            "integrate",
-            "assumed-auditor",
-            "--audit-debt",
-            "none reachable",
-        ])
+        .args(["integrate", "assumed-auditor", "--debt", "none reachable"])
         .assert()
         .success();
 
@@ -1906,7 +1875,7 @@ fn an_assumed_identity_does_not_discharge_the_debt() {
             .args(["status", "assumed-auditor", "--json"]),
     );
     assert_eq!(
-        status["audit_debt_outstanding"], true,
+        status["debt_outstanding"], true,
         "an identity arc invented cannot settle a debt owed an independent review"
     );
 
@@ -1927,7 +1896,7 @@ fn an_assumed_identity_does_not_discharge_the_debt() {
         repo.arc(&repo.root)
             .args(["status", "assumed-auditor", "--json"]),
     );
-    assert_eq!(status["audit_debt_outstanding"], false, "{status}");
+    assert_eq!(status["debt_outstanding"], false, "{status}");
 }
 
 /// A verdict on an earlier draft judged something other than what shipped.
@@ -1954,13 +1923,13 @@ fn a_verdict_on_a_superseded_patchset_does_not_discharge_the_debt() {
         .assert()
         .success();
     repo.arc(&repo.root)
-        .args(["integrate", "moved-on", "--audit-debt", "shipping now"])
+        .args(["integrate", "moved-on", "--debt", "shipping now"])
         .assert()
         .success();
 
     let status = json_stdout(repo.arc(&repo.root).args(["status", "moved-on", "--json"]));
     assert_eq!(
-        status["audit_debt_outstanding"], true,
+        status["debt_outstanding"], true,
         "the independent verdict judged an earlier revision than the one that shipped"
     );
 }
@@ -2631,7 +2600,7 @@ fn an_approval_of_another_patchset_does_not_corroborate() {
 }
 
 #[test]
-fn integrate_audit_debt_records_missing_review_and_model_coverage() {
+fn integrate_debt_records_missing_review_and_model_coverage() {
     let repo = repo_forbidding_self_approval();
     let worktree = snapshotted_change(&repo, "typed-coverage");
     repo.arc(&worktree)
@@ -2650,7 +2619,7 @@ fn integrate_audit_debt_records_missing_review_and_model_coverage() {
         .args([
             "integrate",
             "typed-coverage",
-            "--audit-debt",
+            "--debt",
             "reviewer unavailable",
         ])
         .assert()
@@ -2676,7 +2645,7 @@ fn integrate_audit_debt_records_missing_review_and_model_coverage() {
             .args(["status", "typed-coverage", "--json"]),
     );
     assert_eq!(
-        status["audit_debt"]["coverage"][0]["model"], "gpt-5.6-luna#max",
+        status["debt"]["coverage"][0]["model"], "gpt-5.6-luna#max",
         "{status}"
     );
     let human = stdout(repo.arc(&repo.root).args(["show", "typed-coverage"]));
@@ -2685,7 +2654,7 @@ fn integrate_audit_debt_records_missing_review_and_model_coverage() {
 }
 
 #[test]
-fn audit_debt_coverage_preserves_an_unrecorded_model() {
+fn debt_coverage_preserves_an_unrecorded_model() {
     let repo = repo_forbidding_self_approval();
     let worktree = snapshotted_change(&repo, "unrecorded-model");
     repo.arc(&worktree)
@@ -2697,7 +2666,7 @@ fn audit_debt_coverage_preserves_an_unrecorded_model() {
         .args([
             "integrate",
             "unrecorded-model",
-            "--audit-debt",
+            "--debt",
             "reviewer unavailable",
         ])
         .assert()
@@ -2707,7 +2676,7 @@ fn audit_debt_coverage_preserves_an_unrecorded_model() {
         repo.arc(&repo.root)
             .args(["status", "unrecorded-model", "--json"]),
     );
-    let coverage = status["audit_debt"]["coverage"].as_array().unwrap();
+    let coverage = status["debt"]["coverage"].as_array().unwrap();
     assert_eq!(coverage.len(), 1, "{status}");
     assert_eq!(coverage[0]["reviewer"], "Solo", "{status}");
     assert!(coverage[0].get("model").is_none(), "{status}");
@@ -2717,14 +2686,14 @@ fn audit_debt_coverage_preserves_an_unrecorded_model() {
 }
 
 #[test]
-fn audit_debt_without_verdicts_has_empty_coverage() {
+fn debt_without_verdicts_has_empty_coverage() {
     let repo = repo_forbidding_self_approval();
     snapshotted_change(&repo, "empty-coverage");
     repo.arc(&repo.root)
         .args([
             "integrate",
             "empty-coverage",
-            "--audit-debt",
+            "--debt",
             "no reviewer reached the change",
         ])
         .assert()
@@ -2734,12 +2703,9 @@ fn audit_debt_without_verdicts_has_empty_coverage() {
         repo.arc(&repo.root)
             .args(["status", "empty-coverage", "--json"]),
     );
-    assert_eq!(
-        status["audit_debt"]["missing"], "independent-review",
-        "{status}"
-    );
+    assert_eq!(status["debt"]["missing"], "independent-review", "{status}");
     assert!(
-        status["audit_debt"]["coverage"]
+        status["debt"]["coverage"]
             .as_array()
             .is_some_and(Vec::is_empty),
         "{status}"
@@ -2756,7 +2722,7 @@ fn a_later_audit_discharge_records_its_model_beside_the_debt() {
         .args([
             "integrate",
             "model-discharge",
-            "--audit-debt",
+            "--debt",
             "reviewer unavailable",
         ])
         .assert()
@@ -2778,13 +2744,13 @@ fn a_later_audit_discharge_records_its_model_beside_the_debt() {
         repo.arc(&repo.root)
             .args(["status", "model-discharge", "--json"]),
     );
-    assert_eq!(status["audit_debt_outstanding"], false, "{status}");
+    assert_eq!(status["debt_outstanding"], false, "{status}");
     assert_eq!(
-        status["audit_debt"]["discharged_by"]["reviewer"], "Reviewer",
+        status["debt"]["discharged_by"]["reviewer"], "Reviewer",
         "{status}"
     );
     assert_eq!(
-        status["audit_debt"]["discharged_by"]["model"], "gpt-5.6-auditor#high",
+        status["debt"]["discharged_by"]["model"], "gpt-5.6-auditor#high",
         "{status}"
     );
     assert_eq!(
@@ -2799,16 +2765,11 @@ fn a_later_audit_discharge_records_its_model_beside_the_debt() {
 }
 
 #[test]
-fn a_legacy_audit_debt_event_still_discharge_and_render_without_typed_fields() {
+fn a_legacy_debt_event_still_discharge_and_render_without_typed_fields() {
     let repo = repo_forbidding_self_approval();
     let (change_id, _) = snapshotted_change_with_id(&repo, "legacy-debt");
     repo.arc(&repo.root)
-        .args([
-            "integrate",
-            "legacy-debt",
-            "--audit-debt",
-            "reviewer unavailable",
-        ])
+        .args(["integrate", "legacy-debt", "--debt", "reviewer unavailable"])
         .assert()
         .success();
 
@@ -2822,9 +2783,9 @@ fn a_legacy_audit_debt_event_still_discharge_and_render_without_typed_fields() {
         repo.arc(&repo.root)
             .args(["status", "legacy-debt", "--json"]),
     );
-    assert_eq!(before["audit_debt_outstanding"], true, "{before}");
-    assert!(before["audit_debt"].get("missing").is_none(), "{before}");
-    assert!(before["audit_debt"].get("coverage").is_none(), "{before}");
+    assert_eq!(before["debt_outstanding"], true, "{before}");
+    assert!(before["debt"].get("missing").is_none(), "{before}");
+    assert!(before["debt"].get("coverage").is_none(), "{before}");
     let human_before = stdout(repo.arc(&repo.root).args(["show", "legacy-debt"]));
     assert!(human_before.contains("Record: legacy"), "{human_before}");
     assert!(!human_before.contains("Missing:"), "{human_before}");
@@ -2847,11 +2808,11 @@ fn a_legacy_audit_debt_event_still_discharge_and_render_without_typed_fields() {
         repo.arc(&repo.root)
             .args(["status", "legacy-debt", "--json"]),
     );
-    assert_eq!(after["audit_debt_outstanding"], false, "{after}");
-    assert!(after["audit_debt"].get("missing").is_none(), "{after}");
-    assert!(after["audit_debt"].get("coverage").is_none(), "{after}");
+    assert_eq!(after["debt_outstanding"], false, "{after}");
+    assert!(after["debt"].get("missing").is_none(), "{after}");
+    assert!(after["debt"].get("coverage").is_none(), "{after}");
     assert_eq!(
-        after["audit_debt"]["discharged_by"]["model"], "gpt-5.6-legacy-auditor",
+        after["debt"]["discharged_by"]["model"], "gpt-5.6-legacy-auditor",
         "{after}"
     );
     let human_after = stdout(repo.arc(&repo.root).args(["show", "legacy-debt"]));

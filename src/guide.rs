@@ -225,7 +225,7 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   a directory, since declared paths are matched against changed files.
 
   If no independent verdict is available, integrate with
-  `arc integrate <change> --audit-debt "<why>"`. The debt can stand in for an
+  `arc integrate <change> --debt "<why>"`. The debt can stand in for an
   absent verdict or rescue a self-approval rejected by repository policy. It
   binds to the exact patchset head declared, so new work needs a new
   declaration — it does not excuse the rest of the change's life.
@@ -257,9 +257,9 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
 
   Coming back to owed work:
 
-    arc inbox                       audit-owed bucket, including closed changes
+    arc inbox                       debt-owed bucket, including closed changes
     arc catchup                     the same, with each reason
-    arc query --audit-debt          change IDs alone, for scripting
+    arc query --debt                change IDs alone, for scripting
     arc query --provisional         approvals still owed corroboration
     arc diff <change> --integrated  the exact range that landed, for an audit
     arc audit <change> --verdict <v>          record a post-integration review

@@ -2,7 +2,7 @@ use super::*;
 use chrono::{DateTime, Utc};
 
 #[derive(Debug)]
-struct AuditDebtEntry {
+struct DebtEntry {
     change_id: String,
     title: String,
     reason: String,
@@ -10,7 +10,7 @@ struct AuditDebtEntry {
     surfaces: Vec<String>,
 }
 
-impl AuditDebtEntry {
+impl DebtEntry {
     fn surface_detail(&self) -> String {
         if self.surfaces.is_empty() {
             "unknown".to_string()
@@ -31,14 +31,14 @@ impl AuditDebtEntry {
 }
 
 #[derive(Debug)]
-pub(crate) struct AuditDebtSummary {
-    entries: Vec<AuditDebtEntry>,
+pub(crate) struct DebtSummary {
+    entries: Vec<DebtEntry>,
     oldest_age_seconds: u64,
     surfaces: Vec<String>,
     priority_advisory: bool,
 }
 
-impl AuditDebtSummary {
+impl DebtSummary {
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -66,14 +66,14 @@ impl AuditDebtSummary {
     pub(crate) fn render_summary(&self) {
         if !self.is_empty() {
             println!(
-                "audit-owed ({}): {}; discharge with: arc audit <change> --verdict <v>",
+                "debt-owed ({}): {}; discharge with: arc audit <change> --verdict <v>",
                 self.entries.len(),
                 self.detail()
             );
         }
     }
 
-    fn touching<'a>(&'a self, ctx: &Ctx, state: &ChangeState) -> Vec<&'a AuditDebtEntry> {
+    fn touching<'a>(&'a self, ctx: &Ctx, state: &ChangeState) -> Vec<&'a DebtEntry> {
         let changed = change_surfaces(ctx, state);
         if changed.is_empty() {
             return Vec::new();
@@ -91,7 +91,7 @@ impl AuditDebtSummary {
 
     pub(crate) fn render_touched(&self, ctx: &Ctx, state: &ChangeState) {
         for entry in self.touching(ctx, state) {
-            println!("    audit debt {}", entry.detail());
+            println!("    debt {}", entry.detail());
         }
     }
 
@@ -104,12 +104,12 @@ impl AuditDebtSummary {
             return Vec::new();
         }
         let mut advisories = vec![crate::status::Advisory {
-            code: "audit-debt-summary",
+            code: "debt-summary",
             detail: self.detail(),
         }];
         for entry in self.touching(ctx, state) {
             advisories.push(crate::status::Advisory {
-                code: "audit-debt-touched",
+                code: "debt-touched",
                 detail: entry.detail(),
             });
         }
@@ -117,25 +117,21 @@ impl AuditDebtSummary {
     }
 }
 
-pub(crate) fn collect_audit_debts(
+pub(crate) fn collect_debts(
     ctx: &Ctx,
     states: &BTreeMap<String, ChangeState>,
-) -> Result<AuditDebtSummary> {
+) -> Result<DebtSummary> {
     let mut entries = Vec::new();
     for state in states.values() {
-        let Some(debt) = state
-            .audit_debt
-            .as_ref()
-            .filter(|_| state.audit_debt_outstanding())
-        else {
+        let Some(debt) = state.debt.as_ref().filter(|_| state.debt_outstanding()) else {
             continue;
         };
-        entries.push(AuditDebtEntry {
+        entries.push(DebtEntry {
             change_id: state.change_id.clone(),
             title: state.title.clone(),
             reason: debt.reason.clone(),
             declared_at: debt.declared_at,
-            surfaces: audit_debt_surfaces(ctx, state, debt),
+            surfaces: debt_surfaces(ctx, state, debt),
         });
     }
     entries.sort_by(|a, b| a.change_id.cmp(&b.change_id));
@@ -165,7 +161,7 @@ pub(crate) fn collect_audit_debts(
                 .debt_age_threshold_seconds
                 .is_some_and(|threshold| oldest_age_seconds > threshold)
     };
-    Ok(AuditDebtSummary {
+    Ok(DebtSummary {
         entries,
         oldest_age_seconds,
         surfaces: surfaces.into_iter().collect(),
@@ -173,11 +169,7 @@ pub(crate) fn collect_audit_debts(
     })
 }
 
-fn audit_debt_surfaces(
-    ctx: &Ctx,
-    state: &ChangeState,
-    debt: &crate::state::AuditDebt,
-) -> Vec<String> {
+fn debt_surfaces(ctx: &Ctx, state: &ChangeState, debt: &crate::state::Debt) -> Vec<String> {
     let range = state
         .closure
         .as_ref()
@@ -540,7 +532,7 @@ fn collect_inbox(
             }
         }
         // An audit obligation is the one queue item that survives closure.
-        inbox.absorb_audit_debt(state);
+        inbox.absorb_debt(state);
         if state.is_closed() {
             continue;
         }
@@ -603,7 +595,7 @@ pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
 }
 
 /// Outstanding review obligations as one actionable summary row.
-fn render_audit_debts(summary: &AuditDebtSummary) {
+fn render_debts(summary: &DebtSummary) {
     summary.render_summary();
 }
 
@@ -698,7 +690,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     }
 
     let states = ctx.load_all_states(&store)?;
-    let debts = collect_audit_debts(ctx, &states)?;
+    let debts = collect_debts(ctx, &states)?;
     let review_queue = collect_review_queue(&store, &states)?;
     let worktrees = crate::worktree_usage::measure(&ctx.cwd, &states);
     println!("ledger: {}", store.root.display());
@@ -707,7 +699,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     for (name, rows) in inbox.sections() {
         // Owed audits are rendered below as one summary, while touched debts
         // are attached to the change whose diff can carry them forward.
-        if rows.is_empty() || name == "audit-owed" {
+        if rows.is_empty() || name == "debt-owed" {
             continue;
         }
         any = true;
@@ -728,7 +720,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         println!("  no open changes");
     }
     render_worktree_accounting(&worktrees);
-    render_audit_debts(&debts);
+    render_debts(&debts);
     match journal {
         Ok(journal) => journal.render(),
         Err(error) => println!("journal: unavailable ({error:#})"),

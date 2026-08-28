@@ -3,7 +3,7 @@ use crate::state::{ChangeState, ClaimIdentity};
 use crate::status::{ClaimStatus, StatusReport};
 use serde::Serialize;
 
-pub const INBOX_SCHEMA: &str = "arc-inbox/5";
+pub const INBOX_SCHEMA: &str = "arc-inbox/6";
 
 /// The journal's actionable backlog, carried beside the ledger buckets.
 ///
@@ -59,7 +59,7 @@ pub struct InboxRow {
     pub reason: Option<String>,
 }
 
-/// The `arc-inbox/5` rollup: a lead-facing queue derived entirely from
+/// The `arc-inbox/6` rollup: a lead-facing queue derived entirely from
 /// existing ledger + Git state. A change may appear in more than one bucket
 /// when it is genuinely in more than one actionable state (e.g. blocked and
 /// awaiting review); each bucket is computed independently.
@@ -85,8 +85,8 @@ pub struct Inbox {
     /// integrated changes: the obligation outlives the change, and a queue
     /// that dropped it at closure would lose exactly the work it exists to
     /// track.
-    #[serde(rename = "audit-owed")]
-    pub audit_owed: Vec<InboxRow>,
+    #[serde(rename = "debt-owed")]
+    pub debt_owed: Vec<InboxRow>,
     /// Open changes no other bucket claimed. Every bucket is an independent
     /// predicate, so a state none of them anticipated lands nowhere and the
     /// queue reports empty while work waits. This bucket makes that failure
@@ -116,7 +116,7 @@ impl Inbox {
             held: Vec::new(),
             in_progress: Vec::new(),
             stalled: Vec::new(),
-            audit_owed: Vec::new(),
+            debt_owed: Vec::new(),
             unclassified: Vec::new(),
         }
     }
@@ -132,7 +132,7 @@ impl Inbox {
             ("held", &self.held),
             ("in-progress", &self.in_progress),
             ("stalled", &self.stalled),
-            ("audit-owed", &self.audit_owed),
+            ("debt-owed", &self.debt_owed),
             ("unclassified", &self.unclassified),
         ]
     }
@@ -241,7 +241,7 @@ impl Inbox {
             .sort_by_key(|row| std::cmp::Reverse(row.priority));
         self.stalled
             .sort_by_key(|row| std::cmp::Reverse(row.priority));
-        self.audit_owed
+        self.debt_owed
             .sort_by_key(|row| std::cmp::Reverse(row.priority));
         self.unclassified
             .sort_by_key(|row| std::cmp::Reverse(row.priority));
@@ -249,11 +249,11 @@ impl Inbox {
 
     /// Record a change that owes a review. Called for closed changes too, so
     /// it stands apart from `absorb`, which only sees open work.
-    pub fn absorb_audit_debt(&mut self, state: &ChangeState) {
-        if !state.audit_debt_outstanding() {
+    pub fn absorb_debt(&mut self, state: &ChangeState) {
+        if !state.debt_outstanding() {
             return;
         }
-        self.audit_owed.push(InboxRow {
+        self.debt_owed.push(InboxRow {
             change_id: state.change_id.clone(),
             title: state.title.clone(),
             priority: state.priority,

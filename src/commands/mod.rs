@@ -37,7 +37,7 @@ use crate::state::{self, ChangeState};
 use crate::status::{self, StatusReport};
 use crate::store::{Store, TransitionLock};
 use anyhow::{bail, Context, Result};
-pub use audit::{audit, declare_audit_debt, AuditArgs};
+pub use audit::{audit, declare_debt, AuditArgs};
 pub use bundle_io::{export_bundle, import_bundle};
 pub use chain::chain;
 pub use changelog::changelog;
@@ -612,7 +612,7 @@ pub struct QueryArgs {
     pub actor: Option<String>,
     pub harness: Option<String>,
     /// Only changes carrying an undischarged review obligation.
-    pub audit_debt: bool,
+    pub debt: bool,
     /// Only changes whose gating approval is still owed corroboration.
     pub provisional: bool,
     pub json: bool,
@@ -720,7 +720,7 @@ mod tests {
             verdicts: Vec::new(),
             audit_verdicts: Vec::new(),
             audit_findings: Default::default(),
-            audit_debt: None,
+            debt: None,
             blocked_on_stages: Vec::new(),
             verifications: Vec::new(),
             verification_runs: Vec::new(),

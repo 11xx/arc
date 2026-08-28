@@ -293,7 +293,7 @@ struct ProjectBacklog {
     anchor: String,
     /// Changes whose next step is a verdict rather than more work.
     needs_review: Vec<String>,
-    audit_owed: Vec<String>,
+    debt_owed: Vec<String>,
     open_items: usize,
     later_items: usize,
     feature_requests: usize,
@@ -317,7 +317,7 @@ struct BacklogItems {
 impl ProjectBacklog {
     /// Whether anything here is waiting on a person rather than on work.
     fn blocked(&self) -> usize {
-        self.needs_review.len() + self.audit_owed.len()
+        self.needs_review.len() + self.debt_owed.len()
     }
 
     fn is_empty(&self) -> bool {
@@ -376,7 +376,7 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
             .clone()
             .expect("a reachable project has an anchor");
 
-        let (needs_review, audit_owed) = match &project.ledger {
+        let (needs_review, debt_owed) = match &project.ledger {
             Some(root) => ledger_queues(root)?,
             None => (Vec::new(), Vec::new()),
         };
@@ -413,7 +413,7 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
             project: project.label(),
             anchor: anchor.display().to_string(),
             needs_review,
-            audit_owed,
+            debt_owed,
             open_items,
             later_items,
             feature_requests,
@@ -460,8 +460,8 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
         for change in &project.needs_review {
             println!("  needs-review  {change}");
         }
-        for change in &project.audit_owed {
-            println!("  audit-owed    {change}");
+        for change in &project.debt_owed {
+            println!("  debt-owed    {change}");
         }
         let age = match project.oldest_open_days {
             Some(days) => format!(", oldest {days}d"),
@@ -503,20 +503,20 @@ fn ledger_queues(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
     };
     let states = repo_states(&store)?;
     let mut needs_review = Vec::new();
-    let mut audit_owed = Vec::new();
+    let mut debt_owed = Vec::new();
     for state in states.values() {
         // Audit debt outlives integration, so it is asked of every change;
         // a review verdict is only owed while the change is still open.
-        if state.audit_debt_outstanding() {
-            audit_owed.push(state.change_id.clone());
+        if state.debt_outstanding() {
+            debt_owed.push(state.change_id.clone());
         }
         if !state.is_closed() && crate::inbox::needs_review(state) {
             needs_review.push(state.change_id.clone());
         }
     }
     needs_review.sort();
-    audit_owed.sort();
-    Ok((needs_review, audit_owed))
+    debt_owed.sort();
+    Ok((needs_review, debt_owed))
 }
 
 /// Print the exact, safe rebase command for every open change that depended on

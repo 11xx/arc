@@ -952,7 +952,7 @@ fn conflicting_target_movement_requires_rebase_before_integration() {
         .code(11);
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "conflict-r"]))).unwrap();
-    assert_eq!(status["schema"], "arc-status/12");
+    assert_eq!(status["schema"], "arc-status/13");
     assert_eq!(status["needs_rebase"], true);
     assert!(status["blockers"]
         .as_array()
@@ -2048,7 +2048,7 @@ fn status_projection_and_stage_note_file_read_stdin() {
         .args(["status", "projected", "--get", "schema"])
         .assert()
         .success()
-        .stdout("arc-status/12\n");
+        .stdout("arc-status/13\n");
 
     repo.arc(&wt)
         .args([
@@ -2431,7 +2431,7 @@ fn append_policy_has_a_single_authority() {
         "gatekeeping.rs::close::ifst.is_closed(){",
         "gatekeeping.rs::integrate_one::ifst.is_closed()&&matches!(closed_behavior,ClosedBehavior::SkipTagged){",
         "hooks.rs::change_for_branch::ifstate.is_closed(){",
-        "audit.rs::declare_audit_debt::letpatchset_id=ifst.is_closed(){",
+        "audit.rs::declare_debt::letpatchset_id=ifst.is_closed(){",
         "hooks.rs::post_commit::ifstate.is_closed(){",
         "hooks.rs::prepare_commit_msg::ifstate.is_closed(){",
         "lifecycle.rs::begin::ifst.is_closed(){",

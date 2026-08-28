@@ -373,7 +373,7 @@ fn author_assumed(on_behalf_of: Option<&str>, source: Option<ActorSource>) -> bo
 
 /// A declared, not-yet-discharged review obligation.
 #[derive(Debug, Clone, Serialize)]
-pub struct AuditDebt {
+pub struct Debt {
     pub event_id: String,
     pub reason: String,
     /// The patchset this waiver was declared against, if it waived anything.
@@ -703,7 +703,7 @@ pub struct ChangeState {
     pub audit_findings: BTreeMap<String, FindingState>,
     /// The latest declared review obligation, if one was ever declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audit_debt: Option<AuditDebt>,
+    pub debt: Option<Debt>,
     /// The latest dirty-tree waiver, which counts only while it names the
     /// current head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -913,7 +913,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     verdicts: Vec::new(),
                     audit_verdicts: Vec::new(),
                     audit_findings: BTreeMap::new(),
-                    audit_debt: None,
+                    debt: None,
                     blocked_on_stages: Vec::new(),
                     verifications: Vec::new(),
                     verification_runs: Vec::new(),
@@ -1432,7 +1432,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 reason,
                 patchset_id,
             } => {
-                state.audit_debt = Some(AuditDebt {
+                state.debt = Some(Debt {
                     event_id: ev.event_id.clone(),
                     reason: reason.clone(),
                     patchset_id: patchset_id.clone(),
@@ -1449,7 +1449,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 missing,
                 coverage,
             } => {
-                state.audit_debt = Some(AuditDebt {
+                state.debt = Some(Debt {
                     event_id: ev.event_id.clone(),
                     reason: reason.clone(),
                     patchset_id: patchset_id.clone(),
@@ -1890,9 +1890,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
     for reply in replies {
         attach_reply(&mut state, reply);
     }
-    if let Some(debt) = state.audit_debt.clone() {
-        let discharged_by = state.audit_debt_discharge(&debt);
-        if let Some(current) = state.audit_debt.as_mut() {
+    if let Some(debt) = state.debt.clone() {
+        let discharged_by = state.debt_discharge(&debt);
+        if let Some(current) = state.debt.as_mut() {
             current.discharged_by = discharged_by;
         }
     }
@@ -2043,15 +2043,15 @@ impl ChangeState {
     ///
     /// The debt is what makes integration without an independent verdict
     /// honest rather than silent: it survives closure, and
-    /// `arc query --audit-debt` finds it once a reviewer is available again.
+    /// `arc query --debt` finds it once a reviewer is available again.
     /// Whether the declared debt still authorizes its recorded patchset.
     ///
     /// Only while it names the patchset that is about to ship. Any newer
     /// snapshot leaves the waiver behind exactly as it leaves an approval
     /// behind, so re-declaring is a deliberate act rather than a thing that
     /// happened once and never expired.
-    pub fn audit_debt_waives_latest_patchset(&self) -> bool {
-        let Some(debt) = &self.audit_debt else {
+    pub fn debt_waives_latest_patchset(&self) -> bool {
+        let Some(debt) = &self.debt else {
             return false;
         };
         let Some(declared_for) = debt.patchset_id.as_deref() else {
@@ -2076,7 +2076,7 @@ impl ChangeState {
     /// gates, and a provisional approval left behind by a new patchset would
     /// keep reporting an obligation that gates nothing.
     ///
-    /// Independent of integration, unlike audit debt: a provisional approval
+    /// Independent of integration, unlike debt: a provisional approval
     /// is an open obligation the moment it is recorded, because the point is
     /// to see it before the merge rather than after.
     pub fn outstanding_provisional_approval(&self) -> Option<&VerdictEntry> {
@@ -2129,8 +2129,8 @@ impl ChangeState {
         later_clean_approval || later_audit
     }
 
-    pub fn audit_debt_outstanding(&self) -> bool {
-        let Some(debt) = &self.audit_debt else {
+    pub fn debt_outstanding(&self) -> bool {
+        let Some(debt) = &self.debt else {
             return false;
         };
         if !self
@@ -2140,7 +2140,7 @@ impl ChangeState {
         {
             return false;
         }
-        !self.audit_debt_discharged(debt)
+        !self.debt_discharged(debt)
     }
 
     /// Any independent verdict on the revision that shipped, recorded after
@@ -2152,13 +2152,13 @@ impl ChangeState {
     /// debt standing for a review that happened, or file a post-integration
     /// audit that did not. The verdict's outcome, and anything it found, live
     /// in the verdict and its findings rather than in the debt.
-    fn audit_debt_discharged(&self, debt: &AuditDebt) -> bool {
-        self.audit_debt_discharge(debt).is_some()
+    fn debt_discharged(&self, debt: &Debt) -> bool {
+        self.debt_discharge(debt).is_some()
     }
 
     /// The verdict or audit that satisfies the existing discharge predicate.
     /// The returned model is copied from that event and is never inferred.
-    fn audit_debt_discharge(&self, debt: &AuditDebt) -> Option<DebtCoverage> {
+    fn debt_discharge(&self, debt: &Debt) -> Option<DebtCoverage> {
         // A debt that names an independent review as the thing missing cannot
         // be settled by the people who wrote the patchset, nor by an identity
         // arc invented. A name taken from `git config` is not a claim anybody
