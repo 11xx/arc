@@ -34,6 +34,9 @@ path with no test is the ordinary case, not the exception.
   `--verdict approved` only when the deliverables and tests are met.
 - Do not implement fixes under the reviewer role; request changes and let the
   implementer act.
+- Exit status does not distinguish a finished run from a killed one: the
+  report is the deliverable. A missing, empty, or truncated report is an
+  incomplete run whatever the exit code says, and a finding, not a note.
 
 ## Sandbox facts
 

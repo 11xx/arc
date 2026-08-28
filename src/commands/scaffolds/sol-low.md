@@ -9,6 +9,13 @@
 ## Deliverables
 <the exact files/commands to produce — nothing beyond this list>
 
+Before sending: grep-verify every path, symbol, and line number named below,
+and say here what each was verified against. A target that moved costs a
+whole round. If the change adds a struct field or enum variant, list every
+construction site it forces (test fixtures are the usual ones) — separate
+from `..` destructuring patterns, which need none — with the value each site
+takes and why it asserts the legacy case.
+
 ## Tests
 <the exact tests to add — none beyond these>
 
@@ -16,6 +23,11 @@
 <name each probe as a runnable command whose outcome distinguishes the intended
 behavior from a plausible wrong implementation; a brief whose material risk
 has no such command is not ready to delegate>
+
+Name the probe that fails first — the one that fails against the change's
+base revision and passes only at the patchset head — and record its baseline
+while HEAD is still that base, so the pre-change evidence exists before the
+work starts rather than being asserted after.
 
 Declare them on the brief with `arc brief <change> --probes-json` (a JSON
 array inline, a path, or `-` for stdin), so a probe is a contract rather than
@@ -73,15 +85,15 @@ The absence of declared probes means "no probe contract was recorded", never
 - Work only in this change's worktree. `git rebase master` first — earlier
   chain members land ahead of you, so the base is stale by design. Rebase
   before the brief is recorded where you can; a baseline is only as good as
-  the base it was measured at. Rebase
-  before the brief is recorded where you can; a baseline is only as good as
   the base it was measured at.
 - Run as `ARC_ROLE=implementer` with `ARC_HARNESS`/`ARC_SESSION` set, and a
   distinct `ARC_ACTOR`. Loop: `arc stage <change> implementing --claim` →
   implement in scoped commits → `arc done`, then STOP for lead review.
 - Scope ceiling: only the deliverables above. No refactors, renames,
-  dependency additions, or tests beyond those listed. If a named file,
-  symbol, or assumption is missing or wrong, run
+  dependency additions, or tests beyond those listed. Updating literals the
+  deliverables force (a new field or variant) is inside the ceiling; `serde`
+  fills a missing field on deserialize and never fills a Rust literal.
+  If a named file, symbol, or assumption is missing or wrong, run
   `arc stage <change> blocked-on --note "<what>"`, `arc release-claim`, and
   stop — do not work around it.
 - If a probe fails for what looks like a defect in the probe rather than the
@@ -99,6 +111,10 @@ The absence of declared probes means "no probe contract was recorded", never
 - Never run `review`, `integrate`, or `close`; those are the lead's.
 
 ## Sandbox facts (arc-driving executors)
+
+State this run's environment, not the general lesson: what this executor can
+write, whether it can sign commits, and what it can reach. The generic facts
+below stay only as defaults you have checked apply.
 
 - Arc needs `.git` writable. A workspace-write sandbox blocks it; run with
   `-s danger-full-access` or an equivalent that permits `.git`.
