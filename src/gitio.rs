@@ -400,6 +400,40 @@ pub fn worktree_for_branch(cwd: &Path, branch: &str) -> Result<Option<PathBuf>> 
             }
         }
     }
+    // A worktree whose HEAD is detached has no `branch` line, so the
+    // per-worktree gitdir is consulted: a worktree's detached HEAD is the
+    // gitdir's HEAD sha, and the worktree whose sha equals the branch's tip
+    // is the one that was on that branch. Adopt must be reachable detached —
+    // it is the recovery path for a fork the operator detached to inspect.
+    let Ok(head) = git(cwd, &["rev-parse", branch]) else {
+        return Ok(None);
+    };
+    let head = head.trim();
+    let mut current: Option<PathBuf> = None;
+    let mut seen_detached: Vec<(PathBuf, String)> = Vec::new();
+    for line in out.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            current = Some(PathBuf::from(p));
+        } else if line == "detached" {
+            if let Some(worktree) = &current {
+                let dot_git = worktree.join(".git");
+                if let Ok(gitfile) = std::fs::read_to_string(&dot_git) {
+                    if let Some(gitdir) = gitfile.lines().find_map(|l| l.strip_prefix("gitdir: ")) {
+                        let head_path = PathBuf::from(gitdir.trim()).join("HEAD");
+                        if let Ok(sha) = std::fs::read_to_string(&head_path) {
+                            seen_detached.push((worktree.clone(), sha.trim().to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if seen_detached.iter().any(|(_, sha)| sha == head) {
+        return Ok(seen_detached
+            .into_iter()
+            .find(|(_, sha)| sha == head)
+            .map(|(worktree, _)| worktree));
+    }
     Ok(None)
 }
 

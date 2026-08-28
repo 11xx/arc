@@ -420,3 +420,104 @@ fn fork_refusal_holds_on_detached_head() {
         .failure()
         .stderr(predicates::str::contains("fork worktree detachable"));
 }
+
+/// A hand-made fork (no `<repo>-fork-<slug>` gitdir name) keeps the
+/// integrate refusal while detached: the marker's `worktree:` record is
+/// arc's own data about which checkout the fork is, and it answers where
+/// the directory name cannot. The gitdir-name shape stays as a fallback
+/// for forks with no marker, corroborated by the branch existing.
+#[test]
+fn fork_refusal_holds_detached_for_a_hand_made_fork() {
+    let repo = Repo::new();
+    let worktree = repo.home.join(".worktrees").join("my-own-place");
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fork/handmade",
+            worktree.to_str().unwrap(),
+            "master",
+        ],
+    );
+    // Adopt it, so a marker recording `worktree: <path>` exists.
+    stdout(repo.arc(&repo.root).args(["fork", "adopt", "handmade"]));
+    git(&worktree, &["checkout", "--detach", "HEAD"]);
+
+    repo.arc(&worktree)
+        .args(["integrate"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("fork worktree handmade"))
+        .stderr(predicates::str::contains("unintegrated by intent"));
+
+    // An unmarked fork whose gitdir name carries no slug cannot be
+    // identified from the name — Git names gitdirs after the directory, not
+    // the branch — and no other data arc holds maps this path to a fork.
+    // Falling through is the honest report of an unknowable identity, not a
+    // gap in the marker path: adopting the fork while attached is the
+    // recovery, and adopt stays reachable detached because the worktree's
+    // gitdir HEAD still matches the branch tip.
+    let repo = Repo::new();
+    let worktree = repo.home.join(".worktrees").join("no-marker-here");
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fork/unmarked",
+            worktree.to_str().unwrap(),
+            "master",
+        ],
+    );
+    git(&worktree, &["checkout", "--detach", "HEAD"]);
+    repo.arc(&worktree)
+        .args(["integrate"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("provide a change"));
+
+    // Adopt finds the worktree even detached, and the refusal then holds.
+    let out = stdout(repo.arc(&repo.root).args(["fork", "adopt", "unmarked"]));
+    assert!(out.contains("adopted: unmarked"), "{out}");
+    repo.arc(&worktree)
+        .args(["integrate"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("fork worktree unmarked"));
+}
+
+/// --force names what it destroys before destroying it: a summary of
+/// untracked files and uncommitted modifications, not a refusal.
+#[test]
+fn fork_retire_force_names_what_it_discards() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "loud"]));
+    let worktree = fork_worktree(&repo, "loud");
+
+    // Tracked-and-clean worktrees say nothing: there is nothing to name.
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["fork", "retire", "loud", "merged", "--force"]),
+    );
+    assert!(
+        !out.contains("discarding:"),
+        "clean worktree must be silent: {out}"
+    );
+    assert!(!worktree.exists());
+
+    // An untracked file is named before the removal.
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "louder"]));
+    let worktree = fork_worktree(&repo, "louder");
+    fs::write(worktree.join("untracked.txt"), "local state\n").unwrap();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["fork", "retire", "louder", "dropped", "--force"]),
+    );
+    assert!(out.contains("discarding: 1 untracked file(s)"), "{out}");
+    assert!(!worktree.exists());
+}

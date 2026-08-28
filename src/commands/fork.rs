@@ -42,12 +42,11 @@ pub fn fork_slug_at(cwd: &Path) -> Result<Option<String>> {
         return Ok(fork_slug_from_branch(&branch));
     }
     // Detached: there is no branch symbol, and the porcelain list records
-    // only `detached` — so the fork identity comes from the worktree's own
-    // gitdir name, which Git keeps for the worktree's lifetime and which
-    // `fork begin` established as <repo>-fork-<slug>. Without this, detaching
-    // to inspect history would silently lift the integrate refusal the fork
-    // exists to enforce.
-    fork_slug_from_gitdir(cwd)
+    // only `detached`. Identity comes from data arc wrote — a marker whose
+    // `worktree:` field names this checkout — with the gitdir-name shape as
+    // a corroborated fallback. Without either, detaching to inspect history
+    // would silently lift the integrate refusal the fork exists to enforce.
+    fork_slug_when_detached(cwd)
 }
 
 fn fork_slug_from_branch(branch: &str) -> Option<String> {
@@ -62,36 +61,59 @@ fn fork_slug_from_branch(branch: &str) -> Option<String> {
     )
 }
 
-/// The slug recorded in the worktree's gitdir name, when `cwd` stands in a
-/// linked fork worktree. `<common>/worktrees/<name>` is the identity Git
-/// preserves across detached HEADs and everything short of removal — but
-/// the name is `<repo>-fork-<slug>` only because `fork begin` chose it, and
-/// Git does not enforce the shape. So the name is corroborated the same way
-/// `list` corroborates a marker: the gitdir's HEAD must resolve to a
-/// `fork/<slug>` branch, or the gitdir name is not trusted.
-fn fork_slug_from_gitdir(cwd: &Path) -> Result<Option<String>> {
+/// The slug of the fork `cwd` belongs to, once detached.
+///
+/// Detaching erases the branch symbol, and Git preserves no record of the
+/// branch a worktree was on. What survives is the worktree's identity: its
+/// checked-out path, and the gitdir Git keeps for the worktree's lifetime.
+/// Identity is resolved in two steps, arc's own data first.
+///
+/// A fork marker records `worktree: <path>`; a checkout at that path is
+/// that fork, whatever HEAD points at. That covers hand-made forks `adopt`
+/// has journaled. The fallback is the gitdir name, which means something
+/// only because `fork begin` minted it as `<repo>-fork-<slug>` — a shape
+/// Git does not enforce and directory names do not carry
+/// ("arc-fork-command" would split to slug "command"). A fallback slug is
+/// trusted only when its `fork/<slug>` branch exists, the same
+/// corroboration `list` demands before a claim becomes a fork.
+fn fork_slug_when_detached(cwd: &Path) -> Result<Option<String>> {
     // The .git file lives at the worktree root, not in the subdirectory the
     // operator is standing in; resolve the root first.
     let root = crate::gitio::toplevel(cwd)?;
     let Some(gitdir) = worktree_gitdir(&root)? else {
         return Ok(None);
     };
-    // The worktree's own HEAD, detached or not: a symref to a branch when
-    // attached, a raw sha when detached. Only the attached case names a
-    // branch, and only a fork branch is a fork.
+    // The worktree's HEAD file is a symref when attached — handled above —
+    // and a raw sha when detached, which is the only case that reaches here.
     let head = gitdir.join("HEAD");
     let Ok(text) = std::fs::read_to_string(&head) else {
         return Ok(None);
     };
-    if let Some(branch) = text.trim().strip_prefix("ref: refs/heads/") {
-        return Ok(fork_slug_from_branch(branch));
+    if text.trim().starts_with("ref: ") {
+        return Ok(None);
     }
-    // Detached. The worktree's checked-out branch is recoverable: Git keeps
-    // a symref file at <gitdir>/branch-heads... no — it keeps the branch the
-    // worktree was on nowhere. But the branch itself still exists in the
-    // repository, and `fork begin` created exactly one branch per fork. So
-    // the slug comes from the gitdir name, corroborated by a fork branch
-    // with that slug existing in the repository.
+
+    // Primary: a marker whose worktree field names this checkout.
+    let dir = crate::journal::resolve_dir(cwd)?;
+    let root_canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    for marker in fork_markers(&dir) {
+        if let Some(recorded) = marker_field(&marker.body, "worktree") {
+            let recorded = PathBuf::from(recorded);
+            let recorded = recorded.canonicalize().unwrap_or(recorded);
+            if recorded == root_canonical {
+                let slug = marker
+                    .filename
+                    .rsplit_once("-fork-")
+                    .and_then(|(_, rest)| rest.strip_suffix("-plan.md"))
+                    .map(str::to_string)
+                    .filter(|slug| !slug.is_empty());
+                return Ok(slug);
+            }
+        }
+    }
+
+    // Fallback: the gitdir-name shape, trusted only when the fork branch it
+    // names exists.
     let Some(slug) = gitdir
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -106,6 +128,27 @@ fn fork_slug_from_gitdir(cwd: &Path) -> Result<Option<String>> {
     } else {
         Ok(None)
     }
+}
+
+/// Every fork marker in the journal, newest first: the path match wants the
+/// newest claim about a worktree that may have been re-forked.
+fn fork_markers(dir: &Path) -> Vec<ForkMarker> {
+    let mut markers: Vec<ForkMarker> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            crate::journal::parse_artifact_name(&name)
+                .filter(|(_, topic, kind)| kind == "plan" && topic.starts_with(FORK_TOPIC_PREFIX))
+                .map(|_| ForkMarker {
+                    filename: name.clone(),
+                    body: std::fs::read_to_string(dir.join(&name)).unwrap_or_default(),
+                })
+        })
+        .collect();
+    markers.sort_by(|a, b| b.filename.cmp(&a.filename));
+    markers
 }
 
 /// The per-worktree git directory a linked worktree's `.git` file points at.
@@ -363,6 +406,15 @@ pub fn retire(
     }
     if !keep_worktree {
         if let Some(worktree) = crate::gitio::worktree_for_branch(&ctx.cwd, &branch)? {
+            if force {
+                // --force destroys work arc cannot see; the operator reads
+                // what is being destroyed in the same breath as the
+                // decision. A summary, not a refusal — the flag decided.
+                let lost = uncommitted_summary(&worktree);
+                if !lost.is_empty() {
+                    println!("discarding: {lost}");
+                }
+            }
             crate::gitio::remove_worktree(&ctx.cwd, &worktree, force).with_context(|| {
                 format!(
                     "cannot remove {}; it holds work arc cannot see — move or delete it, \
@@ -555,6 +607,33 @@ fn describe(cwd: &Path, dir: &Path, slug: &str, consumed: &HashSet<&str>) -> For
         retired,
         ahead,
         base_branch,
+    }
+}
+
+/// What a forced removal will destroy, as one line: untracked files, and
+/// tracked files carrying uncommitted modifications. A summary a reader can
+/// act on before the removal, never a refusal — `--force` already decided.
+fn uncommitted_summary(worktree: &Path) -> String {
+    let status = crate::gitio::git(
+        worktree,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )
+    .unwrap_or_default();
+    let mut untracked = 0usize;
+    let mut modified = 0usize;
+    for line in status.lines() {
+        let state = &line[..2.min(line.len())];
+        if state.starts_with('?') {
+            untracked += 1;
+        } else if !state.trim().is_empty() {
+            modified += 1;
+        }
+    }
+    match (untracked, modified) {
+        (0, 0) => String::new(),
+        (u, 0) => format!("{u} untracked file(s)"),
+        (0, m) => format!("{m} file(s) with uncommitted changes"),
+        (u, m) => format!("{u} untracked file(s), {m} file(s) with uncommitted changes"),
     }
 }
 
