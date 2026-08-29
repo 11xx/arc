@@ -421,6 +421,53 @@ fn fork_refusal_holds_on_detached_head() {
         .stderr(predicates::str::contains("fork worktree detachable"));
 }
 
+/// The gitdir-name fallback must not lend an unrelated fork's name to this
+/// worktree. That `fork/<slug>` exists corroborates nothing about identity:
+/// the named branch's tip must equal the worktree's HEAD — the same match
+/// `adopt` demands — or the worktree stays unnamed. Naming it as another
+/// fork would point the printed `arc fork retire` at that other fork's
+/// record.
+#[test]
+fn fork_refusal_detached_does_not_borrow_an_unrelated_forks_name() {
+    let repo = Repo::new();
+    // An unrelated fork branch whose tip shares nothing with the worktree.
+    git(&repo.root, &["branch", "fork/alpha"]);
+    // The worktree is on fork/beta, but its directory name says alpha — the
+    // shape a hand-chosen or stale worktree path produces.
+    let worktree = fork_worktree(&repo, "alpha");
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fork/beta",
+            worktree.to_str().unwrap(),
+            "master",
+        ],
+    );
+    repo.commit(&worktree, "work.txt", "work\n", "test: beta work");
+
+    // Attached, the branch symbol answers: this is beta, whatever the
+    // directory is called.
+    repo.arc(&worktree)
+        .args(["integrate"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("fork worktree beta"));
+
+    // Detached, the name suggests alpha and fork/alpha exists — but its
+    // tip is not this HEAD, so the identity is unknowable and integrate
+    // falls through to its ordinary refusal instead of naming alpha.
+    git(&worktree, &["checkout", "--detach", "HEAD"]);
+    repo.arc(&worktree)
+        .args(["integrate"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("provide a change"));
+}
+
 /// A hand-made fork (no `<repo>-fork-<slug>` gitdir name) keeps the
 /// integrate refusal while detached: the marker's `worktree:` record is
 /// arc's own data about which checkout the fork is, and it answers where

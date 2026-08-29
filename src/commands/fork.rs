@@ -113,7 +113,13 @@ fn fork_slug_when_detached(cwd: &Path) -> Result<Option<String>> {
     }
 
     // Fallback: the gitdir-name shape, trusted only when the fork branch it
-    // names exists.
+    // names exists AND points at this worktree's HEAD. Existence alone
+    // corroborates nothing about identity: an unrelated `fork/<other>` in
+    // the same repository would lend its name to whichever slug this
+    // worktree's gitdir splits to. The same sha match `adopt` demands
+    // between a detached worktree and a branch tip decides here too; a
+    // worktree that fails it stays unnamed rather than named as another
+    // fork, whose record a printed `retire` command would act on.
     let Some(slug) = gitdir
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
@@ -123,7 +129,10 @@ fn fork_slug_when_detached(cwd: &Path) -> Result<Option<String>> {
         return Ok(None);
     };
     let branch = format!("{FORK_BRANCH_PREFIX}{slug}");
-    if crate::gitio::branch_exists(cwd, &branch) {
+    let head_sha = text.trim();
+    if crate::gitio::branch_exists(cwd, &branch)
+        && crate::gitio::branch_head(cwd, &branch).is_ok_and(|tip| tip == head_sha)
+    {
         Ok(Some(slug))
     } else {
         Ok(None)
