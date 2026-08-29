@@ -7734,6 +7734,12 @@ fn a_question_remains_answerable_after_its_source_is_archived() {
             .args(["journal", "questions", "--json"]),
     );
     assert_eq!(waiting["questions"][0]["file"], file.as_str(), "{waiting}");
+    // The prose has to survive the move too: a question listed without its
+    // own text asks the reader to answer something it cannot show them.
+    assert_eq!(
+        waiting["questions"][0]["heading"], "Which disposition?",
+        "{waiting}"
+    );
 
     repo.arc(&repo.root)
         .args([

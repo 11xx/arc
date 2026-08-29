@@ -2043,18 +2043,12 @@ fn open_discussion_for_answer(ctx: &Ctx, filename: &str) -> Result<(PathBuf, Pat
         bail!("{filename} is a {kind}, not a discussion");
     }
     let hot = resolve_dir(&ctx.cwd)?;
-    let path = hot.join(filename);
-    if path.is_file() {
-        return Ok((hot, path, topic));
-    }
-    let cold = archive_dir(&hot);
-    let archived = cold.join(filename);
-    if archived.is_file() {
-        // The events stay in the hot journal, so the answer is recorded there
-        // whichever directory holds the body it is appended to.
-        return Ok((hot, archived, topic));
-    }
-    bail!("no such artifact {} in {}", filename, hot.display());
+    // The events stay in the hot journal, so the answer is recorded there
+    // whichever directory holds the body it is appended to.
+    let Some(path) = artifact_body_path(&hot, filename) else {
+        bail!("no such artifact {} in {}", filename, hot.display());
+    };
+    Ok((hot, path, topic))
 }
 
 /// Record that an open artifact was checked against the source at the
@@ -2404,6 +2398,19 @@ fn questions(ctx: &Ctx, json: bool) -> Result<i32> {
 /// discussion it is whatever the scaffold opens with, and on any file with
 /// several questions it is the same string for all of them. A prompt needs
 /// what was actually asked.
+/// The file holding an artifact's body, hot journal first and cold archive
+/// second. Consumption is what makes an artifact archivable, so anything that
+/// reads a body derived from the event stream must look in both: the events
+/// outlive the move and the reader would otherwise see the artifact vanish.
+fn artifact_body_path(hot: &Path, filename: &str) -> Option<PathBuf> {
+    let path = hot.join(filename);
+    if path.is_file() {
+        return Some(path);
+    }
+    let archived = archive_dir(hot).join(filename);
+    archived.is_file().then_some(archived)
+}
+
 fn question_text(path: &Path, question_id: &str) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     // A fenced block quoting the conventions is prose, exactly as it is for
@@ -2561,7 +2568,7 @@ fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
                 .count()
         };
         open.push(OpenQuestion {
-            heading: question_text(&dir.join(file), question),
+            heading: artifact_body_path(dir, file).and_then(|path| question_text(&path, question)),
             file: file.to_string(),
             topic: event.topic.clone(),
             question: question.to_string(),
