@@ -648,16 +648,19 @@ fn render_worktree_accounting(accounting: &crate::worktree_usage::WorktreeAccoun
     if accounting.is_empty() {
         return;
     }
+    let total_entries = accounting.changes.len() + accounting.unknown.len();
     match accounting.total_bytes {
         Some(total) => println!(
             "worktrees: {} across {} open worktree(s)",
             crate::worktree_usage::human(total),
-            accounting.changes.len()
+            total_entries
         ),
-        None => println!(
-            "worktrees: {} open, size unavailable",
-            accounting.changes.len()
+        None if !accounting.unknown.is_empty() => println!(
+            "worktrees: {} open, accounting unavailable for {} (size unknown)",
+            total_entries,
+            accounting.unknown.len()
         ),
+        None => println!("worktrees: {} open, size unavailable", total_entries),
     }
     for usage in &accounting.changes {
         let size = usage
@@ -665,6 +668,12 @@ fn render_worktree_accounting(accounting: &crate::worktree_usage::WorktreeAccoun
             .map(crate::worktree_usage::human)
             .unwrap_or_else(|| "size unknown".to_string());
         println!("  {}  {}  {}", usage.change_id, size, usage.path);
+    }
+    for usage in &accounting.unknown {
+        println!(
+            "  {}  size unknown  {}  ({})",
+            usage.change_id, usage.path, usage.reason
+        );
     }
 }
 
@@ -676,23 +685,24 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     let store = ctx.store()?;
     let inbox = collect_inbox(ctx, &store, None)?;
     let journal = crate::journal::orientation(ctx);
+    let states = ctx.load_all_states(&store)?;
+    let worktrees = crate::worktree_usage::measure(&ctx.cwd, &states);
 
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-catchup/1",
+                "schema": "arc-catchup/2",
                 "ledger": inbox,
                 "journal": journal.as_ref().ok(),
+                "worktrees": worktrees,
             }))?
         );
         return Ok(0);
     }
 
-    let states = ctx.load_all_states(&store)?;
     let debts = collect_debts(ctx, &states)?;
     let review_queue = collect_review_queue(&store, &states)?;
-    let worktrees = crate::worktree_usage::measure(&ctx.cwd, &states);
     println!("ledger: {}", store.root.display());
     let mut any = false;
     let mut rendered_debt_details = BTreeSet::new();

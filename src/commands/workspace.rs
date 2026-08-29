@@ -302,7 +302,8 @@ struct ProjectBacklog {
     oldest_open_days: Option<u64>,
     /// Every artifact behind the counts above, when `--items` asked for
     /// them. The same artifacts the counts are taken over, so the two cannot
-    /// disagree. Additive in `arc-workspace-backlog/3`.
+    /// disagree. The debt_owed rename is carried by
+    /// arc-workspace-backlog/4.
     #[serde(skip_serializing_if = "Option::is_none")]
     items: Option<BacklogItems>,
 }
@@ -440,7 +441,7 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/3",
+                schema: "arc-workspace-backlog/4",
                 projects,
                 unreachable,
             })?

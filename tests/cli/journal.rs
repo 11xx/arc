@@ -6199,7 +6199,7 @@ fn a_closing_answer_over_unargued_branches_warns_and_still_counts() {
     // replay is worse than one refused outright, because nothing says so.
     let waiting = stdout(repo.arc(&repo.root).args(["journal", "questions"]));
     assert!(
-        waiting.contains("no question is waiting on a person"),
+        waiting.contains("no question is awaiting settlement"),
         "{waiting}"
     );
     let summary = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
@@ -6903,7 +6903,8 @@ fn journal_questions_lists_what_is_waiting_on_a_person_with_its_branches() {
         .success();
 
     let text = stdout(repo.arc(&repo.root).args(["journal", "questions"]));
-    assert!(text.contains("questions waiting on a person (1)"), "{text}");
+    assert!(text.contains("questions awaiting settlement (1)"), "{text}");
+    assert!(!text.contains("waiting on a person"), "{text}");
     assert!(text.contains("- paths (1 argued)"), "{text}");
     assert!(text.contains("- properties (0 argued)"), "{text}");
 
@@ -6921,7 +6922,7 @@ fn journal_questions_lists_what_is_waiting_on_a_person_with_its_branches() {
     // The one signal that needs a person is reported where a cold session
     // orients, not only where somebody thought to look for it.
     let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
-    assert!(catchup.contains("waiting on a person (1)"), "{catchup}");
+    assert!(catchup.contains("awaiting settlement (1)"), "{catchup}");
     assert!(catchup.contains(&question), "{catchup}");
 }
 
@@ -6967,7 +6968,7 @@ fn an_answered_question_leaves_the_waiting_queue() {
 
     let text = stdout(repo.arc(&repo.root).args(["journal", "questions"]));
     assert!(
-        text.contains("no question is waiting on a person"),
+        text.contains("no question is awaiting settlement"),
         "{text}"
     );
     assert!(!stdout(repo.arc(&repo.root).args(["catchup"])).contains("waiting on a person"));
@@ -7050,7 +7051,7 @@ fn an_answer_outside_the_offered_options_settles_the_question_and_says_so() {
     );
     // It settled the question like any other answer.
     assert!(stdout(repo.arc(&repo.root).args(["journal", "questions"]))
-        .contains("no question is waiting on a person"));
+        .contains("no question is awaiting settlement"));
 }
 
 /// Exactly one of the two paths, and an off-menu answer has to say something.
@@ -7467,6 +7468,13 @@ fn journal_transition_moves_a_feature_request_into_a_discussion() {
         .assert()
         .success()
         .stdout(predicates::str::contains("topic transition-me"));
+
+    let tail = stdout(repo.arc(&repo.root).args(["journal", "catchup"]));
+    assert!(
+        tail.contains(&format!("transitioned {source} -> {successor}")),
+        "{tail}"
+    );
+    assert!(tail.contains("needs positions"), "{tail}");
 }
 
 #[test]
@@ -7555,6 +7563,135 @@ fn journal_transition_refusals_leave_the_journal_untouched() {
         .assert()
         .success()
         .stdout(predicates::str::contains("problems:\n  (none)"));
+}
+
+/// A transition interrupted after its relation event has a successor and an
+/// unretired source. Doctor must name that partial state, and retrying the same
+/// command must finish the retirement instead of creating another successor.
+#[test]
+fn journal_doctor_reports_and_recovers_an_interrupted_transition() {
+    let repo = Repo::new();
+    let write_out = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "feature-request", "interrupted-transition"])
+            .args(["--body-file", "-"])
+            .write_stdin("A transition can be interrupted.\n"),
+    );
+    let source = Path::new(write_out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let transitioned =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "transition", &source, "--to", "discussion"]),
+        );
+    let successor = transitioned
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("transitioned: ")?
+                .split(" → ")
+                .nth(1)?
+                .split(" (")
+                .next()
+        })
+        .expect("transition output should name the successor")
+        .to_string();
+
+    // Remove only the retirement event: this is the state left when the
+    // process stops between the relation and the final append.
+    let events_path = journal_dir(&repo).join("events.jsonl");
+    let interrupted = fs::read_to_string(&events_path)
+        .unwrap()
+        .lines()
+        .filter(|line| !(line.contains("\"event\":\"consumed\"") && line.contains(&source)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&events_path, format!("{interrupted}\n")).unwrap();
+
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("incomplete-transition"))
+        .stdout(predicates::str::contains(&source))
+        .stdout(predicates::str::contains(&successor));
+
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &source, "--to", "discussion"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("problems:\n  (none)"));
+}
+
+/// A consumed discussion still carries an unanswered question. The source is
+/// closed for new work, but settling that existing question remains visible and
+/// answerable on the source itself.
+#[test]
+fn a_question_remains_answerable_after_its_source_is_consumed() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "consumed-question", "# Keep the question?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "keep",
+            "--option",
+            "drop",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Which disposition?\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &file, "--to", "plan"])
+        .assert()
+        .success();
+
+    let waiting = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert_eq!(waiting["questions"][0]["file"], file.as_str());
+    assert_eq!(waiting["questions"][0]["question"], question.as_str());
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "keep",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Keep the question's provenance.\n")
+        .assert()
+        .success();
+
+    let settled = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert!(
+        settled["questions"].as_array().unwrap().is_empty(),
+        "{settled}"
+    );
 }
 
 /// A question carries who may settle it. A question marks what this session
@@ -7690,6 +7827,7 @@ fn a_question_names_who_can_settle_it() {
 fn settle_by_flag_combinations_are_guarded() {
     let repo = Repo::new();
     let file = discussion_named(&repo, "settle-guard", "# Who decides?\n");
+    let events_path = journal_dir(&repo).join("events.jsonl");
 
     repo.arc(&repo.root)
         .args([
@@ -7734,4 +7872,29 @@ fn settle_by_flag_combinations_are_guarded() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("--delegate is valid only with"));
+
+    let before = fs::read_to_string(&events_path).unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--settle-by",
+            "delegate",
+            "--delegate",
+            "",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("An answerer must be named.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be empty"));
+    assert_eq!(fs::read_to_string(events_path).unwrap(), before);
 }

@@ -558,7 +558,14 @@ fn catchup_reports_ledger_and_journal_together() {
     let change_id = begin_change(&repo, "catchup-change", None);
 
     let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-    assert_eq!(catchup["schema"], "arc-catchup/1");
+    assert_eq!(catchup["schema"], "arc-catchup/2");
+    assert!(
+        catchup["worktrees"]["changes"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{catchup}"
+    );
     assert!(bucket_has(&catchup["ledger"], "needs-review", &change_id));
     assert_eq!(catchup["journal"]["later"][0]["kind"], "later");
 

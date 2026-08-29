@@ -353,6 +353,29 @@ fn env_detects_opencode2_by_process_ancestry() {
     );
 }
 
+/// README examples are part of the command contract: stale commands and stale
+/// exit-status claims send a cold session down a path the CLI no longer accepts.
+#[test]
+fn readme_documents_current_debt_and_partial_opencode_identity() {
+    let readme = include_str!("../../README.md");
+    let normalized = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        normalized.contains("arc integrate <change> --debt"),
+        "{readme}"
+    );
+    assert!(normalized.contains("arc query --debt"), "{readme}");
+    assert!(!normalized.contains("--audit-debt"), "{readme}");
+    assert!(!normalized.contains("audit-debt"), "{readme}");
+    assert!(
+        normalized.contains("OpenCode v2 is recognized without a session"),
+        "{readme}"
+    );
+    assert!(
+        normalized.contains("When no harness is detected, it prints placeholders and exits 1"),
+        "{readme}"
+    );
+}
+
 #[test]
 fn env_omits_model_when_no_session_store_matches() {
     let repo = Repo::new();

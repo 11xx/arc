@@ -1927,7 +1927,7 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
             }
         }
         let output = CheckOutput {
-            schema: "arc-check/2",
+            schema: "arc-check/3",
             change_id: &change_id,
             ready: report.integrate_ready,
             exit_code: code,

@@ -127,7 +127,7 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   actually consumed — including uncommitted ones, which Git cannot recover for
   an auditor afterwards. This is not a config store: arc records no
   configuration history, only the inputs to one irreversible decision.
-  It also records the audit-debt declaration when that waiver is what let the
+  It also records the debt declaration when that waiver is what let the
   approval stand, because then it is an authorization input like the verdict
   itself — and not when one was declared beside an approval that needed no
   waiver, where it authorized nothing. A
@@ -311,10 +311,12 @@ appends an `ARC_MODEL` export (`model-slug[#effort]`): Claude reads the newest
 assistant model from its project transcript; Codex honors `CODEX_HOME` and
 reads the latest turn's model and effort; OpenCode reads the selected model and
 variant from its SQLite session row when `sqlite3` is available; and Pi reads
-model and thinking-level changes from its JSONL session. Detection failure is
-a silent omission, never an error. It does not inject identity into other
-commands; without a detected session it prints commented placeholders (naming
-`ARC_MODEL` too) and exits 1.
+model and thinking-level changes from its JSONL session. Failure while reading
+a session store is a silent omission, never an error. OpenCode v2 is recognized
+without a session when `OPENCODE_TERMINAL` or process ancestry identifies it;
+it prints `ARC_HARNESS` plus a commented `ARC_SESSION` and exits 0. When no
+harness is detected, it prints placeholders and exits 1. It does not inject
+identity into other commands.
 
 `arc resume [CHANGE]` renders the latest brief, claim and stage, open findings,
 head gate state, next action, live journal lanes, and matching open journal
@@ -561,9 +563,9 @@ recorded patchset to name what landed.
 
 Delegated sessions can bind an execution boundary with
 `ARC_ROLE=implementer|reviewer|lead` or the equivalent global `--role` flag.
-Implementers may not run `review`, `audit`, `audit-debt`, `resolve`, `hold`,
-`release-hold`, `close`, or `integrate`; reviewers may not run `audit-debt`,
-`close`, or `integrate`; leads retain full access. Declaring audit debt is a
+Implementers may not run `review`, `audit`, `debt`, `resolve`, `hold`,
+`release-hold`, `close`, or `integrate`; reviewers may not run `debt`,
+`close`, or `integrate`; leads retain full access. Declaring debt is a
 lead decision because an open declaration can supply an absent verdict or let
 a policy-rejected self-approval gate. Role refusals happen before the command
 takes a lock or writes an event.
@@ -865,7 +867,7 @@ previous-run marker — the boundary is supplied by the caller, so the command
 stays derived. `--items` names every actionable artifact under each project in
 the same open, later, and feature-request tier order used by `journal open`.
 Each item can include its `verification` stamp, and the text rows use the same
-renderer as `journal open`. JSON is versioned `arc-workspace-backlog/3`.
+renderer as `journal open`. JSON is versioned `arc-workspace-backlog/4`.
 
 `arc brief <change> --scaffold <name>` prepends a template to the brief being
 recorded (`--scaffold` alone records the template). A repo-local
@@ -1044,29 +1046,29 @@ finding, the newest patchset it saw, and whether that is the final one. `arc
 status --json` carries it as `review_map`, and `arc show` renders it.
 
 What that map implies is reported as **advisories**: `arc status --json` and
-`arc check --json` (`arc-check/2`) carry `advisories`, each a stable `code`
+`arc check --json` (`arc-check/3`) carry `advisories`, each a stable `code`
 with a `detail` line, and `arc check` prints them under `Advisories (never
 blocking)`. The codes are `reviewer-behind-final-patchset`
 (`Reviewer last saw ps-07; integrating ps-11`), `no-independent-reviewer`,
 `reviewer-attribution-unknown`, `brief-author-only-review`, and
-`audit-debt-outstanding`. None of them changes readiness or the exit code:
+`debt-outstanding`. None of them changes readiness or the exit code:
 plenty of changes legitimately ship with a single reviewer, and an
 orchestrator's review is a valid review unless a project's policy says
 otherwise. A reviewer that cannot be told apart from the patchset author
 (neither side recorded `--on-behalf-of`) is reported as unknown attribution
 rather than counted as independent or as self-review.
 
-When no independent verdict is reachable, declaring an **audit debt** records
+When no independent verdict is reachable, declaring **debt** records
 the missing review instead of pretending it happened. It can stand in for an
 absent verdict or rescue a self-approval rejected by `forbid_self_approval`:
 
 ```sh
-arc integrate <change> --audit-debt "no independent reviewer reachable"
+arc integrate <change> --debt "no independent reviewer reachable"
 
 # later, when a reviewer is available
-arc inbox                                    # audit-owed bucket
+arc inbox                                    # debt-owed bucket
 arc catchup                                  # the same, with reasons
-arc query --audit-debt                       # IDs alone, for scripting
+arc query --debt                             # IDs alone, for scripting
 arc diff <change> --integrated               # the exact range that landed
 arc audit <change> --verdict approved --body-file -
 arc findings <change> --audit                # what the audit raised
@@ -1075,7 +1077,7 @@ arc findings <change> --audit                # what the audit raised
 The obligation is a ledger fact that survives closure, so the owed review is
 findable instead of living in prose. `arc inbox` carries it in the one bucket
 that includes integrated changes, `arc doctor` reports it as
-`audit-debt-outstanding`, and `arc chain` shows it beside reviewer coverage.
+`debt-outstanding`, and `arc chain` shows it beside reviewer coverage.
 
 Three rules keep the escape hatch from becoming a hole:
 
@@ -1429,7 +1431,7 @@ change ledger. Malformed events, store configuration, IDs, and missing open
 events are problems; orphaned temporary files and retention refs, missing open
 branches, long-expired claims, dependency cycles, and future event types are
 non-failing advice. Human output names each affected path or ref; JSON uses the
-versioned `arc-doctor/1` report. The exit status is 0 for a clean or advice-only
+versioned `arc-doctor/2` report. The exit status is 0 for a clean or advice-only
 ledger and 1 when problems are present.
 
 ## Roadmap
