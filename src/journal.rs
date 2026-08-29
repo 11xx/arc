@@ -2033,17 +2033,28 @@ fn open_discussion(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, Strin
 /// consumed artifact is closed to new work, positions, and questions, but its
 /// unanswered question remains a live obligation and may receive its one
 /// settlement block.
+///
+/// The cold archive is searched after the hot journal, because consumption is
+/// what makes an artifact archivable: an open question outlives its source,
+/// and the source it outlives is exactly the kind that has already moved.
 fn open_discussion_for_answer(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String)> {
     let (topic, kind) = check_artifact_name(filename)?;
     if kind != JournalKind::Discussion.as_str() {
         bail!("{filename} is a {kind}, not a discussion");
     }
-    let dir = resolve_dir(&ctx.cwd)?;
-    let path = dir.join(filename);
-    if !path.is_file() {
-        bail!("no such artifact {} in {}", filename, dir.display());
+    let hot = resolve_dir(&ctx.cwd)?;
+    let path = hot.join(filename);
+    if path.is_file() {
+        return Ok((hot, path, topic));
     }
-    Ok((dir, path, topic))
+    let cold = archive_dir(&hot);
+    let archived = cold.join(filename);
+    if archived.is_file() {
+        // The events stay in the hot journal, so the answer is recorded there
+        // whichever directory holds the body it is appended to.
+        return Ok((hot, archived, topic));
+    }
+    bail!("no such artifact {} in {}", filename, hot.display());
 }
 
 /// Record that an open artifact was checked against the source at the

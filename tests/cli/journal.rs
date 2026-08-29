@@ -7694,6 +7694,73 @@ fn a_question_remains_answerable_after_its_source_is_consumed() {
     );
 }
 
+/// Consumption is what makes an artifact archivable, so the source an open
+/// question outlives is exactly the kind that has already moved to the cold
+/// archive. The question stays listed, so it must stay answerable.
+#[test]
+fn a_question_remains_answerable_after_its_source_is_archived() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "archived-question", "# Keep the question?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "keep",
+            "--option",
+            "drop",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Which disposition?\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &file, "--to", "plan"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "archive", "--consumed"])
+        .assert()
+        .success();
+
+    let waiting = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert_eq!(waiting["questions"][0]["file"], file.as_str(), "{waiting}");
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "keep",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Answered after the source was archived.\n")
+        .assert()
+        .success();
+
+    let settled = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert!(
+        settled["questions"].as_array().unwrap().is_empty(),
+        "{settled}"
+    );
+}
+
 /// A question carries who may settle it. A question marks what this session
 /// should not settle alone — an operator who delegated the call names the
 /// delegate — so `delegate:<name>` and `anyone` are first-class values, and
