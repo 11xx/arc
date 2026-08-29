@@ -2370,6 +2370,9 @@ fn run(cli: Cli) -> Result<i32> {
             if debt.is_some() && change.is_none() {
                 bail!("--debt requires a change");
             }
+            // A fork refusal means no integration happened, so it must not
+            // create an audit obligation for work that never shipped.
+            fork::ensure_not_fork(&ctx.cwd)?;
             // Declared before the merge so the obligation is on the ledger
             // even if integration then fails for an unrelated reason — but
             // never under --dry-run, which promises to write nothing.

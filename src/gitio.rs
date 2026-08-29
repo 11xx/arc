@@ -404,55 +404,57 @@ pub fn ahead_count(cwd: &Path, base: &str, branch: &str) -> Result<usize> {
         .with_context(|| format!("cannot parse rev-list count {out:?}"))
 }
 
+/// One entry from `git worktree list --porcelain`. A detached worktree has no
+/// branch association; its path is still useful when another durable record
+/// names that exact checkout.
+#[derive(Debug, Clone)]
+pub struct WorktreeEntry {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+}
+
+/// Read Git's current worktree inventory, preserving the order Git reports.
+pub fn worktree_inventory(cwd: &Path) -> Result<Vec<WorktreeEntry>> {
+    let out = git(cwd, &["worktree", "list", "--porcelain"])?;
+    let mut entries = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_branch: Option<String> = None;
+    for line in out.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(path) = current_path.replace(PathBuf::from(path)) {
+                entries.push(WorktreeEntry {
+                    path,
+                    branch: current_branch.take(),
+                });
+            }
+            current_branch = None;
+        } else if let Some(branch) = line.strip_prefix("branch ") {
+            current_branch = Some(
+                branch
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(branch)
+                    .to_string(),
+            );
+        } else if line == "detached" {
+            current_branch = None;
+        }
+    }
+    if let Some(path) = current_path {
+        entries.push(WorktreeEntry {
+            path,
+            branch: current_branch,
+        });
+    }
+    Ok(entries)
+}
+
 /// The worktree (if any) that has `branch` checked out.
 pub fn worktree_for_branch(cwd: &Path, branch: &str) -> Result<Option<PathBuf>> {
-    let out = git(cwd, &["worktree", "list", "--porcelain"])?;
-    let wanted = format!("refs/heads/{branch}");
-    let mut current: Option<PathBuf> = None;
-    for line in out.lines() {
-        if let Some(p) = line.strip_prefix("worktree ") {
-            current = Some(PathBuf::from(p));
-        } else if let Some(b) = line.strip_prefix("branch ") {
-            if b == wanted {
-                return Ok(current);
-            }
-        }
-    }
-    // A worktree whose HEAD is detached has no `branch` line, so the
-    // per-worktree gitdir is consulted: a worktree's detached HEAD is the
-    // gitdir's HEAD sha, and the worktree whose sha equals the branch's tip
-    // is the one that was on that branch. Adopt must be reachable detached —
-    // it is the recovery path for a fork the operator detached to inspect.
-    let Ok(head) = git(cwd, &["rev-parse", branch]) else {
-        return Ok(None);
-    };
-    let head = head.trim();
-    let mut current: Option<PathBuf> = None;
-    let mut seen_detached: Vec<(PathBuf, String)> = Vec::new();
-    for line in out.lines() {
-        if let Some(p) = line.strip_prefix("worktree ") {
-            current = Some(PathBuf::from(p));
-        } else if line == "detached" {
-            if let Some(worktree) = &current {
-                let dot_git = worktree.join(".git");
-                if let Ok(gitfile) = std::fs::read_to_string(&dot_git) {
-                    if let Some(gitdir) = gitfile.lines().find_map(|l| l.strip_prefix("gitdir: ")) {
-                        let head_path = PathBuf::from(gitdir.trim()).join("HEAD");
-                        if let Ok(sha) = std::fs::read_to_string(&head_path) {
-                            seen_detached.push((worktree.clone(), sha.trim().to_string()));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if seen_detached.iter().any(|(_, sha)| sha == head) {
-        return Ok(seen_detached
-            .into_iter()
-            .find(|(_, sha)| sha == head)
-            .map(|(worktree, _)| worktree));
-    }
-    Ok(None)
+    let inventory = worktree_inventory(cwd)?;
+    Ok(inventory
+        .iter()
+        .find(|entry| entry.branch.as_deref() == Some(branch))
+        .map(|entry| entry.path.clone()))
 }
 
 /// The primary worktree path (the first entry from `git worktree list`),

@@ -1305,9 +1305,7 @@ pub fn integrate(
     // A fork is where work goes to stay unintegrated on purpose. The refusal
     // comes before any store read, so it holds even in a fork whose base has
     // no ledger, and it names the way out rather than only the wall.
-    if let Some(slug) = super::fork::fork_slug_at(&ctx.cwd)? {
-        bail!("{}", super::fork::integrate_refusal(&slug));
-    }
+    super::fork::ensure_not_fork(&ctx.cwd)?;
     match (reference, tags.is_empty()) {
         (Some(reference), true) => integrate_one(
             ctx,

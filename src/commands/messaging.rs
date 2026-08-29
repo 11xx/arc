@@ -720,7 +720,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-catchup/2",
+                "schema": "arc-catchup/3",
                 "ledger": inbox,
                 "journal": journal.as_ref().ok(),
                 // Open forks only: retired ones are history, and the JSON

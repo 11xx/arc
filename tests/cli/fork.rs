@@ -335,7 +335,7 @@ fn fork_views_agree_about_retirement_and_catchup_json_carries_forks() {
     let catchup_text = stdout(repo.arc(&repo.root).arg("catchup"));
     assert!(!catchup_text.contains("agreed"), "{catchup_text}");
     let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-    assert_eq!(catchup["schema"], "arc-catchup/2");
+    assert_eq!(catchup["schema"], "arc-catchup/3");
     assert!(catchup["forks"].as_array().unwrap().is_empty(), "{catchup}");
 
     stdout(repo.arc(&repo.root).args(["fork", "begin", "open-now"]));
@@ -483,8 +483,7 @@ fn fork_list_from_inside_a_fork_uses_the_primary_worktree_branch() {
 
 /// The integrate refusal holds on a detached HEAD. Detaching has no branch
 /// symbol and the porcelain list records only `detached`, so the fork
-/// identity comes from the worktree's gitdir name — corroborated by the
-/// fork branch existing, the same way list corroborates a marker.
+/// identity comes from the marker's branch-to-worktree binding.
 #[test]
 fn fork_refusal_holds_on_detached_head() {
     let repo = Repo::new();
@@ -508,12 +507,10 @@ fn fork_refusal_holds_on_detached_head() {
         .stderr(predicates::str::contains("fork worktree detachable"));
 }
 
-/// The gitdir-name fallback must not lend an unrelated fork's name to this
-/// worktree. That `fork/<slug>` exists corroborates nothing about identity:
-/// the named branch's tip must equal the worktree's HEAD — the same match
-/// `adopt` demands — or the worktree stays unnamed. Naming it as another
-/// fork would point the printed `arc fork retire` at that other fork's
-/// record.
+/// A detached worktree without a marker has no branch-to-path binding. Its
+/// directory name and an existing fork branch do not identify it, so a
+/// directory chosen for one fork must not lend that fork's name to another
+/// detached checkout.
 #[test]
 fn fork_refusal_detached_does_not_borrow_an_unrelated_forks_name() {
     let repo = Repo::new();
@@ -544,9 +541,9 @@ fn fork_refusal_detached_does_not_borrow_an_unrelated_forks_name() {
         .failure()
         .stderr(predicates::str::contains("fork worktree beta"));
 
-    // Detached, the name suggests alpha and fork/alpha exists — but its
-    // tip is not this HEAD, so the identity is unknowable and integrate
-    // falls through to its ordinary refusal instead of naming alpha.
+    // Detached, the name suggests alpha and fork/alpha exists — but there is
+    // no marker binding alpha to this path, so identity is unknowable and
+    // integrate falls through to its ordinary refusal.
     git(&worktree, &["checkout", "--detach", "HEAD"]);
     repo.arc(&worktree)
         .args(["integrate"])
@@ -558,8 +555,8 @@ fn fork_refusal_detached_does_not_borrow_an_unrelated_forks_name() {
 /// A hand-made fork (no `<repo>-fork-<slug>` gitdir name) keeps the
 /// integrate refusal while detached: the marker's `worktree:` record is
 /// arc's own data about which checkout the fork is, and it answers where
-/// the directory name cannot. The gitdir-name shape stays as a fallback
-/// for forks with no marker, corroborated by the branch existing.
+/// the directory name cannot. An unmarked fork must be adopted while its
+/// branch is attached, before Git has discarded that branch-to-path link.
 #[test]
 fn fork_refusal_holds_detached_for_a_hand_made_fork() {
     let repo = Repo::new();
@@ -590,10 +587,7 @@ fn fork_refusal_holds_detached_for_a_hand_made_fork() {
     // An unmarked fork whose gitdir name carries no slug cannot be
     // identified from the name — Git names gitdirs after the directory, not
     // the branch — and no other data arc holds maps this path to a fork.
-    // Falling through is the honest report of an unknowable identity, not a
-    // gap in the marker path: adopting the fork while attached is the
-    // recovery, and adopt stays reachable detached because the worktree's
-    // gitdir HEAD still matches the branch tip.
+    // Falling through is the honest report of an unknowable identity.
     let repo = Repo::new();
     let worktree = repo.home.join(".worktrees").join("no-marker-here");
     fs::create_dir_all(worktree.parent().unwrap()).unwrap();
@@ -615,9 +609,11 @@ fn fork_refusal_holds_detached_for_a_hand_made_fork() {
         .code(1)
         .stderr(predicates::str::contains("provide a change"));
 
-    // Adopt finds the worktree even detached, and the refusal then holds.
+    // Attach the branch so adopt can record the durable path binding.
+    git(&worktree, &["checkout", "fork/unmarked"]);
     let out = stdout(repo.arc(&repo.root).args(["fork", "adopt", "unmarked"]));
     assert!(out.contains("adopted: unmarked"), "{out}");
+    git(&worktree, &["checkout", "--detach", "HEAD"]);
     repo.arc(&worktree)
         .args(["integrate"])
         .assert()
@@ -654,4 +650,181 @@ fn fork_retire_force_names_what_it_discards() {
     );
     assert!(out.contains("discarding: 1 untracked file(s)"), "{out}");
     assert!(!worktree.exists());
+}
+
+/// A detached fork remains the marker's worktree even when its HEAD no longer
+/// equals the fork branch tip. Retirement must remove that exact checkout
+/// before consuming the marker.
+#[test]
+fn fork_retire_removes_a_detached_worktree_at_a_non_tip() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "non-tip"]));
+    let worktree = fork_worktree(&repo, "non-tip");
+    repo.commit(&worktree, "work.txt", "work\n", "test: fork work");
+    let earlier = git_out(&worktree, &["rev-parse", "HEAD~1"]);
+    git(&worktree, &["checkout", "--detach", &earlier]);
+
+    let before = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(
+        before["forks"][0]["worktree"],
+        worktree.to_str().unwrap(),
+        "{before}"
+    );
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "fork",
+        "retire",
+        "non-tip",
+        "dropped: inspected history",
+    ]));
+    assert!(out.contains("retired: non-tip"), "{out}");
+    assert!(
+        !worktree.exists(),
+        "the detached fork worktree must be removed"
+    );
+}
+
+/// Two detached worktrees may have the same HEAD. The fork marker identifies
+/// the fork's checkout, so retirement must not remove whichever equal-SHA
+/// worktree Git lists first.
+#[test]
+fn fork_retire_removes_the_marked_worktree_among_equal_detached_heads() {
+    let repo = Repo::new();
+    let unrelated = repo.home.join(".worktrees/repo-fork-a-unrelated");
+    fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            unrelated.to_str().unwrap(),
+            "master",
+        ],
+    );
+
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "same-sha"]));
+    let worktree = fork_worktree(&repo, "same-sha");
+    git(&worktree, &["checkout", "--detach", "HEAD"]);
+
+    stdout(
+        repo.arc(&repo.root)
+            .args(["fork", "retire", "same-sha", "dropped: selected fork"]),
+    );
+    assert!(
+        !worktree.exists(),
+        "the marked fork worktree must be removed"
+    );
+    assert!(
+        unrelated.exists(),
+        "an unrelated equal-SHA worktree must remain"
+    );
+}
+
+/// The branch field is the marker's identity, not a delimiter in its
+/// filename. Slugs may therefore contain the text used to separate a topic
+/// from its kind.
+#[test]
+fn fork_refusal_preserves_a_slug_containing_fork_separator_text() {
+    let repo = Repo::new();
+    let slug = "alpha-fork-beta";
+    stdout(repo.arc(&repo.root).args(["fork", "begin", slug]));
+    let worktree = fork_worktree(&repo, slug);
+    git(&worktree, &["checkout", "--detach", "HEAD"]);
+
+    repo.arc(&worktree)
+        .args(["integrate"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("fork worktree alpha-fork-beta"))
+        .stderr(predicates::str::contains("fork worktree beta").not());
+}
+
+/// A primary checkout has a .git directory rather than a linked-worktree
+/// gitdir file. Its marker path still identifies the adopted fork after the
+/// primary is detached.
+#[test]
+fn fork_refusal_holds_for_a_detached_primary_checkout() {
+    let repo = Repo::new();
+    let (change_id, change_worktree, _) = change_with_patchset(&repo, "ready-change");
+    repo.arc(&change_worktree)
+        .args(["review", "ready-change", "--verdict", "approved"])
+        .assert()
+        .success();
+    git(&repo.root, &["switch", "-c", "fork/primary"]);
+    assert!(repo.root.join(".git").is_dir());
+    stdout(repo.arc(&repo.root).args(["fork", "adopt", "primary"]));
+
+    let target = repo.home.join(".worktrees/integration-target");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "integration-target",
+            target.to_str().unwrap(),
+            "master",
+        ],
+    );
+    git(&repo.root, &["checkout", "--detach", "HEAD"]);
+
+    repo.arc(&repo.root)
+        .args(["integrate", &change_id])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("fork worktree primary"))
+        .stderr(predicates::str::contains("unintegrated by intent"));
+}
+
+/// A disposition is valid only for an existing fork branch. A typo must not
+/// create a consumed marker or make a nonexistent fork appear in the queues.
+#[test]
+fn fork_retire_refuses_a_branch_that_never_existed() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["fork", "retire", "never-made", "dropped: typo"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("fork/never-made"))
+        .stderr(predicates::str::contains("does not exist"));
+
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert!(
+        !open["open"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["file"]
+                .as_str()
+                .is_some_and(|file| file.contains("fork-never-made-plan"))),
+        "a typo must not create a marker: {open}"
+    );
+    assert_eq!(
+        stdout(repo.arc(&repo.root).args(["fork", "list"])),
+        "no forks\n"
+    );
+}
+
+/// A fork refusal is a precondition failure, not a merge failure. Declaring
+/// integration debt must therefore wait until that refusal has passed.
+#[test]
+fn integrate_debt_does_not_record_an_obligation_from_inside_a_fork() {
+    let repo = Repo::new();
+    let (change_id, ..) = change_with_patchset(&repo, "debt-from-fork");
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "debt-context"]));
+    let fork = fork_worktree(&repo, "debt-context");
+
+    repo.arc(&fork)
+        .args(["integrate", &change_id, "--debt", "no reviewer reachable"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("fork worktree debt-context"));
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", &change_id, "--json"]));
+    assert_ne!(status["debt_outstanding"], true, "{status}");
+    assert!(
+        status["debt"].is_null(),
+        "a refused integration owes no review: {status}"
+    );
 }

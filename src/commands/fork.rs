@@ -30,22 +30,17 @@ pub fn is_fork_branch(branch: &str) -> bool {
 
 /// The slug of the fork whose worktree `cwd` stands in, when it is one.
 ///
-/// The worktree's checked-out branch decides — not the directory name,
-/// which an operator is free to choose differently. The branch is read from
-/// `worktree list --porcelain` rather than `symbolic-ref`: a detached HEAD
-/// has no branch symbol to read, and a fork checkout is exactly where an
-/// operator might detach to inspect history — which must not silently lift
-/// the integrate refusal the fork exists to enforce.
+/// The fork branch is the defining fact. An attached worktree exposes it
+/// directly; a detached worktree is identified only by the marker that binds
+/// that branch to its exact worktree path. Directory names and HEAD commits
+/// are not fork identity.
 pub fn fork_slug_at(cwd: &Path) -> Result<Option<String>> {
     // Attached: the branch symbol answers directly.
     if let Some(branch) = crate::gitio::current_branch(cwd)? {
         return Ok(fork_slug_from_branch(&branch));
     }
-    // Detached: there is no branch symbol, and the porcelain list records
-    // only `detached`. Identity comes from data arc wrote — a marker whose
-    // `worktree:` field names this checkout — with the gitdir-name shape as
-    // a corroborated fallback. Without either, detaching to inspect history
-    // would silently lift the integrate refusal the fork exists to enforce.
+    // Detached: Git has removed the branch symbol, so use the durable
+    // branch-to-path binding in the marker.
     fork_slug_when_detached(cwd)
 }
 
@@ -61,82 +56,22 @@ fn fork_slug_from_branch(branch: &str) -> Option<String> {
     )
 }
 
-/// The slug of the fork `cwd` belongs to, once detached.
-///
-/// Detaching erases the branch symbol, and Git preserves no record of the
-/// branch a worktree was on. What survives is the worktree's identity: its
-/// checked-out path, and the gitdir Git keeps for the worktree's lifetime.
-/// Identity is resolved in two steps, arc's own data first.
-///
-/// A fork marker records `worktree: <path>`; a checkout at that path is
-/// that fork, whatever HEAD points at. That covers hand-made forks `adopt`
-/// has journaled. The fallback is the gitdir name, which means something
-/// only because `fork begin` minted it as `<repo>-fork-<slug>` — a shape
-/// Git does not enforce and directory names do not carry
-/// ("arc-fork-command" would split to slug "command"). A fallback slug is
-/// trusted only when its `fork/<slug>` branch exists, the same
-/// corroboration `list` demands before a claim becomes a fork.
+/// Resolve a detached checkout from an existing branch-to-path marker.
 fn fork_slug_when_detached(cwd: &Path) -> Result<Option<String>> {
-    // The .git file lives at the worktree root, not in the subdirectory the
-    // operator is standing in; resolve the root first.
     let root = crate::gitio::toplevel(cwd)?;
-    let Some(gitdir) = worktree_gitdir(&root)? else {
-        return Ok(None);
-    };
-    // The worktree's HEAD file is a symref when attached — handled above —
-    // and a raw sha when detached, which is the only case that reaches here.
-    let head = gitdir.join("HEAD");
-    let Ok(text) = std::fs::read_to_string(&head) else {
-        return Ok(None);
-    };
-    if text.trim().starts_with("ref: ") {
-        return Ok(None);
-    }
-
-    // Primary: a marker whose worktree field names this checkout.
     let dir = crate::journal::resolve_dir(cwd)?;
-    let root_canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root = canonical_path(&root);
     for marker in fork_markers(&dir) {
-        if let Some(recorded) = marker_field(&marker.body, "worktree") {
-            let recorded = PathBuf::from(recorded);
-            let recorded = recorded.canonicalize().unwrap_or(recorded);
-            if recorded == root_canonical {
-                let slug = marker
-                    .filename
-                    .rsplit_once("-fork-")
-                    .and_then(|(_, rest)| rest.strip_suffix("-plan.md"))
-                    .map(str::to_string)
-                    .filter(|slug| !slug.is_empty());
-                return Ok(slug);
-            }
+        let Some(branch) = marker_branch(&marker) else {
+            continue;
+        };
+        if crate::gitio::branch_exists(cwd, &branch)
+            && marker_worktree_path(&root, &marker).is_some_and(|path| path == root)
+        {
+            return Ok(fork_slug_from_branch(&branch));
         }
     }
-
-    // Fallback: the gitdir-name shape, trusted only when the fork branch it
-    // names exists AND points at this worktree's HEAD. Existence alone
-    // corroborates nothing about identity: an unrelated `fork/<other>` in
-    // the same repository would lend its name to whichever slug this
-    // worktree's gitdir splits to. The same sha match `adopt` demands
-    // between a detached worktree and a branch tip decides here too; a
-    // worktree that fails it stays unnamed rather than named as another
-    // fork, whose record a printed `retire` command would act on.
-    let Some(slug) = gitdir
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .and_then(|name| name.split_once("-fork-").map(|(_, slug)| slug.to_string()))
-        .filter(|slug| !slug.is_empty())
-    else {
-        return Ok(None);
-    };
-    let branch = format!("{FORK_BRANCH_PREFIX}{slug}");
-    let head_sha = text.trim();
-    if crate::gitio::branch_exists(cwd, &branch)
-        && crate::gitio::branch_head(cwd, &branch).is_ok_and(|tip| tip == head_sha)
-    {
-        Ok(Some(slug))
-    } else {
-        Ok(None)
-    }
+    Ok(None)
 }
 
 /// Every fork marker in the journal, newest first: the path match wants the
@@ -160,24 +95,6 @@ fn fork_markers(dir: &Path) -> Vec<ForkMarker> {
     markers
 }
 
-/// The per-worktree git directory a linked worktree's `.git` file points at.
-/// `None` for a primary checkout (its `.git` is a directory) or a directory
-/// outside any repository.
-fn worktree_gitdir(cwd: &Path) -> Result<Option<PathBuf>> {
-    let dot_git = cwd.join(".git");
-    if !dot_git.is_file() {
-        return Ok(None);
-    }
-    let text = std::fs::read_to_string(&dot_git)
-        .with_context(|| format!("cannot read {}", dot_git.display()))?;
-    for line in text.lines() {
-        if let Some(path) = line.strip_prefix("gitdir:") {
-            return Ok(Some(PathBuf::from(path.trim())));
-        }
-    }
-    Ok(None)
-}
-
 fn fork_branch(slug: &str) -> String {
     format!("{FORK_BRANCH_PREFIX}{slug}")
 }
@@ -195,27 +112,62 @@ struct ForkMarker {
     body: String,
 }
 
-/// The fork marker a slug's journal holds, if any. A marker is `plan`-kind
-/// under `fork-<slug>`: work-shaped enough to be visible in the queues a
-/// session reads, retired by the same consume machinery every actionable
-/// kind uses.
+fn marker_branch(marker: &ForkMarker) -> Option<String> {
+    let branch = marker_field(&marker.body, "branch")?;
+    is_fork_branch(&branch).then_some(branch)
+}
+
+fn canonical_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn marker_worktree_path(root: &Path, marker: &ForkMarker) -> Option<PathBuf> {
+    let recorded = PathBuf::from(marker_field(&marker.body, "worktree")?);
+    let path = if recorded.is_absolute() {
+        recorded
+    } else {
+        root.join(recorded)
+    };
+    Some(canonical_path(&path))
+}
+
+/// Resolve the worktree of a fork from its branch association or its marker's
+/// exact path. Detached worktrees have no branch association, and their HEAD
+/// is not an identity because another worktree can have the same commit.
+fn fork_worktree(cwd: &Path, slug: &str, marker: Option<&ForkMarker>) -> Result<Option<PathBuf>> {
+    let branch = fork_branch(slug);
+    let inventory = crate::gitio::worktree_inventory(cwd)?;
+    if let Some(entry) = inventory
+        .iter()
+        .find(|entry| entry.branch.as_deref() == Some(branch.as_str()))
+    {
+        return Ok(Some(entry.path.clone()));
+    }
+
+    let Some(marker) =
+        marker.filter(|marker| marker_branch(marker).as_deref() == Some(branch.as_str()))
+    else {
+        return Ok(None);
+    };
+    let root = crate::gitio::toplevel(cwd)?;
+    let Some(recorded) = marker_worktree_path(&root, marker) else {
+        return Ok(None);
+    };
+    Ok(inventory
+        .into_iter()
+        .find(|entry| entry.branch.is_none() && canonical_path(&entry.path) == recorded)
+        .map(|entry| entry.path))
+}
+
+/// The fork marker a branch's journal holds, if any. A marker is a `plan`
+/// artifact whose body records the exact fork branch and worktree path; its
+/// topic keeps it visible in the journal queues and the consume machinery
+/// retires it with the other actionable kinds.
 fn fork_marker(dir: &Path, slug: &str) -> Option<ForkMarker> {
-    let topic = fork_topic(slug);
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            crate::journal::parse_artifact_name(&name)
-                .filter(|(_, entry_topic, kind)| entry_topic.as_str() == topic && kind == "plan")
-                .map(|_| name)
-        })
-        .collect();
-    // Newest wins; an older marker for the same slug is a re-fork's history.
-    names.sort();
-    let filename = names.pop()?;
-    let body = std::fs::read_to_string(dir.join(&filename)).unwrap_or_default();
-    Some(ForkMarker { filename, body })
+    let branch = fork_branch(slug);
+    fork_markers(dir)
+        .into_iter()
+        .find(|marker| marker_branch(marker).as_deref() == Some(branch.as_str()))
 }
 
 /// One line from a marker body, as `key: value`.
@@ -340,14 +292,16 @@ pub fn begin(ctx: &Ctx, slug: &str, base_branch: Option<&str>) -> Result<i32> {
 pub fn adopt(ctx: &Ctx, slug: &str, intent: Option<&str>) -> Result<i32> {
     crate::ids::validate_slug(slug)?;
     let branch = fork_branch(slug);
-    let Some(worktree) = crate::gitio::worktree_for_branch(&ctx.cwd, &branch)? else {
+    let dir = crate::journal::resolve_dir(&ctx.cwd)?;
+    let marker = fork_marker(&dir, slug);
+    let Some(worktree) = fork_worktree(&ctx.cwd, slug, marker.as_ref())? else {
         bail!(
-            "no worktree has {branch} checked out; a hand-made fork is adoptable \
-             only while its worktree exists"
+            "no worktree has {branch} checked out with a reliable branch identity; \
+             adopt a hand-made fork while its branch is attached so arc can record \
+             the worktree path"
         );
     };
-    let dir = crate::journal::resolve_dir(&ctx.cwd)?;
-    if fork_marker(&dir, slug).is_none() {
+    if marker.is_none() {
         journal_marker(
             ctx,
             slug,
@@ -397,6 +351,9 @@ pub fn retire(
         bail!("retire needs a disposition: merged, dropped, or kept, with a word of why");
     }
     let branch = fork_branch(slug);
+    if !crate::gitio::branch_exists(&ctx.cwd, &branch) {
+        bail!("fork branch {branch} does not exist; nothing to retire");
+    }
     let dir = crate::journal::resolve_dir(&ctx.cwd)?;
     let marker = fork_marker(&dir, slug);
     // Retirement consumes the marker, so a consumed marker is a retired
@@ -405,7 +362,7 @@ pub fn retire(
         let events = crate::journal::read_events(&dir)?;
         if crate::journal::is_consumed(&events, &marker.filename) {
             if !keep_worktree {
-                if let Some(worktree) = crate::gitio::worktree_for_branch(&ctx.cwd, &branch)? {
+                if let Some(worktree) = fork_worktree(&ctx.cwd, slug, Some(marker))? {
                     crate::gitio::remove_worktree(&ctx.cwd, &worktree, force)?;
                     println!("worktree removed: {}", worktree.display());
                 }
@@ -414,7 +371,7 @@ pub fn retire(
         }
     }
     if !keep_worktree {
-        if let Some(worktree) = crate::gitio::worktree_for_branch(&ctx.cwd, &branch)? {
+        if let Some(worktree) = fork_worktree(&ctx.cwd, slug, marker.as_ref())? {
             if force {
                 // --force destroys work arc cannot see; the operator reads
                 // what is being destroyed in the same breath as the
@@ -606,7 +563,7 @@ fn describe(cwd: &Path, dir: &Path, slug: &str, consumed: &HashSet<&str>) -> For
         .as_ref()
         .filter(|marker| consumed.contains(marker.filename.as_str()))
         .map(|_| "retired".to_string());
-    let worktree = crate::gitio::worktree_for_branch(cwd, &branch)
+    let worktree = fork_worktree(cwd, slug, marker.as_ref())
         .ok()
         .flatten()
         .map(|path| path.display().to_string());
@@ -655,6 +612,13 @@ fn uncommitted_summary(worktree: &Path) -> String {
 /// The refusal `integrate` prints inside a fork worktree. It names the way
 /// out rather than only the wall: a fork merges when its operator moves the
 /// work, and the disposition is recorded, not gated.
+pub fn ensure_not_fork(cwd: &Path) -> Result<()> {
+    if let Some(slug) = fork_slug_at(cwd)? {
+        bail!("{}", integrate_refusal(&slug));
+    }
+    Ok(())
+}
+
 pub fn integrate_refusal(slug: &str) -> String {
     format!(
         "this is fork worktree {slug}: unintegrated by intent, so arc does not \
