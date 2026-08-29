@@ -1524,7 +1524,7 @@ pub fn resolve_dir(cwd: &Path) -> Result<PathBuf> {
 fn resolve(cwd: &Path) -> Result<JournalResolution> {
     if let Some(dir) = std::env::var_os("ARC_JOURNAL_DIR") {
         return Ok(JournalResolution {
-            directory: PathBuf::from(dir),
+            directory: anchor_journal_destination(cwd, PathBuf::from(dir))?,
             source: ResolutionSource::Env,
             anchor: None,
         });
@@ -1560,7 +1560,7 @@ fn resolve(cwd: &Path) -> Result<JournalResolution> {
     }
     if let Some((_, anchor, directory)) = configured {
         return Ok(JournalResolution {
-            directory,
+            directory: anchor_journal_destination(cwd, directory)?,
             source: ResolutionSource::ConfigPrefix,
             anchor: Some(anchor),
         });
@@ -1654,6 +1654,23 @@ fn recorded_anchor_journal(cfg: &config::Config, canonical_cwd: &Path) -> Result
 /// The main repository root, shared by every worktree. Keying the archive
 /// off this (never a worktree path) means two worktrees of one repo always
 /// resolve to the same directory.
+/// Anchor a journal destination so every checkout of one repository reads the
+/// same directory. A relative destination — from `ARC_JOURNAL_DIR` or a
+/// configured scope — would otherwise be joined to whatever the caller's cwd
+/// happens to be, which is the one input that can still send the primary and
+/// a linked worktree to different journals. Outside a repository there is no
+/// shared root, so the cwd is the only anchor available.
+fn anchor_journal_destination(cwd: &Path, directory: PathBuf) -> Result<PathBuf> {
+    if directory.is_absolute() {
+        return Ok(directory);
+    }
+    let base = match std::fs::canonicalize(cwd) {
+        Ok(canonical) => repo_root(&canonical).unwrap_or(canonical),
+        Err(_) => cwd.to_path_buf(),
+    };
+    Ok(base.join(directory))
+}
+
 fn repo_root(cwd: &Path) -> Result<PathBuf> {
     let common = gitio::common_dir(cwd)?;
     let root = if common.file_name().is_some_and(|n| n == ".git") {

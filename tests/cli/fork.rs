@@ -1124,3 +1124,39 @@ fn a_fork_base_ignores_a_primary_parked_on_a_working_branch() {
         "{parked}"
     );
 }
+
+/// A relative journal destination must anchor to the repository, not to the
+/// caller. Otherwise each checkout joins it to its own directory, and an
+/// artifact written from one worktree is invisible from another — which is
+/// how a fork's marker goes missing from the checkout that most needs it.
+#[test]
+fn a_relative_journal_destination_is_one_journal_for_every_worktree() {
+    let repo = Repo::new();
+    let linked = repo.root.parent().unwrap().join("linked-checkout");
+    git(
+        &repo.root,
+        &["worktree", "add", "-b", "side", linked.to_str().unwrap()],
+    );
+
+    stdout(
+        repo.arc(&repo.root)
+            .env("ARC_JOURNAL_DIR", ".arc-journal")
+            .args(["fork", "begin", "anchored"]),
+    );
+
+    let from_primary = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_JOURNAL_DIR", ".arc-journal")
+            .args(["journal", "list"]),
+    );
+    let from_linked = stdout(
+        repo.arc(&linked)
+            .env("ARC_JOURNAL_DIR", ".arc-journal")
+            .args(["journal", "list"]),
+    );
+    assert!(from_primary.contains("fork-anchored"), "{from_primary}");
+    assert!(
+        from_linked.contains("fork-anchored"),
+        "a linked worktree read a different journal: {from_linked}"
+    );
+}
