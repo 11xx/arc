@@ -561,7 +561,7 @@ fn review_map_names_the_reviewer_that_never_saw_the_final_patchset() {
 
     // Advisory only: thin coverage never becomes a blocker.
     let check = json_stdout(repo.arc(&repo.root).args(["check", "drifted", "--json"]));
-    assert_eq!(check["schema"], "arc-check/2", "{check}");
+    assert_eq!(check["schema"], "arc-check/3", "{check}");
     assert!(check["advisories"]
         .as_array()
         .unwrap()
@@ -819,6 +819,7 @@ fn doctor_reports_an_undischarged_obligation() {
         .assert()
         .success();
     let report = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
+    assert_eq!(report["schema"], "arc-doctor/2", "{report}");
     let codes: Vec<&str> = report["advice"]
         .as_array()
         .unwrap()

@@ -79,7 +79,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
 
     let exit = i32::from(!problems.is_empty());
     let report = Report {
-        schema: "arc-doctor/1",
+        schema: "arc-doctor/2",
         problems,
         advice,
     };
@@ -639,7 +639,17 @@ fn inspect_closed_worktrees(
     states: &BTreeMap<String, ChangeState>,
     advice: &mut Vec<Finding>,
 ) -> Result<()> {
-    let registered = gitio::git(cwd, &["worktree", "list", "--porcelain"])?
+    let inventory = match gitio::git(cwd, &["worktree", "list", "--porcelain"]) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            advice.push(Finding {
+                code: "worktree-inventory-unknown",
+                detail: error.to_string(),
+            });
+            return Ok(());
+        }
+    };
+    let registered = inventory
         .lines()
         .filter_map(|line| line.strip_prefix("worktree "))
         .map(str::to_string)
@@ -687,6 +697,15 @@ fn inspect_worktree_accounting(
         advice.push(Finding {
             code: "open-worktree-usage",
             detail: format!("{}: {} at {}", usage.change_id, size, usage.path),
+        });
+    }
+    for usage in &accounting.unknown {
+        advice.push(Finding {
+            code: "open-worktree-usage-unknown",
+            detail: format!(
+                "{}: unknown at {} ({})",
+                usage.change_id, usage.path, usage.reason
+            ),
         });
     }
     if let Some(total) = accounting.total_bytes {

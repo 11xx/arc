@@ -1260,7 +1260,7 @@ fn brief_author_only_review_warns_but_remains_integrate_ready() {
     assert_eq!(status["integrate_ready"], true, "{status}");
 
     let check = json_stdout(repo.arc(&repo.root).args(["check", "briefed", "--json"]));
-    assert_eq!(check["schema"], "arc-check/2", "{check}");
+    assert_eq!(check["schema"], "arc-check/3", "{check}");
     assert_eq!(check["ready"], true, "{check}");
     assert_eq!(check["exit_code"], 0, "{check}");
     assert!(

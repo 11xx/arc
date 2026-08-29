@@ -471,8 +471,8 @@ pub enum JournalCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Every question awaiting a person, across the journal. arc records
-    /// what agents cannot settle; it does not ask. This is the view an agent
+    /// Every open question, across the journal. arc records what agents cannot
+    /// settle alone; it does not ask. This is the view an agent
     /// reads to raise the question through its own harness prompt — file, id,
     /// placement, the options to offer, and which branches were already
     /// argued — and `answer` is where the reply comes back. `--json` carries
@@ -1119,6 +1119,91 @@ fn split_journal_candidates(dir: &Path, anchor: Option<&Path>) -> Result<Vec<Pat
     Ok(found)
 }
 
+/// Check the three durable pieces of a kind transition against one another.
+///
+/// A transition is written as a relation event, a successor artifact, and a
+/// superseded retirement event. The writes cannot share one filesystem
+/// transaction, so every incomplete combination must remain visible to the
+/// repair surface instead of looking like an ordinary queue item.
+fn inspect_transition_integrity(
+    dir: &Path,
+    cold: &Path,
+    hot_files: &[String],
+    events: &[JournalEvent],
+    problems: &mut Vec<DoctorFinding>,
+) -> Result<()> {
+    let mut relations = HashSet::new();
+    let mut relation_counts = HashMap::new();
+    for event in events.iter().filter(|event| event.event == "transition") {
+        let (Some(successor), Some(source)) = (event.file.as_deref(), event.supersedes.as_deref())
+        else {
+            continue;
+        };
+        let key = (source.to_string(), successor.to_string());
+        *relation_counts.entry(key.clone()).or_insert(0usize) += 1;
+        relations.insert(key.clone());
+
+        let mut issues = Vec::new();
+        if !dir.join(source).is_file() && !cold.join(source).is_file() {
+            issues.push("the source artifact is missing");
+        }
+        let successor_path = [dir.join(successor), cold.join(successor)]
+            .into_iter()
+            .find(|path| path.is_file());
+        match successor_path {
+            None => issues.push("the successor artifact is missing"),
+            Some(path) if artifact_supersedes(&path).as_deref() != Some(source) => {
+                issues.push("the successor does not carry the supersedes link")
+            }
+            Some(_) => {}
+        }
+        if !events.iter().any(|candidate| {
+            candidate.event == "consumed"
+                && candidate.file.as_deref() == Some(source)
+                && candidate.outcome.as_deref() == Some(ConsumeOutcome::Superseded.as_str())
+        }) {
+            issues.push("the source has no superseded retirement event");
+        }
+        if relation_counts[&key] > 1 {
+            issues.push("the relation event is duplicated");
+        }
+        if !issues.is_empty() {
+            problems.push(DoctorFinding {
+                code: "incomplete-transition",
+                detail: format!("{source} -> {successor}: {}", issues.join("; ")),
+            });
+        }
+    }
+
+    let mut artifacts = Vec::new();
+    for (storage, names) in [
+        ("hot", hot_files.to_vec()),
+        ("cold", sorted_artifact_names(cold)?),
+    ] {
+        for name in names {
+            let path = if storage == "hot" {
+                dir.join(&name)
+            } else {
+                cold.join(&name)
+            };
+            if let Some(source) = artifact_supersedes(&path) {
+                artifacts.push((source, name, storage));
+            }
+        }
+    }
+    for (source, successor, storage) in artifacts {
+        if !relations.contains(&(source.clone(), successor.clone())) {
+            problems.push(DoctorFinding {
+                code: "incomplete-transition",
+                detail: format!(
+                    "{storage} artifact {successor} supersedes {source} without a transition relation event"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     let resolution = resolve(&ctx.cwd)?;
     let dir = resolution.directory.clone();
@@ -1228,6 +1313,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
             });
         }
     }
+    inspect_transition_integrity(&dir, &cold, &hot_files, &events, &mut problems)?;
 
     // A journal is addressed by the slugged path of its project. When that
     // path stops existing the journal becomes unreachable from anywhere, and
@@ -1943,6 +2029,28 @@ fn open_discussion(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, Strin
     Ok((dir, path, topic))
 }
 
+/// Open a discussion for settling a question that was already posed. A
+/// consumed artifact is closed to new work, positions, and questions, but its
+/// unanswered question remains a live obligation and may receive its one
+/// settlement block.
+///
+/// The cold archive is searched after the hot journal, because consumption is
+/// what makes an artifact archivable: an open question outlives its source,
+/// and the source it outlives is exactly the kind that has already moved.
+fn open_discussion_for_answer(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String)> {
+    let (topic, kind) = check_artifact_name(filename)?;
+    if kind != JournalKind::Discussion.as_str() {
+        bail!("{filename} is a {kind}, not a discussion");
+    }
+    let hot = resolve_dir(&ctx.cwd)?;
+    // The events stay in the hot journal, so the answer is recorded there
+    // whichever directory holds the body it is appended to.
+    let Some(path) = artifact_body_path(&hot, filename) else {
+        bail!("no such artifact {} in {}", filename, hot.display());
+    };
+    Ok((hot, path, topic))
+}
+
 /// Record that an open artifact was checked against the source at the
 /// project's current anchor head. An unborn or otherwise headless anchor still
 /// gets the verification fact; it simply has no revision to compare later.
@@ -2022,7 +2130,10 @@ fn question(
     let settle_by = match (settle_by, delegate) {
         (Some("person"), None) | (None, None) => None,
         (Some("anyone"), None) => Some("anyone".to_string()),
-        (Some("delegate"), Some(name)) => Some(format!("delegate:{name}")),
+        (Some("delegate"), Some(name)) if name.trim().is_empty() => {
+            bail!("--delegate <name> cannot be empty")
+        }
+        (Some("delegate"), Some(name)) => Some(format!("delegate:{}", name.trim())),
         (Some("delegate"), None) => {
             bail!("--settle-by delegate needs --delegate <name>: name who may answer")
         }
@@ -2072,7 +2183,7 @@ fn answer(
     let body = read_body_verbatim(body_file)?;
     let dir = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&dir)?;
-    let (dir, path, topic) = open_discussion(ctx, filename)?;
+    let (dir, path, topic) = open_discussion_for_answer(ctx, filename)?;
     let events = read_events(&dir)?;
     let artifact = std::fs::read_to_string(&path)
         .with_context(|| format!("cannot read {}", path.display()))?;
@@ -2252,10 +2363,10 @@ fn questions(ctx: &Ctx, json: bool) -> Result<i32> {
         return Ok(0);
     }
     if open.is_empty() {
-        println!("no question is waiting on a person");
+        println!("no question is awaiting settlement");
         return Ok(0);
     }
-    println!("questions waiting on a person ({}):", open.len());
+    println!("questions awaiting settlement ({}):", open.len());
     for question in &open {
         let settle_by = match &question.settle_by {
             None => "person".to_string(),
@@ -2287,6 +2398,19 @@ fn questions(ctx: &Ctx, json: bool) -> Result<i32> {
 /// discussion it is whatever the scaffold opens with, and on any file with
 /// several questions it is the same string for all of them. A prompt needs
 /// what was actually asked.
+/// The file holding an artifact's body, hot journal first and cold archive
+/// second. Consumption is what makes an artifact archivable, so anything that
+/// reads a body derived from the event stream must look in both: the events
+/// outlive the move and the reader would otherwise see the artifact vanish.
+fn artifact_body_path(hot: &Path, filename: &str) -> Option<PathBuf> {
+    let path = hot.join(filename);
+    if path.is_file() {
+        return Some(path);
+    }
+    let archived = archive_dir(hot).join(filename);
+    archived.is_file().then_some(archived)
+}
+
 fn question_text(path: &Path, question_id: &str) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     // A fenced block quoting the conventions is prose, exactly as it is for
@@ -2444,7 +2568,7 @@ fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
                 .count()
         };
         open.push(OpenQuestion {
-            heading: question_text(&dir.join(file), question),
+            heading: artifact_body_path(dir, file).and_then(|path| question_text(&path, question)),
             file: file.to_string(),
             topic: event.topic.clone(),
             question: question.to_string(),
@@ -2761,10 +2885,7 @@ impl JournalEvent {
                         .as_ref()
                         .is_some_and(|values| valid_question_options(values))
                     && self.option.is_none()
-                    && self
-                        .settle_by
-                        .as_deref()
-                        .is_none_or(|value| value == "anyone" || value.starts_with("delegate:"))
+                    && self.settle_by.as_deref().is_none_or(valid_settle_by)
             }
             "answer" => {
                 self.file_is_discussion()
@@ -2815,6 +2936,14 @@ fn valid_question_options(values: &[String]) -> bool {
         && values
             .iter()
             .all(|value| !value.trim().is_empty() && seen.insert(value.as_str()))
+}
+
+fn valid_settle_by(value: &str) -> bool {
+    value == "person"
+        || value == "anyone"
+        || value
+            .strip_prefix("delegate:")
+            .is_some_and(|name| !name.trim().is_empty())
 }
 
 /// One question's replay state. Branch coverage is not tracked here: whether
@@ -3222,6 +3351,16 @@ fn event_message(event: &JournalEvent) -> String {
                 .note
                 .as_deref()
                 .map(|v| format!(": {v}"))
+                .unwrap_or_default()
+        ),
+        "transition" => format!(
+            "transitioned {} -> {}{}",
+            event.supersedes.as_deref().unwrap_or_default(),
+            event.file.as_deref().unwrap_or_default(),
+            event
+                .note
+                .as_deref()
+                .map(|value| format!(": {value}"))
                 .unwrap_or_default()
         ),
         "archived" => format!(
@@ -5738,11 +5877,76 @@ fn transition_allowed_target(kind: JournalKind) -> bool {
     )
 }
 
-/// Change a live artifact's kind as one guarded operation: write the typed
-/// successor, link it back, retire the source as superseded. A caller can
-/// hand-compose this sequence, and incompletely — the failures this guards
-/// against are the forgotten back-reference, the duplicate body, the two
-/// artifacts both left actionable.
+fn artifact_supersedes(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let source = text.lines().next()?.strip_prefix("supersedes: ")?.trim();
+    parse_artifact_name(source).map(|_| source.to_string())
+}
+
+fn find_transition_artifact(
+    dir: &Path,
+    topic: &str,
+    target_kind: &str,
+    source: &str,
+) -> Result<Option<String>> {
+    let mut found = None;
+    for name in sorted_artifact_names(dir)? {
+        let Some((_, artifact_topic, artifact_kind)) = parse_artifact_name(&name) else {
+            continue;
+        };
+        if artifact_topic != topic
+            || artifact_kind != target_kind
+            || artifact_supersedes(&dir.join(&name)).as_deref() != Some(source)
+        {
+            continue;
+        }
+        if found.is_some() {
+            bail!(
+                "multiple {} successors supersede {}; repair the journal before retrying",
+                target_kind,
+                source
+            );
+        }
+        found = Some(name);
+    }
+    Ok(found)
+}
+
+fn write_successor(path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "cannot create {} (an artifact with this second's timestamp already exists)",
+                path.display()
+            )
+        })?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("cannot write {}", path.display()))
+}
+
+fn append_transition_retirement(
+    ctx: &Ctx,
+    dir: &Path,
+    topic: &str,
+    source: &str,
+    successor: &str,
+) -> Result<()> {
+    let mut consumed = JournalEvent::base(ctx, Utc::now(), topic, "consumed");
+    consumed.file = Some(source.to_string());
+    consumed.outcome = Some(ConsumeOutcome::Superseded.as_str().to_string());
+    consumed.note = Some(format!("transitioned to {successor}"));
+    append_event(ctx, dir, &consumed)
+}
+
+/// Change a live artifact's kind as one guarded operation: record the relation,
+/// create the successor, and retire the source. The relation is written first,
+/// so an interruption leaves the source actionable with a pending fact rather
+/// than silently creating an untracked second queue item. A retry completes a
+/// pending relation, while the journal doctor reports every incomplete pair.
 #[allow(clippy::too_many_arguments)]
 fn transition(
     ctx: &Ctx,
@@ -5790,14 +5994,14 @@ fn transition(
     if is_consumed(&events, filename) {
         bail!("{filename} is already consumed (see the journal)");
     }
-    // Unanswered questions are work nobody did. The successor inherits them
-    // by naming the source, and every view that reads the source for
-    // questions still does; but the caller should say so, not discover it.
+    // An unanswered question is not settled by a kind change. It remains
+    // attached to the consumed source, where the answer operation can still
+    // append its settlement and keep the original provenance visible.
     let open = unanswered_questions(&events, filename);
     if !open.is_empty() && !dry_run {
         eprintln!(
             "warning: {filename} holds {} unanswered question{} ({}) that the successor \
-             does not settle; settle, re-file, or consume the source instead",
+             does not settle; it remains answerable on the consumed source",
             open.len(),
             if open.len() == 1 { "" } else { "s" },
             open.join(", ")
@@ -5806,9 +6010,9 @@ fn transition(
 
     // The successor's body: the caller's body when given, otherwise the
     // source's own body under a heading that names what changed. Same-second
-    // same-topic collisions are impossible against the source (kinds
-    // differ), but a same-second sibling could collide — exclusive create
-    // fails loudly rather than overwriting.
+    // same-topic collisions are impossible against the source (kinds differ),
+    // but a same-second sibling could collide — exclusive create fails loudly
+    // rather than overwriting.
     let now = Utc::now();
     let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
     let successor_name = format!("{stamp}-{topic}-{}.md", to.as_str());
@@ -5852,44 +6056,73 @@ fn transition(
         );
         return Ok(0);
     }
-    if successor_path.exists() {
+    let _transition = lock_journal_transition(&dir)?;
+    let events = read_events(&dir)?;
+    if is_consumed(&events, filename) {
+        bail!("{filename} is already consumed (see the journal)");
+    }
+
+    if let Some(existing) = events
+        .iter()
+        .rev()
+        .find(|event| event.event == "transition" && event.supersedes.as_deref() == Some(filename))
+    {
+        let successor = existing
+            .file
+            .as_deref()
+            .context("transition event has no successor filename")?;
+        let Some((_, existing_topic, existing_kind)) = parse_artifact_name(successor) else {
+            bail!("transition event names malformed successor {successor}");
+        };
+        if existing_topic != topic || existing_kind != to.as_str() {
+            bail!(
+                "{filename} already has a transition to {successor}; retry that transition instead"
+            );
+        }
+        // The successor may have been consumed and archived between the
+        // interrupted transition and this retry. Resolving it across both
+        // stores is what stops the retry recreating a hot duplicate that
+        // shadows the real one.
+        match artifact_body_path(&dir, successor) {
+            Some(path) if artifact_supersedes(&path).as_deref() != Some(filename) => bail!(
+                "transition successor {} exists without the supersedes link to {}",
+                path.display(),
+                filename
+            ),
+            Some(_) => {}
+            None => write_successor(&dir.join(successor), &format!("{supersession}{contents}"))?,
+        }
+        append_transition_retirement(ctx, &dir, &topic, filename, successor)?;
+        println!(
+            "completed transition: {filename} → {successor} ({} superseded)",
+            from_kind
+        );
+        return Ok(0);
+    }
+
+    let successor_name =
+        find_transition_artifact(&dir, &topic, to.as_str(), filename)?.unwrap_or(successor_name);
+    let successor_path = dir.join(&successor_name);
+    if successor_path.exists() && artifact_supersedes(&successor_path).as_deref() != Some(filename)
+    {
         bail!(
             "cannot create {} (an artifact with this second's timestamp already exists)",
             successor_path.display()
         );
     }
-    let _transition = lock_journal_transition(&dir)?;
-    // Re-read under the lock: a concurrent consumer of the source must turn
-    // this into a refusal rather than a second disposition of the same
-    // artifact.
-    if is_consumed(&read_events(&dir)?, filename) {
-        bail!("{filename} is already consumed (see the journal)");
-    }
-    {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&successor_path)
-            .with_context(|| {
-                format!(
-                    "cannot create {} (an artifact with this second's timestamp already exists)",
-                    successor_path.display()
-                )
-            })?;
-        f.write_all(format!("{supersession}{contents}").as_bytes())
-            .with_context(|| format!("cannot write {}", successor_path.display()))?;
-    }
+
+    // The relation is the durable intent. If the next write is interrupted,
+    // the journal doctor can name it and a retry can finish it without
+    // inventing another successor.
     let mut event = JournalEvent::base(ctx, now, &topic, "transition");
     event.file = Some(successor_name.clone());
     event.supersedes = Some(filename.to_string());
     event.note = reason.map(str::to_string);
     append_event(ctx, &dir, &event)?;
-    let mut consumed = JournalEvent::base(ctx, now, &topic, "consumed");
-    consumed.file = Some(filename.to_string());
-    consumed.outcome = Some(ConsumeOutcome::Superseded.as_str().to_string());
-    consumed.note = Some(format!("transitioned to {successor_name}"));
-    append_event(ctx, &dir, &consumed)?;
+    if !successor_path.exists() {
+        write_successor(&successor_path, &format!("{supersession}{contents}"))?;
+    }
+    append_transition_retirement(ctx, &dir, &topic, filename, &successor_name)?;
     println!(
         "transitioned: {filename} → {successor_name} ({} superseded)",
         from_kind
@@ -6123,7 +6356,10 @@ impl Orientation {
     pub(crate) fn render(&self) {
         render_lanes(&self.lanes, Utc::now());
         if !self.open_questions.is_empty() {
-            println!("waiting on a person ({}):", self.open_questions.len());
+            println!(
+                "questions awaiting settlement ({}):",
+                self.open_questions.len()
+            );
             for question in &self.open_questions {
                 let settle_by = match &question.settle_by {
                     None => "person",

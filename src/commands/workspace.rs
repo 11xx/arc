@@ -303,7 +303,7 @@ struct ProjectBacklog {
     /// Every artifact behind the counts above, when `--items` asked for
     /// them. The same artifacts the counts are taken over, so the two cannot
     /// disagree. Additive in `arc-workspace-backlog/3`; the debt-owed rename
-    /// moved the schema to 4.
+    /// carried the schema to 4.
     #[serde(skip_serializing_if = "Option::is_none")]
     items: Option<BacklogItems>,
 }
