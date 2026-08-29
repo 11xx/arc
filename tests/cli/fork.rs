@@ -961,6 +961,145 @@ fn a_relative_marker_path_names_no_worktree_from_anywhere() {
     assert!(from_primary.contains("no worktree"), "{from_primary}");
 }
 
+/// Fork markers and Git's worktree inventory must come from one repository
+/// view. A journal prefix covering the primary checkout must therefore still
+/// be used when the question is asked from a linked, detached fork checkout.
+#[test]
+fn fork_marker_inventory_is_shared_across_worktrees_with_a_journal_prefix() {
+    let repo = Repo::new();
+    let primary = fs::canonicalize(&repo.root).unwrap();
+    let journal = repo.home.join("configured-fork-journal");
+    let config = repo.home.join(".local/ai/arc");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        format!(
+            "[journals.dirs]\n\"{}\" = \"{}\"\n",
+            primary.display(),
+            journal.display()
+        ),
+    )
+    .unwrap();
+
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "scoped"]));
+    let worktree = fork_worktree(&repo, "scoped");
+    git(&worktree, &["checkout", "--detach", "HEAD"]);
+
+    let from_primary = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    let from_fork = json_stdout(repo.arc(&worktree).args(["fork", "list", "--json"]));
+    assert_eq!(
+        from_primary, from_fork,
+        "one repository must have one fork view"
+    );
+    assert_eq!(
+        from_fork["forks"][0]["worktree"],
+        worktree.to_str().unwrap(),
+        "the detached checkout must be resolved from the shared marker"
+    );
+    assert_eq!(
+        stdout(repo.arc(&repo.root).args(["journal", "dir"])),
+        stdout(repo.arc(&worktree).args(["journal", "dir"])),
+        "both worktrees must read the configured repository journal"
+    );
+
+    repo.arc(&worktree)
+        .args(["integrate", "anything"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("fork worktree scoped"));
+}
+
+/// A relative worktrees_dir is resolved before a fork marker is written, so
+/// the marker carries an absolute record. An older relative record is invalid
+/// state and must remain visible to the journal repair surface.
+#[test]
+fn relative_fork_marker_is_written_absolute_and_diagnosed_when_legacy() {
+    let repo = Repo::new();
+    let config = repo.home.join(".local/ai/arc");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        "worktrees_dir = \"relative-worktrees\"\n",
+    )
+    .unwrap();
+
+    let output = stdout(repo.arc(&repo.root).args(["fork", "begin", "legacy"]));
+    let worktree = PathBuf::from(
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix("worktree: "))
+            .expect("fork output should name its worktree"),
+    );
+    assert!(
+        worktree.is_absolute(),
+        "fork output must name an absolute path"
+    );
+
+    let dir = PathBuf::from(stdout(repo.arc(&repo.root).args(["journal", "dir"])).trim());
+    let marker = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("-fork-legacy-plan.md"))
+        })
+        .expect("the fork wrote a marker");
+    let body = fs::read_to_string(&marker).unwrap();
+    let recorded = body
+        .lines()
+        .find_map(|line| line.strip_prefix("worktree: "))
+        .map(PathBuf::from)
+        .expect("the marker should record its worktree");
+    assert!(recorded.is_absolute(), "marker records must be absolute");
+    assert_eq!(recorded, worktree);
+
+    // This is the state an older writer could leave behind. It has no safe
+    // anchor now: resolving it against either caller would invent a different
+    // fork location.
+    let relative_record = PathBuf::from("relative-worktrees/repo-fork-legacy");
+    let legacy_body = body
+        .lines()
+        .map(|line| {
+            if line.starts_with("worktree: ") {
+                format!("worktree: {}", relative_record.display())
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&marker, format!("{legacy_body}\n")).unwrap();
+    git(&worktree, &["checkout", "--detach", "HEAD"]);
+
+    let doctor = |cwd: &Path| {
+        let output = repo
+            .arc(cwd)
+            .args(["journal", "doctor", "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "doctor must reject the marker"
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let from_primary = doctor(&repo.root);
+    let from_fork = doctor(&worktree);
+    assert_eq!(
+        from_primary, from_fork,
+        "diagnosis must use the repository journal"
+    );
+    assert_eq!(from_fork["problems"][0]["code"], "invalid-fork-marker");
+    let detail = from_fork["problems"][0]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("relative-worktrees/repo-fork-legacy"),
+        "the diagnosis should name the invalid marker field: {from_fork}"
+    );
+}
+
 /// A fork's base is a property of the repository, not of whatever the primary
 /// checkout happens to hold. Parking the primary on a change branch must not
 /// make every fork measure against it.

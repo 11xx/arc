@@ -1204,6 +1204,42 @@ fn inspect_transition_integrity(
     Ok(())
 }
 
+/// A fork marker must carry an absolute worktree path. Resolving a relative
+/// path against the caller would make the same repository name a different
+/// checkout from different worktrees, and there is no recorded anchor that
+/// can recover the old meaning safely.
+fn inspect_fork_marker_paths(
+    dir: &Path,
+    hot_files: &[String],
+    problems: &mut Vec<DoctorFinding>,
+) -> Result<()> {
+    for name in hot_files {
+        let Some((_, topic, kind)) = parse_artifact_name(name) else {
+            continue;
+        };
+        if kind != JournalKind::Plan.as_str() || !topic.starts_with("fork-") {
+            continue;
+        }
+        let body = std::fs::read_to_string(dir.join(name))
+            .with_context(|| format!("cannot read {}", dir.join(name).display()))?;
+        let Some(recorded) = body
+            .lines()
+            .find_map(|line| line.strip_prefix("worktree: "))
+        else {
+            continue;
+        };
+        if !Path::new(recorded).is_absolute() {
+            problems.push(DoctorFinding {
+                code: "invalid-fork-marker",
+                detail: format!(
+                    "{name}: relative worktree path {recorded:?}; fork markers must record an absolute path"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     let resolution = resolve(&ctx.cwd)?;
     let dir = resolution.directory.clone();
@@ -1314,6 +1350,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
         }
     }
     inspect_transition_integrity(&dir, &cold, &hot_files, &events, &mut problems)?;
+    inspect_fork_marker_paths(&dir, &hot_files, &mut problems)?;
 
     // A journal is addressed by the slugged path of its project. When that
     // path stops existing the journal becomes unreachable from anywhere, and
@@ -1495,6 +1532,12 @@ fn resolve(cwd: &Path) -> Result<JournalResolution> {
     let cfg = config::load()?;
     let canonical_cwd = std::fs::canonicalize(cwd)
         .with_context(|| format!("cannot canonicalize journal cwd {}", cwd.display()))?;
+    // A Git repository is one project even when it has several checkout
+    // paths. Match configured journal prefixes against that shared root so a
+    // prefix cannot send the primary and a linked worktree to different
+    // journals. Non-repository directories retain their cwd-based scopes.
+    let repository = repo_root(&canonical_cwd).ok();
+    let prefix_path = repository.as_deref().unwrap_or(&canonical_cwd);
     let mut configured = None;
     for (raw_anchor, raw_directory) in &cfg.journal_dirs {
         let anchor_path = config::expand_tilde(raw_anchor)?;
@@ -1504,7 +1547,7 @@ fn resolve(cwd: &Path) -> Result<JournalResolution> {
         let Ok(anchor) = std::fs::canonicalize(&anchor_path) else {
             continue;
         };
-        if !canonical_cwd.starts_with(&anchor) {
+        if !prefix_path.starts_with(&anchor) {
             continue;
         }
         let depth = anchor.components().count();
@@ -1522,7 +1565,7 @@ fn resolve(cwd: &Path) -> Result<JournalResolution> {
             anchor: Some(anchor),
         });
     }
-    if let Ok(root) = repo_root(&canonical_cwd) {
+    if let Some(root) = repository {
         return Ok(JournalResolution {
             directory: cfg.ai_home.join("journals").join(config::path_slug(&root)),
             source: ResolutionSource::Git,

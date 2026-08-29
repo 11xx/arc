@@ -286,9 +286,13 @@ pub fn begin(ctx: &Ctx, slug: &str, base_branch: Option<&str>) -> Result<i32> {
         .context("cannot determine repository name")?
         .to_string_lossy()
         .into_owned();
-    let worktree = crate::config::load()?
-        .worktrees_dir
-        .join(format!("{repo_name}-fork-{slug}"));
+    let worktree_root = crate::config::load()?.worktrees_dir;
+    let worktree_root = if worktree_root.is_absolute() {
+        worktree_root
+    } else {
+        canonical_path(cwd).join(worktree_root)
+    };
+    let worktree = worktree_root.join(format!("{repo_name}-fork-{slug}"));
     if worktree.exists() {
         bail!("worktree path {} already exists", worktree.display());
     }

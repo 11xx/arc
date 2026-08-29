@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 /// on purpose — sandboxing is achieved by pointing the paths elsewhere.
 #[derive(Debug, Default, Deserialize)]
 pub struct ConfigFile {
-    /// Directory that receives change worktrees (default `~/.worktrees`).
+    /// Directory that receives change worktrees (default `~/.worktrees`). A
+    /// relative value remains relative until the command using it resolves it
+    /// against its invocation path.
     #[serde(default)]
     pub worktrees_dir: Option<String>,
     /// When set, ledgers live at `<data_root>/<repo-path-slug>/` instead
@@ -17,9 +19,10 @@ pub struct ConfigFile {
     #[serde(default)]
     pub data_root: Option<String>,
     /// Stable absolute path scopes for project-journal directories. The
-    /// longest matching component prefix wins before Git discovery; a prefix
-    /// covering repositories shadows their Git journals. Values may use a
-    /// leading `~`.
+    /// longest matching component prefix wins before Git discovery; for a Git
+    /// repository, matching uses its shared root so linked worktrees cannot
+    /// select different journals. A prefix covering repositories shadows
+    /// their Git journals. Values may use a leading `~`.
     #[serde(default)]
     pub journals: JournalsConfig,
     /// Journal behavior toggles (distinct from the per-project `[journals]`
