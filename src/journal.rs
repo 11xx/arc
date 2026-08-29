@@ -6079,17 +6079,18 @@ fn transition(
                 "{filename} already has a transition to {successor}; retry that transition instead"
             );
         }
-        let path = dir.join(successor);
-        if path.exists() {
-            if artifact_supersedes(&path).as_deref() != Some(filename) {
-                bail!(
-                    "transition successor {} exists without the supersedes link to {}",
-                    path.display(),
-                    filename
-                );
-            }
-        } else {
-            write_successor(&path, &format!("{supersession}{contents}"))?;
+        // The successor may have been consumed and archived between the
+        // interrupted transition and this retry. Resolving it across both
+        // stores is what stops the retry recreating a hot duplicate that
+        // shadows the real one.
+        match artifact_body_path(&dir, successor) {
+            Some(path) if artifact_supersedes(&path).as_deref() != Some(filename) => bail!(
+                "transition successor {} exists without the supersedes link to {}",
+                path.display(),
+                filename
+            ),
+            Some(_) => {}
+            None => write_successor(&dir.join(successor), &format!("{supersession}{contents}"))?,
         }
         append_transition_retirement(ctx, &dir, &topic, filename, successor)?;
         println!(

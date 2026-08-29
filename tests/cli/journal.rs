@@ -7767,6 +7767,56 @@ fn a_question_remains_answerable_after_its_source_is_archived() {
     );
 }
 
+/// A transition retry must find a successor that has since been consumed and
+/// archived. Recreating it in the hot journal would shadow the real record
+/// under hot-first resolution, and the reader would lose the archived body.
+#[test]
+fn a_transition_retry_finds_an_archived_successor_instead_of_recreating_it() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "retry-successor", "# Shape of the work\n");
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &file, "--to", "plan"])
+        .assert()
+        .success();
+    let dir = journal_dir(&repo);
+    let successor = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .find(|name| name.ends_with("-retry-successor-plan.md"))
+        .expect("the transition wrote a successor");
+
+    // Reproduce the half-written state the retry path exists for: the relation
+    // event and the successor stand, and the source was never retired.
+    let events = dir.join("events.jsonl");
+    let kept: Vec<String> = fs::read_to_string(&events)
+        .unwrap()
+        .lines()
+        .filter(|line| !(line.contains("\"consumed\"") && line.contains(&file)))
+        .map(str::to_string)
+        .collect();
+    fs::write(&events, format!("{}\n", kept.join("\n"))).unwrap();
+
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &successor, "--outcome", "done"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "archive", "--consumed"])
+        .assert()
+        .success();
+    assert!(!dir.join(&successor).exists(), "the successor was archived");
+
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &file, "--to", "plan"])
+        .assert()
+        .success();
+    assert!(
+        !dir.join(&successor).exists(),
+        "the retry recreated a hot successor that shadows the archived one"
+    );
+}
+
 /// A question carries who may settle it. A question marks what this session
 /// should not settle alone — an operator who delegated the call names the
 /// delegate — so `delegate:<name>` and `anyone` are first-class values, and
