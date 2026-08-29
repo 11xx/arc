@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use crate::commands::fork::is_fork_branch;
 use std::cell::Cell;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -368,7 +369,8 @@ pub fn remove_worktree(cwd: &Path, path: &Path, force: bool) -> Result<()> {
 /// failing to resolve is an error, not a zero a reader would sum.
 ///
 /// The default branch a comparison falls back to, when no marker recorded
-/// the fork's base: the repository's HEAD branch when discoverable, else
+/// the fork's base: the current branch, unless that is itself a fork — a
+/// fork is not an integrated base, the same refusal `begin` makes — else
 /// the configured init default. A guess, and the ahead count that rides on
 /// it is advice measured against a guess.
 pub fn default_branch(cwd: &Path) -> String {
@@ -376,6 +378,7 @@ pub fn default_branch(cwd: &Path) -> String {
         .ok()
         .flatten()
         .filter(|branch| !branch.is_empty())
+        .filter(|branch| !is_fork_branch(branch))
         .unwrap_or_else(|| "master".to_string())
 }
 

@@ -394,6 +394,51 @@ fn fork_list_shows_unknown_ahead_as_plus_question() {
     assert_eq!(value["forks"][0]["ahead"], 0);
 }
 
+/// An unmarked fork is never measured against itself. The current-branch
+/// fallback for its base must refuse fork branches the same way `begin`
+/// does: running `fork list` from inside a fork worktree otherwise reports
+/// every fork as +0 over a fork, a zero a reader would sum to "nothing to
+/// integrate".
+#[test]
+fn fork_list_from_inside_a_fork_never_names_a_fork_as_base() {
+    let repo = Repo::new();
+    repo.commit(&repo.root, "master.txt", "master\n", "test: master work");
+    // A fork made by hand: no `fork begin`, so no marker records its base.
+    let worktree = repo.home.join(".worktrees").join("repo-fork-selfbase");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fork/selfbase",
+            worktree.to_str().unwrap(),
+            "master",
+        ],
+    );
+    repo.commit(&worktree, "fork.txt", "fork\n", "test: fork work");
+
+    // From inside the fork worktree — where `current_branch` answers with
+    // the fork itself — the base is not a fork and the count is honest.
+    let text = stdout(repo.arc(&worktree).args(["fork", "list"]));
+    assert!(
+        !text.contains("over fork/"),
+        "a fork must not be measured against a fork: {text}"
+    );
+    assert!(text.contains("+1 over master"), "{text}");
+
+    let value = json_stdout(repo.arc(&worktree).args(["fork", "list", "--json"]));
+    let fork = &value["forks"][0];
+    assert!(!fork["base_branch"]
+        .as_str()
+        .is_some_and(|base| base.starts_with("fork/")), "{value}");
+    assert_eq!(fork["ahead"], 1, "{value}");
+
+    // The primary checkout keeps its answer.
+    let text = stdout(repo.arc(&repo.root).args(["fork", "list"]));
+    assert!(text.contains("+1 over master"), "{text}");
+}
+
 /// The integrate refusal holds on a detached HEAD. Detaching has no branch
 /// symbol and the porcelain list records only `detached`, so the fork
 /// identity comes from the worktree's gitdir name — corroborated by the
