@@ -576,19 +576,22 @@ pub struct ForkEntry {
     pub retired: Option<String>,
     /// Commits the fork branch carries that its base branch does not.
     /// `None` when the count cannot be computed — a missing base branch,
-    /// a failed rev-list — because an uncomputable number is not zero, and
-    /// a zero a reader would sum is a lie about work that may exist.
+    /// a failed rev-list, or no safely discoverable base — because an
+    /// uncomputable number is not zero, and a zero a reader would sum is a
+    /// lie about work that may exist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ahead: Option<usize>,
+    /// The recorded or discovered integration branch. `"unknown"` means no
+    /// marker or safe repository-level discovery supplied a branch.
     pub base_branch: String,
 }
 
 fn describe(cwd: &Path, dir: &Path, slug: &str, consumed: &HashSet<&str>) -> ForkEntry {
     let branch = fork_branch(slug);
     let marker = fork_marker(dir, slug);
-    // The base a marker recorded is the fork's own claim; an unmarked fork
-    // falls back to the repository's HEAD branch, which is a guess the
-    // ahead count inherits.
+    // A marker's base is the fork's own claim. An unmarked fork uses the
+    // primary worktree's branch or origin/HEAD; if neither is safe to use,
+    // retain an explicit unknown base instead of guessing a literal.
     let (intent, recorded_base) = marker
         .as_ref()
         .map(|marker| {
@@ -598,7 +601,7 @@ fn describe(cwd: &Path, dir: &Path, slug: &str, consumed: &HashSet<&str>) -> For
             )
         })
         .unwrap_or_else(|| (None, None));
-    let base_branch = recorded_base.unwrap_or_else(|| crate::gitio::default_branch(cwd));
+    let base_branch = recorded_base.or_else(|| crate::gitio::default_branch(cwd));
     let retired = marker
         .as_ref()
         .filter(|marker| consumed.contains(marker.filename.as_str()))
@@ -607,7 +610,10 @@ fn describe(cwd: &Path, dir: &Path, slug: &str, consumed: &HashSet<&str>) -> For
         .ok()
         .flatten()
         .map(|path| path.display().to_string());
-    let ahead = crate::gitio::ahead_count(cwd, &base_branch, &branch).ok();
+    let ahead = base_branch
+        .as_deref()
+        .and_then(|base| crate::gitio::ahead_count(cwd, base, &branch).ok());
+    let base_branch = base_branch.unwrap_or_else(|| "unknown".to_string());
     ForkEntry {
         slug: slug.to_string(),
         branch,

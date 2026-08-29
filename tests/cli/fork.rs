@@ -394,11 +394,10 @@ fn fork_list_shows_unknown_ahead_as_plus_question() {
     assert_eq!(value["forks"][0]["ahead"], 0);
 }
 
-/// An unmarked fork is never measured against itself. The current-branch
-/// fallback for its base must refuse fork branches the same way `begin`
-/// does: running `fork list` from inside a fork worktree otherwise reports
-/// every fork as +0 over a fork, a zero a reader would sum to "nothing to
-/// integrate".
+/// An unmarked fork is never measured against itself. Base discovery must
+/// refuse fork branches the same way `begin` does: running `fork list` from
+/// inside a fork worktree otherwise reports every fork as +0 over a fork, a
+/// zero a reader would sum to "nothing to integrate".
 #[test]
 fn fork_list_from_inside_a_fork_never_names_a_fork_as_base() {
     let repo = Repo::new();
@@ -418,8 +417,8 @@ fn fork_list_from_inside_a_fork_never_names_a_fork_as_base() {
     );
     repo.commit(&worktree, "fork.txt", "fork\n", "test: fork work");
 
-    // From inside the fork worktree — where `current_branch` answers with
-    // the fork itself — the base is not a fork and the count is honest.
+    // From inside the fork worktree, discovery reaches the repository's
+    // primary worktree instead of treating the fork branch as its own base.
     let text = stdout(repo.arc(&worktree).args(["fork", "list"]));
     assert!(
         !text.contains("over fork/"),
@@ -429,14 +428,57 @@ fn fork_list_from_inside_a_fork_never_names_a_fork_as_base() {
 
     let value = json_stdout(repo.arc(&worktree).args(["fork", "list", "--json"]));
     let fork = &value["forks"][0];
-    assert!(!fork["base_branch"]
-        .as_str()
-        .is_some_and(|base| base.starts_with("fork/")), "{value}");
+    assert!(
+        !fork["base_branch"]
+            .as_str()
+            .is_some_and(|base| base.starts_with("fork/")),
+        "{value}"
+    );
     assert_eq!(fork["ahead"], 1, "{value}");
 
     // The primary checkout keeps its answer.
     let text = stdout(repo.arc(&repo.root).args(["fork", "list"]));
     assert!(text.contains("+1 over master"), "{text}");
+}
+
+/// A repository with a primary `main` branch and a stale `master` branch
+/// uses `main` for an unmarked fork from both worktree views.
+#[test]
+fn fork_list_from_inside_a_fork_uses_the_primary_worktree_branch() {
+    let repo = Repo::new();
+    git(&repo.root, &["branch", "-m", "master", "main"]);
+    git(&repo.root, &["branch", "master"]);
+    repo.commit(&repo.root, "main-one.txt", "one\n", "test: main one");
+    repo.commit(&repo.root, "main-two.txt", "two\n", "test: main two");
+
+    let worktree = repo.home.join(".worktrees").join("repo-fork-late");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fork/late",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    repo.commit(&worktree, "fork.txt", "fork\n", "test: fork late");
+
+    let primary_text = stdout(repo.arc(&repo.root).args(["fork", "list"]));
+    assert!(primary_text.contains("+1 over main"), "{primary_text}");
+    let primary = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(primary["schema"], "arc-forks/1", "{primary}");
+    assert_eq!(primary["forks"][0]["base_branch"], "main", "{primary}");
+    assert_eq!(primary["forks"][0]["ahead"], 1, "{primary}");
+
+    let fork_text = stdout(repo.arc(&worktree).args(["fork", "list"]));
+    assert!(fork_text.contains("+1 over main"), "{fork_text}");
+    let inside = json_stdout(repo.arc(&worktree).args(["fork", "list", "--json"]));
+    assert_eq!(
+        inside["forks"][0]["base_branch"],
+        primary["forks"][0]["base_branch"]
+    );
+    assert_eq!(inside["forks"][0]["ahead"], primary["forks"][0]["ahead"]);
 }
 
 /// The integrate refusal holds on a detached HEAD. Detaching has no branch

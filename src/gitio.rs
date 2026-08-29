@@ -1,5 +1,5 @@
-use anyhow::{bail, Context, Result};
 use crate::commands::fork::is_fork_branch;
+use anyhow::{bail, Context, Result};
 use std::cell::Cell;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -368,18 +368,33 @@ pub fn remove_worktree(cwd: &Path, path: &Path, force: bool) -> Result<()> {
 /// How many commits `branch` carries that `base` does not. Either side
 /// failing to resolve is an error, not a zero a reader would sum.
 ///
-/// The default branch a comparison falls back to, when no marker recorded
-/// the fork's base: the current branch, unless that is itself a fork — a
-/// fork is not an integrated base, the same refusal `begin` makes — else
-/// the configured init default. A guess, and the ahead count that rides on
-/// it is advice measured against a guess.
-pub fn default_branch(cwd: &Path) -> String {
-    current_branch(cwd)
+/// Discover the branch a repository presents as its integration branch.
+///
+/// Git lists the primary worktree first, so its checked-out branch is the
+/// strongest local signal. When that worktree is detached, `origin/HEAD` is
+/// used when it names a non-fork branch. `None` means no safe branch was
+/// discoverable; callers must not substitute a literal branch name, because
+/// it could resolve to an unrelated history.
+pub fn default_branch(cwd: &Path) -> Option<String> {
+    let primary_branch = primary_worktree_branch(cwd)
         .ok()
         .flatten()
         .filter(|branch| !branch.is_empty())
-        .filter(|branch| !is_fork_branch(branch))
-        .unwrap_or_else(|| "master".to_string())
+        .filter(|branch| !is_fork_branch(branch));
+    if primary_branch.is_some() {
+        return primary_branch;
+    }
+
+    git(
+        cwd,
+        &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"],
+    )
+    .ok()
+    .filter(|branch| {
+        branch
+            .strip_prefix("origin/")
+            .is_some_and(|branch| !branch.is_empty() && !is_fork_branch(branch))
+    })
 }
 
 pub fn ahead_count(cwd: &Path, base: &str, branch: &str) -> Result<usize> {
