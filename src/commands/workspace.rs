@@ -302,8 +302,8 @@ struct ProjectBacklog {
     oldest_open_days: Option<u64>,
     /// Every artifact behind the counts above, when `--items` asked for
     /// them. The same artifacts the counts are taken over, so the two cannot
-    /// disagree. The debt_owed rename is carried by
-    /// arc-workspace-backlog/4.
+    /// disagree. Additive in `arc-workspace-backlog/3`; the debt-owed rename
+    /// carried the schema to 4.
     #[serde(skip_serializing_if = "Option::is_none")]
     items: Option<BacklogItems>,
 }

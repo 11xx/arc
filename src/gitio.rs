@@ -1,3 +1,4 @@
+use crate::commands::fork::is_fork_branch;
 use anyhow::{bail, Context, Result};
 use std::cell::Cell;
 use std::io::Write;
@@ -330,21 +331,152 @@ pub fn add_worktree(cwd: &Path, path: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-/// The worktree (if any) that has `branch` checked out.
-pub fn worktree_for_branch(cwd: &Path, branch: &str) -> Result<Option<PathBuf>> {
+/// Create `branch` at HEAD (or `start`) and check it out in a new worktree,
+/// as one Git call. The `-b` must precede the path: `worktree add <path>
+/// <new-branch>` treats the branch as an existing commit-ish and fails with
+/// `invalid reference`, so a branch cannot be minted positionally.
+pub fn add_worktree_new_branch(cwd: &Path, path: &Path, branch: &str, start: &str) -> Result<()> {
+    git(
+        cwd,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            path.to_str().context("non-UTF8 worktree path")?,
+            start,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Remove a worktree. Fails loudly when Git refuses — uncommitted or
+/// untracked files make it refuse — so a fork worktree holding work arc
+/// cannot see is never destroyed silently. The operator's `--force` is the
+/// decision that gets past this, not a flag arc reaches for itself.
+pub fn remove_worktree(cwd: &Path, path: &Path, force: bool) -> Result<()> {
+    let mut args = vec!["worktree".to_string(), "remove".to_string()];
+    if force {
+        args.push("--force".to_string());
+    }
+    args.push(path.to_str().context("non-UTF8 worktree path")?.to_string());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    git(cwd, &refs)?;
+    Ok(())
+}
+
+/// How many commits `branch` carries that `base` does not. Either side
+/// failing to resolve is an error, not a zero a reader would sum.
+///
+/// Discover the branch a repository presents as its integration branch.
+///
+/// Git lists the primary worktree first, so its checked-out branch is the
+/// strongest local signal. When that worktree is detached, `origin/HEAD` is
+/// used when it names a non-fork branch. `None` means no safe branch was
+/// discoverable; callers must not substitute a literal branch name, because
+/// it could resolve to an unrelated history.
+pub fn default_branch(cwd: &Path) -> Option<String> {
+    // `origin/HEAD` is a property of the repository, so it is asked first: the
+    // primary worktree's branch is whatever someone happens to have checked
+    // out, and a fork measured against that changes its answer when an
+    // unrelated checkout moves.
+    let declared = git(
+        cwd,
+        &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"],
+    )
+    .ok()
+    .and_then(|branch| branch.strip_prefix("origin/").map(str::to_string))
+    .filter(|branch| !branch.is_empty() && !is_working_branch(branch));
+    if declared.is_some() {
+        return declared;
+    }
+
+    // Without a declared default the primary checkout is the best remaining
+    // evidence, but only when it holds an integration branch. A branch arc
+    // itself creates is work in progress and never something a fork
+    // integrates into, so it yields no base rather than a misleading one.
+    primary_worktree_branch(cwd)
+        .ok()
+        .flatten()
+        .filter(|branch| !branch.is_empty())
+        .filter(|branch| !is_working_branch(branch))
+}
+
+/// Whether a branch is one arc creates to carry work: a change branch or a
+/// fork. Neither is ever an integration target.
+fn is_working_branch(branch: &str) -> bool {
+    is_fork_branch(branch) || branch.starts_with("arc/")
+}
+
+pub fn ahead_count(cwd: &Path, base: &str, branch: &str) -> Result<usize> {
+    let out = git(cwd, &["rev-list", "--count", &format!("{base}..{branch}")])?;
+    out.trim()
+        .parse::<usize>()
+        .with_context(|| format!("cannot parse rev-list count {out:?}"))
+}
+
+/// One entry from `git worktree list --porcelain`. A detached worktree has no
+/// branch association; its path is still useful when another durable record
+/// names that exact checkout. Git marks an entry `prunable` after its path
+/// disappears, so consumers can distinguish a live checkout from stale
+/// administrative state.
+#[derive(Debug, Clone)]
+pub struct WorktreeEntry {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub prunable: bool,
+}
+
+/// Read Git's current worktree inventory, preserving the order Git reports.
+pub fn worktree_inventory(cwd: &Path) -> Result<Vec<WorktreeEntry>> {
     let out = git(cwd, &["worktree", "list", "--porcelain"])?;
-    let wanted = format!("refs/heads/{branch}");
-    let mut current: Option<PathBuf> = None;
+    let mut entries = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_branch: Option<String> = None;
+    let mut current_prunable = false;
     for line in out.lines() {
-        if let Some(p) = line.strip_prefix("worktree ") {
-            current = Some(PathBuf::from(p));
-        } else if let Some(b) = line.strip_prefix("branch ") {
-            if b == wanted {
-                return Ok(current);
+        if let Some(path) = line.strip_prefix("worktree ") {
+            if let Some(path) = current_path.replace(PathBuf::from(path)) {
+                entries.push(WorktreeEntry {
+                    path,
+                    branch: current_branch.take(),
+                    prunable: current_prunable,
+                });
             }
+            current_branch = None;
+            current_prunable = false;
+        } else if let Some(branch) = line.strip_prefix("branch ") {
+            current_branch = Some(
+                branch
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(branch)
+                    .to_string(),
+            );
+        } else if line == "detached" {
+            current_branch = None;
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            current_prunable = true;
         }
     }
-    Ok(None)
+    if let Some(path) = current_path {
+        entries.push(WorktreeEntry {
+            path,
+            branch: current_branch,
+            prunable: current_prunable,
+        });
+    }
+    Ok(entries)
+}
+
+/// The live worktree (if any) that has `branch` checked out.
+pub fn worktree_for_branch(cwd: &Path, branch: &str) -> Result<Option<PathBuf>> {
+    let inventory = worktree_inventory(cwd)?;
+    Ok(inventory
+        .iter()
+        .find(|entry| {
+            !entry.prunable && entry.path.exists() && entry.branch.as_deref() == Some(branch)
+        })
+        .map(|entry| entry.path.clone()))
 }
 
 /// The primary worktree path (the first entry from `git worktree list`),

@@ -1302,6 +1302,10 @@ pub fn integrate(
     cleanup: bool,
     dry_run: bool,
 ) -> Result<i32> {
+    // A fork is where work goes to stay unintegrated on purpose. The refusal
+    // comes before any store read, so it holds even in a fork whose base has
+    // no ledger, and it names the way out rather than only the wall.
+    super::fork::ensure_not_fork(&ctx.cwd)?;
     match (reference, tags.is_empty()) {
         (Some(reference), true) => integrate_one(
             ctx,

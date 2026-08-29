@@ -508,6 +508,8 @@ fn bare_arc_prints_the_workflow_guide() {
     let guide = stdout(&mut repo.arc(&repo.root));
     for expected in [
         "arc catchup",
+        "arc fork <slug>",
+        "unintegrated by",
         "arc journal open",
         "arc journal verified <file> [--note <text>]",
         "SETTLE A QUESTION",

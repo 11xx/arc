@@ -641,6 +641,33 @@ pub(crate) fn render_journal_backlog(backlog: Option<&crate::inbox::JournalBackl
     println!("  full queue: arc journal open");
 }
 
+/// Forks this repository holds, from the journal's `fork-<slug>` markers
+/// plus any `fork/*` branch. They are listed because `catchup` answers what
+/// is waiting: a fork is work in progress by intent, and the operator's
+/// next session should know it exists without finding the worktree by hand.
+/// Arc does not gate forks, so this is orientation, not obligation.
+fn render_forks(forks: &[crate::commands::fork::ForkEntry]) {
+    let open: Vec<_> = forks.iter().filter(|fork| fork.retired.is_none()).collect();
+    if !open.is_empty() {
+        println!("forks ({}):", open.len());
+        for fork in &open {
+            let place = fork
+                .worktree
+                .as_deref()
+                .map(|path| format!(" ({path})"))
+                .unwrap_or_default();
+            let ahead = fork
+                .ahead
+                .map(|count| format!("+{count}"))
+                .unwrap_or_else(|| "+?".to_string());
+            println!(
+                "  {}  {}  {} over {}{}",
+                fork.slug, fork.branch, ahead, fork.base_branch, place
+            );
+        }
+    }
+}
+
 /// What the open changes' worktrees occupy, measured read-only. Build
 /// output is reproducible, so this is cost, not content — the fact a session
 /// of parallel changes fills a filesystem without any command reporting it.
@@ -685,6 +712,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     let store = ctx.store()?;
     let inbox = collect_inbox(ctx, &store, None)?;
     let journal = crate::journal::orientation(ctx);
+    let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
     let states = ctx.load_all_states(&store)?;
     let worktrees = crate::worktree_usage::measure(&ctx.cwd, &states);
 
@@ -692,9 +720,15 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-catchup/2",
+                "schema": "arc-catchup/3",
                 "ledger": inbox,
                 "journal": journal.as_ref().ok(),
+                // Open forks only: retired ones are history, and the JSON
+                // view answers the same question the text section does.
+                "forks": forks
+                    .iter()
+                    .filter(|fork| fork.retired.is_none())
+                    .collect::<Vec<_>>(),
                 "worktrees": worktrees,
             }))?
         );
@@ -729,6 +763,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     if !any {
         println!("  no open changes");
     }
+    render_forks(&forks);
     render_worktree_accounting(&worktrees);
     render_debts(&debts);
     match journal {

@@ -1204,6 +1204,42 @@ fn inspect_transition_integrity(
     Ok(())
 }
 
+/// A fork marker must carry an absolute worktree path. Resolving a relative
+/// path against the caller would make the same repository name a different
+/// checkout from different worktrees, and there is no recorded anchor that
+/// can recover the old meaning safely.
+fn inspect_fork_marker_paths(
+    dir: &Path,
+    hot_files: &[String],
+    problems: &mut Vec<DoctorFinding>,
+) -> Result<()> {
+    for name in hot_files {
+        let Some((_, topic, kind)) = parse_artifact_name(name) else {
+            continue;
+        };
+        if kind != JournalKind::Plan.as_str() || !topic.starts_with("fork-") {
+            continue;
+        }
+        let body = std::fs::read_to_string(dir.join(name))
+            .with_context(|| format!("cannot read {}", dir.join(name).display()))?;
+        let Some(recorded) = body
+            .lines()
+            .find_map(|line| line.strip_prefix("worktree: "))
+        else {
+            continue;
+        };
+        if !Path::new(recorded).is_absolute() {
+            problems.push(DoctorFinding {
+                code: "invalid-fork-marker",
+                detail: format!(
+                    "{name}: relative worktree path {recorded:?}; fork markers must record an absolute path"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     let resolution = resolve(&ctx.cwd)?;
     let dir = resolution.directory.clone();
@@ -1314,6 +1350,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
         }
     }
     inspect_transition_integrity(&dir, &cold, &hot_files, &events, &mut problems)?;
+    inspect_fork_marker_paths(&dir, &hot_files, &mut problems)?;
 
     // A journal is addressed by the slugged path of its project. When that
     // path stops existing the journal becomes unreachable from anywhere, and
@@ -1487,7 +1524,7 @@ pub fn resolve_dir(cwd: &Path) -> Result<PathBuf> {
 fn resolve(cwd: &Path) -> Result<JournalResolution> {
     if let Some(dir) = std::env::var_os("ARC_JOURNAL_DIR") {
         return Ok(JournalResolution {
-            directory: PathBuf::from(dir),
+            directory: anchor_journal_destination(cwd, PathBuf::from(dir))?,
             source: ResolutionSource::Env,
             anchor: None,
         });
@@ -1495,6 +1532,12 @@ fn resolve(cwd: &Path) -> Result<JournalResolution> {
     let cfg = config::load()?;
     let canonical_cwd = std::fs::canonicalize(cwd)
         .with_context(|| format!("cannot canonicalize journal cwd {}", cwd.display()))?;
+    // A Git repository is one project even when it has several checkout
+    // paths. Match configured journal prefixes against that shared root so a
+    // prefix cannot send the primary and a linked worktree to different
+    // journals. Non-repository directories retain their cwd-based scopes.
+    let repository = repo_root(&canonical_cwd).ok();
+    let prefix_path = repository.as_deref().unwrap_or(&canonical_cwd);
     let mut configured = None;
     for (raw_anchor, raw_directory) in &cfg.journal_dirs {
         let anchor_path = config::expand_tilde(raw_anchor)?;
@@ -1504,7 +1547,7 @@ fn resolve(cwd: &Path) -> Result<JournalResolution> {
         let Ok(anchor) = std::fs::canonicalize(&anchor_path) else {
             continue;
         };
-        if !canonical_cwd.starts_with(&anchor) {
+        if !prefix_path.starts_with(&anchor) {
             continue;
         }
         let depth = anchor.components().count();
@@ -1517,12 +1560,12 @@ fn resolve(cwd: &Path) -> Result<JournalResolution> {
     }
     if let Some((_, anchor, directory)) = configured {
         return Ok(JournalResolution {
-            directory,
+            directory: anchor_journal_destination(cwd, directory)?,
             source: ResolutionSource::ConfigPrefix,
             anchor: Some(anchor),
         });
     }
-    if let Ok(root) = repo_root(&canonical_cwd) {
+    if let Some(root) = repository {
         return Ok(JournalResolution {
             directory: cfg.ai_home.join("journals").join(config::path_slug(&root)),
             source: ResolutionSource::Git,
@@ -1611,6 +1654,23 @@ fn recorded_anchor_journal(cfg: &config::Config, canonical_cwd: &Path) -> Result
 /// The main repository root, shared by every worktree. Keying the archive
 /// off this (never a worktree path) means two worktrees of one repo always
 /// resolve to the same directory.
+/// Anchor a journal destination so every checkout of one repository reads the
+/// same directory. A relative destination — from `ARC_JOURNAL_DIR` or a
+/// configured scope — would otherwise be joined to whatever the caller's cwd
+/// happens to be, which is the one input that can still send the primary and
+/// a linked worktree to different journals. Outside a repository there is no
+/// shared root, so the cwd is the only anchor available.
+fn anchor_journal_destination(cwd: &Path, directory: PathBuf) -> Result<PathBuf> {
+    if directory.is_absolute() {
+        return Ok(directory);
+    }
+    let base = match std::fs::canonicalize(cwd) {
+        Ok(canonical) => repo_root(&canonical).unwrap_or(canonical),
+        Err(_) => cwd.to_path_buf(),
+    };
+    Ok(base.join(directory))
+}
+
 fn repo_root(cwd: &Path) -> Result<PathBuf> {
     let common = gitio::common_dir(cwd)?;
     let root = if common.file_name().is_some_and(|n| n == ".git") {
@@ -1727,7 +1787,7 @@ fn default_scaffold(kind: JournalKind) -> Option<&'static str> {
 }
 
 /// One write, whichever verb named the kind.
-fn write_kind(ctx: &Ctx, kind: JournalKind, write: KindWrite) -> Result<i32> {
+pub(crate) fn write_kind(ctx: &Ctx, kind: JournalKind, write: KindWrite) -> Result<i32> {
     note(
         ctx,
         &write.topic,
@@ -2612,7 +2672,7 @@ fn events(ctx: &Ctx, limit: Option<usize>) -> Result<i32> {
 const JOURNAL_SCHEMA: &str = "journal-events/1";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct JournalEvent {
+pub(crate) struct JournalEvent {
     schema: String,
     ts: String,
     harness: String,
@@ -2627,11 +2687,11 @@ struct JournalEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     topic: String,
-    event: String,
+    pub(crate) event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    file: Option<String>,
+    pub(crate) file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3290,7 +3350,7 @@ fn parse_lane_marker(message: &str) -> Option<LaneMarker> {
     None
 }
 
-fn read_events(dir: &Path) -> Result<Vec<JournalEvent>> {
+pub(crate) fn read_events(dir: &Path) -> Result<Vec<JournalEvent>> {
     let mut events = Vec::new();
     let jsonl = dir.join("events.jsonl");
     if jsonl.is_file() {
@@ -3945,7 +4005,7 @@ struct Catchup {
 }
 
 /// Split `<ts>-<topic>-<kind>.md` into its parts.
-fn parse_artifact_name(name: &str) -> Option<(String, String, String)> {
+pub(crate) fn parse_artifact_name(name: &str) -> Option<(String, String, String)> {
     let stem = name.strip_suffix(".md")?;
     let first = stem.find('-')?;
     let ts = &stem[..first];
@@ -4168,7 +4228,7 @@ fn consumption(events: &[JournalEvent], filename: &str) -> Option<String> {
         .and_then(|event| event.outcome.clone())
 }
 
-fn is_consumed(events: &[JournalEvent], filename: &str) -> bool {
+pub(crate) fn is_consumed(events: &[JournalEvent], filename: &str) -> bool {
     consumption(events, filename).is_some()
 }
 
@@ -5553,7 +5613,7 @@ fn unanswered_questions(events: &[JournalEvent], filename: &str) -> Vec<String> 
     open
 }
 
-fn consume(
+pub(crate) fn consume(
     ctx: &Ctx,
     filename: &str,
     outcome: ConsumeOutcome,

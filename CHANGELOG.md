@@ -12,6 +12,19 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `arc fork` — fork this repository and start working, as one command
+  instead of a hand-assembled worktree, branch, and unspoken contract.
+  `begin` creates a `fork/<slug>` worktree outside the change lifecycle
+  and journals its marker; `adopt` journals a hand-made fork rather than
+  leaving it invisible; `retire <slug> <outcome>` records the disposition
+  (merged, dropped, kept), removes the worktree, and keeps the branch;
+  `list` reports every fork from markers and branches together, with the
+  ahead-count over its base. `catchup` lists open forks beside the
+  ledger queue, and `integrate` refuses inside a fork worktree with the
+  way out named: a fork is unintegrated by intent, the operator decides
+  what to merge, rebase, or discard, and a fork is a fork until the
+  operator says otherwise.
+
 - A question carries who may settle it: `--settle-by anyone` opens it to
   any session, `--settle-by delegate --delegate <name>` records the
   session or actor delegated the call, and the absence of the flag stays

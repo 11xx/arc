@@ -32,7 +32,13 @@ SAY WHO YOU ARE (before the first write)
   instead of a record.
 
 ORIENT (start here, in this order)
-  arc catchup            Live state: ledger queue, journal backlog, lanes.
+  arc catchup            Live state: ledger queue, journal backlog, forks.
+  arc fork <slug>        Fork this repository: a worktree on fork/<slug>,
+                         outside the change lifecycle — unintegrated by
+                         intent; the operator decides what to merge, rebase,
+                         or discard. `arc integrate` refuses inside a fork;
+                         `arc fork retire <slug> <outcome>` records the
+                         disposition and removes the worktree.
   arc journal open       The actionable backlog — work waiting for a session.
   arc journal verified <file> [--note <text>]
                          Record a source check at the project's anchor head.
