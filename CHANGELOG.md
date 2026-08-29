@@ -12,6 +12,51 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- A question carries who may settle it: `--settle-by anyone` opens it to
+  any session, `--settle-by delegate --delegate <name>` records the
+  session or actor delegated the call, and the absence of the flag stays
+  the classic default — a person. The prose claimed no model may ever
+  answer, while nothing in the mechanism enforced it and delegating the
+  call was the ordinary way it got settled; the field records what
+  actually decides. `journal questions` (text and JSON) and the catchup
+  orientation carry the fact, so an agent knows whether it may answer or
+  must prompt, and a delegate knows the question waits on it.
+
+- The discussion view reads what the write allows. `journal position`
+  accepts any live artifact — only branch positions need a discussion —
+  but `journal discussion` refused to open the very files positions were
+  landing on, leaving a recorded, attributed stance with no reader.
+  Positions, participants, and rounds now render for any artifact;
+  question and resolution sections stay empty where the write side never
+  created them.
+
+- `arc journal transition <file> --to <kind>` changes a live artifact's <file> --to <kind>` changes a live artifact's
+  workflow kind as one guarded operation instead of a hand-composed
+  sequence: a typed successor is written carrying a machine-readable
+  `supersedes` link (and the inherited body, unless `--body-file` says
+  otherwise), a `transition` event records source, successor, and
+  provenance, and the source is consumed as superseded. Closed,
+  consumed, same-kind, and same-second-collision sources are refused;
+  `--dry-run` prints the successor and every lifecycle effect without
+  writing; `journal doctor` treats the new event as known state. The
+  transition matrix is deliberately narrow — a decision is how a
+  discussion ends, not what it becomes, and promotion to a code change
+  remains `begin --from-journal`.
+
+### Changed
+
+- The review-obligation surface is named `debt` end to end: the
+  `--debt` flag on `integrate` and `query`, the `arc debt` subcommand,
+  the `debt` status fields, the `debt-outstanding`/`debt-summary`/
+  `debt-touched` advisory codes, the `debt-owed` inbox bucket, and the
+  Rust types. The tool stops using two words for one thing. Wire formats
+  that moved carry schema bumps (`arc-status/13`, `arc-chain/4`,
+  `arc-inbox/6`); the untyped `audit-debt-declared` event type is what
+  earlier builds wrote and keeps its serialized name forever, so
+  nothing already recorded is lost.
+
+### Added
+
 - Consuming a discussion reports the two facts `arc journal discussion`
   renders that say a decision was never tested: every position came from
   one participant, and nobody answered the last position. Warnings rather

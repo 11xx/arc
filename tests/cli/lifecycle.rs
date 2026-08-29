@@ -952,7 +952,7 @@ fn conflicting_target_movement_requires_rebase_before_integration() {
         .code(11);
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "conflict-r"]))).unwrap();
-    assert_eq!(status["schema"], "arc-status/12");
+    assert_eq!(status["schema"], "arc-status/13");
     assert_eq!(status["needs_rebase"], true);
     assert!(status["blockers"]
         .as_array()
@@ -1260,7 +1260,7 @@ fn brief_author_only_review_warns_but_remains_integrate_ready() {
     assert_eq!(status["integrate_ready"], true, "{status}");
 
     let check = json_stdout(repo.arc(&repo.root).args(["check", "briefed", "--json"]));
-    assert_eq!(check["schema"], "arc-check/2", "{check}");
+    assert_eq!(check["schema"], "arc-check/3", "{check}");
     assert_eq!(check["ready"], true, "{check}");
     assert_eq!(check["exit_code"], 0, "{check}");
     assert!(
@@ -2048,7 +2048,7 @@ fn status_projection_and_stage_note_file_read_stdin() {
         .args(["status", "projected", "--get", "schema"])
         .assert()
         .success()
-        .stdout("arc-status/12\n");
+        .stdout("arc-status/13\n");
 
     repo.arc(&wt)
         .args([
@@ -2431,7 +2431,7 @@ fn append_policy_has_a_single_authority() {
         "gatekeeping.rs::close::ifst.is_closed(){",
         "gatekeeping.rs::integrate_one::ifst.is_closed()&&matches!(closed_behavior,ClosedBehavior::SkipTagged){",
         "hooks.rs::change_for_branch::ifstate.is_closed(){",
-        "audit.rs::declare_audit_debt::letpatchset_id=ifst.is_closed(){",
+        "audit.rs::declare_debt::letpatchset_id=ifst.is_closed(){",
         "hooks.rs::post_commit::ifstate.is_closed(){",
         "hooks.rs::prepare_commit_msg::ifstate.is_closed(){",
         "lifecycle.rs::begin::ifst.is_closed(){",
@@ -2943,4 +2943,36 @@ fn unused_kept_context_is_absent_from_show_json() {
     begin_change(&repo, "bare-json", None);
     let show = json_stdout(repo.arc(&repo.root).args(["show", "bare-json", "--json"]));
     assert!(show.get("kept").is_none(), "{show}");
+}
+
+/// A worktree floor is a warning, never a refusal: with free space below the
+/// declared floor, `begin` still succeeds and says what the disk holds.
+#[test]
+fn begin_warns_below_declared_worktree_floor_and_still_creates_the_worktree() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nworktree_free_floor_bytes = 999999999999\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy"]);
+
+    let out = stdout(repo.arc(&repo.root).args(["begin", "floor-warn"]));
+    let change_id = opened_change_id(&out);
+    assert!(out.contains("warning:"), "{out}");
+    assert!(out.contains("worktree floor"), "{out}");
+    let wt = repo.home.join(".worktrees/repo-floor-warn");
+    assert!(wt.is_dir(), "worktree must still be created");
+    assert!(stdout(repo.arc(&wt).args(["status", &change_id])).contains(&change_id));
+}
+
+/// No floor declared, no opinion: an absent key prints nothing about space,
+/// and the warning is opt-in per project rather than guessed by arc.
+#[test]
+fn begin_prints_no_space_warning_without_a_declared_floor() {
+    let repo = Repo::new();
+    let out = stdout(repo.arc(&repo.root).args(["begin", "no-floor"]));
+    assert!(!out.contains("warning:"), "{out}");
 }

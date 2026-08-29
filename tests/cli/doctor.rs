@@ -1,4 +1,5 @@
 use super::common::*;
+use std::os::unix::fs::PermissionsExt;
 
 /// Doctor's job is to report malformed state, so a malformed repository event
 /// must be a finding rather than a fatal error raised by whichever inspection
@@ -55,7 +56,7 @@ fn doctor_clean_ledger_exits_zero() {
         .args(["doctor", "--json"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("\"schema\":\"arc-doctor/1\""));
+        .stdout(predicates::str::contains("\"schema\":\"arc-doctor/2\""));
 }
 
 #[test]
@@ -158,6 +159,154 @@ pub(crate) fn doctor_groups_advice_and_ignores_closed_claims() {
         .assert()
         .failure()
         .code(2);
+}
+
+/// What the open changes' worktrees occupy is reported by `catchup` and
+/// `doctor` without being asked: disk is the resource `begin` spends and
+/// nothing reported, and a full filesystem fails as exit 0 elsewhere.
+#[test]
+fn catchup_and_doctor_report_open_worktree_usage() {
+    let repo = Repo::new();
+    // The shared begin_change helper runs --no-worktree; this surface needs
+    // real worktrees to account for.
+    begin_change_no_helper(&repo, "usage-one");
+    begin_change_no_helper(&repo, "usage-two");
+
+    let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(catchup.contains("worktrees: "), "{catchup}");
+    assert!(catchup.contains("2 open worktree(s)"), "{catchup}");
+    assert!(catchup.contains("usage-one"), "{catchup}");
+    assert!(catchup.contains("repo-usage-two"), "{catchup}");
+
+    let catchup_json = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    assert_eq!(catchup_json["schema"], "arc-catchup/2", "{catchup_json}");
+    assert_eq!(
+        catchup_json["worktrees"]["changes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "{catchup_json}"
+    );
+    assert!(
+        catchup_json["worktrees"]["total_bytes"].as_u64().is_some(),
+        "{catchup_json}"
+    );
+
+    let doctor = stdout(repo.arc(&repo.root).args(["doctor", "--verbose"]));
+    assert!(doctor.contains("open-worktree-usage: "), "{doctor}");
+    assert!(doctor.contains("open-worktree-usage-total"), "{doctor}");
+
+    // A ledger with no open worktrees stays silent on the subject.
+    let cleaned = Repo::new();
+    let quiet = stdout(cleaned.arc(&cleaned.root).args(["catchup"]));
+    assert!(!quiet.contains("worktrees: "), "{quiet}");
+}
+
+/// Recorded worktree paths may be relative when a caller supplied
+/// --worktree. Accounting resolves them from the command cwd before matching
+/// Git's inventory and before invoking du; paths that do not match remain
+/// visible as unknown instead of disappearing.
+#[test]
+fn worktree_accounting_resolves_relative_paths_and_reports_mismatches() {
+    let repo = Repo::new();
+    let relative_output = stdout(repo.arc(&repo.root).args(["begin", "relative-accounted"]));
+    let relative_id = opened_change_id(&relative_output);
+    let relative_path = repo.home.join(".worktrees/repo-relative-accounted");
+    let relative_recorded = PathBuf::from("..")
+        .join(repo.home.file_name().unwrap())
+        .join(".worktrees/repo-relative-accounted");
+    rewrite_event(&repo, &relative_id, "change-opened", |event| {
+        event["worktree"] =
+            serde_json::Value::String(relative_recorded.to_string_lossy().into_owned());
+    });
+
+    let missing_output = stdout(repo.arc(&repo.root).args(["begin", "missing-accounted"]));
+    let missing_id = opened_change_id(&missing_output);
+    rewrite_event(&repo, &missing_id, "change-opened", |event| {
+        event["worktree"] =
+            serde_json::Value::String("../home/.worktrees/no-such-worktree".to_string());
+    });
+
+    let report = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    let changes = report["worktrees"]["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1, "{report}");
+    assert_eq!(changes[0]["change_id"], relative_id);
+    assert_eq!(
+        changes[0]["path"],
+        relative_path.to_string_lossy().as_ref(),
+        "{report}"
+    );
+    assert!(changes[0]["bytes"].as_u64().is_some(), "{report}");
+
+    let unknown = report["worktrees"]["unknown"].as_array().unwrap();
+    assert_eq!(unknown.len(), 1, "{report}");
+    assert_eq!(unknown[0]["change_id"], missing_id);
+    assert!(
+        unknown[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("does not match Git"),
+        "{report}"
+    );
+    assert!(report["worktrees"]["total_bytes"].is_null(), "{report}");
+}
+
+/// A failed Git inventory is not an empty inventory. Catchup keeps the open
+/// worktree visible and says that its accounting is unknown, in both views.
+#[test]
+fn catchup_reports_unknown_worktree_accounting_when_git_inventory_fails() {
+    let repo = Repo::new();
+    let output = stdout(repo.arc(&repo.root).args(["begin", "inventory-failure"]));
+    let change_id = opened_change_id(&output);
+
+    let bin = repo.home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .expect("git must be available on PATH");
+    let fake_git = bin.join("git");
+    fs::write(
+        &fake_git,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = worktree ] && [ \"$2\" = list ] && [ \"$3\" = --porcelain ]; then\n  echo inventory unavailable >&2\n  exit 42\nfi\nexec \"{}\" \"$@\"\n",
+            real_git.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+
+    let text = stdout(repo.arc(&repo.root).env("PATH", &path).args(["catchup"]));
+    assert!(text.contains("accounting unavailable"), "{text}");
+    assert!(text.contains(&change_id), "{text}");
+
+    let json = json_stdout(
+        repo.arc(&repo.root)
+            .env("PATH", &path)
+            .args(["catchup", "--json"]),
+    );
+    assert!(json["worktrees"]["total_bytes"].is_null(), "{json}");
+    assert_eq!(json["worktrees"]["unknown"][0]["change_id"], change_id);
+    assert!(
+        json["worktrees"]["unknown"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("inventory unavailable"),
+        "{json}"
+    );
+}
+
+fn begin_change_no_helper(repo: &Repo, slug: &str) {
+    repo.arc(&repo.root)
+        .args(["begin", slug])
+        .assert()
+        .success();
 }
 
 pub(crate) fn doctor_reports_closed_registered_worktrees_without_removing_them() {

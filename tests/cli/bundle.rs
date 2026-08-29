@@ -65,7 +65,7 @@ fn importing_a_waiver_only_integration_stamps_store_format_three() {
     stdout(source.arc(&worktree).args(["snapshot", "waiver-only"]));
     source
         .arc(&source.root)
-        .args(["integrate", "waiver-only", "--audit-debt", "review later"])
+        .args(["integrate", "waiver-only", "--debt", "review later"])
         .assert()
         .success();
     let event_dir = source.root.join(".git/arc/changes");

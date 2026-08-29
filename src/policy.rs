@@ -146,6 +146,13 @@ pub struct Policy {
     /// age itself remains ordinary.
     #[serde(default)]
     pub debt_age_threshold_seconds: Option<u64>,
+    /// Free bytes below which `arc begin` warns that creating another
+    /// worktree is about to add to a filesystem that is running out. Opt-in:
+    /// the default is no floor and no warning, because a threshold guessed
+    /// per-project by arc would fire wrong everywhere. The floor is never a
+    /// refusal — the operator decides with the number, not instead of it.
+    #[serde(default)]
+    pub worktree_free_floor_bytes: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -61,8 +61,9 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     inspect_danger_paths(&ctx.cwd, &mut problems);
     inspect_danger_classification(&ctx.cwd, &mut problems);
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
-    inspect_audit_debt(ctx, &states, &mut advice)?;
+    inspect_debt(ctx, &states, &mut advice)?;
     inspect_hold_releases(&Store::discover(&ctx.cwd)?, &states, &mut advice);
+    inspect_worktree_accounting(&ctx.cwd, &states, &mut advice);
 
     let open_states = states
         .iter()
@@ -78,7 +79,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
 
     let exit = i32::from(!problems.is_empty());
     let report = Report {
-        schema: "arc-doctor/1",
+        schema: "arc-doctor/2",
         problems,
         advice,
     };
@@ -507,15 +508,15 @@ fn inspect_danger_classification(cwd: &Path, problems: &mut Vec<Finding>) {
     }
 }
 
-fn inspect_audit_debt(
+fn inspect_debt(
     ctx: &Ctx,
     states: &BTreeMap<String, ChangeState>,
     advice: &mut Vec<Finding>,
 ) -> Result<()> {
-    let summary = crate::commands::messaging::collect_audit_debts(ctx, states)?;
+    let summary = crate::commands::messaging::collect_debts(ctx, states)?;
     if !summary.is_empty() {
         advice.push(Finding {
-            code: "audit-debt-outstanding",
+            code: "debt-outstanding",
             detail: summary.detail(),
         });
     }
@@ -638,7 +639,17 @@ fn inspect_closed_worktrees(
     states: &BTreeMap<String, ChangeState>,
     advice: &mut Vec<Finding>,
 ) -> Result<()> {
-    let registered = gitio::git(cwd, &["worktree", "list", "--porcelain"])?
+    let inventory = match gitio::git(cwd, &["worktree", "list", "--porcelain"]) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            advice.push(Finding {
+                code: "worktree-inventory-unknown",
+                detail: error.to_string(),
+            });
+            return Ok(());
+        }
+    };
+    let registered = inventory
         .lines()
         .filter_map(|line| line.strip_prefix("worktree "))
         .map(str::to_string)
@@ -660,6 +671,54 @@ fn inspect_closed_worktrees(
         }
     }
     Ok(())
+}
+
+/// What the open changes' worktrees occupy.
+///
+/// Disk is the resource `begin` spends and nothing reported: a full
+/// filesystem fails as exit 0 elsewhere, empty reports and bare exit codes,
+/// which reads as nothing-to-do. That failure is exactly why this is advice
+/// rather than silence — the number is a fact about state arc created, which
+/// is the same reason it reports open changes.
+fn inspect_worktree_accounting(
+    cwd: &Path,
+    states: &BTreeMap<String, ChangeState>,
+    advice: &mut Vec<Finding>,
+) {
+    let accounting = crate::worktree_usage::measure(cwd, states);
+    if accounting.is_empty() {
+        return;
+    }
+    for usage in &accounting.changes {
+        let size = usage
+            .bytes
+            .map(crate::worktree_usage::human)
+            .unwrap_or_else(|| "size unknown".to_string());
+        advice.push(Finding {
+            code: "open-worktree-usage",
+            detail: format!("{}: {} at {}", usage.change_id, size, usage.path),
+        });
+    }
+    for usage in &accounting.unknown {
+        advice.push(Finding {
+            code: "open-worktree-usage-unknown",
+            detail: format!(
+                "{}: unknown at {} ({})",
+                usage.change_id, usage.path, usage.reason
+            ),
+        });
+    }
+    if let Some(total) = accounting.total_bytes {
+        advice.push(Finding {
+            code: "open-worktree-usage-total",
+            detail: format!(
+                "{} across {} open worktree(s); build output in a clean \
+                 worktree is reproducible and removable",
+                crate::worktree_usage::human(total),
+                accounting.changes.len()
+            ),
+        });
+    }
 }
 
 fn render(label: &str, findings: &[Finding]) {
@@ -731,6 +790,10 @@ fn grouped_summary(code: &str, count: usize) -> Option<String> {
             "{count} registered worktrees belong to closed changes; \
              run arc doctor --verbose to list change/path pairs; remove only with \
              git worktree remove <path>"
+        ),
+        "open-worktree-usage" => format!(
+            "{count} open changes hold worktree storage; \
+             run arc doctor --verbose to list change/path/size triples"
         ),
         _ => return None,
     };

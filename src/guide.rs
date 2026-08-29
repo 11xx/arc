@@ -22,11 +22,14 @@ SAY WHO YOU ARE (before the first write)
   default — the write succeeds and arc records an actor nobody claimed, which
   is discovered later by a reader who cannot tell whose work it was.
 
-  `arc env` only detects a harness that exports its own session variable, and
-  not every harness does; it exits non-zero and prints the export template
-  when it cannot. That is the normal path for setting them by hand, not a
-  failure. `[policy] require_declared_actor` makes an undeclared identity a
-  refusal instead of a record.
+  `arc env` detects a harness by the session variable it exports; not every
+  harness exports one. OpenCode v2 (`opencode2`) is recognized without one —
+  by `OPENCODE_TERMINAL` or its process ancestry — and prints the harness
+  export with the session left as a comment to set by hand. With nothing to
+  detect at all it exits non-zero and prints the export template, which is
+  the normal path for setting identity manually, not a failure.
+  `[policy] require_declared_actor` makes an undeclared identity a refusal
+  instead of a record.
 
 ORIENT (start here, in this order)
   arc catchup            Live state: ledger queue, journal backlog, lanes.
@@ -67,6 +70,10 @@ SETTLE A QUESTION (before it is work)
     --other "<answer>"                 Settle it outside the options offered.
   arc journal discussion <file>        Read stances, branches, and open questions.
   arc journal consume <file> --outcome done --decision <decision>
+  arc journal transition <file> --to discussion [--dry-run]
+    Change a live artifact's kind as one guarded operation: a typed successor
+    with a `supersedes` link, the source retired. Promotion to a code change
+    stays with `begin --from-journal`, never a kind conversion.
   arc journal <kind> <topic> --body-file -   One verb per kind; `arc journal
                                        --help` is the registry. `arc fr` is
                                        the top-level alias for one of them.
@@ -104,11 +111,16 @@ SETTLE A QUESTION (before it is work)
   nothing was settled and the body travels onto the change. Both name the ids,
   and a question worth keeping past either is worth its own artifact.
 
-  A question is the part no model should settle. arc records that one is
-  waiting; it never asks. Raising it is the agent's job, through whatever
-  prompt its harness offers — `arc journal questions --json` carries the
-  options and the branches already argued, which is everything a prompt needs
-  — and `answer` is where the reply comes back. When the answer is none of
+  A question says what this session should not settle alone. arc records that
+  one is waiting, and who may settle it: a person by default, `anyone` with
+  `--settle-by anyone`, or a named delegate with `--settle-by delegate
+  --delegate <name>` — an operator who handed the call to a stronger model
+  records exactly that, instead of a question holding open against a person
+  who was never the only possible answerer. Raising it is still the agent's
+  job, through whatever prompt its harness offers — `arc journal questions
+  --json` carries the settle-by, the options, and the branches already
+  argued, which is everything a prompt needs — and `answer` is where the
+  reply comes back. When the answer is none of
   the options, `--other "<answer>"` records it in the answerer's own words
   and marks that the menu was stepped outside, because a menu somebody had to
   leave was framed wrong and the next one should know. Placement decides when:
@@ -222,7 +234,7 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   a directory, since declared paths are matched against changed files.
 
   If no independent verdict is available, integrate with
-  `arc integrate <change> --audit-debt "<why>"`. The debt can stand in for an
+  `arc integrate <change> --debt "<why>"`. The debt can stand in for an
   absent verdict or rescue a self-approval rejected by repository policy. It
   binds to the exact patchset head declared, so new work needs a new
   declaration — it does not excuse the rest of the change's life.
@@ -254,9 +266,9 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
 
   Coming back to owed work:
 
-    arc inbox                       audit-owed bucket, including closed changes
+    arc inbox                       debt-owed bucket, including closed changes
     arc catchup                     the same, with each reason
-    arc query --audit-debt          change IDs alone, for scripting
+    arc query --debt                change IDs alone, for scripting
     arc query --provisional         approvals still owed corroboration
     arc diff <change> --integrated  the exact range that landed, for an audit
     arc audit <change> --verdict <v>          record a post-integration review

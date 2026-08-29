@@ -5186,8 +5186,12 @@ fn resolver_participation_requires_matching_harness_and_session() {
     assert_eq!(summary["resolution"]["resolver_participated"], false);
 }
 
+/// The discussion view reads what the write allows: a non-discussion
+/// artifact opens as a (so far empty) summary, because a feature request
+/// that collected stances is legible as what it became rather than a file
+/// nobody's tool will read.
 #[test]
-fn journal_discussion_rejects_non_discussion_kinds() {
+fn journal_discussion_reads_any_artifact_the_write_side_allows() {
     let repo = Repo::new();
     let seed = stdout(
         repo.arc(&repo.root)
@@ -5210,8 +5214,8 @@ fn journal_discussion_rejects_non_discussion_kinds() {
     repo.arc(&repo.root)
         .args(["journal", "discussion", &file])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("not a discussion"));
+        .success()
+        .stdout(predicates::str::contains("positions: 0"));
 }
 
 #[test]
@@ -6195,7 +6199,7 @@ fn a_closing_answer_over_unargued_branches_warns_and_still_counts() {
     // replay is worse than one refused outright, because nothing says so.
     let waiting = stdout(repo.arc(&repo.root).args(["journal", "questions"]));
     assert!(
-        waiting.contains("no question is waiting on a person"),
+        waiting.contains("no question is awaiting settlement"),
         "{waiting}"
     );
     let summary = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
@@ -6899,7 +6903,8 @@ fn journal_questions_lists_what_is_waiting_on_a_person_with_its_branches() {
         .success();
 
     let text = stdout(repo.arc(&repo.root).args(["journal", "questions"]));
-    assert!(text.contains("questions waiting on a person (1)"), "{text}");
+    assert!(text.contains("questions awaiting settlement (1)"), "{text}");
+    assert!(!text.contains("waiting on a person"), "{text}");
     assert!(text.contains("- paths (1 argued)"), "{text}");
     assert!(text.contains("- properties (0 argued)"), "{text}");
 
@@ -6917,7 +6922,7 @@ fn journal_questions_lists_what_is_waiting_on_a_person_with_its_branches() {
     // The one signal that needs a person is reported where a cold session
     // orients, not only where somebody thought to look for it.
     let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
-    assert!(catchup.contains("waiting on a person (1)"), "{catchup}");
+    assert!(catchup.contains("awaiting settlement (1)"), "{catchup}");
     assert!(catchup.contains(&question), "{catchup}");
 }
 
@@ -6963,7 +6968,7 @@ fn an_answered_question_leaves_the_waiting_queue() {
 
     let text = stdout(repo.arc(&repo.root).args(["journal", "questions"]));
     assert!(
-        text.contains("no question is waiting on a person"),
+        text.contains("no question is awaiting settlement"),
         "{text}"
     );
     assert!(!stdout(repo.arc(&repo.root).args(["catchup"])).contains("waiting on a person"));
@@ -7046,7 +7051,7 @@ fn an_answer_outside_the_offered_options_settles_the_question_and_says_so() {
     );
     // It settled the question like any other answer.
     assert!(stdout(repo.arc(&repo.root).args(["journal", "questions"]))
-        .contains("no question is waiting on a person"));
+        .contains("no question is awaiting settlement"));
 }
 
 /// Exactly one of the two paths, and an off-menu answer has to say something.
@@ -7342,4 +7347,677 @@ fn a_repository_template_shadows_a_built_in_and_the_listing_says_so() {
             .args(["journal", "scaffolds", "--show", "discussion"]),
     );
     assert_eq!(shown, "> House discussion rules.\n");
+}
+
+/// A kind transition is the safe manual sequence — successor, back-reference,
+/// source retirement — performed as one guarded operation. The queue lists
+/// only the successor, the discussion view resolves it, and the source is
+/// neither deleted nor left actionable.
+#[test]
+fn journal_transition_moves_a_feature_request_into_a_discussion() {
+    let repo = Repo::new();
+    let body = repo.home.join("transition-body.md");
+    fs::write(&body, "A proposal body.\n\nSecond paragraph.\n").unwrap();
+    let write_out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "feature-request",
+                "transition-me",
+                "--title",
+                "The proposal",
+            ])
+            .args(["--body-file", body.to_str().unwrap()]),
+    );
+    // The write prints the artifact's full path; keep the bare filename.
+    let source = Path::new(write_out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(source.ends_with("-feature-request.md"), "{source}");
+
+    // Dry run shows the effects and writes nothing.
+    let dry = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "transition",
+        &source,
+        "--to",
+        "discussion",
+        "--dry-run",
+    ]));
+    assert!(dry.contains("effects:"), "{dry}");
+    assert!(dry.contains("superseded"), "{dry}");
+    assert!(dry.contains(&source), "{dry}");
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "transition",
+        &source,
+        "--to",
+        "discussion",
+        "--reason",
+        "needs positions",
+    ]));
+    let successor = out
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("transitioned: ")?
+                .split(" → ")
+                .nth(1)?
+                .split(" (")
+                .next()
+        })
+        .expect("transition output should name the successor")
+        .to_string();
+    assert_ne!(successor, source);
+
+    // The successor carries the machine-readable back-reference and the
+    // inherited body.
+    let successor_path = stdout(repo.arc(&repo.root).args(["journal", "dir"]))
+        .trim()
+        .to_string();
+    let text = fs::read_to_string(Path::new(&successor_path).join(&successor)).unwrap();
+    assert!(
+        text.starts_with(&format!("supersedes: {source}\n")),
+        "{text}"
+    );
+    assert!(text.contains("A proposal body."), "{text}");
+    assert!(
+        text.contains(&format!("Transitioned from `{source}`")),
+        "{text}"
+    );
+
+    // Exactly one successor, one typed relation, one source retirement.
+    let events = fs::read_to_string(Path::new(&successor_path).join("events.jsonl")).unwrap();
+    assert_eq!(
+        events
+            .lines()
+            .filter(|l| l.contains("\"event\":\"transition\""))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .lines()
+            .filter(|l| l.contains("\"outcome\":\"superseded\"") && l.contains(&source))
+            .count(),
+        1
+    );
+
+    // The queue exposes only the successor; the discussion view resolves it.
+    // The text view prints columns rather than filenames, so the JSON view
+    // carries the comparison.
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let listed = open["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["file"] == successor.as_str());
+    assert!(listed, "{open}");
+    assert!(
+        !open["feature_requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["file"] == source.as_str()),
+        "{open}"
+    );
+    repo.arc(&repo.root)
+        .args(["journal", "discussion", &successor])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("topic transition-me"));
+
+    let tail = stdout(repo.arc(&repo.root).args(["journal", "catchup"]));
+    assert!(
+        tail.contains(&format!("transitioned {source} -> {successor}")),
+        "{tail}"
+    );
+    assert!(tail.contains("needs positions"), "{tail}");
+}
+
+#[test]
+fn journal_transition_refusals_leave_the_journal_untouched() {
+    let repo = Repo::new();
+    let body = repo.home.join("transition-refusal-body.md");
+    fs::write(&body, "Refusal body.\n").unwrap();
+    let write_out = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "feature-request", "transition-refusal"])
+            .args(["--body-file", body.to_str().unwrap()]),
+    );
+    let dir = Path::new(write_out.trim()).parent().unwrap().to_path_buf();
+    // The write prints the artifact's full path; keep the bare filename.
+    let source = Path::new(write_out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(source.ends_with("-feature-request.md"), "{source}");
+
+    // A decision is how a discussion ends, not what it becomes; promotion to
+    // work is `begin --from-journal`, never a kind conversion.
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &source, "--to", "decision"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a transition target"));
+
+    // Same kind, nothing to transition.
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &source, "--to", "feature-request"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already a feature-request"));
+
+    // A repeated transition reports the existing relation instead of
+    // duplicating artifacts.
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &source, "--to", "plan"])
+        .assert()
+        .success();
+    let after_out =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "transition", &source, "--to", "todo"]),
+        );
+    let _ = after_out;
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &source, "--to", "todo"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already consumed"));
+    let after = {
+        let names: Vec<String> = fs::read_dir(Path::new(&dir))
+            .unwrap()
+            .filter_map(|e| {
+                let name = e.as_ref().ok()?.file_name().to_string_lossy().to_string();
+                name.contains("transition-refusal").then_some(name)
+            })
+            .collect();
+        names
+            .iter()
+            .find(|n| n.ends_with("-plan.md"))
+            .cloned()
+            .expect("plan successor should exist")
+    };
+    assert_eq!(
+        fs::read_dir(Path::new(&dir))
+            .unwrap()
+            .filter(|e| {
+                let name = e.as_ref().unwrap().file_name();
+                let name = name.to_string_lossy();
+                name.contains("transition-refusal") && name != "events.jsonl"
+            })
+            .count(),
+        2
+    );
+    assert_ne!(after, source);
+    assert!(after.ends_with("-plan.md"), "{after}");
+
+    // Doctor stays clean: the transition event is known state, not garbage.
+    repo.arc(&repo.root)
+        .arg("journal")
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("problems:\n  (none)"));
+}
+
+/// A transition interrupted after its relation event has a successor and an
+/// unretired source. Doctor must name that partial state, and retrying the same
+/// command must finish the retirement instead of creating another successor.
+#[test]
+fn journal_doctor_reports_and_recovers_an_interrupted_transition() {
+    let repo = Repo::new();
+    let write_out = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "feature-request", "interrupted-transition"])
+            .args(["--body-file", "-"])
+            .write_stdin("A transition can be interrupted.\n"),
+    );
+    let source = Path::new(write_out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    let transitioned =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "transition", &source, "--to", "discussion"]),
+        );
+    let successor = transitioned
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("transitioned: ")?
+                .split(" → ")
+                .nth(1)?
+                .split(" (")
+                .next()
+        })
+        .expect("transition output should name the successor")
+        .to_string();
+
+    // Remove only the retirement event: this is the state left when the
+    // process stops between the relation and the final append.
+    let events_path = journal_dir(&repo).join("events.jsonl");
+    let interrupted = fs::read_to_string(&events_path)
+        .unwrap()
+        .lines()
+        .filter(|line| !(line.contains("\"event\":\"consumed\"") && line.contains(&source)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&events_path, format!("{interrupted}\n")).unwrap();
+
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("incomplete-transition"))
+        .stdout(predicates::str::contains(&source))
+        .stdout(predicates::str::contains(&successor));
+
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &source, "--to", "discussion"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("problems:\n  (none)"));
+}
+
+/// A consumed discussion still carries an unanswered question. The source is
+/// closed for new work, but settling that existing question remains visible and
+/// answerable on the source itself.
+#[test]
+fn a_question_remains_answerable_after_its_source_is_consumed() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "consumed-question", "# Keep the question?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "keep",
+            "--option",
+            "drop",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Which disposition?\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &file, "--to", "plan"])
+        .assert()
+        .success();
+
+    let waiting = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert_eq!(waiting["questions"][0]["file"], file.as_str());
+    assert_eq!(waiting["questions"][0]["question"], question.as_str());
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "keep",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Keep the question's provenance.\n")
+        .assert()
+        .success();
+
+    let settled = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert!(
+        settled["questions"].as_array().unwrap().is_empty(),
+        "{settled}"
+    );
+}
+
+/// Consumption is what makes an artifact archivable, so the source an open
+/// question outlives is exactly the kind that has already moved to the cold
+/// archive. The question stays listed, so it must stay answerable.
+#[test]
+fn a_question_remains_answerable_after_its_source_is_archived() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "archived-question", "# Keep the question?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "keep",
+            "--option",
+            "drop",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Which disposition?\n")
+        .assert()
+        .success();
+    let question = question_id(&repo, &file);
+
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &file, "--to", "plan"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "archive", "--consumed"])
+        .assert()
+        .success();
+
+    let waiting = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert_eq!(waiting["questions"][0]["file"], file.as_str(), "{waiting}");
+    // The prose has to survive the move too: a question listed without its
+    // own text asks the reader to answer something it cannot show them.
+    assert_eq!(
+        waiting["questions"][0]["heading"], "Which disposition?",
+        "{waiting}"
+    );
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "keep",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Answered after the source was archived.\n")
+        .assert()
+        .success();
+
+    let settled = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert!(
+        settled["questions"].as_array().unwrap().is_empty(),
+        "{settled}"
+    );
+}
+
+/// A transition retry must find a successor that has since been consumed and
+/// archived. Recreating it in the hot journal would shadow the real record
+/// under hot-first resolution, and the reader would lose the archived body.
+#[test]
+fn a_transition_retry_finds_an_archived_successor_instead_of_recreating_it() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "retry-successor", "# Shape of the work\n");
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &file, "--to", "plan"])
+        .assert()
+        .success();
+    let dir = journal_dir(&repo);
+    let successor = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .find(|name| name.ends_with("-retry-successor-plan.md"))
+        .expect("the transition wrote a successor");
+
+    // Reproduce the half-written state the retry path exists for: the relation
+    // event and the successor stand, and the source was never retired.
+    let events = dir.join("events.jsonl");
+    let kept: Vec<String> = fs::read_to_string(&events)
+        .unwrap()
+        .lines()
+        .filter(|line| !(line.contains("\"consumed\"") && line.contains(&file)))
+        .map(str::to_string)
+        .collect();
+    fs::write(&events, format!("{}\n", kept.join("\n"))).unwrap();
+
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &successor, "--outcome", "done"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "archive", "--consumed"])
+        .assert()
+        .success();
+    assert!(!dir.join(&successor).exists(), "the successor was archived");
+
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &file, "--to", "plan"])
+        .assert()
+        .success();
+    assert!(
+        !dir.join(&successor).exists(),
+        "the retry recreated a hot successor that shadows the archived one"
+    );
+}
+
+/// A question carries who may settle it. A question marks what this session
+/// should not settle alone — an operator who delegated the call names the
+/// delegate — so `delegate:<name>` and `anyone` are first-class values, and
+/// the view carries the fact an agent needs to know whether it may answer.
+#[test]
+fn a_question_names_who_can_settle_it() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "settle-by", "# Who decides?\n");
+
+    // Delegate spelled through its own flag; the heading records the fact
+    // where the prose reads.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "keep",
+            "--option",
+            "drop",
+            "--settle-by",
+            "delegate",
+            "--delegate",
+            "second-opinion",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Who reviews the reviewer?\n")
+        .assert()
+        .success();
+
+    let artifact = stdout(repo.arc(&repo.root).args(["journal", "dir"]));
+    let artifact = PathBuf::from(artifact.trim()).join(&file);
+    let text = fs::read_to_string(&artifact).unwrap();
+    assert!(text.contains("settle by delegate:second-opinion"), "{text}");
+
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert_eq!(
+        value["questions"][0]["settle_by"],
+        "delegate:second-opinion"
+    );
+    let waiting = stdout(repo.arc(&repo.root).args(["journal", "questions"]));
+    assert!(
+        waiting.contains("settle by: delegate:second-opinion"),
+        "{waiting}"
+    );
+
+    // The delegate's answer settles it like any other: the field records who
+    // may answer, it does not gate the write.
+    let question = value["questions"][0]["question"].as_str().unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            question,
+            "--option",
+            "keep",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("The delegated call.\n")
+        .assert()
+        .success();
+
+    // `anyone` opens the question to any session; the default stays person.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "paths",
+            "--option",
+            "properties",
+            "--settle-by",
+            "anyone",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("What shape?\n")
+        .assert()
+        .success();
+    // A question posed without the flag stays on the classic default: the
+    // field is omitted, which reads as person.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "ledger",
+            "--option",
+            "journal",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Where does it land?\n")
+        .assert()
+        .success();
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    let settle_bys: Vec<&serde_json::Value> = value["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|q| &q["settle_by"])
+        .collect();
+    assert!(settle_bys.contains(&&serde_json::json!("anyone")));
+    assert!(
+        settle_bys.iter().any(|v| v.is_null()),
+        "default stays unset (person)"
+    );
+}
+
+/// The settle-by flags refuse the combinations that would record nothing or
+/// mislead: a delegate without a name, a name without delegate mode.
+#[test]
+fn settle_by_flag_combinations_are_guarded() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "settle-guard", "# Who decides?\n");
+    let events_path = journal_dir(&repo).join("events.jsonl");
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--settle-by",
+            "delegate",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("No delegate named.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--delegate <name>"));
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--settle-by",
+            "person",
+            "--delegate",
+            "bob",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Name without delegate mode.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--delegate is valid only with"));
+
+    let before = fs::read_to_string(&events_path).unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--settle-by",
+            "delegate",
+            "--delegate",
+            "",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("An answerer must be named.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be empty"));
+    assert_eq!(fs::read_to_string(events_path).unwrap(), before);
 }

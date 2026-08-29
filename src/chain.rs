@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-pub const CHAIN_SCHEMA: &str = "arc-chain/3";
+pub const CHAIN_SCHEMA: &str = "arc-chain/4";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChainMember {
@@ -44,7 +44,7 @@ pub struct ChainReview {
     /// Reviewers whose last look predates the final patchset.
     pub stale_reviewers: usize,
     /// A review obligation recorded at integration and not yet discharged.
-    pub audit_debt_outstanding: bool,
+    pub debt_outstanding: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

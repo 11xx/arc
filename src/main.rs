@@ -20,6 +20,7 @@ mod session_store;
 mod state;
 mod status;
 mod store;
+mod worktree_usage;
 
 use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -243,8 +244,8 @@ enum Cmd {
         #[arg(long)]
         commit: Option<String>,
         /// Only changes that integrated owing a review nobody has recorded yet
-        #[arg(long = "audit-debt")]
-        audit_debt: bool,
+        #[arg(long = "debt")]
+        debt: bool,
         /// Only changes whose gating approval was recorded as owed
         /// corroboration and has not received it — from an independent
         /// approval of the same patchset, or from an audit
@@ -445,7 +446,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Lead-facing queue rollup: open changes, active claims, and outstanding audit debt (arc-inbox/5 schema)
+    /// Lead-facing queue rollup: open changes, active claims, and outstanding debt (arc-inbox/6 schema)
     Inbox {
         /// Restrict to changes assigned to this harness
         #[arg(long = "assigned-to")]
@@ -454,7 +455,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Show a tagged program in dependency order (arc-chain/3 schema)
+    /// Show a tagged program in dependency order (arc-chain/4 schema)
     Chain {
         /// The tag naming the program to render
         tag: String,
@@ -511,7 +512,7 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/12 schema)
+    /// Machine-readable status report (the versioned arc-status/13 schema)
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -921,12 +922,15 @@ enum Cmd {
     /// `CLAUDE_SESSION_ID`, `CODEX_THREAD_ID`, `OPENCODE_SESSION`, or
     /// `PI_SESSION_ID` — and then that harness's own session store for the
     /// model, and the effort where the store records one. Not every harness
-    /// exports one, and a harness that does may not in every mode.
+    /// exports one, and a harness that does may not in every mode. OpenCode
+    /// v2 exports none and is recognized by `OPENCODE_TERMINAL` or its
+    /// process ancestry, printing the harness export with the session left
+    /// as a comment to set by hand.
     ///
-    /// With nothing to detect it prints the export template as a comment and
-    /// exits non-zero, which is a report that identity must be set by hand
-    /// rather than a failure. Every value it emits can be set directly:
-    /// explicit identity always wins over a detected one
+    /// With nothing to detect at all it prints the export template as a
+    /// comment and exits non-zero, which is a report that identity must be
+    /// set by hand rather than a failure. Every value it emits can be set
+    /// directly: explicit identity always wins over a detected one
     Env,
     /// Print a shell completion script to stdout
     Completions {
@@ -1023,13 +1027,13 @@ enum Cmd {
         /// for a self-approval policy would reject — in the same invocation.
         /// It never overrules a reviewer who read this patchset and asked for
         /// changes: that is a verdict, not a missing one. The obligation
-        /// survives closure and `arc query --audit-debt` finds it; discharge it
+        /// survives closure and `arc query --debt` finds it; discharge it
         /// with `arc audit`.
-        #[arg(long = "audit-debt", value_name = "REASON")]
-        audit_debt: Option<String>,
+        #[arg(long = "debt", value_name = "REASON")]
+        debt: Option<String>,
     },
     /// Record a review obligation this change carries but has not discharged
-    AuditDebt {
+    Debt {
         /// Change that owes the review
         change: String,
         /// What review is owed, and why it could not run
@@ -1190,7 +1194,7 @@ enum WorkspaceCmd {
         /// Count only journal items filed at or after this journal stamp
         /// (20260101T000000Z) or RFC 3339 timestamp, so the tiers read as
         /// arrivals rather than as what is outstanding. Changes awaiting a
-        /// verdict and audit debt are always reported in full: a blocker
+        /// verdict and debt are always reported in full: a blocker
         /// matters more the longer it has been one
         #[arg(long)]
         since: Option<String>,
@@ -1403,7 +1407,7 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
         ExecutionRole::Lead => None,
         ExecutionRole::Reviewer => match command {
             Cmd::Integrate { .. } => Some(("integrate", "lead")),
-            Cmd::AuditDebt { .. } => Some(("audit-debt", "lead")),
+            Cmd::Debt { .. } => Some(("debt", "lead")),
             Cmd::Close { .. } => Some(("close", "lead")),
             _ => None,
         },
@@ -1415,7 +1419,7 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
             Cmd::Hold { .. } => Some(("hold", "reviewer or lead")),
             Cmd::ReleaseHold { .. } => Some(("release-hold", "reviewer or lead")),
             Cmd::Audit { .. } => Some(("audit", "reviewer or lead")),
-            Cmd::AuditDebt { .. } => Some(("audit-debt", "lead")),
+            Cmd::Debt { .. } => Some(("debt", "lead")),
             Cmd::Close { .. } => Some(("close", "lead")),
             Cmd::Integrate { .. } => Some(("integrate", "lead")),
             _ => None,
@@ -1563,7 +1567,12 @@ fn run(cli: Cli) -> Result<i32> {
                 .is_none_or(|explicit| explicit == detected.harness)
             {
                 harness.get_or_insert(detected.harness);
-                session.get_or_insert(detected.session);
+                // A harness recognized without its cooperation carries no
+                // session id; recording the harness alone is the honest half
+                // of the detection, not a partial failure.
+                if let Some(detected_session) = detected.session {
+                    session.get_or_insert(detected_session);
+                }
                 if model.is_none() {
                     model = detected.model;
                 }
@@ -1658,7 +1667,7 @@ fn run(cli: Cli) -> Result<i32> {
             actor,
             harness,
             commit,
-            audit_debt,
+            debt,
             provisional,
             json,
         } => {
@@ -1674,7 +1683,7 @@ fn run(cli: Cli) -> Result<i32> {
                         verdict,
                         actor,
                         harness,
-                        audit_debt,
+                        debt,
                         provisional,
                         json,
                     },
@@ -2289,26 +2298,26 @@ fn run(cli: Cli) -> Result<i32> {
             message,
             cleanup,
             dry_run,
-            audit_debt,
+            debt,
         } => {
             let change = select(change)?;
-            if audit_debt.is_some() && !tag.is_empty() {
+            if debt.is_some() && !tag.is_empty() {
                 if change.is_some() {
                     bail!("provide a change or --tag, not both");
                 }
-                bail!("--audit-debt names one change; it cannot apply to a --tag series");
+                bail!("--debt names one change; it cannot apply to a --tag series");
             }
-            if audit_debt.is_some() && change.is_none() {
-                bail!("--audit-debt requires a change");
+            if debt.is_some() && change.is_none() {
+                bail!("--debt requires a change");
             }
             // Declared before the merge so the obligation is on the ledger
             // even if integration then fails for an unrelated reason — but
             // never under --dry-run, which promises to write nothing.
-            if let Some(reason) = audit_debt.filter(|_| !dry_run) {
+            if let Some(reason) = debt.filter(|_| !dry_run) {
                 let change = change
                     .as_deref()
-                    .expect("audit-debt selection was validated above");
-                commands::declare_audit_debt(&ctx, change, reason)?;
+                    .expect("debt selection was validated above");
+                commands::declare_debt(&ctx, change, reason)?;
             }
             commands::integrate(
                 &ctx,
@@ -2320,8 +2329,8 @@ fn run(cli: Cli) -> Result<i32> {
                 dry_run,
             )
         }
-        Cmd::AuditDebt { change, reason } => {
-            commands::declare_audit_debt(&ctx, &change, reason)?;
+        Cmd::Debt { change, reason } => {
+            commands::declare_debt(&ctx, &change, reason)?;
             Ok(0)
         }
         Cmd::Audit {

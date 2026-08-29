@@ -46,7 +46,7 @@ pub fn authorization_basis(basis: &crate::model::AuthorizationBasis) -> String {
     let mut out = String::new();
     let _ = match &basis.verdict_event_id {
         Some(verdict) => writeln!(out, "    verdict: {verdict}"),
-        None => writeln!(out, "    verdict: none — authorized by declared audit debt"),
+        None => writeln!(out, "    verdict: none — authorized by declared debt"),
     };
     let _ = match &basis.danger {
         Some(danger) => writeln!(
@@ -99,7 +99,7 @@ pub fn authorization_basis(basis: &crate::model::AuthorizationBasis) -> String {
         );
     }
     if let Some(debt) = &basis.audit_debt_event_id {
-        let _ = writeln!(out, "    audit debt waiving review: {debt}");
+        let _ = writeln!(out, "    debt waiving review: {debt}");
     }
     let _ = write!(
         out,
@@ -746,13 +746,13 @@ pub fn markdown(
         }
     }
 
-    if report.audit_debt.is_some() || !report.audit_verdicts.is_empty() {
+    if report.debt.is_some() || !report.audit_verdicts.is_empty() {
         let _ = writeln!(w, "\n## Post-integration audit\n");
-        if let Some(debt) = &report.audit_debt {
+        if let Some(debt) = &report.debt {
             let _ = writeln!(
                 w,
                 "- Owed{}: {} (declared by {})",
-                if report.audit_debt_outstanding {
+                if report.debt_outstanding {
                     ""
                 } else {
                     " (discharged)"
@@ -771,7 +771,7 @@ pub fn markdown(
                 } else {
                     let _ = writeln!(w, "  - Coverage:");
                     for reviewer in coverage {
-                        let _ = writeln!(w, "    - {}", audit_debt_coverage_label(reviewer));
+                        let _ = writeln!(w, "    - {}", debt_coverage_label(reviewer));
                     }
                 }
             }
@@ -779,7 +779,7 @@ pub fn markdown(
                 let _ = writeln!(
                     w,
                     "  - Discharged by: {}",
-                    audit_debt_coverage_label(discharged_by)
+                    debt_coverage_label(discharged_by)
                 );
             }
         }
@@ -973,7 +973,7 @@ fn blocker_title(blocker: Blocker) -> &'static str {
     }
 }
 
-fn audit_debt_coverage_label(coverage: &DebtCoverage) -> String {
+fn debt_coverage_label(coverage: &DebtCoverage) -> String {
     match coverage.model.as_deref() {
         Some(model) => format!("{} ({model})", coverage.reviewer),
         None => format!("{} (model unrecorded)", coverage.reviewer),
@@ -1230,7 +1230,7 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                 } else {
                     coverage
                         .iter()
-                        .map(audit_debt_coverage_label)
+                        .map(debt_coverage_label)
                         .collect::<Vec<_>>()
                         .join(", ")
                 }

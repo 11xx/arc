@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/12";
+pub const STATUS_SCHEMA: &str = "arc-status/13";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// Two identities arc assumed cannot establish that two people acted. The
@@ -427,10 +427,10 @@ pub struct StatusReport {
     /// nobody reviewed the change.
     #[serde(skip_serializing_if = "is_false")]
     pub verdict_contested: bool,
-    /// A declared audit debt supplied a missing verdict or let a self-approval
+    /// A declared debt supplied a missing verdict or let a self-approval
     /// stand. Only then is the waiver an authorization input.
     #[serde(skip_serializing_if = "is_false")]
-    pub approval_waived_by_audit_debt: bool,
+    pub approval_waived_by_debt: bool,
     pub next_action: String,
     /// Facts sessions kept while working, oldest first. Carried on the report
     /// so `resume` and `status --json` hand them back without a second read.
@@ -447,15 +447,15 @@ pub struct StatusReport {
     pub closure: Option<crate::state::ClosureState>,
     /// A declared review obligation with no audit answering it. Additive in
     /// arc-status/6.
-    pub audit_debt_outstanding: bool,
+    pub debt_outstanding: bool,
     /// The change's gating approval was recorded as owed corroboration, and
-    /// no audit has supplied it. Reported beside `audit_debt_outstanding`
+    /// no audit has supplied it. Reported beside `debt_outstanding`
     /// because it is the same obligation seen one step earlier: debt says a
     /// review never happened, this says one happened and is not yet trusted.
     /// Additive in `arc-status/9`.
     pub provisional_approval_outstanding: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub audit_debt: Option<crate::state::AuditDebt>,
+    pub debt: Option<crate::state::Debt>,
     /// The dirty-tree waiver in force at the current head, if one is. A waiver
     /// naming an earlier revision is spent, and is not reported as though it
     /// still excused anything. Additive in `arc-status/10`.
@@ -805,7 +805,7 @@ fn build_report(
         // Self-approval compares the reviewer with every contributor on the
         // patchset, so a lead may review work recorded for an executor unless
         // the lead is also in the declared contributor set.
-        // A declared audit debt converts the absent or policy-rejected review
+        // A declared debt converts the absent or policy-rejected review
         // into a recorded obligation. The requirement is carried forward where
         // a query can find it when no independent reviewer is reachable.
         let would_reject_self_approval = danger.requires_independent_review(policy)
@@ -818,7 +818,7 @@ fn build_report(
         // beside a changes-requested or comment-only verdict authorized
         // nothing, and saying otherwise would report an approval that does
         // not exist.
-        let debt_waives_current_head = head_matches && state.audit_debt_waives_latest_patchset();
+        let debt_waives_current_head = head_matches && state.debt_waives_latest_patchset();
         waiver_authorized_approval = v.verdict == Verdict::Approved
             && would_reject_self_approval
             && debt_waives_current_head;
@@ -850,8 +850,8 @@ fn build_report(
         .dirty_tree_waiver
         .clone()
         .filter(|waiver| Some(&waiver.revision) == current_head.as_ref());
-    let debt_waives_current_head = head_matches && state.audit_debt_waives_latest_patchset();
-    let approval_waived_by_audit_debt = waiver_authorized_approval
+    let debt_waives_current_head = head_matches && state.debt_waives_latest_patchset();
+    let approval_waived_by_debt = waiver_authorized_approval
         || (debt_waives_current_head
             && !verdict
                 .as_ref()
@@ -1085,7 +1085,7 @@ fn build_report(
     // So the waiver satisfies this gate exactly when the gate is unmet for want
     // of a verdict — none recorded, or one that only policy's self-approval rule
     // rejects. The obligation itself is untouched and stays where
-    // `arc query --audit-debt` finds it.
+    // `arc query --debt` finds it.
     let verdict_refuses_this_head = verdict.as_ref().is_some_and(|v| {
         v.verdict != Verdict::Approved
             && latest_patchset
@@ -1165,12 +1165,12 @@ fn build_report(
     {
         format!("run_probe:{}", probe.name)
     } else if state.iterating {
-        // An iterating change owes declared audit debt rather than a verdict,
+        // An iterating change owes declared debt rather than a verdict,
         // so it never reaches `request_review`. It reaches this arm only once
         // findings, holds, gates and probes are clear, because those are real
         // work whether or not integration is the goal.
-        if state.audit_debt.is_none() && state.latest_patchset().is_some() {
-            "declare_audit_debt".into()
+        if state.debt.is_none() && state.latest_patchset().is_some() {
+            "declare_debt".into()
         } else {
             "iterating:clear".into()
         }
@@ -1258,7 +1258,7 @@ fn build_report(
         blocker_summary,
         approval_rejection_reason,
         verdict_contested,
-        approval_waived_by_audit_debt,
+        approval_waived_by_debt,
         next_action,
         kept: state.kept.clone(),
         danger,
@@ -1267,9 +1267,9 @@ fn build_report(
         integrate_ready: ready,
         blockers,
         closure: state.closure.clone(),
-        audit_debt_outstanding: state.audit_debt_outstanding(),
+        debt_outstanding: state.debt_outstanding(),
         provisional_approval_outstanding: state.provisional_approval_outstanding(),
-        audit_debt: state.audit_debt.clone(),
+        debt: state.debt.clone(),
         dirty_tree_waiver: dirty_tree_waiver_in_force,
         audit_verdicts: state.audit_verdicts.clone(),
         forge,
@@ -1630,9 +1630,9 @@ pub fn advisories(
             ),
         });
     }
-    if state.audit_debt_outstanding() {
+    if state.debt_outstanding() {
         warnings.push(Advisory {
-            code: "audit-debt-outstanding",
+            code: "debt-outstanding",
             detail: "a review obligation was recorded at integration and is not discharged"
                 .to_string(),
         });

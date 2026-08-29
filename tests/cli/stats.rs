@@ -322,7 +322,7 @@ fn stats_by_model_attributes_patchsets_and_rework_to_the_subject() {
         .assert()
         .success();
     repo.arc(&wt)
-        .args(["integrate", "delegated", "--audit-debt", "nobody reachable"])
+        .args(["integrate", "delegated", "--debt", "nobody reachable"])
         .assert()
         .success();
     repo.arc(&wt)

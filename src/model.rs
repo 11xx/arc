@@ -374,7 +374,7 @@ pub enum Payload {
     ///
     /// Declaring it is what lets a change integrate without an independent
     /// verdict: the requirement is not waived, it is recorded as debt that
-    /// `arc query --audit-debt` can find after the reviewer becomes available.
+    /// `arc query --debt` can find after the reviewer becomes available.
     AuditDebtDeclared {
         reason: String,
         /// The patchset the waiver applies to. A waiver that stands in for an
@@ -595,7 +595,7 @@ pub enum Payload {
     },
     /// The author declares whether this change is being iterated on rather
     /// than driven to a merge. An iterating change records progress with
-    /// snapshots and declared audit debt, and integrates only once the
+    /// snapshots and declared debt, and integrates only once the
     /// declaration is cleared.
     IterationScopeSet {
         iterating: bool,
@@ -715,7 +715,7 @@ pub enum Payload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorizationBasis {
     /// The verdict that approved the merged patchset, when one did. Absent
-    /// when a declared audit debt stood in for a review nobody performed: the
+    /// when a declared debt stood in for a review nobody performed: the
     /// merge then rests on `audit_debt_event_id` alone, and saying so is more
     /// honest than naming a verdict that does not exist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -737,7 +737,7 @@ pub struct AuthorizationBasis {
     /// written before this fact was recorded; absence is not a safe result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub danger: Option<DangerScope>,
-    /// The audit-debt declaration that stood in for an absent verdict or made
+    /// The debt declaration that stood in for an absent verdict or made
     /// a self-approved merge eligible. It is an authorization input like the
     /// verdict: without it the merge would have been refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]

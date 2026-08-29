@@ -1520,8 +1520,8 @@ fn authorization_basis(
         verdict.patchset_id == approved_patchset_id
             && verdict.verdict == crate::model::Verdict::Approved
     });
-    if verdict.is_none() && !st.audit_debt_waives_latest_patchset() {
-        anyhow::bail!("integration is ready but nothing authorizes the merged patchset: no approving verdict and no declared audit debt");
+    if verdict.is_none() && !st.debt_waives_latest_patchset() {
+        anyhow::bail!("integration is ready but nothing authorizes the merged patchset: no approving verdict and no declared debt");
     }
 
     let mut gate_evidence = BTreeMap::new();
@@ -1617,9 +1617,9 @@ fn authorization_basis(
         // beside an approval that needed no waiver authorized nothing, and
         // recording it would claim the merge rested on something it did not.
         audit_debt_event_id: st
-            .audit_debt
+            .debt
             .as_ref()
-            .filter(|_| report.approval_waived_by_audit_debt)
+            .filter(|_| report.approval_waived_by_debt)
             .map(|debt| debt.event_id.clone()),
     })
 }
@@ -1910,7 +1910,7 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
     let mut report = ctx.report(&store, &st)?;
     let code = status::check_exit_code(&report);
     let states = ctx.load_all_states(&store)?;
-    let debts = super::messaging::collect_audit_debts(ctx, &states)?;
+    let debts = super::messaging::collect_debts(ctx, &states)?;
     report.advisories.extend(debts.advisories_for(ctx, &st));
     let review_queue = if report.next_action == "request_review" {
         Some(super::messaging::collect_review_queue(&store, &states)?)
@@ -1927,7 +1927,7 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
             }
         }
         let output = CheckOutput {
-            schema: "arc-check/2",
+            schema: "arc-check/3",
             change_id: &change_id,
             ready: report.integrate_ready,
             exit_code: code,

@@ -10,6 +10,9 @@ must not cross — name them explicitly; inferred intent drifts>
 ## Deliverables
 <the surfaces to change; the executor chooses the implementation>
 
+Before sending: grep-verify every path, symbol, and line number named below,
+and say here what each was verified against.
+
 ## Tests
 <the behaviors that must be covered; the executor may add more where the
 design demands it>
@@ -23,13 +26,20 @@ design demands it>
   scoped commits → `arc done`, then STOP for lead review.
 - Overbuild fence: do not turn a small change into a rewrite; add no tests,
   refactors, or dependencies beyond what the goal needs, and say so if the
-  goal itself is underspecified rather than guessing.
+  goal itself is underspecified rather than guessing. Updating literals the
+  goal forces (a new field or variant breaks every construction site, usually
+  test fixtures) is inside the ceiling, not overbuild.
+
 - Over-determination fence: if a target, symbol, or precondition is missing,
   `arc stage <change> blocked-on --note "<what>"`, release the claim, and
   stop — never work around a missing target to satisfy the literal goal.
 - Never run `review`, `integrate`, or `close`; the lead gates those.
 
 ## Sandbox facts (arc-driving executors)
+
+State this run's environment, not the general lesson: what this executor can
+write, whether it can sign commits, and what it can reach. The generic facts
+below stay only as defaults you have checked apply.
 
 - Arc needs `.git` writable. A workspace-write sandbox blocks it; run with
   `-s danger-full-access` or an equivalent that permits `.git`.

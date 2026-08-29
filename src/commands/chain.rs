@@ -42,7 +42,7 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                         },
                         coverage: Vec::new(),
                         stale_reviewers: 0,
-                        audit_debt_outstanding: state.audit_debt_outstanding(),
+                        debt_outstanding: state.debt_outstanding(),
                     };
                 };
                 let subject = patchset
@@ -126,7 +126,7 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                     at_final,
                     lifetime,
                     stale_reviewers: coverage.iter().filter(|row| !row.covers_final).count(),
-                    audit_debt_outstanding: state.audit_debt_outstanding(),
+                    debt_outstanding: state.debt_outstanding(),
                     coverage,
                 }
             });
@@ -228,7 +228,7 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
                             );
                         }
                     }
-                    if review.audit_debt_outstanding {
+                    if review.debt_outstanding {
                         println!("  audit: owed, not yet discharged");
                     }
                 }
