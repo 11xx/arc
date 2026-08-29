@@ -552,6 +552,94 @@ fn fork_refusal_detached_does_not_borrow_an_unrelated_forks_name() {
         .stderr(predicates::str::contains("provide a change"));
 }
 
+/// A detached checkout is no longer the fork once its branch is attached in
+/// another worktree. Every caller must use the same branch-first answer:
+/// integration in the stale checkout falls through, while list and retire
+/// resolve the branch to its attached worktree.
+#[test]
+fn fork_callers_agree_after_a_detached_branch_moves_worktrees() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "alpha"]));
+    let detached = fork_worktree(&repo, "alpha");
+    git(&detached, &["checkout", "--detach", "HEAD"]);
+
+    let attached = repo.home.join(".worktrees/repo-fork-alpha-attached");
+    fs::create_dir_all(attached.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &["worktree", "add", attached.to_str().unwrap(), "fork/alpha"],
+    );
+
+    repo.arc(&detached)
+        .args(["integrate"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("provide a change"))
+        .stderr(predicates::str::contains("fork worktree alpha").not());
+
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(listed["forks"][0]["worktree"], attached.to_str().unwrap());
+
+    stdout(
+        repo.arc(&repo.root)
+            .args(["fork", "retire", "alpha", "dropped: moved"]),
+    );
+    assert!(
+        !attached.exists(),
+        "retire must remove the attached worktree"
+    );
+    assert!(
+        detached.exists(),
+        "retire must not remove the stale detached checkout"
+    );
+}
+
+/// Git keeps a prunable worktree entry after its checkout is deleted outside
+/// Git. Fork views must not turn that administrative record into a live path,
+/// and adopt must not report a surviving marker as already journaled there.
+#[test]
+fn fork_list_and_adopt_ignore_a_prunable_deleted_worktree() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "vanished"]));
+    let worktree = fork_worktree(&repo, "vanished");
+    git(&worktree, &["checkout", "--detach", "HEAD"]);
+    fs::remove_dir_all(&worktree).unwrap();
+
+    let inventory = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
+    assert!(inventory.contains(&format!("worktree {}", worktree.display())));
+    assert!(inventory.lines().any(|line| line.starts_with("prunable ")));
+
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert!(listed["forks"][0]["worktree"].is_null(), "{listed}");
+
+    repo.arc(&repo.root)
+        .args(["fork", "adopt", "vanished"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no live worktree"))
+        .stderr(predicates::str::contains("already journaled").not());
+}
+
+/// A marker is not a fork without the branch it names. Adopt must apply the
+/// same branch identity rule as retire instead of treating the marker alone
+/// as sufficient.
+#[test]
+fn fork_adopt_refuses_after_its_branch_is_deleted() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "gone"]));
+    let worktree = fork_worktree(&repo, "gone");
+    git(&worktree, &["checkout", "--detach", "HEAD"]);
+    git(&repo.root, &["branch", "-D", "fork/gone"]);
+
+    repo.arc(&repo.root)
+        .args(["fork", "adopt", "gone"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "fork branch fork/gone does not exist",
+        ));
+}
+
 /// A hand-made fork (no `<repo>-fork-<slug>` gitdir name) keeps the
 /// integrate refusal while detached: the marker's `worktree:` record is
 /// arc's own data about which checkout the fork is, and it answers where

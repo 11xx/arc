@@ -406,11 +406,14 @@ pub fn ahead_count(cwd: &Path, base: &str, branch: &str) -> Result<usize> {
 
 /// One entry from `git worktree list --porcelain`. A detached worktree has no
 /// branch association; its path is still useful when another durable record
-/// names that exact checkout.
+/// names that exact checkout. Git marks an entry `prunable` after its path
+/// disappears, so consumers can distinguish a live checkout from stale
+/// administrative state.
 #[derive(Debug, Clone)]
 pub struct WorktreeEntry {
     pub path: PathBuf,
     pub branch: Option<String>,
+    pub prunable: bool,
 }
 
 /// Read Git's current worktree inventory, preserving the order Git reports.
@@ -419,15 +422,18 @@ pub fn worktree_inventory(cwd: &Path) -> Result<Vec<WorktreeEntry>> {
     let mut entries = Vec::new();
     let mut current_path: Option<PathBuf> = None;
     let mut current_branch: Option<String> = None;
+    let mut current_prunable = false;
     for line in out.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {
             if let Some(path) = current_path.replace(PathBuf::from(path)) {
                 entries.push(WorktreeEntry {
                     path,
                     branch: current_branch.take(),
+                    prunable: current_prunable,
                 });
             }
             current_branch = None;
+            current_prunable = false;
         } else if let Some(branch) = line.strip_prefix("branch ") {
             current_branch = Some(
                 branch
@@ -437,23 +443,28 @@ pub fn worktree_inventory(cwd: &Path) -> Result<Vec<WorktreeEntry>> {
             );
         } else if line == "detached" {
             current_branch = None;
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            current_prunable = true;
         }
     }
     if let Some(path) = current_path {
         entries.push(WorktreeEntry {
             path,
             branch: current_branch,
+            prunable: current_prunable,
         });
     }
     Ok(entries)
 }
 
-/// The worktree (if any) that has `branch` checked out.
+/// The live worktree (if any) that has `branch` checked out.
 pub fn worktree_for_branch(cwd: &Path, branch: &str) -> Result<Option<PathBuf>> {
     let inventory = worktree_inventory(cwd)?;
     Ok(inventory
         .iter()
-        .find(|entry| entry.branch.as_deref() == Some(branch))
+        .find(|entry| {
+            !entry.prunable && entry.path.exists() && entry.branch.as_deref() == Some(branch)
+        })
         .map(|entry| entry.path.clone()))
 }
 
