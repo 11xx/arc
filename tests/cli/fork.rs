@@ -960,3 +960,28 @@ fn a_relative_marker_path_names_no_worktree_from_anywhere() {
     assert!(from_fork.contains("no worktree"), "{from_fork}");
     assert!(from_primary.contains("no worktree"), "{from_primary}");
 }
+
+/// A fork's base is a property of the repository, not of whatever the primary
+/// checkout happens to hold. Parking the primary on a change branch must not
+/// make every fork measure against it.
+#[test]
+fn a_fork_base_ignores_a_primary_parked_on_a_working_branch() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "based"]));
+    let marker_free = "fork/loose";
+    git(&repo.root, &["branch", marker_free]);
+
+    let on_target = stdout(repo.arc(&repo.root).args(["fork", "list"]));
+    assert!(on_target.contains("over master"), "{on_target}");
+
+    git(&repo.root, &["checkout", "-b", "arc/parked"]);
+    let parked = stdout(repo.arc(&repo.root).args(["fork", "list"]));
+    assert!(
+        !parked.contains("over arc/parked"),
+        "a working branch is never an integration target: {parked}"
+    );
+    assert!(
+        parked.contains("over master") || parked.contains("unknown"),
+        "{parked}"
+    );
+}

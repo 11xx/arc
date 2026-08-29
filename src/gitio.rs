@@ -376,25 +376,36 @@ pub fn remove_worktree(cwd: &Path, path: &Path, force: bool) -> Result<()> {
 /// discoverable; callers must not substitute a literal branch name, because
 /// it could resolve to an unrelated history.
 pub fn default_branch(cwd: &Path) -> Option<String> {
-    let primary_branch = primary_worktree_branch(cwd)
-        .ok()
-        .flatten()
-        .filter(|branch| !branch.is_empty())
-        .filter(|branch| !is_fork_branch(branch));
-    if primary_branch.is_some() {
-        return primary_branch;
-    }
-
-    git(
+    // `origin/HEAD` is a property of the repository, so it is asked first: the
+    // primary worktree's branch is whatever someone happens to have checked
+    // out, and a fork measured against that changes its answer when an
+    // unrelated checkout moves.
+    let declared = git(
         cwd,
         &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"],
     )
     .ok()
-    .filter(|branch| {
-        branch
-            .strip_prefix("origin/")
-            .is_some_and(|branch| !branch.is_empty() && !is_fork_branch(branch))
-    })
+    .and_then(|branch| branch.strip_prefix("origin/").map(str::to_string))
+    .filter(|branch| !branch.is_empty() && !is_working_branch(branch));
+    if declared.is_some() {
+        return declared;
+    }
+
+    // Without a declared default the primary checkout is the best remaining
+    // evidence, but only when it holds an integration branch. A branch arc
+    // itself creates is work in progress and never something a fork
+    // integrates into, so it yields no base rather than a misleading one.
+    primary_worktree_branch(cwd)
+        .ok()
+        .flatten()
+        .filter(|branch| !branch.is_empty())
+        .filter(|branch| !is_working_branch(branch))
+}
+
+/// Whether a branch is one arc creates to carry work: a change branch or a
+/// fork. Neither is ever an integration target.
+fn is_working_branch(branch: &str) -> bool {
+    is_fork_branch(branch) || branch.starts_with("arc/")
 }
 
 pub fn ahead_count(cwd: &Path, base: &str, branch: &str) -> Result<usize> {
