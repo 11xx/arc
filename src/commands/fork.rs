@@ -88,14 +88,14 @@ fn canonical_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn marker_worktree_path(root: &Path, marker: &ForkMarker) -> Option<PathBuf> {
+/// A marker records where a fork's checkout is, and that answer must be the
+/// same from every worktree in the repository. A relative path cannot be:
+/// resolving it against the caller's root makes the fork live in a different
+/// place depending on where the question was asked, which is how one resolver
+/// starts answering as two. Only an absolute record names a checkout.
+fn marker_worktree_path(marker: &ForkMarker) -> Option<PathBuf> {
     let recorded = PathBuf::from(marker_field(&marker.body, "worktree")?);
-    let path = if recorded.is_absolute() {
-        recorded
-    } else {
-        root.join(recorded)
-    };
-    Some(canonical_path(&path))
+    recorded.is_absolute().then(|| canonical_path(&recorded))
 }
 
 enum ForkSelector<'a> {
@@ -179,7 +179,7 @@ fn resolve_fork(cwd: &Path, selector: ForkSelector<'_>) -> Result<Option<ForkRes
         let Some(marker) = &fork.marker else {
             continue;
         };
-        let Some(recorded) = marker_worktree_path(&root, marker) else {
+        let Some(recorded) = marker_worktree_path(marker) else {
             continue;
         };
         if let Some((entry, _)) = live

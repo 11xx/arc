@@ -916,3 +916,47 @@ fn integrate_debt_does_not_record_an_obligation_from_inside_a_fork() {
         "a refused integration owes no review: {status}"
     );
 }
+
+/// A marker's answer about where a fork lives must be the same from every
+/// worktree. A relative record cannot be, so it names no checkout at all
+/// rather than one that depends on who asked.
+#[test]
+fn a_relative_marker_path_names_no_worktree_from_anywhere() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "relative"]));
+    let worktree = fork_worktree(&repo, "relative");
+    git(&worktree, &["checkout", "--detach", "HEAD"]);
+
+    let dir = PathBuf::from(stdout(repo.arc(&repo.root).args(["journal", "dir"])).trim());
+    let marker = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("-fork-relative-plan.md"))
+        })
+        .expect("the fork wrote a marker");
+    let body = fs::read_to_string(&marker).unwrap();
+    let edited: String = body
+        .lines()
+        .map(|line| {
+            if line.starts_with("worktree: ") {
+                "worktree: .".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&marker, format!("{edited}\n")).unwrap();
+
+    // Asked from the fork's own checkout and from the primary, the answer is
+    // the same: the marker names nothing, so no command claims a live
+    // worktree the others cannot see.
+    let from_fork = stdout(repo.arc(&worktree).args(["fork", "list"]));
+    let from_primary = stdout(repo.arc(&repo.root).args(["fork", "list"]));
+    assert!(from_fork.contains("no worktree"), "{from_fork}");
+    assert!(from_primary.contains("no worktree"), "{from_primary}");
+}
