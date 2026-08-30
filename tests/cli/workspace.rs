@@ -126,7 +126,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/5");
+    assert_eq!(value["schema"], "arc-workspace-backlog/6");
     let project = value["projects"]
         .as_array()
         .unwrap()
@@ -459,7 +459,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/5");
+    assert_eq!(value["schema"], "arc-workspace-backlog/6");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {
@@ -666,4 +666,106 @@ fn restack_advise_prints_rebase_for_dependent_and_writes_nothing() {
         "restack must not write events"
     );
     let _ = base;
+}
+
+/// A verdict is read at a revision, and the target moves under it. The report
+/// says how far, because that distance is where a clean text merge can still
+/// fail to compile.
+#[test]
+fn workspace_backlog_names_how_far_a_change_is_behind_its_target() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "feat-stale", "--no-worktree"])
+        .assert()
+        .success();
+    fs::write(repo.root.join("work.txt"), "work\n").unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "feat: work"]);
+    repo.arc(&repo.root).args(["snapshot"]).assert().success();
+
+    // The target takes a commit the change was never based on.
+    let branch = git_out(&repo.root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    git(&repo.root, &["checkout", "master"]);
+    fs::write(repo.root.join("sibling.txt"), "sibling\n").unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "feat: sibling"]);
+    git(&repo.root, &["checkout", branch.trim()]);
+
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut report);
+    let project = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["anchor"].as_str().unwrap().ends_with("repo"))
+        .unwrap_or_else(|| panic!("project missing: {value}"));
+    let entry = project["needs_review"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| {
+            entry["change_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("feat-stale")
+        })
+        .unwrap_or_else(|| panic!("reviewable change missing: {project}"));
+    assert_eq!(entry["behind_target"], 1, "{entry}");
+}
+
+/// Debt is recorded per change, so a file carried by several obligations is
+/// invisible from any one of them. Reviewing one such change does not read
+/// that file's other unread revisions, and the report says which files those
+/// are.
+#[test]
+fn workspace_backlog_names_a_path_more_than_one_obligation_carries() {
+    let repo = Repo::new();
+    for (slug, other) in [("feat-first", "first.txt"), ("feat-second", "second.txt")] {
+        repo.arc(&repo.root)
+            .args(["begin", slug, "--no-worktree", "--target", "master"])
+            .assert()
+            .success();
+        // One file both changes touch, and one only this change touches.
+        fs::write(repo.root.join("shared.txt"), format!("{slug}\n")).unwrap();
+        fs::write(repo.root.join(other), "own\n").unwrap();
+        git(&repo.root, &["add", "-A"]);
+        git(&repo.root, &["commit", "-m", &format!("feat: {slug}")]);
+        repo.arc(&repo.root).args(["snapshot"]).assert().success();
+        repo.arc(&repo.root)
+            .args([
+                "debt",
+                slug,
+                "--reason",
+                "no independent reviewer reachable",
+            ])
+            .assert()
+            .success();
+        // Integration merges into the target, which has to be the checkout.
+        git(&repo.root, &["checkout", "master"]);
+        repo.arc(&repo.root)
+            .args(["integrate", slug])
+            .assert()
+            .success();
+    }
+
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut report);
+    let project = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["anchor"].as_str().unwrap().ends_with("repo"))
+        .unwrap_or_else(|| panic!("project missing: {value}"));
+
+    let shared = &project["shared_surfaces"];
+    let carriers = shared["shared.txt"]
+        .as_array()
+        .unwrap_or_else(|| panic!("shared.txt not reported: {project}"));
+    assert_eq!(carriers.len(), 2, "{shared}");
+    // A path only one obligation carries is not shared, and saying so would
+    // make every touched file look like a collision.
+    assert!(shared.get("first.txt").is_none(), "{shared}");
+    assert!(shared.get("second.txt").is_none(), "{shared}");
 }

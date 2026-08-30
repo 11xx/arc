@@ -301,6 +301,11 @@ struct ReviewOwed {
     /// means the change has never been reviewed.
     #[serde(skip_serializing_if = "Option::is_none")]
     superseded_verdict: Option<String>,
+    /// Commits the target has taken since this change's base. A verdict read
+    /// at this revision is a verdict on a revision that will move before it
+    /// integrates, and the rebase is where a clean text merge can still fail
+    /// to compile.
+    behind_target: usize,
 }
 
 /// One outstanding review obligation, carrying the facts that decide whether
@@ -319,6 +324,10 @@ struct DebtOwed {
     /// cannot be filtered by what it owes.
     typed: bool,
     declared_by: String,
+    /// Paths the unreviewed revision changed. Two obligations naming one path
+    /// are two unread readings of the same code.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    surfaces: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -339,6 +348,10 @@ struct ProjectBacklog {
     /// The primary tier's oldest entry, in days. A one-item queue never looks
     /// like a backlog from inside the project; across projects it is visible.
     oldest_open_days: Option<u64>,
+    /// Paths more than one outstanding obligation names, with the changes
+    /// naming them. Reviewing one such change is not reviewing that path.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    shared_surfaces: BTreeMap<String, Vec<String>>,
     /// Every artifact behind the counts above, when `--items` asked for
     /// them. The same artifacts the counts are taken over, so the two cannot
     /// disagree. Absent unless asked for.
@@ -416,9 +429,9 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
             .clone()
             .expect("a reachable project has an anchor");
 
-        let (needs_review, no_patchset, debt_owed) = match &project.ledger {
+        let queues = match &project.ledger {
             Some(root) => ledger_queues(root)?,
-            None => (Vec::new(), Vec::new(), Vec::new()),
+            None => LedgerQueues::default(),
         };
 
         let open_queue = crate::journal::collect_open_in(ctx, &project.journal_dir, &anchor, None)?;
@@ -452,9 +465,10 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
         let entry = ProjectBacklog {
             project: project.label(),
             anchor: anchor.display().to_string(),
-            needs_review,
-            no_patchset,
-            debt_owed,
+            needs_review: queues.needs_review,
+            no_patchset: queues.no_patchset,
+            shared_surfaces: queues.shared_surfaces,
+            debt_owed: queues.debt_owed,
             open_items,
             later_items,
             feature_requests,
@@ -481,7 +495,7 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/5",
+                schema: "arc-workspace-backlog/6",
                 projects,
                 unreachable,
             })?
@@ -503,8 +517,12 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
                 Some(verdict) => format!(", {verdict} superseded"),
                 None => String::new(),
             };
+            let stale = match change.behind_target {
+                0 => String::new(),
+                behind => format!(", {behind} behind target"),
+            };
             println!(
-                "  needs-review  {}  waiting {}d{seen}",
+                "  needs-review  {}  waiting {}d{seen}{stale}",
                 change.change_id, change.waiting_days
             );
         }
@@ -520,6 +538,29 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
                 "  debt-owed     {}  {}d, {kind}, by {}",
                 change.change_id, change.age_days, change.declared_by
             );
+        }
+        // The text view is read to decide what to open next, so it names the
+        // most-carried paths and counts the rest. `--json` carries them all.
+        let mut shared: Vec<_> = project.shared_surfaces.iter().collect();
+        shared.sort_by(|(left_path, left), (right_path, right)| {
+            right
+                .len()
+                .cmp(&left.len())
+                .then_with(|| left_path.cmp(right_path))
+        });
+        for (surface, changes) in shared.iter().take(SHARED_SURFACES_SHOWN) {
+            println!(
+                "  shared        {surface}  unread by {} changes: {}",
+                changes.len(),
+                changes.join(", ")
+            );
+        }
+        if let Some(rest) = shared
+            .len()
+            .checked_sub(SHARED_SURFACES_SHOWN)
+            .filter(|rest| *rest > 0)
+        {
+            println!("  shared        +{rest} more paths carried by more than one obligation");
         }
         let age = match project.oldest_open_days {
             Some(days) => format!(", oldest {days}d"),
@@ -555,11 +596,18 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
 
 /// The two ledger buckets a lead reads across projects: what awaits a verdict,
 /// and what shipped owing one.
-type LedgerQueues = (Vec<ReviewOwed>, Vec<String>, Vec<DebtOwed>);
+/// What one project's ledger owes, read once so the buckets cannot disagree.
+#[derive(Default)]
+struct LedgerQueues {
+    needs_review: Vec<ReviewOwed>,
+    no_patchset: Vec<String>,
+    debt_owed: Vec<DebtOwed>,
+    shared_surfaces: BTreeMap<String, Vec<String>>,
+}
 
 fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
     let Some(store) = Store::open_at(root)? else {
-        return Ok((Vec::new(), Vec::new(), Vec::new()));
+        return Ok(LedgerQueues::default());
     };
     let states = repo_states(&store)?;
     let now = chrono::Utc::now();
@@ -572,6 +620,7 @@ fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
         if state.debt_outstanding() {
             if let Some(debt) = &state.debt {
                 debt_owed.push(DebtOwed {
+                    surfaces: crate::commands::messaging::debt_surfaces(root, state, debt),
                     change_id: state.change_id.clone(),
                     declared_at: debt.declared_at,
                     age_days: days_between(debt.declared_at, now),
@@ -593,6 +642,15 @@ fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
                     superseded_verdict: state
                         .latest_verdict()
                         .and_then(|verdict| wire_name(&verdict.verdict)),
+                    // A target that cannot be read leaves the distance
+                    // unknown, and an unknown distance is reported as none
+                    // rather than guessed at.
+                    behind_target: crate::gitio::ahead_count(
+                        root,
+                        &state.base,
+                        &state.target_branch,
+                    )
+                    .unwrap_or(0),
                 }),
                 None => no_patchset.push(state.change_id.clone()),
             }
@@ -601,8 +659,34 @@ fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
     needs_review.sort_by(|a, b| a.change_id.cmp(&b.change_id));
     no_patchset.sort();
     debt_owed.sort_by(|a, b| a.change_id.cmp(&b.change_id));
-    Ok((needs_review, no_patchset, debt_owed))
+    Ok(LedgerQueues {
+        shared_surfaces: shared_surfaces(&debt_owed),
+        needs_review,
+        no_patchset,
+        debt_owed,
+    })
 }
+
+/// Paths named by more than one outstanding obligation. Debt is recorded per
+/// change, so a path carried by several is invisible from any one of them,
+/// and reading the change that finally touches it reads only the newest of
+/// the readings nobody has done.
+fn shared_surfaces(debts: &[DebtOwed]) -> BTreeMap<String, Vec<String>> {
+    let mut by_path: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for debt in debts {
+        for surface in &debt.surfaces {
+            by_path
+                .entry(surface.clone())
+                .or_default()
+                .push(debt.change_id.clone());
+        }
+    }
+    by_path.retain(|_, changes| changes.len() > 1);
+    by_path
+}
+
+/// How many shared paths the text view names before it starts counting.
+const SHARED_SURFACES_SHOWN: usize = 3;
 
 /// The wire spelling of a serde enum, so the report never carries a second
 /// hand-written copy of a name the model already defines.
