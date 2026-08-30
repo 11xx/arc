@@ -287,13 +287,52 @@ struct Backlog {
     unreachable: Vec<UnreachableProject>,
 }
 
+/// One change awaiting a verdict, with what a reader needs to judge its age
+/// and weight without opening it.
+#[derive(Serialize)]
+struct ReviewOwed {
+    change_id: String,
+    /// Patchsets recorded. Always at least one: a change with none is
+    /// reported under `no_patchset`, because its next step is work.
+    patchsets: usize,
+    /// Age of the newest patchset, in days.
+    waiting_days: u64,
+    /// The verdict a newer patchset superseded, when there was one. Absent
+    /// means the change has never been reviewed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded_verdict: Option<String>,
+}
+
+/// One outstanding review obligation, carrying the facts that decide whether
+/// it can be discharged and by whom.
+#[derive(Serialize)]
+struct DebtOwed {
+    change_id: String,
+    declared_at: chrono::DateTime<chrono::Utc>,
+    age_days: u64,
+    /// What the versioned obligation says is missing. Absent on an
+    /// obligation declared before the kind was recorded, whose meaning is
+    /// independent-review debt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    missing: Option<String>,
+    /// Whether the obligation carries its kind. An obligation without one
+    /// cannot be filtered by what it owes.
+    typed: bool,
+    declared_by: String,
+}
+
 #[derive(Serialize)]
 struct ProjectBacklog {
     project: String,
     anchor: String,
-    /// Changes whose next step is a verdict rather than more work.
-    needs_review: Vec<String>,
-    debt_owed: Vec<String>,
+    /// Changes whose next step is a verdict rather than more work: a
+    /// patchset exists and no verdict answers it.
+    needs_review: Vec<ReviewOwed>,
+    /// Open changes carrying no patchset. Their next step is work, so they
+    /// are not waiting on a person and do not count as blocked.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    no_patchset: Vec<String>,
+    debt_owed: Vec<DebtOwed>,
     open_items: usize,
     later_items: usize,
     feature_requests: usize,
@@ -302,8 +341,7 @@ struct ProjectBacklog {
     oldest_open_days: Option<u64>,
     /// Every artifact behind the counts above, when `--items` asked for
     /// them. The same artifacts the counts are taken over, so the two cannot
-    /// disagree. Additive in `arc-workspace-backlog/3`; the debt-owed rename
-    /// carried the schema to 4.
+    /// disagree. Absent unless asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     items: Option<BacklogItems>,
 }
@@ -323,6 +361,7 @@ impl ProjectBacklog {
 
     fn is_empty(&self) -> bool {
         self.blocked() == 0
+            && self.no_patchset.is_empty()
             && self.open_items == 0
             && self.later_items == 0
             && self.feature_requests == 0
@@ -377,9 +416,9 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
             .clone()
             .expect("a reachable project has an anchor");
 
-        let (needs_review, debt_owed) = match &project.ledger {
+        let (needs_review, no_patchset, debt_owed) = match &project.ledger {
             Some(root) => ledger_queues(root)?,
-            None => (Vec::new(), Vec::new()),
+            None => (Vec::new(), Vec::new(), Vec::new()),
         };
 
         let open_queue = crate::journal::collect_open_in(ctx, &project.journal_dir, &anchor, None)?;
@@ -414,6 +453,7 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
             project: project.label(),
             anchor: anchor.display().to_string(),
             needs_review,
+            no_patchset,
             debt_owed,
             open_items,
             later_items,
@@ -441,7 +481,7 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/4",
+                schema: "arc-workspace-backlog/5",
                 projects,
                 unreachable,
             })?
@@ -459,10 +499,27 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
     for project in &projects {
         println!("# {} ({})", project.project, project.anchor);
         for change in &project.needs_review {
-            println!("  needs-review  {change}");
+            let seen = match &change.superseded_verdict {
+                Some(verdict) => format!(", {verdict} superseded"),
+                None => String::new(),
+            };
+            println!(
+                "  needs-review  {}  waiting {}d{seen}",
+                change.change_id, change.waiting_days
+            );
+        }
+        for change in &project.no_patchset {
+            println!("  no-patchset   {change}  open, nothing recorded to review");
         }
         for change in &project.debt_owed {
-            println!("  debt-owed    {change}");
+            let kind = match &change.missing {
+                Some(missing) => missing.clone(),
+                None => "unversioned".to_owned(),
+            };
+            println!(
+                "  debt-owed     {}  {}d, {kind}, by {}",
+                change.change_id, change.age_days, change.declared_by
+            );
         }
         let age = match project.oldest_open_days {
             Some(days) => format!(", oldest {days}d"),
@@ -498,26 +555,68 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
 
 /// The two ledger buckets a lead reads across projects: what awaits a verdict,
 /// and what shipped owing one.
-fn ledger_queues(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
+type LedgerQueues = (Vec<ReviewOwed>, Vec<String>, Vec<DebtOwed>);
+
+fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
     let Some(store) = Store::open_at(root)? else {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     };
     let states = repo_states(&store)?;
+    let now = chrono::Utc::now();
     let mut needs_review = Vec::new();
+    let mut no_patchset = Vec::new();
     let mut debt_owed = Vec::new();
     for state in states.values() {
         // Audit debt outlives integration, so it is asked of every change;
         // a review verdict is only owed while the change is still open.
         if state.debt_outstanding() {
-            debt_owed.push(state.change_id.clone());
+            if let Some(debt) = &state.debt {
+                debt_owed.push(DebtOwed {
+                    change_id: state.change_id.clone(),
+                    declared_at: debt.declared_at,
+                    age_days: days_between(debt.declared_at, now),
+                    missing: debt.missing.as_ref().and_then(wire_name),
+                    typed: debt.missing.is_some(),
+                    declared_by: debt.actor.clone(),
+                });
+            }
         }
         if !state.is_closed() && crate::inbox::needs_review(state) {
-            needs_review.push(state.change_id.clone());
+            // A change with no patchset is waiting on work, not on a person.
+            // Reporting it beside changes that carry a reviewable revision
+            // makes a queue of empty changes read as review backlog.
+            match state.latest_patchset() {
+                Some(patchset) => needs_review.push(ReviewOwed {
+                    change_id: state.change_id.clone(),
+                    patchsets: state.patchsets.len(),
+                    waiting_days: days_between(patchset.created_at, now),
+                    superseded_verdict: state
+                        .latest_verdict()
+                        .and_then(|verdict| wire_name(&verdict.verdict)),
+                }),
+                None => no_patchset.push(state.change_id.clone()),
+            }
         }
     }
-    needs_review.sort();
-    debt_owed.sort();
-    Ok((needs_review, debt_owed))
+    needs_review.sort_by(|a, b| a.change_id.cmp(&b.change_id));
+    no_patchset.sort();
+    debt_owed.sort_by(|a, b| a.change_id.cmp(&b.change_id));
+    Ok((needs_review, no_patchset, debt_owed))
+}
+
+/// The wire spelling of a serde enum, so the report never carries a second
+/// hand-written copy of a name the model already defines.
+fn wire_name<T: Serialize>(value: &T) -> Option<String> {
+    serde_json::to_value(value)
+        .ok()?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Whole days between two instants, floored, and never negative: a clock that
+/// disagrees with a recorded stamp must not read as a negative age.
+fn days_between(from: chrono::DateTime<chrono::Utc>, to: chrono::DateTime<chrono::Utc>) -> u64 {
+    (to - from).num_days().max(0) as u64
 }
 
 /// Print the exact, safe rebase command for every open change that depended on
