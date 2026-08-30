@@ -867,7 +867,20 @@ previous-run marker — the boundary is supplied by the caller, so the command
 stays derived. `--items` names every actionable artifact under each project in
 the same open, later, and feature-request tier order used by `journal open`.
 Each item can include its `verification` stamp, and the text rows use the same
-renderer as `journal open`. JSON is versioned `arc-workspace-backlog/4`.
+renderer as `journal open`. JSON is versioned `arc-workspace-backlog/5`.
+
+The two ledger buckets carry the facts that decide what to do about them, so a
+reader never re-derives them per change. A review entry names how many
+patchsets exist, how many days the newest has waited, and the verdict a newer
+patchset superseded — absent when the change has never been reviewed at all. A
+debt entry names when it was declared, its age in days, who declared it, and
+what it says is missing; an obligation declared before the kind was recorded
+carries no `missing` and reads as `unversioned`, which is independent-review
+debt that cannot be filtered by what it owes.
+
+Only a change carrying a patchset can be answered by a verdict. An open change
+with none is reported under `no_patchset`, and does not count as blocked: its
+next step is work, not a person.
 
 `arc brief <change> --scaffold <name>` prepends a template to the brief being
 recorded (`--scaffold` alone records the template). A repo-local

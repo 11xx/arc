@@ -126,7 +126,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/4");
+    assert_eq!(value["schema"], "arc-workspace-backlog/5");
     let project = value["projects"]
         .as_array()
         .unwrap()
@@ -134,13 +134,78 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
         .find(|entry| entry["anchor"].as_str().unwrap().ends_with("repo"))
         .unwrap_or_else(|| panic!("project missing: {value}"));
     assert_eq!(project["open_items"], 1);
-    // A change with no verdict yet is waiting on a reviewer.
+    // A change carrying no patchset is waiting on work, not on a reviewer,
+    // so it is reported apart from the review queue.
     assert!(
-        project["needs_review"]
+        project["no_patchset"]
             .as_array()
             .unwrap()
             .iter()
             .any(|id| id.as_str().unwrap().starts_with("feat-pending")),
+        "{project}"
+    );
+    assert_eq!(
+        project["needs_review"].as_array().unwrap().len(),
+        0,
+        "{project}"
+    );
+}
+
+/// A change carrying a revision is the only kind a verdict can answer, and the
+/// entry says how long it has been waiting without opening the change.
+#[test]
+fn workspace_backlog_separates_a_reviewable_change_from_an_empty_one() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "feat-ready", "--no-worktree"])
+        .assert()
+        .success();
+    fs::write(repo.root.join("shipped.txt"), "work\n").unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "feat: work"]);
+    repo.arc(&repo.root).args(["snapshot"]).assert().success();
+    repo.arc(&repo.root)
+        .args(["begin", "feat-empty", "--no-worktree", "--target", "master"])
+        .assert()
+        .success();
+
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut report);
+    let project = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["anchor"].as_str().unwrap().ends_with("repo"))
+        .unwrap_or_else(|| panic!("project missing: {value}"));
+
+    let reviewable = project["needs_review"].as_array().unwrap();
+    let entry = reviewable
+        .iter()
+        .find(|entry| {
+            entry["change_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("feat-ready")
+        })
+        .unwrap_or_else(|| panic!("reviewable change missing: {project}"));
+    assert_eq!(entry["patchsets"], 1, "{entry}");
+    assert!(entry["waiting_days"].is_number(), "{entry}");
+    // Never reviewed is not the same as reviewed and superseded.
+    assert!(entry.get("superseded_verdict").is_none(), "{entry}");
+    assert!(
+        !reviewable.iter().any(|entry| entry["change_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("feat-empty")),
+        "an empty change must not sit in the review queue: {project}"
+    );
+    assert!(
+        project["no_patchset"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id.as_str().unwrap().starts_with("feat-empty")),
         "{project}"
     );
 }
@@ -394,7 +459,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/4");
+    assert_eq!(value["schema"], "arc-workspace-backlog/5");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {
