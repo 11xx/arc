@@ -131,7 +131,7 @@ pub(crate) fn collect_debts(
             title: state.title.clone(),
             reason: debt.reason.clone(),
             declared_at: debt.declared_at,
-            surfaces: debt_surfaces(ctx, state, debt),
+            surfaces: debt_surfaces(&ctx.cwd, state, debt),
         });
     }
     entries.sort_by(|a, b| a.change_id.cmp(&b.change_id));
@@ -169,7 +169,11 @@ pub(crate) fn collect_debts(
     })
 }
 
-fn debt_surfaces(ctx: &Ctx, state: &ChangeState, debt: &crate::state::Debt) -> Vec<String> {
+pub(crate) fn debt_surfaces(
+    cwd: &Path,
+    state: &ChangeState,
+    debt: &crate::state::Debt,
+) -> Vec<String> {
     let range = state
         .closure
         .as_ref()
@@ -194,7 +198,7 @@ fn debt_surfaces(ctx: &Ctx, state: &ChangeState, debt: &crate::state::Debt) -> V
                 .map(|patchset| (patchset.base.as_str(), patchset.head.as_str()))
         });
     range
-        .and_then(|(base, head)| crate::gitio::changed_paths(&ctx.cwd, base, head).ok())
+        .and_then(|(base, head)| crate::gitio::changed_paths(cwd, base, head).ok())
         .unwrap_or_default()
 }
 

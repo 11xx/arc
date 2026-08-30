@@ -867,7 +867,7 @@ previous-run marker — the boundary is supplied by the caller, so the command
 stays derived. `--items` names every actionable artifact under each project in
 the same open, later, and feature-request tier order used by `journal open`.
 Each item can include its `verification` stamp, and the text rows use the same
-renderer as `journal open`. JSON is versioned `arc-workspace-backlog/5`.
+renderer as `journal open`. JSON is versioned `arc-workspace-backlog/6`.
 
 The two ledger buckets carry the facts that decide what to do about them, so a
 reader never re-derives them per change. A review entry names how many
@@ -881,6 +881,18 @@ debt that cannot be filtered by what it owes.
 Only a change carrying a patchset can be answered by a verdict. An open change
 with none is reported under `no_patchset`, and does not count as blocked: its
 next step is work, not a person.
+
+A review entry also names `behind_target`: how many commits the target has
+taken since the change's base. A verdict is read at a revision, and that
+distance is the revision it will not integrate at — where a text merge that
+git resolves cleanly can still fail to compile.
+
+`shared_surfaces` names each path more than one outstanding obligation
+changed, with the changes that changed it. Debt is recorded per change, so a
+file several obligations carry is invisible from any one of them: reviewing
+the change that finally touches it reads only the newest of the readings
+nobody has done. The text view names the most-carried paths and counts the
+rest; `--json` carries them all.
 
 `arc brief <change> --scaffold <name>` prepends a template to the brief being
 recorded (`--scaffold` alone records the template). A repo-local
