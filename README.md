@@ -867,7 +867,7 @@ previous-run marker — the boundary is supplied by the caller, so the command
 stays derived. `--items` names every actionable artifact under each project in
 the same open, later, and feature-request tier order used by `journal open`.
 Each item can include its `verification` stamp, and the text rows use the same
-renderer as `journal open`. JSON is versioned `arc-workspace-backlog/6`.
+renderer as `journal open`. JSON is versioned `arc-workspace-backlog/7`.
 
 The two ledger buckets carry the facts that decide what to do about them, so a
 reader never re-derives them per change. A review entry names how many
@@ -882,17 +882,23 @@ Only a change carrying a patchset can be answered by a verdict. An open change
 with none is reported under `no_patchset`, and does not count as blocked: its
 next step is work, not a person.
 
-A review entry also names `behind_target`: how many commits the target has
-taken since the change's base. A verdict is read at a revision, and that
-distance is the revision it will not integrate at — where a text merge that
-git resolves cleanly can still fail to compile.
+A review entry names two independent target-movement facts. `behind_target`
+is the number of commits the target has taken since the latest patchset's
+base, an integration-staleness measure. `target_path_overlap` is the sorted
+set of paths changed by both that patchset and the target movement, a direct
+file-overlap signal. A semantic conflict can cross different files and is
+established only by evaluating the combined tree. Either report value is
+`null` when its Git range cannot be read; the text view says `unknown` rather
+than presenting a failed probe as zero or an empty set.
 
 `shared_surfaces` names each path more than one outstanding obligation
 changed, with the changes that changed it. Debt is recorded per change, so a
 file several obligations carry is invisible from any one of them: reviewing
 the change that finally touches it reads only the newest of the readings
 nobody has done. The text view names the most-carried paths and counts the
-rest; `--json` carries them all.
+rest; `--json` carries them all. A debt whose recorded range cannot be read
+carries `surfaces: null` and is excluded from exact-path correlation without
+being presented as known to touch nothing.
 
 `arc brief <change> --scaffold <name>` prepends a template to the brief being
 recorded (`--scaffold` alone records the template). A repo-local

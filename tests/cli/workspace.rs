@@ -126,7 +126,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/6");
+    assert_eq!(value["schema"], "arc-workspace-backlog/7");
     let project = value["projects"]
         .as_array()
         .unwrap()
@@ -459,7 +459,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/6");
+    assert_eq!(value["schema"], "arc-workspace-backlog/7");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {
@@ -668,9 +668,8 @@ fn restack_advise_prints_rebase_for_dependent_and_writes_nothing() {
     let _ = base;
 }
 
-/// A verdict is read at a revision, and the target moves under it. The report
-/// says how far, because that distance is where a clean text merge can still
-/// fail to compile.
+/// Commit distance is integration staleness. Unrelated target work does not
+/// become conflict risk merely because there is more of it.
 #[test]
 fn workspace_backlog_names_how_far_a_change_is_behind_its_target() {
     let repo = Repo::new();
@@ -712,6 +711,95 @@ fn workspace_backlog_names_how_far_a_change_is_behind_its_target() {
         })
         .unwrap_or_else(|| panic!("reviewable change missing: {project}"));
     assert_eq!(entry["behind_target"], 1, "{entry}");
+    assert_eq!(
+        entry["target_path_overlap"],
+        serde_json::json!([]),
+        "{entry}"
+    );
+}
+
+/// Target movement through a change's own paths is direct file overlap. A
+/// semantic conflict can cross paths and is established only by evaluation.
+#[test]
+fn workspace_backlog_names_target_paths_that_overlap_the_change() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "feat-overlap", "--no-worktree"])
+        .assert()
+        .success();
+    fs::write(repo.root.join("shared.txt"), "change\n").unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "feat: change shared path"]);
+    repo.arc(&repo.root).args(["snapshot"]).assert().success();
+
+    let branch = git_out(&repo.root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    git(&repo.root, &["checkout", "master"]);
+    fs::write(repo.root.join("shared.txt"), "target\n").unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "feat: target shared path"]);
+    git(&repo.root, &["checkout", branch.trim()]);
+
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut report);
+    let project = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["anchor"].as_str().unwrap().ends_with("repo"))
+        .unwrap_or_else(|| panic!("project missing: {value}"));
+    let entry = project["needs_review"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| {
+            entry["change_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("feat-overlap")
+        })
+        .unwrap_or_else(|| panic!("reviewable change missing: {project}"));
+    assert_eq!(entry["behind_target"], 1, "{entry}");
+    assert_eq!(
+        entry["target_path_overlap"],
+        serde_json::json!(["shared.txt"]),
+        "{entry}"
+    );
+}
+
+/// A failed Git probe is a fact the caller needs. Zero distance and an empty
+/// surface set are known answers and cannot stand in for it.
+#[test]
+fn workspace_backlog_preserves_unknown_git_probes() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "feat-unknown", "--no-worktree"])
+        .assert()
+        .success();
+    fs::write(repo.root.join("work.txt"), "work\n").unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "feat: work"]);
+    repo.arc(&repo.root).args(["snapshot"]).assert().success();
+    git(&repo.root, &["branch", "-D", "master"]);
+
+    let mut json = repo.arc(&repo.root);
+    json.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut json);
+    let project = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["anchor"].as_str().unwrap().ends_with("repo"))
+        .unwrap_or_else(|| panic!("project missing: {value}"));
+    let entry = project["needs_review"].as_array().unwrap().first().unwrap();
+    assert!(entry.get("behind_target").is_some(), "{entry}");
+    assert!(entry["behind_target"].is_null(), "{entry}");
+    assert!(entry.get("target_path_overlap").is_some(), "{entry}");
+    assert!(entry["target_path_overlap"].is_null(), "{entry}");
+
+    let text = stdout(repo.arc(&repo.root).args(["workspace", "backlog"]));
+    assert!(text.contains("target distance unknown"), "{text}");
+    assert!(text.contains("target path overlap unknown"), "{text}");
 }
 
 /// Debt is recorded per change, so a file carried by several obligations is
@@ -768,4 +856,77 @@ fn workspace_backlog_names_a_path_more_than_one_obligation_carries() {
     // make every touched file look like a collision.
     assert!(shared.get("first.txt").is_none(), "{shared}");
     assert!(shared.get("second.txt").is_none(), "{shared}");
+}
+
+/// A recorded integration range can become unreadable after history is
+/// rewritten. The debt remains real, while its surfaces become unknown.
+#[test]
+fn workspace_backlog_preserves_an_unreadable_debt_range() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "feat-unreadable", "--no-worktree"])
+        .assert()
+        .success();
+    fs::write(repo.root.join("work.txt"), "work\n").unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "feat: work"]);
+    repo.arc(&repo.root).args(["snapshot"]).assert().success();
+    repo.arc(&repo.root)
+        .args(["debt", "feat-unreadable", "--reason", "review unavailable"])
+        .assert()
+        .success();
+    git(&repo.root, &["checkout", "master"]);
+    repo.arc(&repo.root)
+        .args(["integrate", "feat-unreadable"])
+        .assert()
+        .success();
+
+    let event_dir = repo
+        .root
+        .join(".git/arc/changes")
+        .read_dir()
+        .unwrap()
+        .find_map(|entry| {
+            let path = entry.unwrap().path();
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("feat-unreadable")
+                .then_some(path.join("events"))
+        })
+        .unwrap();
+    let integration_path = event_dir
+        .read_dir()
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap())
+                .is_ok_and(|event| event["event_type"] == "change-integrated")
+        })
+        .unwrap();
+    let mut integration: serde_json::Value =
+        serde_json::from_slice(&fs::read(&integration_path).unwrap()).unwrap();
+    integration["target_before"] = serde_json::json!("missing-target");
+    integration["integrated_commit"] = serde_json::json!("missing-integration");
+    fs::write(
+        integration_path,
+        serde_json::to_vec_pretty(&integration).unwrap(),
+    )
+    .unwrap();
+
+    let mut json = repo.arc(&repo.root);
+    json.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut json);
+    let project = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["anchor"].as_str().unwrap().ends_with("repo"))
+        .unwrap_or_else(|| panic!("project missing: {value}"));
+    let debt = project["debt_owed"].as_array().unwrap().first().unwrap();
+    assert!(debt.get("surfaces").is_some(), "{debt}");
+    assert!(debt["surfaces"].is_null(), "{debt}");
+
+    let text = stdout(repo.arc(&repo.root).args(["workspace", "backlog"]));
+    assert!(text.contains("surfaces unknown"), "{text}");
 }
