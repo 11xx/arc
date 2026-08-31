@@ -58,6 +58,10 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Fork identity is classified under the same independent-review boundary as
+  fork creation and retirement. The resolver decides which recorded fork a
+  lifecycle operation addresses, so it carries the authority of its callers.
+
 - `arc workspace backlog` separates integration staleness from direct path
   overlap: review entries carry both target commit distance and paths changed
   on both sides. Failed target and debt-range probes remain explicit `unknown`
