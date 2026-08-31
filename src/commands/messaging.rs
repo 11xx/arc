@@ -7,15 +7,15 @@ struct DebtEntry {
     title: String,
     reason: String,
     declared_at: DateTime<Utc>,
-    surfaces: Vec<String>,
+    surfaces: Option<Vec<String>>,
 }
 
 impl DebtEntry {
     fn surface_detail(&self) -> String {
-        if self.surfaces.is_empty() {
-            "unknown".to_string()
-        } else {
-            self.surfaces.join(", ")
+        match &self.surfaces {
+            Some(surfaces) if surfaces.is_empty() => "none".to_string(),
+            Some(surfaces) => surfaces.join(", "),
+            None => "unknown".to_string(),
         }
     }
 
@@ -35,6 +35,7 @@ pub(crate) struct DebtSummary {
     entries: Vec<DebtEntry>,
     oldest_age_seconds: u64,
     surfaces: Vec<String>,
+    unknown_surface_entries: usize,
     priority_advisory: bool,
 }
 
@@ -44,10 +45,13 @@ impl DebtSummary {
     }
 
     pub(crate) fn detail(&self) -> String {
-        let surfaces = if self.surfaces.is_empty() {
-            "unknown".to_string()
-        } else {
-            self.surfaces.join(", ")
+        let surfaces = match (self.surfaces.is_empty(), self.unknown_surface_entries) {
+            (true, 0) => "none".to_string(),
+            (true, unknown) => format!("unknown for {unknown}"),
+            (false, 0) => self.surfaces.join(", "),
+            (false, unknown) => {
+                format!("{}; unknown for {unknown}", self.surfaces.join(", "))
+            }
         };
         format!(
             "{} outstanding; oldest {}; surfaces ({}): {}{}",
@@ -83,7 +87,9 @@ impl DebtSummary {
             .filter(|entry| {
                 entry
                     .surfaces
-                    .iter()
+                    .as_ref()
+                    .into_iter()
+                    .flatten()
                     .any(|surface| changed.contains(surface))
             })
             .collect()
@@ -146,8 +152,14 @@ pub(crate) fn collect_debts(
         .max(0) as u64;
     let mut surfaces = BTreeSet::new();
     for entry in &entries {
-        surfaces.extend(entry.surfaces.iter().cloned());
+        if let Some(entry_surfaces) = &entry.surfaces {
+            surfaces.extend(entry_surfaces.iter().cloned());
+        }
     }
+    let unknown_surface_entries = entries
+        .iter()
+        .filter(|entry| entry.surfaces.is_none())
+        .count();
     let priority_advisory = if entries.is_empty() {
         false
     } else {
@@ -165,6 +177,7 @@ pub(crate) fn collect_debts(
         entries,
         oldest_age_seconds,
         surfaces: surfaces.into_iter().collect(),
+        unknown_surface_entries,
         priority_advisory,
     })
 }
@@ -173,7 +186,7 @@ pub(crate) fn debt_surfaces(
     cwd: &Path,
     state: &ChangeState,
     debt: &crate::state::Debt,
-) -> Vec<String> {
+) -> Option<Vec<String>> {
     let range = state
         .closure
         .as_ref()
@@ -197,9 +210,8 @@ pub(crate) fn debt_surfaces(
                 .latest_patchset()
                 .map(|patchset| (patchset.base.as_str(), patchset.head.as_str()))
         });
-    range
-        .and_then(|(base, head)| crate::gitio::changed_paths(cwd, base, head).ok())
-        .unwrap_or_default()
+    let (base, head) = range?;
+    crate::gitio::changed_paths(cwd, base, head).ok()
 }
 
 fn change_surfaces(ctx: &Ctx, state: &ChangeState) -> BTreeSet<String> {

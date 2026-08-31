@@ -301,11 +301,12 @@ struct ReviewOwed {
     /// means the change has never been reviewed.
     #[serde(skip_serializing_if = "Option::is_none")]
     superseded_verdict: Option<String>,
-    /// Commits the target has taken since this change's base. A verdict read
-    /// at this revision is a verdict on a revision that will move before it
-    /// integrates, and the rebase is where a clean text merge can still fail
-    /// to compile.
-    behind_target: usize,
+    /// Commits the target has taken since the latest patchset's base. Unknown
+    /// when either revision cannot be read.
+    behind_target: Option<usize>,
+    /// Paths changed by both the patchset and target movement since their
+    /// shared base. Unknown when either range cannot be read.
+    target_path_overlap: Option<Vec<String>>,
 }
 
 /// One outstanding review obligation, carrying the facts that decide whether
@@ -326,8 +327,7 @@ struct DebtOwed {
     declared_by: String,
     /// Paths the unreviewed revision changed. Two obligations naming one path
     /// are two unread readings of the same code.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    surfaces: Vec<String>,
+    surfaces: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -495,7 +495,7 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/6",
+                schema: "arc-workspace-backlog/7",
                 projects,
                 unreachable,
             })?
@@ -518,11 +518,17 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
                 None => String::new(),
             };
             let stale = match change.behind_target {
-                0 => String::new(),
-                behind => format!(", {behind} behind target"),
+                Some(0) => String::new(),
+                Some(behind) => format!(", {behind} behind target"),
+                None => ", target distance unknown".to_string(),
+            };
+            let overlap = match &change.target_path_overlap {
+                Some(paths) if paths.is_empty() => String::new(),
+                Some(paths) => format!(", {} overlapping paths", paths.len()),
+                None => ", target path overlap unknown".to_string(),
             };
             println!(
-                "  needs-review  {}  waiting {}d{seen}{stale}",
+                "  needs-review  {}  waiting {}d{seen}{stale}{overlap}",
                 change.change_id, change.waiting_days
             );
         }
@@ -535,8 +541,15 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
                 None => "unversioned".to_owned(),
             };
             println!(
-                "  debt-owed     {}  {}d, {kind}, by {}",
-                change.change_id, change.age_days, change.declared_by
+                "  debt-owed     {}  {}d, {kind}, by {}{}",
+                change.change_id,
+                change.age_days,
+                change.declared_by,
+                if change.surfaces.is_none() {
+                    ", surfaces unknown"
+                } else {
+                    ""
+                }
             );
         }
         // The text view is read to decide what to open next, so it names the
@@ -635,23 +648,20 @@ fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
             // Reporting it beside changes that carry a reviewable revision
             // makes a queue of empty changes read as review backlog.
             match state.latest_patchset() {
-                Some(patchset) => needs_review.push(ReviewOwed {
-                    change_id: state.change_id.clone(),
-                    patchsets: state.patchsets.len(),
-                    waiting_days: days_between(patchset.created_at, now),
-                    superseded_verdict: state
-                        .latest_verdict()
-                        .and_then(|verdict| wire_name(&verdict.verdict)),
-                    // A target that cannot be read leaves the distance
-                    // unknown, and an unknown distance is reported as none
-                    // rather than guessed at.
-                    behind_target: crate::gitio::ahead_count(
-                        root,
-                        &state.base,
-                        &state.target_branch,
-                    )
-                    .unwrap_or(0),
-                }),
+                Some(patchset) => {
+                    let (behind_target, target_path_overlap) =
+                        target_movement(root, state, patchset);
+                    needs_review.push(ReviewOwed {
+                        change_id: state.change_id.clone(),
+                        patchsets: state.patchsets.len(),
+                        waiting_days: days_between(patchset.created_at, now),
+                        superseded_verdict: state
+                            .latest_verdict()
+                            .and_then(|verdict| wire_name(&verdict.verdict)),
+                        behind_target,
+                        target_path_overlap,
+                    });
+                }
                 None => no_patchset.push(state.change_id.clone()),
             }
         }
@@ -674,7 +684,10 @@ fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
 fn shared_surfaces(debts: &[DebtOwed]) -> BTreeMap<String, Vec<String>> {
     let mut by_path: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for debt in debts {
-        for surface in &debt.surfaces {
+        let Some(surfaces) = &debt.surfaces else {
+            continue;
+        };
+        for surface in surfaces {
             by_path
                 .entry(surface.clone())
                 .or_default()
@@ -683,6 +696,29 @@ fn shared_surfaces(debts: &[DebtOwed]) -> BTreeMap<String, Vec<String>> {
     }
     by_path.retain(|_, changes| changes.len() > 1);
     by_path
+}
+
+/// Target distance measures integration staleness; overlapping paths name
+/// direct file overlap. Semantic conflicts can cross files and require gates
+/// against the combined tree. Each probe preserves failure independently.
+fn target_movement(
+    root: &Path,
+    state: &ChangeState,
+    patchset: &crate::state::Patchset,
+) -> (Option<usize>, Option<Vec<String>>) {
+    let behind_target = crate::gitio::ahead_count(root, &patchset.base, &state.target_branch).ok();
+    let target_path_overlap =
+        crate::gitio::changed_paths(root, &patchset.base, &state.target_branch)
+            .ok()
+            .zip(crate::gitio::changed_paths(root, &patchset.base, &patchset.head).ok())
+            .map(|(target, patchset)| {
+                let patchset: BTreeSet<_> = patchset.into_iter().collect();
+                target
+                    .into_iter()
+                    .filter(|path| patchset.contains(path))
+                    .collect()
+            });
+    (behind_target, target_path_overlap)
 }
 
 /// How many shared paths the text view names before it starts counting.

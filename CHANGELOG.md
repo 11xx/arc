@@ -58,6 +58,12 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- `arc workspace backlog` separates integration staleness from direct path
+  overlap: review entries carry both target commit distance and paths changed
+  on both sides. Failed target and debt-range probes remain explicit `unknown`
+  values instead of becoming zero or an empty set. JSON is
+  `arc-workspace-backlog/7`.
+
 - The review-obligation surface is named `debt` end to end: the
   `--debt` flag on `integrate` and `query`, the `arc debt` subcommand,
   the `debt` status fields, the `debt-outstanding`/`debt-summary`/
