@@ -874,7 +874,7 @@ previous-run marker — the boundary is supplied by the caller, so the command
 stays derived. `--items` names every actionable artifact under each project in
 the same open, later, and feature-request tier order used by `journal open`.
 Each item can include its `verification` stamp, and the text rows use the same
-renderer as `journal open`. JSON is versioned `arc-workspace-backlog/9` and
+renderer as `journal open`. JSON is versioned `arc-workspace-backlog/10` and
 states whether its scope is global or beneath one canonical path. Missing
 anchors are filtered by their recorded path, so an unreachable project inside
 a requested workspace remains visible without unrelated orphans leaking in.
@@ -883,6 +883,14 @@ and unreachable journals, and the text view prints those totals before project
 detail. Temporary and scratch anchors are collapsed in the default text view;
 `--unreachable` expands every maintenance row, while JSON always retains the
 complete structured list.
+
+Review rows carry the actor, model, harness, and session that recorded the
+latest patchset, plus `on_behalf_of` when that actor represented another
+subject; debt rows carry the same identity from the obligation event. `arc show
+--json` retains opening identity as `opened_by`, `opened_on_behalf_of`,
+`opened_model`, `opened_harness`, and `opened_session`, and patchset and debt
+objects keep their own event identity. Missing values remain `null`: Arc never
+guesses a native session that the harness did not declare.
 
 The two ledger buckets carry the facts that decide what to do about them, so a
 reader never re-derives them per change. A review entry names how many

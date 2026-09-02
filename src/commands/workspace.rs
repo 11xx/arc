@@ -424,6 +424,11 @@ impl ResolvedWorkspaceScope {
 #[derive(Serialize)]
 struct ReviewOwed {
     change_id: String,
+    recorded_by: String,
+    on_behalf_of: Option<String>,
+    recorded_model: Option<String>,
+    recorded_harness: Option<String>,
+    recorded_session: Option<String>,
     /// Patchsets recorded. Always at least one: a change with none is
     /// reported under `no_patchset`, because its next step is work.
     patchsets: usize,
@@ -457,6 +462,10 @@ struct DebtOwed {
     /// cannot be filtered by what it owes.
     typed: bool,
     declared_by: String,
+    on_behalf_of: Option<String>,
+    declared_model: Option<String>,
+    declared_harness: Option<String>,
+    declared_session: Option<String>,
     /// Paths the unreviewed revision changed. Two obligations naming one path
     /// are two unread readings of the same code.
     surfaces: Option<Vec<String>>,
@@ -538,6 +547,30 @@ impl UnreachableProject {
         println!("    journal: {}", self.journal_dir);
         println!("    adopt from the project's new location: arc journal rebind <dir>");
     }
+}
+
+fn identity_text(
+    verb: &str,
+    actor: &str,
+    on_behalf_of: Option<&str>,
+    model: Option<&str>,
+    harness: Option<&str>,
+    session: Option<&str>,
+) -> String {
+    let mut parts = vec![format!("{verb} by {actor}")];
+    if let Some(subject) = on_behalf_of {
+        parts.push(format!("for {subject}"));
+    }
+    if let Some(model) = model {
+        parts.push(format!("model {model}"));
+    }
+    if let Some(harness) = harness {
+        parts.push(format!("via {harness}"));
+    }
+    if let Some(session) = session {
+        parts.push(format!("session {session}"));
+    }
+    parts.join(", ")
 }
 
 /// One backlog across every project the registry knows, ledger and journal
@@ -658,7 +691,7 @@ fn workspace_backlog(
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/9",
+                schema: "arc-workspace-backlog/10",
                 scope: scope.view(),
                 summary,
                 projects,
@@ -695,8 +728,17 @@ fn workspace_backlog(
                 None => ", target path overlap unknown".to_string(),
             };
             println!(
-                "  needs-review  {}  waiting {}d{seen}{stale}{overlap}",
-                change.change_id, change.waiting_days
+                "  needs-review  {}  waiting {}d{seen}{stale}{overlap}, {}",
+                change.change_id,
+                change.waiting_days,
+                identity_text(
+                    "recorded",
+                    &change.recorded_by,
+                    change.on_behalf_of.as_deref(),
+                    change.recorded_model.as_deref(),
+                    change.recorded_harness.as_deref(),
+                    change.recorded_session.as_deref(),
+                )
             );
         }
         for change in &project.no_patchset {
@@ -708,10 +750,17 @@ fn workspace_backlog(
                 None => "unversioned".to_owned(),
             };
             println!(
-                "  debt-owed     {}  {}d, {kind}, by {}{}",
+                "  debt-owed     {}  {}d, {kind}, {}{}",
                 change.change_id,
                 change.age_days,
-                change.declared_by,
+                identity_text(
+                    "declared",
+                    &change.declared_by,
+                    change.on_behalf_of.as_deref(),
+                    change.declared_model.as_deref(),
+                    change.declared_harness.as_deref(),
+                    change.declared_session.as_deref(),
+                ),
                 if change.surfaces.is_none() {
                     ", surfaces unknown"
                 } else {
@@ -828,6 +877,10 @@ fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
                     missing: debt.missing.as_ref().and_then(wire_name),
                     typed: debt.missing.is_some(),
                     declared_by: debt.actor.clone(),
+                    on_behalf_of: debt.on_behalf_of.clone(),
+                    declared_model: debt.model.clone(),
+                    declared_harness: debt.harness.clone(),
+                    declared_session: debt.session.clone(),
                 });
             }
         }
@@ -841,6 +894,11 @@ fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
                         target_movement(root, state, patchset);
                     needs_review.push(ReviewOwed {
                         change_id: state.change_id.clone(),
+                        recorded_by: patchset.actor.clone(),
+                        on_behalf_of: patchset.on_behalf_of.clone(),
+                        recorded_model: patchset.model.clone(),
+                        recorded_harness: patchset.harness.clone(),
+                        recorded_session: patchset.session.clone(),
                         patchsets: state.patchsets.len(),
                         waiting_days: days_between(patchset.created_at, now),
                         superseded_verdict: state

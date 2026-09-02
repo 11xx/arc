@@ -64,6 +64,13 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Change, patchset, debt, and workspace views retain the model, harness, and
+  native session already carried by their source events. `show --json` exposes
+  opening identity, review rows name the latest patchset's recording identity
+  and represented subject, and debt rows name the obligation identity; absent
+  provenance stays null rather than being inferred. Workspace JSON is
+  `arc-workspace-backlog/10`.
+
 - `arc workspace backlog` opens with aggregate project, ledger, journal, and
   unreachable totals instead of making each reader reduce the rows. Temporary
   and scratch orphan journals collapse into one maintenance count by default;

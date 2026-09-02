@@ -8,6 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct Patchset {
     pub id: String,
     pub actor: String,
+    pub model: Option<String>,
+    pub harness: Option<String>,
+    pub session: Option<String>,
     /// Where `actor` came from. `None` on patchsets recorded before arc kept
     /// the provenance, which is unknown rather than declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -379,6 +382,10 @@ pub struct Debt {
     /// The patchset this waiver was declared against, if it waived anything.
     pub patchset_id: Option<String>,
     pub actor: String,
+    pub on_behalf_of: Option<String>,
+    pub model: Option<String>,
+    pub harness: Option<String>,
+    pub session: Option<String>,
     pub declared_at: chrono::DateTime<chrono::Utc>,
     /// What the versioned obligation says was missing. Absent on the
     /// pre-versioned obligation, whose meaning is legacy independent-review
@@ -680,7 +687,10 @@ pub struct ChangeState {
     pub base: String,
     pub worktree: Option<String>,
     pub opened_by: String,
+    pub opened_on_behalf_of: Option<String>,
     pub opened_harness: Option<String>,
+    pub opened_model: Option<String>,
+    pub opened_session: Option<String>,
     /// Journal artifact this change was opened from, if any.
     pub journal_ref: Option<String>,
     pub blocked_by: Vec<String>,
@@ -897,7 +907,10 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     base: base.clone(),
                     worktree: worktree.clone(),
                     opened_by: ev.actor.clone(),
+                    opened_on_behalf_of: ev.on_behalf_of.clone(),
                     opened_harness: ev.harness.clone(),
+                    opened_model: ev.model.clone(),
+                    opened_session: ev.session.clone(),
                     journal_ref: journal_ref.clone(),
                     blocked_by: blocked_by.clone(),
                     tags: tags.clone(),
@@ -1093,6 +1106,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 state.patchsets.push(Patchset {
                     id: patchset_id.clone(),
                     actor: ev.actor.clone(),
+                    model: ev.model.clone(),
+                    harness: ev.harness.clone(),
+                    session: ev.session.clone(),
                     actor_source: ev.actor_source,
                     on_behalf_of: ev.on_behalf_of.clone(),
                     base: base.clone(),
@@ -1437,6 +1453,10 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     reason: reason.clone(),
                     patchset_id: patchset_id.clone(),
                     actor: ev.actor.clone(),
+                    on_behalf_of: ev.on_behalf_of.clone(),
+                    model: ev.model.clone(),
+                    harness: ev.harness.clone(),
+                    session: ev.session.clone(),
                     declared_at: ev.created_at,
                     missing: None,
                     coverage: None,
@@ -1454,6 +1474,10 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     reason: reason.clone(),
                     patchset_id: patchset_id.clone(),
                     actor: ev.actor.clone(),
+                    on_behalf_of: ev.on_behalf_of.clone(),
+                    model: ev.model.clone(),
+                    harness: ev.harness.clone(),
+                    session: ev.session.clone(),
                     declared_at: ev.created_at,
                     missing: Some(*missing),
                     coverage: Some(coverage.clone()),
