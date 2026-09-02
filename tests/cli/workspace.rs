@@ -126,7 +126,8 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/7");
+    assert_eq!(value["schema"], "arc-workspace-backlog/8");
+    assert_eq!(value["scope"]["mode"], "global");
     let project = value["projects"]
         .as_array()
         .unwrap()
@@ -254,6 +255,104 @@ fn workspace_backlog_names_an_unreachable_project() {
         .unwrap_or_else(|| panic!("orphan not reported: {value}"));
     assert_eq!(stranded["anchor"], "/gone/away/project");
     assert_eq!(stranded["reason"], "anchor does not exist");
+}
+
+#[test]
+fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
+    let repo = Repo::new();
+    let workspace = repo.home.join("projects");
+    let alpha = workspace.join("one/repo");
+    let beta = workspace.join("two/repo");
+    let elsewhere = repo.home.join("elsewhere/repo");
+    let missing_inside = workspace.join("gone/repo");
+    let missing_outside = repo.home.join("gone-elsewhere/repo");
+
+    for root in [&alpha, &beta, &elsewhere, &missing_inside, &missing_outside] {
+        fs::create_dir_all(root).unwrap();
+        git(root, &["init", "-b", "master"]);
+        git(root, &["config", "user.name", "Tester"]);
+        git(root, &["config", "user.email", "tester@example.invalid"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        fs::write(root.join("README.md"), "registered\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "init"]);
+        let body = repo.home.join(format!(
+            "{}.md",
+            root.parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+        ));
+        fs::write(&body, "work\n").unwrap();
+        repo.arc(root)
+            .args([
+                "journal",
+                "note",
+                "waiting",
+                "--kind",
+                "todo",
+                "--body-file",
+                body.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+    }
+
+    fs::remove_dir_all(&missing_inside).unwrap();
+    fs::remove_dir_all(&missing_outside).unwrap();
+
+    let mut scoped = repo.arc(&workspace);
+    scoped.args(["workspace", "backlog", "--here", "--json"]);
+    let value = json_stdout(&mut scoped);
+    assert_eq!(value["schema"], "arc-workspace-backlog/8");
+    assert_eq!(value["scope"]["mode"], "under");
+    assert_eq!(
+        value["scope"]["under"],
+        workspace.canonicalize().unwrap().display().to_string()
+    );
+    let anchors: Vec<_> = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["anchor"].as_str().unwrap())
+        .collect();
+    assert_eq!(anchors.len(), 2, "{value}");
+    assert!(anchors.iter().any(|anchor| anchor.ends_with("one/repo")));
+    assert!(anchors.iter().any(|anchor| anchor.ends_with("two/repo")));
+    assert!(
+        !anchors
+            .iter()
+            .any(|anchor| anchor.ends_with("elsewhere/repo")),
+        "{value}"
+    );
+    let unreachable = value["unreachable"].as_array().unwrap();
+    assert_eq!(unreachable.len(), 1, "{value}");
+    assert_eq!(
+        unreachable[0]["anchor"],
+        missing_inside.display().to_string()
+    );
+
+    let mut global = repo.arc(&workspace);
+    global.args(["workspace", "backlog", "--global", "--json"]);
+    let global = json_stdout(&mut global);
+    assert_eq!(global["scope"]["mode"], "global");
+    assert_eq!(global["projects"].as_array().unwrap().len(), 3, "{global}");
+    assert_eq!(global["unreachable"].as_array().unwrap().len(), 2);
+
+    let empty = repo.home.join("empty-workspace");
+    fs::create_dir(&empty).unwrap();
+    repo.arc(&empty)
+        .args(["workspace", "backlog", "--here"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "scope: under {}",
+            empty.display()
+        )))
+        .stdout(predicates::str::contains(
+            "nothing outstanding in this workspace scope",
+        ));
 }
 
 /// Printing nothing is the same shape as a command that died with its output
@@ -459,7 +558,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/7");
+    assert_eq!(value["schema"], "arc-workspace-backlog/8");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {

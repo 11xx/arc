@@ -12,6 +12,12 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `arc workspace backlog --here|--under <path>` gives a non-Git workspace root
+  a first command: it filters the registered projects by canonical anchor,
+  keeps missing anchors inside that path visible, and states the active scope
+  in text and JSON. `--global` names the existing all-project view explicitly;
+  JSON is `arc-workspace-backlog/8`.
+
 - `arc fork` — fork this repository and start working, as one command
   instead of a hand-assembled worktree, branch, and unspoken contract.
   `begin` creates a `fork/<slug>` worktree outside the change lifecycle

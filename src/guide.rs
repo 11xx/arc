@@ -31,7 +31,12 @@ SAY WHO YOU ARE (before the first write)
   `[policy] require_declared_actor` makes an undeclared identity a refusal
   instead of a record.
 
-ORIENT (start here, in this order)
+FROM A WORKSPACE ROOT (outside a project)
+  arc workspace backlog --here
+                       Discover work beneath this directory without crawling it.
+  cd <anchor>          Enter one project named by the report, then orient there.
+
+ORIENT INSIDE A PROJECT (start here, in this order)
   arc catchup            Live state: ledger queue, journal backlog, forks.
   arc fork <slug>        Fork this repository: a worktree on fork/<slug>,
                          outside the change lifecycle — unintegrated by
@@ -44,7 +49,8 @@ ORIENT (start here, in this order)
                          Record a source check at the project's anchor head.
   arc resume <change>    One change's brief, live state, and journal context.
   arc inbox              Lead-facing queue across open changes.
-  arc workspace backlog  The same question asked of every project at once.
+  arc workspace backlog  The same question asked of every registered project.
+    --here | --under <path>  Restrict it to one workspace directory tree.
 
   Work waiting for this project lives in two places. The ledger holds changes
   already open; the journal holds everything not yet opened as one. An empty
@@ -56,7 +62,8 @@ ORIENT (start here, in this order)
   the reason. A row there is a gap in the derivation rather than a resting
   place: it means arc failed to classify open work, and it is worth reporting.
 
-  Every command above answers for the project you are standing in. Some
+  Every command in the project orientation answers for the project you are
+  standing in. Some
   questions are comparisons — which project to open next, what has waited
   longest, where a verdict is the only thing missing — and those are answerable
   only across projects, which is what `workspace backlog` is for.
