@@ -78,7 +78,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 pub use timeline::log;
-pub use workspace::{restack, workspace, WorkspaceView};
+pub use workspace::{restack, workspace, WorkspaceScope, WorkspaceView};
 
 pub struct Ctx {
     pub cwd: PathBuf,

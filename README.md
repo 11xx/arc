@@ -820,7 +820,14 @@ trailers.
 
 Three read-only conveniences for a lead working across repos and handoffs.
 
-`arc workspace list|inbox|backlog [--json]` aggregates across every project.
+`arc workspace list|inbox|backlog [--json]` aggregates across registered
+projects. `workspace backlog --here` restricts the report to canonical project
+anchors beneath the current directory; `--under <path>` names another
+directory, and `--global` states the default all-project scope explicitly.
+The path boundary, rather than a project basename, keeps same-named projects
+independently addressable. From a non-Git workspace root, start with
+`workspace backlog --here`, enter one reported anchor, then use project-local
+`catchup`.
 Discovery has two modes and the configured one wins: with a `data_root` the
 stores sit side by side and enumerate directly; without one they live inside
 each repository's Git common dir, where the journal registry — one directory
@@ -867,7 +874,10 @@ previous-run marker — the boundary is supplied by the caller, so the command
 stays derived. `--items` names every actionable artifact under each project in
 the same open, later, and feature-request tier order used by `journal open`.
 Each item can include its `verification` stamp, and the text rows use the same
-renderer as `journal open`. JSON is versioned `arc-workspace-backlog/7`.
+renderer as `journal open`. JSON is versioned `arc-workspace-backlog/8` and
+states whether its scope is global or beneath one canonical path. Missing
+anchors are filtered by their recorded path, so an unreachable project inside
+a requested workspace remains visible without unrelated orphans leaking in.
 
 The two ledger buckets carry the facts that decide what to do about them, so a
 reader never re-derives them per change. A review entry names how many

@@ -5,12 +5,22 @@
 use super::*;
 use crate::gates::GatesFile;
 use crate::policy::PolicyFile;
+use anyhow::ensure;
 use serde::Serialize;
 
 pub enum WorkspaceView {
     List,
     Inbox,
-    Backlog { since: Option<String>, items: bool },
+    Backlog {
+        since: Option<String>,
+        items: bool,
+        scope: WorkspaceScope,
+    },
+}
+
+pub enum WorkspaceScope {
+    Global,
+    Under(PathBuf),
 }
 
 #[derive(Serialize)]
@@ -134,8 +144,13 @@ fn repo_states(store: &Store) -> Result<BTreeMap<String, ChangeState>> {
 }
 
 pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<()> {
-    if let WorkspaceView::Backlog { since, items } = view {
-        return workspace_backlog(ctx, since.as_deref(), items, json);
+    if let WorkspaceView::Backlog {
+        since,
+        items,
+        scope,
+    } = view
+    {
+        return workspace_backlog(ctx, since.as_deref(), items, scope, json);
     }
     let stores = workspace_stores()?;
     match view {
@@ -283,8 +298,72 @@ fn workspace_inbox(stores: &[(String, Store)], json: bool) -> Result<()> {
 #[derive(Serialize)]
 struct Backlog {
     schema: &'static str,
+    scope: BacklogScope,
     projects: Vec<ProjectBacklog>,
     unreachable: Vec<UnreachableProject>,
+}
+
+#[derive(Serialize)]
+struct BacklogScope {
+    mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    under: Option<String>,
+}
+
+enum ResolvedWorkspaceScope {
+    Global,
+    Under(PathBuf),
+}
+
+impl ResolvedWorkspaceScope {
+    fn resolve(scope: WorkspaceScope) -> Result<Self> {
+        match scope {
+            WorkspaceScope::Global => Ok(Self::Global),
+            WorkspaceScope::Under(path) => {
+                let path = std::fs::canonicalize(&path).with_context(|| {
+                    format!("cannot resolve workspace scope {}", path.display())
+                })?;
+                ensure!(
+                    path.is_dir(),
+                    "workspace scope is not a directory: {}",
+                    path.display()
+                );
+                Ok(Self::Under(path))
+            }
+        }
+    }
+
+    fn includes(&self, anchor: Option<&Path>) -> bool {
+        match self {
+            Self::Global => true,
+            Self::Under(root) => anchor.is_some_and(|anchor| {
+                anchor
+                    .canonicalize()
+                    .unwrap_or_else(|_| anchor.to_path_buf())
+                    .starts_with(root)
+            }),
+        }
+    }
+
+    fn view(&self) -> BacklogScope {
+        match self {
+            Self::Global => BacklogScope {
+                mode: "global",
+                under: None,
+            },
+            Self::Under(path) => BacklogScope {
+                mode: "under",
+                under: Some(path.display().to_string()),
+            },
+        }
+    }
+
+    fn text(&self) -> String {
+        match self {
+            Self::Global => "global".to_string(),
+            Self::Under(path) => format!("under {}", path.display()),
+        }
+    }
 }
 
 /// One change awaiting a verdict, with what a reader needs to judge its age
@@ -395,8 +474,15 @@ struct UnreachableProject {
 /// Ranked by what is blocked, never by comparing items across projects: arc
 /// records no priority that spans repositories, and inventing one here would
 /// be a routing opinion rather than a derived fact.
-fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: bool) -> Result<()> {
+fn workspace_backlog(
+    ctx: &Ctx,
+    since: Option<&str>,
+    show_items: bool,
+    scope: WorkspaceScope,
+    json: bool,
+) -> Result<()> {
     let cfg = crate::config::load()?;
+    let scope = ResolvedWorkspaceScope::resolve(scope)?;
     let cutoff = match since {
         Some(raw) => Some(
             crate::journal::parse_since(raw)
@@ -408,6 +494,9 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
     let mut unreachable = Vec::new();
 
     for project in crate::registry::projects(&cfg)? {
+        if !scope.includes(project.anchor.as_deref()) {
+            continue;
+        }
         if !project.reachable {
             // An orphan holds work nobody can reach; a merely empty journal at
             // a vanished path is housekeeping, not a finding.
@@ -495,7 +584,8 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/7",
+                schema: "arc-workspace-backlog/8",
+                scope: scope.view(),
                 projects,
                 unreachable,
             })?
@@ -503,11 +593,12 @@ fn workspace_backlog(ctx: &Ctx, since: Option<&str>, show_items: bool, json: boo
         return Ok(());
     }
 
+    println!("scope: {}", scope.text());
     if let Some(raw) = since {
         println!("since {raw}: journal counts are what was filed since, not what is outstanding");
     }
     if projects.is_empty() && unreachable.is_empty() {
-        println!("nothing outstanding across every known project");
+        println!("nothing outstanding in this workspace scope");
         return Ok(());
     }
     for project in &projects {

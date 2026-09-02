@@ -29,6 +29,7 @@ use model::{
     ActorSource, DispositionStatus, MessageSeverity, MessageType, ProbePhase, ReviewCause,
     RunOutcome, Severity, Side, Verdict, VerdictRelationKind, VerifyResult,
 };
+use std::path::PathBuf;
 
 /// Change, review, and integration state over plain Git for agentic
 /// coding arcs. Git owns content and history; arc owns the collaboration
@@ -1250,6 +1251,15 @@ enum WorkspaceCmd {
         /// Name every actionable artifact, instead of counting them
         #[arg(long)]
         items: bool,
+        /// Report only projects whose canonical anchor is beneath this path
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
+        under: Option<PathBuf>,
+        /// Report only projects beneath the current directory
+        #[arg(long, conflicts_with_all = ["under", "global"])]
+        here: bool,
+        /// Report every registered project, the default when no scope is set
+        #[arg(long, conflicts_with_all = ["under", "here"])]
+        global: bool,
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
@@ -2588,8 +2598,28 @@ fn run(cli: Cli) -> Result<i32> {
             let (view, json) = match cmd {
                 WorkspaceCmd::List { json } => (commands::WorkspaceView::List, json),
                 WorkspaceCmd::Inbox { json } => (commands::WorkspaceView::Inbox, json),
-                WorkspaceCmd::Backlog { since, items, json } => {
-                    (commands::WorkspaceView::Backlog { since, items }, json)
+                WorkspaceCmd::Backlog {
+                    since,
+                    items,
+                    under,
+                    here,
+                    global: _,
+                    json,
+                } => {
+                    let scope = match (under, here) {
+                        (Some(path), false) => commands::WorkspaceScope::Under(path),
+                        (None, true) => commands::WorkspaceScope::Under(std::env::current_dir()?),
+                        (None, false) => commands::WorkspaceScope::Global,
+                        (Some(_), true) => unreachable!("clap rejects conflicting scopes"),
+                    };
+                    (
+                        commands::WorkspaceView::Backlog {
+                            since,
+                            items,
+                            scope,
+                        },
+                        json,
+                    )
                 }
             };
             commands::workspace(&ctx, view, json)?;
