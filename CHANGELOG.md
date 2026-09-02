@@ -64,6 +64,12 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- `arc workspace backlog` opens with aggregate project, ledger, journal, and
+  unreachable totals instead of making each reader reduce the rows. Temporary
+  and scratch orphan journals collapse into one maintenance count by default;
+  `--unreachable` expands them all, durable missing anchors stay named, and
+  JSON keeps the complete list plus `summary` in `arc-workspace-backlog/9`.
+
 - Fork identity is classified under the same independent-review boundary as
   fork creation and retirement. The resolver decides which recorded fork a
   lifecycle operation addresses, so it carries the authority of its callers.
