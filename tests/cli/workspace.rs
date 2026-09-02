@@ -156,7 +156,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/9");
+    assert_eq!(value["schema"], "arc-workspace-backlog/10");
     assert_eq!(value["scope"]["mode"], "global");
     assert_backlog_summary_matches_rows(&value);
     let project = value["projects"]
@@ -181,6 +181,111 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
         0,
         "{project}"
     );
+}
+
+#[test]
+fn workspace_backlog_and_show_project_recorded_event_identity() {
+    let repo = Repo::new();
+    let opened = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_ACTOR", "opening-lead")
+            .env("ARC_HARNESS", "claude")
+            .env("ARC_SESSION", "opening-session")
+            .env("ARC_MODEL", "opening-model#high")
+            .args(["begin", "identity"]),
+    );
+    let change_id = opened
+        .lines()
+        .find_map(|line| line.strip_prefix("change: "))
+        .unwrap();
+    let worktree = repo.home.join(".worktrees/repo-identity");
+    repo.commit(&worktree, "identity.txt", "identity\n", "feat: identity");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "patch-author")
+        .env("ARC_HARNESS", "codex")
+        .env("ARC_SESSION", "patch-session")
+        .env("ARC_MODEL", "patch-model#medium")
+        .env("ARC_ON_BEHALF_OF", "executor-subject")
+        .args(["snapshot", change_id])
+        .assert()
+        .success();
+
+    let show = json_stdout(repo.arc(&worktree).args(["show", change_id, "--json"]));
+    assert_eq!(show["opened_by"], "opening-lead");
+    assert_eq!(show["opened_harness"], "claude");
+    assert_eq!(show["opened_session"], "opening-session");
+    assert_eq!(show["opened_model"], "opening-model#high");
+    assert_eq!(show["patchsets"][0]["actor"], "patch-author");
+    assert_eq!(show["patchsets"][0]["on_behalf_of"], "executor-subject");
+    assert_eq!(show["patchsets"][0]["harness"], "codex");
+    assert_eq!(show["patchsets"][0]["session"], "patch-session");
+    assert_eq!(show["patchsets"][0]["model"], "patch-model#medium");
+
+    let mut pending = repo.arc(&worktree);
+    pending.args(["workspace", "backlog", "--json"]);
+    let pending = json_stdout(&mut pending);
+    let review = pending["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|project| project["needs_review"].as_array().unwrap())
+        .find(|entry| entry["change_id"] == change_id)
+        .unwrap_or_else(|| panic!("review row missing: {pending}"));
+    assert_eq!(review["recorded_by"], "patch-author");
+    assert_eq!(review["on_behalf_of"], "executor-subject");
+    assert_eq!(review["recorded_harness"], "codex");
+    assert_eq!(review["recorded_session"], "patch-session");
+    assert_eq!(review["recorded_model"], "patch-model#medium");
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "debt-lead")
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_SESSION", "debt-session")
+        .env("ARC_MODEL", "debt-model#high")
+        .args(["integrate", change_id, "--debt", "review later"])
+        .assert()
+        .success();
+
+    let show = json_stdout(repo.arc(&repo.root).args(["show", change_id, "--json"]));
+    assert_eq!(show["debt"]["actor"], "debt-lead");
+    assert_eq!(show["debt"]["harness"], "claude");
+    assert_eq!(show["debt"]["session"], "debt-session");
+    assert_eq!(show["debt"]["model"], "debt-model#high");
+
+    let mut backlog = repo.arc(&repo.root);
+    backlog.args(["workspace", "backlog", "--json"]);
+    let backlog = json_stdout(&mut backlog);
+    let debt = backlog["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|project| project["debt_owed"].as_array().unwrap())
+        .find(|entry| entry["change_id"] == change_id)
+        .unwrap_or_else(|| panic!("debt row missing: {backlog}"));
+    assert_eq!(debt["declared_by"], "debt-lead");
+    assert_eq!(debt["declared_harness"], "claude");
+    assert_eq!(debt["declared_session"], "debt-session");
+    assert_eq!(debt["declared_model"], "debt-model#high");
+}
+
+#[test]
+fn show_keeps_undeclared_session_and_model_absent() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .env_remove("ARC_SESSION")
+        .env_remove("ARC_MODEL")
+        .args(["begin", "absent-identity", "--no-worktree"])
+        .assert()
+        .success();
+
+    let show = json_stdout(
+        repo.arc(&repo.root)
+            .args(["show", "absent-identity", "--json"]),
+    );
+    assert_eq!(show["opened_harness"], "test");
+    assert!(show["opened_on_behalf_of"].is_null(), "{show}");
+    assert!(show["opened_session"].is_null(), "{show}");
+    assert!(show["opened_model"].is_null(), "{show}");
 }
 
 /// A change carrying a revision is the only kind a verdict can answer, and the
@@ -396,7 +501,7 @@ fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
     let mut scoped = repo.arc(&workspace);
     scoped.args(["workspace", "backlog", "--here", "--json"]);
     let value = json_stdout(&mut scoped);
-    assert_eq!(value["schema"], "arc-workspace-backlog/9");
+    assert_eq!(value["schema"], "arc-workspace-backlog/10");
     assert_eq!(value["scope"]["mode"], "under");
     assert_eq!(
         value["scope"]["under"],
@@ -649,7 +754,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/9");
+    assert_eq!(value["schema"], "arc-workspace-backlog/10");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {
