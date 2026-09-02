@@ -1260,6 +1260,9 @@ enum WorkspaceCmd {
         /// Report every registered project, the default when no scope is set
         #[arg(long, conflicts_with_all = ["under", "here"])]
         global: bool,
+        /// Name every unreachable journal, including temporary and scratch anchors
+        #[arg(long)]
+        unreachable: bool,
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
@@ -2604,6 +2607,7 @@ fn run(cli: Cli) -> Result<i32> {
                     under,
                     here,
                     global: _,
+                    unreachable,
                     json,
                 } => {
                     let scope = match (under, here) {
@@ -2617,6 +2621,7 @@ fn run(cli: Cli) -> Result<i32> {
                             since,
                             items,
                             scope,
+                            show_unreachable: unreachable,
                         },
                         json,
                     )

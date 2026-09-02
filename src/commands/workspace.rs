@@ -15,6 +15,7 @@ pub enum WorkspaceView {
         since: Option<String>,
         items: bool,
         scope: WorkspaceScope,
+        show_unreachable: bool,
     },
 }
 
@@ -148,9 +149,10 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<()> {
         since,
         items,
         scope,
+        show_unreachable,
     } = view
     {
-        return workspace_backlog(ctx, since.as_deref(), items, scope, json);
+        return workspace_backlog(ctx, since.as_deref(), items, scope, show_unreachable, json);
     }
     let stores = workspace_stores()?;
     match view {
@@ -299,8 +301,59 @@ fn workspace_inbox(stores: &[(String, Store)], json: bool) -> Result<()> {
 struct Backlog {
     schema: &'static str,
     scope: BacklogScope,
+    summary: BacklogSummary,
     projects: Vec<ProjectBacklog>,
     unreachable: Vec<UnreachableProject>,
+}
+
+#[derive(Serialize)]
+struct BacklogSummary {
+    projects: usize,
+    needs_review: usize,
+    no_patchset: usize,
+    debt_owed: usize,
+    open_items: usize,
+    later_items: usize,
+    feature_requests: usize,
+    unreachable: usize,
+}
+
+impl BacklogSummary {
+    fn derive(projects: &[ProjectBacklog], unreachable: &[UnreachableProject]) -> Self {
+        Self {
+            projects: projects.len(),
+            needs_review: projects
+                .iter()
+                .map(|project| project.needs_review.len())
+                .sum(),
+            no_patchset: projects
+                .iter()
+                .map(|project| project.no_patchset.len())
+                .sum(),
+            debt_owed: projects.iter().map(|project| project.debt_owed.len()).sum(),
+            open_items: projects.iter().map(|project| project.open_items).sum(),
+            later_items: projects.iter().map(|project| project.later_items).sum(),
+            feature_requests: projects
+                .iter()
+                .map(|project| project.feature_requests)
+                .sum(),
+            unreachable: unreachable.len(),
+        }
+    }
+
+    fn render(&self) {
+        println!(
+            "summary: {} projects; {} needs-review; {} debt-owed; {} no-patchset; journal {} open, {} later, {} feature-request; {} unreachable",
+            self.projects,
+            self.needs_review,
+            self.debt_owed,
+            self.no_patchset,
+            self.open_items,
+            self.later_items,
+            self.feature_requests,
+            self.unreachable,
+        );
+    }
 }
 
 #[derive(Serialize)]
@@ -468,6 +521,25 @@ struct UnreachableProject {
     reason: &'static str,
 }
 
+impl UnreachableProject {
+    fn is_temporary_or_scratch(&self) -> bool {
+        let Some(anchor) = self.anchor.as_deref().map(Path::new) else {
+            return false;
+        };
+        anchor.starts_with(std::env::temp_dir())
+            || anchor.starts_with("/var/tmp")
+            || anchor
+                .components()
+                .any(|component| component.as_os_str() == "scratchpad")
+    }
+
+    fn render(&self) {
+        println!("  {}  {}", self.slug, self.reason);
+        println!("    journal: {}", self.journal_dir);
+        println!("    adopt from the project's new location: arc journal rebind <dir>");
+    }
+}
+
 /// One backlog across every project the registry knows, ledger and journal
 /// together.
 ///
@@ -479,6 +551,7 @@ fn workspace_backlog(
     since: Option<&str>,
     show_items: bool,
     scope: WorkspaceScope,
+    show_unreachable: bool,
     json: bool,
 ) -> Result<()> {
     let cfg = crate::config::load()?;
@@ -579,13 +652,15 @@ fn workspace_backlog(
             .then_with(|| b.open_items.cmp(&a.open_items))
             .then_with(|| a.project.cmp(&b.project))
     });
+    let summary = BacklogSummary::derive(&projects, &unreachable);
 
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/8",
+                schema: "arc-workspace-backlog/9",
                 scope: scope.view(),
+                summary,
                 projects,
                 unreachable,
             })?
@@ -597,6 +672,7 @@ fn workspace_backlog(
     if let Some(raw) = since {
         println!("since {raw}: journal counts are what was filed since, not what is outstanding");
     }
+    summary.render();
     if projects.is_empty() && unreachable.is_empty() {
         println!("nothing outstanding in this workspace scope");
         return Ok(());
@@ -688,11 +764,32 @@ fn workspace_backlog(
         }
     }
     if !unreachable.is_empty() {
-        println!("unreachable:");
-        for project in &unreachable {
-            println!("  {}  {}", project.slug, project.reason);
-            println!("    journal: {}", project.journal_dir);
-            println!("    adopt from the project's new location: arc journal rebind <dir>");
+        let temporary = unreachable
+            .iter()
+            .filter(|project| project.is_temporary_or_scratch())
+            .count();
+        let durable = unreachable.len() - temporary;
+        println!(
+            "maintenance: {} unreachable journals ({temporary} temporary/scratch, {durable} other)",
+            unreachable.len()
+        );
+        if show_unreachable {
+            println!("unreachable:");
+            for project in &unreachable {
+                project.render();
+            }
+        } else {
+            for project in unreachable
+                .iter()
+                .filter(|project| !project.is_temporary_or_scratch())
+            {
+                project.render();
+            }
+            if temporary > 0 {
+                println!(
+                    "  {temporary} temporary/scratch journals hidden; rerun with --unreachable to expand"
+                );
+            }
         }
     }
     Ok(())

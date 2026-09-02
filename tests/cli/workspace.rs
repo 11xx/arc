@@ -1,5 +1,35 @@
 use crate::common::*;
 
+fn assert_backlog_summary_matches_rows(value: &serde_json::Value) {
+    let projects = value["projects"].as_array().unwrap();
+    let count = |field: &str| {
+        projects
+            .iter()
+            .map(|project| project[field].as_array().map_or(0, Vec::len))
+            .sum::<usize>()
+    };
+    let sum = |field: &str| {
+        projects
+            .iter()
+            .map(|project| project[field].as_u64().unwrap())
+            .sum::<u64>()
+    };
+    assert_eq!(value["summary"]["projects"], projects.len());
+    assert_eq!(value["summary"]["needs_review"], count("needs_review"));
+    assert_eq!(value["summary"]["no_patchset"], count("no_patchset"));
+    assert_eq!(value["summary"]["debt_owed"], count("debt_owed"));
+    assert_eq!(value["summary"]["open_items"], sum("open_items"));
+    assert_eq!(value["summary"]["later_items"], sum("later_items"));
+    assert_eq!(
+        value["summary"]["feature_requests"],
+        sum("feature_requests")
+    );
+    assert_eq!(
+        value["summary"]["unreachable"],
+        value["unreachable"].as_array().unwrap().len()
+    );
+}
+
 #[test]
 fn workspace_list_aggregates_repos_and_tags_rows_with_slugs() {
     // Two independent repos whose ledgers share one data_root.
@@ -126,8 +156,9 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/8");
+    assert_eq!(value["schema"], "arc-workspace-backlog/9");
     assert_eq!(value["scope"]["mode"], "global");
+    assert_backlog_summary_matches_rows(&value);
     let project = value["projects"]
         .as_array()
         .unwrap()
@@ -247,6 +278,7 @@ fn workspace_backlog_names_an_unreachable_project() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
+    assert_backlog_summary_matches_rows(&value);
     let stranded = value["unreachable"]
         .as_array()
         .unwrap()
@@ -255,6 +287,65 @@ fn workspace_backlog_names_an_unreachable_project() {
         .unwrap_or_else(|| panic!("orphan not reported: {value}"));
     assert_eq!(stranded["anchor"], "/gone/away/project");
     assert_eq!(stranded["reason"], "anchor does not exist");
+}
+
+#[test]
+fn workspace_backlog_compacts_temporary_unreachable_journals() {
+    let repo = Repo::new();
+    let journals = repo.home.join(".local/ai/journals");
+    for index in 0..5 {
+        let journal = journals.join(format!("-tmp-noise-{index}"));
+        fs::create_dir_all(&journal).unwrap();
+        fs::write(
+            journal.join("20260101T000000Z-waiting-todo.md"),
+            "# Waiting\n",
+        )
+        .unwrap();
+        fs::write(
+            journal.join("bindings.jsonl"),
+            format!(
+                "{{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\"event\":\"bound\",\"anchor\":\"/tmp/arc-scratch-{index}\"}}\n"
+            ),
+        )
+        .unwrap();
+    }
+    let durable = journals.join("-durable-project");
+    fs::create_dir_all(&durable).unwrap();
+    fs::write(
+        durable.join("20260101T000000Z-waiting-todo.md"),
+        "# Waiting\n",
+    )
+    .unwrap();
+    fs::write(
+        durable.join("bindings.jsonl"),
+        "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\"event\":\"bound\",\"anchor\":\"/srv/durable-project\"}\n",
+    )
+    .unwrap();
+
+    let text = stdout(repo.arc(&repo.root).args(["workspace", "backlog"]));
+    assert!(
+        text.contains("maintenance: 6 unreachable journals (5 temporary/scratch, 1 other)"),
+        "{text}"
+    );
+    assert!(text.contains("-durable-project"), "{text}");
+    assert!(!text.contains("-tmp-noise-0"), "{text}");
+    assert!(
+        text.contains("5 temporary/scratch journals hidden; rerun with --unreachable to expand"),
+        "{text}"
+    );
+
+    let expanded = stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "backlog", "--unreachable"]),
+    );
+    assert!(expanded.contains("-tmp-noise-0"), "{expanded}");
+    assert!(expanded.contains("-durable-project"), "{expanded}");
+
+    let mut json = repo.arc(&repo.root);
+    json.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut json);
+    assert_backlog_summary_matches_rows(&value);
+    assert_eq!(value["summary"]["unreachable"], 6);
 }
 
 #[test]
@@ -305,7 +396,7 @@ fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
     let mut scoped = repo.arc(&workspace);
     scoped.args(["workspace", "backlog", "--here", "--json"]);
     let value = json_stdout(&mut scoped);
-    assert_eq!(value["schema"], "arc-workspace-backlog/8");
+    assert_eq!(value["schema"], "arc-workspace-backlog/9");
     assert_eq!(value["scope"]["mode"], "under");
     assert_eq!(
         value["scope"]["under"],
@@ -558,7 +649,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/8");
+    assert_eq!(value["schema"], "arc-workspace-backlog/9");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {

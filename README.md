@@ -874,10 +874,15 @@ previous-run marker — the boundary is supplied by the caller, so the command
 stays derived. `--items` names every actionable artifact under each project in
 the same open, later, and feature-request tier order used by `journal open`.
 Each item can include its `verification` stamp, and the text rows use the same
-renderer as `journal open`. JSON is versioned `arc-workspace-backlog/8` and
+renderer as `journal open`. JSON is versioned `arc-workspace-backlog/9` and
 states whether its scope is global or beneath one canonical path. Missing
 anchors are filtered by their recorded path, so an unreachable project inside
 a requested workspace remains visible without unrelated orphans leaking in.
+Its top-level `summary` totals the project rows, ledger queues, journal tiers,
+and unreachable journals, and the text view prints those totals before project
+detail. Temporary and scratch anchors are collapsed in the default text view;
+`--unreachable` expands every maintenance row, while JSON always retains the
+complete structured list.
 
 The two ledger buckets carry the facts that decide what to do about them, so a
 reader never re-derives them per change. A review entry names how many
