@@ -866,9 +866,9 @@ enum Cmd {
         route_version: Option<String>,
     },
     /// Run a declared gate (or ad hoc command) and record the evidence. Gate
-    /// evidence only counts at the change's own head, so a gate run from
-    /// anywhere else is refused rather than recorded where status will ignore
-    /// it; `--attest` records evidence arc did not run
+    /// evidence only counts at the change's own head, so the command runs in
+    /// the change's recorded worktree whichever checkout it was typed in;
+    /// `--attest` records evidence arc did not run
     Verify {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in

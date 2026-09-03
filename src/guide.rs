@@ -259,6 +259,15 @@ RUN A CHANGE
   arc audit <change> --verdict <v>   Review an already-integrated revision.
   arc close                          Terminal outcome arc did not merge itself.
 
+  A gate runs where its change lives. `verify`, `snapshot --verify`, `done`,
+  and `rebase --verify` execute the command in the change's recorded worktree
+  and record the evidence at that worktree's head, whichever checkout of the
+  repository the command was typed in; the run says which tree it used when
+  that is not the one you are standing in. Which gates are required is read
+  where you stand, so `status` and `verify` agree on what is owed. A change
+  whose worktree is gone has nowhere to gate: give it one with `git worktree
+  add`, or record evidence arc did not run with `verify --attest`.
+
   `arc rebase` is what `check` names when the target moved with conflicting
   changes. A conflict stops it and leaves the rebase in progress — the partial
   resolution is yours, and aborting would throw it away — with the conflicting

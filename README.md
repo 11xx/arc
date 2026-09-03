@@ -831,6 +831,17 @@ command = "cargo test --test integration"
 timeout = "10m"                              # optional; s, m, or h
 ```
 
+A gate runs in the checkout that holds the change. `verify`, `snapshot
+--verify`, `done`, and `rebase --verify` execute the command in the change's
+recorded worktree and record the evidence at that worktree's head, whichever
+checkout of the repository the command was typed in, and the run names the tree
+it used when that is not the invoking one. The declarations come from the
+invoking checkout instead, the same place `arc status` reads them, so what a
+run discharges and what status still owes cannot disagree. A change whose
+recorded worktree is gone is refused with the path and the `git worktree add`
+that restores it, because a gate run anywhere else would describe another
+tree.
+
 By default `arc verify` runs the gate and observes the result itself. When
 the gate ran elsewhere — inside a sandbox, or on another host — record that
 external evidence with `--attest --result pass|fail` (optionally `--note`):
