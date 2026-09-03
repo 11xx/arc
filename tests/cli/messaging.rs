@@ -320,7 +320,7 @@ fn inbox_buckets_classify_open_changes() {
     age_event(&repo, &stalled_id, "claim-set", 120);
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/6");
+    assert_eq!(inbox["schema"], "arc-inbox/7");
     assert!(bucket_has(&inbox, "needs-review", &review_id));
     assert!(bucket_has(&inbox, "changes-requested", &cr_id));
     assert!(bucket_has(&inbox, "ready-to-integrate", &ready_id));

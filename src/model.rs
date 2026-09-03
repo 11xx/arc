@@ -136,30 +136,160 @@ impl KeptKind {
     }
 }
 
-/// What a declared debt says was missing. New members add a new kind of
-/// obligation without changing the meaning of existing events.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// What a declared debt says was missing.
+///
+/// The kind is the weight, carried as a label rather than a number: a deficit
+/// is a different obligation depending on what was read, and one count over
+/// every debt says only how many exist. Declaration order is severity order,
+/// least covered first, which is the order a queue works through them.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
+)]
 #[serde(rename_all = "kebab-case")]
+#[clap(rename_all = "kebab-case")]
 pub enum DebtMissing {
+    /// No verdict on any patchset of the change.
+    NothingRead,
+    /// An approved patchset, then a merge or rebase resolution nobody read.
+    MergeResolutionUnread,
+    /// An approved patchset, then authored work nobody read.
+    RepairUnread,
+    /// Verdicts on the shipped patchset, all of them from its contributors.
+    ContributorOnly,
+    /// A read by somebody independent, which nobody supplied. Also what an
+    /// obligation recorded before kinds existed means.
     IndependentReview,
 }
 
 impl DebtMissing {
+    /// Every kind, in severity order. A count split over this covers every
+    /// obligation exactly once, so a split and a total cannot disagree.
+    pub const ALL: [DebtMissing; 5] = [
+        DebtMissing::NothingRead,
+        DebtMissing::MergeResolutionUnread,
+        DebtMissing::RepairUnread,
+        DebtMissing::ContributorOnly,
+        DebtMissing::IndependentReview,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::NothingRead => "nothing-read",
+            Self::MergeResolutionUnread => "merge-resolution-unread",
+            Self::RepairUnread => "repair-unread",
+            Self::ContributorOnly => "contributor-only",
             Self::IndependentReview => "independent-review",
         }
     }
 }
 
-/// One verdict's recorded review identity and optional model attribution.
+/// The effort a model string names in a trailing `#suffix`, when it names one.
+///
+/// A reading of the string, never a replacement for it: routing writes model
+/// and effort as one token, and the whole token is what was recorded.
+pub fn model_effort(model: &str) -> Option<&str> {
+    model
+        .rsplit_once('#')
+        .map(|(_, effort)| effort)
+        .filter(|effort| !effort.is_empty())
+}
+
+/// One verdict's recorded review identity and the coordinates it was cast at.
+///
+/// Coordinates only: no routing tier is derived from the identity or from any
+/// configuration, and no ordering is implied between two of these.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DebtCoverage {
     pub reviewer: String,
-    /// Absent when the verdict event recorded no model. No routing tier is
-    /// derived from the identity or from any configuration.
+    /// Absent when the verdict event recorded no model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The effort named by the model string's trailing `#suffix`, when it
+    /// carries one. The model string above stays whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The routing version that selected the reviewer. Absent means unrouted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_version: Option<String>,
+}
+
+impl DebtCoverage {
+    /// Coverage from one recorded review identity, reading the effort off the
+    /// model string.
+    pub fn new(reviewer: String, model: Option<String>, route_version: Option<String>) -> Self {
+        let effort = model.as_deref().and_then(model_effort).map(str::to_owned);
+        DebtCoverage {
+            reviewer,
+            model,
+            effort,
+            route_version,
+        }
+    }
+}
+
+/// One identity at the coordinates arc keeps for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebtIdentity {
+    pub actor: String,
+    /// Subject the work was recorded for, when a lead ran delegated ceremony.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The effort named by the model string's trailing `#suffix`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+}
+
+impl DebtIdentity {
+    pub fn new(
+        actor: String,
+        on_behalf_of: Option<String>,
+        harness: Option<String>,
+        model: Option<String>,
+        session: Option<String>,
+    ) -> Self {
+        let effort = model.as_deref().and_then(model_effort).map(str::to_owned);
+        DebtIdentity {
+            actor,
+            on_behalf_of,
+            harness,
+            model,
+            effort,
+            session,
+        }
+    }
+
+    /// The identity policy attributes the work to: the subject when one was
+    /// named, otherwise the invoker.
+    pub fn effective_actor(&self) -> &str {
+        self.on_behalf_of.as_deref().unwrap_or(&self.actor)
+    }
+}
+
+/// How the work a debt covers was produced: who set the contract and who
+/// answered it.
+///
+/// Coordinates, not a ranking. Whether a planner outranks an implementer, or
+/// either model outranks the other, is a judgment arc does not make.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebtProduction {
+    /// Who recorded the brief version the shipped work answered. Absent when
+    /// the change carries no brief.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner: Option<DebtIdentity>,
+    /// The brief version current at the shipped patchset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief_version: Option<usize>,
+    /// Who recorded the shipped patchset.
+    pub implementer: DebtIdentity,
+    /// Whether a brief exists and somebody other than its author implemented
+    /// it. False for unbriefed work and for work its own planner wrote.
+    pub following_brief: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +499,12 @@ pub enum Payload {
         /// routing opinion arc does not have.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provisional: Option<String>,
+        /// The routing version that selected this reviewer, as the caller
+        /// declared it. Absent means the review was unrouted: arc never infers
+        /// a version, because knowing which roster produced an identity would
+        /// mean holding the roster.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        route_version: Option<String>,
     },
     /// A review obligation this change carries but has not discharged.
     ///
@@ -402,6 +538,11 @@ pub enum Payload {
         /// Every verdict recorded on the bound patchset at declaration time.
         #[serde(default)]
         coverage: Vec<DebtCoverage>,
+        /// Who planned and who implemented the work this debt covers. Absent
+        /// when no patchset was bound, and on obligations recorded before
+        /// production was kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        production: Option<DebtProduction>,
     },
     /// Dirty-tree evidence allowed to count, for one revision.
     ///
@@ -431,6 +572,10 @@ pub enum Payload {
         body: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         findings: Vec<InlineFinding>,
+        /// The routing version that selected this auditor, as the caller
+        /// declared it. Absent means the audit was unrouted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        route_version: Option<String>,
     },
     /// A finding raised by a post-integration audit. An audit that could only
     /// say approved-or-not would be a rubber stamp.

@@ -312,6 +312,10 @@ struct BacklogSummary {
     needs_review: usize,
     no_patchset: usize,
     debt_owed: usize,
+    /// The debt count split by what each obligation says is missing, in
+    /// severity order. A workspace total says how much is owed and nothing
+    /// about what any of it owes.
+    debt_owed_by_kind: Vec<crate::inbox::DebtKindCount>,
     open_items: usize,
     later_items: usize,
     feature_requests: usize,
@@ -331,6 +335,12 @@ impl BacklogSummary {
                 .map(|project| project.no_patchset.len())
                 .sum(),
             debt_owed: projects.iter().map(|project| project.debt_owed.len()).sum(),
+            debt_owed_by_kind: crate::inbox::debt_kind_counts(
+                projects
+                    .iter()
+                    .flat_map(|project| project.debt_owed.iter())
+                    .map(|debt| debt.missing),
+            ),
             open_items: projects.iter().map(|project| project.open_items).sum(),
             later_items: projects.iter().map(|project| project.later_items).sum(),
             feature_requests: projects
@@ -343,10 +353,11 @@ impl BacklogSummary {
 
     fn render(&self) {
         println!(
-            "summary: {} projects; {} needs-review; {} debt-owed; {} no-patchset; journal {} open, {} later, {} feature-request; {} unreachable",
+            "summary: {} projects; {} needs-review; {} debt-owed ({}); {} no-patchset; journal {} open, {} later, {} feature-request; {} unreachable",
             self.projects,
             self.needs_review,
             self.debt_owed,
+            crate::inbox::DebtKindCount::render(&self.debt_owed_by_kind),
             self.no_patchset,
             self.open_items,
             self.later_items,
@@ -457,10 +468,18 @@ struct DebtOwed {
     /// obligation declared before the kind was recorded, whose meaning is
     /// independent-review debt.
     #[serde(skip_serializing_if = "Option::is_none")]
-    missing: Option<String>,
+    missing: Option<DebtMissing>,
     /// Whether the obligation carries its kind. An obligation without one
     /// cannot be filtered by what it owes.
     typed: bool,
+    /// What review the shipped work did have, at the coordinates it was cast
+    /// at. Absent on the legacy shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<Vec<DebtCoverage>>,
+    /// Who set the contract and who answered it. Absent on the legacy shape,
+    /// and when nothing was snapshotted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    production: Option<DebtProduction>,
     declared_by: String,
     on_behalf_of: Option<String>,
     declared_model: Option<String>,
@@ -691,7 +710,7 @@ fn workspace_backlog(
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/10",
+                schema: "arc-workspace-backlog/11",
                 scope: scope.view(),
                 summary,
                 projects,
@@ -745,14 +764,15 @@ fn workspace_backlog(
             println!("  no-patchset   {change}  open, nothing recorded to review");
         }
         for change in &project.debt_owed {
-            let kind = match &change.missing {
-                Some(missing) => missing.clone(),
-                None => "unversioned".to_owned(),
-            };
             println!(
-                "  debt-owed     {}  {}d, {kind}, {}{}",
+                "  debt-owed     {}  {}d, {}, {}{}",
                 change.change_id,
                 change.age_days,
+                crate::render::debt_line(
+                    change.missing,
+                    change.production.as_ref(),
+                    change.coverage.as_deref()
+                ),
                 identity_text(
                     "declared",
                     &change.declared_by,
@@ -874,8 +894,10 @@ fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
                     change_id: state.change_id.clone(),
                     declared_at: debt.declared_at,
                     age_days: days_between(debt.declared_at, now),
-                    missing: debt.missing.as_ref().and_then(wire_name),
+                    missing: debt.missing,
                     typed: debt.missing.is_some(),
+                    coverage: debt.coverage.clone(),
+                    production: debt.production.clone(),
                     declared_by: debt.actor.clone(),
                     on_behalf_of: debt.on_behalf_of.clone(),
                     declared_model: debt.model.clone(),

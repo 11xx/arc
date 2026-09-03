@@ -6,6 +6,11 @@ struct DebtEntry {
     change_id: String,
     title: String,
     reason: String,
+    /// What the obligation says is missing. `None` on one recorded before
+    /// kinds were kept, whose meaning is legacy independent-review debt.
+    missing: Option<DebtMissing>,
+    production: Option<DebtProduction>,
+    coverage: Option<Vec<DebtCoverage>>,
     declared_at: DateTime<Utc>,
     surfaces: Option<Vec<String>>,
 }
@@ -21,10 +26,15 @@ impl DebtEntry {
 
     fn detail(&self) -> String {
         format!(
-            "{} ({}): owed: {}; surfaces: {}",
+            "{} ({}): owed: {}; {}; surfaces: {}",
             self.change_id,
             crate::render::one_line(&self.title),
             crate::render::one_line(&self.reason),
+            crate::render::debt_line(
+                self.missing,
+                self.production.as_ref(),
+                self.coverage.as_deref()
+            ),
             self.surface_detail()
         )
     }
@@ -33,6 +43,7 @@ impl DebtEntry {
 #[derive(Debug)]
 pub(crate) struct DebtSummary {
     entries: Vec<DebtEntry>,
+    by_kind: Vec<crate::inbox::DebtKindCount>,
     oldest_age_seconds: u64,
     surfaces: Vec<String>,
     unknown_surface_entries: usize,
@@ -54,8 +65,9 @@ impl DebtSummary {
             }
         };
         format!(
-            "{} outstanding; oldest {}; surfaces ({}): {}{}",
+            "{} outstanding ({}); oldest {}; surfaces ({}): {}{}",
             self.entries.len(),
+            crate::inbox::DebtKindCount::render(&self.by_kind),
             crate::journal::format_age(self.oldest_age_seconds),
             self.surfaces.len(),
             surfaces,
@@ -136,6 +148,9 @@ pub(crate) fn collect_debts(
             change_id: state.change_id.clone(),
             title: state.title.clone(),
             reason: debt.reason.clone(),
+            missing: debt.missing,
+            production: debt.production.clone(),
+            coverage: debt.coverage.clone(),
             declared_at: debt.declared_at,
             surfaces: debt_surfaces(&ctx.cwd, state, debt),
         });
@@ -174,6 +189,7 @@ pub(crate) fn collect_debts(
                 .is_some_and(|threshold| oldest_age_seconds > threshold)
     };
     Ok(DebtSummary {
+        by_kind: crate::inbox::debt_kind_counts(entries.iter().map(|entry| entry.missing)),
         entries,
         oldest_age_seconds,
         surfaces: surfaces.into_iter().collect(),
@@ -571,6 +587,12 @@ pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
             if rows.is_empty() {
                 println!("  (none)");
             }
+            if name == "debt-owed" && !inbox.debt_owed_by_kind.is_empty() {
+                println!(
+                    "  by kind: {}",
+                    crate::inbox::DebtKindCount::render(&inbox.debt_owed_by_kind)
+                );
+            }
             for row in rows {
                 let claim_details = row
                     .owner
@@ -601,6 +623,16 @@ pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
                     println!(
                         "    hold {} by {}: {}",
                         hold.hold_event_id, hold.held_by, hold.reason
+                    );
+                }
+                if name == "debt-owed" {
+                    println!(
+                        "    {}",
+                        crate::render::debt_line(
+                            row.debt_missing,
+                            row.debt_production.as_ref(),
+                            row.debt_coverage.as_deref(),
+                        )
                     );
                 }
             }

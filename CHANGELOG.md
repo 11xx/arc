@@ -12,6 +12,18 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- A debt records what kind of deficit it is, what review the work did have, and
+  who produced it. `DebtMissing` gains `nothing-read`,
+  `merge-resolution-unread`, `repair-unread` and `contributor-only`; arc
+  derives the kind from the ledger and `--kind <k>` on `arc debt` and
+  `arc integrate --debt` declares one instead. Coverage carries the reviewer's
+  effort and the routing version `arc review --route-version` and
+  `arc audit --route-version` record, and production names who recorded the
+  brief version the shipped work answered and who recorded the patchset.
+  `arc query --debt` orders by kind then age, and the inbox, catchup and
+  workspace summary rows split their count by kind. JSON is `arc-inbox/7` and
+  `arc-workspace-backlog/11`.
+
 - Journal events record the `--on-behalf-of` subject beside the invoking
   actor, so a note, position, question, answer, verification, lane, or
   consumption a lead files for an executor no longer reads as the lead's own.

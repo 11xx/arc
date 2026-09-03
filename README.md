@@ -897,10 +897,13 @@ The two ledger buckets carry the facts that decide what to do about them, so a
 reader never re-derives them per change. A review entry names how many
 patchsets exist, how many days the newest has waited, and the verdict a newer
 patchset superseded — absent when the change has never been reviewed at all. A
-debt entry names when it was declared, its age in days, who declared it, and
-what it says is missing; an obligation declared before the kind was recorded
-carries no `missing` and reads as `unversioned`, which is independent-review
-debt that cannot be filtered by what it owes.
+debt entry names when it was declared, its age in days, who declared it, what
+it says is missing, the coverage the shipped work did have, and who planned and
+who implemented it; an obligation declared before the kind was recorded carries
+no `missing` and reads as `unversioned`, which is independent-review debt that
+cannot be filtered by what it owes. The debt count is split by kind alongside
+the total, because one number over every obligation says how many exist and
+nothing about what any of them owes.
 
 Only a change carrying a patchset can be answered by a verdict. An open change
 with none is reported under `no_patchset`, and does not count as blocked: its
@@ -1133,6 +1136,40 @@ The obligation is a ledger fact that survives closure, so the owed review is
 findable instead of living in prose. `arc inbox` carries it in the one bucket
 that includes integrated changes, `arc doctor` reports it as
 `debt-outstanding`, and `arc chain` shows it beside reviewer coverage.
+
+### What a debt records
+
+A debt is a record a later reader can weigh, not a count. It names what kind of
+deficit it is:
+
+| kind | what it says |
+| --- | --- |
+| `nothing-read` | no verdict on any patchset of the change |
+| `merge-resolution-unread` | an approved patchset, then a merge or rebase resolution nobody read |
+| `repair-unread` | an approved patchset, then authored work nobody read |
+| `contributor-only` | verdicts on the shipped patchset, all of them from its contributors |
+| `independent-review` | a read by somebody independent, which nobody supplied |
+
+Arc derives the kind from the ledger. `--kind <k>`, on `arc debt` and on
+`arc integrate --debt`, declares one instead and wins over the derived value —
+only the caller can say a merge resolution was what went unread, because the
+ledger sees a resolution and a repair the same way.
+
+The kind is the weight, carried as a label rather than a number. `arc query
+--debt` orders by kind in the order above, then by age, and every summary row
+splits its count by kind.
+
+Beside the kind, a debt carries coordinates:
+
+- **Coverage**: each verdict recorded on the shipped patchset — the reviewer,
+  the model string kept whole, the effort its trailing `#suffix` names, and the
+  routing version `arc review --route-version` or `arc audit --route-version`
+  declared. An absent route version means the review was unrouted.
+- **Production**: who recorded the brief version the shipped work answered, who
+  recorded the patchset, and whether the two identities differ.
+
+These are coordinates and nothing more. Arc computes no score from them, joins
+them against no roster, and orders no two models against each other.
 
 Three rules keep the escape hatch from becoming a hole:
 

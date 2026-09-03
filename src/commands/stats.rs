@@ -880,6 +880,7 @@ mod tests {
                     findings: Vec::new(),
                     relation: None,
                     provisional: None,
+                    route_version: None,
                 },
             ),
         ];

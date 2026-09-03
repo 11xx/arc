@@ -463,6 +463,21 @@ pub fn query(ctx: &Ctx, args: QueryArgs) -> Result<()> {
         })
         .collect::<Vec<_>>();
 
+    // Debt is worked through weakest coverage first, and among equals oldest
+    // first. Any other selection keeps its change-id order, which is what a
+    // caller scripting against `arc query` already reads.
+    let mut selected = selected;
+    if args.debt {
+        selected.sort_by_key(|state| {
+            let debt = state.debt.as_ref();
+            (
+                debt.and_then(|debt| debt.missing)
+                    .unwrap_or(DebtMissing::IndependentReview),
+                debt.map(|debt| debt.declared_at),
+            )
+        });
+    }
+
     if args.json {
         let rows = selected
             .iter()
@@ -1001,6 +1016,12 @@ fn list_row(state: &ChangeState, states: &BTreeMap<String, ChangeState>) -> serd
         "blocker": blocker_label(state, states),
         "tags": state.tags,
         "priority": state.priority,
+        // The obligation's coordinates, each as its own field: what kind of
+        // deficit, what review the work did have, and who produced it. Null
+        // together when the change owes nothing.
+        "debt_missing": state.debt.as_ref().and_then(|debt| debt.missing).map(DebtMissing::as_str),
+        "debt_coverage": state.debt.as_ref().and_then(|debt| debt.coverage.clone()),
+        "debt_production": state.debt.as_ref().and_then(|debt| debt.production.clone()),
     })
 }
 

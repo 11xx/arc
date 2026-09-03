@@ -1,9 +1,10 @@
-use crate::model::Verdict;
+use crate::model::{DebtCoverage, DebtMissing, DebtProduction, Verdict};
 use crate::state::{ChangeState, ClaimIdentity};
 use crate::status::{ClaimStatus, StatusReport};
 use serde::Serialize;
+use std::collections::BTreeMap;
 
-pub const INBOX_SCHEMA: &str = "arc-inbox/6";
+pub const INBOX_SCHEMA: &str = "arc-inbox/7";
 
 /// The journal's actionable backlog, carried beside the ledger buckets.
 ///
@@ -52,6 +53,16 @@ pub struct InboxRow {
     /// hold cannot be acted on: releasing one names the event that set it.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub holds: Vec<crate::status::HoldEntry>,
+    /// What kind of deficit a debt row records. Absent on every other bucket,
+    /// and on an obligation declared before kinds were kept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debt_missing: Option<DebtMissing>,
+    /// What review the shipped work did have, on a debt row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debt_coverage: Option<Vec<DebtCoverage>>,
+    /// Who planned and who implemented the work, on a debt row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debt_production: Option<DebtProduction>,
     /// Why this change sits here, when the bucket cannot say so by name.
     /// Carried by `unclassified` rows, which exist precisely because no
     /// bucket name explains them.
@@ -59,7 +70,7 @@ pub struct InboxRow {
     pub reason: Option<String>,
 }
 
-/// The `arc-inbox/6` rollup: a lead-facing queue derived entirely from
+/// The `arc-inbox/7` rollup: a lead-facing queue derived entirely from
 /// existing ledger + Git state. A change may appear in more than one bucket
 /// when it is genuinely in more than one actionable state (e.g. blocked and
 /// awaiting review); each bucket is computed independently.
@@ -87,6 +98,12 @@ pub struct Inbox {
     /// track.
     #[serde(rename = "debt-owed")]
     pub debt_owed: Vec<InboxRow>,
+    /// The debt-owed count split by what each obligation says is missing, in
+    /// severity order, and only for kinds present. One number over every
+    /// obligation says how many exist and nothing about what any of them owes,
+    /// which is the question a lead picking the next one is asking.
+    #[serde(rename = "debt-owed-by-kind")]
+    pub debt_owed_by_kind: Vec<DebtKindCount>,
     /// Open changes no other bucket claimed. Every bucket is an independent
     /// predicate, so a state none of them anticipated lands nowhere and the
     /// queue reports empty while work waits. This bucket makes that failure
@@ -117,6 +134,7 @@ impl Inbox {
             in_progress: Vec::new(),
             stalled: Vec::new(),
             debt_owed: Vec::new(),
+            debt_owed_by_kind: Vec::new(),
             unclassified: Vec::new(),
         }
     }
@@ -151,6 +169,9 @@ impl Inbox {
             stage: None,
             age_seconds: None,
             holds: Vec::new(),
+            debt_missing: None,
+            debt_coverage: None,
+            debt_production: None,
             reason: None,
         };
         let claim_row = |claim: &ClaimStatus| {
@@ -169,6 +190,9 @@ impl Inbox {
                 stage: Some(claim.stage.clone()),
                 age_seconds: Some(claim.age_seconds),
                 holds: Vec::new(),
+                debt_missing: None,
+                debt_coverage: None,
+                debt_production: None,
                 reason: None,
             }
         };
@@ -253,6 +277,7 @@ impl Inbox {
         if !state.debt_outstanding() {
             return;
         }
+        let debt = state.debt.as_ref();
         self.debt_owed.push(InboxRow {
             change_id: state.change_id.clone(),
             title: state.title.clone(),
@@ -263,8 +288,56 @@ impl Inbox {
             stage: None,
             age_seconds: None,
             holds: Vec::new(),
+            debt_missing: debt.and_then(|debt| debt.missing),
+            debt_coverage: debt.and_then(|debt| debt.coverage.clone()),
+            debt_production: debt.and_then(|debt| debt.production.clone()),
             reason: None,
         });
+        // Recomputed from the rows themselves rather than tallied alongside
+        // them, so the split can never disagree with what it splits.
+        self.debt_owed_by_kind =
+            debt_kind_counts(self.debt_owed.iter().map(|row| row.debt_missing));
+    }
+}
+
+/// One kind of deficit and how many outstanding obligations carry it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DebtKindCount {
+    pub kind: String,
+    pub count: usize,
+}
+
+/// Obligations counted by kind, in severity order, omitting kinds nothing
+/// owes. One without a recorded kind counts as the independent review an
+/// obligation recorded before kinds existed means.
+pub fn debt_kind_counts(
+    kinds: impl IntoIterator<Item = Option<DebtMissing>>,
+) -> Vec<DebtKindCount> {
+    let mut counts: BTreeMap<DebtMissing, usize> = BTreeMap::new();
+    for kind in kinds {
+        *counts
+            .entry(kind.unwrap_or(DebtMissing::IndependentReview))
+            .or_default() += 1;
+    }
+    DebtMissing::ALL
+        .iter()
+        .filter_map(|missing| {
+            counts.get(missing).map(|count| DebtKindCount {
+                kind: missing.as_str().to_string(),
+                count: *count,
+            })
+        })
+        .collect()
+}
+
+impl DebtKindCount {
+    /// A split rendered as `nothing-read 2, contributor-only 1`.
+    pub fn render(counts: &[DebtKindCount]) -> String {
+        counts
+            .iter()
+            .map(|entry| format!("{} {}", entry.kind, entry.count))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 

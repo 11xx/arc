@@ -81,6 +81,14 @@ pub struct Brief {
     /// must agree, or comparing them compares different things.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_behalf_of: Option<String>,
+    /// Coordinates of the identity that recorded this version, so a reader can
+    /// tell what produced the contract and not only who signed it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     pub title: Option<String>,
     pub body: String,
     pub caused_by: Vec<BriefCause>,
@@ -288,6 +296,9 @@ pub struct VerdictEntry {
     /// Why this verdict is owed corroboration, when the caller said it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisional: Option<String>,
+    /// The routing version that selected the reviewer. Absent means unrouted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_version: Option<String>,
     pub actor: String,
     /// Subject the verdict was cast for, when a lead reviewed on behalf of one.
     pub on_behalf_of: Option<String>,
@@ -397,6 +408,10 @@ pub struct Debt {
     /// legacy shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<Vec<DebtCoverage>>,
+    /// Who planned and who implemented the work the obligation covers. Absent
+    /// when nothing was snapshotted, and on the legacy shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub production: Option<DebtProduction>,
     /// The first verdict or audit that satisfies the existing discharge
     /// predicate, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -440,6 +455,9 @@ pub struct AuditVerdictEntry {
     /// Model identity recorded on the audit event, when one was declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The routing version that selected the auditor. Absent means unrouted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_version: Option<String>,
     pub actor: String,
     pub on_behalf_of: Option<String>,
     /// Where `actor` came from. `None` on audits recorded before arc kept the
@@ -1024,6 +1042,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 ts: ev.created_at,
                 actor: ev.actor.clone(),
                 on_behalf_of: ev.on_behalf_of.clone(),
+                harness: ev.harness.clone(),
+                model: ev.model.clone(),
+                session: ev.session.clone(),
                 title: title.clone(),
                 body: body.clone(),
                 caused_by: caused_by.clone(),
@@ -1400,6 +1421,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 body,
                 findings,
                 relation,
+                route_version,
             } => {
                 for inline in findings {
                     state.findings.insert(
@@ -1428,6 +1450,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     body: body.clone(),
                     model: ev.model.clone(),
                     provisional: provisional.clone(),
+                    route_version: route_version.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
                     actor_source: ev.actor_source,
@@ -1460,6 +1483,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     declared_at: ev.created_at,
                     missing: None,
                     coverage: None,
+                    production: None,
                     discharged_by: None,
                 });
             }
@@ -1468,6 +1492,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 patchset_id,
                 missing,
                 coverage,
+                production,
             } => {
                 state.debt = Some(Debt {
                     event_id: ev.event_id.clone(),
@@ -1481,6 +1506,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     declared_at: ev.created_at,
                     missing: Some(*missing),
                     coverage: Some(coverage.clone()),
+                    production: production.clone(),
                     discharged_by: None,
                 });
             }
@@ -1489,6 +1515,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 verdict,
                 body,
                 findings,
+                route_version,
             } => {
                 for inline in findings {
                     state.audit_findings.insert(
@@ -1515,6 +1542,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     verdict: *verdict,
                     body: body.clone(),
                     model: ev.model.clone(),
+                    route_version: route_version.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
                     actor_source: ev.actor_source,
@@ -2167,6 +2195,97 @@ impl ChangeState {
         !self.debt_discharged(debt)
     }
 
+    /// The patchset a debt is read against: the one about to ship while the
+    /// change is open, and the one that did ship once it closed.
+    pub fn debt_subject_patchset(&self) -> Option<&Patchset> {
+        if !self.is_closed() {
+            return self.latest_patchset();
+        }
+        let shipped = self
+            .closure
+            .as_ref()
+            .and_then(|closure| closure.source_patchset_id.as_deref())?;
+        self.patchsets
+            .iter()
+            .find(|patchset| patchset.id == shipped)
+    }
+
+    /// What kind of deficit a debt declared now would carry, read off the
+    /// ledger.
+    ///
+    /// A caller's declared kind always wins over this. Arc cannot tell a merge
+    /// resolution from a repair — both are authored work on top of an approved
+    /// patchset — so `merge-resolution-unread` is only ever asserted.
+    pub fn derive_debt_missing(&self, subject: Option<&Patchset>) -> DebtMissing {
+        if self.verdicts.is_empty() {
+            return DebtMissing::NothingRead;
+        }
+        let Some(subject) = subject else {
+            return DebtMissing::IndependentReview;
+        };
+        let read_it: Vec<&VerdictEntry> = self
+            .verdicts
+            .iter()
+            .filter(|verdict| verdict.patchset_id == subject.id)
+            .collect();
+        if read_it.is_empty() {
+            return DebtMissing::RepairUnread;
+        }
+        if read_it.iter().all(|verdict| {
+            subject
+                .contributor_match(verdict.effective_author())
+                .is_some()
+        }) {
+            return DebtMissing::ContributorOnly;
+        }
+        DebtMissing::IndependentReview
+    }
+
+    /// Every verdict recorded on one patchset, at the coordinates it was cast
+    /// at.
+    pub fn debt_coverage_for(&self, subject: &Patchset) -> Vec<DebtCoverage> {
+        self.verdicts
+            .iter()
+            .filter(|verdict| verdict.patchset_id == subject.id)
+            .map(|verdict| {
+                DebtCoverage::new(
+                    verdict.effective_author().to_string(),
+                    verdict.model.clone(),
+                    verdict.route_version.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Who set the contract one patchset answered, and who answered it.
+    pub fn debt_production_for(&self, subject: &Patchset) -> DebtProduction {
+        let planner = self.brief_for(subject).map(|brief| {
+            DebtIdentity::new(
+                brief.actor.clone(),
+                brief.on_behalf_of.clone(),
+                brief.harness.clone(),
+                brief.model.clone(),
+                brief.session.clone(),
+            )
+        });
+        let implementer = DebtIdentity::new(
+            subject.actor.clone(),
+            subject.on_behalf_of.clone(),
+            subject.harness.clone(),
+            subject.model.clone(),
+            subject.session.clone(),
+        );
+        let following_brief = planner
+            .as_ref()
+            .is_some_and(|planner| planner.effective_actor() != implementer.effective_actor());
+        DebtProduction {
+            planner,
+            brief_version: subject.brief_version,
+            implementer,
+            following_brief,
+        }
+    }
+
     /// Any independent verdict on the revision that shipped, recorded after
     /// the debt was declared, discharges it — whichever command emitted it.
     ///
@@ -2210,10 +2329,11 @@ impl ChangeState {
                         .is_none()
                 })
         }) {
-            return Some(DebtCoverage {
-                reviewer: audit.effective_author().to_string(),
-                model: audit.model.clone(),
-            });
+            return Some(DebtCoverage::new(
+                audit.effective_author().to_string(),
+                audit.model.clone(),
+                audit.route_version.clone(),
+            ));
         }
         // Only a verdict on the revision that actually shipped counts; a
         // verdict on an earlier draft judged something else.
@@ -2229,9 +2349,12 @@ impl ChangeState {
                         .contributor_match(verdict.effective_author())
                         .is_none()
             })
-            .map(|verdict| DebtCoverage {
-                reviewer: verdict.effective_author().to_string(),
-                model: verdict.model.clone(),
+            .map(|verdict| {
+                DebtCoverage::new(
+                    verdict.effective_author().to_string(),
+                    verdict.model.clone(),
+                    verdict.route_version.clone(),
+                )
             })
     }
 }
@@ -2288,6 +2411,7 @@ mod tests {
                 findings: Vec::new(),
                 relation,
                 provisional: None,
+                route_version: None,
             },
         )
     }

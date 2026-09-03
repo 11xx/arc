@@ -255,6 +255,32 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   binds to the exact patchset head declared, so new work needs a new
   declaration — it does not excuse the rest of the change's life.
 
+  A debt is a record, not a count. It carries what kind of deficit it is,
+  what review the work did have and at what coordinates, and who planned and
+  who implemented it:
+
+    nothing-read             no verdict on any patchset of the change
+    merge-resolution-unread  approved, then a resolution nobody read
+    repair-unread            approved, then authored work nobody read
+    contributor-only         verdicts on the shipped patchset, all its own
+    independent-review       a read by somebody independent, unsupplied
+
+  arc derives the kind from the ledger; `--kind <k>` on `arc debt` and on
+  `arc integrate --debt` declares one instead, and a declared kind wins. Only
+  the caller can say a resolution was what went unread, because the ledger
+  sees a repair and a merge resolution the same way. The kind is the weight,
+  carried as a label rather than a number: `arc query --debt` works through
+  the list above in order, then by age, and every summary row splits its
+  count by kind rather than reporting one total.
+
+  Coverage names each verdict's reviewer, the model string it was cast under
+  kept whole, the effort that string's trailing `#suffix` names, and the
+  routing version `arc review --route-version` or `arc audit --route-version`
+  declared. Production names who recorded the brief version the shipped work
+  answered and who recorded the patchset. Arc records coordinates and holds
+  no opinion: no score, no roster to join them against, and no ordering
+  between two models.
+
   A verdict can also be owed corroboration rather than absent. `arc review
   --verdict approved --provisional "<why>"` records one that gates like any
   other — independence and staleness are unchanged, because an unproven

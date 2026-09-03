@@ -670,6 +670,9 @@ pub struct ReviewArgs {
     pub causes: Vec<ReviewCause>,
     pub findings_json: Option<String>,
     pub snapshot_first: bool,
+    /// The routing version that selected the reviewer, as the caller declared
+    /// it. `None` records an unrouted review.
+    pub route_version: Option<String>,
 }
 
 pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
@@ -682,6 +685,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         mut causes,
         findings_json,
         snapshot_first,
+        route_version,
     } = args;
     causes.sort_unstable();
     causes.dedup();
@@ -781,6 +785,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         findings: inline,
         relation,
         provisional: provisional.clone(),
+        route_version,
     };
     ensure_append_allowed(&st, &payload)?;
     let mut ev = ctx.event(&store, &change_id, payload);

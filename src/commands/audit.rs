@@ -10,7 +10,12 @@ use crate::state::ChangeState;
 
 /// Record the obligation. Allowed while open (declared at integration time)
 /// and after integration (discovered later).
-pub fn declare_debt(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {
+pub fn declare_debt(
+    ctx: &Ctx,
+    reference: &str,
+    reason: String,
+    kind: Option<DebtMissing>,
+) -> Result<()> {
     let reason = reason.trim();
     if reason.is_empty() {
         bail!("--reason must say what review is owed and why it could not run");
@@ -19,40 +24,37 @@ pub fn declare_debt(ctx: &Ctx, reference: &str, reason: String) -> Result<()> {
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let st = state::reduce(&store.load_events(&change_id)?)?;
-    // An open change records the missing independent verdict for the patchset
-    // that is about to ship. This can supply an absent verdict or rescue a
-    // self-approval rejected by policy. A closed change has no gate left to
-    // satisfy, so its debt is recorded as a bare obligation.
+    // An open change records the deficit for the patchset that is about to
+    // ship. This can supply an absent verdict or rescue a self-approval
+    // rejected by policy. A closed change has no gate left to satisfy, so its
+    // debt binds to no patchset — but what it says was missing is still read
+    // off the work that shipped rather than off nothing.
+    let subject = st.debt_subject_patchset();
     let patchset_id = if st.is_closed() {
         None
     } else {
-        st.latest_patchset().map(|patchset| patchset.id.clone())
+        subject.map(|patchset| patchset.id.clone())
     };
-    let coverage = patchset_id
-        .as_deref()
-        .map(|patchset_id| {
-            st.verdicts
-                .iter()
-                .filter(|verdict| verdict.patchset_id == patchset_id)
-                .map(|verdict| DebtCoverage {
-                    reviewer: verdict.effective_author().to_string(),
-                    model: verdict.model.clone(),
-                })
-                .collect()
-        })
+    let coverage = subject
+        .map(|subject| st.debt_coverage_for(subject))
         .unwrap_or_default();
+    let production = subject.map(|subject| st.debt_production_for(subject));
+    // The caller's kind wins: arc reads the ledger, and the ledger cannot
+    // distinguish a merge resolution from a repair.
+    let missing = kind.unwrap_or_else(|| st.derive_debt_missing(subject));
     let payload = Payload::DebtDeclared {
         reason: reason.to_string(),
         patchset_id: patchset_id.clone(),
-        missing: DebtMissing::IndependentReview,
+        missing,
         coverage,
+        production,
     };
     ensure_append_allowed(&st, &payload)?;
     let event = ctx.event(&store, &change_id, payload);
     store.append_event(&event)?;
     match &patchset_id {
-        Some(id) => println!("debt declared for {id}: {reason}"),
-        None => println!("debt declared: {reason}"),
+        Some(id) => println!("debt declared for {id} ({}): {reason}", missing.as_str()),
+        None => println!("debt declared ({}): {reason}", missing.as_str()),
     }
     println!("event: {}", event.event_id);
     Ok(())
@@ -62,6 +64,9 @@ pub struct AuditArgs {
     pub verdict: Verdict,
     pub body: Option<String>,
     pub findings_json: Option<String>,
+    /// The routing version that selected the auditor, as the caller declared
+    /// it. `None` records an unrouted audit.
+    pub route_version: Option<String>,
 }
 
 /// Record a review performed after integration, discharging any debt.
@@ -84,6 +89,7 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         verdict: args.verdict,
         body: args.body,
         findings: inline,
+        route_version: args.route_version,
     };
     ensure_append_allowed(&st, &payload)?;
     let event = ctx.event(&store, &change_id, payload);
