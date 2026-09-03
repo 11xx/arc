@@ -28,6 +28,7 @@ mod rescue;
 mod review;
 mod roles;
 mod run;
+mod sandbox;
 mod skip_green;
 mod stats;
 mod take;

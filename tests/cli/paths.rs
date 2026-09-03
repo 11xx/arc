@@ -111,16 +111,12 @@ fn config_check_writable_reports_store_failure_and_json_schema() {
 fn config_check_writable_probes_commit_without_touching_the_repository() {
     let repo = Repo::new();
     let before = git_out(&repo.root, &["rev-parse", "HEAD"]);
-    // Give the probe a private temp dir so leak detection observes only this
-    // invocation. Scanning the shared temp dir races sibling tests running
-    // their own probes, and fails for a reason unrelated to cleanup.
-    let tmp = repo.root.join("probe-tmp");
-    fs::create_dir_all(&tmp).unwrap();
-    let out = stdout(
-        repo.arc(&repo.root)
-            .env("TMPDIR", &tmp)
-            .args(["config", "--check-writable"]),
-    );
+    // A scratch directory under the prefix is private to this invocation, so
+    // leak detection observes only its own probe. Scanning the shared temp dir
+    // would race sibling tests running theirs, and fail for a reason unrelated
+    // to cleanup.
+    let tmp = repo.home.join("tmp");
+    let out = stdout(repo.arc(&repo.root).args(["config", "--check-writable"]));
     assert!(
         out.contains("ok: commit"),
         "expected a commit check, got {out:?}"
@@ -129,6 +125,10 @@ fn config_check_writable_probes_commit_without_touching_the_repository() {
     // keep a clean tree.
     assert_eq!(git_out(&repo.root, &["rev-parse", "HEAD"]), before);
     assert!(git_out(&repo.root, &["status", "--porcelain"]).is_empty());
+    assert!(
+        tmp.is_dir(),
+        "the probe should have made its scratch repository under the prefix"
+    );
     assert_eq!(
         fs::read_dir(&tmp).unwrap().count(),
         0,

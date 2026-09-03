@@ -36,10 +36,17 @@ impl Repo {
         }
     }
 
+    /// Where this fixture's arc writes: its ledger under the repository, and
+    /// every other root under `home`. One prefix declares all of them, which
+    /// is the same mechanism a caller sandboxing a real project gets.
+    ///
+    /// `HOME` is set as well because the harness running this suite may export
+    /// a session store under its own home, and identity detection reads it.
     pub(crate) fn arc(&self, cwd: &Path) -> AssertCommand {
         let mut cmd = AssertCommand::cargo_bin("arc").unwrap();
         cmd.current_dir(cwd)
             .env("HOME", &self.home)
+            .env("ARC_SANDBOX", &self.home)
             .env("ARC_ACTOR", "tester")
             .env("ARC_HARNESS", "test")
             .env("ARC_SESSION", "session-a")
@@ -160,6 +167,7 @@ pub(crate) fn spawn_arc_with_session(
         .args(args)
         .current_dir(cwd)
         .env("HOME", &repo.home)
+        .env("ARC_SANDBOX", &repo.home)
         .env("ARC_ACTOR", "tester")
         .env("ARC_HARNESS", "test")
         .env("ARC_SESSION", session)
