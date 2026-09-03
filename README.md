@@ -89,7 +89,9 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   names `arc verify --against <branch>`, which synthesizes that merge, pins it
   so the evidence cannot outlive what it cites, runs every required gate in a
   scratch checkout it removes whatever the gates do, and records the result at
-  the merged tree beside the target head it was computed from. That evidence is
+  the merged tree beside the target head it was computed from. Adding
+  `--skip-green` reuses a gate already green at that merged tree instead of
+  running it again, keyed exactly as readiness keys it. That evidence is
   spent as soon as the target moves again, exactly as a verdict is spent by a
   new commit. A head already on the target tip merges to the tree it already
   has and needs nothing new: a rebase that moves the base without changing the
@@ -172,9 +174,9 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   it instead of reusing a run of something else. Before merging, readiness is
   recomputed and the basis rebuilt; if the two differ, nothing is written.
   `arc integrate --dry-run` prints the basis it would record, when the merge
-  would happen at all. `arc integrate --tag '#series'` applies that same guarded path to every matching change
-  in dependency order, stopping at the first refusal. Refusals carry typed
-  exit codes.
+  would happen at all. `arc integrate <a> <b> <c>` and `arc integrate --tag '#series'` apply that same
+  guarded path to a queue, in dependency order, stopping at the first member that needs a person.
+  Refusals carry typed exit codes.
 
 ## Orientation
 
@@ -254,10 +256,25 @@ arc check radio-refill-fix             # exit 0 = ready
 arc rebase radio-refill-fix --verify   # target moved: replay, snapshot, rerun gates
 arc integrate radio-refill-fix --cleanup
 
-# Integrate every matching series member in dependency order. --cleanup is
-# allowed here; --into and --message are intentionally per-change only.
+# Land a queue in dependency order, named change by change or selected by tag.
+# --cleanup is allowed here; --into, --message, and --debt are per-change only.
+arc integrate radio-refill-fix radio-antenna-swap --cleanup
 arc integrate --tag '#radio-series' --cleanup
 ```
+
+A queue repairs what needs no judgement and defers what does. Per member it
+replays a branch whose target moved under it, runs the required gates that
+have no answer at the tree the merge would ship, and merges. It stops at the
+first member that needs a person — a conflict left in progress with the
+commands that finish it, a gate that failed, a patchset nothing approves —
+exits with that member's own blocker code, and prints a summary naming what
+landed with its merge revision, what stopped the run and why, and what was
+never attempted. `--dry-run` reports the same plan without replaying, running,
+or merging anything. `--debt` stays per-change: the reason it records is a
+judgment about one patchset — what review it owes and why that review could
+not run — and one string spread over every member would bind to nothing in
+particular. A queue is for changes that are already green or already carry
+their verdict.
 
 `arc resolve` accepts `--evidence` for a free-form explanation and, independently,
 `--evidence-event <ID>` for a full event ID from the same change. The event must
@@ -783,6 +800,9 @@ reported for separate transfer.
 | 12 | acceptance probes are not discriminating |
 | 13 | change declares it is iterating; clear it before integrating |
 | 14 | the tree a merge would ship has no gate evidence |
+
+A queue exits with the code of the member that stopped it, so the same table
+reads the same way whether one change was integrated or twenty.
 
 ## Build and gate declaration
 

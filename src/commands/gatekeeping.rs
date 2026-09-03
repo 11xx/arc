@@ -185,13 +185,12 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             || probe.is_some()
             || attest
             || parallel
-            || skip_green
             || waive_dirty.is_some()
             || falsified_by.is_some())
     {
         bail!(
-            "--against runs the whole required gate set on a synthesized merge, so it cannot \
-             be combined with --gate, --command, --probe, --attest, --parallel, --skip-green, \
+            "--against runs the required gate set on a synthesized merge, so it cannot \
+             be combined with --gate, --command, --probe, --attest, --parallel, \
              --waive-dirty, or --falsified-by"
         );
     }
@@ -209,8 +208,11 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
              sequentially to waive."
         );
     }
-    if skip_green && !all {
-        bail!("--skip-green requires --all");
+    // Reuse is a whole-gate-set question: it needs a set to choose within.
+    // `--all` supplies one at the change's head, `--against` at the merged
+    // tree; a single named check has nothing to select from.
+    if skip_green && !all && against.is_none() {
+        bail!("--skip-green requires --all or --against");
     }
     if probe.is_some() && (gate.is_some() || command.is_some()) {
         bail!("--probe is mutually exclusive with --gate and --command");
@@ -366,7 +368,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     // Evidence for a merge is counted at its tree rather than at the change's
     // head, so the head check below is not the question this path answers.
     if let Some(target) = against {
-        return verify_against(ctx, &store, &change_id, &st, &target, note);
+        return verify_against(ctx, &store, &change_id, &st, &target, note, skip_green);
     }
     // Every path below records gate evidence, which status counts only at the
     // change's head.
@@ -546,6 +548,11 @@ impl Drop for ScratchWorktree {
 /// commit id does not. The target head is recorded beside it, because a merge
 /// with a moved target is a different merge and this evidence is about the
 /// earlier one.
+///
+/// `skip_green` reuses the evidence already recorded at that merged tree
+/// instead of rerunning the gate that produced it. Reuse is keyed by tree
+/// exactly as readiness is, so a gate this run skips is a gate status already
+/// counts as green, and the two never disagree about what is owed.
 fn verify_against(
     ctx: &Ctx,
     store: &Store,
@@ -553,6 +560,7 @@ fn verify_against(
     st: &ChangeState,
     target: &str,
     note: Option<String>,
+    skip_green: bool,
 ) -> Result<i32> {
     let toplevel = gitio::toplevel(&ctx.cwd)?;
     let declarations = gates::load(&toplevel)?;
@@ -588,21 +596,9 @@ fn verify_against(
         &synthesized,
     )?;
 
-    let path = super::lifecycle::worktree_path_for(&ctx.cwd, &format!("{}-against", st.slug))?;
-    let scratch = ScratchWorktree::create(&ctx.cwd, path, &synthesized)?;
     println!("merged tree: {merged_tree}");
     println!("synthesized merge: {synthesized}");
 
-    let scratch_ctx = Ctx {
-        cwd: scratch.path.clone(),
-        actor: ctx.actor.clone(),
-        actor_source: ctx.actor_source,
-        fallback_announced: ctx.fallback_announced.clone(),
-        harness: ctx.harness.clone(),
-        session: ctx.session.clone(),
-        model: ctx.model.clone(),
-        on_behalf_of: ctx.on_behalf_of.clone(),
-    };
     let total = required.len();
     let run_id = start_verification_run(
         ctx,
@@ -610,32 +606,73 @@ fn verify_against(
         change_id,
         &synthesized,
         VerificationRunMode::Sequential,
-        false,
+        skip_green,
         &required,
     )?;
-    let mut passed = 0;
+    let legacy_trees = status::legacy_evidence_trees(st, &ctx.cwd);
+    let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
+    let mut reused = Vec::new();
+    let mut to_run = Vec::new();
     for (name, gate) in required {
-        let code = record_verification(
-            &scratch_ctx,
-            store,
-            change_id,
-            VerificationInput {
-                run_id: Some(run_id.clone()),
-                probe: None,
-                gate: Some(name.clone()),
-                command: gate.command.clone(),
-                timeout_seconds: gate.timeout,
-                attested_result: None,
-                tested_revision: Some(synthesized.clone()),
-                execution_host: None,
-                runner: None,
-                note: note.clone(),
-                falsification: None,
-                against_target: Some(target_head.clone()),
-            },
-        )?;
-        if code == 0 {
-            passed += 1;
+        // Reuse is reuse of a *run*, so the recorded command must be the one
+        // declared now. Skipping on a name match would report a gate as
+        // satisfied by a run of something else.
+        let reusable = skip_green
+            .then(|| st.gate_evidence_at_tree(name, &merged_tree, &resolve_tree))
+            .flatten()
+            .filter(|evidence| {
+                evidence.green_at_head(st.dirty_tree_waiver.as_ref())
+                    && status::matches_declaration(evidence, gate)
+            });
+        if let Some(evidence) = reusable {
+            println!("gate {name}: skipped (green at the merged tree)");
+            reused.push((name.clone(), evidence.event_id.clone()));
+        } else {
+            to_run.push((name, gate));
+        }
+    }
+    append_reuses(ctx, store, change_id, &run_id, &synthesized, &reused)?;
+
+    let mut passed = reused.len();
+    // A checkout exists only to run a command in. Where every gate was
+    // answered at this tree already, there is no command left to run and the
+    // scratch worktree would be created and removed having held nothing.
+    if !to_run.is_empty() {
+        let path = super::lifecycle::worktree_path_for(&ctx.cwd, &format!("{}-against", st.slug))?;
+        let scratch = ScratchWorktree::create(&ctx.cwd, path, &synthesized)?;
+        let scratch_ctx = Ctx {
+            cwd: scratch.path.clone(),
+            actor: ctx.actor.clone(),
+            actor_source: ctx.actor_source,
+            fallback_announced: ctx.fallback_announced.clone(),
+            harness: ctx.harness.clone(),
+            session: ctx.session.clone(),
+            model: ctx.model.clone(),
+            on_behalf_of: ctx.on_behalf_of.clone(),
+        };
+        for (name, gate) in to_run {
+            let code = record_verification(
+                &scratch_ctx,
+                store,
+                change_id,
+                VerificationInput {
+                    run_id: Some(run_id.clone()),
+                    probe: None,
+                    gate: Some(name.clone()),
+                    command: gate.command.clone(),
+                    timeout_seconds: gate.timeout,
+                    attested_result: None,
+                    tested_revision: Some(synthesized.clone()),
+                    execution_host: None,
+                    runner: None,
+                    note: note.clone(),
+                    falsification: None,
+                    against_target: Some(target_head.clone()),
+                },
+            )?;
+            if code == 0 {
+                passed += 1;
+            }
         }
     }
     println!("gates: {passed}/{total} pass at the merged tree");
@@ -1698,44 +1735,314 @@ fn resolve_hold(state: &ChangeState, reference: &str, change_id: &str) -> Result
     }
 }
 
-pub fn integrate(
-    ctx: &Ctx,
-    reference: Option<&str>,
-    tags: Vec<String>,
-    into: Option<String>,
-    message: Option<String>,
-    cleanup: bool,
-    dry_run: bool,
-) -> Result<i32> {
+/// The review obligation an integration declares in place of a verdict
+/// nobody recorded, as the caller spelled it.
+pub struct DebtDeclaration {
+    pub reason: String,
+    pub kind: Option<DebtMissing>,
+}
+
+/// Everything an integration was asked for beyond which changes to land.
+pub struct IntegrateArgs {
+    pub tags: Vec<String>,
+    pub into: Option<String>,
+    pub message: Option<String>,
+    pub cleanup: bool,
+    pub dry_run: bool,
+    pub debt: Option<DebtDeclaration>,
+}
+
+pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Result<i32> {
+    let IntegrateArgs {
+        tags,
+        into,
+        message,
+        cleanup,
+        dry_run,
+        debt,
+    } = args;
     // A fork is where work goes to stay unintegrated on purpose. The refusal
     // comes before any store read, so it holds even in a fork whose base has
     // no ledger, and it names the way out rather than only the wall.
     super::fork::ensure_not_fork(&ctx.cwd)?;
-    match (reference, tags.is_empty()) {
-        (Some(reference), true) => integrate_one(
-            ctx,
-            reference,
-            into,
-            message,
-            cleanup,
-            ClosedBehavior::Refuse,
-            dry_run,
-        ),
-        (None, false) => {
+    match (references, tags.is_empty()) {
+        ([reference], true) => {
+            // Declared before the merge so the obligation is on the ledger
+            // even if integration then fails for an unrelated reason — but
+            // never under --dry-run, which promises to write nothing.
+            if let Some(debt) = debt.filter(|_| !dry_run) {
+                super::declare_debt(ctx, reference, debt.reason, debt.kind)?;
+            }
+            integrate_one(
+                ctx,
+                reference,
+                into,
+                message,
+                cleanup,
+                ClosedBehavior::Refuse,
+                dry_run,
+            )
+        }
+        (many, tags_empty) => {
+            if many.is_empty() && tags_empty {
+                bail!("provide a change or at least one --tag");
+            }
+            if !many.is_empty() && !tags_empty {
+                bail!("provide a change or --tag, not both");
+            }
+            // A queue lands several merges, and each is its own commit into
+            // its own recorded target. One message cannot name them all, and
+            // one destination would silently retarget members whose target is
+            // not the one named.
             if into.is_some() {
                 bail!("--into is only valid when integrating one change");
             }
             if message.is_some() {
                 bail!("--message is only valid when integrating one change");
             }
-            if dry_run {
-                bail!("--dry-run is only valid when integrating one change");
+            // A debt is a judgment about one patchset: what review it owes,
+            // and why that review could not run. One reason spread over every
+            // member records an obligation that binds to nothing in
+            // particular, which is the opposite of what the obligation is for.
+            if debt.is_some() {
+                bail!(
+                    "--debt is only valid when integrating one change: a debt reason binds to \
+                     one change's patchset, and a queue is for changes that are already green \
+                     or already carry their verdict"
+                );
             }
-            integrate_tagged(ctx, normalize_tags(tags)?, cleanup)
+            let selection = if many.is_empty() {
+                QueueSelection::Tagged(normalize_tags(tags)?)
+            } else {
+                QueueSelection::Named(many.to_vec())
+            };
+            integrate_queue(ctx, selection, cleanup, dry_run)
         }
-        (Some(_), false) => bail!("provide a change or --tag, not both"),
-        (None, true) => bail!("provide a change or at least one --tag"),
     }
+}
+
+/// How a queued run names the changes it will attempt.
+enum QueueSelection {
+    Named(Vec<String>),
+    Tagged(Vec<String>),
+}
+
+/// What one queued change's turn produced, in the terms the summary reports.
+enum QueueStep {
+    Landed(String),
+    Planned(String),
+    Skipped(String),
+    Stopped { code: i32, reason: String },
+}
+
+/// Integrate a series of changes in dependency order, stopping at the first
+/// one that needs a person.
+///
+/// The loop runs in the primary worktree, which is the checkout that holds
+/// the target branch and therefore the only one every merge can be performed
+/// from. Each change gets the same guarded path a single integration takes,
+/// preceded by the two repairs a queue can make on its own: replaying a
+/// branch whose target moved under it, and running the gates that have no
+/// answer at the tree the merge would ship. Anything else — a conflict a
+/// person must resolve, a red gate, a missing verdict — ends the run, because
+/// the changes behind it would be judged against a target that never moved.
+fn integrate_queue(
+    ctx: &Ctx,
+    selection: QueueSelection,
+    cleanup: bool,
+    dry_run: bool,
+) -> Result<i32> {
+    let queue_ctx = Ctx {
+        cwd: gitio::primary_worktree(&ctx.cwd)?,
+        actor: ctx.actor.clone(),
+        actor_source: ctx.actor_source,
+        fallback_announced: ctx.fallback_announced.clone(),
+        harness: ctx.harness.clone(),
+        session: ctx.session.clone(),
+        model: ctx.model.clone(),
+        on_behalf_of: ctx.on_behalf_of.clone(),
+    };
+    let store = queue_ctx.store()?;
+    let selected = match &selection {
+        QueueSelection::Tagged(tags) => {
+            let selected = queue_ctx
+                .load_all_states(&store)?
+                .into_iter()
+                .filter(|(_, state)| tags.iter().all(|tag| state.tags.contains(tag)))
+                .collect::<BTreeMap<_, _>>();
+            if selected.is_empty() {
+                bail!("no changes match tags {}", tags.join(", "));
+            }
+            selected
+        }
+        QueueSelection::Named(references) => {
+            let mut selected = BTreeMap::new();
+            for reference in references {
+                let change_id = store.resolve_change(reference)?;
+                // Two spellings of one change would make the queue attempt it
+                // twice, and the second attempt would find it closed by the
+                // first — a confusing way to say the request was malformed.
+                if selected.contains_key(&change_id) {
+                    bail!("{change_id} is named more than once in one queue");
+                }
+                let state = state::reduce(&store.load_events(&change_id)?)?;
+                selected.insert(change_id, state);
+            }
+            selected
+        }
+    };
+    let order = dependency_order(&selected)?;
+
+    println!("queue: {} changes in dependency order", order.len());
+    let mut steps: Vec<(String, QueueStep)> = Vec::new();
+    let mut stop_code = 0;
+    let mut remaining = order.iter();
+    for change_id in remaining.by_ref() {
+        println!();
+        let step = if dry_run {
+            queue_dry_run(&queue_ctx, &store, change_id)?
+        } else {
+            queue_step(&queue_ctx, &store, change_id, cleanup)?
+        };
+        let stopped = matches!(step, QueueStep::Stopped { .. });
+        if let QueueStep::Stopped { code, .. } = &step {
+            stop_code = *code;
+        }
+        steps.push((change_id.clone(), step));
+        if stopped {
+            break;
+        }
+    }
+    let not_attempted = remaining.cloned().collect::<Vec<_>>();
+
+    println!();
+    println!("queue summary:");
+    for (change_id, step) in &steps {
+        match step {
+            QueueStep::Landed(merged) => println!("  landed: {change_id} at {merged}"),
+            QueueStep::Planned(target) => println!("  would land: {change_id} into {target}"),
+            QueueStep::Skipped(reason) => println!("  skipped: {change_id} — {reason}"),
+            QueueStep::Stopped { reason, .. } => println!("  stopped: {change_id} — {reason}"),
+        }
+    }
+    for change_id in &not_attempted {
+        println!("  not attempted: {change_id}");
+    }
+    Ok(stop_code)
+}
+
+/// One change's turn in the queue.
+fn queue_step(ctx: &Ctx, store: &Store, change_id: &str, cleanup: bool) -> Result<QueueStep> {
+    let st = state::reduce(&store.load_events(change_id)?)?;
+    if st.is_closed() {
+        println!("{change_id}: {}", change_status(&st));
+        return Ok(QueueStep::Skipped(change_status(&st).to_string()));
+    }
+    println!("{change_id}: integrating into {}", st.target_branch);
+
+    let mut report = ctx.report(store, &st)?;
+    if report.needs_rebase {
+        let code = rebase(ctx, change_id, false)?;
+        if code != 0 {
+            return Ok(QueueStep::Stopped {
+                code,
+                reason: format!("replaying onto {} needs a person", st.target_branch),
+            });
+        }
+        let st = state::reduce(&store.load_events(change_id)?)?;
+        report = ctx.report(store, &st)?;
+    }
+
+    // Only where nothing has answered for the content that would ship: a
+    // fully green change owes no run, and recording one would be evidence
+    // about a question already settled.
+    if report.blockers.iter().any(|blocker| {
+        matches!(
+            blocker,
+            status::Blocker::GatesNotGreen | status::Blocker::MergedTreeUnevaluated
+        )
+    }) {
+        let st = state::reduce(&store.load_events(change_id)?)?;
+        let target = st.target_branch.clone();
+        let code = verify_against(ctx, store, change_id, &st, &target, None, true)?;
+        let st = state::reduce(&store.load_events(change_id)?)?;
+        report = ctx.report(store, &st)?;
+        if code != 0 {
+            let failed = report
+                .gates
+                .iter()
+                .filter(|gate| !gate.green_at_head)
+                .map(|gate| gate.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Ok(QueueStep::Stopped {
+                code: status::Blocker::GatesNotGreen.exit_code(),
+                reason: format!("gate {failed} is not green at the merged tree"),
+            });
+        }
+    }
+
+    let st = state::reduce(&store.load_events(change_id)?)?;
+    if !report.integrate_ready {
+        eprint!("{}", render::blocker_explanation(&st, &report));
+        return Ok(QueueStep::Stopped {
+            code: status::check_exit_code(&report),
+            reason: report.ready_reason.clone(),
+        });
+    }
+
+    let code = integrate_one(
+        ctx,
+        change_id,
+        None,
+        None,
+        cleanup,
+        ClosedBehavior::SkipTagged,
+        false,
+    )?;
+    if code != 0 {
+        return Ok(QueueStep::Stopped {
+            code,
+            reason: "integration refused".into(),
+        });
+    }
+    // A change can close between this turn's readiness read and the target
+    // lock the merge waits on, and the guarded path reports that as a skip
+    // rather than an error. The closure it left says which happened.
+    let closed = state::reduce(&store.load_events(change_id)?)?;
+    match closed
+        .closure
+        .as_ref()
+        .and_then(|c| c.integrated_commit.as_deref())
+    {
+        Some(merged) => Ok(QueueStep::Landed(merged.to_string())),
+        None => Ok(QueueStep::Skipped(change_status(&closed).to_string())),
+    }
+}
+
+/// What the queue would do to one change, reading only what is already
+/// recorded. Nothing is replayed, run, merged, or written.
+fn queue_dry_run(ctx: &Ctx, store: &Store, change_id: &str) -> Result<QueueStep> {
+    let st = state::reduce(&store.load_events(change_id)?)?;
+    if st.is_closed() {
+        println!("dry-run: would skip {change_id} ({})", change_status(&st));
+        return Ok(QueueStep::Skipped(change_status(&st).to_string()));
+    }
+    let report = ctx.report(store, &st)?;
+    if report.needs_rebase {
+        println!(
+            "dry-run: would replay {change_id} onto {} first",
+            st.target_branch
+        );
+    }
+    for gate in report.gates.iter().filter(|gate| !gate.green_at_head) {
+        println!("dry-run: would run gate {} for {change_id}", gate.name);
+    }
+    println!(
+        "dry-run: would integrate {change_id} into {}",
+        st.target_branch
+    );
+    Ok(QueueStep::Planned(st.target_branch))
 }
 
 #[derive(Clone, Copy)]
@@ -2129,44 +2436,6 @@ fn integrate_dry_run(
     } else {
         0
     })
-}
-
-fn integrate_tagged(ctx: &Ctx, tags: Vec<String>, cleanup: bool) -> Result<i32> {
-    let batch_ctx = Ctx {
-        cwd: gitio::primary_worktree(&ctx.cwd)?,
-        actor: ctx.actor.clone(),
-        actor_source: ctx.actor_source,
-        fallback_announced: ctx.fallback_announced.clone(),
-        harness: ctx.harness.clone(),
-        session: ctx.session.clone(),
-        model: ctx.model.clone(),
-        on_behalf_of: ctx.on_behalf_of.clone(),
-    };
-    let store = batch_ctx.store()?;
-    let selected = batch_ctx
-        .load_all_states(&store)?
-        .into_iter()
-        .filter(|(_, state)| tags.iter().all(|tag| state.tags.contains(tag)))
-        .collect::<BTreeMap<_, _>>();
-    if selected.is_empty() {
-        bail!("no changes match tags {}", tags.join(", "));
-    }
-
-    for change_id in dependency_order(&selected)? {
-        let code = integrate_one(
-            &batch_ctx,
-            &change_id,
-            None,
-            None,
-            cleanup,
-            ClosedBehavior::SkipTagged,
-            false,
-        )?;
-        if code != 0 {
-            return Ok(code);
-        }
-    }
-    Ok(0)
 }
 
 /// Return selected changes in dependency order. Unrelated members are stable

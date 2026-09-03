@@ -52,7 +52,7 @@ pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_pr_state};
 pub(crate) use gatekeeping::dependency_order;
 pub use gatekeeping::{
     check_selection, close, done, hold, integrate, rebase, release_hold, snapshot_with_verify,
-    verify, CloseArgs, VerifyArgs,
+    verify, CloseArgs, DebtDeclaration, IntegrateArgs, VerifyArgs,
 };
 pub use history::{record_rewrite, resolve_rewritten};
 pub use hooks::{

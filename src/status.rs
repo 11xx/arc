@@ -728,7 +728,7 @@ impl DangerScope {
 /// Resolved once per distinct revision rather than per gate, and only where a
 /// tree-keyed reading is what the report needs. A revision whose commit is
 /// gone is absent here, and evidence naming it then matches no tree.
-fn legacy_evidence_trees(state: &ChangeState, cwd: &Path) -> BTreeMap<String, String> {
+pub(crate) fn legacy_evidence_trees(state: &ChangeState, cwd: &Path) -> BTreeMap<String, String> {
     state
         .verifications
         .iter()

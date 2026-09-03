@@ -879,7 +879,9 @@ enum Cmd {
         /// Run all declared gates concurrently and append evidence in name order
         #[arg(long)]
         parallel: bool,
-        /// With --all, record reuse of passing evidence already green at the current head
+        /// Record reuse of passing evidence instead of rerunning the gate that
+        /// produced it: with --all, evidence green at the current head; with
+        /// --against, evidence green at the merged tree
         #[arg(long = "skip-green")]
         skip_green: bool,
         /// Gate name from .arc/gates.toml
@@ -950,9 +952,11 @@ enum Cmd {
         /// committed, and evidence at the head says nothing about it. This
         /// synthesizes that merge, checks it out on its own, runs the declared
         /// gates there, and records the result against the merged tree. The
-        /// scratch checkout is removed whatever the gates do. The evidence is
-        /// spent as soon as the target moves again, because that is a
-        /// different merge.
+        /// scratch checkout is removed whatever the gates do, and is not
+        /// created at all when no gate is left to run. The evidence is spent
+        /// as soon as the target moves again, because that is a different
+        /// merge. With --skip-green, a gate already green at that merged tree
+        /// records reuse rather than running a second time.
         #[arg(long, value_name = "BRANCH")]
         against: Option<String>,
     },
@@ -1067,10 +1071,13 @@ enum Cmd {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Guarded merge of one change or a dependency-ordered tagged series
+    /// Guarded merge of one change, or of a dependency-ordered queue named
+    /// by several changes or by --tag
     Integrate {
-        /// Change to integrate; omit only when selecting with --tag
-        change: Option<String>,
+        /// Changes to integrate. Several run as a queue, in dependency order,
+        /// stopping at the first that needs a person. Omit only when
+        /// selecting with --tag
+        change: Vec<String>,
         /// Integrate every change carrying all supplied tags, in dependency order
         #[arg(long)]
         tag: Vec<String>,
@@ -1087,7 +1094,9 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
         /// Integrate without an independent verdict, recording the review this
-        /// change still owes. It stands in for a verdict nobody recorded — and
+        /// change still owes. One change only: the reason binds to one
+        /// patchset, so it has nothing to say about a queue. It stands in
+        /// for a verdict nobody recorded — and
         /// for a self-approval policy would reject — in the same invocation.
         /// It never overrules a reviewer who read this patchset and asked for
         /// changes: that is a verdict, not a missing one. The obligation
@@ -2540,36 +2549,38 @@ fn run(cli: Cli) -> Result<i32> {
             debt,
             debt_kind,
         } => {
-            let change = select(change)?;
-            if debt.is_some() && !tag.is_empty() {
-                if change.is_some() {
-                    bail!("provide a change or --tag, not both");
+            // A list names its own members; `--change` names one, and mixing
+            // the two spellings leaves no reading of what the run was asked
+            // to land.
+            let changes = match change.as_slice() {
+                [] => select(None)?.into_iter().collect::<Vec<_>>(),
+                [one] => select(Some(one.clone()))?.into_iter().collect(),
+                many if flag_change.is_some() => {
+                    bail!(
+                        "{} changes were named as arguments and one more as --change; \
+                         name them all the same way",
+                        many.len()
+                    )
                 }
-                bail!("--debt names one change; it cannot apply to a --tag series");
-            }
-            if debt.is_some() && change.is_none() {
-                bail!("--debt requires a change");
-            }
+                many => many.to_vec(),
+            };
             // A fork refusal means no integration happened, so it must not
             // create an audit obligation for work that never shipped.
             fork::ensure_not_fork(&ctx.cwd)?;
-            // Declared before the merge so the obligation is on the ledger
-            // even if integration then fails for an unrelated reason — but
-            // never under --dry-run, which promises to write nothing.
-            if let Some(reason) = debt.filter(|_| !dry_run) {
-                let change = change
-                    .as_deref()
-                    .expect("debt selection was validated above");
-                commands::declare_debt(&ctx, change, reason, debt_kind)?;
-            }
             commands::integrate(
                 &ctx,
-                change.as_deref(),
-                tag,
-                into,
-                message,
-                cleanup,
-                dry_run,
+                &changes,
+                commands::IntegrateArgs {
+                    tags: tag,
+                    into,
+                    message,
+                    cleanup,
+                    dry_run,
+                    debt: debt.map(|reason| commands::DebtDeclaration {
+                        reason,
+                        kind: debt_kind,
+                    }),
+                },
             )
         }
         Cmd::Debt {

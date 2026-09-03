@@ -254,7 +254,8 @@ RUN A CHANGE
   arc resolve                        Dispose of a finding.
     --evidence-event <id>            Cite the verification run that justifies it.
   arc check                          Integration preflight; exit code names the blocker.
-  arc integrate [--tag <t>]          Guarded --no-ff merge once the gates are green.
+  arc integrate <c>...               Guarded --no-ff merge once the gates are green.
+    <c> <c> <c>, or --tag <t>        Land a queue, in dependency order.
   arc audit <change> --verdict <v>   Review an already-integrated revision.
   arc close                          Terminal outcome arc did not merge itself.
 
@@ -263,6 +264,19 @@ RUN A CHANGE
   resolution is yours, and aborting would throw it away — with the conflicting
   files and the commands that finish the replay. Resolve, `git rebase
   --continue`, then `arc snapshot --verify`.
+
+  Several changes, or `--tag`, make `integrate` a queue: dependency order, and
+  per member the two repairs that need no judgement — replaying a branch its
+  target moved under, and running the gates that have no answer at the tree
+  the merge would ship. It stops at the first member that needs a person: a
+  conflict, a red gate, a missing verdict. The exit code is that member's own
+  blocker, and the closing summary names what landed with its merge revision,
+  what stopped the run and why, and what was never attempted. `--dry-run`
+  reports the same plan without replaying, running, or merging anything.
+  `--into`, `--message`, and `--debt` stay single-change: a queue lands several
+  merges, each into its own recorded target, and none of the three has one
+  thing to name — a debt reason least of all, since it is a judgment about one
+  patchset. A queue is for changes already green or already carrying a verdict.
 
   `--no-worktree` means in place, not nowhere: a clean checkout already on the
   target is checked out onto the new branch and recorded as the change's
@@ -494,9 +508,11 @@ RULES THAT CHANGE WHAT YOU DO
     nothing new: a rebase that moves the base without touching the diff lands
     on the tree that was evaluated, and the evidence carries over to it. The
     gate line reads `inherited from <revision>` wherever the run that answered
-    was against another commit holding that tree. `integrate` never runs a
+    was against another commit holding that tree. A single `integrate` runs no
     gate; it checks that the merge it made carries the tree that was
-    evaluated, and undoes it otherwise.
+    evaluated, and undoes it otherwise. A queue runs the ones with no answer
+    at that tree, because it moves the target itself and every member behind
+    the one it just landed is now evaluating a different merge.
   - A gate that passed is not evidence that it could have failed. Watch it
     fail first, then record the pass with `--falsified-by <failing-event>
     --predicted "<why it should fail>"`; the gate line then reads
