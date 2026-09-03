@@ -2117,29 +2117,48 @@ fn open_discussion_for_answer(ctx: &Ctx, filename: &str) -> Result<(PathBuf, Pat
     Ok((hot, path, topic))
 }
 
-/// Record that an open artifact was checked against the source at the
-/// project's current anchor head. An unborn or otherwise headless anchor still
-/// gets the verification fact; it simply has no revision to compare later.
+/// Record that an open artifact was checked against the source the checker
+/// was standing in. An unborn or otherwise headless checkout still gets the
+/// verification fact; it simply has no revision to compare later.
+///
+/// The revision is the head of the checkout that was read. From the primary
+/// checkout that is the project anchor. From a fork's worktree it is the
+/// fork's own head, recorded with the scope that names it, because a fork
+/// carries commits the anchor does not: stamping the anchor there would
+/// credit the check to code nobody opened.
 fn verified(ctx: &Ctx, filename: &str, note: Option<&str>) -> Result<i32> {
     let resolution = resolve(&ctx.cwd)?;
     let dir = resolution.directory.clone();
     let _transition = lock_journal_transition(&dir)?;
     let (dir, _path, topic, _kind) = open_artifact(ctx, filename)?;
-    let verified_revision = match resolution.anchor.as_deref() {
-        Some(anchor) => gitio::head_if_present(anchor)?,
-        None => None,
+    let fork = crate::commands::fork::current(&ctx.cwd).ok().flatten();
+    let (verified_revision, verified_scope) = match &fork {
+        Some(fork) => (
+            gitio::head_if_present(&fork.worktree)?,
+            Some(format!("fork:{}", fork.slug)),
+        ),
+        None => (
+            match resolution.anchor.as_deref() {
+                Some(anchor) => gitio::head_if_present(anchor)?,
+                None => None,
+            },
+            None,
+        ),
     };
     let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "verified");
     event.file = Some(filename.to_string());
     event.verified_revision = verified_revision;
+    event.verified_scope = verified_scope;
     event.note = note.map(str::to_string);
     append_event(ctx, &dir, &event)?;
     println!(
-        "verified: {filename}{}",
+        "verified: {filename}{}{}",
         event
             .verified_revision
             .as_deref()
             .map(|revision| format!(" at {revision}"))
+            .unwrap_or_default(),
+        fork.map(|fork| format!(" in fork {}", fork.slug))
             .unwrap_or_default()
     );
     Ok(0)
@@ -2730,6 +2749,14 @@ pub(crate) struct JournalEvent {
     /// anchor, remains valid `journal-events/1` input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     verified_revision: Option<String>,
+    /// Which checkout `verified_revision` names, when it is not the project
+    /// anchor: `fork:<slug>` for a check made inside a fork's worktree. The
+    /// anchor's head and a fork's head are different code, and a stamp that
+    /// did not say which one was read would credit the check to source
+    /// nobody looked at. Absent means the anchor, which is what every stamp
+    /// written without the field meant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verified_scope: Option<String>,
     /// The project whose journal holds the artifact named in `decision`,
     /// when it is not this one. Recorded as the registry slug, which is
     /// stable against a label that follows a directory rename.
@@ -2896,6 +2923,7 @@ impl JournalEvent {
             note: None,
             decision: None,
             verified_revision: None,
+            verified_scope: None,
             decision_project: None,
             decision_kind: None,
             decision_digest: None,
@@ -3403,12 +3431,18 @@ fn event_message(event: &JournalEvent) -> String {
             .clone()
             .unwrap_or_else(|| "wrote artifact".into()),
         "verified" => format!(
-            "verified {}{}{}",
+            "verified {}{}{}{}",
             event.file.as_deref().unwrap_or_default(),
             event
                 .verified_revision
                 .as_deref()
                 .map(|revision| format!(" at {revision}"))
+                .unwrap_or_default(),
+            event
+                .verified_scope
+                .as_deref()
+                .and_then(|scope| scope.strip_prefix("fork:"))
+                .map(|slug| format!(" in fork {slug}"))
                 .unwrap_or_default(),
             event
                 .note
@@ -3933,6 +3967,9 @@ pub(crate) struct ArtifactEntry {
 pub(crate) struct VerificationStamp {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) revision: Option<String>,
+    /// Which checkout `revision` names, when it is not the project anchor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) scope: Option<String>,
     pub(crate) timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) actor: Option<String>,
@@ -4327,12 +4364,20 @@ fn verification_stamp(
         .iter()
         .rev()
         .find(|event| event.event == "verified" && event.file.as_deref() == Some(filename))?;
-    let moved = match (event.verified_revision.as_deref(), current_revision) {
-        (Some(verified), Some(current)) => Some(verified != current),
+    // A revision read inside a fork is not on the anchor's line of history,
+    // so the anchor having moved says nothing about whether the check still
+    // holds. An unanswerable comparison is left unanswered.
+    let moved = match (
+        event.verified_scope.as_deref(),
+        event.verified_revision.as_deref(),
+        current_revision,
+    ) {
+        (None, Some(verified), Some(current)) => Some(verified != current),
         _ => None,
     };
     Some(VerificationStamp {
         revision: event.verified_revision.clone(),
+        scope: event.verified_scope.clone(),
         timestamp: event.ts.clone(),
         actor: event.actor.clone(),
         on_behalf_of: event.on_behalf_of.clone(),
@@ -4714,6 +4759,18 @@ fn render_verification(verification: Option<&VerificationStamp>) -> String {
         .clone()
         .or_else(|| verification.model.clone())
         .unwrap_or_else(|| verification.harness.clone());
+    // Where a check was made is part of what it claims: a fork's head is not
+    // the anchor's, and the row says so instead of letting a reader assume
+    // the revision is one they can look up on the project's line of history.
+    if let Some(scope) = verification.scope.as_deref() {
+        let scope = scope.strip_prefix("fork:").map(|slug| format!("fork {slug}"));
+        if let (Some(revision), Some(scope)) = (&verification.revision, scope) {
+            return format!(
+                " [verified at {} in {scope}{age} by {checker}]",
+                short_revision(revision)
+            );
+        }
+    }
     // Only a stamp that has stopped holding needs saying. A current one is
     // already what "verified" means, and an unrevisioned one cannot be
     // compared at all — the missing revision says so without a second word.

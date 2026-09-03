@@ -428,6 +428,24 @@ pub fn checkouts(entries: &[ForkEntry]) -> Vec<crate::worktree_usage::ForkWorktr
         .collect()
 }
 
+/// The fork whose checkout the caller stands in, when it is one.
+pub struct CurrentFork {
+    pub slug: String,
+    pub worktree: std::path::PathBuf,
+}
+
+/// Answer whether this checkout is a fork's, for the commands whose meaning
+/// depends on it. The resolver owns the answer; this only carries it out of
+/// the module in the shape a caller can use.
+pub fn current(cwd: &Path) -> Result<Option<CurrentFork>> {
+    Ok(identity::by_current_path(cwd)?.and_then(|fork| {
+        fork.worktree().map(|worktree| CurrentFork {
+            slug: fork.slug().to_string(),
+            worktree: worktree.to_path_buf(),
+        })
+    }))
+}
+
 /// The identity that opened a fork, and how to reach the session that did.
 ///
 /// A fork outlives the session that made it, and its marker records who was
