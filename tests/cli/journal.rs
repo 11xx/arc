@@ -10790,3 +10790,110 @@ fn a_consumed_artifact_reports_terminal_availability() {
     assert_eq!(rescued["availability"], "terminal");
     assert_eq!(rescued["claims"][0]["closure"]["ended_by"], "consumed");
 }
+
+#[test]
+fn journal_note_uniquifies_a_name_already_taken_in_cold_storage() {
+    let repo = Repo::new();
+    let hot = journal_dir(&repo);
+    let cold = PathBuf::from(format!("{}-archive", hot.display()));
+    fs::create_dir_all(&hot).unwrap();
+    fs::create_dir_all(&cold).unwrap();
+    // Which second the note is stamped with is the clock's to choose, so every
+    // second it could reach is occupied in cold storage beforehand.
+    let now = chrono::Utc::now();
+    for offset in 0..3 {
+        let stamp = (now + chrono::Duration::seconds(offset))
+            .format("%Y%m%dT%H%M%SZ")
+            .to_string();
+        fs::write(cold.join(format!("{stamp}-collide-note.md")), "# First\n").unwrap();
+    }
+
+    let body = repo.home.join("second.md");
+    fs::write(&body, "# Second\n").unwrap();
+    let printed = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "collide",
+        "--kind",
+        "note",
+        "--no-scaffold",
+        "--body-file",
+        body.to_str().unwrap(),
+    ]));
+    let path = PathBuf::from(printed.trim());
+    let name = path.file_name().unwrap().to_string_lossy().to_string();
+    assert!(name.ends_with("-collide-note-2.md"), "{name}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "# Second\n");
+    let stamp = name.strip_suffix("-collide-note-2.md").unwrap();
+    let first = format!("{stamp}-collide-note.md");
+    assert!(cold.join(&first).is_file());
+    assert_eq!(fs::read_to_string(cold.join(&first)).unwrap(), "# First\n");
+
+    let filed = journal_events(&hot).pop().unwrap();
+    assert_eq!(filed["file"], name);
+    assert_eq!(filed["topic"], "collide");
+
+    let catchup = stdout(repo.arc(&repo.root).args(["journal", "catchup"]));
+    assert!(catchup.contains(&name), "{catchup}");
+
+    repo.arc(&repo.root)
+        .args(["journal", "archive", &name])
+        .assert()
+        .success();
+    assert!(!hot.join(&name).exists());
+    assert!(cold.join(&name).is_file());
+    assert!(cold.join(&first).is_file());
+}
+
+#[test]
+fn journal_spool_promote_uniquifies_a_name_taken_while_the_write_waited() {
+    let repo = Repo::new();
+    let hot = journal_dir(&repo);
+    let cold = PathBuf::from(format!("{}-archive", hot.display()));
+    fs::create_dir_all(&hot).unwrap();
+    fs::create_dir_all(&cold).unwrap();
+    let body = repo.home.join("parked.md");
+    fs::write(&body, "# Parked\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "note",
+            "parked",
+            "--kind",
+            "note",
+            "--no-scaffold",
+            "--spool",
+            "--body-file",
+            body.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // The name the parked write derived belongs to an artifact that reached
+    // cold storage while it waited.
+    let spooled: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(
+            fs::read_dir(repo.root.join(".arc/outbox"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let taken = spooled["filename"].as_str().unwrap().to_string();
+    fs::write(cold.join(&taken), "# Filed earlier\n").unwrap();
+
+    let promoted = stdout(repo.arc(&repo.root).args(["journal", "spool", "--promote"]));
+    let expected = taken.replace("-note.md", "-note-2.md");
+    assert!(promoted.contains(&expected), "{promoted}");
+    assert_eq!(
+        fs::read_to_string(hot.join(&expected)).unwrap(),
+        "# Parked\n"
+    );
+    assert!(!hot.join(&taken).exists());
+    let filed = journal_events(&hot).pop().unwrap();
+    assert_eq!(filed["file"], expected);
+}
