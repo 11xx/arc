@@ -92,7 +92,10 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   the merged tree beside the target head it was computed from. That evidence is
   spent as soon as the target moves again, exactly as a verdict is spent by a
   new commit. A head already on the target tip merges to the tree it already
-  has and needs nothing new. `needs-rebase` keeps its narrower meaning: the
+  has and needs nothing new: a rebase that moves the base without changing the
+  diff lands on the evaluated tree, and the gate reads `inherited from
+  <revision>` rather than running again. `needs-rebase` keeps its narrower
+  meaning: the
   text conflicts, so there is no single merged tree to evaluate at all.
 - **Snapshots record Git author and committer identity.** When a claim is live,
   the snapshot also records its generation and actor at snapshot time. Projects
@@ -843,7 +846,7 @@ worktree, the advice is the rerun. Once the tree is clean the advice
 becomes `run_gate:<gate>`, since
 evidence already recorded cannot be repaired by cleaning; only a fresh run
 replaces it. The `clean_worktree:<gate>` action arrived in `arc-status/7`;
-the current schema is `arc-status/15`.
+the current schema is `arc-status/16`.
 
 A gate that passed says nothing about whether it could have failed. A check
 watched to fail for a stated reason, then to pass once that reason was removed,

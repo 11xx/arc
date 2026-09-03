@@ -478,8 +478,12 @@ RULES THAT CHANGE WHAT YOU DO
     merge, in a scratch checkout it removes afterwards. The result is spent
     the moment the target moves, because that is a different merge. A head
     already on the target tip merges to the tree it already has and needs
-    nothing new. `integrate` never runs a gate; it checks that the merge it
-    made carries the tree that was evaluated, and undoes it otherwise.
+    nothing new: a rebase that moves the base without touching the diff lands
+    on the tree that was evaluated, and the evidence carries over to it. The
+    gate line reads `inherited from <revision>` wherever the run that answered
+    was against another commit holding that tree. `integrate` never runs a
+    gate; it checks that the merge it made carries the tree that was
+    evaluated, and undoes it otherwise.
   - A gate that passed is not evidence that it could have failed. Watch it
     fail first, then record the pass with `--falsified-by <failing-event>
     --predicted "<why it should fail>"`; the gate line then reads
