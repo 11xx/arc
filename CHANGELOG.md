@@ -10,6 +10,8 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2026.9.3] - 2026-09-03
+
 ### Added
 
 - `ARC_SANDBOX=<prefix>`, or `--sandbox <prefix>` on any command, stands in for
