@@ -1,6 +1,8 @@
 use crate::gates::GatesFile;
 use crate::gitio;
-use crate::model::{MessageSeverity, MessageType, ProbePhase, Verdict, VerifyResult};
+use crate::model::{
+    Falsification, MessageSeverity, MessageType, ProbePhase, Verdict, VerifyResult,
+};
 use crate::policy::PolicyFile;
 use crate::state::{self, ChangeState, ClaimIdentity, GitIdentity};
 use anyhow::Result;
@@ -9,7 +11,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/13";
+pub const STATUS_SCHEMA: &str = "arc-status/14";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// Two identities arc assumed cannot establish that two people acted. The
@@ -91,6 +93,22 @@ pub struct BlockerStatus {
     pub blockers_ready: Vec<DependencyChangeStatus>,
 }
 
+/// Whether a gate's passing evidence was ever shown capable of failing.
+///
+/// A pass alone cannot say. `Discriminating` means the same check was recorded
+/// failing at an earlier revision of this change, for a reason predicted
+/// before it ran, and this run answers that failure. `Undiscriminated` means
+/// no such failure was recorded — the usual case, and not a defect.
+///
+/// Advisory throughout: nothing here participates in readiness, gate results,
+/// or exit codes.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Discrimination {
+    Discriminating,
+    Undiscriminated,
+}
+
 #[derive(Debug, Serialize)]
 pub struct GateStatus {
     pub name: String,
@@ -134,6 +152,15 @@ pub struct GateStatus {
     pub output_tail: Option<String>,
     #[serde(skip_serializing_if = "is_false")]
     pub timed_out: bool,
+    /// Whether the passing evidence at head was ever shown capable of failing.
+    /// Absent when the head evidence is not a pass: discrimination is a
+    /// property of a pass, and a failure or a missing run has none to report.
+    /// Additive in `arc-status/14`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discrimination: Option<Discrimination>,
+    /// The failure that evidence answers, when it names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub falsification: Option<Falsification>,
 }
 
 impl GateStatus {
@@ -992,6 +1019,13 @@ fn build_report(
                     .and_then(|e| e.output_tail.clone()),
                 timed_out: evidence
                     .is_some_and(|e| e.result == crate::model::VerifyResult::Fail && e.timed_out),
+                discrimination: evidence
+                    .filter(|e| e.result == crate::model::VerifyResult::Pass)
+                    .map(|e| match e.falsification {
+                        Some(_) => Discrimination::Discriminating,
+                        None => Discrimination::Undiscriminated,
+                    }),
+                falsification: evidence.and_then(|e| e.falsification.clone()),
             }
         })
         .collect();
