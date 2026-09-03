@@ -1186,6 +1186,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: HistoryCmd,
     },
+    /// Rewrite this repository's history, carrying every recorded revision
+    /// forward
+    Rewrite {
+        #[command(subcommand)]
+        cmd: RewriteCmd,
+    },
     /// Record and list caller-declared review passes
     Pass {
         #[command(subcommand)]
@@ -1501,8 +1507,7 @@ enum ForgeCmd {
 
 #[derive(Subcommand)]
 enum HistoryCmd {
-    /// Record a rewrite the operator performed, with its commit map. arc never
-    /// rewrites history, offers to, or computes the mapping
+    /// Record a rewrite performed elsewhere, with its commit map
     Rewrite {
         /// Commit map (`<old> <new>` per line, as git filter-repo writes), or
         /// '-' for stdin
@@ -1519,6 +1524,28 @@ enum HistoryCmd {
     Resolve {
         /// A revision a rewrite may have moved; the surviving one is printed
         revision: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RewriteCmd {
+    /// Recreate every commit from --from to the branch head so it is signed by
+    /// one key, moving the refs and recording the map
+    Sign {
+        /// The key to sign with; Git's configured signing key by default
+        #[arg(long)]
+        key: Option<String>,
+        /// Oldest commit to recreate; by default the oldest whose signature is
+        /// missing or made by another key
+        #[arg(long)]
+        from: Option<String>,
+        /// Print the map the rewrite would record and stop
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Recreate the commits without signing them, for a repository with no
+        /// signing key
+        #[arg(long = "no-sign", conflicts_with = "key")]
+        no_sign: bool,
     },
 }
 
@@ -2792,6 +2819,22 @@ fn run(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             HistoryCmd::Resolve { revision } => commands::resolve_rewritten(&ctx, &revision),
+        },
+        Cmd::Rewrite { cmd } => match cmd {
+            RewriteCmd::Sign {
+                key,
+                from,
+                dry_run,
+                no_sign,
+            } => commands::rewrite_sign(
+                &ctx,
+                commands::SignArgs {
+                    key,
+                    from,
+                    dry_run,
+                    no_sign,
+                },
+            ),
         },
         Cmd::Pass { cmd } => match cmd {
             PassCmd::Open { member, note } => {
