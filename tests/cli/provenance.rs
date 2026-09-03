@@ -520,29 +520,19 @@ fn a_ledger_without_provenance_keeps_comparing_names() {
     );
 }
 
-/// Two identities nobody declared cannot show that two people acted, so the
-/// self-approval guard treats an assumed identity as unproven rather than as a
-/// name that happens to differ.
+/// A declared reviewer is a claim somebody made, and it stands against an
+/// authoring identity arc invented: the reviewer said it is somebody else.
+/// Every independence surface reads that the same way, so the approval carries
+/// the merge and an audit of the shipped work accepts the same reviewer.
 #[test]
-fn self_approval_fails_closed_on_an_assumed_identity() {
-    let repo = Repo::new();
-    fs::create_dir_all(repo.root.join(".arc")).unwrap();
-    fs::write(
-        repo.root.join(".arc/policy.toml"),
-        "[policy]\nforbid_self_approval = true\n",
-    )
-    .unwrap();
-    git(&repo.root, &["add", ".arc/policy.toml"]);
-    git(&repo.root, &["commit", "-m", "test: forbid self approval"]);
-    stdout(repo.arc(&repo.root).args(["begin", "unproven"]));
-    let wt = repo.home.join(".worktrees/repo-unproven");
+fn a_declared_reviewer_is_independent_of_an_assumed_author() {
+    let repo = repo_with_self_approval_policy();
+    stdout(repo.arc(&repo.root).args(["begin", "assumed-author"]));
+    let wt = repo.home.join(".worktrees/repo-assumed-author");
     repo.commit(&wt, "work.rs", "done\n", "feat: work");
-
-    // Snapshot with an assumed identity, review with a declared one that
-    // happens to differ: independence is still unproven.
     repo.arc(&wt)
         .env_remove("ARC_ACTOR")
-        .args(["snapshot", "unproven"])
+        .args(["snapshot", "assumed-author"])
         .assert()
         .success();
     repo.arc(&wt)
@@ -550,14 +540,62 @@ fn self_approval_fails_closed_on_an_assumed_identity() {
             "--actor",
             "someone-else",
             "review",
-            "unproven",
+            "assumed-author",
             "--verdict",
             "approved",
         ])
         .assert()
         .success();
 
-    let status = json_stdout(repo.arc(&wt).args(["status", "unproven", "--json"]));
+    let status = json_stdout(repo.arc(&wt).args(["status", "assumed-author", "--json"]));
+    assert_eq!(
+        status["verdict"]["valid_for_current_head"], true,
+        "{status}"
+    );
+    assert!(status["approval_rejection_reason"].is_null(), "{status}");
+    let row = &status["review_map"][0];
+    assert_eq!(row["reviewer"], "someone-else", "{status}");
+    assert_eq!(row["is_author"], false, "{status}");
+    assert_eq!(row["attribution_unknown"], false, "{status}");
+
+    repo.arc(&repo.root)
+        .args(["integrate", "assumed-author"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "--actor",
+            "someone-else",
+            "audit",
+            "assumed-author",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+}
+
+/// An identity arc invented from git configuration names nobody in
+/// particular, so it cannot be the second party independence needs. Coverage
+/// reports it as attribution nobody can place rather than as a review by
+/// somebody else.
+#[test]
+fn an_assumed_reviewer_is_neither_independent_nor_self_review() {
+    let repo = repo_with_self_approval_policy();
+    stdout(repo.arc(&repo.root).args(["begin", "assumed-reviewer"]));
+    let wt = repo.home.join(".worktrees/repo-assumed-reviewer");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    repo.arc(&wt)
+        .args(["--actor", "author", "snapshot", "assumed-reviewer"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["review", "assumed-reviewer", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&wt).args(["status", "assumed-reviewer", "--json"]));
     assert_eq!(
         status["verdict"]["valid_for_current_head"], false,
         "{status}"
@@ -569,7 +607,23 @@ fn self_approval_fails_closed_on_an_assumed_identity() {
             .contains("independence is unproven"),
         "{status}"
     );
+    let row = &status["review_map"][0];
+    assert_eq!(row["reviewer"], "Tester", "{status}");
+    assert_eq!(row["is_author"], false, "{status}");
+    assert_eq!(row["attribution_unknown"], true, "{status}");
+    let advisories = status["advisories"].as_array().unwrap();
+    assert!(
+        advisories
+            .iter()
+            .any(|advisory| advisory["code"] == "reviewer-attribution-unknown"),
+        "{advisories:?}"
+    );
+}
 
+/// Two identities nobody declared cannot show that two people acted.
+#[test]
+fn self_approval_fails_closed_on_an_assumed_identity() {
+    let repo = repo_with_self_approval_policy();
     // Naming the same author is the more specific fact, so it is the one
     // reported even when the identity was also assumed.
     stdout(repo.arc(&repo.root).args(["begin", "same-author"]));
