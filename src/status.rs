@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/15";
+pub const STATUS_SCHEMA: &str = "arc-status/16";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// Two identities arc assumed cannot establish that two people acted. The
@@ -132,6 +132,14 @@ pub struct GateStatus {
     /// Additive in `arc-status/15`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evaluated_tree: Option<String>,
+    /// The revision the counted evidence was recorded at, named only where it
+    /// is not the current head. A gate answers for content, so a run against
+    /// another commit holding the tree being evaluated answers for this one;
+    /// this says which run that was, so a green gate nobody ran at this head
+    /// is never mistaken for one that was never keyed at all.
+    /// Additive in `arc-status/16`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inherited_from: Option<String>,
     /// The tree the command ran against, and whether it differed from the
     /// revision's. Absent is unknown, never a claim the tree was clean.
     /// Additive in `arc-status/6`.
@@ -1021,16 +1029,22 @@ fn build_report(
         .collect();
 
     // The tree the gates must answer for, named only where it is not the
-    // head's own. A rebased head merges to the tree it already carries, and
-    // reading evidence by revision there keeps a gate bound to the commit it
-    // ran on, which is the stricter of the two keys.
+    // head's own — that is, where a merge would ship content neither branch
+    // committed.
     let head_tree = cwd
         .zip(current_head.as_deref())
         .and_then(|(cwd, head)| gitio::commit_tree(cwd, head).ok());
     let evaluated_tree = merged_tree
         .clone()
         .filter(|merged| head_tree.as_ref() != Some(merged));
-    let legacy_trees = match (&evaluated_tree, cwd) {
+    // A gate answers for content, so content is the key everywhere it is
+    // known: the merge's tree where the change is behind its target, the
+    // head's own otherwise. A rebase that moves the base without touching the
+    // diff produces a new commit holding a tree some run already answered
+    // for, and that answer still describes what ships. Only a head whose tree
+    // cannot be read falls back to the revision.
+    let lookup_tree = evaluated_tree.clone().or_else(|| head_tree.clone());
+    let legacy_trees = match (&lookup_tree, cwd) {
         (Some(_), Some(cwd)) => legacy_evidence_trees(state, cwd),
         _ => BTreeMap::new(),
     };
@@ -1040,7 +1054,7 @@ fn build_report(
         .required_for(&state.profile)
         .into_iter()
         .map(|(name, gate)| {
-            let evidence = match (&evaluated_tree, current_head.as_deref()) {
+            let evidence = match (&lookup_tree, current_head.as_deref()) {
                 (Some(tree), _) => state.gate_evidence_at_tree(name, tree, &resolve_tree),
                 (None, Some(head)) => state.gate_evidence_at(name, head),
                 (None, None) => None,
@@ -1050,7 +1064,7 @@ fn build_report(
             // newest run, so a rerun that appends a plain pass cannot retract
             // what an earlier run established against the same tree.
             let counted_pass = evidence.filter(|e| e.result == crate::model::VerifyResult::Pass);
-            let discriminating = counted_pass.and_then(|e| match &evaluated_tree {
+            let discriminating = counted_pass.and_then(|e| match &lookup_tree {
                 Some(tree) => state.gate_falsification_at_tree(name, tree, &resolve_tree),
                 None => state.gate_falsification_at(name, &e.revision),
             });
@@ -1058,6 +1072,9 @@ fn build_report(
                 name: name.clone(),
                 command: gate.command.clone(),
                 evaluated_tree: evaluated_tree.clone(),
+                inherited_from: evidence
+                    .map(|e| e.revision.clone())
+                    .filter(|revision| Some(revision.as_str()) != current_head.as_deref()),
                 result: match result {
                     Some(crate::model::VerifyResult::Pass) => "pass",
                     Some(crate::model::VerifyResult::Fail) => "fail",

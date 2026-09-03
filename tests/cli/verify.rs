@@ -970,7 +970,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
         .code(12);
 
     let status = json_stdout(repo.arc(&worktree).args(["status", "probe-readiness"]));
-    assert_eq!(status["schema"], "arc-status/15");
+    assert_eq!(status["schema"], "arc-status/16");
     assert_eq!(status["probes"][0]["name"], "marker-exists");
     assert_eq!(status["probes"][0]["brief_version"], 2);
     assert_eq!(status["probes"][0]["discriminating_at_head"], false);
@@ -2789,4 +2789,122 @@ fn evidence_recorded_before_arc_kept_the_tree_still_counts_at_its_own_head() {
         .args(["integrate", "legacy-evidence"])
         .assert()
         .success();
+}
+
+/// A change behind its target, with the unit gate evaluated on the merge.
+///
+/// Returns the worktree, the tree the gate answered for, and the revision the
+/// evidence was recorded at.
+fn evaluated_merge(repo: &Repo, slug: &str) -> (PathBuf, String, String) {
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc"]);
+    git(&repo.root, &["commit", "-m", "test: add unit gate"]);
+    stdout(repo.arc(&repo.root).args(["begin", slug]));
+    let worktree = repo.home.join(format!(".worktrees/repo-{slug}"));
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+
+    // The target moves without touching what the change touches, so the merge
+    // ships content neither branch committed and the gate must answer for it.
+    repo.commit(
+        &repo.root,
+        "sibling.txt",
+        "sibling\n",
+        "test: unrelated sibling",
+    );
+    repo.arc(&worktree)
+        .args(["verify", slug, "--against", "master"])
+        .assert()
+        .success();
+
+    let evaluated = json_stdout(repo.arc(&repo.root).args(["status", slug]));
+    let merged_tree = evaluated["merged_tree"].as_str().unwrap().to_string();
+    let revision = evaluated["gates"][0]["revision"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (worktree, merged_tree, revision)
+}
+
+#[test]
+fn a_rebase_onto_the_evaluated_tree_inherits_the_gate_evidence() {
+    let repo = Repo::new();
+    let (worktree, merged_tree, evidence_revision) = evaluated_merge(&repo, "rebased");
+
+    // The rebase moves the base and nothing else, so the new head carries the
+    // very content the gate ran against.
+    git(&worktree, &["rebase", "master"]);
+    let head = repo.head(&worktree);
+    assert_eq!(
+        git_out(&worktree, &["rev-parse", "HEAD^{tree}"]),
+        merged_tree
+    );
+    assert_ne!(head, evidence_revision);
+    repo.arc(&worktree)
+        .args(["snapshot", "rebased"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "rebased"]));
+    let gate = &status["gates"][0];
+    assert_eq!(gate["result"], "pass", "{status}");
+    assert_eq!(gate["green_at_head"], true, "{status}");
+    // The head is on the target tip, so what ships is the head's own content
+    // and there is no separate merged tree to name.
+    assert!(gate["evaluated_tree"].is_null(), "{status}");
+    assert_eq!(
+        gate["inherited_from"],
+        evidence_revision.as_str(),
+        "{status}"
+    );
+    assert!(
+        !status["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["blocker"] == "gates-not-green"),
+        "{status}"
+    );
+
+    repo.arc(&repo.root)
+        .args(["check", "rebased", "--explain"])
+        .assert()
+        .stdout(predicates::str::contains(format!(
+            "inherited from {}",
+            &evidence_revision[..8]
+        )));
+}
+
+#[test]
+fn a_rebase_that_changes_what_ships_inherits_nothing() {
+    let repo = Repo::new();
+    let (worktree, merged_tree, _) = evaluated_merge(&repo, "restacked");
+
+    // The target moves again before the rebase, so the head the rebase
+    // produces holds content no run has answered for.
+    repo.commit(
+        &repo.root,
+        "sibling.txt",
+        "revised\n",
+        "test: sibling moves",
+    );
+    git(&worktree, &["rebase", "master"]);
+    assert_ne!(
+        git_out(&worktree, &["rev-parse", "HEAD^{tree}"]),
+        merged_tree
+    );
+    repo.arc(&worktree)
+        .args(["snapshot", "restacked"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "restacked"]));
+    let gate = &status["gates"][0];
+    assert_eq!(gate["result"], "pending", "{status}");
+    assert_eq!(gate["green_at_head"], false, "{status}");
+    assert!(gate["inherited_from"].is_null(), "{status}");
 }

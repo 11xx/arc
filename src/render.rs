@@ -50,6 +50,21 @@ pub fn discrimination_suffix(gate: &GateStatus) -> String {
     }
 }
 
+/// Which run a gate's result comes from, when it is not one at this head.
+///
+/// A gate holds for a tree, so a run against another commit carrying the tree
+/// being evaluated answers for this one. The line names that commit: a reader
+/// checking gate output against `git log` would otherwise find no run at the
+/// head at all. The tree itself is on the report's merged-tree line.
+///
+/// Advisory. It says where a result came from; it never changes one.
+pub fn inheritance_suffix(gate: &GateStatus) -> String {
+    match &gate.inherited_from {
+        Some(revision) => format!(" (inherited from {})", short_revision(revision)),
+        None => String::new(),
+    }
+}
+
 /// What a gate's greenness is a claim about: the head's own content, or the
 /// tree a merge into the target would ship when the change is behind it.
 fn gate_scope(gate: &GateStatus) -> String {
@@ -89,15 +104,22 @@ fn merged_tree_line(report: &StatusReport) -> Option<String> {
 }
 
 /// One gate's line in a human-facing gate list: the raw result, why a passing
-/// result still does not count at head, and whether a counted pass was ever
-/// shown capable of failing.
+/// result still does not count at head, which run the result came from when it
+/// is not one at this head, and whether a counted pass was ever shown capable
+/// of failing.
 pub fn gate_line(gate: &GateStatus) -> String {
     match gate.not_green_reason() {
-        None => format!("{}{}", gate.result, discrimination_suffix(gate)),
-        Some(reason) => format!(
-            "{} (not green at {}: {reason})",
+        None => format!(
+            "{}{}{}",
             gate.result,
-            gate_scope(gate)
+            inheritance_suffix(gate),
+            discrimination_suffix(gate)
+        ),
+        Some(reason) => format!(
+            "{} (not green at {}: {reason}){}",
+            gate.result,
+            gate_scope(gate),
+            inheritance_suffix(gate)
         ),
     }
 }
@@ -1765,10 +1787,14 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .join("\n"),
     );
     // A green gate answers whether it passes, not whether it could have
-    // failed. The second question has no blocker and no exit code, so the
-    // checklist is the only place a reader meets it.
+    // failed, nor which run said so. Neither question has a blocker or an exit
+    // code, so the checklist is the only place a reader meets them.
     for gate in &report.gates {
-        let suffix = discrimination_suffix(gate);
+        let suffix = format!(
+            "{}{}",
+            inheritance_suffix(gate),
+            discrimination_suffix(gate)
+        );
         if !suffix.is_empty() {
             let _ = writeln!(out, "        gate `{}`:{suffix}", gate.name);
         }
