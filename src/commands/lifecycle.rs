@@ -996,6 +996,15 @@ pub fn is_blocked(ctx: &Ctx, reference: &str) -> Result<i32> {
 }
 
 fn default_worktree_path(cwd: &Path, slug: &str) -> Result<PathBuf> {
+    worktree_path_for(cwd, slug)
+}
+
+/// Where the checkout named `name` for this repository goes.
+///
+/// Every checkout arc creates sits in the configured worktrees directory as
+/// `<repo>-<name>`, so a scratch tree lands beside the change's own rather
+/// than somewhere only whoever made it knows to look.
+pub(crate) fn worktree_path_for(cwd: &Path, name: &str) -> Result<PathBuf> {
     let toplevel = gitio::toplevel(cwd)?;
     let repo_name = toplevel
         .file_name()
@@ -1003,7 +1012,7 @@ fn default_worktree_path(cwd: &Path, slug: &str) -> Result<PathBuf> {
         .to_string_lossy()
         .into_owned();
     let config = crate::config::load()?;
-    Ok(config.worktrees_dir.join(format!("{repo_name}-{slug}")))
+    Ok(config.worktrees_dir.join(format!("{repo_name}-{name}")))
 }
 
 fn list_row(state: &ChangeState, states: &BTreeMap<String, ChangeState>) -> serde_json::Value {

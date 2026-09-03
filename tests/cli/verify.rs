@@ -546,16 +546,31 @@ fn attested_verification_uses_declared_execution_context() {
         .assert()
         .success();
 
-    repo.commit(
+    // The subject is a recording checkout whose own HEAD is not the revision
+    // being attested. It gets a branch of its own so the target stays where
+    // the change is based; whether a change behind its target is green is a
+    // different question, asked elsewhere.
+    let recorder = repo.home.join("recorder");
+    git(
         &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "recorder",
+            recorder.to_str().unwrap(),
+        ],
+    );
+    repo.commit(
+        &recorder,
         "recorder.txt",
         "recorder revision\n",
         "test: advance recorder",
     );
-    let recorder_revision = repo.head(&repo.root);
+    let recorder_revision = repo.head(&recorder);
     assert_ne!(tested_revision, recorder_revision);
     let recorded = repo
-        .arc(&repo.root)
+        .arc(&recorder)
         .args([
             "verify",
             "external-evidence",
@@ -955,7 +970,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
         .code(12);
 
     let status = json_stdout(repo.arc(&worktree).args(["status", "probe-readiness"]));
-    assert_eq!(status["schema"], "arc-status/14");
+    assert_eq!(status["schema"], "arc-status/15");
     assert_eq!(status["probes"][0]["name"], "marker-exists");
     assert_eq!(status["probes"][0]["brief_version"], 2);
     assert_eq!(status["probes"][0]["discriminating_at_head"], false);

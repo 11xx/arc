@@ -789,7 +789,7 @@ worktree, the advice is the rerun. Once the tree is clean the advice
 becomes `run_gate:<gate>`, since
 evidence already recorded cannot be repaired by cleaning; only a fresh run
 replaces it. The `clean_worktree:<gate>` action arrived in `arc-status/7`;
-the current schema is `arc-status/14`.
+the current schema is `arc-status/15`.
 
 A gate that passed says nothing about whether it could have failed. A check
 watched to fail for a stated reason, then to pass once that reason was removed,

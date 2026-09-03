@@ -182,7 +182,22 @@ pub fn merge_base(cwd: &Path, a: &str, b: &str) -> Result<String> {
     git(cwd, &["merge-base", a, b])
 }
 
-pub fn merge_conflicts(cwd: &Path, target_rev: &str, head_rev: &str) -> Result<bool> {
+/// What merging one revision into another would produce, computed without a
+/// worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeOutcome {
+    /// Git could not reconcile the text and a person has to.
+    pub conflicts: bool,
+    /// The tree a clean merge writes. `None` on a conflict, where there is no
+    /// single result to name.
+    ///
+    /// This is the content the merge would ship, and it belongs to neither
+    /// side: a change that is behind its target carries a tree no commit on
+    /// either branch holds, and so one nothing has been run against.
+    pub tree: Option<String>,
+}
+
+pub fn merge_outcome(cwd: &Path, target_rev: &str, head_rev: &str) -> Result<MergeOutcome> {
     let out = Command::new("git")
         .args([
             "merge-tree",
@@ -195,14 +210,53 @@ pub fn merge_conflicts(cwd: &Path, target_rev: &str, head_rev: &str) -> Result<b
         .output()
         .context("failed to spawn git merge-tree")?;
     match out.status.code() {
-        Some(0) => Ok(false),
-        Some(1) => Ok(true),
+        // The tree id is the first line of stdout; anything after it describes
+        // conflicts, and a clean merge has none to describe.
+        Some(0) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let tree = stdout
+                .lines()
+                .next()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .context("git merge-tree reported a clean merge without naming a tree")?
+                .to_string();
+            Ok(MergeOutcome {
+                conflicts: false,
+                tree: Some(tree),
+            })
+        }
+        Some(1) => Ok(MergeOutcome {
+            conflicts: true,
+            tree: None,
+        }),
         code => bail!(
             "git merge-tree failed with exit code {}: {}",
             code.map_or_else(|| "signal".to_string(), |code| code.to_string()),
             String::from_utf8_lossy(&out.stderr).trim()
         ),
     }
+}
+
+/// Write a commit holding `tree` under the given parents, touching no ref.
+///
+/// It exists so a tree belonging to no branch can be checked out, named by
+/// evidence, and pinned. The parents record which two sides produced it, so a
+/// reader can see what it is a merge of.
+pub fn commit_tree_with_parents(
+    cwd: &Path,
+    tree: &str,
+    parents: &[&str],
+    message: &str,
+) -> Result<String> {
+    let mut args = vec!["commit-tree", tree];
+    for parent in parents {
+        args.push("-p");
+        args.push(parent);
+    }
+    args.push("-m");
+    args.push(message);
+    git(cwd, &args)
 }
 
 pub fn blob_oid(cwd: &Path, rev: &str, path: &str) -> Option<String> {
@@ -518,6 +572,15 @@ pub fn tree_retention_ref(change_id: &str, event_id: &str) -> String {
 
 pub fn tree_retention_prefix(change_id: &str) -> String {
     format!("refs/arc/tree/{change_id}/")
+}
+
+/// The ref that keeps a synthesized merge reachable while evidence cites it.
+///
+/// The commit is on no branch, so nothing else holds it; naming it by its own
+/// id makes re-evaluating the same merge idempotent rather than accumulating a
+/// ref per run.
+pub fn merge_retention_ref(change_id: &str, commit: &str) -> String {
+    format!("refs/arc/tree/{change_id}/merge-{commit}")
 }
 
 /// Every object reachable from a revision.

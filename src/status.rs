@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/14";
+pub const STATUS_SCHEMA: &str = "arc-status/15";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// Two identities arc assumed cannot establish that two people acted. The
@@ -36,6 +36,7 @@ pub enum Blocker {
     Iterating,
     BlockedByChanges,
     NeedsRebase,
+    MergedTreeUnevaluated,
     BlockingFindings,
     NoValidApproval,
     GatesNotGreen,
@@ -50,6 +51,7 @@ impl Blocker {
             Blocker::Iterating => 13,
             Blocker::BlockedByChanges => 7,
             Blocker::NeedsRebase => 11,
+            Blocker::MergedTreeUnevaluated => 14,
             Blocker::BlockingFindings => 2,
             Blocker::NoValidApproval => 3,
             Blocker::GatesNotGreen => 5,
@@ -65,6 +67,7 @@ impl Blocker {
             Blocker::Iterating => "iterating",
             Blocker::BlockedByChanges => "blocked-by-changes",
             Blocker::NeedsRebase => "needs-rebase",
+            Blocker::MergedTreeUnevaluated => "merged-tree-unevaluated",
             Blocker::BlockingFindings => "blocking-findings",
             Blocker::NoValidApproval => "no-valid-approval",
             Blocker::GatesNotGreen => "gates-not-green",
@@ -122,6 +125,13 @@ pub struct GateStatus {
     /// The head evidence for this gate is attested (arc did not run it), so a
     /// lead can apply stricter judgment even though it counts for green-ness.
     pub attested: bool,
+    /// The tree this gate's readiness was read at, named only where it is not
+    /// the head's own content — that is, where the change is behind its target
+    /// and a merge would ship something neither branch committed. Absent means
+    /// the head's content is what ships, and the gate answers for it.
+    /// Additive in `arc-status/15`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evaluated_tree: Option<String>,
     /// The tree the command ran against, and whether it differed from the
     /// revision's. Absent is unknown, never a claim the tree was clean.
     /// Additive in `arc-status/6`.
@@ -186,6 +196,7 @@ impl GateStatus {
             return Some("the gate declaration changed since this evidence was recorded");
         }
         Some(match self.result.as_str() {
+            "pending" if self.evaluated_tree.is_some() => "no evidence at the merged tree",
             "pending" => "no evidence at head",
             "fail" => "the gate failed",
             _ if self.tree_moved => "the worktree changed while the gate ran",
@@ -434,6 +445,14 @@ pub struct StatusReport {
     pub claim: Option<ClaimStatus>,
     pub current_head: Option<String>,
     pub needs_rebase: bool,
+    /// The tree a merge into the target would ship, which is what the required
+    /// gates have to answer for. It is the head's own tree while the change is
+    /// rebased, and content neither branch committed once it is behind. `None`
+    /// where no single tree exists to name: no branch, no target, a textual
+    /// conflict, or a report derived from the ledger alone. Additive in
+    /// `arc-status/15`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_tree: Option<String>,
     pub latest_patchset: Option<crate::state::Patchset>,
     pub brief: Option<BriefStatus>,
     pub head_matches_latest_patchset: bool,
@@ -695,6 +714,29 @@ impl DangerScope {
     }
 }
 
+/// The tree each revision names, for evidence recorded before arc kept the
+/// tree beside it.
+///
+/// Resolved once per distinct revision rather than per gate, and only where a
+/// tree-keyed reading is what the report needs. A revision whose commit is
+/// gone is absent here, and evidence naming it then matches no tree.
+fn legacy_evidence_trees(state: &ChangeState, cwd: &Path) -> BTreeMap<String, String> {
+    state
+        .verifications
+        .iter()
+        .filter(|entry| entry.tree.is_none())
+        .map(|entry| entry.revision.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|revision| {
+            Some((
+                revision.to_string(),
+                gitio::commit_tree(cwd, revision).ok()?,
+            ))
+        })
+        .collect()
+}
+
 pub fn build(
     state: &ChangeState,
     cwd: &Path,
@@ -725,10 +767,14 @@ pub fn build_at(
 ) -> Result<StatusReport> {
     let current_head = gitio::branch_head(cwd, &state.branch).ok();
     let target_head = gitio::branch_head(cwd, &state.target_branch).ok();
-    let needs_rebase = match (&current_head, &target_head) {
-        (Some(head), Some(target)) => gitio::merge_conflicts(cwd, target, head)?,
-        _ => false,
+    // One merge-tree run answers both questions it can answer: whether the
+    // text conflicts, and what a clean merge would ship.
+    let merge = match (&current_head, &target_head) {
+        (Some(head), Some(target)) => Some(gitio::merge_outcome(cwd, target, head)?),
+        _ => None,
     };
+    let needs_rebase = merge.as_ref().is_some_and(|merge| merge.conflicts);
+    let merged_tree = merge.and_then(|merge| merge.tree);
     let worktree_dirty = if state.is_closed() {
         None
     } else {
@@ -751,6 +797,7 @@ pub fn build_at(
         Some(cwd),
         current_head,
         needs_rebase,
+        merged_tree,
         worktree_dirty,
         danger,
     )
@@ -788,6 +835,7 @@ pub fn build_as_of(
         current_head.clone(),
         false,
         None,
+        None,
         match repo {
             Some(repo) => DangerScope::resolve(state, policy, repo, current_head.as_deref()),
             None => DangerScope::undetermined(state),
@@ -806,6 +854,7 @@ fn build_report(
     cwd: Option<&Path>,
     current_head: Option<String>,
     needs_rebase: bool,
+    merged_tree: Option<String>,
     worktree_dirty: Option<bool>,
     danger: DangerScope,
 ) -> Result<StatusReport> {
@@ -971,23 +1020,44 @@ fn build_report(
         .map(|f| f.id.clone())
         .collect();
 
+    // The tree the gates must answer for, named only where it is not the
+    // head's own. A rebased head merges to the tree it already carries, and
+    // reading evidence by revision there keeps a gate bound to the commit it
+    // ran on, which is the stricter of the two keys.
+    let head_tree = cwd
+        .zip(current_head.as_deref())
+        .and_then(|(cwd, head)| gitio::commit_tree(cwd, head).ok());
+    let evaluated_tree = merged_tree
+        .clone()
+        .filter(|merged| head_tree.as_ref() != Some(merged));
+    let legacy_trees = match (&evaluated_tree, cwd) {
+        (Some(_), Some(cwd)) => legacy_evidence_trees(state, cwd),
+        _ => BTreeMap::new(),
+    };
+    let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
+
     let gate_statuses: Vec<GateStatus> = gates
         .required_for(&state.profile)
         .into_iter()
         .map(|(name, gate)| {
-            let evidence = current_head
-                .as_deref()
-                .and_then(|head| state.gate_evidence_at(name, head));
+            let evidence = match (&evaluated_tree, current_head.as_deref()) {
+                (Some(tree), _) => state.gate_evidence_at_tree(name, tree, &resolve_tree),
+                (None, Some(head)) => state.gate_evidence_at(name, head),
+                (None, None) => None,
+            };
             let result = evidence.map(|e| e.result);
             // Discrimination is asked of the gate at this revision, not of the
             // newest run, so a rerun that appends a plain pass cannot retract
             // what an earlier run established against the same tree.
             let counted_pass = evidence.filter(|e| e.result == crate::model::VerifyResult::Pass);
-            let discriminating =
-                counted_pass.and_then(|e| state.gate_falsification_at(name, &e.revision));
+            let discriminating = counted_pass.and_then(|e| match &evaluated_tree {
+                Some(tree) => state.gate_falsification_at_tree(name, tree, &resolve_tree),
+                None => state.gate_falsification_at(name, &e.revision),
+            });
             GateStatus {
                 name: name.clone(),
                 command: gate.command.clone(),
+                evaluated_tree: evaluated_tree.clone(),
                 result: match result {
                     Some(crate::model::VerifyResult::Pass) => "pass",
                     Some(crate::model::VerifyResult::Fail) => "fail",
@@ -1120,6 +1190,18 @@ fn build_report(
     if needs_rebase {
         blockers.push(Blocker::NeedsRebase);
     }
+    // Nothing has been run against the content that would ship. A tree some
+    // gates have answered for and others have not is an ordinary red gate;
+    // this is the case where the whole evaluation is missing, and where
+    // running a gate at the head would record it against the wrong tree.
+    let merged_tree_unevaluated = evaluated_tree.is_some()
+        && !gate_statuses.is_empty()
+        && !gate_statuses
+            .iter()
+            .any(|gate| gate.evidence_event_id.is_some());
+    if merged_tree_unevaluated {
+        blockers.push(Blocker::MergedTreeUnevaluated);
+    }
     if !open_blocking.is_empty() {
         blockers.push(Blocker::BlockingFindings);
     }
@@ -1205,7 +1287,15 @@ fn build_report(
     } else if let Some(hold) = state.holds.values().next() {
         format!("release_hold:{}", hold.hold_event_id)
     } else if let Some(gate) = gate_statuses.iter().find(|gate| !gate.green_at_head) {
-        gate.clearing_action(worktree_dirty)
+        // A gate read at a merged tree is not repaired by running it at the
+        // head: that records evidence for content the merge discards. The
+        // merge is what has to be evaluated, and re-evaluated once the work
+        // that makes it pass lands.
+        if evaluated_tree.is_some() {
+            format!("verify_against:{}", state.target_branch)
+        } else {
+            gate.clearing_action(worktree_dirty)
+        }
     } else if let Some(probe) = probe_statuses
         .iter()
         .find(|probe| !probe.discriminating_at_head)
@@ -1281,6 +1371,7 @@ fn build_report(
         claim: claim_status_at(state, now, provenance_mode),
         current_head,
         needs_rebase,
+        merged_tree,
         latest_patchset,
         brief: state.latest_brief().map(|brief| BriefStatus {
             version: state.briefs.len(),
@@ -1384,6 +1475,7 @@ pub fn check_exit_code(report: &StatusReport) -> i32 {
         Blocker::Iterating,
         Blocker::BlockedByChanges,
         Blocker::NeedsRebase,
+        Blocker::MergedTreeUnevaluated,
         Blocker::BlockingFindings,
         Blocker::NoValidApproval,
         Blocker::GatesNotGreen,

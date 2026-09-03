@@ -686,6 +686,22 @@ pub enum Payload {
         /// describes no single tree.
         #[serde(default, skip_serializing_if = "is_false")]
         tree_moved: bool,
+        /// The tree of the revision this evidence names.
+        ///
+        /// A gate holds for content, and content is what a merge carries
+        /// forward; the revision is the commit that happened to hold it. Two
+        /// commits with one tree are one evaluation, and a merge produces a
+        /// tree neither side committed. Absent on evidence written before arc
+        /// recorded it, where the revision resolves it as long as the commit
+        /// is reachable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tree: Option<String>,
+        /// The target head the evaluated tree was computed against, on
+        /// evidence for a synthesized merge. A merge with a moved target is a
+        /// different merge, so naming the target says both what this evidence
+        /// is about and when it stops applying.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        against_target: Option<String>,
     },
     VerificationReused {
         run_id: String,
