@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 /// (`AI_HOME`, `ARC_WORKTREES_DIR`, `ARC_DATA_ROOT`, `ARC_DATA_DIR`,
 /// `ARC_JOURNAL_DIR`) still means the directory it names: the prefix replaces
 /// defaults, not statements.
+///
+/// The prefix bounds recorded paths as well as derived ones. Under a sandbox
+/// arc runs commands in, and writes beneath, the prefix and the repository it
+/// was pointed at; a checkout some record names anywhere else is out of reach.
 #[derive(Debug, Default, Deserialize)]
 pub struct ConfigFile {
     /// Directory that receives change worktrees (default `~/.worktrees`). A
@@ -154,7 +158,9 @@ fn home() -> Result<PathBuf> {
     }
 }
 
-fn real_home() -> Result<PathBuf> {
+/// The caller's own home directory, whatever a sandbox stands in for. Only a
+/// check that has to distinguish the two asks for it.
+pub fn real_home() -> Result<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .context("HOME is unset")
@@ -187,6 +193,58 @@ pub fn temp_dir() -> Result<PathBuf> {
         Some(prefix) => Ok(prefix.join("tmp")),
         None => Ok(std::env::temp_dir()),
     }
+}
+
+/// A path resolved as far as the filesystem can resolve it: the longest
+/// existing ancestor canonicalized, with whatever does not exist appended.
+///
+/// Comparing two paths by spelling answers wrongly wherever a symlink stands
+/// in either of them, and a recorded path that has since been removed still
+/// has to compare against the roots it was recorded under.
+pub fn resolved(path: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut at = path;
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(at) {
+            return missing
+                .iter()
+                .rev()
+                .fold(canonical, |resolved, part| resolved.join(part));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_owned());
+                at = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// The sandbox prefix that puts `path` out of arc's reach, or `None` when arc
+/// may run a command there and write beneath it.
+///
+/// Absent a sandbox everything is in reach. Under one, arc touches the prefix
+/// and the repository it was pointed at, and nothing else. That bound has to
+/// be applied to any path arc reads out of a record rather than deriving:
+/// a ledger states absolute checkout paths, and a ledger copied into a sandbox
+/// states the original's, so following one would put gates, replays, and
+/// spooled writes back into the very checkout a sandbox exists to hold apart.
+pub fn excluded_by_sandbox(repository: &Path, path: &Path) -> Result<Option<PathBuf>> {
+    let Some(prefix) = sandbox()? else {
+        return Ok(None);
+    };
+    let path = resolved(path);
+    if path.starts_with(resolved(&prefix)) || path.starts_with(resolved(repository)) {
+        return Ok(None);
+    }
+    Ok(Some(prefix))
+}
+
+/// Whether arc may run a command in `path` and write beneath it, for a caller
+/// that has nothing to say when it may not.
+pub fn admits_path(repository: &Path, path: &Path) -> bool {
+    matches!(excluded_by_sandbox(repository, path), Ok(None))
 }
 
 /// Expand a leading `~` against the directory arc derives defaults from, so a

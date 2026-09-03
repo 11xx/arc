@@ -12,7 +12,14 @@
 //!
 //! Everything a clone writes is under the prefix. The source is read, never
 //! written, and the copy has no remote pointing back at it, so nothing done in
-//! a sandbox can travel home by accident.
+//! a sandbox can travel home by accident. A copied ledger still states the
+//! source's absolute checkout paths, and the prefix bounds those too: a
+//! command under the sandbox refuses a recorded checkout outside it rather
+//! than running there.
+//!
+//! Discarding one is the reverse question — not "where may arc write" but
+//! "is this directory arc's to remove" — and the marker answers it only by
+//! agreeing with the directory it sits in.
 
 use super::Ctx;
 use crate::config;
@@ -29,12 +36,23 @@ use std::path::{Path, PathBuf};
 /// tree, so it acts only where arc itself recorded what the tree is.
 const MARKER: &str = ".arc-sandbox.json";
 
-const MARKER_SCHEMA: &str = "arc-sandbox/1";
+const MARKER_SCHEMA: &str = "arc-sandbox/2";
+
+/// The schema line alone, so a marker of another format is named as one
+/// instead of being reported as malformed for lacking this format's fields.
+#[derive(Debug, Deserialize)]
+struct MarkerSchema {
+    schema: String,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Marker {
     schema: String,
     created_at: String,
+    /// The prefix this marker was written for, canonical. A marker describes
+    /// one directory, and `discard` removes a directory: the two are the same
+    /// directory only if this says so.
+    prefix: String,
     /// The project this sandbox was copied from, as it was then.
     source_repository: String,
     source_ledger: String,
@@ -108,6 +126,7 @@ pub fn clone(ctx: &Ctx, prefix: &Path, json: bool) -> Result<i32> {
         &Marker {
             schema: MARKER_SCHEMA.to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
+            prefix: display(&config::resolved(&prefix)),
             source_repository: display(&source_repository),
             source_ledger: display(&source_ledger),
             source_journal: display(&source_journal),
@@ -149,6 +168,14 @@ pub fn clone(ctx: &Ctx, prefix: &Path, json: bool) -> Result<i32> {
             } else {
                 &report.revision
             }
+        );
+        // The same rule stated where the paths that trip it are created: a
+        // recorded checkout outside the prefix is refused by name, so the
+        // remedy is a checkout inside it rather than a path to correct.
+        println!(
+            "note: a command under this sandbox refuses a recorded checkout outside {}; \
+             give a change one with `git worktree add {}/<name> <branch>`",
+            report.prefix, report.prefix
         );
     }
     Ok(0)
@@ -237,15 +264,10 @@ fn render(label: &str, diff: &SetDiff) {
 
 pub fn discard(ctx: &Ctx, prefix: &Path) -> Result<i32> {
     let prefix = absolute(prefix)?;
-    // Reading the marker first is what makes this safe to run: an arbitrary
-    // directory is refused before anything is removed.
-    read_marker(&prefix)?;
-    if ctx.cwd.starts_with(&prefix) {
-        bail!(
-            "cannot discard {} from inside it; run this from outside the sandbox",
-            prefix.display()
-        );
-    }
+    // Every refusal happens before anything is removed: the marker is read,
+    // then checked against the directory it claims to describe.
+    let marker = read_marker(&prefix)?;
+    ensure_removable(ctx, &prefix, &marker)?;
     fs::remove_dir_all(&prefix).with_context(|| format!("cannot remove {}", prefix.display()))?;
     println!("discarded: {}", prefix.display());
     Ok(0)
@@ -445,16 +467,81 @@ fn read_marker(prefix: &Path) -> Result<Marker> {
             prefix.display()
         )
     })?;
-    let marker: Marker =
+    let declared: MarkerSchema =
         serde_json::from_slice(&bytes).with_context(|| format!("malformed {}", path.display()))?;
-    if marker.schema != MARKER_SCHEMA {
+    if declared.schema != MARKER_SCHEMA {
         bail!(
             "{} records an unreadable sandbox format {:?}",
             path.display(),
-            marker.schema
+            declared.schema
         );
     }
+    let marker: Marker =
+        serde_json::from_slice(&bytes).with_context(|| format!("malformed {}", path.display()))?;
     Ok(marker)
+}
+
+/// Refuse a prefix whose marker does not describe a sandbox arc built there.
+///
+/// `discard` removes a whole directory tree, and a marker is a file anyone can
+/// write, so being parseable is not evidence. What is evidence is agreement:
+/// the marker names this exact directory, everything it claims to hold lies
+/// inside it, and the repository it names is there with a Git directory. A
+/// prefix that is also the home directory, the filesystem root, or an ancestor
+/// of the caller is refused whatever its marker says — no sandbox is any of
+/// those, so a marker claiming otherwise is the strongest reason to stop.
+fn ensure_removable(ctx: &Ctx, prefix: &Path, marker: &Marker) -> Result<()> {
+    let here = config::resolved(prefix);
+    if here == config::resolved(Path::new("/")) {
+        bail!("refusing to discard the filesystem root");
+    }
+    if here == config::resolved(&config::real_home()?) {
+        bail!(
+            "refusing to discard {}: that is the home directory, not a sandbox",
+            prefix.display()
+        );
+    }
+    if config::resolved(&ctx.cwd).starts_with(&here) {
+        bail!(
+            "cannot discard {} from inside it; run this from outside the sandbox",
+            prefix.display()
+        );
+    }
+    if config::resolved(Path::new(&marker.prefix)) != here {
+        bail!(
+            "{} holds a marker written for {}, so it does not describe this directory",
+            prefix.display(),
+            marker.prefix
+        );
+    }
+    for (label, claimed) in [
+        ("repository", &marker.repository),
+        ("ledger", &marker.ledger),
+        ("journal", &marker.journal),
+    ] {
+        if !config::resolved(Path::new(claimed)).starts_with(&here) {
+            bail!(
+                "{}'s marker puts its {label} at {claimed}, outside the prefix; \
+                 a sandbox holds everything it names",
+                prefix.display()
+            );
+        }
+    }
+    let repository = Path::new(&marker.repository);
+    if !repository.is_dir() {
+        bail!(
+            "{}'s marker names a repository at {} that is not there",
+            prefix.display(),
+            marker.repository
+        );
+    }
+    if !repository.join(".git").exists() {
+        bail!(
+            "{} is named as this sandbox's repository but holds no Git directory",
+            marker.repository
+        );
+    }
+    Ok(())
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<()> {

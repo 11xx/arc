@@ -31,6 +31,7 @@ mod stats;
 mod timeline;
 mod workspace;
 
+use crate::config;
 use crate::gates;
 use crate::gitio;
 use crate::ids;
@@ -256,6 +257,29 @@ impl Ctx {
             model: self.model.clone(),
             on_behalf_of: self.on_behalf_of.clone(),
         }
+    }
+
+    /// The sandbox prefix that puts `path` out of this invocation's reach, or
+    /// `None` when arc may run a command there and write beneath it.
+    ///
+    /// Every lookup that follows a path out of a record asks here, so one rule
+    /// answers for all of them: gates, replays, spool promotion, and worktree
+    /// cleanup either agree about what is in reach or the boundary has a hole.
+    pub(crate) fn excluded_by_sandbox(&self, path: &Path) -> Result<Option<PathBuf>> {
+        config::excluded_by_sandbox(&self.repository(), path)
+    }
+
+    /// Whether arc may run a command in `path` and write beneath it.
+    pub(crate) fn admits_path(&self, path: &Path) -> bool {
+        config::admits_path(&self.repository(), path)
+    }
+
+    /// The repository this invocation was pointed at, which a sandbox admits
+    /// alongside its prefix: arc reads and writes the ledger of the repository
+    /// it is run in wherever that repository sits. An invocation outside a
+    /// repository has only the directory it was typed in.
+    fn repository(&self) -> PathBuf {
+        gitio::primary_worktree(&self.cwd).unwrap_or_else(|_| self.cwd.clone())
     }
 
     fn event(&self, store: &Store, change_id: &str, payload: Payload) -> Event {

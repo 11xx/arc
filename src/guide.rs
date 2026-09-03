@@ -108,7 +108,8 @@ SANDBOX (rehearse something destructive)
                          temp, and the ledger wherever a data root places it.
   arc sandbox diff <prefix>      What the copy's ledger events, journal
                          events, and refs differ by, in both directions.
-  arc sandbox discard <prefix>   Remove it.
+  arc sandbox discard <prefix>   Remove it — only where the marker arc wrote
+                         and the directory agree about what is there.
 
   The prefix stands in for the home directory, so one value moves every root
   at once and a configured `~/…` path follows it. A variable naming one exact
@@ -120,7 +121,9 @@ SANDBOX (rehearse something destructive)
   repository, which is why a rehearsal runs in a clone rather than beside the
   original. A clone carries committed state: uncommitted work is not copied,
   and an open change's recorded checkout is the source's until one is made in
-  the sandbox.
+  the sandbox. The prefix bounds recorded paths too: a checkout outside it is
+  refused by name rather than run in, so gates and `rebase` say to make one
+  inside with `git worktree add`.
 
 SETTLE A QUESTION (before it is work)
   arc journal note <topic> --kind discussion --body-file -

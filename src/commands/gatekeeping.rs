@@ -695,13 +695,6 @@ fn verify_against(
     Ok(if passed == total { 0 } else { 1 })
 }
 
-/// Resolve a path for comparison, falling back to the path itself when it
-/// cannot be canonicalized — a recorded worktree may no longer exist, and a
-/// lexical comparison is still the right answer when it does not.
-fn canonical_or_owned(path: &std::path::Path) -> std::path::PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
 /// The checkout a gate run belongs in, when it is not the invoking one.
 ///
 /// Gate evidence is counted at the change's head, so the tree a gate reads
@@ -710,17 +703,35 @@ fn canonical_or_owned(path: &std::path::Path) -> std::path::PathBuf {
 /// gating whatever that checkout happens to hold. `None` says the invoking
 /// checkout is already the right one, including the case of a change that
 /// records no worktree — there the head check speaks for itself.
+///
+/// A sandbox bounds the redirect: a recorded path outside the prefix is a
+/// checkout arc will not run anything in, so it counts as none at all.
 fn gate_run_ctx(ctx: &Ctx, st: &ChangeState) -> Result<Option<Ctx>> {
     let Some(recorded) = st.worktree.as_deref().map(PathBuf::from) else {
         return Ok(None);
     };
     let toplevel = gitio::toplevel(&ctx.cwd)?;
-    if canonical_or_owned(&toplevel) == canonical_or_owned(&recorded) {
+    if config::resolved(&toplevel) == config::resolved(&recorded) {
         return Ok(None);
+    }
+    if let Some(prefix) = ctx.excluded_by_sandbox(&recorded)? {
+        let change_head = gitio::branch_head(&ctx.cwd, &st.branch)?;
+        bail!(
+            "{}'s recorded checkout {} lies outside the sandbox at {}, so its gates have \
+             nowhere to run\n\
+             tip: give it one inside the sandbox with `git worktree add {}/<name> {}`, or \
+             record evidence arc did not run with `arc verify --attest --tested-revision \
+             {change_head} ...`",
+            st.change_id,
+            recorded.display(),
+            prefix.display(),
+            prefix.display(),
+            st.branch
+        );
     }
     let checkout = gitio::toplevel(&recorded)
         .ok()
-        .filter(|top| canonical_or_owned(top) == canonical_or_owned(&recorded));
+        .filter(|top| config::resolved(top) == config::resolved(&recorded));
     if checkout.is_none() {
         let change_head = gitio::branch_head(&ctx.cwd, &st.branch)?;
         bail!(
@@ -802,7 +813,7 @@ fn ensure_at_change_head(ctx: &Ctx, st: &state::ChangeState) -> Result<()> {
         .worktree
         .as_deref()
         .map(std::path::Path::new)
-        .filter(|recorded| canonical_or_owned(&ctx.cwd).starts_with(canonical_or_owned(recorded)));
+        .filter(|recorded| config::resolved(&ctx.cwd).starts_with(config::resolved(recorded)));
     if let Some(recorded) = recorded {
         bail!(
             "{} lives in {} but that worktree's HEAD is not its branch head ({change_head}), so \
@@ -1191,17 +1202,36 @@ pub fn rebase(ctx: &Ctx, reference: &str, verify_requested: bool) -> Result<i32>
 /// rebase is stopped part-way, though: Git detaches HEAD for the replay, so
 /// the branch belongs to no worktree until the rebase ends, and only the
 /// recorded path still says where the state a person continues from lives.
+///
+/// A sandbox bounds the recorded fallback. Git's own answer is about this
+/// repository and needs no bound; a recorded path is a statement about where
+/// a checkout was, and one outside the prefix names a tree a sandboxed replay
+/// must not rewrite.
 fn replay_worktree(ctx: &Ctx, st: &ChangeState) -> Result<PathBuf> {
     if let Some(checked_out) = gitio::worktree_for_branch(&ctx.cwd, &st.branch)? {
         return Ok(checked_out);
     }
     let recorded = st.worktree.as_deref().map(PathBuf::from);
-    recorded.filter(|path| path.is_dir()).with_context(|| {
-        format!(
+    let Some(recorded) = recorded.filter(|path| path.is_dir()) else {
+        bail!(
             "no worktree has {:?} checked out; check it out before rebasing",
             st.branch
-        )
-    })
+        );
+    };
+    if let Some(prefix) = ctx.excluded_by_sandbox(&recorded)? {
+        bail!(
+            "{}'s recorded checkout {} lies outside the sandbox at {}, so there is nowhere to \
+             replay {:?}\n\
+             tip: give it a checkout inside the sandbox with `git worktree add {}/<name> {}`",
+            st.change_id,
+            recorded.display(),
+            prefix.display(),
+            st.branch,
+            prefix.display(),
+            st.branch
+        );
+    }
+    Ok(recorded)
 }
 
 /// What a worktree carries, in the terms the refusal needs.
@@ -2286,7 +2316,14 @@ fn integrate_one(
         // inside the change worktree that is about to be removed.
         if let Some(wt_path) = &st.worktree {
             let p = PathBuf::from(wt_path);
-            if p.exists() && p != wt {
+            if let Some(prefix) = ctx.excluded_by_sandbox(&p)? {
+                // Removal is the most destructive thing integration does with
+                // a recorded path, so the bound is stated rather than silent.
+                println!(
+                    "kept worktree {wt_path}: it lies outside the sandbox at {}",
+                    prefix.display()
+                );
+            } else if p.exists() && p != wt {
                 gitio::git(&wt, &["worktree", "remove", wt_path])?;
                 println!("removed worktree {wt_path}");
             }
