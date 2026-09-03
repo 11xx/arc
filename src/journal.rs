@@ -4285,6 +4285,39 @@ pub(crate) fn is_consumed(events: &[JournalEvent], filename: &str) -> bool {
     consumption(events, filename).is_some()
 }
 
+/// Who filed an artifact, as the event that filed it recorded them.
+pub(crate) struct RecordedIdentity {
+    pub(crate) harness: Option<String>,
+    pub(crate) session: Option<String>,
+    pub(crate) actor: Option<String>,
+    pub(crate) model: Option<String>,
+}
+
+/// A harness or session arc could not read was recorded as the literal
+/// `unknown`. That is an absence, and a reader is told so rather than shown a
+/// word that reads like a name.
+fn present(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value != "unknown").then(|| value.to_string())
+}
+
+/// The identity on the event that first named `filename` — the write that
+/// created the artifact, not whatever touched it last.
+pub(crate) fn recorded_identity(
+    events: &[JournalEvent],
+    filename: &str,
+) -> Option<RecordedIdentity> {
+    let event = events
+        .iter()
+        .find(|event| event.file.as_deref() == Some(filename))?;
+    Some(RecordedIdentity {
+        harness: present(&event.harness),
+        session: present(&event.session),
+        actor: event.actor.clone(),
+        model: event.model.clone(),
+    })
+}
+
 fn verification_stamp(
     events: &[JournalEvent],
     filename: &str,
