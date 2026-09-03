@@ -1093,9 +1093,9 @@ enum Cmd {
         /// Report what would happen without merging, closing, or writing
         #[arg(long)]
         dry_run: bool,
-        /// Integrate without an independent verdict, recording the review each
-        /// change still owes; in a queue it is declared as each change is
-        /// reached, so one that is never attempted owes nothing. It stands in
+        /// Integrate without an independent verdict, recording the review this
+        /// change still owes. One change only: the reason binds to one
+        /// patchset, so it has nothing to say about a queue. It stands in
         /// for a verdict nobody recorded — and
         /// for a self-approval policy would reject — in the same invocation.
         /// It never overrules a reviewer who read this patchset and asked for

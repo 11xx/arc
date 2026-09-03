@@ -257,7 +257,7 @@ arc rebase radio-refill-fix --verify   # target moved: replay, snapshot, rerun g
 arc integrate radio-refill-fix --cleanup
 
 # Land a queue in dependency order, named change by change or selected by tag.
-# --cleanup and --debt are allowed here; --into and --message are per-change only.
+# --cleanup is allowed here; --into, --message, and --debt are per-change only.
 arc integrate radio-refill-fix radio-antenna-swap --cleanup
 arc integrate --tag '#radio-series' --cleanup
 ```
@@ -269,9 +269,12 @@ first member that needs a person — a conflict left in progress with the
 commands that finish it, a gate that failed, a patchset nothing approves —
 exits with that member's own blocker code, and prints a summary naming what
 landed with its merge revision, what stopped the run and why, and what was
-never attempted. `--debt` covers the whole queue, declared as each member is
-reached, so a member the queue never attempts owes no review. `--dry-run`
-reports the same plan without replaying, running, or merging anything.
+never attempted. `--dry-run` reports the same plan without replaying, running,
+or merging anything. `--debt` stays per-change: the reason it records is a
+judgment about one patchset — what review it owes and why that review could
+not run — and one string spread over every member would bind to nothing in
+particular. A queue is for changes that are already green or already carry
+their verdict.
 
 `arc resolve` accepts `--evidence` for a free-form explanation and, independently,
 `--evidence-event <ID>` for a full event ID from the same change. The event must

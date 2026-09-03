@@ -1800,12 +1800,23 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
             if message.is_some() {
                 bail!("--message is only valid when integrating one change");
             }
+            // A debt is a judgment about one patchset: what review it owes,
+            // and why that review could not run. One reason spread over every
+            // member records an obligation that binds to nothing in
+            // particular, which is the opposite of what the obligation is for.
+            if debt.is_some() {
+                bail!(
+                    "--debt is only valid when integrating one change: a debt reason binds to \
+                     one change's patchset, and a queue is for changes that are already green \
+                     or already carry their verdict"
+                );
+            }
             let selection = if many.is_empty() {
                 QueueSelection::Tagged(normalize_tags(tags)?)
             } else {
                 QueueSelection::Named(many.to_vec())
             };
-            integrate_queue(ctx, selection, cleanup, dry_run, debt)
+            integrate_queue(ctx, selection, cleanup, dry_run)
         }
     }
 }
@@ -1840,7 +1851,6 @@ fn integrate_queue(
     selection: QueueSelection,
     cleanup: bool,
     dry_run: bool,
-    debt: Option<DebtDeclaration>,
 ) -> Result<i32> {
     let queue_ctx = Ctx {
         cwd: gitio::primary_worktree(&ctx.cwd)?,
@@ -1892,7 +1902,7 @@ fn integrate_queue(
         let step = if dry_run {
             queue_dry_run(&queue_ctx, &store, change_id)?
         } else {
-            queue_step(&queue_ctx, &store, change_id, cleanup, debt.as_ref())?
+            queue_step(&queue_ctx, &store, change_id, cleanup)?
         };
         let stopped = matches!(step, QueueStep::Stopped { .. });
         if let QueueStep::Stopped { code, .. } = &step {
@@ -1922,25 +1932,13 @@ fn integrate_queue(
 }
 
 /// One change's turn in the queue.
-fn queue_step(
-    ctx: &Ctx,
-    store: &Store,
-    change_id: &str,
-    cleanup: bool,
-    debt: Option<&DebtDeclaration>,
-) -> Result<QueueStep> {
+fn queue_step(ctx: &Ctx, store: &Store, change_id: &str, cleanup: bool) -> Result<QueueStep> {
     let st = state::reduce(&store.load_events(change_id)?)?;
     if st.is_closed() {
         println!("{change_id}: {}", change_status(&st));
         return Ok(QueueStep::Skipped(change_status(&st).to_string()));
     }
     println!("{change_id}: integrating into {}", st.target_branch);
-
-    // Declared as the change is reached rather than up front, so a queue that
-    // stops never records an obligation against work it did not attempt.
-    if let Some(debt) = debt {
-        super::declare_debt(ctx, change_id, debt.reason.clone(), debt.kind)?;
-    }
 
     let mut report = ctx.report(store, &st)?;
     if report.needs_rebase {

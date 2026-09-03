@@ -317,3 +317,67 @@ fn a_queue_refuses_the_flags_that_name_one_merge() {
         "a refused queue merges nothing"
     );
 }
+
+#[test]
+fn a_queue_refuses_a_debt_reason_and_records_none() {
+    let repo = repo_with_gates();
+    // Neither change carries a verdict, so a debt is the only thing that could
+    // make either of them ready — and the refusal must come first anyway.
+    let (first, _) = snapshotted(&repo, "debt-first", "first.txt", "first\n");
+    let (second, _) = snapshotted(&repo, "debt-second", "second.txt", "second\n");
+    repo.arc(&repo.root)
+        .args(["metadata", &first, "--tag", "#debt-series"])
+        .assert()
+        .success();
+    let counts = [events(&repo, &first).len(), events(&repo, &second).len()];
+
+    for selector in [
+        vec!["integrate", &first, &second],
+        vec!["integrate", "--tag", "#debt-series"],
+    ] {
+        let mut command = repo.arc(&repo.root);
+        command.args(selector);
+        command
+            .args(["--debt", "no independent reviewer reachable"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "--debt is only valid when integrating one change",
+            ))
+            .stderr(predicates::str::contains("binds to one change's patchset"));
+    }
+
+    // The refusal precedes every effect: no obligation on the ledger, and
+    // nothing replayed, verified, or merged.
+    assert_eq!(
+        [events(&repo, &first).len(), events(&repo, &second).len()],
+        counts,
+        "a refused queue writes no event, least of all the debt it refused"
+    );
+    for change_id in [&first, &second] {
+        let status = json_stdout(repo.arc(&repo.root).args(["status", change_id, "--json"]));
+        assert!(status["debt"].is_null(), "{}", status["debt"]);
+        assert_eq!(status["state"], "open", "{status}");
+    }
+    assert_eq!(
+        git_out(&repo.root, &["log", "--format=%s", "-1"]),
+        "test: declare gates",
+        "a refused queue merges nothing"
+    );
+
+    // One change still takes the reason, declared before the merge.
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            &first,
+            "--debt",
+            "no independent reviewer reachable",
+        ])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", &first, "--json"]));
+    assert_eq!(
+        status["debt"]["reason"], "no independent reviewer reachable",
+        "{status}"
+    );
+}

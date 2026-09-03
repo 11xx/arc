@@ -273,8 +273,10 @@ RUN A CHANGE
   blocker, and the closing summary names what landed with its merge revision,
   what stopped the run and why, and what was never attempted. `--dry-run`
   reports the same plan without replaying, running, or merging anything.
-  `--into` and `--message` stay single-change: a queue lands several merges,
-  each into its own recorded target, and neither flag has one thing to name.
+  `--into`, `--message`, and `--debt` stay single-change: a queue lands several
+  merges, each into its own recorded target, and none of the three has one
+  thing to name — a debt reason least of all, since it is a judgment about one
+  patchset. A queue is for changes already green or already carrying a verdict.
 
   `--no-worktree` means in place, not nowhere: a clean checkout already on the
   target is checked out onto the new branch and recorded as the change's
