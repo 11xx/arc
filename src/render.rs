@@ -50,8 +50,42 @@ pub fn discrimination_suffix(gate: &GateStatus) -> String {
     }
 }
 
+/// What a gate's greenness is a claim about: the head's own content, or the
+/// tree a merge into the target would ship when the change is behind it.
+fn gate_scope(gate: &GateStatus) -> String {
+    match gate.evaluated_tree.as_deref() {
+        Some(tree) => format!("merged tree {}", short_revision(tree)),
+        None => "head".to_string(),
+    }
+}
+
 fn short_revision(revision: &str) -> &str {
     &revision[..revision.len().min(8)]
+}
+
+/// `merged tree: <short> (evaluated|unevaluated at <n> gates)`.
+///
+/// What a merge into the target would ship, and whether the required gates
+/// have answered for it. `None` where no single tree exists to name: a textual
+/// conflict, a missing branch or target, or a report built from the ledger
+/// alone.
+fn merged_tree_line(report: &StatusReport) -> Option<String> {
+    let tree = report.merged_tree.as_deref()?;
+    let evaluated = report
+        .gates
+        .iter()
+        .filter(|gate| gate.evidence_event_id.is_some())
+        .count();
+    let (state, count) = if evaluated > 0 {
+        ("evaluated", evaluated)
+    } else {
+        ("unevaluated", report.gates.len())
+    };
+    Some(format!(
+        "merged tree: {} ({state} at {count} gate{})",
+        short_revision(tree),
+        if count == 1 { "" } else { "s" }
+    ))
 }
 
 /// One gate's line in a human-facing gate list: the raw result, why a passing
@@ -60,7 +94,11 @@ fn short_revision(revision: &str) -> &str {
 pub fn gate_line(gate: &GateStatus) -> String {
     match gate.not_green_reason() {
         None => format!("{}{}", gate.result, discrimination_suffix(gate)),
-        Some(reason) => format!("{} (not green at head: {reason})", gate.result),
+        Some(reason) => format!(
+            "{} (not green at {}: {reason})",
+            gate.result,
+            gate_scope(gate)
+        ),
     }
 }
 
@@ -225,6 +263,10 @@ pub fn markdown(
             None => "unknown",
         }
     );
+
+    if let Some(line) = merged_tree_line(report) {
+        let _ = writeln!(w, "- {line}");
+    }
 
     if !report.blocker_status.blockers_ready.is_empty() {
         let _ = writeln!(w, "\n## Blocked by\n");
@@ -912,6 +954,29 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                     state.target_branch
                 );
             }
+            Blocker::MergedTreeUnevaluated => {
+                let _ = writeln!(
+                    out,
+                    "  - merging into {} would ship tree {}, which no required gate has run \
+                     against",
+                    state.target_branch,
+                    report
+                        .merged_tree
+                        .as_deref()
+                        .map(short_revision)
+                        .unwrap_or("unknown")
+                );
+                let _ = writeln!(
+                    out,
+                    "  - evaluate that merge with `arc verify --against {}`",
+                    state.target_branch
+                );
+                let _ = writeln!(
+                    out,
+                    "  - the result is spent as soon as {} moves again, exactly as a verdict is",
+                    state.target_branch
+                );
+            }
             Blocker::BlockingFindings => {
                 for finding in report
                     .findings
@@ -942,8 +1007,9 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                 for gate in report.gates.iter().filter(|gate| !gate.green_at_head) {
                     let _ = writeln!(
                         out,
-                        "  - Gate `{}` is not green at head: {}",
+                        "  - Gate `{}` is not green at {}: {}",
                         gate.name,
+                        gate_scope(gate),
                         gate.not_green_reason().unwrap_or_default()
                     );
                 }
@@ -994,6 +1060,7 @@ fn blocker_title(blocker: Blocker) -> &'static str {
         Blocker::Iterating => "change is iterating",
         Blocker::BlockedByChanges => "prerequisite changes unresolved",
         Blocker::NeedsRebase => "target branch conflicts with change",
+        Blocker::MergedTreeUnevaluated => "merged tree has no gate evidence",
         Blocker::BlockingFindings => "open blocking findings",
         Blocker::NoValidApproval => "missing or stale approval",
         Blocker::GatesNotGreen => "required gates not green",
@@ -1554,6 +1621,9 @@ fn first_line(body: &str) -> String {
 pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Integration readiness for {}", state.change_id);
+    if let Some(line) = merged_tree_line(report) {
+        let _ = writeln!(out, "{line}");
+    }
     let _ = writeln!(out);
 
     let blocked = |blocker: Blocker| report.blockers.contains(&blocker);
@@ -1614,6 +1684,16 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
     );
     condition(
         &mut out,
+        Blocker::MergedTreeUnevaluated,
+        "merged tree evaluated",
+        format!(
+            "no required gate has run against the tree merging into `{}` would ship; \
+             run `arc verify --against {}`",
+            state.target_branch, state.target_branch
+        ),
+    );
+    condition(
+        &mut out,
         Blocker::BlockingFindings,
         "no open blocking findings",
         report
@@ -1651,8 +1731,9 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .filter(|gate| !gate.green_at_head)
             .map(|gate| {
                 format!(
-                    "gate `{}` is not green at head: {}",
+                    "gate `{}` is not green at {}: {}",
                     gate.name,
+                    gate_scope(gate),
                     gate.not_green_reason().unwrap_or_default()
                 )
             })

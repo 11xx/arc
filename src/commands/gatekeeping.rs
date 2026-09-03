@@ -71,6 +71,7 @@ pub struct VerifyArgs {
     pub waive_dirty: Option<String>,
     pub falsified_by: Option<String>,
     pub predicted: Option<String>,
+    pub against: Option<String>,
 }
 
 struct VerificationInput {
@@ -85,6 +86,9 @@ struct VerificationInput {
     runner: Option<String>,
     note: Option<String>,
     falsification: Option<Falsification>,
+    /// The target head a synthesized merge was computed against, on a run
+    /// evaluating that merge rather than a commit either branch holds.
+    against_target: Option<String>,
 }
 
 struct CompletedVerification {
@@ -109,6 +113,7 @@ struct CompletedVerification {
     worktree_dirty_tracked: Option<bool>,
     worktree_dirty_untracked: Option<bool>,
     tree_moved: bool,
+    against_target: Option<String>,
 }
 
 pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
@@ -130,6 +135,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         waive_dirty,
         falsified_by,
         predicted,
+        against,
     } = args;
     if all
         && (gate.is_some()
@@ -169,6 +175,26 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         (None, Some(_)) => bail!("--predicted requires --falsified-by <event-id>"),
         (None, None) => None,
     };
+    // Evaluating a merge is a whole-gate-set question about content that is
+    // on no branch, so the flags naming one check, asserting a result arc did
+    // not observe, or describing this worktree have nothing to select or
+    // excuse there.
+    if against.is_some()
+        && (gate.is_some()
+            || command.is_some()
+            || probe.is_some()
+            || attest
+            || parallel
+            || skip_green
+            || waive_dirty.is_some()
+            || falsified_by.is_some())
+    {
+        bail!(
+            "--against runs the whole required gate set on a synthesized merge, so it cannot \
+             be combined with --gate, --command, --probe, --attest, --parallel, --skip-green, \
+             --waive-dirty, or --falsified-by"
+        );
+    }
     if parallel && !all {
         bail!("--parallel requires --all");
     }
@@ -327,6 +353,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 runner,
                 note,
                 falsification,
+                against_target: None,
             },
         )?;
         let observed = if code == 0 {
@@ -335,6 +362,11 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             VerifyResult::Fail
         };
         return Ok(if observed == expected { 0 } else { 1 });
+    }
+    // Evidence for a merge is counted at its tree rather than at the change's
+    // head, so the head check below is not the question this path answers.
+    if let Some(target) = against {
+        return verify_against(ctx, &store, &change_id, &st, &target, note);
     }
     // Every path below records gate evidence, which status counts only at the
     // change's head.
@@ -409,6 +441,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                     runner: None,
                     note: note.clone(),
                     falsification: None,
+                    against_target: None,
                 },
             )?;
             if result == 0 {
@@ -455,8 +488,158 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             runner,
             note,
             falsification,
+            against_target: None,
         },
     )
+}
+
+/// A detached checkout that lives only as long as one evaluation.
+///
+/// A synthesized merge is on no branch, so gating it needs a tree of its own.
+/// Removal happens however the run ends, including a gate that fails or
+/// errors: the checkout holds content nothing else refers to, and one left
+/// behind makes the next evaluation refuse.
+struct ScratchWorktree {
+    repo: PathBuf,
+    path: PathBuf,
+}
+
+impl ScratchWorktree {
+    fn create(repo: &Path, path: PathBuf, revision: &str) -> Result<Self> {
+        let display = path.display().to_string();
+        // A checkout an interrupted run left behind is stale by construction:
+        // it holds one revision and this run is asking for another.
+        let _ = gitio::git(repo, &["worktree", "remove", "--force", &display]);
+        if path.exists() {
+            bail!(
+                "{display} exists and is not a worktree arc can remove; delete it and run this \
+                 again"
+            );
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("cannot create {}", parent.display()))?;
+        }
+        gitio::git(repo, &["worktree", "add", "--detach", &display, revision])?;
+        Ok(Self {
+            repo: repo.to_path_buf(),
+            path,
+        })
+    }
+}
+
+impl Drop for ScratchWorktree {
+    fn drop(&mut self) {
+        let display = self.path.display().to_string();
+        if let Err(error) = gitio::git(&self.repo, &["worktree", "remove", "--force", &display]) {
+            eprintln!("warning: could not remove the scratch worktree {display} ({error:#})");
+        }
+    }
+}
+
+/// Run the required gates against the merge that would ship.
+///
+/// A change behind its target merges to content neither branch committed, so
+/// nothing has been run against what would actually land. That content is
+/// written as a commit, checked out on its own, gated there, and the evidence
+/// is recorded against the tree — the coordinate the merge preserves and the
+/// commit id does not. The target head is recorded beside it, because a merge
+/// with a moved target is a different merge and this evidence is about the
+/// earlier one.
+fn verify_against(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    st: &ChangeState,
+    target: &str,
+    note: Option<String>,
+) -> Result<i32> {
+    let toplevel = gitio::toplevel(&ctx.cwd)?;
+    let declarations = gates::load(&toplevel)?;
+    let required = declarations.required_for(&st.profile);
+    if required.is_empty() {
+        bail!("no gates declared for profile {}", st.profile);
+    }
+    let target_head = gitio::branch_head(&ctx.cwd, target)
+        .or_else(|_| gitio::rev_parse(&ctx.cwd, target))
+        .with_context(|| format!("cannot resolve target {target:?}"))?;
+    let change_head = gitio::branch_head(&ctx.cwd, &st.branch)?;
+    let merged_tree = gitio::merge_outcome(&ctx.cwd, &target_head, &change_head)?
+        .tree
+        .with_context(|| {
+            format!(
+                "merging {} into {target} conflicts textually, so there is no single tree to \
+                 evaluate; rebase first",
+                st.branch
+            )
+        })?;
+    let synthesized = gitio::commit_tree_with_parents(
+        &ctx.cwd,
+        &merged_tree,
+        &[&target_head, &change_head],
+        "arc synthesized merge",
+    )?;
+    // The evidence about to be recorded names this commit and nothing else
+    // refers to it, so without a ref it is collectable and the record would
+    // cite content that is gone.
+    gitio::update_ref(
+        &ctx.cwd,
+        &gitio::merge_retention_ref(change_id, &synthesized),
+        &synthesized,
+    )?;
+
+    let path = super::lifecycle::worktree_path_for(&ctx.cwd, &format!("{}-against", st.slug))?;
+    let scratch = ScratchWorktree::create(&ctx.cwd, path, &synthesized)?;
+    println!("merged tree: {merged_tree}");
+    println!("synthesized merge: {synthesized}");
+
+    let scratch_ctx = Ctx {
+        cwd: scratch.path.clone(),
+        actor: ctx.actor.clone(),
+        actor_source: ctx.actor_source,
+        fallback_announced: ctx.fallback_announced.clone(),
+        harness: ctx.harness.clone(),
+        session: ctx.session.clone(),
+        model: ctx.model.clone(),
+        on_behalf_of: ctx.on_behalf_of.clone(),
+    };
+    let total = required.len();
+    let run_id = start_verification_run(
+        ctx,
+        store,
+        change_id,
+        &synthesized,
+        VerificationRunMode::Sequential,
+        false,
+        &required,
+    )?;
+    let mut passed = 0;
+    for (name, gate) in required {
+        let code = record_verification(
+            &scratch_ctx,
+            store,
+            change_id,
+            VerificationInput {
+                run_id: Some(run_id.clone()),
+                probe: None,
+                gate: Some(name.clone()),
+                command: gate.command.clone(),
+                timeout_seconds: gate.timeout,
+                attested_result: None,
+                tested_revision: Some(synthesized.clone()),
+                execution_host: None,
+                runner: None,
+                note: note.clone(),
+                falsification: None,
+                against_target: Some(target_head.clone()),
+            },
+        )?;
+        if code == 0 {
+            passed += 1;
+        }
+    }
+    println!("gates: {passed}/{total} pass at the merged tree");
+    Ok(if passed == total { 0 } else { 1 })
 }
 
 /// Resolve a path for comparison, falling back to the path itself when it
@@ -678,6 +861,7 @@ pub fn snapshot_with_verify(
                 waive_dirty: None,
                 falsified_by: None,
                 predicted: None,
+                against: None,
             },
         );
     }
@@ -728,6 +912,7 @@ pub fn snapshot_with_verify(
                     runner: None,
                     note: None,
                     falsification: None,
+                    against_target: None,
                 },
             )?;
             if code == 0 {
@@ -761,6 +946,7 @@ pub fn snapshot_with_verify(
                 waive_dirty: None,
                 falsified_by: None,
                 predicted: None,
+                against: None,
             },
         )?;
         if code == 0 {
@@ -800,6 +986,7 @@ pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
             waive_dirty: None,
             falsified_by: None,
             predicted: None,
+            against: None,
         },
     )?;
     check(ctx, reference, false, false)
@@ -840,6 +1027,7 @@ fn verify_all_parallel(
             runner: None,
             note: note.clone(),
             falsification: None,
+            against_target: None,
         })
         .collect::<Vec<_>>();
     for input in &inputs {
@@ -1020,6 +1208,7 @@ fn execute_verification(
         runner,
         note,
         falsification,
+        against_target,
     } = input;
     let attested = attested_result.is_some();
     let (result, exit_code, duration_ms, output_tail, timed_out) = match attested_result {
@@ -1062,6 +1251,7 @@ fn execute_verification(
         runner,
         note,
         falsification,
+        against_target,
         // Filled in by the caller, which is what sees the worktree on both
         // sides of the run.
         tested_tree: None,
@@ -1113,6 +1303,13 @@ fn append_verifications(
             runner: item.runner,
             note: item.note,
             falsification: item.falsification,
+            // The content the gate holds for, written beside the revision
+            // carrying it so the record still says what was evaluated once
+            // that commit is unreachable. Unknown rather than guessed where
+            // the revision does not resolve here, which is any attested run
+            // naming a revision this repository does not have.
+            tree: gitio::commit_tree(&ctx.cwd, &revision).ok(),
+            against_target: item.against_target,
             // Set below, once the tree is pinned.
             tested_tree: None,
             worktree_dirty: item.worktree_dirty,
@@ -1510,6 +1707,9 @@ fn integrate_one(
         bail!("target worktree {} is not clean", wt.display());
     }
     let old_target = gitio::branch_head(&ctx.cwd, &target)?;
+    // The content readiness was decided against, read under the target lock so
+    // the merge is checked against the same tree the authorization covers.
+    let evaluated_tree = gitio::merge_outcome(&ctx.cwd, &old_target, &approved_head)?.tree;
     let msg = message.unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
 
     if let Err(e) = gitio::git(
@@ -1528,6 +1728,20 @@ fn integrate_one(
              expected [{old_target}, {approved_head}] — target moved during \
              integration, inspect before trusting this merge"
         );
+    }
+    // Parents say which commits were merged; the tree says what the merge
+    // carries, and only the tree is what any gate ever ran against. A merge
+    // resolving to something else ships content nothing evaluated, so it is
+    // undone rather than recorded.
+    if let Some(expected) = &evaluated_tree {
+        let shipped = gitio::commit_tree(&wt, &merged)?;
+        if &shipped != expected {
+            let _ = gitio::git(&wt, &["reset", "--hard", &old_target]);
+            bail!(
+                "merge commit {merged} carries tree {shipped}, not the evaluated tree \
+                 {expected}; {target} was reset to {old_target} and nothing was recorded"
+            );
+        }
     }
 
     let ev = ctx.event(
@@ -1736,7 +1950,8 @@ fn integrate_dry_run(
         .head
         .clone();
     let target_head = gitio::branch_head(&ctx.cwd, target)?;
-    let conflicts = gitio::merge_conflicts(&ctx.cwd, &target_head, &approved_head)?;
+    let outcome = gitio::merge_outcome(&ctx.cwd, &target_head, &approved_head)?;
+    let conflicts = outcome.conflicts;
     let msg = message
         .map(str::to_string)
         .unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
@@ -1752,6 +1967,9 @@ fn integrate_dry_run(
             "clean"
         }
     );
+    if let Some(tree) = &outcome.tree {
+        println!("  merge tree: {tree}");
+    }
     // Only when the merge would actually happen: a conflicting dry run
     // records nothing, so printing a basis "it would record" would describe
     // an event that could not be written.

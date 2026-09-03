@@ -894,6 +894,8 @@ mod tests {
             0,
             Payload::VerificationRecorded {
                 timeout_seconds: None,
+                tree: None,
+                against_target: None,
                 tested_tree: None,
                 worktree_dirty: None,
                 worktree_dirty_tracked: None,
@@ -921,6 +923,8 @@ mod tests {
             0,
             Payload::VerificationRecorded {
                 timeout_seconds: None,
+                tree: None,
+                against_target: None,
                 tested_tree: None,
                 worktree_dirty: None,
                 worktree_dirty_tracked: None,

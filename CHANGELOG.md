@@ -12,6 +12,18 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Gate evidence binds to the tree a command ran against rather than to the
+  commit carrying it, so a change that is behind its target cannot ship
+  content nothing has evaluated. `check` refuses with
+  `merged-tree-unevaluated` (exit 14) and names `arc verify --against
+  <branch>`, which synthesizes that merge, runs every required gate in a
+  scratch checkout it removes whatever the gates do, and records the result at
+  the merged tree beside the target head it was computed from. The evidence is
+  spent when the target moves again; a head already on the target tip needs
+  nothing new; `needs-rebase` still means a textual conflict alone. `integrate`
+  checks the merge it made carries the evaluated tree and undoes it otherwise,
+  and still never runs a gate. `arc-status/15` adds `merged_tree` to the report
+  and `evaluated_tree` to each gate, both shown by `show` and `check --explain`.
 - Every `arc journal` write verb and `arc journal log` accept `--source
   'harness=<h> session=<id> ts=<rfc3339>'` and `--item-key <key>`, so an item
   distilled out of a recorded session carries where it came from. `turn`,

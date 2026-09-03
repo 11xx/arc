@@ -512,6 +512,16 @@ pub struct VerificationEntry {
     pub worktree_dirty_untracked: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false_ref")]
     pub tree_moved: bool,
+    /// The tree of the revision this evidence names, which is the content the
+    /// gate holds for. `None` on evidence written before arc recorded it; the
+    /// revision resolves it while the commit is reachable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<String>,
+    /// The target head this evidence's tree was merged against, on evidence
+    /// for a synthesized merge. A target that has moved since makes a
+    /// different merge, and this evidence is about the earlier one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub against_target: Option<String>,
     /// The recorded failure this evidence answers, absent when the check was
     /// never seen to fail before it passed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -604,6 +614,18 @@ impl VerificationEntry {
         self.result == VerifyResult::Pass
             && !self.tree_moved
             && (self.attested || (self.tested_tree.is_some() && dirt_excused))
+    }
+
+    /// Whether this evidence is about the given tree.
+    ///
+    /// Evidence recorded before arc kept the tree beside the revision still
+    /// describes one, and `resolve` reads it back from the revision. A
+    /// revision whose commit is gone answers `None` and matches nothing.
+    pub fn describes_tree(&self, tree: &str, resolve: &dyn Fn(&str) -> Option<String>) -> bool {
+        match self.tree.as_deref() {
+            Some(recorded) => recorded == tree,
+            None => resolve(&self.revision).as_deref() == Some(tree),
+        }
     }
 }
 
@@ -920,6 +942,40 @@ impl ChangeState {
         self.verifications
             .iter()
             .rfind(|v| v.gate.as_deref() == Some(gate) && v.revision == revision)
+    }
+
+    /// Latest verification evidence per gate name at an exact tree.
+    ///
+    /// A gate holds for content, so the tree is the key wherever what ships is
+    /// the content of no commit either side made. Evidence written before arc
+    /// recorded the tree names only a revision; `resolve` turns that revision
+    /// into the tree it points at, and a revision resolving to nothing matches
+    /// no tree, which is unknown rather than a match.
+    pub fn gate_evidence_at_tree(
+        &self,
+        gate: &str,
+        tree: &str,
+        resolve: &dyn Fn(&str) -> Option<String>,
+    ) -> Option<&VerificationEntry> {
+        self.verifications
+            .iter()
+            .rfind(|v| v.gate.as_deref() == Some(gate) && v.describes_tree(tree, resolve))
+    }
+
+    /// The latest passing evidence that showed this gate able to fail at this
+    /// tree, keyed the way the evidence that counts there is keyed.
+    pub fn gate_falsification_at_tree(
+        &self,
+        gate: &str,
+        tree: &str,
+        resolve: &dyn Fn(&str) -> Option<String>,
+    ) -> Option<&VerificationEntry> {
+        self.verifications.iter().rfind(|v| {
+            v.gate.as_deref() == Some(gate)
+                && v.result == VerifyResult::Pass
+                && v.falsification.is_some()
+                && v.describes_tree(tree, resolve)
+        })
     }
 
     /// The latest passing evidence that showed this gate able to fail at this
@@ -1726,6 +1782,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 worktree_dirty_tracked,
                 worktree_dirty_untracked,
                 tree_moved,
+                tree,
+                against_target,
                 falsification,
                 ..
             } => {
@@ -1805,6 +1863,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     worktree_dirty_tracked: *worktree_dirty_tracked,
                     worktree_dirty_untracked: *worktree_dirty_untracked,
                     tree_moved: *tree_moved,
+                    tree: tree.clone(),
+                    against_target: against_target.clone(),
                     run_id: run_id.clone(),
                     probe: probe.clone(),
                     gate: gate.clone(),
@@ -2833,6 +2893,8 @@ mod tests {
             change,
             Payload::VerificationRecorded {
                 timeout_seconds: None,
+                tree: None,
+                against_target: None,
                 gate: Some("unit".into()),
                 command: "true".into(),
                 revision: "head".into(),

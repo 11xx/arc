@@ -513,7 +513,7 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/14 schema)
+    /// Machine-readable status report (the versioned arc-status/15 schema)
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -932,6 +932,18 @@ enum Cmd {
         /// --falsified-by.
         #[arg(long, value_name = "REASON")]
         predicted: Option<String>,
+        /// Run every required gate against the merge with this branch, not
+        /// against the change's own head.
+        ///
+        /// A change that is behind its target merges to content neither branch
+        /// committed, and evidence at the head says nothing about it. This
+        /// synthesizes that merge, checks it out on its own, runs the declared
+        /// gates there, and records the result against the merged tree. The
+        /// scratch checkout is removed whatever the gates do. The evidence is
+        /// spent as soon as the target moves again, because that is a
+        /// different merge.
+        #[arg(long, value_name = "BRANCH")]
+        against: Option<String>,
     },
     /// Finish implementation: snapshot, verify all gates, then print check state
     Done {
@@ -2315,6 +2327,7 @@ fn run(cli: Cli) -> Result<i32> {
             waive_dirty,
             falsified_by,
             predicted,
+            against,
         } => {
             let change = infer(change.as_deref())?;
             commands::verify(
@@ -2338,6 +2351,7 @@ fn run(cli: Cli) -> Result<i32> {
                     waive_dirty,
                     falsified_by,
                     predicted,
+                    against,
                 },
             )
         }

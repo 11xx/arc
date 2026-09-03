@@ -208,6 +208,8 @@ RUN A CHANGE
   arc snapshot                       Record the current head as a patchset.
   arc verify --gate <name>           Run a declared gate; record the evidence.
   arc verify --command <cmd>         Same, for an ad hoc probe.
+  arc verify --against <branch>      Run every required gate on the merge with
+                                     that branch, not on this head.
     --falsified-by <id> --predicted <why>
                                      Name the failure this pass answers.
   arc done                           Snapshot, run every gate, print check state.
@@ -412,6 +414,15 @@ RULES THAT CHANGE WHAT YOU DO
     verdict, including a provisional approval and its recorded reason;
     `gates-green` checks every required gate at the current head; `blocked`
     and `brief-recorded` name the events that recorded those facts.
+  - Gate evidence binds to a tree, not to a commit. A change sitting behind
+    its target merges to content neither branch committed, and evidence at the
+    head says nothing about it: `check` refuses with `merged-tree-unevaluated`
+    until `arc verify --against <target>` runs the required gates on that
+    merge, in a scratch checkout it removes afterwards. The result is spent
+    the moment the target moves, because that is a different merge. A head
+    already on the target tip merges to the tree it already has and needs
+    nothing new. `integrate` never runs a gate; it checks that the merge it
+    made carries the tree that was evaluated, and undoes it otherwise.
   - A gate that passed is not evidence that it could have failed. Watch it
     fail first, then record the pass with `--falsified-by <failing-event>
     --predicted "<why it should fail>"`; the gate line then reads

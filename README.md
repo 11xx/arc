@@ -78,7 +78,22 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   CI checks. Attested verification records no exit code or duration because arc
   did not run the command. Passing evidence may also name the failure it
   answers, which is what distinguishes a gate shown able to fail from one that
-  has only ever passed.
+  has only ever passed. Evidence binds to the tree the command ran against,
+  not to the commit that happened to carry it: two commits with one tree are
+  one evaluation, and a merge produces a tree neither side committed. Evidence
+  written before arc recorded the tree resolves it from the revision it names.
+- **A change behind its target must evaluate the merge, not its own head.**
+  A change that is textually clean against a target that has moved still ships
+  content nothing has run against — the two sides are each correct and their
+  merge is not. `check` refuses with `merged-tree-unevaluated` (exit 14) and
+  names `arc verify --against <branch>`, which synthesizes that merge, pins it
+  so the evidence cannot outlive what it cites, runs every required gate in a
+  scratch checkout it removes whatever the gates do, and records the result at
+  the merged tree beside the target head it was computed from. That evidence is
+  spent as soon as the target moves again, exactly as a verdict is spent by a
+  new commit. A head already on the target tip merges to the tree it already
+  has and needs nothing new. `needs-rebase` keeps its narrower meaning: the
+  text conflicts, so there is no single merged tree to evaluate at all.
 - **Snapshots record Git author and committer identity.** When a claim is live,
   the snapshot also records its generation and actor at snapshot time. Projects
   using per-actor Git identities report a mismatch as provenance evidence,
@@ -97,7 +112,10 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   reports it as `hold-release-names-no-hold`.
 
   It merges the approved SHA (not the branch name) with `--no-ff`, then
-  verifies the merge commit's parents. It records a `change-integrated` event
+  verifies the merge commit's parents and that its tree is the one the gates
+  were evaluated against, undoing the merge otherwise: parents say which
+  commits were merged, and only the tree says what ships. It never runs a
+  gate. It records a `change-integrated` event
   carrying the patchset and head that were merged, the branch merged into, and
   where that branch stood first. A merge arc did not perform is `arc close
   --assert-integrated <rev> [--patchset <ps>] [--into <branch>]`, which writes
@@ -712,6 +730,7 @@ reported for separate transfer.
 | 9 | execution role refused the command |
 | 10 | forge link refused: observed tuple or policy mismatch |
 | 13 | change declares it is iterating; clear it before integrating |
+| 14 | the tree a merge would ship has no gate evidence |
 
 ## Build and gate declaration
 
@@ -789,7 +808,7 @@ worktree, the advice is the rerun. Once the tree is clean the advice
 becomes `run_gate:<gate>`, since
 evidence already recorded cannot be repaired by cleaning; only a fresh run
 replaces it. The `clean_worktree:<gate>` action arrived in `arc-status/7`;
-the current schema is `arc-status/14`.
+the current schema is `arc-status/15`.
 
 A gate that passed says nothing about whether it could have failed. A check
 watched to fail for a stated reason, then to pass once that reason was removed,
