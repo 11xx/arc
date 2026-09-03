@@ -826,6 +826,30 @@ fn render_worktree_accounting(accounting: &crate::worktree_usage::WorktreeAccoun
     }
 }
 
+/// Journal writes an executor parked in an open change's worktree and nobody
+/// has filed. The outbox lives inside the worktree, so it is deleted with it:
+/// what is listed here is a countdown, and the promote command travels with
+/// the count so filing it never needs the layout looked up.
+fn render_waiting_spools(states: &BTreeMap<String, crate::state::ChangeState>) {
+    let waiting: Vec<_> = states
+        .values()
+        .filter(|state| state.closure.is_none())
+        .filter_map(|state| {
+            let worktree = state.worktree.as_deref()?;
+            let (dir, paths) = crate::journal::waiting_spool(Path::new(worktree))?;
+            Some((state.change_id.clone(), dir, paths.len()))
+        })
+        .collect();
+    if waiting.is_empty() {
+        return;
+    }
+    println!("waiting spools ({}):", waiting.len());
+    for (change_id, dir, count) in &waiting {
+        println!("  {change_id}  {count} write(s)  {}", dir.display());
+    }
+    println!("  file them with: arc journal spool --promote (from the worktree)");
+}
+
 /// Orient a session in one call: the ledger's actionable buckets, then the
 /// journal's lanes, memories, and backlog. `inbox` answers what is already
 /// open; this answers what is waiting, which is the larger question and the
@@ -890,6 +914,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         println!("  no open changes");
     }
     render_forks(&forks);
+    render_waiting_spools(&states);
     render_worktree_accounting(&worktrees);
     render_debts(&debts);
     render_deferred(&inbox.deferred);

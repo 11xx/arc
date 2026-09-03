@@ -515,7 +515,8 @@ RULES THAT CHANGE WHAT YOU DO
   - A spool made inside a change's worktree is deleted with that worktree, so
     `snapshot` and `integrate` file it from the change's recorded worktree
     first and print what they promoted; one they cannot file is named and left
-    intact rather than blocking the command.
+    intact rather than blocking the command. `arc catchup` lists every spool
+    still waiting in an open change's worktree.
   - `arc run dispatch` names exactly one subject: `--change <id>`, `--fork
     <slug>`, or `--range <base>..<head>`. A round is its ordinal within that
     subject, so the loop of bounded rounds records on a fork or a bare commit

@@ -11099,3 +11099,28 @@ fn integrate_promotes_the_spool_before_removing_the_worktree() {
         .unwrap_or_else(|| panic!("{events:?}"));
     assert_eq!(logged["actor"], "executor", "{logged}");
 }
+
+/// `catchup` answers what is waiting, and a spool nobody has filed is waiting
+/// in exactly that sense: it names the worktree holding it and the command
+/// that files it.
+#[test]
+fn catchup_lists_a_spool_waiting_in_a_change_worktree() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "spooled-catchup"]));
+    let wt = repo.home.join(".worktrees/repo-spooled-catchup");
+    stdout(repo.arc(&wt).args([
+        "journal",
+        "log",
+        "sandboxed",
+        "--spool",
+        "waiting to be filed",
+    ]));
+
+    let caught = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(caught.contains("waiting spools (1)"), "{caught}");
+    assert!(
+        caught.contains(&wt.join(".arc").join("outbox").display().to_string()),
+        "{caught}"
+    );
+    assert!(caught.contains("arc journal spool --promote"), "{caught}");
+}
