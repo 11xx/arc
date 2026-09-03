@@ -368,7 +368,8 @@ fn env_detects_opencode2_by_process_ancestry() {
 
     // assert_cmd execs the binary directly, which would leave the test runner
     // as the parent; spawn through the wrapper so the ancestry is real.
-    let output = Command::new(&harness)
+    let mut wrapped = Command::new(&harness);
+    wrapped
         .current_dir(&repo.root)
         .arg(assert_cmd::cargo_bin!("arc"))
         .arg("env")
@@ -381,9 +382,8 @@ fn env_detects_opencode2_by_process_ancestry() {
         .env_remove("OPENCODE_TERMINAL")
         .env_remove("ARC_HARNESS")
         .env_remove("ARC_SESSION")
-        .env_remove("ARC_MODEL")
-        .output()
-        .unwrap();
+        .env_remove("ARC_MODEL");
+    let output = output_past_busy_text(&mut wrapped);
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),

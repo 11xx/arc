@@ -378,3 +378,23 @@ pub(crate) fn artifact_claim_ids(dir: &Path, file: &str) -> Vec<String> {
         .map(|event| event["claim_id"].as_str().unwrap().to_string())
         .collect()
 }
+
+/// Run a command that executes a fixture script this suite wrote itself,
+/// tolerating the kernel's text-file-busy refusal.
+///
+/// A fixture is executable the moment its bytes are written, but a sibling
+/// test thread that forks while the writing descriptor is still open hands the
+/// child an inherited copy of it. Until that child reaches its own exec, the
+/// fixture's inode has an open writer, and any exec of it is refused. The
+/// window is microseconds wide and closes on its own, so retry across it.
+pub(crate) fn output_past_busy_text(command: &mut Command) -> std::process::Output {
+    for _ in 0..40 {
+        match command.output() {
+            Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                thread::sleep(Duration::from_millis(25));
+            }
+            other => return other.unwrap(),
+        }
+    }
+    panic!("fixture executable stayed busy");
+}
