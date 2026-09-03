@@ -195,7 +195,7 @@ fn resolve_path(cwd: &Path, path: &Path) -> PathBuf {
 }
 
 fn git_worktree_inventory(cwd: &Path) -> Result<BTreeSet<PathBuf>, String> {
-    let output = Command::new("git")
+    let output = crate::gitio::git_command()
         .args(["worktree", "list", "--porcelain"])
         .current_dir(cwd)
         .output()

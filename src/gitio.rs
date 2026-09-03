@@ -22,8 +22,27 @@ pub fn with_deadline<T>(deadline: Option<Instant>, f: impl FnOnce() -> Result<T>
     })
 }
 
-pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
+/// A Git subprocess, with no way to reach an editor.
+///
+/// Git launches whatever editor the environment names as soon as it wants a
+/// message it was not given: `rebase --continue`, a merge it cannot
+/// fast-forward, a commit without one. arc runs Git for an agent, where there
+/// is nobody to close a window, and a blocked subprocess is indistinguishable
+/// from a slow one. Accepting the message that is already in the file is what
+/// every one of these calls means, and `GIT_EDITOR` is what settles it for
+/// good: it outranks `core.editor` as well as the environment's own.
+///
+/// Every Git subprocess arc runs is built here, so there is one answer to
+/// this rather than one per call site.
+pub fn git_command() -> Command {
     let mut command = Command::new("git");
+    command.env("GIT_EDITOR", "true");
+    command.env("GIT_SEQUENCE_EDITOR", "true");
+    command
+}
+
+pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
+    let mut command = git_command();
     command.args(args).current_dir(cwd);
     let out = command_output(&mut command)
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
@@ -42,7 +61,7 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
 /// Forwarding preserves Git's diff rendering while keeping command output
 /// visible to callers that capture Arc itself, including the CLI test harness.
 pub fn git_inherit(cwd: &Path, args: &[String]) -> Result<()> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(args)
         .current_dir(cwd)
         .output()
@@ -113,7 +132,7 @@ pub fn head(cwd: &Path) -> Result<String> {
 }
 
 pub fn latest_tag(cwd: &Path) -> Result<Option<String>> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(["describe", "--tags", "--abbrev=0"])
         .current_dir(cwd)
         .output()
@@ -130,7 +149,7 @@ pub fn latest_tag(cwd: &Path) -> Result<Option<String>> {
 /// Resolve HEAD when the repository has one. An unborn repository is a
 /// normal probe condition, while other Git failures remain errors.
 pub fn head_if_present(cwd: &Path) -> Result<Option<String>> {
-    let out = Command::new("git")
+    let out = git_command()
         .args(["rev-parse", "--verify", "-q", "HEAD"])
         .current_dir(cwd)
         .output()
@@ -154,7 +173,7 @@ pub fn branch_head(cwd: &Path, branch: &str) -> Result<String> {
 }
 
 pub fn current_branch(cwd: &Path) -> Result<Option<String>> {
-    let out = Command::new("git")
+    let out = git_command()
         .args(["symbolic-ref", "--short", "-q", "HEAD"])
         .current_dir(cwd)
         .output()?;
@@ -198,7 +217,7 @@ pub struct MergeOutcome {
 }
 
 pub fn merge_outcome(cwd: &Path, target_rev: &str, head_rev: &str) -> Result<MergeOutcome> {
-    let out = Command::new("git")
+    let out = git_command()
         .args([
             "merge-tree",
             "--write-tree",
@@ -466,7 +485,7 @@ pub fn commit_tree_as(
             None => "-S".into(),
         });
     }
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command
         .args(&args)
         .current_dir(cwd)
@@ -719,7 +738,7 @@ fn openpgp_sign(cwd: &Path, payload: &[u8], key: Option<&str>) -> Result<Vec<u8>
 
 /// One Git configuration value, or nothing where it is unset.
 fn config_value(cwd: &Path, key: &str) -> Result<Option<String>> {
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command.args(["config", "--get", key]).current_dir(cwd);
     let out = command_output(&mut command)
         .with_context(|| format!("failed to read git config in {}", cwd.display()))?;
@@ -775,7 +794,7 @@ fn piped_output(
 
 /// Git's raw output, for the callers that read objects rather than text.
 fn git_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command.args(args).current_dir(cwd);
     let out = command_output(&mut command)
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
@@ -911,7 +930,7 @@ pub fn worktree_tree(cwd: &Path) -> Result<String> {
     // rather than the subtree a caller happened to run from.
     let top = toplevel(cwd)?;
     let run = |args: &[&str]| -> Result<String> {
-        let output = std::process::Command::new("git")
+        let output = git_command()
             .args(args)
             .current_dir(&top)
             .env("GIT_INDEX_FILE", &index)
@@ -1244,7 +1263,7 @@ pub fn missing_objects<'a>(
     revisions: impl Iterator<Item = &'a str>,
 ) -> Result<Vec<String>> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     // A revision containing a newline would become two queries and shift every
     // later answer, so those are refused rather than silently misaligned.
@@ -1254,7 +1273,7 @@ pub fn missing_objects<'a>(
     if revisions.is_empty() {
         return Ok(Vec::new());
     }
-    let mut child = Command::new("git")
+    let mut child = git_command()
         .args(["cat-file", "--batch-check=%(objectname) %(objecttype)"])
         .current_dir(cwd)
         .stdin(Stdio::piped())
@@ -1311,7 +1330,7 @@ pub fn missing_objects<'a>(
 }
 
 pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
-    let out = Command::new("git")
+    let out = git_command()
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .current_dir(cwd)
         .output()
@@ -1440,7 +1459,7 @@ pub fn commit_identity(cwd: &Path, rev: &str) -> Result<CommitIdentity> {
 
 pub fn commit_exists(cwd: &Path, oid: &str) -> Result<bool> {
     let object = format!("{oid}^{{commit}}");
-    let out = Command::new("git")
+    let out = git_command()
         .args(["cat-file", "-e", "--", &object])
         .current_dir(cwd)
         .output()
@@ -1452,28 +1471,27 @@ pub fn commit_exists(cwd: &Path, oid: &str) -> Result<bool> {
 mod tests {
     use super::*;
 
-    /// Assembling a commit object here has to agree with `commit-tree` on
-    /// every byte, or the header order, the identity lines or the message
-    /// boundary are wrong and a carried header would come with a silent
-    /// change to something else.
-    #[test]
-    fn a_hand_built_commit_is_the_one_commit_tree_writes() {
-        let tmp = tempfile::TempDir::new().unwrap();
+    /// A repository holding one commit, with the machine's own configuration
+    /// out of scope.
+    fn fixture(tmp: &tempfile::TempDir, config: &[&str]) -> PathBuf {
         let root = tmp.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
-        for args in [
+        let mut setup: Vec<Vec<&str>> = vec![
             vec!["init", "-b", "master"],
             vec!["config", "user.name", "Tester"],
             vec!["config", "user.email", "tester@example.invalid"],
             vec!["config", "commit.gpgsign", "false"],
-        ] {
+        ];
+        if !config.is_empty() {
+            let mut line = vec!["config"];
+            line.extend_from_slice(config);
+            setup.push(line);
+        }
+        for args in setup {
             git(&root, &args).unwrap();
         }
         std::fs::write(root.join("one.txt"), "one\n").unwrap();
         git(&root, &["add", "."]).unwrap();
-        // A message with an interior blank line and trailing whitespace, so
-        // the boundary between the headers and the message is checked rather
-        // than assumed.
         git(
             &root,
             &[
@@ -1484,6 +1502,34 @@ mod tests {
             ],
         )
         .unwrap();
+        root
+    }
+
+    /// A Git command that wants a message must take the one it already has
+    /// rather than reach for an editor, whatever the repository or the
+    /// environment names as one. `git commit --amend` is the shortest command
+    /// that asks: without a message on the line, it opens an editor.
+    #[test]
+    fn a_git_command_never_reaches_an_editor() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // An editor that fails is how an editor being consulted at all is
+        // made visible; a windowed one would instead block until somebody
+        // closed it.
+        let root = fixture(&tmp, &["core.editor", "false"]);
+        git(&root, &["commit", "--amend"]).expect("an amend must not consult an editor");
+    }
+
+    /// Assembling a commit object here has to agree with `commit-tree` on
+    /// every byte, or the header order, the identity lines or the message
+    /// boundary are wrong and a carried header would come with a silent
+    /// change to something else.
+    #[test]
+    fn a_hand_built_commit_is_the_one_commit_tree_writes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // The fixture's message carries an interior blank line and trailing
+        // whitespace, so the boundary between the headers and the message is
+        // checked rather than assumed.
+        let root = fixture(&tmp, &[]);
 
         let head = git(&root, &["rev-parse", "HEAD"]).unwrap();
         let commit = read_commit(&root, &head).unwrap();
