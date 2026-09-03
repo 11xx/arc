@@ -502,6 +502,33 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   verdict is a review that happened, not an independent one, and it leaves an
   independent-review debt owed.
 
+HISTORY REWRITES
+    arc rewrite sign [--key <id>] [--from <rev>] [--dry-run]
+                       Recreate every commit from --from through the branch
+                       head so one key signs them all, move the branch, arc's
+                       refs and the local branches and tags that point into
+                       the range, and record the map. --from defaults to the
+                       oldest commit whose signature is missing or made by
+                       another key; --dry-run prints the map and stops.
+    arc history rewrite --map <file> --reason <why>
+                       Record a rewrite performed elsewhere, from its commit
+                       map.
+    arc history resolve <rev>     Where a recorded revision ended up.
+
+  Only the signature and the commit ids change: tree, parents, author,
+  committer, dates, encoding and message travel through untouched, so a
+  commit recreated without signing has the id it started with. Trees are
+  identical either way, which is why tree-keyed gate evidence counts the same
+  on both sides of a signing rewrite.
+
+  Recorded revisions keep saying what they said; every derived reading follows
+  them forward, and `arc doctor` reports `unresolved-revision` where that
+  leads nowhere. A branch with commits of its own on top of the rewritten
+  range shares no commit with the branch it was cut from — the rewrite names
+  each one and the `git rebase --onto` that replays it, and until then no
+  comparison between the two has an answer. Approval does not travel: a
+  verdict binds to an exact head, so re-snapshot and re-approve.
+
 RULES THAT CHANGE WHAT YOU DO
   - A verdict binds to the exact approved patchset head. Any new commit makes
     the approval stale until a fresh verdict on a new snapshot.

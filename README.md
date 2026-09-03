@@ -440,11 +440,16 @@ the object carries one entry per member and no top-level placeholders.
 
 `arc doctor` reports a `dangling-revision` for any revision the ledger records
 that Git can no longer resolve — patchset heads and bases, brief bases, merge
-bases, verification and verification-run revisions, audit revisions,
-disposition commits, the integration commit, and the forge's recorded heads. A
-history rewrite leaves the ledger intact and its evidence unreachable, which is
-advice rather than a problem: the ledger is not malformed and the rewrite was
-deliberate, but it is the difference between evidence and a claim.
+bases, verification and verification-run revisions, the target a merged tree
+was evaluated against, falsification anchors, audit revisions, the dirty-tree
+waiver, disposition commits, the integration commit, its source head and
+target-before, prerequisite closures, and the forge's recorded heads. A history
+rewrite leaves the ledger intact and its evidence unreachable, which is advice
+rather than a problem: the ledger is not malformed and the rewrite was
+deliberate, but it is the difference between evidence and a claim. Where a
+recorded rewrite claims to have moved a revision to a commit that is also
+missing, following it forward answers nothing, and that is a problem —
+`unresolved-revision`.
 
 `--since <event-id>` treats a valid ULID as an exclusive lower bound and
 composes with replay, follow, change, and type filters. `events --exec <cmd>`
@@ -1173,31 +1178,60 @@ The ledger is append-only, so migrating those events is unavailable by
 construction — and should stay unavailable. A ledger that rewrites itself when
 Git moves is a projection of whatever Git currently says, which is the thing
 arc exists to supplement rather than mirror. So the rewrite is recorded as the
-fact it is:
+fact it is, and every derived reading follows revisions forward through it:
 
 ```sh
-git filter-repo --...                        # you rewrite; arc never does
-arc history rewrite --map .git/filter-repo/commit-map \
-  --reason "signed two unsigned commits" --tool git-filter-repo
+arc rewrite sign --dry-run                   # the map this would record
+arc rewrite sign --key <id>                  # re-sign, move the refs, record
 arc history resolve <old-sha>                # exit 2 when nothing moved it
+```
+
+`arc rewrite sign` recreates every commit from `--from` through the branch head
+so a single key signs them all. `--from` defaults to the oldest commit whose
+signature is missing or made by another key. Only the signature and the commit
+ids change: tree, parents, author, committer, dates, encoding, and message
+bytes travel through untouched, so a commit recreated without signing
+(`--no-sign`) has the object id it started with — which is what makes "only
+the signature changed" checkable rather than hoped for. Trees are identical either
+way, so tree-keyed gate evidence counts the same on both sides.
+
+It refuses a dirty worktree, a detached HEAD, and an ancestry it cannot
+rebuild because a parent is neither in the map nor a commit here. It moves the
+branch, every ref under `refs/arc/` that pins evidence, and the local branches
+and tags whose tips are rewritten commits. An annotated tag is reported rather
+than re-pointed: rewriting its object is a decision about a release. A branch
+holding commits of its own on top of the range has no successor to move to —
+its commits are still built on the line that was replaced — so the rewrite
+names each such branch and the `git rebase --onto` that replays it. Until a
+stranded branch is replayed it shares no commit with the branch it was cut
+from, and every question comparing the two is unanswerable.
+
+A rewrite performed elsewhere is recorded from its commit map instead:
+
+```sh
+git filter-repo --...
+arc history rewrite --map .git/filter-repo/commit-map \
+  --reason "purged a secret" --tool git-filter-repo
 ```
 
 The commit map is `<old> <new>` per line, as `git filter-repo` writes it,
 including its `old`/`new` column header. A new revision of all zeroes records a
 commit the rewrite dropped, which survives at nothing; a line mapping a commit
 to itself is not a move and is not recorded; and a revision mapped twice to
-different successors is refused. arc never rewrites history, offers to, or
-computes the mapping — but it does check that every revision the map
-claims survives is a commit in this repository, so a map from somewhere else,
-or one naming an object that is not a commit, is refused rather than recorded
-as fact.
+different successors is refused. A supplied map is judged by the same rules as
+one arc computed: every revision it claims survives must be a commit in this
+repository, so a map from somewhere else, or one naming an object that is not a
+commit, is refused rather than recorded as fact.
 
 Revisions match by prefix in either direction, so a map may abbreviate what
 the ledger records in full and a caller may abbreviate what the map records;
 an abbreviation matching more than one recorded revision names none of them.
 
 Nothing already written changes. An old event keeps saying exactly what it
-said; readers gain the ability to follow it forward. `arc doctor` reports a
+said, and every derived reading answers in the revisions this repository holds:
+a change's status, its patchsets, gate evidence, waivers, closures, forge
+observations, and a journal artifact's `verified` stamp all name the commit
+their recorded revision is called here. `arc doctor` reports a
 moved revision as `revision-rewritten` naming its successor, and a dropped one
 as `revision-dropped`, instead of `dangling-revision`. `arc diff` renders the
 surviving commit when a recorded one no longer resolves — every range it
