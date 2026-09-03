@@ -50,6 +50,21 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          thread <slug>` names the harness, session, and model
                          that opened it, and how to resume that session.
   arc journal open       The actionable backlog — work waiting for a session.
+                         A row occupied by somebody reads `[claimed by <actor>
+                         via <harness>: active|expired]`; `--json` carries the
+                         same as `availability` and the claims themselves.
+  arc claim <file.md>    Claim a journal artifact, the way a change is
+                         claimed: a lease with a TTL, renewed by working it,
+                         released with `arc release-claim <file.md> --outcome
+                         paused|abandoned|expired`. `arc stage <file.md>
+                         <stage>` records typed progress against it.
+  arc journal checkpoint <file.md> --body-file -
+                         Where the work stands and what a successor should
+                         read, appended to the artifact and recorded with a
+                         digest of the block. `--next`, `--gate`, and
+                         `--blocker` carry the structured half; `--supersedes
+                         <checkpoint-id>` corrects an earlier one without
+                         hiding it.
   arc journal verified <file> [--note <text>]
                          Record a source check at the head of the checkout it
                          was made in: the project anchor, or a fork's own
@@ -412,6 +427,19 @@ RULES THAT CHANGE WHAT YOU DO
   - The ledger gates; claims, stages, and lanes are advisory signals, never locks.
   - A lane's owner is a harness and a session together. Harnesses mint session
     strings independently, so neither half names an owner on its own.
+  - A lane is occupancy of a topic; a claim on a journal artifact is occupancy
+    of that file. Both render on a row and neither becomes the other: work with
+    no artifact still takes a lane.
+  - An artifact claim expires by its lease alone. A change's stages are
+    budgeted and a stage over budget reads `stale`; an artifact has no stages
+    to budget, so `expired` is when it becomes reclaimable, and `--takeover`
+    is what displaces it.
+  - `arc journal consume` and `arc journal transition` refuse while any claim
+    on the artifact is open, and take `--acknowledge-claim <id>` for each.
+    Those claims then end with `ended_by` naming the event and no owner
+    outcome: how somebody's work stopped is theirs to say. `arc begin
+    --from-journal` closes the invoker's own claim as `promoted` citing the
+    change it opened.
   - Give every concurrent writer its own branch and worktree. Integration and
     shared refs belong to the lead alone.
   - An executor's first act is `arc config --check-writable`; a nonzero exit
@@ -420,6 +448,10 @@ RULES THAT CHANGE WHAT YOU DO
   - An executor that hangs never reaches its own release. Before leaving a
     delegated run unattended, arm `arc watch <change> --until stalled`; silence
     is unknown, not healthy. `arc rescue <change> --take` recovers it.
+  - `arc watch <file.md> --until stalled` arms the same wait over an artifact
+    claim, and `arc rescue <file.md> [--take]` reports where the work stopped
+    and takes it over. An artifact answers only `stalled`; the rest of the
+    vocabulary asks about patchsets and verdicts.
   - `arc watch <change> --until` accepts `snapshot`, `stalled`, `reviewed`,
     `approved`, `gates-green`, `ready`, `blocked`, `brief-recorded`,
     `integrated`, and `closed`. `approved` returns on the latest approving

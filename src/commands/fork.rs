@@ -301,6 +301,10 @@ pub fn retire(
                 Some(&note),
                 None,
                 false,
+                // A fork marker is retired by the fork that owns it. Nothing
+                // acknowledges a claim here: a marker somebody has claimed is
+                // refused, and released by its holder.
+                &[],
             )?;
         }
         Some(marker) => {
@@ -311,6 +315,10 @@ pub fn retire(
                 Some(&note),
                 None,
                 false,
+                // A fork marker is retired by the fork that owns it. Nothing
+                // acknowledges a claim here: a marker somebody has claimed is
+                // refused, and released by its holder.
+                &[],
             )?;
         }
     }

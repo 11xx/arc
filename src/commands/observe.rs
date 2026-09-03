@@ -171,6 +171,20 @@ pub fn watch(ctx: &Ctx, reference: Option<&str>, args: WatchArgs) -> Result<i32>
         exec_command,
         json,
     } = args;
+    if let Some(file) =
+        reference.and_then(|reference| crate::journal::artifact_subject(&ctx.cwd, reference))
+    {
+        return watch_artifact(
+            ctx,
+            &file,
+            tags,
+            quorum,
+            until,
+            timeout_secs,
+            exec_command,
+            json,
+        );
+    }
     // A single change and a tagged set are different questions, and a quorum is
     // meaningless for one change. Refuse rather than guess, because both wrong
     // guesses — returning early or waiting forever — are silent.
@@ -218,6 +232,76 @@ pub fn watch(ctx: &Ctx, reference: Option<&str>, args: WatchArgs) -> Result<i32>
         }
         Err(error) => Err(error),
     }
+}
+
+/// Wait until the claim on a journal artifact stops being worked.
+///
+/// Only `stalled` is a question about an artifact. The rest of the vocabulary
+/// asks about patchsets, verdicts, and gates, which belong to a change; a
+/// watch that silently never fired would be indistinguishable from work still
+/// in progress, which is the failure the whole surface exists to avoid.
+#[allow(clippy::too_many_arguments)]
+fn watch_artifact(
+    ctx: &Ctx,
+    file: &str,
+    tags: &[String],
+    quorum: Option<WatchQuorum>,
+    until: &[WatchUntil],
+    timeout_secs: Option<u64>,
+    exec_command: Option<&str>,
+    json: bool,
+) -> Result<i32> {
+    if !tags.is_empty() || quorum.is_some() {
+        bail!("--tag, --any, and --all select changes, not a journal artifact");
+    }
+    if let Some(other) = until
+        .iter()
+        .find(|condition| !matches!(condition, WatchUntil::Stalled))
+    {
+        bail!(
+            "--until {} asks about a change; a journal artifact answers only `stalled`",
+            other.label()
+        );
+    }
+    if until.is_empty() {
+        bail!("watch requires --until");
+    }
+    let deadline = timeout_secs.map(|timeout| Instant::now() + Duration::from_secs(timeout));
+    let mut poll_interval = POLL_MIN;
+    let claim_id = loop {
+        if let Some(claim_id) = crate::journal::stalled_artifact_claim(ctx, file)? {
+            break Some(claim_id);
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            break None;
+        }
+        let sleep_for = deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .map_or(poll_interval, |remaining| poll_interval.min(remaining));
+        thread::sleep(sleep_for);
+        poll_interval = (poll_interval * 2).min(POLL_MAX);
+    };
+    let Some(claim_id) = claim_id else {
+        report_timeout(until, json)?;
+        return Ok(2);
+    };
+    let value = serde_json::json!({
+        "event_type": "watch-reached",
+        "condition": WatchUntil::Stalled.label(),
+        "file": file,
+        "claim_id": claim_id,
+    });
+    if json {
+        println!("{}", serde_json::to_string(&value)?);
+    } else {
+        println!("reached: {} ({file})", WatchUntil::Stalled.label());
+    }
+    if let Some(command) = exec_command {
+        let mut diagnostic = serde_json::to_vec(&value)?;
+        diagnostic.push(b'\n');
+        run_hook(command, &diagnostic, &value);
+    }
+    Ok(0)
 }
 
 enum WatchSelection {

@@ -1780,6 +1780,51 @@ covered by a live lane, distinguishing this-session from external
 occupancy, and `catchup` leads with the lanes block so a newly opened
 session sees who else is here first.
 
+A **claim on a journal artifact** is the same object the ledger uses for a
+change, with the artifact filename as its subject: `claim <file>.md [--ttl 2h]
+[--takeover]`, `stage <file>.md <stage>`, and `release-claim <file>.md
+[--outcome paused|abandoned|expired]`. Any of those commands takes an artifact
+filename where it takes a change reference — a name ending in `.md` that exists
+in the journal directory is an artifact, and a change ID cannot contain a dot.
+Both subjects reduce to the same claim state and are timed by the same
+function, so `active` and `expired` mean what they mean on a change. A change's
+stages carry budgets and a stage over budget reads `stale`; an artifact has no
+stages to budget, so its lease is the whole of what expires and `expired` is
+when it becomes reclaimable. A live claim held by someone else is refused; an
+expired one is displaced only with `--takeover`, which records the displaced
+claim. A lane is occupancy of a topic and a claim is occupancy of a file: both
+render on a row, and neither is ever rewritten into the other.
+
+`journal checkpoint <file>.md --body-file - [--next <action>] [--gate <cmd>]
+[--blocker <ref>] [--supersedes <checkpoint-id>]` appends a `### Work
+checkpoint` block to the artifact and records a typed event carrying the
+structured fields and a digest of exactly the bytes appended, so a reader can
+tell a checkpoint that still says what it said from one rewritten underneath.
+It requires a live claim held by this identity and is refused once the artifact
+is consumed. A correction is another checkpoint naming the one it supersedes;
+views follow the uncorrected tip, and `journal doctor` reports a claim left
+with two of them.
+
+`journal consume` and `journal transition` refuse while any claim on the
+artifact is open, naming each, and proceed only when `--acknowledge-claim <id>`
+names every one — a lease that has run out included, since the claim being dead
+is a fact about the clock rather than its holder's consent. Those claims end
+with `ended_by` naming the lifecycle event and no owner outcome, because how
+somebody's work stopped is theirs to say. `begin --from-journal` closes the
+invoker's own claim as `promoted` citing the change it opened, and ends every
+other claim on the artifact with the change opening.
+
+`journal open` rows append `[claimed by <actor> via <harness>: <state>]`, and
+`--json` carries `availability` (`available`, `occupied`, `reclaimable`, or
+`terminal`) beside the claim objects. Where nothing holds an artifact, the row
+says whether that is knowable: one filed before the `artifact-claims`
+capability marker reads `unknown`, and one filed after it with no claim
+`never-started`. `catchup` lists open artifact claims beside the lanes with
+each claim's next action; `rescue <file>.md [--take]` reports where the work
+stopped and takes over a lease another identity left run out; and `watch
+<file>.md --until stalled` waits for a lease to run out, the only condition an
+artifact answers.
+
 Long free text can come from a file (or stdin with `-`) instead of shell
 quoting: `journal lane open|renew --status-file`, `stage --note-file`, and
 `hold --reason-file` are mutually exclusive with their inline counterparts.
