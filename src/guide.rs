@@ -84,6 +84,8 @@ SETTLE A QUESTION (before it is work)
   arc journal position <file> --body-file - [--stance <for|against|amend>]
   arc journal question <file> --placement opening|closing --option <a> --option <b> --body-file -
   arc journal questions                Every question waiting on a person.
+  arc journal delivered <file> --question <id> --to person|anyone|delegate:<name>
+    --handle <opaque>                  Record that you asked somebody.
   arc journal scaffolds [--show <n>]   What a write prepends, before it does.
   arc journal answer <file> --question <id> --option <choice> --body-file -
     --other "<answer>"                 Settle it outside the options offered.
@@ -185,7 +187,15 @@ SETTLE A QUESTION (before it is work)
   job, through whatever prompt its harness offers — `arc journal questions
   --json` carries the settle-by, the options, and the branches already
   argued, which is everything a prompt needs — and `answer` is where the
-  reply comes back. When the answer is none of
+  reply comes back. Once you have raised it, `delivered <file> --question
+  <id> --to person|anyone|delegate:<name>` records that you did; arc keeps
+  the fact and sends nothing. Every question view then reports `delivery`:
+  `unasked` means prompting work remains, `delivered` means the reply is
+  merely pending, `answered` ends it, and `unknown` marks a question posed
+  before this journal recorded deliveries at all. Asking again records
+  again — nothing is erased, because a question asked twice and still
+  unanswered is the more urgent one — and a question waiting on one named
+  delegate accepts only that delegate. When the answer is none of
   the options, `--other "<answer>"` records it in the answerer's own words
   and marks that the menu was stepped outside, because a menu somebody had to
   leave was framed wrong and the next one should know. Placement decides when:

@@ -12,6 +12,22 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `arc journal delivered <file> --question <id> --to
+  person|anyone|delegate:<name> [--handle <opaque>]` records that a caller
+  delivered an open question to somebody; arc keeps the fact and sends
+  nothing. A question recorded who may settle it but never whether anybody
+  was asked, so the queue could not separate prompting work still to do from
+  an answer merely pending. Every question view now carries `delivery`
+  (`unknown|unasked|delivered|answered`) and the full `deliveries` list, and
+  the text listing leads each question with its state. Deliveries accumulate:
+  asking twice records twice and erases nothing. A delivery is refused when
+  the question is unknown, already answered, or waiting on a named delegate
+  and addressed to anyone else. A typed `capability` event marks where the
+  journal began recording a facility, so a question posed beforehand reads
+  `unknown` rather than `unasked`; `journal doctor` validates both events.
+  `journal questions --json` becomes `arc-journal-questions/2` and carries
+  the marker.
+
 - Gate evidence binds to the tree a command ran against rather than to the
   commit carrying it, so a change that is behind its target cannot ship
   content nothing has evaluated. `check` refuses with

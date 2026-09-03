@@ -1629,6 +1629,38 @@ than turn-taking. Once resolved, the view also includes the outcome, optional
 decision artifact, and a resolver-participation flag that surfaces a resolver
 who also argued a side under the same harness-native session identity.
 
+`journal question <filename> --placement opening|closing --option <a>
+--option <b> --body-file <src>` poses a question the session should not settle
+alone, and `--settle-by person|anyone|delegate --delegate <name>` records who
+may settle it. `journal questions [--json]` is the queue of those still open.
+Who may settle a question is not whether anybody was asked, so a question also
+carries a delivery record: `journal delivered <filename> --question <id> --to
+person|anyone|delegate:<name> [--handle <opaque>]` records a delivery the
+caller already made. Arc keeps the fact and sends nothing — it holds no
+messaging credentials and infers no delivery from prose — and `--handle`
+stores whatever opaque identifier the delivery system returned, verbatim and
+unresolved, so the delivery can be found again outside arc. A delivery is
+refused when the question is unknown, when it is already answered, and when
+the question waits on one named delegate and the delivery names anyone else,
+since that would record prompting done against an audience that cannot settle
+it; who may answer is changed by correcting or superseding the question.
+Deliveries accumulate rather than replace, because a question asked twice and
+still unanswered is more urgent than one asked once.
+
+Every question view reports the resulting state. `journal questions --json`
+(schema `arc-journal-questions/2`) and the questions in `journal discussion
+--json` carry `delivery` — `unasked` while prompting work remains, `delivered`
+once somebody was asked and the reply is merely pending, `answered` once it is
+settled, and `unknown` for a question posed before the journal recorded
+deliveries at all — plus `deliveries`, every recorded attempt with its
+recipient, handle, identity, and timestamp. The text listing leads each
+question with the same state. Delivery never claims the recipient read
+anything, only that a caller reported sending it. The boundary that makes
+`unknown` meaningful is a typed `capability` event naming a facility and the
+anchor head it began at, appended once per name by the first write that needs
+it; `questions --json` carries it, because the state cannot be interpreted
+without knowing which questions predate the record.
+
 An entry filed wrong is amended rather than rewritten. `journal correct
 <filename> --target <target> --field <field> --value <value> [--note <text>]`
 replaces one field of one entry, and `journal retract <filename> --target
