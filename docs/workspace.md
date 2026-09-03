@@ -1,8 +1,9 @@
 # Workspace, scaffolds, and cross-repo transfer
 
-## Workspace, brief scaffolds, and restack advice
+Three read-only conveniences for a lead working across repos and handoffs,
+and the bundle that moves one change's ledger between repositories.
 
-Three read-only conveniences for a lead working across repos and handoffs.
+## Workspace
 
 `arc workspace list|inbox|backlog [--json]` aggregates across registered
 projects. `workspace backlog --here` restricts the report to canonical project
@@ -110,6 +111,8 @@ rest; `--json` carries them all. A debt whose recorded range cannot be read
 carries `surfaces: null` and is excluded from exact-path correlation without
 being presented as known to touch nothing.
 
+## Brief scaffolds
+
 `arc brief <change> --scaffold <name>` prepends a template to the brief being
 recorded (`--scaffold` alone records the template). A repo-local
 `.arc/templates/<name>.md` wins; otherwise a built-in applies (`sol-low`,
@@ -138,6 +141,8 @@ because the other verdicts do not ask for a revision. References resolve by
 unique prefix and are stored canonically, so an ambiguous prefix refuses
 rather than picking a candidate: the resolved identifier is permanent.
 
+## Acceptance probes
+
 `arc brief --probes-json` binds named acceptance commands to one brief
 version, taking a JSON array inline, a path, or `-` for stdin. Probe names are
 unique kebab-case slugs. Declaring a probe is `brief`'s job; `arc verify` only
@@ -153,6 +158,8 @@ passes at the patchset head. That pair proves behavioral discrimination, not
 semantic relevance: reviewers still inspect the baseline output to confirm the
 intended failure.
 
+## Audit ranges
+
 `arc diff <change> --integrated` renders the exact range an integration
 recorded — from where the target stood before to the commit that landed —
 which is what an audit reviews; a patchset range describes the work instead.
@@ -162,6 +169,8 @@ arc recorded the range knows what landed but not what it landed onto, so it
 requires `--base <rev>` rather than having one guessed; passing `--base` where
 a range *was* recorded is refused, because the recorded range is the fact. A
 change that was abandoned or superseded has no integration range and says so.
+
+## Restack advice
 
 `arc restack <change> --advise` prints, for each open dependent of a change,
 the exact `git rebase --onto <target> <base>` command to run in that
