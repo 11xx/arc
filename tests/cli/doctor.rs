@@ -585,3 +585,153 @@ fn a_recorded_rewrite_translates_revisions_instead_of_migrating_events() {
         "{exported}"
     );
 }
+
+/// Fork checkouts are measured beside the changes and totalled apart from
+/// them. A fork sits outside the change lifecycle, so no integration ever
+/// retires its worktree; an accounting that omitted it understated exactly
+/// the checkouts that persist, and one that summed it in would answer
+/// neither question.
+#[test]
+fn worktree_accounting_counts_forks_apart_from_changes() {
+    let repo = Repo::new();
+    begin_change_no_helper(&repo, "usage-change");
+    repo.arc(&repo.root)
+        .args(["fork", "begin", "usage-fork"])
+        .assert()
+        .success();
+
+    let value = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    let accounting = &value["worktrees"];
+    let changes = accounting["changes"].as_array().unwrap();
+    let forks = accounting["forks"].as_array().unwrap();
+    assert_eq!(changes.len(), 1, "{accounting}");
+    assert_eq!(forks.len(), 1, "{accounting}");
+    assert_eq!(forks[0]["slug"], "usage-fork", "{accounting}");
+    assert!(
+        forks[0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("repo-fork-usage-fork"),
+        "{accounting}"
+    );
+
+    // The change total is the changes alone: the fork's bytes are reported,
+    // never folded in.
+    assert_eq!(
+        accounting["total_bytes"].as_u64().unwrap(),
+        changes[0]["bytes"].as_u64().unwrap(),
+        "{accounting}"
+    );
+    assert_eq!(
+        accounting["fork_total_bytes"].as_u64().unwrap(),
+        forks[0]["bytes"].as_u64().unwrap(),
+        "{accounting}"
+    );
+
+    let text = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(text.contains("fork worktrees: "), "{text}");
+    assert!(text.contains("usage-fork"), "{text}");
+
+    let doctor = stdout(repo.arc(&repo.root).args(["doctor", "--verbose"]));
+    assert!(
+        doctor.contains("fork-worktree-usage: usage-fork"),
+        "{doctor}"
+    );
+    assert!(doctor.contains("fork-worktree-usage-total"), "{doctor}");
+}
+
+/// A size is reported with the method that produced it and the filesystem it
+/// was taken on. `du` sums apparent size, which is physical cost only where
+/// bytes are stored one for one, so the number travels with what it means.
+#[test]
+fn worktree_accounting_names_its_method_and_the_mount_it_measured() {
+    let repo = Repo::new();
+    begin_change_no_helper(&repo, "measured");
+
+    let value = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    let measurement = &value["worktrees"]["measurement"];
+    assert_eq!(measurement["method"], "du-apparent", "{measurement}");
+    assert_eq!(measurement["physical"], "unknown", "{measurement}");
+    assert!(
+        measurement["filesystem"]["free_bytes"].as_u64().is_some(),
+        "{measurement}"
+    );
+    assert!(
+        measurement["filesystem"]["mount"].as_str().is_some(),
+        "{measurement}"
+    );
+
+    // Every total a reader could spend carries the method in text too.
+    let text = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(text.contains("[du-apparent; physical: unknown"), "{text}");
+    assert!(text.contains("worktree root: "), "{text}");
+}
+
+/// Every binary the accounting consults is optional. Without `findmnt` the
+/// filesystem type is unknown and the sizes are still reported: a missing
+/// tool degrades one field rather than failing a command that only advises.
+#[test]
+fn worktree_accounting_without_findmnt_reports_an_unknown_filesystem() {
+    let repo = Repo::new();
+    begin_change_no_helper(&repo, "no-findmnt");
+
+    // A PATH holding only the tools the accounting may still use. Git
+    // resolves its own helpers from the real binary behind the symlink, so
+    // the repository keeps working while `findmnt` is genuinely absent.
+    let shim = repo.home.join("shim");
+    fs::create_dir_all(&shim).unwrap();
+    for tool in ["git", "du", "df"] {
+        std::os::unix::fs::symlink(which(tool), shim.join(tool)).unwrap();
+    }
+
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .env("PATH", &shim)
+            .args(["catchup", "--json"]),
+    );
+    let measurement = &value["worktrees"]["measurement"];
+    assert_eq!(
+        measurement["filesystem"]["fstype"], "unknown",
+        "{measurement}"
+    );
+    // Whether the mount compresses is unread, which is not the claim that it
+    // does not, so the field is absent rather than false.
+    assert!(
+        measurement["filesystem"]["compressed"].is_null(),
+        "{measurement}"
+    );
+    assert_eq!(measurement["method"], "du-apparent", "{measurement}");
+    assert!(
+        value["worktrees"]["changes"][0]["bytes"].as_u64().is_some(),
+        "sizes must survive a missing findmnt: {value}"
+    );
+    // `df` still answers, so the mount and its free space remain.
+    assert!(
+        measurement["filesystem"]["free_bytes"].as_u64().is_some(),
+        "{measurement}"
+    );
+}
+
+/// The first binary of `tool` on the invoking PATH.
+fn which(tool: &str) -> PathBuf {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|dir| dir.join(tool))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("{tool} must be on PATH for this test"))
+}
+
+/// Creating a worktree spends disk, and the space it will land in is
+/// reported before it is spent. A filesystem that fills reports as success
+/// everywhere else, which is why the number is printed rather than assumed.
+#[test]
+fn begin_and_fork_begin_report_what_the_worktree_root_has_left() {
+    let repo = Repo::new();
+    let begun = stdout(repo.arc(&repo.root).args(["begin", "preflighted"]));
+    assert!(begun.contains("worktree root free: "), "{begun}");
+    assert!(begun.contains(" on "), "{begun}");
+
+    let forked = stdout(repo.arc(&repo.root).args(["fork", "begin", "preflighted"]));
+    assert!(forked.contains("worktree root free: "), "{forked}");
+}

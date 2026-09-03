@@ -331,9 +331,16 @@ fn fork_views_agree_about_retirement_and_catchup_json_carries_forks() {
     assert_eq!(value["forks"][0]["retired"], "retired");
     assert!(value["forks"][0]["worktree"].is_string());
 
-    // Retired forks leave the catchup surfaces; open ones appear in both.
+    // A retired fork leaves the live-fork listing. Its worktree does not
+    // leave the disk, so the accounting keeps reporting it: a record that
+    // says retired above a checkout that still costs space is exactly the
+    // half-state where worktree cost goes to hide.
     let catchup_text = stdout(repo.arc(&repo.root).arg("catchup"));
-    assert!(!catchup_text.contains("agreed"), "{catchup_text}");
+    assert!(!catchup_text.contains("forks ("), "{catchup_text}");
+    assert!(
+        catchup_text.contains("fork worktrees: ") && catchup_text.contains("agreed"),
+        "{catchup_text}"
+    );
     let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
     assert_eq!(catchup["schema"], "arc-catchup/3");
     assert!(catchup["forks"].as_array().unwrap().is_empty(), "{catchup}");
@@ -1159,4 +1166,186 @@ fn a_relative_journal_destination_is_one_journal_for_every_worktree() {
         from_linked.contains("fork-anchored"),
         "a linked worktree read a different journal: {from_linked}"
     );
+}
+
+/// A fork outlives the session that opened it, and the marker records who
+/// that was. `fork thread` reads it back, with the command that reopens the
+/// session where the harness has a stable resume form.
+#[test]
+fn fork_thread_prints_the_identity_that_opened_the_fork() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "claude")
+        .env("ARC_SESSION", "session-threaded")
+        .env("ARC_MODEL", "model-threaded")
+        .args(["fork", "begin", "threaded"])
+        .assert()
+        .success();
+
+    let out = stdout(repo.arc(&repo.root).args(["fork", "thread", "threaded"]));
+    assert!(out.contains("fork: threaded"), "{out}");
+    assert!(out.contains("harness: claude"), "{out}");
+    assert!(out.contains("session: session-threaded"), "{out}");
+    assert!(out.contains("model: model-threaded"), "{out}");
+    assert!(out.contains("actor: tester"), "{out}");
+    assert!(
+        out.contains("resume: claude --resume session-threaded"),
+        "{out}"
+    );
+
+    // A harness with no known resume form is reported without one: a wrong
+    // incantation costs a reader more than an absent one.
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "some-other-harness")
+        .args(["fork", "begin", "unresumable"])
+        .assert()
+        .success();
+    let other = stdout(repo.arc(&repo.root).args(["fork", "thread", "unresumable"]));
+    assert!(other.contains("harness: some-other-harness"), "{other}");
+    assert!(!other.contains("resume: "), "{other}");
+}
+
+/// A fork adopted with nothing declared has nothing to attribute, and says
+/// so. An identity arc never received is absent, not a plausible name.
+#[test]
+fn fork_thread_reports_an_undeclared_identity_as_absent() {
+    let repo = Repo::new();
+    let worktree = fork_worktree(&repo, "handmade");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fork/handmade",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION")
+        .args(["fork", "adopt", "handmade"])
+        .assert()
+        .success();
+
+    let out = stdout(repo.arc(&repo.root).args(["fork", "thread", "handmade"]));
+    assert!(out.contains("harness: absent"), "{out}");
+    assert!(out.contains("session: absent"), "{out}");
+    assert!(out.contains("model: absent"), "{out}");
+    assert!(out.contains("actor: absent"), "{out}");
+    assert!(!out.contains("resume: "), "{out}");
+}
+
+/// A verification made inside a fork names the fork's own head. The anchor's
+/// head is different code, and a stamp that claimed it would credit the check
+/// to source nobody opened.
+#[test]
+fn journal_verified_inside_a_fork_stamps_the_fork_head_and_scope() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "fork-check",
+                "--kind",
+                "todo",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Fork check\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    repo.arc(&repo.root)
+        .args(["fork", "begin", "checked"])
+        .assert()
+        .success();
+    let worktree = fork_worktree(&repo, "checked");
+    // The fork carries a commit the anchor does not, so the two heads are
+    // distinguishable and the stamp can be wrong in a visible way.
+    repo.commit(&worktree, "forked.txt", "forked\n", "test: fork commit");
+    let fork_head = repo.head(&worktree);
+    let anchor_head = repo.head(&repo.root);
+    assert_ne!(fork_head, anchor_head);
+
+    let out = stdout(
+        repo.arc(&worktree)
+            .args(["journal", "verified", &file])
+            .env("ARC_HARNESS", "test"),
+    );
+    assert!(out.contains(&format!("at {fork_head}")), "{out}");
+    assert!(out.contains("in fork checked"), "{out}");
+
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let stamp = open["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file"] == file)
+        .map(|item| item["verification"].clone())
+        .unwrap();
+    assert_eq!(stamp["revision"], fork_head, "{stamp}");
+    assert_eq!(stamp["scope"], "fork:checked", "{stamp}");
+    // The anchor moving says nothing about a revision off its line of
+    // history, so no movement is claimed either way.
+    assert!(stamp["moved"].is_null(), "{stamp}");
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(
+        text.contains(&format!("[verified at {} in fork checked", &fork_head[..8])),
+        "{text}"
+    );
+}
+
+/// Outside a fork the stamp is the project anchor's head, with no scope: a
+/// check made in the primary checkout means what it always meant.
+#[test]
+fn journal_verified_outside_a_fork_still_stamps_the_anchor() {
+    let repo = Repo::new();
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                "anchor-check",
+                "--kind",
+                "todo",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Anchor check\n"),
+    );
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    // A fork exists but is not where the check is made.
+    repo.arc(&repo.root)
+        .args(["fork", "begin", "elsewhere"])
+        .assert()
+        .success();
+    let anchor_head = repo.head(&repo.root);
+
+    let out = stdout(repo.arc(&repo.root).args(["journal", "verified", &file]));
+    assert!(out.contains(&format!("at {anchor_head}")), "{out}");
+    assert!(!out.contains("in fork"), "{out}");
+
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let stamp = open["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file"] == file)
+        .map(|item| item["verification"].clone())
+        .unwrap();
+    assert_eq!(stamp["revision"], anchor_head, "{stamp}");
+    assert!(stamp["scope"].is_null(), "{stamp}");
+    assert_eq!(stamp["moved"], false, "{stamp}");
 }
