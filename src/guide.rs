@@ -191,8 +191,9 @@ SETTLE A QUESTION (before it is work)
   <id> --to person|anyone|delegate:<name>` records that you did; arc keeps
   the fact and sends nothing. Every question view then reports `delivery`:
   `unasked` means prompting work remains, `delivered` means the reply is
-  merely pending, `answered` ends it, and `unknown` marks a question posed
-  before this journal recorded deliveries at all. Asking again records
+  merely pending, `answered` ends it, and `unknown` marks a question older
+  than the record itself — posing marks the facility, so only questions
+  predating that reach it. Asking again records
   again — nothing is erased, because a question asked twice and still
   unanswered is the more urgent one — and a question waiting on one named
   delegate accepts only that delegate. When the answer is none of

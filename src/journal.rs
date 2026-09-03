@@ -3253,11 +3253,25 @@ fn question(
         bail!("a question needs at least two options; one option is a statement");
     }
     let body = read_body_verbatim(body_file)?;
-    let dir = resolve_dir(&ctx.cwd)?;
-    let _transition = lock_journal_transition(&dir)?;
+    let resolution = resolve(&ctx.cwd)?;
+    let anchor = resolution.anchor.clone();
+    let _transition = lock_journal_transition(&resolution.directory)?;
     let (dir, path, topic) = open_discussion(ctx, filename)?;
 
     let now = Utc::now();
+    // Posing records a question whose delivery this build can report, so the
+    // facility is marked here as well as at the first delivery. Without it the
+    // first question in a journal would read as predating the record, and a
+    // project that has never delivered anything could never say that nobody
+    // has been asked.
+    ensure_capability(
+        ctx,
+        &dir,
+        now,
+        anchor.as_deref(),
+        &read_events(&dir)?,
+        QUESTION_DELIVERY_CAPABILITY,
+    )?;
     let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
     let question_id = format!("q-{}", ulid::Ulid::new().to_string().to_ascii_lowercase());
     let settle_by = match (settle_by, delegate) {
@@ -3493,10 +3507,18 @@ fn capability(events: &[JournalEvent], name: &str) -> Option<Capability> {
 ///
 /// The marker separates entries the facility can describe from entries that
 /// predate it, so it is appended before the first write that needs it and
-/// never again for that name.
+/// never again for that name. Every command that can record the facility
+/// marks it, not only the one that populates it: a question this build poses
+/// can say whether anybody was asked, and would otherwise be indistinguishable
+/// from one written before the facility existed.
+///
+/// It carries the timestamp of the write that needed it, so that the two share
+/// a stamp and the marker's earlier place in the file settles the order. A
+/// later stamp would sort the marker after the very entry it must precede.
 fn ensure_capability(
     ctx: &Ctx,
     dir: &Path,
+    now: DateTime<Utc>,
     anchor: Option<&Path>,
     events: &[JournalEvent],
     name: &str,
@@ -3504,7 +3526,7 @@ fn ensure_capability(
     if capability(events, name).is_some() {
         return Ok(());
     }
-    let mut event = JournalEvent::base(ctx, Utc::now(), CAPABILITY_TOPIC, "capability");
+    let mut event = JournalEvent::base(ctx, now, CAPABILITY_TOPIC, "capability");
     event.name = Some(name.to_string());
     event.revision = match anchor {
         Some(anchor) => gitio::head_if_present(anchor)?,
@@ -3668,15 +3690,17 @@ fn delivered(
         }
     }
 
+    let now = Utc::now();
     ensure_capability(
         ctx,
         &dir,
+        now,
         anchor.as_deref(),
         &events,
         QUESTION_DELIVERY_CAPABILITY,
     )?;
 
-    let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "question-delivered");
+    let mut event = JournalEvent::base(ctx, now, &topic, "question-delivered");
     event.file = Some(filename.to_string());
     event.question_id = Some(question_id.to_string());
     event.delivered_to = Some(to.to_string());

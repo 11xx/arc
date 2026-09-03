@@ -9868,6 +9868,19 @@ fn deliver(repo: &Repo, file: &str, question: &str, to: &str) -> assert_cmd::ass
         .assert()
 }
 
+/// How many markers name the delivery facility. One is the invariant: the
+/// marker dates the facility, and a second would redate it.
+fn delivery_markers(repo: &Repo) -> usize {
+    fs::read_to_string(journal_dir(repo).join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .filter(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["event"] == "capability" && event["name"] == "question-delivery"
+        })
+        .count()
+}
+
 /// The delivery state of one question in the `questions` queue.
 fn queue_state(repo: &Repo, question: &str) -> String {
     let queue = json_stdout(
@@ -9892,35 +9905,59 @@ fn queue_state(repo: &Repo, question: &str) -> String {
 fn a_question_records_whether_anyone_was_asked() {
     let repo = Repo::new();
     let file = discussion_named(&repo, "rollout", "# One go, or staged?\n");
-    pose(
-        &repo,
-        &file,
-        "Legacy: posed before anything was delivered.\n",
-    );
-    pose(&repo, &file, "The one that gets delivered.\n");
-    let posed = question_ids(&repo, &file);
-    let (legacy, delivered) = (posed[0].clone(), posed[1].clone());
 
-    // Nothing has been delivered in this journal, so both predate the record
-    // and neither absence is evidence that nobody was asked.
-    assert_eq!(queue_state(&repo, &legacy), "unknown");
-    assert_eq!(queue_state(&repo, &delivered), "unknown");
+    // A question from before this journal recorded the facility. It is written
+    // as a bare event because that is the only way one can exist: every build
+    // that poses a question now marks the facility while doing so.
+    let legacy = "q-01legacy0000000000000000";
+    let event = serde_json::json!({
+        "schema": "journal-events/1",
+        "ts": "2026-01-01T00:00:01Z",
+        "harness": "test",
+        "session": "test",
+        "topic": "rollout",
+        "event": "question",
+        "file": file,
+        "question_id": legacy,
+        "placement": "closing",
+        "options": ["one-go", "staged"],
+    });
+    use std::io::Write;
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(journal_dir(&repo).join("events.jsonl"))
+            .unwrap(),
+        "{event}"
+    )
+    .unwrap();
+    assert_eq!(queue_state(&repo, legacy), "unknown");
+
+    // Posing marks the facility, so the question posed under it carries a real
+    // negative: nobody was asked, and prompting work remains.
+    pose(&repo, &file, "The one that gets delivered.\n");
+    let delivered = question_ids(&repo, &file)
+        .into_iter()
+        .find(|id| id != legacy)
+        .expect("the posed question");
+    assert_eq!(queue_state(&repo, &delivered), "unasked");
+    // The marker does not reach backwards over what preceded it.
+    assert_eq!(queue_state(&repo, legacy), "unknown");
 
     deliver(&repo, &file, &delivered, "person").success();
-
-    // The facility now exists. The delivered question says so; the one posed
-    // before the marker stays unknown, because arc still cannot say whether
-    // anybody was asked before it began recording.
     assert_eq!(queue_state(&repo, &delivered), "delivered");
-    assert_eq!(queue_state(&repo, &legacy), "unknown");
+    assert_eq!(queue_state(&repo, legacy), "unknown");
 
-    // A question posed after the marker has a real negative: nobody was asked,
-    // and prompting work remains. Every event in this test shares a
-    // second-granular timestamp, so the boundary is the marker's place in the
-    // log rather than a comparison of stamps.
+    // Every event this build wrote shares one second-granular timestamp, so
+    // the boundary is the marker's place in the log rather than a comparison
+    // of stamps.
     pose(&repo, &file, "Posed once deliveries were being recorded.\n");
-    let unasked = question_ids(&repo, &file)[2].clone();
+    let unasked = question_ids(&repo, &file)
+        .into_iter()
+        .find(|id| id != legacy && *id != delivered)
+        .expect("the second posed question");
     assert_eq!(queue_state(&repo, &unasked), "unasked");
+    assert_eq!(delivery_markers(&repo), 1);
 
     let queue = json_stdout(
         repo.arc(&repo.root)
@@ -9945,6 +9982,26 @@ fn a_question_records_whether_anyone_was_asked() {
         )),
         "{text}"
     );
+}
+
+/// A project that has never delivered anything must still be able to say that
+/// nobody has been asked. Posing marks the facility for that reason: waiting
+/// for a first delivery would leave every question in such a project reading
+/// as though it predated the record, and the state that means prompting work
+/// remains would be unreachable.
+#[test]
+fn posing_a_question_marks_the_delivery_facility() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "fresh", "# Nothing delivered here.\n");
+    pose(&repo, &file, "The first question this journal has held.\n");
+
+    let question = question_id(&repo, &file);
+    assert_eq!(queue_state(&repo, &question), "unasked");
+    assert_eq!(delivery_markers(&repo), 1);
+
+    // A second question does not redate the facility.
+    pose(&repo, &file, "The second.\n");
+    assert_eq!(delivery_markers(&repo), 1);
 }
 
 /// A delivery is recorded for each shape a question's settle-by can take, and
@@ -10046,15 +10103,7 @@ fn repeated_deliveries_accumulate_and_the_marker_is_written_once() {
     }
 
     // One marker for the facility, however many deliveries it covers.
-    let log = fs::read_to_string(journal_dir(&repo).join("events.jsonl")).unwrap();
-    let markers = log
-        .lines()
-        .filter(|line| {
-            let event: serde_json::Value = serde_json::from_str(line).unwrap();
-            event["event"] == "capability" && event["name"] == "question-delivery"
-        })
-        .count();
-    assert_eq!(markers, 1, "{log}");
+    assert_eq!(delivery_markers(&repo), 1);
 }
 
 /// An answer ends the question: what was asked on the way stays listed, but

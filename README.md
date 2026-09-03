@@ -1651,15 +1651,24 @@ Every question view reports the resulting state. `journal questions --json`
 (schema `arc-journal-questions/2`) and the questions in `journal discussion
 --json` carry `delivery` — `unasked` while prompting work remains, `delivered`
 once somebody was asked and the reply is merely pending, `answered` once it is
-settled, and `unknown` for a question posed before the journal recorded
-deliveries at all — plus `deliveries`, every recorded attempt with its
-recipient, handle, identity, and timestamp. The text listing leads each
-question with the same state. Delivery never claims the recipient read
-anything, only that a caller reported sending it. The boundary that makes
-`unknown` meaningful is a typed `capability` event naming a facility and the
-anchor head it began at, appended once per name by the first write that needs
-it; `questions --json` carries it, because the state cannot be interpreted
-without knowing which questions predate the record.
+settled, and `unknown` for a question older than the record itself — plus
+`deliveries`, every recorded attempt with its recipient, handle, identity, and
+timestamp. The text listing leads each question with the same state. Delivery
+never claims the recipient read anything, only that a caller reported sending
+it.
+
+The boundary that makes `unknown` meaningful is a typed `capability` event
+naming a facility and the anchor head it began at, appended once per name by
+the first write that can record the facility — posing a question as much as
+delivering one. Marking it at the first delivery alone would leave a project
+that has never delivered anything unable to say that nobody has been asked,
+which is the state such a project is most often in. So a question this build
+poses reads `unasked` immediately, and only a question predating the marker
+reads `unknown`. The boundary is the marker's position in the append-only log
+rather than its timestamp: stamps are second-granular and the marker is
+written in the same second as the entry that needed it. `questions --json`
+carries the marker, because the state cannot be interpreted without knowing
+which questions predate the record.
 
 An entry filed wrong is amended rather than rewritten. `journal correct
 <filename> --target <target> --field <field> --value <value> [--note <text>]`

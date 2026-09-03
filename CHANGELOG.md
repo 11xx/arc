@@ -23,10 +23,11 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   asking twice records twice and erases nothing. A delivery is refused when
   the question is unknown, already answered, or waiting on a named delegate
   and addressed to anyone else. A typed `capability` event marks where the
-  journal began recording a facility, so a question posed beforehand reads
-  `unknown` rather than `unasked`; `journal doctor` validates both events.
-  `journal questions --json` becomes `arc-journal-questions/2` and carries
-  the marker.
+  journal began recording a facility, appended once by the first write that
+  can record it — posing as much as delivering — so a question posed by this
+  build reads `unasked` at once and only one older than the record reads
+  `unknown`; `journal doctor` validates both events. `journal questions
+  --json` becomes `arc-journal-questions/2` and carries the marker.
 
 - Gate evidence binds to the tree a command ran against rather than to the
   commit carrying it, so a change that is behind its target cannot ship
