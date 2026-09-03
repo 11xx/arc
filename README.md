@@ -1899,6 +1899,14 @@ cannot be parsed is reported and left in place, because it is the only copy of
 that write. `promoted_by` is an optional `journal-events/1` field, so an
 events file written before it stays valid.
 
+The outbox belongs to the checkout that holds it, and a change's worktree is
+its own checkout, so a write an executor spools there disappears when the
+worktree is removed. `arc snapshot` and `arc integrate` therefore promote the
+spool in the change's recorded worktree before the merge that removes it,
+printing what they filed; a spool neither can file is named, left intact, and
+blocks neither the snapshot nor the merge. `arc catchup` lists every spool
+still waiting in an open change's worktree with its count.
+
 `arc doctor [--json]` performs the same read-only split for the authoritative
 change ledger. Malformed events, store configuration, IDs, and missing open
 events are problems; orphaned temporary files and retention refs, missing open
