@@ -136,14 +136,11 @@ fn config_check_writable_probes_commit_without_touching_the_repository() {
     );
 }
 
-/// Whether a commit can be written and whether it can be signed are separate
-/// findings, so an unreachable signing credential leaves writability intact
-/// and is reported on its own line — without reading as reassuring.
+/// A project that signs nothing has nothing to report about signing, and
+/// says that rather than claiming a capability it never exercised.
 #[test]
-fn config_check_writable_separates_committing_from_signing() {
+fn config_check_writable_reports_signing_as_not_required_when_it_is_off() {
     let repo = Repo::new();
-    // Signing off: committing is proven and the signing line says why nothing
-    // was exercised.
     let unsigned = stdout(
         repo.arc(&repo.root)
             .args(["config", "--check-writable", "--json"]),
@@ -152,13 +149,24 @@ fn config_check_writable_separates_committing_from_signing() {
     assert_eq!(named_check(&value, "commit")["ok"], true);
     let signing = named_check(&value, "signing");
     assert_eq!(signing["ok"], true);
+    assert_eq!(signing["advisory"], true);
     assert!(
         signing["detail"].as_str().unwrap().contains("not required"),
         "{signing:?}"
     );
+    repo.arc(&repo.root)
+        .args(["config", "--check-writable"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ok: signing: not required"));
+}
 
-    // Required but unsatisfiable: writability still passes, and the signing
-    // line carries gpg's own reason rather than the outer context alone.
+/// The exit code answers what this process can write. Signing is somebody
+/// else's to supply when the work is landed, so an unreachable credential
+/// warns with gpg's own reason and leaves the probe's verdict alone.
+#[test]
+fn config_check_writable_warns_about_unreachable_signing_without_failing() {
+    let repo = Repo::new();
     git_out(&repo.root, &["config", "commit.gpgsign", "true"]);
     git_out(
         &repo.root,
@@ -167,13 +175,15 @@ fn config_check_writable_separates_committing_from_signing() {
     repo.arc(&repo.root)
         .args(["config", "--check-writable"])
         .assert()
-        .failure()
+        .success()
         .stdout(predicates::str::contains("ok: commit"))
-        .stdout(predicates::str::contains("fail: signing"))
+        .stdout(predicates::str::contains("warn: signing"))
         .stdout(predicates::str::contains(
             "the signature could not be produced",
         ))
-        .stdout(predicates::str::contains("gpg"));
+        .stdout(predicates::str::contains("gpg"))
+        .stdout(predicates::str::contains("fail:").not());
+
     let blocked: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
         "config",
         "--check-writable",
@@ -181,7 +191,12 @@ fn config_check_writable_separates_committing_from_signing() {
     ])))
     .unwrap();
     assert_eq!(named_check(&blocked, "commit")["ok"], true);
-    assert_eq!(named_check(&blocked, "signing")["ok"], false);
+    let signing = named_check(&blocked, "signing");
+    assert_eq!(signing["ok"], false);
+    assert_eq!(
+        signing["advisory"], true,
+        "a consumer must be able to tell a warning from a blocked path: {signing:?}"
+    );
 }
 
 /// Git resolves every boolean spelling, so reading the raw string would report
@@ -198,8 +213,8 @@ fn config_check_writable_honours_every_git_boolean_spelling_for_signing() {
         repo.arc(&repo.root)
             .args(["config", "--check-writable"])
             .assert()
-            .failure()
-            .stdout(predicates::str::contains("fail: signing"))
+            .success()
+            .stdout(predicates::str::contains("warn: signing"))
             .stdout(predicates::str::contains("gpg"));
     }
 }

@@ -1410,14 +1410,18 @@ first blocked path. It also probes committing, in a throwaway repository so the
 target gains no commit, because a sandbox that cannot commit otherwise
 discovers it only once a slice is ready to land.
 
-Committing and signing are reported apart. The `commit` check makes an unsigned
-commit and answers writability alone. The `signing` check answers whether the
-credential a signed commit needs is reachable: it says `not required` where the
-repository's resolved `commit.gpgsign` is off, and otherwise carries the
-repository's signing key so it exercises the credential the real commit will
-use, ignoring a global signing policy the repository overrides. A project that
-signs and cannot reach its agent fails that check with gpg's own reason, since
-its commits cannot be produced.
+Committing and signing are reported apart, and only the writability checks
+decide the exit code. The `commit` check makes an unsigned commit and answers
+writability alone. The `signing` check is advisory: it says `not required`
+where the repository's resolved `commit.gpgsign` is off, and otherwise carries
+the repository's signing key so it exercises the credential the real commit
+will use, ignoring a global signing policy the repository overrides. An
+unreachable credential prints as `warn: signing: ...` with gpg's own reason and
+leaves the exit code alone, because the process that makes the work need not be
+the one that signs it — but a project whose `commit.gpgsign` is on still needs
+signing working somewhere before its commits can land. In `--json` that row
+keeps `"ok": false` and carries `"advisory": true`, so a consumer can tell a
+warning from a blocked path.
 
 Change derivation: `begin` targets the branch checked out in the
 **primary worktree** (the main checkout — normally master/main), not

@@ -464,10 +464,13 @@ RULES THAT CHANGE WHAT YOU DO
   - Give every concurrent writer its own branch and worktree. Integration and
     shared refs belong to the lead alone.
   - An executor's first act is `arc config --check-writable`; a nonzero exit
-    means stop, not work around. It reports committing and signing apart: the
-    `commit` line is writability, and the `signing` line says whether the
-    credential a signed commit needs is reachable. It releases its claim
-    whenever it stops, for any reason, so a live claim always means live work.
+    means stop, not work around. Only writability decides that exit: the
+    `commit` line says whether a commit can be made at all, while the
+    `signing` line reports whether a signed one can be and never gates the
+    exit, because whoever lands the work signs it. A project whose
+    `commit.gpgsign` is on still needs signing working somewhere before its
+    commits can land. It releases its claim whenever it stops, for any
+    reason, so a live claim always means live work.
   - An executor that hangs never reaches its own release. Before leaving a
     delegated run unattended, arm `arc watch <change> --until stalled`; silence
     is unknown, not healthy. `arc rescue <change> --take` recovers it.

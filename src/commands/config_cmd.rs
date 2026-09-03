@@ -16,12 +16,41 @@ struct WritabilityCheck {
     name: &'static str,
     ok: bool,
     detail: String,
+    /// Whether a failure here is a warning rather than a blocked path. The
+    /// probe answers what an executor can write; a capability it reports on
+    /// without owning is carried for the diagnosis and decides no exit code.
+    advisory: bool,
     /// Whether the text view prints this passing check's detail. Most details
     /// are the path the probe used and the name already says which capability
     /// passed; a check whose detail changes what the caller should do says it
     /// out loud instead.
     #[serde(skip)]
     show_detail: bool,
+}
+
+impl WritabilityCheck {
+    /// A capability the executor itself must have; failing one is a blocked
+    /// path and stops the probe.
+    fn required(name: &'static str, ok: bool, detail: String, show_detail: bool) -> Self {
+        Self {
+            name,
+            ok,
+            detail,
+            advisory: false,
+            show_detail,
+        }
+    }
+
+    /// A capability reported for the diagnosis, whose failure warns.
+    fn advisory(name: &'static str, ok: bool, detail: String) -> Self {
+        Self {
+            name,
+            ok,
+            detail,
+            advisory: true,
+            show_detail: true,
+        }
+    }
 }
 
 /// Probe each writable surface needed by an executor before it starts work.
@@ -51,12 +80,7 @@ pub fn check_writable(ctx: &Ctx, json: bool) -> Result<i32> {
         ("commit", probe_commit(ctx)),
     ] {
         match result {
-            Ok(detail) => checks.push(WritabilityCheck {
-                name,
-                ok: true,
-                detail,
-                show_detail: false,
-            }),
+            Ok(detail) => checks.push(WritabilityCheck::required(name, true, detail, false)),
             Err(error) => {
                 checks.push(failed(name, error));
                 return finish(json, checks);
@@ -77,28 +101,22 @@ pub fn check_writable(ctx: &Ctx, json: bool) -> Result<i32> {
 /// probe's exit code non-zero on its own.
 fn probe_journal(ctx: &Ctx) -> WritabilityCheck {
     match crate::journal::writability(&ctx.cwd) {
-        Ok((dir, None)) => WritabilityCheck {
-            name: "journal",
-            ok: true,
-            detail: dir.display().to_string(),
-            show_detail: false,
-        },
-        Ok((dir, Some(outbox))) => WritabilityCheck {
-            name: "journal",
-            ok: true,
-            detail: format!(
+        Ok((dir, None)) => {
+            WritabilityCheck::required("journal", true, dir.display().to_string(), false)
+        }
+        Ok((dir, Some(outbox))) => WritabilityCheck::required(
+            "journal",
+            true,
+            format!(
                 "{} is unwritable: writes spool to {}, file them with `arc journal spool --promote`",
                 dir.display(),
                 outbox.display()
             ),
-            show_detail: true,
-        },
-        Err(error) => WritabilityCheck {
-            name: "journal",
-            ok: true,
-            detail: format!("unresolved: {error:#}"),
-            show_detail: true,
-        },
+            true,
+        ),
+        Err(error) => {
+            WritabilityCheck::required("journal", true, format!("unresolved: {error:#}"), true)
+        }
     }
 }
 
@@ -151,34 +169,28 @@ fn probe_commit(ctx: &Ctx) -> Result<String> {
 
 /// Whether the credential a signed commit needs is reachable.
 ///
-/// A project that requires signed commits needs signing to work, so an
-/// unreachable agent is a failure with the reason attached rather than a note.
-/// Where the project signs nothing, the line says so instead of claiming a
-/// capability that was never exercised.
+/// Advisory, because signing is not always the probing process's job: work
+/// made in a sandbox is signed by whoever lands it, so an unreachable agent
+/// here is a fact the caller needs and never a reason for that caller to
+/// stop. It is still a warning rather than a note — a project whose
+/// `commit.gpgsign` is on cannot land a commit until signing works somewhere,
+/// so the line says the signature could not be produced. Where the project
+/// signs nothing, it says so instead of claiming a capability never exercised.
 fn probe_signing(ctx: &Ctx) -> WritabilityCheck {
     if !signing_required(ctx) {
-        return WritabilityCheck {
-            name: "signing",
-            ok: true,
-            detail: "not required (commit.gpgsign is off)".into(),
-            show_detail: true,
-        };
+        return WritabilityCheck::advisory(
+            "signing",
+            true,
+            "not required (commit.gpgsign is off)".into(),
+        );
     }
     match probe_commit_throwaway(ctx, true) {
-        Ok(()) => WritabilityCheck {
-            name: "signing",
-            ok: true,
-            detail: "signed commit".into(),
-            show_detail: true,
-        },
-        Err(error) => WritabilityCheck {
-            name: "signing",
-            ok: false,
-            show_detail: true,
-            detail: format!(
-                "commit.gpgsign is on and the signature could not be produced: {error:#}"
-            ),
-        },
+        Ok(()) => WritabilityCheck::advisory("signing", true, "signed commit".into()),
+        Err(error) => WritabilityCheck::advisory(
+            "signing",
+            false,
+            format!("commit.gpgsign is on and the signature could not be produced: {error:#}"),
+        ),
     }
 }
 
@@ -248,20 +260,19 @@ fn git_config(ctx: &Ctx, key: &str) -> Option<String> {
 }
 
 fn failed(name: &'static str, error: anyhow::Error) -> WritabilityCheck {
-    WritabilityCheck {
-        name,
-        ok: false,
-        show_detail: true,
-        // Render the whole cause chain: the outermost context names which
-        // capability failed, and only the innermost says why. A probe that
-        // reports "cannot create a commit" without "gpg-agent unreachable"
-        // costs the reader the diagnosis the probe exists to deliver.
-        detail: format!("{error:#}"),
-    }
+    // Render the whole cause chain: the outermost context names which
+    // capability failed, and only the innermost says why. A probe that
+    // reports "cannot create a commit" without "gpg-agent unreachable" costs
+    // the reader the diagnosis the probe exists to deliver.
+    WritabilityCheck::required(name, false, format!("{error:#}"), true)
 }
 
+/// The exit code answers one question — can this process write what the
+/// ceremony needs — so only the required checks decide it. An advisory
+/// finding is printed for the reader and never turns a usable sandbox into a
+/// refusal to start.
 fn finish(json: bool, checks: Vec<WritabilityCheck>) -> Result<i32> {
-    let passed = checks.iter().all(|check| check.ok);
+    let passed = checks.iter().all(|check| check.ok || check.advisory);
     if json {
         println!(
             "{}",
@@ -273,7 +284,8 @@ fn finish(json: bool, checks: Vec<WritabilityCheck>) -> Result<i32> {
     } else {
         for check in checks {
             if !check.ok {
-                println!("fail: {}: {}", check.name, check.detail);
+                let label = if check.advisory { "warn" } else { "fail" };
+                println!("{label}: {}: {}", check.name, check.detail);
             } else if check.show_detail {
                 println!("ok: {}: {}", check.name, check.detail);
             } else if check.detail == "skipped: unborn HEAD" {
