@@ -1522,6 +1522,56 @@ digest of its bytes, so a later reader can tell a resolution that still says
 what it said from one rewritten underneath. The journal is append-only;
 consumption never edits or deletes the artifact.
 
+### Items distilled from a recorded session
+
+An item read out of a recorded session carries where it came from. Every write
+verb and `journal log` accept `--source '<spec>'` and `--item-key <key>`, where
+the spec is space-separated `key=value` pairs: `harness`, `session`, and an
+RFC 3339 `ts` are required, and `turn` (a whole-number ordinal), `schema`, and
+`coverage` are recorded only when an emitter supplies them — a turn reference
+is never synthesized from a timestamp that happens to be present. Any other
+field, a duplicate one, an empty value, or an unparseable `ts` is refused
+before anything is written. The event envelope carries the reference as
+`source` with `item_key` beside it; both are optional, so every event written
+without them stays valid `journal-events/1` input, while a key with no source
+to index into or a coordinate that resolves to nothing is reported by
+`journal doctor`. No transcript text, credential, or content digest enters the
+journal, and arc never opens the recording to infer a project or a body: a
+recorded session directory is evidence, never authority to write there.
+
+The reference is what makes a repeated scan of the same endings cheap.
+Identity is the recording and the caller's key together — `(harness, session,
+item_key)` — so one recording carries as many items as the caller gives it
+keys, and the same item read out of a different session is a different item.
+A write whose identity was already recorded writes nothing, prints
+`existing: <artifact or event stamp> [<disposition>]`, and exits 0; the check
+runs before the body is read, so a repeat neither blocks on a stdin body nor
+needs one. Nothing deduplicates by title or prose similarity.
+
+A disposition is one of `open`, `no-action`, or `consumed:<outcome>`, where the
+outcome is whichever one consumption recorded — `done`, `superseded`, or
+`discarded`. Every terminal artifact state spells the same way, so a scan
+separates work still waiting from work already disposed of by the prefix alone,
+and reads the outcome only when it cares which disposal it was.
+`journal log <topic> "<message>"
+--source .. --item-key .. --outcome no-action` records a judgment that an item
+needs no work at all; `no-action` is the only outcome a log line may carry,
+because every other disposition belongs to an artifact, and recording it as a
+log event answers the next scan without putting anything into a queue.
+
+`journal source --harness <h> --session <id> [--item-key <k>] [--json]` lists
+what one recording produced here: every item key, its disposition, the artifact
+when one exists, and the events behind it. It is derived from the event log
+rather than kept in a store of its own, which could disagree with it; JSON is
+versioned `journal-source/1`. `journal source-attach <filename> --source
+'<spec>' [--item-key <k>]` records a further recording as evidence behind an
+existing artifact as an event with no body, since one item can be evidenced by
+several sessions and an artifact that has been consumed still accepts one —
+where a record came from stays worth knowing after the work it described is
+discharged. `journal show` prints an artifact's sources on the diagnostic
+stream so stdout remains the body verbatim, and `journal open --json` carries
+them on the queue row as `sources`.
+
 A `discussion` is the answer-owed actionable kind: an open debate rides the
 same queue until someone resolves it, and `arc begin --from-journal` promotes
 one straight into a change. `journal position <filename> [--ref <target>]
