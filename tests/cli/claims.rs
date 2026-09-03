@@ -446,7 +446,7 @@ fn stage_requires_owned_live_claim_and_tracks_heartbeats_advisory_order_and_snap
         .assert()
         .code(8);
     repo.arc(&repo.root)
-        .args(["claim", "stage-life", "--ttl", "1s"])
+        .args(["claim", "stage-life", "--ttl", "30m"])
         .assert()
         .success();
     repo.arc(&repo.root)
@@ -516,7 +516,10 @@ fn stage_requires_owned_live_claim_and_tracks_heartbeats_advisory_order_and_snap
         .failure();
 
     let change_id = opened_change_id(&opened);
-    age_event(&repo, &change_id, "patchset-added", 5);
+    // The lease outlives every step above it and runs out only here, so what
+    // the reclaim restarts is an expired claim rather than whichever one the
+    // scheduler happened to leave alive.
+    age_event(&repo, &change_id, "patchset-added", 3_600);
     repo.arc(&repo.root)
         .args(["claim", "stage-life"])
         .assert()
@@ -1282,7 +1285,7 @@ fn artifact_claim_releases_with_each_owner_outcome() {
 #[test]
 fn an_artifact_lease_expires_on_its_own_with_no_stage_budget_to_set() {
     let repo = Repo::new();
-    let (_, file) = journal_artifact(&repo, "artifact-lease", "todo", "# X\n");
+    let (dir, file) = journal_artifact(&repo, "artifact-lease", "todo", "# X\n");
     // A change's stages are budgeted; an artifact has no stages to budget, so
     // the lease is the whole of what expires.
     repo.arc(&repo.root)
@@ -1294,7 +1297,7 @@ fn an_artifact_lease_expires_on_its_own_with_no_stage_budget_to_set() {
         ));
 
     repo.arc(&repo.root)
-        .args(["claim", &file, "--ttl", "1s"])
+        .args(["claim", &file, "--ttl", "30m"])
         .assert()
         .success();
     let occupied: serde_json::Value = serde_json::from_str(&stdout(
@@ -1307,7 +1310,7 @@ fn an_artifact_lease_expires_on_its_own_with_no_stage_budget_to_set() {
         serde_json::json!({})
     );
 
-    thread::sleep(Duration::from_millis(1200));
+    age_journal_events(&dir, 3_600);
     let reclaimable: serde_json::Value = serde_json::from_str(&stdout(
         repo.arc(&repo.root).args(["journal", "open", "--json"]),
     ))
@@ -1325,7 +1328,7 @@ fn artifact_takeover_refuses_a_live_claim_and_displaces_an_expired_one() {
     let repo = Repo::new();
     let (dir, file) = journal_artifact(&repo, "artifact-takeover", "todo", "# X\n");
     repo.arc(&repo.root)
-        .args(["claim", &file, "--ttl", "1s"])
+        .args(["claim", &file, "--ttl", "30m"])
         .assert()
         .success();
     let first = artifact_claim_ids(&dir, &file).remove(0);
@@ -1341,7 +1344,7 @@ fn artifact_takeover_refuses_a_live_claim_and_displaces_an_expired_one() {
             "--takeover is unavailable because the claim has not expired",
         ));
 
-    thread::sleep(Duration::from_millis(1200));
+    age_journal_events(&dir, 3_600);
     // An expired one is displaced only when the caller says so.
     repo.arc(&repo.root)
         .env("ARC_SESSION", "session-b")
@@ -1383,9 +1386,9 @@ fn artifact_takeover_refuses_a_live_claim_and_displaces_an_expired_one() {
 #[test]
 fn rescue_take_requires_an_artifact_claim_another_identity_left_expired() {
     let repo = Repo::new();
-    let (_, file) = journal_artifact(&repo, "artifact-rescue", "todo", "# X\n");
+    let (dir, file) = journal_artifact(&repo, "artifact-rescue", "todo", "# X\n");
     repo.arc(&repo.root)
-        .args(["claim", &file, "--ttl", "1s"])
+        .args(["claim", &file, "--ttl", "30m"])
         .assert()
         .success();
     repo.arc(&repo.root)
@@ -1413,7 +1416,7 @@ fn rescue_take_requires_an_artifact_claim_another_identity_left_expired() {
             "requires a claim owned by another identity whose lease has run out",
         ));
 
-    thread::sleep(Duration::from_millis(1200));
+    age_journal_events(&dir, 3_600);
     let taken = stdout(
         repo.arc(&repo.root)
             .env("ARC_SESSION", "session-b")
@@ -1428,9 +1431,9 @@ fn rescue_take_requires_an_artifact_claim_another_identity_left_expired() {
 #[test]
 fn watch_reaches_stalled_on_an_expired_artifact_claim_and_refuses_other_conditions() {
     let repo = Repo::new();
-    let (_, file) = journal_artifact(&repo, "artifact-watch", "todo", "# X\n");
+    let (dir, file) = journal_artifact(&repo, "artifact-watch", "todo", "# X\n");
     repo.arc(&repo.root)
-        .args(["claim", &file, "--ttl", "1s"])
+        .args(["claim", &file, "--ttl", "30m"])
         .assert()
         .success();
     // Every other condition asks about patchsets and verdicts, which an
@@ -1443,6 +1446,7 @@ fn watch_reaches_stalled_on_an_expired_artifact_claim_and_refuses_other_conditio
         .stderr(predicates::str::contains(
             "a journal artifact answers only `stalled`",
         ));
+    age_journal_events(&dir, 3_600);
     repo.arc(&repo.root)
         .args(["watch", &file, "--until", "stalled", "--timeout", "10"])
         .assert()

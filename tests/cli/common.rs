@@ -370,6 +370,31 @@ pub(crate) fn journal_event_log(dir: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Move every event in a journal directory `seconds` further into the past, so
+/// the leases and lanes recorded there read as that much older.
+///
+/// Shifting the whole log rather than one entry keeps the events in the order
+/// they were appended, which is the order a reader replays them in. It lets a
+/// test hold a lease long enough that no scheduling delay can end it, and then
+/// end it exactly when the test says so, instead of racing a short TTL against
+/// the wall clock.
+pub(crate) fn age_journal_events(dir: &Path, seconds: i64) {
+    let path = dir.join("events.jsonl");
+    let aged = fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let mut event: serde_json::Value = serde_json::from_str(line).unwrap();
+            let ts = chrono::DateTime::parse_from_rfc3339(event["ts"].as_str().unwrap()).unwrap()
+                - chrono::Duration::seconds(seconds);
+            event["ts"] = serde_json::Value::String(ts.to_rfc3339());
+            serde_json::to_string(&event).unwrap()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&path, format!("{aged}\n")).unwrap();
+}
+
 /// The claim IDs `claim-set` recorded on one artifact, oldest first.
 pub(crate) fn artifact_claim_ids(dir: &Path, file: &str) -> Vec<String> {
     journal_event_log(dir)
