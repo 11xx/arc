@@ -127,7 +127,11 @@ fn no_candidate_tip(store: &Store) -> Result<String> {
     Ok(tip)
 }
 
-fn infer_change(store: &Store, cwd: &Path) -> Result<Option<String>> {
+/// The open change this checkout belongs to, matched first by branch and then
+/// by recorded worktree. `None` is an answer: a caller may legitimately stand
+/// outside every open change, and only a caller that requires one turns that
+/// into an error.
+pub(crate) fn infer_change(store: &Store, cwd: &Path) -> Result<Option<String>> {
     let open = open_changes(store)?;
     if let Some(branch) = gitio::current_branch(cwd)? {
         let matches = open
