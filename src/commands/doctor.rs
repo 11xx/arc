@@ -63,7 +63,13 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
     inspect_debt(ctx, &states, &mut advice)?;
     inspect_hold_releases(&Store::discover(&ctx.cwd)?, &states, &mut advice);
-    inspect_worktree_accounting(&ctx.cwd, &states, &mut advice);
+    let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
+    inspect_worktree_accounting(
+        &ctx.cwd,
+        &states,
+        &crate::commands::fork::checkouts(&forks),
+        &mut advice,
+    );
 
     let open_states = states
         .iter()
@@ -673,22 +679,29 @@ fn inspect_closed_worktrees(
     Ok(())
 }
 
-/// What the open changes' worktrees occupy.
+/// What the open changes' and the forks' worktrees occupy.
 ///
 /// Disk is the resource `begin` spends and nothing reported: a full
 /// filesystem fails as exit 0 elsewhere, empty reports and bare exit codes,
 /// which reads as nothing-to-do. That failure is exactly why this is advice
 /// rather than silence — the number is a fact about state arc created, which
 /// is the same reason it reports open changes.
+///
+/// Forks are reported under their own codes and never folded into the change
+/// total. Nothing in the change lifecycle retires a fork's checkout, so a
+/// reader deciding what to reclaim needs the two answers apart — and needs to
+/// know that both are apparent size rather than physical cost.
 fn inspect_worktree_accounting(
     cwd: &Path,
     states: &BTreeMap<String, ChangeState>,
+    forks: &[crate::worktree_usage::ForkWorktree],
     advice: &mut Vec<Finding>,
 ) {
-    let accounting = crate::worktree_usage::measure(cwd, states);
+    let accounting = crate::worktree_usage::measure(cwd, states, forks);
     if accounting.is_empty() {
         return;
     }
+    let caveat = accounting.measurement.caveat();
     for usage in &accounting.changes {
         let size = usage
             .bytes
@@ -712,11 +725,39 @@ fn inspect_worktree_accounting(
         advice.push(Finding {
             code: "open-worktree-usage-total",
             detail: format!(
-                "{} across {} open worktree(s); build output in a clean \
+                "{} across {} open worktree(s) [{caveat}]; build output in a clean \
                  worktree is reproducible and removable",
                 crate::worktree_usage::human(total),
                 accounting.changes.len()
             ),
+        });
+    }
+    for usage in &accounting.forks {
+        let size = usage
+            .bytes
+            .map(crate::worktree_usage::human)
+            .unwrap_or_else(|| "size unknown".to_string());
+        advice.push(Finding {
+            code: "fork-worktree-usage",
+            detail: format!("{}: {} at {}", usage.slug, size, usage.path),
+        });
+    }
+    if let Some(total) = accounting.fork_total_bytes {
+        advice.push(Finding {
+            code: "fork-worktree-usage-total",
+            detail: format!(
+                "{} across {} fork worktree(s) [{caveat}]; a fork's checkout goes \
+                 away when `arc fork retire <slug> <outcome>` records its \
+                 disposition, never on its own",
+                crate::worktree_usage::human(total),
+                accounting.forks.len()
+            ),
+        });
+    }
+    if let Some(root) = accounting.measurement.root_line() {
+        advice.push(Finding {
+            code: "worktree-root-filesystem",
+            detail: root,
         });
     }
 }

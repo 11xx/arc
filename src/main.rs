@@ -1242,6 +1242,15 @@ enum ForkCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Who opened this fork, and how to reopen their session
+    ///
+    /// The marker records the harness, session, model, and actor that made
+    /// the fork. A field the marker does not carry prints as absent, and a
+    /// resume line appears only for a harness whose resume form is stable.
+    Thread {
+        /// The fork slug — the part of the branch name after fork/
+        slug: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2368,6 +2377,7 @@ fn run(cli: Cli) -> Result<i32> {
                 force,
             } => fork::retire(&ctx, &slug, &outcome, keep_worktree, force),
             ForkCmd::List { json } => fork::list(&ctx, json),
+            ForkCmd::Thread { slug } => fork::thread(&ctx, &slug),
         },
         Cmd::Hold {
             change,

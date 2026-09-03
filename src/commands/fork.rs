@@ -131,6 +131,9 @@ pub fn begin(ctx: &Ctx, slug: &str, base_branch: Option<&str>) -> Result<i32> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
+    // A fork is the longest-lived checkout arc creates, so the space it will
+    // occupy is reported before it exists rather than discovered later.
+    crate::worktree_usage::report_root_free(&worktree_root);
     // The branch is created by the worktree add itself: one command, no
     // window where a branch exists with no checkout.
     crate::gitio::add_worktree_new_branch(cwd, &worktree, &branch, &base)?;
@@ -405,6 +408,100 @@ pub struct ForkEntry {
     /// The recorded or discovered integration branch. `"unknown"` means no
     /// marker or safe repository-level discovery supplied a branch.
     pub base_branch: String,
+}
+
+/// The fork checkouts on disk, for the accounting that measures them. It
+/// reads a listing rather than resolving again, so the repository answers the
+/// identity question once per command.
+pub fn checkouts(entries: &[ForkEntry]) -> Vec<crate::worktree_usage::ForkWorktree> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .worktree
+                .as_ref()
+                .map(|path| crate::worktree_usage::ForkWorktree {
+                    slug: entry.slug.clone(),
+                    path: std::path::PathBuf::from(path),
+                })
+        })
+        .collect()
+}
+
+/// The fork whose checkout the caller stands in, when it is one.
+pub struct CurrentFork {
+    pub slug: String,
+    pub worktree: std::path::PathBuf,
+}
+
+/// Answer whether this checkout is a fork's, for the commands whose meaning
+/// depends on it. The resolver owns the answer; this only carries it out of
+/// the module in the shape a caller can use.
+pub fn current(cwd: &Path) -> Result<Option<CurrentFork>> {
+    Ok(identity::by_current_path(cwd)?.and_then(|fork| {
+        fork.worktree().map(|worktree| CurrentFork {
+            slug: fork.slug().to_string(),
+            worktree: worktree.to_path_buf(),
+        })
+    }))
+}
+
+/// The identity that opened a fork, and how to reach the session that did.
+///
+/// A fork outlives the session that made it, and its marker records who was
+/// working, through which harness, in which conversation. Reading that back
+/// is the difference between a branch nobody can account for and one whose
+/// reasoning is a command away. Nothing is inferred: a field the marker event
+/// does not carry prints as absent rather than as a plausible guess, and a
+/// harness with no stable resume form gets no invented incantation.
+pub fn thread(ctx: &Ctx, slug: &str) -> Result<i32> {
+    crate::ids::validate_slug(slug)?;
+    let branch = fork_branch(slug);
+    let Some(resolved) = identity::by_branch(&ctx.cwd, slug)? else {
+        bail!("fork branch {branch} does not exist; `arc fork list` names the forks there are");
+    };
+    println!("fork: {slug}");
+    println!("branch: {branch}");
+    match resolved.worktree() {
+        Some(worktree) => println!("worktree: {}", worktree.display()),
+        None => println!("worktree: absent"),
+    }
+
+    let dir = crate::journal::resolve_dir(&ctx.cwd)?;
+    let events = crate::journal::read_events(&dir)?;
+    let recorded = resolved
+        .marker()
+        .and_then(|marker| crate::journal::recorded_identity(&events, marker.filename()));
+    let Some(recorded) = recorded else {
+        println!("identity: absent");
+        println!("no journal marker records who opened this fork.");
+        return Ok(0);
+    };
+    for (label, value) in [
+        ("harness", &recorded.harness),
+        ("session", &recorded.session),
+        ("model", &recorded.model),
+        ("actor", &recorded.actor),
+    ] {
+        println!("{label}: {}", value.as_deref().unwrap_or("absent"));
+    }
+    if let Some((harness, session)) = recorded.harness.as_deref().zip(recorded.session.as_deref()) {
+        if let Some(resume) = resume_command(harness, session) {
+            println!("resume: {resume}");
+        }
+    }
+    Ok(0)
+}
+
+/// The command that reopens a session, for the harnesses whose resume form is
+/// a stable part of their CLI. A harness without one is printed as identity
+/// alone: a wrong incantation costs a reader more than an absent one.
+fn resume_command(harness: &str, session: &str) -> Option<String> {
+    match harness {
+        "claude" => Some(format!("claude --resume {session}")),
+        "codex" => Some(format!("codex resume {session}")),
+        _ => None,
+    }
 }
 
 /// Render one resolved fork. It takes an identity rather than a slug, so the

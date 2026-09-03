@@ -37,16 +37,22 @@ FROM A WORKSPACE ROOT (outside a project)
   cd <anchor>          Enter one project named by the report, then orient there.
 
 ORIENT INSIDE A PROJECT (start here, in this order)
-  arc catchup            Live state: ledger queue, journal backlog, forks.
+  arc catchup            Live state: ledger queue, journal backlog, forks,
+                         and what the change and fork worktrees occupy —
+                         apparent size, with the mount's free space.
   arc fork <slug>        Fork this repository: a worktree on fork/<slug>,
                          outside the change lifecycle — unintegrated by
                          intent; the operator decides what to merge, rebase,
                          or discard. `arc integrate` refuses inside a fork;
                          `arc fork retire <slug> <outcome>` records the
-                         disposition and removes the worktree.
+                         disposition and removes the worktree. `arc fork
+                         thread <slug>` names the harness, session, and model
+                         that opened it, and how to resume that session.
   arc journal open       The actionable backlog — work waiting for a session.
   arc journal verified <file> [--note <text>]
-                         Record a source check at the project's anchor head.
+                         Record a source check at the head of the checkout it
+                         was made in: the project anchor, or a fork's own
+                         head recorded with the fork as its scope.
   arc resume <change>    One change's brief, live state, and journal context.
   arc inbox              Lead-facing queue across open changes.
   arc workspace backlog  The same question asked of every registered project.
