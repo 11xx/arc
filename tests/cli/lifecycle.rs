@@ -2446,6 +2446,8 @@ fn append_policy_has_a_single_authority() {
         "gatekeeping.rs::check_tagged::ifstate.is_closed(){",
         "gatekeeping.rs::close::ifst.is_closed(){",
         "gatekeeping.rs::integrate_one::ifst.is_closed()&&matches!(closed_behavior,ClosedBehavior::SkipTagged){",
+        "gatekeeping.rs::queue_dry_run::ifst.is_closed(){",
+        "gatekeeping.rs::queue_step::ifst.is_closed(){",
         "gatekeeping.rs::rebase::ifst.is_closed(){",
         "hooks.rs::change_for_branch::ifstate.is_closed(){",
         "audit.rs::declare_debt::letpatchset_id=ifst.is_closed(){",
