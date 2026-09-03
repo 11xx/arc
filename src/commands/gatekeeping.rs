@@ -69,6 +69,8 @@ pub struct VerifyArgs {
     pub runner: Option<String>,
     pub note: Option<String>,
     pub waive_dirty: Option<String>,
+    pub falsified_by: Option<String>,
+    pub predicted: Option<String>,
 }
 
 struct VerificationInput {
@@ -82,6 +84,7 @@ struct VerificationInput {
     execution_host: Option<String>,
     runner: Option<String>,
     note: Option<String>,
+    falsification: Option<Falsification>,
 }
 
 struct CompletedVerification {
@@ -100,6 +103,7 @@ struct CompletedVerification {
     attested: bool,
     runner: Option<String>,
     note: Option<String>,
+    falsification: Option<Falsification>,
     tested_tree: Option<String>,
     worktree_dirty: Option<bool>,
     worktree_dirty_tracked: Option<bool>,
@@ -124,6 +128,8 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         runner,
         note,
         waive_dirty,
+        falsified_by,
+        predicted,
     } = args;
     if all
         && (gate.is_some()
@@ -142,6 +148,27 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
              --probe-phase, --attest, --result, --tested-revision, --execution-host, or --runner"
         );
     }
+    if all && (falsified_by.is_some() || predicted.is_some()) {
+        bail!(
+            "--falsified-by and --predicted cannot be combined with --all: a falsification \
+             answers one check, and a batch runs several"
+        );
+    }
+    // The reference without the reason records that something failed and not
+    // why it was expected to; the reason without the reference is an
+    // unsupported claim. Neither half is evidence on its own.
+    let falsified_by = match (falsified_by, predicted) {
+        (Some(event_id), Some(reason)) => {
+            let reason = reason.trim().to_string();
+            if reason.is_empty() {
+                bail!("--predicted must state why the check was expected to fail");
+            }
+            Some((event_id, reason))
+        }
+        (Some(_), None) => bail!("--falsified-by requires --predicted <reason>"),
+        (None, Some(_)) => bail!("--predicted requires --falsified-by <event-id>"),
+        (None, None) => None,
+    };
     if parallel && !all {
         bail!("--parallel requires --all");
     }
@@ -279,6 +306,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             ProbePhase::Baseline => VerifyResult::Fail,
             ProbePhase::Final => VerifyResult::Pass,
         };
+        let falsification = resolve_falsification(&st, None, &declaration.command, falsified_by)?;
         let code = record_verification(
             ctx,
             &store,
@@ -298,6 +326,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 execution_host,
                 runner,
                 note,
+                falsification,
             },
         )?;
         let observed = if code == 0 {
@@ -379,6 +408,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                     execution_host: None,
                     runner: None,
                     note: note.clone(),
+                    falsification: None,
                 },
             )?;
             if result == 0 {
@@ -408,6 +438,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         (Some(_), Some(_)) => bail!("--gate and --command are mutually exclusive"),
         (None, None) => bail!("provide --gate <name> or --command <cmd>"),
     };
+    let falsification = resolve_falsification(&st, gate.as_deref(), &cmd, falsified_by)?;
     record_verification(
         ctx,
         &store,
@@ -423,6 +454,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             execution_host,
             runner,
             note,
+            falsification,
         },
     )
 }
@@ -644,6 +676,8 @@ pub fn snapshot_with_verify(
                 runner: None,
                 note: None,
                 waive_dirty: None,
+                falsified_by: None,
+                predicted: None,
             },
         );
     }
@@ -693,6 +727,7 @@ pub fn snapshot_with_verify(
                     execution_host: None,
                     runner: None,
                     note: None,
+                    falsification: None,
                 },
             )?;
             if code == 0 {
@@ -724,6 +759,8 @@ pub fn snapshot_with_verify(
                 runner: None,
                 note: None,
                 waive_dirty: None,
+                falsified_by: None,
+                predicted: None,
             },
         )?;
         if code == 0 {
@@ -761,6 +798,8 @@ pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
             runner: None,
             note: None,
             waive_dirty: None,
+            falsified_by: None,
+            predicted: None,
         },
     )?;
     check(ctx, reference, false, false)
@@ -800,6 +839,7 @@ fn verify_all_parallel(
             execution_host: None,
             runner: None,
             note: note.clone(),
+            falsification: None,
         })
         .collect::<Vec<_>>();
     for input in &inputs {
@@ -866,6 +906,39 @@ fn verify_all_parallel(
     let passed = ran_passed + skipped_green;
     println!("gates: {passed}/{total} pass");
     Ok(if passed == total { 0 } else { 1 })
+}
+
+/// Turn `--falsified-by`/`--predicted` into the reference that will be
+/// recorded, or refuse.
+///
+/// The revision is read from the referenced failure rather than asked for: the
+/// two can then never disagree, and there is no third value for a caller to
+/// get wrong. Refusal happens before the command runs, because a verification
+/// arc will not record is a command nobody should have paid for.
+fn resolve_falsification(
+    state: &ChangeState,
+    gate: Option<&str>,
+    command: &str,
+    falsified_by: Option<(String, String)>,
+) -> Result<Option<Falsification>> {
+    let Some((event_id, predicted_reason)) = falsified_by else {
+        return Ok(None);
+    };
+    let revision = state
+        .verifications
+        .iter()
+        .find(|entry| entry.event_id == event_id)
+        .map(|entry| entry.revision.clone())
+        .unwrap_or_default();
+    let falsification = Falsification {
+        event_id,
+        revision,
+        predicted_reason,
+    };
+    match state::falsification_mismatch(&state.verifications, gate, command, &falsification) {
+        Some(mismatch) => bail!("--falsified-by {mismatch}"),
+        None => Ok(Some(falsification)),
+    }
 }
 
 fn record_verification(
@@ -946,6 +1019,7 @@ fn execute_verification(
         execution_host: _,
         runner,
         note,
+        falsification,
     } = input;
     let attested = attested_result.is_some();
     let (result, exit_code, duration_ms, output_tail, timed_out) = match attested_result {
@@ -987,6 +1061,7 @@ fn execute_verification(
         attested,
         runner,
         note,
+        falsification,
         // Filled in by the caller, which is what sees the worktree on both
         // sides of the run.
         tested_tree: None,
@@ -1037,6 +1112,7 @@ fn append_verifications(
             attested: item.attested,
             runner: item.runner,
             note: item.note,
+            falsification: item.falsification,
             // Set below, once the tree is pinned.
             tested_tree: None,
             worktree_dirty: item.worktree_dirty,
