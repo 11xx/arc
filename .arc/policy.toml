@@ -40,6 +40,10 @@ paths = [
   # surface a full disk hides in.
   "src/commands/fork.rs",
   "src/commands/fork/identity.rs",
+  # `sandbox discard` removes a whole directory tree and `sandbox clone` writes
+  # a second copy of the ledger and journal. A defect deletes recorded state or
+  # leaves a duplicate of it that reads as the original.
+  "src/commands/sandbox.rs",
   # Integrate and merge: the only path that writes to a shared branch.
   "src/gitio.rs",
   "src/chain.rs",
