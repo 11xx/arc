@@ -62,6 +62,16 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   discussion ends, not what it becomes, and promotion to a code change
   remains `begin --from-journal`.
 
+### Fixed
+
+- `arc env` recognizes `CLAUDE_CODE_SESSION_ID`, the variable Claude Code
+  actually exports into its tool shells, beside the hand-set
+  `CLAUDE_SESSION_ID`. A Claude Code session that followed the guide's
+  first step got the manual template and no identity; the ledger shows the
+  result as Claude sessions naming themselves four different ways. The test
+  helper also strips every harness session variable, so the suite detects
+  its fixtures rather than whichever harness happens to run it.
+
 ### Changed
 
 - Change, patchset, debt, and workspace views retain the model, harness, and

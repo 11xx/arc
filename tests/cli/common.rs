@@ -48,7 +48,16 @@ impl Repo {
             .env_remove("ARC_DATA_DIR")
             .env_remove("ARC_DATA_ROOT")
             .env_remove("ARC_WORKTREES_DIR")
-            .env_remove("AI_HOME");
+            .env_remove("AI_HOME")
+            // The suite may itself run inside a harness. Whatever session
+            // variable that harness exports must not reach the binary under
+            // test, or `env` detects the runner instead of the fixture.
+            .env_remove("CLAUDE_SESSION_ID")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("OPENCODE_SESSION")
+            .env_remove("OPENCODE_TERMINAL")
+            .env_remove("PI_SESSION_ID");
         cmd
     }
 

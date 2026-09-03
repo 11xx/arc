@@ -305,9 +305,10 @@ leaves it untouched and prints the generated block to stdout.
 
 `arc env` is the explicit identity bootstrap. It prints eval-able
 `ARC_HARNESS` and `ARC_SESSION` exports from the first available variable in
-this order: `CLAUDE_SESSION_ID`, `CODEX_THREAD_ID`, `OPENCODE_SESSION`,
-`PI_SESSION_ID`. When the harness's own session store yields the model, it
-appends an `ARC_MODEL` export (`model-slug[#effort]`): Claude reads the newest
+this order: `CLAUDE_SESSION_ID`, `CLAUDE_CODE_SESSION_ID` (the name Claude
+Code itself exports), `CODEX_THREAD_ID`, `OPENCODE_SESSION`, `PI_SESSION_ID`.
+When the harness's own session store yields the model, it appends an
+`ARC_MODEL` export (`model-slug[#effort]`): Claude reads the newest
 assistant model from its project transcript; Codex honors `CODEX_HOME` and
 reads the latest turn's model and effort; OpenCode reads the selected model and
 variant from its SQLite session row when `sqlite3` is available; and Pi reads
