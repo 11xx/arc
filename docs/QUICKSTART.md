@@ -99,10 +99,10 @@ arc integrate fix-parser --cleanup  # guarded --no-ff merge into the target
 `arc done` composes snapshot + verify + check in one call. `arc resume`
 prints a change's brief, live state, and journal context to pick work back up.
 
-## 7. Sandboxing across repos
+## 7. Ledgers outside the Git dir
 
-Point ledgers at an isolated tree instead of each repo's Git dir so a
-sandboxed executor never needs write access to `.git`:
+Point ledgers at an isolated tree instead of each repo's Git dir so an
+executor with no write access to `.git` can still record work:
 
 ```sh
 export ARC_DATA_ROOT=~/.local/state/arc      # per-repo slug subdirectories
@@ -111,3 +111,7 @@ arc config --check-writable                  # fail fast if paths are read-only
 
 With a `data_root` configured, `arc workspace list|inbox` aggregates every
 repo's changes in one view.
+
+To move every root at once instead of the ledger alone — for a disposable copy
+to rehearse something destructive in — see `ARC_SANDBOX` and `arc sandbox
+clone` in the README's Sandbox section.

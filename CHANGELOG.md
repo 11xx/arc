@@ -12,6 +12,18 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `ARC_SANDBOX=<prefix>`, or `--sandbox <prefix>` on any command, stands in for
+  the home directory wherever arc derives a default path, so one value moves
+  every root arc writes: journal, registry, configuration, worktrees, temp, and
+  the ledger wherever a `data_root` places it. A variable naming one exact
+  directory still means it. `arc sandbox clone <prefix>` copies a project —
+  repository, ledger, journal, configuration — so the copy answers the way the
+  source does, with no remote back to it and no inherited path;
+  `arc sandbox diff <prefix>` reports what its ledger events, journal events,
+  and refs differ by; `arc sandbox discard <prefix>` removes a prefix arc
+  recorded as a sandbox, and nothing else. `arc doctor` opens with the roots
+  the invocation reads and writes, and its JSON report is `arc-doctor/3`.
+
 - `arc claim --takeover --because <reason>` displaces a claim that is not yet
   reclaimable — inside its stage budget on a change, still leased on a journal
   artifact — recording the stated reason on the displaced claim and verifying

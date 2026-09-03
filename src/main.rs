@@ -30,7 +30,7 @@ use model::{
     ActorSource, DebtMissing, DispositionStatus, MessageSeverity, MessageType, ProbePhase,
     ReviewCause, RunOutcome, Severity, Side, Verdict, VerdictRelationKind, VerifyResult,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Change, review, and integration state over plain Git for agentic
 /// coding arcs. Git owns content and history; arc owns the collaboration
@@ -66,6 +66,11 @@ struct Cli {
     /// Change to act on, wherever the positional is optional
     #[arg(long = "change", id = "change_flag", global = true)]
     change: Option<String>,
+    /// Absolute prefix that stands in for the home directory: every root arc
+    /// writes by default (ledger under a data root, journal, registry,
+    /// configuration, worktrees, temp) lives beneath it
+    #[arg(long, global = true, env = config::SANDBOX_VAR)]
+    sandbox: Option<String>,
     /// Absent prints the workflow guide: what arc owns, the command
     /// lifecycle, profile selection, and the rules that change what a
     /// session should do.
@@ -1205,6 +1210,12 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Make, compare, and remove a disposable copy of this project under a
+    /// sandbox prefix
+    Sandbox {
+        #[command(subcommand)]
+        cmd: SandboxCmd,
+    },
     /// Check the append-only ledger for malformed or stale state (read-only)
     Doctor {
         /// Emit the machine-readable JSON view instead of text
@@ -1361,6 +1372,34 @@ enum WorkspaceCmd {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SandboxCmd {
+    /// Copy this project — repository with its ledger, journal, registry
+    /// entry, and configuration — into the prefix, so the copy answers
+    /// `arc catchup` the way the source does
+    Clone {
+        /// Absolute prefix to build the sandbox under
+        prefix: String,
+        /// Emit the report as structured JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report what a sandbox's ledger events, journal events, and Git refs
+    /// differ by from the project it was cloned from
+    Diff {
+        /// Prefix holding the sandbox
+        prefix: String,
+        /// Emit the report as structured JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a sandbox arc made, refusing any prefix that is not one
+    Discard {
+        /// Prefix holding the sandbox
+        prefix: String,
     },
 }
 
@@ -1731,6 +1770,11 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<i32> {
+    // Export the prefix before anything resolves a path, so the flag and the
+    // variable are one input and every command arc runs inherits the sandbox.
+    if let Some(prefix) = cli.sandbox.as_deref().filter(|value| !value.is_empty()) {
+        std::env::set_var(config::SANDBOX_VAR, prefix);
+    }
     let role = ExecutionRole::parse(cli.role.as_deref())?;
     // No subcommand is not an error: it is the request to be oriented.
     let Some(cmd) = cli.cmd else {
@@ -2830,6 +2874,7 @@ fn run(cli: Cli) -> Result<i32> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
+                    "sandbox": cfg.sandbox.as_ref().map(|p| p.display().to_string()),
                     "ai_home": cfg.ai_home.display().to_string(),
                     "config_file": cfg.config_path.display().to_string(),
                     "config_file_exists": cfg.config_path.is_file(),
@@ -2840,6 +2885,15 @@ fn run(cli: Cli) -> Result<i32> {
             );
             Ok(0)
         }
+        Cmd::Sandbox { cmd } => match cmd {
+            SandboxCmd::Clone { prefix, json } => {
+                commands::sandbox::clone(&ctx, Path::new(&prefix), json)
+            }
+            SandboxCmd::Diff { prefix, json } => {
+                commands::sandbox::diff(&ctx, Path::new(&prefix), json)
+            }
+            SandboxCmd::Discard { prefix } => commands::sandbox::discard(&ctx, Path::new(&prefix)),
+        },
         Cmd::Doctor { json, verbose } => commands::run_doctor(&ctx, json, verbose),
         Cmd::Hooks { cmd } => match cmd {
             HooksCmd::Install { force } => {

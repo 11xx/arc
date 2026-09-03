@@ -1,12 +1,18 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// User-level configuration. arc treats `~/.local/ai/` as the AI data
 /// home (relocatable via `AI_HOME`) and reads `<ai-home>/arc/config.toml`.
-/// Environment variables override the file; flags do not exist for these
-/// on purpose — sandboxing is achieved by pointing the paths elsewhere.
+/// Environment variables override the file.
+///
+/// A sandbox prefix (`ARC_SANDBOX`, `--sandbox`) stands in for the home
+/// directory everywhere arc derives a default path, so one value moves every
+/// root arc writes at once. A variable naming one exact directory
+/// (`AI_HOME`, `ARC_WORKTREES_DIR`, `ARC_DATA_ROOT`, `ARC_DATA_DIR`,
+/// `ARC_JOURNAL_DIR`) still means the directory it names: the prefix replaces
+/// defaults, not statements.
 #[derive(Debug, Default, Deserialize)]
 pub struct ConfigFile {
     /// Directory that receives change worktrees (default `~/.worktrees`). A
@@ -93,6 +99,9 @@ pub struct JournalsConfig {
 
 #[derive(Debug)]
 pub struct Config {
+    /// The sandbox prefix every default path was derived from, when one is in
+    /// force. `None` means the roots are the caller's own.
+    pub sandbox: Option<PathBuf>,
     pub ai_home: PathBuf,
     pub config_path: PathBuf,
     pub worktrees_dir: PathBuf,
@@ -108,7 +117,44 @@ pub struct Config {
     pub provenance_git_identity: GitIdentityMode,
 }
 
+/// The variable naming the sandbox prefix. The `--sandbox` flag exports it, so
+/// a command arc runs (a gate, a hook, a nested `arc`) inherits the sandbox
+/// rather than reaching back into the caller's own roots.
+pub const SANDBOX_VAR: &str = "ARC_SANDBOX";
+
+/// The sandbox prefix in force, when there is one.
+///
+/// An absolute path is required: every root is derived by joining onto it, and
+/// a relative prefix would mean a different set of roots per working directory,
+/// which is the opposite of what a sandbox is for.
+pub fn sandbox() -> Result<Option<PathBuf>> {
+    let Some(raw) = std::env::var_os(SANDBOX_VAR) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(&raw);
+    if path.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    let path = expand_tilde_at(&real_home()?, path.to_string_lossy().as_ref())?;
+    if !path.is_absolute() {
+        bail!(
+            "{SANDBOX_VAR} must be an absolute path, got {}",
+            path.display()
+        );
+    }
+    Ok(Some(path))
+}
+
+/// The directory every default path is derived from: the sandbox prefix where
+/// one is in force, otherwise the caller's home.
 fn home() -> Result<PathBuf> {
+    match sandbox()? {
+        Some(prefix) => Ok(prefix),
+        None => real_home(),
+    }
+}
+
+fn real_home() -> Result<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .context("HOME is unset")
@@ -117,21 +163,50 @@ fn home() -> Result<PathBuf> {
 pub fn ai_home() -> Result<PathBuf> {
     match std::env::var_os("AI_HOME") {
         Some(d) => Ok(PathBuf::from(d)),
-        None => Ok(home()?.join(".local").join("ai")),
+        None => Ok(ai_home_under(&home()?)),
     }
 }
 
+/// The AI data home a home directory — or a sandbox prefix standing in for one
+/// — supplies. One definition, so a sandbox built by hand and a sandbox
+/// `ARC_SANDBOX` resolves to are the same layout.
+pub fn ai_home_under(base: &Path) -> PathBuf {
+    base.join(".local").join("ai")
+}
+
+/// The worktrees directory a home directory or sandbox prefix supplies.
+pub fn worktrees_under(base: &Path) -> PathBuf {
+    base.join(".worktrees")
+}
+
+/// Where arc puts a scratch directory it creates and removes itself. Inside a
+/// sandbox this is part of the sandbox, so a run leaves nothing in the shared
+/// temp directory either.
+pub fn temp_dir() -> Result<PathBuf> {
+    match sandbox()? {
+        Some(prefix) => Ok(prefix.join("tmp")),
+        None => Ok(std::env::temp_dir()),
+    }
+}
+
+/// Expand a leading `~` against the directory arc derives defaults from, so a
+/// configured `~/…` path follows a sandbox prefix the same way a default does.
 pub fn expand_tilde(s: &str) -> Result<PathBuf> {
+    expand_tilde_at(&home()?, s)
+}
+
+fn expand_tilde_at(base: &Path, s: &str) -> Result<PathBuf> {
     if s == "~" {
-        home()
+        Ok(base.to_path_buf())
     } else if let Some(rest) = s.strip_prefix("~/") {
-        Ok(home()?.join(rest))
+        Ok(base.join(rest))
     } else {
         Ok(PathBuf::from(s))
     }
 }
 
 pub fn load() -> Result<Config> {
+    let sandbox = sandbox()?;
     let ai_home = ai_home()?;
     let config_path = ai_home.join("arc").join("config.toml");
     let file: ConfigFile = if config_path.is_file() {
@@ -146,7 +221,7 @@ pub fn load() -> Result<Config> {
         Some(d) => PathBuf::from(d),
         None => match &file.worktrees_dir {
             Some(s) => expand_tilde(s)?,
-            None => home()?.join(".worktrees"),
+            None => worktrees_under(&home()?),
         },
     };
     let data_root = match std::env::var_os("ARC_DATA_ROOT") {
@@ -158,6 +233,7 @@ pub fn load() -> Result<Config> {
     };
 
     Ok(Config {
+        sandbox,
         ai_home,
         config_path,
         worktrees_dir,

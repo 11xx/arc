@@ -819,7 +819,7 @@ fn doctor_reports_an_undischarged_obligation() {
         .assert()
         .success();
     let report = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
-    assert_eq!(report["schema"], "arc-doctor/2", "{report}");
+    assert_eq!(report["schema"], "arc-doctor/3", "{report}");
     let codes: Vec<&str> = report["advice"]
         .as_array()
         .unwrap()

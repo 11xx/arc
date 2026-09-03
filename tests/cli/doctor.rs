@@ -56,7 +56,7 @@ fn doctor_clean_ledger_exits_zero() {
         .args(["doctor", "--json"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("\"schema\":\"arc-doctor/2\""));
+        .stdout(predicates::str::contains("\"schema\":\"arc-doctor/3\""));
 }
 
 #[test]

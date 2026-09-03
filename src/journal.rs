@@ -1670,7 +1670,6 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
     // one that fails here has moved nothing at all.
     let (harness, session) = identity(ctx);
     append_binding(
-        ctx,
         &source,
         &JournalBinding {
             schema: BINDING_SCHEMA.to_string(),
@@ -5123,9 +5122,35 @@ fn read_bindings(dir: &Path) -> Result<Vec<JournalBinding>> {
         .collect())
 }
 
-fn append_binding(ctx: &Ctx, dir: &Path, binding: &JournalBinding) -> Result<()> {
+/// State that the journal in `dir` belongs to `anchor`, recording where it was
+/// bound before. A journal is addressed by the slugged path of its project, so
+/// a journal that travels — moved, or copied into a sandbox — needs the record
+/// to say which project it now belongs to; without it, the directory is read as
+/// its old project's, in a place that project does not live.
+pub(crate) fn record_binding(
+    dir: &Path,
+    event: &str,
+    anchor: &Path,
+    previous: &Path,
+    harness: Option<String>,
+    session: Option<String>,
+) -> Result<()> {
+    append_binding(
+        dir,
+        &JournalBinding {
+            schema: BINDING_SCHEMA.to_string(),
+            ts: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            event: event.to_string(),
+            anchor: anchor.display().to_string(),
+            previous_anchor: Some(previous.display().to_string()),
+            harness,
+            session,
+        },
+    )
+}
+
+fn append_binding(dir: &Path, binding: &JournalBinding) -> Result<()> {
     use std::io::Write;
-    let _ = ctx;
     let path = bindings_path(dir);
     let mut line = serde_json::to_string(binding)?;
     line.push('\n');
@@ -5733,7 +5758,6 @@ fn ensure_bound(ctx: &Ctx, dir: &Path) -> Result<()> {
     }
     let (harness, session) = identity(ctx);
     append_binding(
-        ctx,
         dir,
         &JournalBinding {
             schema: BINDING_SCHEMA.to_string(),

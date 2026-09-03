@@ -20,6 +20,7 @@ mod pass;
 mod rescue;
 pub(crate) mod review;
 pub mod run;
+pub(crate) mod sandbox;
 pub(crate) mod scaffold;
 pub(crate) use scaffold::{
     available as scaffolds_available, default_for_kind as scaffold_default_for_kind,
