@@ -181,9 +181,13 @@ everything not yet opened as a change. `arc inbox` therefore reports the
 journal's tier counts and newest primary items beside its own buckets, and
 `arc begin <slug> --from-journal <file>` turns a queued artifact into a change,
 consuming it.
-`arc inbox --json` uses `arc-inbox/5`; a change opened with `--iterating` is
+`arc inbox --json` uses `arc-inbox/8`; a change opened with `--iterating` is
 classified in the separate `iterating` bucket rather than in review or ready
-queues.
+queues. Both `arc inbox` and `arc catchup` also carry a `deferred` section:
+the findings delegated rounds left open, each with the subject and round that
+deferred it, the reason, and its age. A deferral binds to a run's subject
+rather than to a change, so it is the one queue entry that can name a fork or
+a commit range.
 
 ## Quick tour
 
@@ -692,6 +696,37 @@ arc check --tag '#radio'
 See [DELEGATION.md](DELEGATION.md) before generating cross-harness executor
 prompts. In particular, a Codex executor works locally and must never be told
 to invoke `codex exec` on itself.
+
+### Delegated rounds
+
+`arc run` records delegated runs. A dispatch names exactly one subject —
+`--change <id>`, `--fork <slug>`, or `--range <base>..<head>` — and naming
+none or two is refused. A ledger change is one shape a delegation takes, not
+the only one: the loop of brief, review, and targeted change request runs just
+as often on a fork, which is outside the lifecycle by design, or on a bare
+commit range in a repository whose ledger holds nothing yet.
+
+```sh
+arc run dispatch --route 'codex:gpt-5.6-luna#max' --worktree ../wt --fork spool-spike
+arc run end <dispatch-event> --outcome completed --reviewed-head "$(git rev-parse HEAD)" \
+  --raised-json raised.json --deferred-json deferred.json --collects def-01j0z
+arc run list
+```
+
+A round is the ordinal of a dispatch within its subject, derived rather than
+recorded. `run list` groups by subject, numbers the rounds, and shows each
+round's reviewed head, raised count, and deferrals still open.
+
+The ending is where a bounded round says what it left. `--raised-json` and
+`--deferred-json` take a path or `-`, holding a JSON array of objects with a
+`summary` and an optional `severity`; a deferral additionally requires a `why`
+and may name its own `id`, and arc mints `def-<ulid>` when it does not. The
+reason is required because a deferral without one cannot be told from a
+finding that was missed. A deferral stays open until a later round on the same
+subject collects it by ID with `--collects`, which is refused for an ID that
+is not open on that subject. Open deferrals are surfaced by `arc inbox` and
+`arc catchup`, since a deferral absent from the answer to "what is waiting" is
+a deferral nobody will honor.
 
 ## Export / import
 
@@ -1756,6 +1791,38 @@ retired kinds as non-failing `retired-artifact-kind` advice; malformed journal
 lines, artifact names, unknown kinds, and dangling references remain problems
 with a failing exit status, while stale lanes and archive housekeeping remain
 non-failing advice. It never creates the journal directory.
+
+### Spooling a write the journal cannot take
+
+The journal lives outside the repository, so a process sandboxed to the
+repository it is editing cannot write one — and the executors running bounded
+rounds are precisely the ones asked to record what they deferred. Every kind
+verb and `journal log` therefore accept `--spool`, and a write also spools on
+its own when the journal directory cannot be created or written. Either way
+the write lands in `<repo toplevel>/.arc/outbox/<ts>-<kind>-<topic>.json`, the
+command prints `spooled: <path>` and exits 0. Arc creates the outbox on first
+use with a `.gitignore` of `*`: a spooled write is in-flight state, not
+project content.
+
+A spool file is `{"schema": "arc-journal-spool/1", "filename": <the artifact
+this write would create, absent for a log>, "event": <the journal event as it
+would have been appended>, "body": <the artifact body, null for a log>}`.
+
+```sh
+arc config --check-writable          # says whether writes go to the journal or the outbox
+arc journal todo deferred-work --body-file - --spool
+arc journal spool                    # what is waiting
+arc journal spool --promote          # file it, oldest first
+```
+
+`--promote` replays each write as a real one: the artifact is written, the
+event is appended with the spooled identity verbatim — actor, harness,
+session, model, and represented subject — plus `promoted_by` naming the
+promoting caller, and the spool file is removed only after the event is
+appended. Promotion adds a carrier, never a new author. A spool file that
+cannot be parsed is reported and left in place, because it is the only copy of
+that write. `promoted_by` is an optional `journal-events/1` field, so an
+events file written before it stays valid.
 
 `arc doctor [--json]` performs the same read-only split for the authoritative
 change ledger. Malformed events, store configuration, IDs, and missing open

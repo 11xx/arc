@@ -37,9 +37,10 @@ FROM A WORKSPACE ROOT (outside a project)
   cd <anchor>          Enter one project named by the report, then orient there.
 
 ORIENT INSIDE A PROJECT (start here, in this order)
-  arc catchup            Live state: ledger queue, journal backlog, forks,
-                         and what the change and fork worktrees occupy —
-                         apparent size, with the mount's free space.
+  arc catchup            Live state: ledger queue, deferrals delegated rounds
+                         left open, journal backlog, forks, and what the
+                         change and fork worktrees occupy — apparent size,
+                         with the mount's free space.
   arc fork <slug>        Fork this repository: a worktree on fork/<slug>,
                          outside the change lifecycle — unintegrated by
                          intent; the operator decides what to merge, rebase,
@@ -440,7 +441,23 @@ RULES THAT CHANGE WHAT YOU DO
     `discriminating` instead of `undiscriminated`. Advisory: it changes no
     result and no exit code, and arc infers it from nothing.
   - The journal lives outside the repo, so worktrees stay clean. Cross-session
-    context goes there, never into tracked files.
+    context goes there, never into tracked files. A sandbox that cannot reach
+    it is not a reason to leave the record in a transcript: every kind verb
+    and `journal log` take `--spool`, and a write spools by itself when the
+    journal cannot be written. It parks in `.arc/outbox/` and prints
+    `spooled: <path>`; `arc journal spool --promote` files it later with the
+    identity it was spooled with. `arc config --check-writable` says which of
+    the two will happen before you write.
+  - `arc run dispatch` names exactly one subject: `--change <id>`, `--fork
+    <slug>`, or `--range <base>..<head>`. A round is its ordinal within that
+    subject, so the loop of bounded rounds records on a fork or a bare commit
+    range as readily as on a ledger change.
+  - A bounded round records what it deliberately left, so the next round
+    inherits a list instead of a memory: `arc run end <dispatch> --outcome
+    <o> --reviewed-head <sha> --raised-json <path|-> --deferred-json <path|->`.
+    A deferral requires a `why` and gets a `def-<ulid>` when it names no id; a
+    later round on the same subject discharges it with `--collects <id>`.
+    `arc inbox` and `arc catchup` carry the ones still open.
   - arc holds no routing opinion. It records the --actor, --harness, and --model
     it is given; who to delegate to is the caller's policy, not arc's.
 

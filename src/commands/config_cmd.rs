@@ -16,6 +16,12 @@ struct WritabilityCheck {
     name: &'static str,
     ok: bool,
     detail: String,
+    /// Whether the text view prints this passing check's detail. Most details
+    /// are the path the probe used and the name already says which capability
+    /// passed; a check whose detail changes what the caller should do says it
+    /// out loud instead.
+    #[serde(skip)]
+    show_detail: bool,
 }
 
 /// Probe each writable surface needed by an executor before it starts work.
@@ -49,6 +55,7 @@ pub fn check_writable(ctx: &Ctx, json: bool) -> Result<i32> {
                 name,
                 ok: true,
                 detail,
+                show_detail: false,
             }),
             Err(error) => {
                 checks.push(failed(name, error));
@@ -56,7 +63,42 @@ pub fn check_writable(ctx: &Ctx, json: bool) -> Result<i32> {
             }
         }
     }
+    checks.push(probe_journal(ctx));
     finish(json, checks)
+}
+
+/// Where journal writes will land.
+///
+/// A journal this process cannot write is not a failure: the write spools to
+/// the repository-local outbox and a later caller files it. The check reports
+/// which of the two will happen, so an executor knows before it writes rather
+/// than discovering it from a spooled path afterwards, and it never turns the
+/// probe's exit code non-zero on its own.
+fn probe_journal(ctx: &Ctx) -> WritabilityCheck {
+    match crate::journal::writability(&ctx.cwd) {
+        Ok((dir, None)) => WritabilityCheck {
+            name: "journal",
+            ok: true,
+            detail: dir.display().to_string(),
+            show_detail: false,
+        },
+        Ok((dir, Some(outbox))) => WritabilityCheck {
+            name: "journal",
+            ok: true,
+            detail: format!(
+                "{} is unwritable: writes spool to {}, file them with `arc journal spool --promote`",
+                dir.display(),
+                outbox.display()
+            ),
+            show_detail: true,
+        },
+        Err(error) => WritabilityCheck {
+            name: "journal",
+            ok: true,
+            detail: format!("unresolved: {error:#}"),
+            show_detail: true,
+        },
+    }
 }
 
 fn probe_file(dir: &Path) -> Result<String> {
@@ -170,6 +212,7 @@ fn failed(name: &'static str, error: anyhow::Error) -> WritabilityCheck {
     WritabilityCheck {
         name,
         ok: false,
+        show_detail: true,
         // Render the whole cause chain: the outermost context names which
         // capability failed, and only the innermost says why. A probe that
         // reports "cannot create a commit" without "gpg-agent unreachable"
@@ -190,14 +233,14 @@ fn finish(json: bool, checks: Vec<WritabilityCheck>) -> Result<i32> {
         );
     } else {
         for check in checks {
-            if check.ok {
-                if check.detail == "skipped: unborn HEAD" {
-                    println!("{}", check.detail);
-                } else {
-                    println!("ok: {}", check.name);
-                }
-            } else {
+            if !check.ok {
                 println!("fail: {}: {}", check.name, check.detail);
+            } else if check.show_detail {
+                println!("ok: {}: {}", check.name, check.detail);
+            } else if check.detail == "skipped: unborn HEAD" {
+                println!("{}", check.detail);
+            } else {
+                println!("ok: {}", check.name);
             }
         }
     }

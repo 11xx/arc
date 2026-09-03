@@ -1545,12 +1545,20 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             route,
             worktree,
             change,
+            fork,
+            range,
             note,
             ..
         } => {
             let mut summary = format!("route={} worktree={}", one_line(route), one_line(worktree));
             if let Some(change) = change {
                 summary.push_str(&format!(" change={}", one_line(change)));
+            }
+            if let Some(fork) = fork {
+                summary.push_str(&format!(" fork={}", one_line(fork)));
+            }
+            if let Some(range) = range {
+                summary.push_str(&format!(" range={}", one_line(&range.as_str())));
             }
             if let Some(note) = note {
                 summary.push_str(" — ");
@@ -1561,9 +1569,25 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
         Payload::RunEnded {
             dispatch_event_id,
             outcome,
+            reviewed_head,
+            raised,
+            deferred,
+            collects,
             note,
         } => {
             let mut summary = format!("{} for {dispatch_event_id}", outcome.as_str());
+            if let Some(head) = reviewed_head {
+                summary.push_str(&format!(" reviewed={}", short_sha(head)));
+            }
+            for (label, count) in [
+                ("raised", raised.len()),
+                ("deferred", deferred.len()),
+                ("collects", collects.len()),
+            ] {
+                if count > 0 {
+                    summary.push_str(&format!(" {label}={count}"));
+                }
+            }
             if let Some(note) = note {
                 summary.push_str(" — ");
                 summary.push_str(&one_line(note));
@@ -1606,7 +1630,7 @@ fn disposition_summary(
     summary
 }
 
-fn short_sha(sha: &str) -> String {
+pub(crate) fn short_sha(sha: &str) -> String {
     sha.chars().take(12).collect()
 }
 

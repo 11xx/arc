@@ -12,6 +12,31 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `arc run dispatch` binds a delegated run to one subject — `--change <id>`,
+  `--fork <slug>`, or `--range <base>..<head>` — and refuses a dispatch naming
+  none or two. `arc run end` records what the round reviewed and produced:
+  `--reviewed-head <sha>`, `--raised-json <path|->`, `--deferred-json
+  <path|->`, and repeatable `--collects <deferral-id>`. A deferral requires a
+  `why` and is minted `def-<ulid>` when it names no id, and stays open until a
+  later round on the same subject collects it. `run list` groups by subject
+  and numbers the rounds, showing each round's reviewed head, raised count,
+  and deferrals still open. `arc inbox` and `arc catchup` gain a `deferred`
+  section naming each open deferral's subject, round, reason, and age
+  (`arc-inbox/8`, `arc-catchup/4`), since a deferral absent from the answer to
+  "what is waiting" is a deferral nobody will honor.
+
+- Every journal kind verb and `arc journal log` accept `--spool`, and a write
+  spools on its own when the journal directory cannot be created or written.
+  The journal lives outside the repository, so an executor sandboxed to the
+  repository it is editing could not record what it deferred; the write now
+  lands in `<repo toplevel>/.arc/outbox/` as an `arc-journal-spool/1` file
+  instead of failing. `arc journal spool` lists what is waiting and
+  `--promote` files each into the journal oldest first, keeping the spooled
+  identity verbatim and naming the promoting caller in a new optional
+  `promoted_by` journal-event field; an unparseable spool file is reported and
+  kept. `arc config --check-writable` reports whether writes reach the journal
+  or will spool.
+
 - `arc journal delivered <file> --question <id> --to
   person|anyone|delegate:<name> [--handle <opaque>]` records that a caller
   delivered an open question to somebody; arc keeps the fact and sends
@@ -69,7 +94,6 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `--body-file -` never waits on stdin. Writing that half by hand is most of
   what made a handoff expensive enough to skip; the guide now also names the
   four moments at which a session journals rather than leaving it to the end.
-
 - `arc journal correct <file> --target <t> --field <f> --value <v>` and
   `arc journal retract <file> --target <t> --body-file -` amend a recorded
   entry without rewriting it. A wrong entry could only be answered by another

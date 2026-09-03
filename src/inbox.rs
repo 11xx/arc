@@ -1,10 +1,32 @@
-use crate::model::{DebtCoverage, DebtMissing, DebtProduction, Verdict};
+use crate::model::{DebtCoverage, DebtMissing, DebtProduction, Severity, Verdict};
 use crate::state::{ChangeState, ClaimIdentity};
 use crate::status::{ClaimStatus, StatusReport};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-pub const INBOX_SCHEMA: &str = "arc-inbox/7";
+pub const INBOX_SCHEMA: &str = "arc-inbox/8";
+
+/// One finding a delegated round deferred and no later round has collected.
+///
+/// A deferral that is not in the answer to "what is waiting" is a deferral
+/// nobody will honor, which is the whole failure recording one is meant to
+/// prevent. The row names the run that deferred it, so the next session can
+/// read the decision rather than rediscover the finding.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DeferredRow {
+    pub id: String,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<Severity>,
+    pub why: String,
+    /// The subject it is open on, as `run list` heads its group.
+    pub subject: String,
+    /// The round that deferred it, absent on a run that named no subject.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round: Option<usize>,
+    pub dispatch_event_id: String,
+    pub age_seconds: u64,
+}
 
 /// The journal's actionable backlog, carried beside the ledger buckets.
 ///
@@ -70,7 +92,7 @@ pub struct InboxRow {
     pub reason: Option<String>,
 }
 
-/// The `arc-inbox/7` rollup: a lead-facing queue derived entirely from
+/// The `arc-inbox/8` rollup: a lead-facing queue derived entirely from
 /// existing ledger + Git state. A change may appear in more than one bucket
 /// when it is genuinely in more than one actionable state (e.g. blocked and
 /// awaiting review); each bucket is computed independently.
@@ -114,6 +136,9 @@ pub struct Inbox {
     /// null-check one key and not the other eight will forget, and the key it
     /// forgets is the one reporting that arc failed to classify open work.
     pub unclassified: Vec<InboxRow>,
+    /// Findings delegated rounds deferred and no later round collected,
+    /// newest first. Always serialized, like every bucket above.
+    pub deferred: Vec<DeferredRow>,
     /// Absent when the journal directory could not be resolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub journal: Option<JournalBacklog>,
@@ -136,6 +161,7 @@ impl Inbox {
             debt_owed: Vec::new(),
             debt_owed_by_kind: Vec::new(),
             unclassified: Vec::new(),
+            deferred: Vec::new(),
         }
     }
 

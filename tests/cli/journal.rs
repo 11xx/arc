@@ -10159,3 +10159,207 @@ fn an_answer_settles_a_delivered_question_and_closes_it_to_delivery() {
     assert!(!doctor.contains("unknown-jsonl-event"), "{doctor}");
     assert!(!doctor.contains("invalid-question-state"), "{doctor}");
 }
+
+/// A journal directory this process cannot write, as a sandboxed executor
+/// finds it. Restored by the caller so the fixture can be cleaned up.
+fn unwritable_journal(repo: &Repo) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = repo.home.join("sealed-journal");
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    dir
+}
+
+fn reopen(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn outbox(repo: &Repo) -> PathBuf {
+    repo.root.join(".arc").join("outbox")
+}
+
+fn spool_files(repo: &Repo) -> Vec<String> {
+    let dir = outbox(repo);
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let mut names: Vec<String> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|name| name.ends_with(".json"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// `--spool` parks a write where a sandbox can reach it, leaving the journal
+/// alone. The outbox ignores itself: a spooled write is in-flight state, not
+/// project content.
+#[test]
+fn spool_parks_a_write_in_the_repository() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    let spooled = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "todo",
+                "sandboxed",
+                "--body-file",
+                "-",
+                "--spool",
+            ])
+            .write_stdin("what the round deferred\n"),
+    );
+    assert!(spooled.starts_with("spooled: "), "{spooled}");
+    assert_eq!(spool_files(&repo).len(), 1, "{spooled}");
+    assert!(
+        !dir.join("events.jsonl").exists(),
+        "the journal must be untouched"
+    );
+    assert_eq!(
+        fs::read_to_string(outbox(&repo).join(".gitignore")).unwrap(),
+        "*\n"
+    );
+
+    let name = &spool_files(&repo)[0];
+    assert!(name.ends_with("-todo-sandboxed.json"), "{name}");
+    let file: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(outbox(&repo).join(name)).unwrap()).unwrap();
+    assert_eq!(file["schema"], "arc-journal-spool/1", "{file}");
+    assert_eq!(file["body"], "what the round deferred\n", "{file}");
+    assert_eq!(file["event"]["event"], "note", "{file}");
+    assert_eq!(file["event"]["actor"], "tester", "{file}");
+    assert_eq!(file["filename"], file["event"]["file"], "{file}");
+}
+
+/// The executor that most needs to record a deferral is the one that cannot
+/// write the journal, so an unreachable journal spools instead of failing.
+#[test]
+fn an_unwritable_journal_spools_rather_than_refusing_the_write() {
+    let repo = Repo::new();
+    let sealed = unwritable_journal(&repo);
+
+    let spooled = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_JOURNAL_DIR", &sealed)
+            .args(["journal", "todo", "sealed", "--body-file", "-"])
+            .write_stdin("deferred\n"),
+    );
+    assert!(spooled.starts_with("spooled: "), "{spooled}");
+
+    let logged = stdout(repo.arc(&repo.root).env("ARC_JOURNAL_DIR", &sealed).args([
+        "journal",
+        "log",
+        "sealed",
+        "a line nobody could file",
+    ]));
+    assert!(logged.starts_with("spooled: "), "{logged}");
+    assert_eq!(spool_files(&repo).len(), 2);
+    assert!(
+        fs::read_dir(&sealed).unwrap().next().is_none(),
+        "nothing reached the sealed journal"
+    );
+
+    // The writability probe says so before a write discovers it.
+    let checked = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_JOURNAL_DIR", &sealed)
+            .args(["config", "--check-writable"]),
+    );
+    assert!(checked.contains("ok: journal:"), "{checked}");
+    assert!(checked.contains("is unwritable"), "{checked}");
+    assert!(checked.contains("arc journal spool --promote"), "{checked}");
+    reopen(&sealed);
+}
+
+/// Promotion files the write and adds a carrier, never a new author: the
+/// spooled identity is what the record is for.
+#[test]
+fn promote_files_the_write_with_its_own_identity() {
+    let repo = Repo::new();
+    let sealed = unwritable_journal(&repo);
+    stdout(
+        repo.arc(&repo.root)
+            .env("ARC_JOURNAL_DIR", &sealed)
+            .env("ARC_ACTOR", "executor")
+            .env("ARC_HARNESS", "codex")
+            .env("ARC_SESSION", "sandboxed-run")
+            .env("ARC_MODEL", "some-model#high")
+            .args(["journal", "todo", "sealed", "--body-file", "-"])
+            .write_stdin("what the round deferred\n"),
+    );
+    let listed = stdout(repo.arc(&repo.root).args(["journal", "spool"]));
+    assert!(listed.contains("1 spooled write(s)"), "{listed}");
+    assert!(listed.contains("-todo-sealed.json"), "{listed}");
+    reopen(&sealed);
+
+    let promoted = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_JOURNAL_DIR", &sealed)
+            .env("ARC_ACTOR", "lead")
+            .args(["journal", "spool", "--promote"]),
+    );
+    assert!(promoted.contains("promoted 1, kept 0"), "{promoted}");
+    assert!(spool_files(&repo).is_empty(), "the spool file is removed");
+
+    let events = journal_events(&sealed);
+    assert_eq!(events.len(), 1, "{events:?}");
+    let event = &events[0];
+    assert_eq!(event["actor"], "executor", "{event}");
+    assert_eq!(event["harness"], "codex", "{event}");
+    assert_eq!(event["session"], "sandboxed-run", "{event}");
+    assert_eq!(event["model"], "some-model#high", "{event}");
+    assert_eq!(event["promoted_by"], "lead", "{event}");
+
+    let artifact = sealed.join(event["file"].as_str().unwrap());
+    assert_eq!(
+        fs::read_to_string(&artifact).unwrap(),
+        "what the round deferred\n"
+    );
+    // A promoted event is valid journal input, not something doctor reports.
+    let doctored = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_JOURNAL_DIR", &sealed)
+            .args(["journal", "doctor"]),
+    );
+    assert!(doctored.contains("problems:\n  (none)"), "{doctored}");
+}
+
+/// A spool file arc cannot read is the only copy of that write, so it is
+/// reported and left where it is rather than dropped.
+#[test]
+fn a_malformed_spool_file_is_reported_and_kept() {
+    let repo = Repo::new();
+    let sealed = unwritable_journal(&repo);
+    stdout(repo.arc(&repo.root).env("ARC_JOURNAL_DIR", &sealed).args([
+        "journal",
+        "log",
+        "sealed",
+        "a line worth keeping",
+    ]));
+    reopen(&sealed);
+    let broken = outbox(&repo).join("20260101T000000Z-note-broken.json");
+    fs::write(&broken, "{not json").unwrap();
+
+    let listed = stdout(repo.arc(&repo.root).args(["journal", "spool"]));
+    assert!(listed.contains("unreadable"), "{listed}");
+
+    let promoted = stdout(repo.arc(&repo.root).env("ARC_JOURNAL_DIR", &sealed).args([
+        "journal",
+        "spool",
+        "--promote",
+    ]));
+    assert!(
+        promoted.contains("kept 20260101T000000Z-note-broken.json"),
+        "{promoted}"
+    );
+    assert!(promoted.contains("promoted 1, kept 1"), "{promoted}");
+    assert!(broken.is_file(), "the unreadable write stays on disk");
+    assert_eq!(
+        spool_files(&repo),
+        vec![broken.file_name().unwrap().to_string_lossy().to_string()]
+    );
+    assert_eq!(journal_events(&sealed).len(), 1);
+}

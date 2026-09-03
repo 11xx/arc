@@ -447,7 +447,7 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Lead-facing queue rollup: open changes, active claims, and outstanding debt (arc-inbox/6 schema)
+    /// Lead-facing queue rollup: open changes, active claims, and outstanding debt (arc-inbox/8 schema)
     Inbox {
         /// Restrict to changes assigned to this harness
         #[arg(long = "assigned-to")]
@@ -1484,7 +1484,9 @@ enum PassCmd {
 
 #[derive(Subcommand)]
 enum RunCmd {
-    /// Record that a caller dispatched a run through a resolved route
+    /// Record that a caller dispatched a run through a resolved route.
+    /// Exactly one subject is named: rounds are numbered within it, so a run
+    /// against nothing belongs to no sequence
     Dispatch {
         /// Resolved route used for dispatch
         #[arg(long)]
@@ -1492,9 +1494,16 @@ enum RunCmd {
         /// Worktree path given to the run
         #[arg(long)]
         worktree: String,
-        /// Change the run belongs to, when one exists
+        /// Change the run is against
         #[arg(long, id = "change_flag")]
         change: Option<String>,
+        /// Fork slug the run is against, for work outside the lifecycle
+        #[arg(long)]
+        fork: Option<String>,
+        /// Commit range the run is against, as <base>..<head>, for work with
+        /// no ledger change
+        #[arg(long)]
+        range: Option<String>,
         /// Brief event given to the run, when one exists
         #[arg(long = "brief-event")]
         brief_event_id: Option<String>,
@@ -1502,18 +1511,36 @@ enum RunCmd {
         #[arg(long)]
         note: Option<String>,
     },
-    /// Record the terminal outcome of a dispatched run
+    /// Record the terminal outcome of a dispatched run, with what the round
+    /// reviewed, raised, and deliberately left
     End {
         /// RunDispatched event ID being closed
         dispatch_event_id: String,
         /// Terminal outcome supplied by the caller
         #[arg(long, value_enum)]
         outcome: RunOutcome,
+        /// Revision the round reviewed
+        #[arg(long = "reviewed-head")]
+        reviewed_head: Option<String>,
+        /// Findings raised for repair: a JSON array of objects with a
+        /// `summary` and an optional `severity`, from a file or '-' for stdin
+        #[arg(long = "raised-json")]
+        raised_json: Option<String>,
+        /// Findings deferred: the same array, each object additionally
+        /// carrying a required `why` and an optional `id` (one is minted when
+        /// absent)
+        #[arg(long = "deferred-json")]
+        deferred_json: Option<String>,
+        /// Deferral this round takes up, by ID; repeat for each. The deferral
+        /// must be open on the same subject
+        #[arg(long)]
+        collects: Vec<String>,
         /// Free-text ending note
         #[arg(long)]
         note: Option<String>,
     },
-    /// List every dispatched run, including open runs
+    /// List every dispatched run grouped by subject, with rounds numbered and
+    /// deferrals still open
     List {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
@@ -2615,18 +2642,46 @@ fn run(cli: Cli) -> Result<i32> {
                 route,
                 worktree,
                 change,
+                fork,
+                range,
                 brief_event_id,
                 note,
             } => {
-                commands::dispatch_run(&ctx, route, worktree, change, brief_event_id, note)?;
+                commands::dispatch_run(
+                    &ctx,
+                    commands::DispatchInput {
+                        route,
+                        worktree,
+                        change,
+                        fork,
+                        range,
+                        brief_event_id,
+                        note,
+                    },
+                )?;
                 Ok(0)
             }
             RunCmd::End {
                 dispatch_event_id,
                 outcome,
+                reviewed_head,
+                raised_json,
+                deferred_json,
+                collects,
                 note,
             } => {
-                commands::end_run(&ctx, &dispatch_event_id, outcome, note)?;
+                commands::end_run(
+                    &ctx,
+                    &dispatch_event_id,
+                    commands::EndingInput {
+                        outcome,
+                        reviewed_head,
+                        raised_json,
+                        deferred_json,
+                        collects,
+                        note,
+                    },
+                )?;
                 Ok(0)
             }
             RunCmd::List { json } => {

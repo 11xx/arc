@@ -342,7 +342,7 @@ fn fork_views_agree_about_retirement_and_catchup_json_carries_forks() {
         "{catchup_text}"
     );
     let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-    assert_eq!(catchup["schema"], "arc-catchup/3");
+    assert_eq!(catchup["schema"], "arc-catchup/4");
     assert!(catchup["forks"].as_array().unwrap().is_empty(), "{catchup}");
 
     stdout(repo.arc(&repo.root).args(["fork", "begin", "open-now"]));

@@ -179,7 +179,7 @@ fn catchup_and_doctor_report_open_worktree_usage() {
     assert!(catchup.contains("repo-usage-two"), "{catchup}");
 
     let catchup_json = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-    assert_eq!(catchup_json["schema"], "arc-catchup/3", "{catchup_json}");
+    assert_eq!(catchup_json["schema"], "arc-catchup/4", "{catchup_json}");
     assert_eq!(
         catchup_json["worktrees"]["changes"]
             .as_array()

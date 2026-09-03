@@ -445,6 +445,11 @@ pub struct KindWrite {
     pub no_scaffold: bool,
     #[command(flatten)]
     pub source: SourceArgs,
+    /// Write to the repository-local outbox instead of the journal, for a
+    /// caller that cannot reach the journal directory. `arc journal spool
+    /// --promote` files it later, keeping this write's identity
+    #[arg(long)]
+    pub spool: bool,
 }
 
 #[derive(Subcommand)]
@@ -463,6 +468,15 @@ pub enum JournalCmd {
         /// Emit structured JSON instead of text
         #[arg(long)]
         json: bool,
+    },
+    /// List journal writes parked in the repository-local outbox, for a
+    /// caller that could not reach the journal directory
+    Spool {
+        /// File each spooled write into the journal, oldest first, keeping
+        /// the identity it was spooled with and naming this caller as the
+        /// one that promoted it
+        #[arg(long)]
+        promote: bool,
     },
     /// Write a timestamped artifact and append its journal line
     Note {
@@ -551,6 +565,10 @@ pub enum JournalCmd {
         /// belongs to an artifact
         #[arg(long, value_parser = [NO_ACTION], requires = "item_key")]
         outcome: Option<String>,
+        /// Write to the repository-local outbox instead of the journal, for a
+        /// caller that cannot reach the journal directory
+        #[arg(long)]
+        spool: bool,
     },
     /// Record a second recorded session as a source of an existing artifact.
     /// One item may be evidenced by several sessions; this appends the extra
@@ -958,6 +976,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             Ok(0)
         }
         JournalCmd::Doctor { json } => doctor(ctx, json),
+        JournalCmd::Spool { promote } => spool(ctx, promote),
         JournalCmd::Note { write, kind } => write_kind(ctx, kind, write),
         JournalCmd::FeatureRequest { write } => write_kind(ctx, JournalKind::FeatureRequest, write),
         JournalCmd::Todo { write } => write_kind(ctx, JournalKind::Todo, write),
@@ -974,7 +993,8 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             message,
             source,
             outcome,
-        } => log_line(ctx, &topic, &message, &source, outcome.as_deref()),
+            spool,
+        } => log_line(ctx, &topic, &message, &source, outcome.as_deref(), spool),
         JournalCmd::SourceAttach {
             filename,
             source,
@@ -1119,6 +1139,260 @@ pub fn archive_dir(hot: &Path) -> PathBuf {
     let mut cold = hot.as_os_str().to_os_string();
     cold.push("-archive");
     PathBuf::from(cold)
+}
+
+const SPOOL_SCHEMA: &str = "arc-journal-spool/1";
+const OUTBOX_DIR: &str = "outbox";
+
+/// One journal write held in the repository for a later caller to file.
+///
+/// The journal lives outside the repository, so a process sandboxed to the
+/// repository it is editing cannot write one. Its deferrals would survive only
+/// in a transcript, which makes the record depend on somebody relaying it by
+/// hand. A spooled write is the same write, parked where the sandbox does
+/// reach, carrying the identity of whoever made it so promotion adds a carrier
+/// rather than replacing an author.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SpooledWrite {
+    schema: String,
+    /// The artifact this write would have created. Absent for a log line,
+    /// which creates none; present exactly when `body` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filename: Option<String>,
+    event: JournalEvent,
+    body: Option<String>,
+}
+
+/// The repository-local outbox, beside the ledger's other repository state.
+fn outbox_dir(cwd: &Path) -> Result<PathBuf> {
+    let toplevel = crate::gitio::toplevel(cwd)
+        .context("cannot spool a journal write outside a Git repository")?;
+    Ok(toplevel.join(".arc").join(OUTBOX_DIR))
+}
+
+/// Create the outbox, ignored by the repository that holds it. A spooled write
+/// is in-flight state, not project content, and committing one would file it
+/// into history instead of the journal.
+fn ensure_outbox(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("cannot create outbox {}", dir.display()))?;
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(&ignore, "*\n")
+            .with_context(|| format!("cannot write {}", ignore.display()))?;
+    }
+    Ok(())
+}
+
+/// Whether a failed write means the journal is out of reach, rather than the
+/// write being wrong. A directory this process may not create or write is the
+/// sandbox case the outbox exists for; every other failure is a real one and
+/// is reported rather than quietly diverted.
+fn out_of_reach(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::ReadOnlyFilesystem
+            )
+        })
+    })
+}
+
+/// Park one write in the outbox and say where it went.
+fn spool_write(
+    ctx: &Ctx,
+    stamp: &str,
+    kind: &str,
+    topic: &str,
+    event: &JournalEvent,
+    body: Option<&str>,
+) -> Result<i32> {
+    let dir = outbox_dir(&ctx.cwd)?;
+    ensure_outbox(&dir)?;
+    let path = dir.join(format!("{stamp}-{kind}-{topic}.json"));
+    let spooled = SpooledWrite {
+        schema: SPOOL_SCHEMA.to_string(),
+        filename: event.file.clone(),
+        event: event.clone(),
+        body: body.map(str::to_string),
+    };
+    let contents = serde_json::to_string_pretty(&spooled)?;
+    // Exclusive creation, like the artifact write it stands in for: a
+    // same-second collision must fail loudly rather than overwrite a write
+    // nobody has filed yet.
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| {
+                format!(
+                    "cannot create {} (a spooled write with this second's timestamp already exists)",
+                    path.display()
+                )
+            })?;
+        f.write_all(contents.as_bytes())
+            .with_context(|| format!("cannot write {}", path.display()))?;
+    }
+    println!("spooled: {}", path.display());
+    Ok(0)
+}
+
+/// Every spool file, in timestamp order. The name carries the stamp, so
+/// sorting by it orders the writes as they were made.
+fn spooled_paths(dir: &Path) -> Result<Vec<PathBuf>> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_file() && path.extension().is_some_and(|ext| ext == "json") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// List what is waiting in the outbox, or file it into the journal.
+fn spool(ctx: &Ctx, promote: bool) -> Result<i32> {
+    let dir = outbox_dir(&ctx.cwd)?;
+    let paths = spooled_paths(&dir)?;
+    if paths.is_empty() {
+        println!("no spooled writes  {}", dir.display());
+        return Ok(0);
+    }
+    if !promote {
+        println!("{} spooled write(s)  {}", paths.len(), dir.display());
+        for path in &paths {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            match read_spooled(path) {
+                Ok(spooled) => println!(
+                    "  {name}  {}  {}",
+                    spooled.event.event,
+                    spooled.filename.as_deref().unwrap_or_else(|| spooled
+                        .event
+                        .message
+                        .as_deref()
+                        .unwrap_or(""))
+                ),
+                Err(error) => println!("  {name}  unreadable: {error:#}"),
+            }
+        }
+        println!("file them with: arc journal spool --promote");
+        return Ok(0);
+    }
+
+    let journal = resolve_dir(&ctx.cwd)?;
+    std::fs::create_dir_all(&journal)
+        .with_context(|| format!("cannot create archive dir {}", journal.display()))?;
+    let promoter = promoting_actor(ctx);
+    let mut promoted = 0usize;
+    let mut kept = 0usize;
+    for path in &paths {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        // A file arc cannot read is reported and left where it is: deleting a
+        // write nobody could file would destroy the only copy of it.
+        let spooled = match read_spooled(path) {
+            Ok(spooled) => spooled,
+            Err(error) => {
+                println!("kept {name}: {error:#}");
+                kept += 1;
+                continue;
+            }
+        };
+        match promote_one(ctx, &journal, &spooled, &promoter) {
+            Ok(filed) => {
+                // The spool file is the only copy until the event is appended,
+                // so it is removed last and never before.
+                std::fs::remove_file(path)
+                    .with_context(|| format!("cannot remove {}", path.display()))?;
+                println!("promoted {name}{filed}");
+                promoted += 1;
+            }
+            Err(error) => {
+                println!("kept {name}: {error:#}");
+                kept += 1;
+            }
+        }
+    }
+    println!("promoted {promoted}, kept {kept}");
+    Ok(0)
+}
+
+fn read_spooled(path: &Path) -> Result<SpooledWrite> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let spooled: SpooledWrite = serde_json::from_str(&text)
+        .with_context(|| format!("malformed spooled write in {}", path.display()))?;
+    if spooled.schema != SPOOL_SCHEMA {
+        bail!(
+            "spooled write in {} is {}, not {SPOOL_SCHEMA}",
+            path.display(),
+            spooled.schema
+        );
+    }
+    if spooled.filename.is_some() != spooled.body.is_some() {
+        bail!(
+            "spooled write in {} names an artifact without a body, or the reverse",
+            path.display()
+        );
+    }
+    Ok(spooled)
+}
+
+/// File one spooled write, artifact first and event last.
+fn promote_one(
+    ctx: &Ctx,
+    journal: &Path,
+    spooled: &SpooledWrite,
+    promoter: &str,
+) -> Result<String> {
+    let mut filed = String::new();
+    if let (Some(filename), Some(body)) = (&spooled.filename, &spooled.body) {
+        let (_, _) = check_artifact_name(filename)?;
+        let path = journal.join(filename);
+        create_artifact(journal, &path, body)?;
+        filed = format!(" -> {}", path.display());
+    }
+    // The identity is carried verbatim: promotion records who filed the write,
+    // never who moved it. The promoting caller is named beside it.
+    let mut event = spooled.event.clone();
+    event.promoted_by = Some(promoter.to_string());
+    append_event(ctx, journal, &event)?;
+    Ok(filed)
+}
+
+/// Who is filing a spooled write. A declared actor names them; without one,
+/// the harness is all that is known, and naming it is better than a promotion
+/// that says nobody carried it.
+fn promoting_actor(ctx: &Ctx) -> String {
+    declared_actor(ctx).unwrap_or_else(|| identity(ctx).0)
+}
+
+/// Whether the journal directory can be written, and where writes go when it
+/// cannot. Reported rather than enforced: an unwritable journal is the case
+/// the outbox exists for, not a failure.
+pub fn writability(cwd: &Path) -> Result<(PathBuf, Option<PathBuf>)> {
+    let dir = resolve_dir(cwd)?;
+    let probe = std::fs::create_dir_all(&dir).and_then(|()| {
+        let path = dir.join(format!(".probe-{}.tmp", crate::ids::new_event_id()));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        std::fs::remove_file(&path)
+    });
+    match probe {
+        Ok(()) => Ok((dir, None)),
+        Err(_) => Ok((dir, Some(outbox_dir(cwd)?))),
+    }
 }
 
 #[derive(Serialize)]
@@ -2694,9 +2968,6 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
         None => body,
     };
 
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("cannot create archive dir {}", dir.display()))?;
-
     let now = Utc::now();
     let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
     let filename = format!("{stamp}-{topic}-{}.md", kind.as_str());
@@ -2706,32 +2977,50 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
         Some(t) => format!("# {t}\n\n{body}"),
         None => body,
     };
-    // Exclusive creation: a same-second same-topic/kind collision must fail
-    // loudly rather than silently overwrite a queued artifact.
-    {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .with_context(|| {
-                format!(
-                    "cannot create {} (an artifact with this second's timestamp already exists)",
-                    path.display()
-                )
-            })?;
-        f.write_all(contents.as_bytes())
-            .with_context(|| format!("cannot write {}", path.display()))?;
-    }
-
     let mut event = JournalEvent::base(ctx, now, topic, "note");
     event.file = Some(filename.clone());
     event.title = title.map(str::to_string);
     event.source = source;
     event.item_key = item_key;
+
+    if write.spool {
+        return spool_write(ctx, &stamp, kind.as_str(), topic, &event, Some(&contents));
+    }
+    // The artifact is the first thing written, so a journal this process
+    // cannot reach fails here with nothing on disk and the write spools
+    // instead. Anything else is a real failure and is reported as one.
+    match create_artifact(&dir, &path, &contents) {
+        Ok(()) => {}
+        Err(error) if out_of_reach(&error) => {
+            return spool_write(ctx, &stamp, kind.as_str(), topic, &event, Some(&contents));
+        }
+        Err(error) => return Err(error),
+    }
     append_event(ctx, &dir, &event)?;
     println!("{}", path.display());
     Ok(0)
+}
+
+/// Write one artifact, creating the journal directory if it is absent.
+///
+/// Exclusive creation: a same-second same-topic/kind collision must fail
+/// loudly rather than silently overwrite a queued artifact.
+fn create_artifact(dir: &Path, path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("cannot create archive dir {}", dir.display()))?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "cannot create {} (an artifact with this second's timestamp already exists)",
+                path.display()
+            )
+        })?;
+    f.write_all(contents.as_bytes())
+        .with_context(|| format!("cannot write {}", path.display()))
 }
 
 fn log_line(
@@ -2740,20 +3029,13 @@ fn log_line(
     message: &str,
     declared: &SourceArgs,
     outcome: Option<&str>,
+    spool: bool,
 ) -> Result<i32> {
     if !valid_topic(topic) {
         bail!("topic {topic:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
     }
     let (source, item_key) = declared_source(declared)?;
     let dir = resolve_dir(&ctx.cwd)?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("cannot create archive dir {}", dir.display()))?;
-    if let Some(existing) =
-        already_recorded(&read_events(&dir)?, source.as_ref(), item_key.as_deref())
-    {
-        println!("{existing}");
-        return Ok(0);
-    }
     let now = Utc::now();
     // Free text is always a log event: marker promotion is reserved for the
     // internal consume/archive/lane callers, so a message that happens to
@@ -2763,8 +3045,32 @@ fn log_line(
     event.source = source;
     event.item_key = item_key;
     event.outcome = outcome.map(str::to_string);
-    append_event(ctx, &dir, &event)?;
-    Ok(0)
+    let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+    // A spooled write cannot consult the journal, so the rescan check belongs
+    // on the path that reaches it.
+    if spool {
+        return spool_write(ctx, &stamp, "log", topic, &event, None);
+    }
+    let written = std::fs::create_dir_all(&dir)
+        .with_context(|| format!("cannot create archive dir {}", dir.display()))
+        .and_then(|()| {
+            // An item this recording already filed answers for itself rather
+            // than being filed twice.
+            if let Some(existing) = already_recorded(
+                &read_events(&dir)?,
+                event.source.as_ref(),
+                event.item_key.as_deref(),
+            ) {
+                println!("{existing}");
+                return Ok(());
+            }
+            append_event(ctx, &dir, &event)
+        });
+    match written {
+        Ok(()) => Ok(0),
+        Err(error) if out_of_reach(&error) => spool_write(ctx, &stamp, "log", topic, &event, None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Record a further recorded session as evidence behind an existing artifact.
@@ -4445,6 +4751,13 @@ pub(crate) struct JournalEvent {
     /// alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     item_key: Option<String>,
+    /// Who filed an event that was spooled by one caller and appended by
+    /// another. The identity fields keep naming the caller whose work this
+    /// records; this one names the caller that carried it into the journal,
+    /// so the two are never confused. Absent on a write that reached the
+    /// journal directly, which is what every write without it meant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    promoted_by: Option<String>,
 }
 
 /// Every field a correction may name, over all targets. Which of them a given
@@ -4613,6 +4926,7 @@ impl JournalEvent {
             amendment_id: None,
             source: None,
             item_key: None,
+            promoted_by: None,
         }
     }
 
@@ -4635,6 +4949,15 @@ impl JournalEvent {
             .as_ref()
             .is_none_or(|source| source.well_formed())
             || (self.item_key.is_some() && self.source.is_none())
+        {
+            return false;
+        }
+        // A promotion that names nobody records nothing: the field exists to
+        // separate the caller who filed the write from the one who carried it.
+        if self
+            .promoted_by
+            .as_deref()
+            .is_some_and(|actor| actor.trim().is_empty())
         {
             return false;
         }
@@ -5357,6 +5680,9 @@ fn render_event(event: &JournalEvent) -> String {
         if let Some(file) = &event.file {
             line.push_str(&format!(" ({file})"));
         }
+    }
+    if let Some(promoted_by) = &event.promoted_by {
+        line.push_str(&format!(" [promoted by {promoted_by}]"));
     }
     line
 }
