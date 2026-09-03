@@ -9180,3 +9180,155 @@ fn journal_correct_renames_the_identity_a_position_is_attributed_to() {
         artifact_body(&repo, &file)
     );
 }
+
+/// The mechanical half of a handoff is read from the repository rather than
+/// transcribed: branch, head, distance from the change's target, cleanliness,
+/// worktree, change and claim, queue depth, and the installed build.
+#[test]
+fn journal_handoff_derives_state_inside_a_change_worktree() {
+    let repo = Repo::new();
+    let (change_id, worktree, head) = change_with_patchset(&repo, "derived");
+    let body = repo.home.join("body.md");
+    fs::write(&body, "learned x\n").unwrap();
+
+    let out = stdout(repo.arc(&worktree).args([
+        "journal",
+        "handoff",
+        "derived-state",
+        "--derive",
+        "--body-file",
+        body.to_str().unwrap(),
+    ]));
+    let text = fs::read_to_string(out.trim()).unwrap();
+
+    assert!(text.starts_with("## State (derived at "), "{text}");
+    let root = fs::canonicalize(&repo.root).unwrap();
+    let checkout = fs::canonicalize(&worktree).unwrap();
+    let branch = git_out(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    for line in [
+        format!("- repository: {}\n", root.display()),
+        format!("- branch: {branch}\n"),
+        format!("- head: {}\n", &head[..8]),
+        "- target: master\n".to_string(),
+        // One commit sits on the branch and nothing has moved on master.
+        "- ahead: 1\n".to_string(),
+        "- behind: 0\n".to_string(),
+        "- tree: clean\n".to_string(),
+        format!("- worktree: {}\n", checkout.display()),
+        format!("- change: {change_id}\n"),
+    ] {
+        assert!(text.contains(&line), "missing {line:?} in {text}");
+    }
+    // Stage, claim, queue depth and installed build are answered rather than
+    // left unknown from inside a claimed change.
+    for label in ["- stage: ", "- claim: ", "- open journal items: "] {
+        let value = text
+            .lines()
+            .find_map(|line| line.strip_prefix(label))
+            .unwrap_or_else(|| panic!("no {label:?} line in {text}"));
+        assert_ne!(value, "unknown", "{label} in {text}");
+    }
+    assert!(text.contains("- installed: "), "{text}");
+    // The body follows the derived section rather than being replaced by it.
+    assert!(text.ends_with("learned x\n"), "{text}");
+}
+
+/// A handoff is written wherever a session stops, including outside every
+/// open change. The facts that depend on one say so instead of vanishing: an
+/// absent line cannot be told apart from a fact nobody recorded.
+#[test]
+fn journal_handoff_derive_reports_unknown_outside_any_change() {
+    let repo = Repo::new();
+    let body = repo.home.join("body.md");
+    fs::write(&body, "learned x\n").unwrap();
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "handoff",
+        "no-change",
+        "--derive",
+        "--body-file",
+        body.to_str().unwrap(),
+    ]));
+    let text = fs::read_to_string(out.trim()).unwrap();
+
+    for line in [
+        "- target: unknown\n",
+        "- ahead: unknown\n",
+        "- behind: unknown\n",
+        "- change: unknown\n",
+        "- stage: unknown\n",
+        "- claim: unknown\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in {text}");
+    }
+    // What the repository can still answer is answered.
+    assert!(text.contains("- branch: master\n"), "{text}");
+    assert!(text.contains("- tree: clean\n"), "{text}");
+}
+
+/// Uncommitted work is the fact a successor most needs and the one a
+/// hand-written handoff most often omits.
+#[test]
+fn journal_handoff_derive_reports_a_dirty_tree() {
+    let repo = Repo::new();
+    let body = repo.home.join("body.md");
+    fs::write(&body, "learned x\n").unwrap();
+    fs::write(repo.root.join("scratch.txt"), "half-done\n").unwrap();
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "handoff",
+        "dirty-tree",
+        "--derive",
+        "--body-file",
+        body.to_str().unwrap(),
+    ]));
+
+    let text = fs::read_to_string(out.trim()).unwrap();
+    assert!(text.contains("- tree: dirty\n"), "{text}");
+}
+
+/// There is no repository state to read outside a repository, and the refusal
+/// lands before the body is read so `--body-file -` cannot wait on stdin for a
+/// write that can never happen.
+#[test]
+fn journal_handoff_derive_is_refused_outside_git() {
+    let repo = Repo::new();
+    let outside = repo.home.join("elsewhere");
+    fs::create_dir_all(&outside).unwrap();
+
+    repo.arc(&outside)
+        .args([
+            "journal",
+            "handoff",
+            "no-repo",
+            "--derive",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("learned x\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is not inside a Git repository"));
+}
+
+/// Without `--derive` a handoff is the body and nothing else, so an author
+/// who wants to write the whole artifact by hand still can.
+#[test]
+fn journal_handoff_without_derive_writes_the_body_verbatim() {
+    let repo = Repo::new();
+    let body_path = repo.home.join("body.md");
+    let body = "# Handoff\n\nbranch: mine\nlearned x\n";
+    fs::write(&body_path, body).unwrap();
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "handoff",
+        "verbatim",
+        "--body-file",
+        body_path.to_str().unwrap(),
+    ]));
+
+    assert_eq!(fs::read_to_string(out.trim()).unwrap(), body);
+}

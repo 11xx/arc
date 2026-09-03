@@ -2149,16 +2149,7 @@ fn default_scaffold(kind: JournalKind) -> Option<&'static str> {
 
 /// One write, whichever verb named the kind.
 pub(crate) fn write_kind(ctx: &Ctx, kind: JournalKind, write: KindWrite) -> Result<i32> {
-    note(
-        ctx,
-        &write.topic,
-        kind,
-        write.body_file.as_deref(),
-        write.title.as_deref(),
-        write.scaffold.as_deref(),
-        write.no_scaffold,
-        None,
-    )
+    note(ctx, kind, &write, None)
 }
 
 /// Write a handoff, optionally with its mechanical half derived rather than
@@ -2170,16 +2161,7 @@ fn handoff(ctx: &Ctx, write: KindWrite, derive: bool) -> Result<i32> {
         true => Some(derived_state(ctx, Utc::now())?),
         false => None,
     };
-    note(
-        ctx,
-        &write.topic,
-        JournalKind::Handoff,
-        write.body_file.as_deref(),
-        write.title.as_deref(),
-        write.scaffold.as_deref(),
-        write.no_scaffold,
-        state.as_deref(),
-    )
+    note(ctx, JournalKind::Handoff, &write, state.as_deref())
 }
 
 /// The mechanical half of a handoff, read from the repository at the moment
@@ -2250,7 +2232,10 @@ fn derived_state(ctx: &Ctx, now: DateTime<Utc>) -> Result<String> {
         change.as_ref().map(|state| state.change_id.clone()),
     );
     fact("stage", change.as_ref().map(stage_label));
-    fact("claim", change.as_ref().map(|state| claim_label(state, now)));
+    fact(
+        "claim",
+        change.as_ref().map(|state| claim_label(state, now)),
+    );
     fact("open journal items", open_items.map(|n| n.to_string()));
     fact("installed", Some(installed_label(cwd)));
     Ok(section)
@@ -2334,16 +2319,9 @@ pub fn feature_request(ctx: &Ctx, write: KindWrite) -> Result<i32> {
     write_kind(ctx, JournalKind::FeatureRequest, write)
 }
 
-fn note(
-    ctx: &Ctx,
-    topic: &str,
-    kind: JournalKind,
-    body_file: Option<&str>,
-    title: Option<&str>,
-    scaffold: Option<&str>,
-    no_scaffold: bool,
-    prelude: Option<&str>,
-) -> Result<i32> {
+fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) -> Result<i32> {
+    let topic = write.topic.as_str();
+    let title = write.title.as_deref();
     if !valid_topic(topic) {
         bail!("topic {topic:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
     }
@@ -2351,7 +2329,7 @@ fn note(
     // parsed from, the quoting reply form, the resolution vocabulary — so the
     // scaffold that states them is the default rather than something an author
     // has to know exists.
-    let scaffold = match (scaffold, no_scaffold) {
+    let scaffold = match (write.scaffold.as_deref(), write.no_scaffold) {
         (Some(name), _) => Some(name),
         (None, true) => None,
         (None, false) => default_scaffold(kind),
@@ -2363,7 +2341,7 @@ fn note(
         Some(name) => crate::commands::scaffold::resolve(ctx, name)?,
         None => String::new(),
     };
-    let content = match body_file {
+    let content = match write.body_file.as_deref() {
         Some(source) => read_body_verbatim(source)?,
         None => String::new(),
     };
