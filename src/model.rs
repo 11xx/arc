@@ -815,11 +815,11 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         pr_head: Option<String>,
     },
-    /// A Git history rewrite that happened to this repository, recorded
-    /// rather than applied. Nothing already written changes: an old event
-    /// keeps saying exactly what it said, and readers gain the ability to
-    /// follow a recorded revision forward. arc never performs the rewrite and
-    /// never computes the mapping; the operator supplies it.
+    /// A Git history rewrite this repository underwent. Nothing already
+    /// written changes: an old event keeps saying exactly what it said, and
+    /// readers follow a recorded revision forward through this. The mapping
+    /// is either arc's own output or one the operator supplied, and both are
+    /// judged by the same rules before being recorded.
     HistoryRewritten {
         /// Old revision to its replacement, or to nothing when the rewrite
         /// dropped the commit entirely. A revision the rewrite left alone is

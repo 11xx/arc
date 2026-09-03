@@ -63,6 +63,10 @@ paths = [
   # Records the rewrite facts that decide whether a recorded revision was
   # moved or lost. A wrong mapping makes stranded evidence read as recovered.
   "src/commands/history.rs",
+  # Performs the rewrite: recreates commits, moves the refs that pin evidence,
+  # and records the map every later reading depends on. A defect here strands
+  # the history and the ledger's account of it together.
+  "src/commands/rewrite.rs",
 ]
 
 # Roots inside which classification is closed: every tracked file under one of
