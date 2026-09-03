@@ -24,6 +24,28 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   was a bare id string, and an answer is an object carrying its option and the
   same pair.
 
+- `arc catchup` and `arc doctor` measure fork checkouts beside the open
+  changes' worktrees, under their own key and total. A fork sits outside the
+  change lifecycle, so nothing retires its worktree and it is routinely the
+  longest-lived checkout on disk; fork bytes are never summed into the change
+  total, and a retired fork whose worktree was kept stays in the accounting
+  after it leaves the live-fork listing. Every total names the method that
+  produced it: sizes are `du` apparent size, physical cost is reported as
+  unknown with the reason named where the filesystem gives one, and the
+  worktrees root's mount is reported with its free space. An absent `findmnt`
+  leaves the filesystem type unknown instead of guessed.
+
+- `arc begin` and `arc fork begin` print what the worktrees root has left
+  before creating a worktree, and warn when the mount is close to full.
+  Advice, never a refusal — a filesystem that fills reports as success
+  everywhere else.
+
+- `arc fork thread <slug>` prints the harness, session, model, and actor the
+  fork's marker recorded, with the command that reopens that session where
+  the harness has a stable resume form. Fields the marker does not carry
+  print as absent.
+
+
 - `arc workspace backlog --here|--under <path>` gives a non-Git workspace root
   a first command: it filters the registered projects by canonical anchor,
   keeps missing anchors inside that path visible, and states the active scope
@@ -90,6 +112,14 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   its fixtures rather than whichever harness happens to run it.
 
 ### Changed
+
+- `arc journal verified` run inside a fork worktree stamps the fork's own
+  head and records `verified_scope: fork:<slug>`, and the open-queue row
+  reads `[verified at <rev> in fork <slug> ...]`. A fork carries commits the
+  anchor does not, so the previous anchor stamp credited the check to source
+  nobody had opened. A fork-scoped stamp claims no anchor comparison, since a
+  revision off the anchor's line of history cannot be compared with it.
+  Outside a fork nothing changes.
 
 - Change, patchset, debt, and workspace views retain the model, harness, and
   native session already carried by their source events. `show --json` exposes

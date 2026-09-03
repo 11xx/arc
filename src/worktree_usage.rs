@@ -347,8 +347,8 @@ pub fn measurement(path: &Path) -> Measurement {
     // Compression is the case where apparent and physical size diverge
     // without bound, so it is named: a reader who knows why the physical
     // number is missing can decide whether the apparent one answers.
-    let physical_reason = (filesystem.compressed == Some(true))
-        .then(|| format!("{} compression", filesystem.fstype));
+    let physical_reason =
+        (filesystem.compressed == Some(true)).then(|| format!("{} compression", filesystem.fstype));
     Measurement {
         method: METHOD,
         physical: PHYSICAL_UNKNOWN,

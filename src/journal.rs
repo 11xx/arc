@@ -4763,7 +4763,9 @@ fn render_verification(verification: Option<&VerificationStamp>) -> String {
     // the anchor's, and the row says so instead of letting a reader assume
     // the revision is one they can look up on the project's line of history.
     if let Some(scope) = verification.scope.as_deref() {
-        let scope = scope.strip_prefix("fork:").map(|slug| format!("fork {slug}"));
+        let scope = scope
+            .strip_prefix("fork:")
+            .map(|slug| format!("fork {slug}"));
         if let (Some(revision), Some(scope)) = (&verification.revision, scope) {
             return format!(
                 " [verified at {} in {scope}{age} by {checker}]",
