@@ -1407,11 +1407,17 @@ Before starting an executor in a sandbox, run `arc config --check-writable`.
 It probes the ledger root, lock, event-path, and Git-ref writes without adding
 an event; `--json` emits `arc-writability/1` for automation and stops at the
 first blocked path. It also probes committing, in a throwaway repository so the
-target gains no commit, because a sandbox that cannot reach the signing agent
-otherwise discovers it only once a slice is ready to land. The probe follows
-the repository's resolved `commit.gpgsign` and carries its signing key, so it
-exercises the credential the real commit will use and ignores a global signing
-policy the repository overrides.
+target gains no commit, because a sandbox that cannot commit otherwise
+discovers it only once a slice is ready to land.
+
+Committing and signing are reported apart. The `commit` check makes an unsigned
+commit and answers writability alone. The `signing` check answers whether the
+credential a signed commit needs is reachable: it says `not required` where the
+repository's resolved `commit.gpgsign` is off, and otherwise carries the
+repository's signing key so it exercises the credential the real commit will
+use, ignoring a global signing policy the repository overrides. A project that
+signs and cannot reach its agent fails that check with gpg's own reason, since
+its commits cannot be produced.
 
 Change derivation: `begin` targets the branch checked out in the
 **primary worktree** (the main checkout — normally master/main), not

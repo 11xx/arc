@@ -63,6 +63,7 @@ pub fn check_writable(ctx: &Ctx, json: bool) -> Result<i32> {
             }
         }
     }
+    checks.push(probe_signing(ctx));
     checks.push(probe_journal(ctx));
     finish(json, checks)
 }
@@ -137,20 +138,58 @@ fn probe_ref(ctx: &Ctx) -> Result<String> {
 
 /// Committing is the other capability the ceremony needs, and the one a
 /// sandboxed executor otherwise discovers only once a slice is ready to land.
-/// Probe it in a throwaway repository so the target repository gains no commit,
-/// and exercise signing only where the project asks for it.
+/// Probe it in a throwaway repository so the target repository gains no commit.
+///
+/// Whether a commit can be made and whether it can be signed are two facts,
+/// and only the first is writability: a reachable repository with an
+/// unreachable signing agent is a signing problem reported as one, not a
+/// repository the executor should be told it cannot write.
 fn probe_commit(ctx: &Ctx) -> Result<String> {
-    let signed = signing_required(ctx);
+    probe_commit_throwaway(ctx, false)?;
+    Ok("unsigned commit".into())
+}
+
+/// Whether the credential a signed commit needs is reachable.
+///
+/// A project that requires signed commits needs signing to work, so an
+/// unreachable agent is a failure with the reason attached rather than a note.
+/// Where the project signs nothing, the line says so instead of claiming a
+/// capability that was never exercised.
+fn probe_signing(ctx: &Ctx) -> WritabilityCheck {
+    if !signing_required(ctx) {
+        return WritabilityCheck {
+            name: "signing",
+            ok: true,
+            detail: "not required (commit.gpgsign is off)".into(),
+            show_detail: true,
+        };
+    }
+    match probe_commit_throwaway(ctx, true) {
+        Ok(()) => WritabilityCheck {
+            name: "signing",
+            ok: true,
+            detail: "signed commit".into(),
+            show_detail: true,
+        },
+        Err(error) => WritabilityCheck {
+            name: "signing",
+            ok: false,
+            show_detail: true,
+            detail: format!(
+                "commit.gpgsign is on and the signature could not be produced: {error:#}"
+            ),
+        },
+    }
+}
+
+/// Make one probe commit in a repository that is deleted either way, so the
+/// target repository gains nothing from having been asked.
+fn probe_commit_throwaway(ctx: &Ctx, signed: bool) -> Result<()> {
     let dir = std::env::temp_dir().join(format!("arc-commit-probe-{}", ids::new_event_id()));
     fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let result = probe_commit_in(&dir, ctx, signed);
     let _ = fs::remove_dir_all(&dir);
-    result?;
-    Ok(if signed {
-        "signed commit".into()
-    } else {
-        "unsigned commit (commit.gpgsign is off)".into()
-    })
+    result
 }
 
 fn probe_commit_in(dir: &Path, ctx: &Ctx, signed: bool) -> Result<()> {
