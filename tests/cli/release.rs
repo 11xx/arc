@@ -23,3 +23,54 @@ fn mangen_writes_arc_1_into_the_target_dir() {
     let text = fs::read_to_string(&page).unwrap();
     assert!(text.contains("arc"), "man page is empty");
 }
+
+/// A release is named for the date it is published, so the package version
+/// is a calendar date and nothing else: the three numeric fields Cargo's
+/// semver parser accepts, no leading zeros, and no qualifier. One release is
+/// cut per date, so there is never a counter to carry.
+#[test]
+fn the_package_version_is_a_calendar_date() {
+    let version = env!("CARGO_PKG_VERSION");
+    assert!(
+        !version.contains('+') && !version.contains('-'),
+        "version {version} carries a qualifier a date has no room for"
+    );
+    let fields = version.split('.').collect::<Vec<_>>();
+    assert_eq!(fields.len(), 3, "version {version} is not YYYY.M.D");
+    for field in &fields {
+        assert!(
+            !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_digit()),
+            "version {version} has a non-numeric field"
+        );
+        assert!(
+            field.len() == 1 || !field.starts_with('0'),
+            "version {version} has a leading zero Cargo rejects"
+        );
+    }
+    let field = |index: usize| fields[index].parse::<u32>().unwrap();
+    assert_eq!(
+        fields[0].len(),
+        4,
+        "version {version} has no four-digit year"
+    );
+    assert!(
+        (1..=12).contains(&field(1)),
+        "version {version} has no month"
+    );
+    assert!((1..=31).contains(&field(2)), "version {version} has no day");
+}
+
+/// `--version` is where an operator reads the release, so it carries the
+/// package version rather than a string that can drift from it.
+#[test]
+fn version_flag_reports_the_package_version() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicates::str::starts_with(format!(
+            "arc {}",
+            env!("CARGO_PKG_VERSION")
+        )));
+}

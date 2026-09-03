@@ -46,6 +46,36 @@ never sees; `tests/cli/docs.rs` holds the two surfaces together by asserting
 that every exit code and every refusal or guarantee sentence in `docs/`
 appears in the guide or in a command's help.
 
+## Releasing
+
+**A version is the calendar date of its publication.** Releases are named
+`YYYY.M.D`, the date written as the three numeric fields Cargo's semver
+parser accepts and nothing more: no leading zero on the month or the day,
+and no fourth field, prerelease, or build metadata, all of which Cargo
+either rejects or orders in a way a date does not. One release is cut per
+date; a second waits for the next date rather than qualifying a version.
+`arc --version`, the manifest, and the changelog's top released heading all
+carry the same string.
+
+The checklist a release passes, in order:
+
+1. Every commit reachable from the release head is signed by one key
+   (`git log --format=%G? <head>` is `G` throughout).
+2. `arc catchup` reports no outstanding review debt, or each remaining one
+   waived with a reason recorded on the ledger.
+3. `docs/schemas.md` names which schema versions are commitments, and the
+   guide and `--help` text agree with the behaviour being released.
+4. The `[Unreleased]` block is cut into a section headed with the release
+   version and its date, leaving `[Unreleased]` empty above it.
+5. The release head is tagged. Until a tag names it, the changelog
+   projection has no boundary to measure from and offers the whole history
+   as unreleased.
+6. `cargo publish --dry-run` is clean, and the manifest names a repository
+   URL so the packaged crate points somewhere.
+
+Publication itself is the operator's act: `cargo publish` is never run from
+a session.
+
 ## Non-goals
 
 Not a forge or forge clone, no hosted-PR parity claim, no daemon, no web
