@@ -249,11 +249,26 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     // refusal, so the identity question is settled before anything executes.
     ctx.ensure_declared_actor(&store)?;
     let (change_id, st) = ctx.load_state(&store, reference)?;
+    // Attested evidence describes a run arc did not perform, and `--against`
+    // gates a synthesized merge in a scratch checkout of its own, so neither
+    // has a recorded worktree to choose. Every other path below executes a
+    // command, and it executes it where the change lives.
+    let redirected = if attest || against.is_some() {
+        None
+    } else {
+        gate_run_ctx(ctx, &st)?
+    };
+    let run_ctx = redirected.as_ref().unwrap_or(ctx);
+    // Which gates are required is read from the checkout the command was
+    // typed in, the same one `arc status` reads, so what a run discharges and
+    // what status still owes cannot disagree. Only the tree the command reads
+    // follows the change.
     let toplevel = gitio::toplevel(&ctx.cwd)?;
     // Declared before anything runs, so the evidence this invocation records
     // is judged under the waiver rather than needing a second pass to excuse
-    // it. It names the head it was declared at, which is the only revision it
-    // covers.
+    // it. It names the head it was declared at — the head of the checkout the
+    // gate runs in, which is the tree whose dirt it excuses — and that is the
+    // only revision it covers.
     let st = if let Some(reason) = waive_dirty.as_deref() {
         let reason = reason.trim();
         if reason.is_empty() {
@@ -261,7 +276,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 "--waive-dirty must say why dirty evidence should count;                  an empty reason waives the gate without recording a reason"
             );
         }
-        let revision = gitio::head(&ctx.cwd)?;
+        let revision = gitio::head(&run_ctx.cwd)?;
         let ev = ctx.event(
             &store,
             &change_id,
@@ -308,7 +323,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 .base_revision
                 .as_deref()
                 .context("legacy brief has no base revision for baseline probe evidence")?;
-            let head = gitio::head(&ctx.cwd)?;
+            let head = gitio::head(&run_ctx.cwd)?;
             if head != base {
                 bail!("baseline probe requires HEAD {base}; current HEAD is {head}");
             }
@@ -327,7 +342,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         if phase_counts_at_head(phase) {
             match &tested_revision {
                 Some(revision) => warn_if_attested_off_head(ctx, &st, revision),
-                None => ensure_at_change_head(ctx, &st)?,
+                None => ensure_at_change_head(run_ctx, &st)?,
             }
         }
         let expected = match phase {
@@ -336,7 +351,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         };
         let falsification = resolve_falsification(&st, None, &declaration.command, falsified_by)?;
         let code = record_verification(
-            ctx,
+            run_ctx,
             &store,
             &change_id,
             VerificationInput {
@@ -374,7 +389,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     // change's head.
     match &tested_revision {
         Some(revision) => warn_if_attested_off_head(ctx, &st, revision),
-        None => ensure_at_change_head(ctx, &st)?,
+        None => ensure_at_change_head(run_ctx, &st)?,
     }
     if all {
         let gates = gates::load(&toplevel)?;
@@ -383,14 +398,15 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             bail!("no gates declared for profile {}", st.profile);
         }
         let total = required.len();
-        let head = gitio::head(&ctx.cwd)?;
+        let head = gitio::head(&run_ctx.cwd)?;
         let mode = if parallel {
             VerificationRunMode::Parallel
         } else {
             VerificationRunMode::Sequential
         };
-        let run_id =
-            start_verification_run(ctx, &store, &change_id, &head, mode, skip_green, &required)?;
+        let run_id = start_verification_run(
+            run_ctx, &store, &change_id, &head, mode, skip_green, &required,
+        )?;
         let mut reused = Vec::new();
         let mut to_run = Vec::new();
         for (name, gate) in required {
@@ -414,7 +430,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         append_reuses(ctx, &store, &change_id, &run_id, &head, &reused)?;
         if parallel {
             return verify_all_parallel(
-                ctx,
+                run_ctx,
                 &store,
                 &change_id,
                 to_run,
@@ -428,7 +444,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         let mut passed = reused.len();
         for (name, gate) in to_run {
             let result = record_verification(
-                ctx,
+                run_ctx,
                 &store,
                 &change_id,
                 VerificationInput {
@@ -475,7 +491,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     };
     let falsification = resolve_falsification(&st, gate.as_deref(), &cmd, falsified_by)?;
     record_verification(
-        ctx,
+        run_ctx,
         &store,
         &change_id,
         VerificationInput {
@@ -686,6 +702,41 @@ fn canonical_or_owned(path: &std::path::Path) -> std::path::PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The checkout a gate run belongs in, when it is not the invoking one.
+///
+/// Gate evidence is counted at the change's head, so the tree a gate reads
+/// has to be the change's own. A run started from another checkout of the
+/// repository is redirected to the change's recorded worktree rather than
+/// gating whatever that checkout happens to hold. `None` says the invoking
+/// checkout is already the right one, including the case of a change that
+/// records no worktree — there the head check speaks for itself.
+fn gate_run_ctx(ctx: &Ctx, st: &ChangeState) -> Result<Option<Ctx>> {
+    let Some(recorded) = st.worktree.as_deref().map(PathBuf::from) else {
+        return Ok(None);
+    };
+    let toplevel = gitio::toplevel(&ctx.cwd)?;
+    if canonical_or_owned(&toplevel) == canonical_or_owned(&recorded) {
+        return Ok(None);
+    }
+    let checkout = gitio::toplevel(&recorded)
+        .ok()
+        .filter(|top| canonical_or_owned(top) == canonical_or_owned(&recorded));
+    if checkout.is_none() {
+        let change_head = gitio::branch_head(&ctx.cwd, &st.branch)?;
+        bail!(
+            "{}'s worktree {} is not a checkout, so its gates have nowhere to run\n\
+             tip: give it one with `git worktree add {} {}`, or record evidence arc did \
+             not run with `arc verify --attest --tested-revision {change_head} ...`",
+            st.change_id,
+            recorded.display(),
+            recorded.display(),
+            st.branch
+        );
+    }
+    println!("running in {} ({})", recorded.display(), st.change_id);
+    Ok(Some(ctx.with_cwd(recorded)))
+}
+
 /// Whether evidence from this probe phase is counted at the change's head.
 ///
 /// A total match rather than a `!=`: a phase added later must be classified
@@ -747,19 +798,19 @@ fn ensure_at_change_head(ctx: &Ctx, st: &state::ChangeState) -> Result<()> {
     // worktree sitting detached on this branch's history answers None. That is
     // a checkout in the wrong state, not a missing one, and advising `worktree
     // add` beside it would be advice that cannot be followed.
-    if st
+    let recorded = st
         .worktree
         .as_deref()
         .map(std::path::Path::new)
-        .is_some_and(|recorded| {
-            canonical_or_owned(&ctx.cwd).starts_with(canonical_or_owned(recorded))
-        })
-    {
+        .filter(|recorded| canonical_or_owned(&ctx.cwd).starts_with(canonical_or_owned(recorded)));
+    if let Some(recorded) = recorded {
         bail!(
-            "{} is checked out here but HEAD is not its branch head ({change_head}), so gate \
-             evidence would be recorded where status will never count it\n\
-             tip: `git checkout {}` in this worktree",
+            "{} lives in {} but that worktree's HEAD is not its branch head ({change_head}), so \
+             gate evidence would be recorded where status will never count it\n\
+             tip: `git -C {} checkout {}`",
             st.change_id,
+            recorded.display(),
+            recorded.display(),
             st.branch
         );
     }
@@ -908,7 +959,9 @@ pub fn snapshot_with_verify(
             bail!("--gate values must be unique within one verification run");
         }
         let store = ctx.store()?;
-        let (change_id, _) = ctx.load_state(&store, reference)?;
+        let (change_id, st) = ctx.load_state(&store, reference)?;
+        let redirected = gate_run_ctx(ctx, &st)?;
+        let run_ctx = redirected.as_ref().unwrap_or(ctx);
         let toplevel = gitio::toplevel(&ctx.cwd)?;
         let declarations = gates::load(&toplevel)?;
         let selected = gates
@@ -920,9 +973,9 @@ pub fn snapshot_with_verify(
                     .with_context(|| format!("gate {name:?} not declared in .arc/gates.toml"))
             })
             .collect::<Result<Vec<_>>>()?;
-        let revision = gitio::head(&ctx.cwd)?;
+        let revision = gitio::head(&run_ctx.cwd)?;
         let run_id = start_verification_run(
-            ctx,
+            run_ctx,
             &store,
             &change_id,
             &revision,
@@ -934,7 +987,7 @@ pub fn snapshot_with_verify(
         let mut passed = 0;
         for (name, gate) in selected {
             let code = record_verification(
-                ctx,
+                run_ctx,
                 &store,
                 &change_id,
                 VerificationInput {
