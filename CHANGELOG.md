@@ -24,6 +24,31 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   recorded as a sandbox, and nothing else. `arc doctor` opens with the roots
   the invocation reads and writes, and its JSON report is `arc-doctor/3`.
 
+- `arc rewrite sign [--key <id>] [--from <rev>] [--dry-run] [--no-sign]`
+  recreates every commit from `--from` through the branch head so one key
+  signs them all, then moves the branch, every `refs/arc/` ref that pins
+  evidence, and the local branches and tags whose tips it rewrote, and records
+  the map. `--from` defaults to the oldest commit whose signature is missing or
+  made by another key. Tree, parents, author, committer, dates, encoding and
+  message bytes travel through unchanged, so a commit recreated unsigned has
+  the id it started with. It refuses a dirty worktree, a detached HEAD, and an
+  ancestry it cannot rebuild, and names each branch left sitting on the
+  replaced line together with the `git rebase --onto` that replays it.
+
+- Every derived reading follows recorded revisions forward through the
+  recorded rewrites, so a status, check, or queue computed after a rewrite
+  answers what it answered before: patchset bases and heads, brief anchors,
+  gate evidence and the target a merged tree was evaluated against,
+  falsification anchors, dirty-tree waivers, audits, closures with their
+  source head, target-before and prerequisites, the forge's observed heads,
+  and a journal artifact's `verified` stamp.
+
+- `arc doctor` reports `unresolved-revision` where a recorded rewrite claims a
+  revision moved to a commit that is missing too, which previously read as the
+  healthiest of the three answers. Its revision scan also covers the
+  dirty-tree waiver, merged-tree targets, falsification anchors, integrated
+  source heads and target-before, and prerequisite closures.
+
 - `arc claim --takeover --because <reason>` displaces a claim that is not yet
   reclaimable — inside its stage budget on a change, still leased on a journal
   artifact — recording the stated reason on the displaced claim and verifying

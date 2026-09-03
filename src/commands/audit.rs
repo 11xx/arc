@@ -23,7 +23,7 @@ pub fn declare_debt(
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
-    let st = state::reduce(&store.load_events(&change_id)?)?;
+    let st = store.state(&change_id)?;
     // An open change records the deficit for the patchset that is about to
     // ship. This can supply an absent verdict or rescue a self-approval
     // rejected by policy. A closed change has no gate left to satisfy, so its
@@ -74,7 +74,7 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
-    let st = state::reduce(&store.load_events(&change_id)?)?;
+    let st = store.state(&change_id)?;
 
     let revision = integrated_revision(&st)?;
     refuse_self_audit(ctx, &st, args.verdict)?;

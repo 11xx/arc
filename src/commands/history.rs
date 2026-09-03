@@ -3,11 +3,9 @@
 use super::*;
 use crate::rewrite::{parse_commit_map, RewriteMap};
 
-/// Record a rewrite the operator performed. arc never rewrites history and
-/// never computes the mapping: it is supplied, and the ledger is annotated
-/// rather than migrated.
+/// Record a rewrite performed elsewhere, from a supplied commit map. The
+/// ledger is annotated rather than migrated: nothing already written changes.
 pub fn record_rewrite(ctx: &Ctx, map: &str, reason: String, tool: Option<String>) -> Result<()> {
-    let store = ctx.store()?;
     let text = if map == "-" {
         let mut buf = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
@@ -15,10 +13,30 @@ pub fn record_rewrite(ctx: &Ctx, map: &str, reason: String, tool: Option<String>
     } else {
         std::fs::read_to_string(map).with_context(|| format!("cannot read commit map {map}"))?
     };
+    let mapping = parse_commit_map(&text)?;
+    let event_id = record_mapping(ctx, mapping, reason, tool)?;
+    println!("event: {event_id}");
+    println!("Recorded revisions still say what they said; readers follow them forward.");
+    Ok(())
+}
+
+/// Record a mapping as a rewrite of this repository's history, and answer
+/// with the event that holds it.
+///
+/// Every write path lands here, so a map arc computed and a map an operator
+/// supplied are judged by one set of rules: the successors must be commits in
+/// this repository, and the result must not contradict a rewrite already
+/// recorded.
+pub fn record_mapping(
+    ctx: &Ctx,
+    mapping: std::collections::BTreeMap<String, Option<String>>,
+    reason: String,
+    tool: Option<String>,
+) -> Result<String> {
+    let store = ctx.store()?;
     // The same lock the import path takes: a rewrite recorded here and one
     // arriving in a bundle build the same map, and it is judged as a whole.
     let _repository_events = store.lock_repository_events()?;
-    let mapping = parse_commit_map(&text)?;
     // A map from another repository, or with a typo in it, would otherwise be
     // recorded as fact: doctor would report a rewritten revision and suppress
     // the dangling warning, while nothing could resolve the successor. arc
@@ -65,9 +83,7 @@ pub fn record_rewrite(ctx: &Ctx, map: &str, reason: String, tool: Option<String>
         .context("this rewrite contradicts one already recorded; nothing was written")?;
     store.append_repository_event(&event)?;
     println!("history rewrite recorded: {count} revisions");
-    println!("event: {}", event.event_id);
-    println!("Recorded revisions still say what they said; readers follow them forward.");
-    Ok(())
+    Ok(event.event_id)
 }
 
 /// Where a recorded revision ended up. Exit 2 when nothing rewrote it, so a

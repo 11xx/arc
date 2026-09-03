@@ -108,7 +108,13 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     // whatever happened to read it first — which is what doctor exists to
     // prevent for every other kind of event.
     inspect_repository_events(&Store::discover(&ctx.cwd)?, &mut problems);
-    inspect_dangling_revisions(&ctx.cwd, &Store::discover(&ctx.cwd)?, &states, &mut advice)?;
+    inspect_dangling_revisions(
+        &ctx.cwd,
+        &Store::discover(&ctx.cwd)?,
+        &states,
+        &mut problems,
+        &mut advice,
+    )?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
     inspect_danger_paths(&ctx.cwd, &mut problems);
     inspect_danger_classification(&ctx.cwd, &mut problems);
@@ -154,117 +160,78 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
 
 /// Recorded revisions that Git can no longer resolve.
 ///
-/// A history rewrite leaves the ledger intact and its evidence unreachable:
-/// every recorded SHA still says what was verified and reviewed, and none of
-/// it can be checked out. That is advice rather than a problem — the ledger is
-/// not malformed, and the rewrite was somebody's deliberate act — but it is
-/// the difference between evidence and a claim, so it has to be visible
-/// without writing a bespoke script.
+/// A rewrite leaves the ledger intact and its evidence unreachable: every
+/// recorded SHA still says what was verified and reviewed, and none of it can
+/// be checked out. Where a recorded rewrite explains it, that is advice — the
+/// ledger is not malformed, the rewrite was somebody's deliberate act, and a
+/// reader can follow the revision forward.
+///
+/// The exception is a revision a rewrite claims to have moved to a commit
+/// that is not here either. Nothing about that record can be followed
+/// anywhere, and reporting it as a rewrite would suppress the warning while
+/// naming a successor nobody can read.
 fn inspect_dangling_revisions(
     cwd: &Path,
     store: &Store,
     states: &BTreeMap<String, ChangeState>,
+    problems: &mut Vec<Finding>,
     advice: &mut Vec<Finding>,
 ) -> Result<()> {
     let mut wanted: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (change_id, state) in states {
-        // Every revision the ledger records, because the point is that the
-        // evidence still resolves, and a hexadecimal string is what Git will
-        // be asked to resolve however short it is.
-        let mut note = |revision: &str, what: String| {
-            let revision = revision.trim();
-            if !revision.is_empty() && revision.chars().all(|c| c.is_ascii_hexdigit()) {
-                wanted
-                    .entry(revision.to_string())
-                    .or_default()
-                    .insert(format!("{change_id} {what}"));
-            }
-        };
-        note(&state.base, "base".to_string());
-        for patchset in &state.patchsets {
-            note(&patchset.head, format!("{} head", patchset.id));
-            note(&patchset.base, format!("{} base", patchset.id));
-            if let Some(merge_base) = patchset.merge_base.as_deref() {
-                note(merge_base, format!("{} merge-base", patchset.id));
-            }
-        }
-        for brief in &state.briefs {
-            if let Some(base) = brief.base_revision.as_deref() {
-                note(base, "brief base".to_string());
-            }
-        }
-        for verification in &state.verifications {
-            note(&verification.revision, "verification".to_string());
-        }
-        for run in &state.verification_runs {
-            note(&run.revision, "verification run".to_string());
-        }
-        for audit in &state.audit_verdicts {
-            note(&audit.revision, "audit".to_string());
-        }
-        for finding in state.findings.values().chain(state.audit_findings.values()) {
-            for disposition in &finding.dispositions {
-                if let Some(commit) = disposition.commit.as_deref() {
-                    note(commit, format!("{} disposition", finding.id));
-                }
-            }
-        }
-        if let Some(commit) = state
-            .closure
-            .as_ref()
-            .and_then(|closure| closure.integrated_commit.as_deref())
-        {
-            note(commit, "integration".to_string());
-        }
-        // A forge records revisions too, and a rewritten branch strands them
-        // exactly as it strands a local one. These come from the events rather
-        // than from reduced state, because forge facts are latest-wins: an
-        // earlier head is still recorded, and still names something that was
-        // supposed to exist.
-        // A malformed event file is already reported as its own problem, and
-        // a scan for unreachable revisions should not be the thing that fails
-        // because of it.
-        for event in store.load_events(change_id).unwrap_or_default() {
-            match &event.payload {
-                Payload::ForgeLink { head_sha, .. } => {
-                    note(head_sha, "forge link head".to_string())
-                }
-                Payload::ForgeChecks { pr_head, .. } => {
-                    note(pr_head, "forge checks head".to_string())
-                }
-                Payload::ForgePrState {
-                    merge_sha: Some(merge_sha),
-                    ..
-                } => note(merge_sha, "forge merge".to_string()),
-                _ => {}
-            }
+        for (revision, what) in state.recorded_revisions() {
+            wanted
+                .entry(revision)
+                .or_default()
+                .insert(format!("{change_id} {what}"));
         }
     }
     if wanted.is_empty() {
         return Ok(());
     }
-    // One batch rather than a process per revision: a ledger of any age holds
-    // thousands, and a doctor that costs a minute stops being run.
     // A map that cannot be read is reported by `inspect_repository_events`;
     // here it means only that no revision can be followed forward, which is
     // the same answer as no rewrite having been recorded.
     let rewrites = crate::rewrite::RewriteMap::load(store).unwrap_or_default();
-    for revision in gitio::missing_objects(cwd, wanted.keys().map(String::as_str))? {
+    // Every revision that has to resolve, and every successor a rewrite claims
+    // for one, in a single batch. A ledger of any age holds thousands, and a
+    // doctor that costs a minute stops being run.
+    let successors: BTreeMap<&String, String> = wanted
+        .keys()
+        .map(|revision| (revision, rewrites.current(revision)))
+        .collect();
+    let mut queries: BTreeSet<&str> = wanted.keys().map(String::as_str).collect();
+    queries.extend(successors.values().map(String::as_str));
+    let missing: BTreeSet<String> = gitio::missing_objects(cwd, queries.into_iter())?
+        .into_iter()
+        .collect();
+    for (revision, referents) in &wanted {
+        if !missing.contains(revision) {
+            continue;
+        }
         let short = &revision[..revision.len().min(8)];
-        let referents = wanted
-            .get(&revision)
-            .map(|set| set.iter().cloned().collect::<Vec<_>>().join(", "))
-            .unwrap_or_default();
+        let referents = referents.iter().cloned().collect::<Vec<_>>().join(", ");
         // A revision a recorded rewrite moved is not a casualty: the event
-        // still says what it said, and the reader can follow it forward.
-        match rewrites.fate(&revision) {
-            Some(crate::rewrite::Fate::Rewritten(successor)) => advice.push(Finding {
-                code: "revision-rewritten",
-                detail: format!(
-                    "{short} was rewritten to {}: {referents}",
-                    &successor[..successor.len().min(8)]
-                ),
-            }),
+        // still says what it said, and the reader can follow it forward — so
+        // long as what it leads to is here.
+        match rewrites.fate(revision) {
+            Some(crate::rewrite::Fate::Rewritten(successor)) => {
+                let short_successor = &successor[..successor.len().min(8)];
+                if missing.contains(&successor) {
+                    problems.push(Finding {
+                        code: "unresolved-revision",
+                        detail: format!(
+                            "{short} was rewritten to {short_successor}, which is not in this \
+                             repository either: {referents}"
+                        ),
+                    });
+                } else {
+                    advice.push(Finding {
+                        code: "revision-rewritten",
+                        detail: format!("{short} was rewritten to {short_successor}: {referents}"),
+                    });
+                }
+            }
             Some(crate::rewrite::Fate::Dropped) => advice.push(Finding {
                 code: "revision-dropped",
                 detail: format!("{short} was dropped by a recorded rewrite: {referents}"),
@@ -407,6 +374,9 @@ fn inspect_change(
         });
         return Ok(());
     }
+    // Deliberately the unresolved reduction. Doctor's job includes reporting
+    // which recorded revisions no longer resolve, and a view that had already
+    // followed them forward would have nothing left to report.
     let Ok(state) = state::reduce(&events) else {
         return Ok(());
     };

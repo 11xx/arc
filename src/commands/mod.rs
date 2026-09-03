@@ -19,6 +19,7 @@ mod observe;
 mod pass;
 mod rescue;
 pub(crate) mod review;
+mod rewrite;
 pub mod run;
 pub(crate) mod sandbox;
 pub(crate) mod scaffold;
@@ -70,6 +71,7 @@ pub use observe::{events, watch, EventsArgs, WatchArgs, WatchQuorum};
 pub use pass::{abandon_pass, complete_pass, list_passes, open_pass};
 pub use rescue::rescue;
 pub use review::{comment, finding, keep, read_review, reply, resolve, review, ReviewArgs};
+pub use rewrite::{sign as rewrite_sign, SignArgs};
 pub use run::{dispatch_run, end_run, list_runs, DispatchInput, EndingInput};
 use serde::Serialize;
 pub use stats::{stats, StatsSelection};
@@ -160,7 +162,7 @@ impl From<StageArg> for ClaimStage {
 fn locked_state(store: &Store, reference: &str) -> Result<(String, TransitionLock, ChangeState)> {
     let change_id = store.resolve_change(reference)?;
     let transition = store.lock_transition(&change_id)?;
-    let state = state::reduce(&store.load_events(&change_id)?)?;
+    let state = store.state(&change_id)?;
     Ok((change_id, transition, state))
 }
 
@@ -374,15 +376,16 @@ impl Ctx {
     ) -> Result<(String, ChangeState)> {
         let change_id = store.resolve_change(reference)?;
         let events = store.load_events(&change_id)?;
-        let state = state::reduce(&events)?;
+        let state = state::reduce_following(&events, &store.rewrites())?;
         Ok((change_id, state))
     }
 
     fn load_all_states(&self, store: &Store) -> Result<BTreeMap<String, ChangeState>> {
         let mut states = BTreeMap::new();
+        let rewrites = store.rewrites();
         for change_id in store.list_change_ids()? {
             let events = store.load_events(&change_id)?;
-            states.insert(change_id, state::reduce(&events)?);
+            states.insert(change_id, state::reduce_following(&events, &rewrites)?);
         }
         Ok(states)
     }
@@ -433,7 +436,7 @@ pub(crate) fn reduce_at(store: &Store, change_id: &str, event_id: &str) -> Resul
         .iter()
         .position(|event| event.event_id == event_id)
         .with_context(|| format!("unknown event {event_id:?} in {change_id}"))?;
-    state::reduce(&events[..=position])
+    state::reduce_following(&events[..=position], &store.rewrites())
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

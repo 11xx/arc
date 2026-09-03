@@ -73,7 +73,7 @@ pub fn take(ctx: &Ctx, tags: Vec<String>, ttl: Option<String>, json: bool) -> Re
     event.event_id = event_id_after(&previous_event_id)?;
     store.append_event(&event)?;
     if json {
-        let state = state::reduce(&store.load_events(&candidate.change_id)?)?;
+        let state = store.state(&candidate.change_id)?;
         let output = status_output(ctx, &store, &state)?;
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -150,7 +150,7 @@ fn claim_inner(
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
-    let state = state::reduce(&store.load_events(&change_id)?)?;
+    let state = store.state(&change_id)?;
     let now = chrono::Utc::now();
     let mut previous_owner = None;
     let (takeover, because) = match mode {
@@ -252,7 +252,7 @@ pub fn release_claim(ctx: &Ctx, reference: &str) -> Result<i32> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
-    let state = state::reduce(&store.load_events(&change_id)?)?;
+    let state = store.state(&change_id)?;
     let now = chrono::Utc::now();
     let Some(existing) = &state.claim else {
         eprintln!("claim conflict: {change_id} has no live claim");
@@ -307,7 +307,7 @@ pub fn stage(
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let events = store.load_events(&change_id)?;
-    let mut state = state::reduce(&events)?;
+    let mut state = state::reduce_following(&events, &store.rewrites())?;
     let mut previous_event_id = events
         .last()
         .context("change has no opening event")?
@@ -347,7 +347,7 @@ pub fn stage(
         previous_event_id = claim_event.event_id.clone();
         println!("claimed: {change_id} for 7200s");
         println!("event: {}", claim_event.event_id);
-        state = state::reduce(&store.load_events(&change_id)?)?;
+        state = store.state(&change_id)?;
     }
     let Some(existing) = &state.claim else {
         eprintln!(

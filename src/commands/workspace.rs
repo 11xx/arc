@@ -137,9 +137,10 @@ fn data_root_stores() -> Result<Vec<(String, Store)>> {
 
 fn repo_states(store: &Store) -> Result<BTreeMap<String, ChangeState>> {
     let mut states = BTreeMap::new();
+    let rewrites = store.rewrites();
     for change_id in store.list_change_ids()? {
         let events = store.load_events(&change_id)?;
-        states.insert(change_id, state::reduce(&events)?);
+        states.insert(change_id, state::reduce_following(&events, &rewrites)?);
     }
     Ok(states)
 }

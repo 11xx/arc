@@ -259,6 +259,265 @@ pub fn commit_tree_with_parents(
     git(cwd, &args)
 }
 
+/// Who did something to a commit, and when, exactly as the commit object
+/// spells it.
+///
+/// The date keeps Git's own `<seconds> <±hhmm>` spelling rather than a parsed
+/// timestamp. A rewrite that reformatted it would move the commit's offset to
+/// whatever the rewriting machine happened to be set to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitStamp {
+    pub name: String,
+    pub email: String,
+    pub date: String,
+}
+
+impl CommitStamp {
+    /// The date in the form `git commit-tree` reads from the environment.
+    fn git_date(&self) -> String {
+        format!("@{}", self.date)
+    }
+
+    fn parse(line: &str, what: &str) -> Result<Self> {
+        let open = line
+            .find('<')
+            .with_context(|| format!("commit {what} {line:?} names no email"))?;
+        let close = line[open..]
+            .find('>')
+            .map(|offset| open + offset)
+            .with_context(|| format!("commit {what} {line:?} names no email"))?;
+        Ok(Self {
+            name: line[..open].trim_end().to_string(),
+            email: line[open + 1..close].to_string(),
+            date: line[close + 1..].trim().to_string(),
+        })
+    }
+}
+
+/// A commit object as the database holds it: everything a rewrite has to
+/// carry forward unchanged.
+///
+/// The message is bytes. A commit message is not required to be UTF-8 — that
+/// is what the `encoding` header is for — and a rewrite that decoded and
+/// re-encoded one would change the object it claims to have only re-signed.
+#[derive(Debug, Clone)]
+pub struct RawCommit {
+    pub tree: String,
+    pub parents: Vec<String>,
+    pub author: CommitStamp,
+    pub committer: CommitStamp,
+    pub encoding: Option<String>,
+    pub message: Vec<u8>,
+}
+
+/// Read one commit object whole.
+pub fn read_commit(cwd: &Path, rev: &str) -> Result<RawCommit> {
+    let raw = git_bytes(cwd, &["cat-file", "commit", rev])?;
+    parse_commit_object(&raw)
+        .with_context(|| format!("cannot read commit {rev} in {}", cwd.display()))
+}
+
+/// Split a commit object into its headers and its message.
+///
+/// A header value may continue onto following lines, each indented by one
+/// space; that is how a signature is stored. The message begins after the
+/// first empty line and is taken verbatim to the end of the object.
+fn parse_commit_object(raw: &[u8]) -> Result<RawCommit> {
+    let split = raw
+        .windows(2)
+        .position(|pair| pair == b"\n\n")
+        .context("commit object has no message")?;
+    let (headers, message) = (&raw[..split], &raw[split + 2..]);
+    let headers = std::str::from_utf8(headers).context("commit headers are not UTF-8")?;
+    let mut tree = None;
+    let mut parents = Vec::new();
+    let mut author = None;
+    let mut committer = None;
+    let mut encoding = None;
+    for line in headers.lines() {
+        // A continuation of the header above it, which is only ever a
+        // signature's remaining lines.
+        if line.starts_with(' ') {
+            continue;
+        }
+        let Some((field, value)) = line.split_once(' ') else {
+            continue;
+        };
+        match field {
+            "tree" => tree = Some(value.to_string()),
+            "parent" => parents.push(value.to_string()),
+            "author" => author = Some(CommitStamp::parse(value, "author")?),
+            "committer" => committer = Some(CommitStamp::parse(value, "committer")?),
+            "encoding" => encoding = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    Ok(RawCommit {
+        tree: tree.context("commit object names no tree")?,
+        parents,
+        author: author.context("commit object names no author")?,
+        committer: committer.context("commit object names no committer")?,
+        encoding,
+        message: message.to_vec(),
+    })
+}
+
+/// Write a commit holding `tree` under the given parents, carrying the given
+/// author, committer, dates, encoding and message bytes, and signed when a
+/// key is asked for. Touches no ref.
+///
+/// Recreating a commit this way changes its signature and its parents and
+/// nothing else, so a commit rebuilt with the same inputs and no signature
+/// has the same object id it started with.
+pub fn commit_tree_as(
+    cwd: &Path,
+    commit: &RawCommit,
+    sign: Option<Option<&str>>,
+) -> Result<String> {
+    let RawCommit {
+        tree,
+        parents,
+        author,
+        committer,
+        encoding,
+        message,
+    } = commit;
+    let mut args: Vec<String> = Vec::new();
+    // The encoding header is written from configuration, so it travels as
+    // configuration rather than as a flag `commit-tree` does not have.
+    if let Some(encoding) = encoding {
+        args.push("-c".into());
+        args.push(format!("i18n.commitEncoding={encoding}"));
+    }
+    args.push("commit-tree".into());
+    args.push(tree.clone());
+    for parent in parents {
+        args.push("-p".into());
+        args.push(parent.clone());
+    }
+    if let Some(key) = sign {
+        args.push(match key {
+            Some(key) => format!("-S{key}"),
+            None => "-S".into(),
+        });
+    }
+    let mut command = Command::new("git");
+    command
+        .args(&args)
+        .current_dir(cwd)
+        .env("GIT_AUTHOR_NAME", &author.name)
+        .env("GIT_AUTHOR_EMAIL", &author.email)
+        .env("GIT_AUTHOR_DATE", author.git_date())
+        .env("GIT_COMMITTER_NAME", &committer.name)
+        .env("GIT_COMMITTER_EMAIL", &committer.email)
+        .env("GIT_COMMITTER_DATE", committer.git_date())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().context("cannot run git commit-tree")?;
+    let mut stdin = child.stdin.take().context("git commit-tree has no stdin")?;
+    let message = message.to_vec();
+    // The message goes out on its own thread for the same reason every other
+    // piped Git call here does: a message larger than the pipe buffer
+    // deadlocks a writer that is not being read from.
+    let writer = thread::spawn(move || stdin.write_all(&message));
+    let out = child.wait_with_output().context("git commit-tree failed")?;
+    writer
+        .join()
+        .map_err(|_| anyhow::anyhow!("the commit-tree writer thread panicked"))??;
+    if !out.status.success() {
+        bail!(
+            "git commit-tree failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Git's raw output, for the callers that read objects rather than text.
+fn git_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(cwd);
+    let out = command_output(&mut command)
+        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+    if !out.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(out.stdout)
+}
+
+/// How each commit reachable from `rev` is signed, newest first: the commit,
+/// Git's one-letter verification result, and the key that signed it.
+///
+/// The verification letter and the key are what Git itself reports, including
+/// `N` for no signature and an empty key where there is none to name.
+pub fn signature_survey(cwd: &Path, rev: &str) -> Result<Vec<(String, String, String)>> {
+    let out = git(cwd, &["log", "--format=%H%x00%G?%x00%GK", rev])?;
+    out.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let mut fields = line.split('\0');
+            let commit = fields.next().unwrap_or_default().to_string();
+            let verification = fields.next().unwrap_or_default().to_string();
+            let key = fields.next().unwrap_or_default().to_string();
+            if commit.is_empty() {
+                bail!("git log returned a row naming no commit");
+            }
+            Ok((commit, verification, key))
+        })
+        .collect()
+}
+
+/// Every commit from `from` through `rev`, parents before children.
+///
+/// `from` is included, and its own ancestry is not: excluding the parents of
+/// `from` is what makes the range start there rather than at the root, and it
+/// is spelled that way so a root commit — which has no parents to exclude —
+/// needs no special case.
+pub fn commits_from(cwd: &Path, from: &str, rev: &str) -> Result<Vec<String>> {
+    let out = git(
+        cwd,
+        &[
+            "rev-list",
+            "--topo-order",
+            "--reverse",
+            rev,
+            &format!("^{from}^@"),
+        ],
+    )?;
+    Ok(out.lines().map(str::to_string).collect())
+}
+
+/// Every local branch and tag, as (refname, object id, object type) triples.
+/// The type separates a tag pointing straight at a commit from an annotated
+/// tag object, which names a commit but is not one.
+pub fn local_refs(cwd: &Path) -> Result<Vec<(String, String, String)>> {
+    let out = git(
+        cwd,
+        &[
+            "for-each-ref",
+            "--format=%(refname)%00%(objectname)%00%(objecttype)",
+            "refs/heads/",
+            "refs/tags/",
+        ],
+    )?;
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\0');
+            Some((
+                fields.next()?.to_string(),
+                fields.next()?.to_string(),
+                fields.next()?.to_string(),
+            ))
+        })
+        .collect())
+}
+
 pub fn blob_oid(cwd: &Path, rev: &str, path: &str) -> Option<String> {
     git(cwd, &["rev-parse", "--verify", &format!("{rev}:{path}")]).ok()
 }

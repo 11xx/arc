@@ -290,7 +290,7 @@ pub fn snapshot(
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let events = store.load_events(&change_id)?;
-    let st = state::reduce(&events)?;
+    let st = state::reduce_following(&events, &store.rewrites())?;
     // Snapshotting is the lead's first read of the change's worktree, and an
     // executor confined to that worktree spools its journal writes there.
     // Filing them here puts them in the journal while the worktree still
@@ -430,7 +430,7 @@ pub fn amend_attribution(
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let events = store.load_events(&change_id)?;
-    let st = state::reduce(&events)?;
+    let st = state::reduce_following(&events, &store.rewrites())?;
     let patchset_id = resolve_patchset_id(&st, Some(patchset))?
         .context("no patchset to amend; run `arc snapshot` first")?;
     let patchset = st
@@ -737,7 +737,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let events = store.load_events(&change_id)?;
-    let st = state::reduce(&events)?;
+    let st = state::reduce_following(&events, &store.rewrites())?;
     let patchset_id = resolve_patchset_id(&st, patchset)?
         .context("no patchset to review; run `arc snapshot` first")?;
     let observed: Vec<String> = st
@@ -834,7 +834,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
 /// Reports whether it said anything, so a caller can tell an approval the gate
 /// rejected from one it let stand.
 fn report_inert_approval(ctx: &Ctx, store: &Store, change_id: &str) -> Result<bool> {
-    let st = state::reduce(&store.load_events(change_id)?)?;
+    let st = store.state(change_id)?;
     let report = ctx.report(store, &st)?;
     let Some(reason) = report.approval_rejection_reason.as_deref() else {
         return Ok(false);

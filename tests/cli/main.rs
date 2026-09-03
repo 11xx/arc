@@ -26,6 +26,7 @@ mod rebase;
 mod release;
 mod rescue;
 mod review;
+mod rewrite;
 mod roles;
 mod run;
 mod sandbox;

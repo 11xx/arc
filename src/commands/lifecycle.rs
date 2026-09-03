@@ -59,9 +59,10 @@ pub fn begin(
     };
     let mut open_change_branches: Vec<String> = Vec::new();
     let mut closed_in_place_target: Option<(String, String)> = None;
+    let rewrites = store.rewrites();
     for existing in store.list_change_ids()? {
         let events = store.load_events(&existing)?;
-        let st = state::reduce(&events)?;
+        let st = state::reduce_following(&events, &rewrites)?;
         if st.is_closed() {
             let belongs_to_primary_in_place_change = primary_branch
                 .as_deref()
@@ -903,7 +904,7 @@ pub fn status_cmd(
             status_output_as_of(ctx, &store, &st)?
         }
         None => {
-            let st = state::reduce(&store.load_events(&change_id)?)?;
+            let st = store.state(&change_id)?;
             status_output(ctx, &store, &st)?
         }
     };
@@ -1084,7 +1085,7 @@ fn show(
     let change_id = store.resolve_change(reference)?;
     let st = match at {
         Some(at) => super::reduce_at(&store, &change_id, at)?,
-        None => state::reduce(&store.load_events(&change_id)?)?,
+        None => store.state(&change_id)?,
     };
     if json {
         println!("{}", serde_json::to_string_pretty(&st)?);

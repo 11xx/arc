@@ -106,7 +106,7 @@ fn change_for_branch(ctx: &Ctx, store: &Store) -> Result<Option<ChangeState>> {
     };
     let mut closed_match = None;
     for change_id in store.list_change_ids()? {
-        let state = state::reduce(&store.load_events(&change_id)?)?;
+        let state = store.state(&change_id)?;
         if state.branch != branch {
             continue;
         }
@@ -189,7 +189,7 @@ pub fn query_commit(ctx: &Ctx, sha: &str) -> Result<()> {
     let store = ctx.store()?;
     let mut matched = Vec::new();
     for change_id in store.list_change_ids()? {
-        let state = state::reduce(&store.load_events(&change_id)?)?;
+        let state = store.state(&change_id)?;
         let mut revisions: Vec<&str> = state
             .patchsets
             .iter()

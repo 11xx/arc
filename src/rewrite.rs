@@ -137,6 +137,45 @@ impl RewriteMap {
         }
     }
 
+    /// The revision a recorded one names in this repository: itself when no
+    /// recorded rewrite touched it, and its successor once every recorded
+    /// rewrite has been followed.
+    ///
+    /// A revision a rewrite dropped, and one whose chain cannot be read,
+    /// answers itself. Nothing survives it, and answering with the last
+    /// readable link would name a commit the record does not claim.
+    pub fn current(&self, revision: &str) -> String {
+        match self.fate(revision) {
+            Some(Fate::Rewritten(successor)) => successor,
+            Some(Fate::Dropped) | None => revision.to_string(),
+        }
+    }
+
+    /// Follow a recorded revision forward in place.
+    pub fn advance(&self, revision: &mut String) {
+        if self.steps.is_empty() {
+            return;
+        }
+        *revision = self.current(revision);
+    }
+
+    /// Follow an optional recorded revision forward in place.
+    pub fn advance_opt(&self, revision: &mut Option<String>) {
+        if let Some(revision) = revision.as_mut() {
+            self.advance(revision);
+        }
+    }
+
+    /// Whether two revisions name one commit once both are followed forward.
+    ///
+    /// Either may abbreviate the other: a recorded map and a Git read of the
+    /// same commit need not agree on length, and a comparison that demanded
+    /// they did would answer "different commit" for one commit.
+    pub fn same(&self, left: &str, right: &str) -> bool {
+        let (left, right) = (self.current(left), self.current(right));
+        !left.is_empty() && (left.starts_with(&right) || right.starts_with(&left))
+    }
+
     /// One hop, resolving `revision` against the map by prefix in either
     /// direction.
     fn step(&self, revision: &str) -> Step {
