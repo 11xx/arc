@@ -2409,6 +2409,7 @@ mod tests {
                 findings: Vec::new(),
                 relation,
                 provisional: None,
+                route_version: None,
             },
         )
     }

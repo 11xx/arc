@@ -156,7 +156,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/10");
+    assert_eq!(value["schema"], "arc-workspace-backlog/11");
     assert_eq!(value["scope"]["mode"], "global");
     assert_backlog_summary_matches_rows(&value);
     let project = value["projects"]
@@ -501,7 +501,7 @@ fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
     let mut scoped = repo.arc(&workspace);
     scoped.args(["workspace", "backlog", "--here", "--json"]);
     let value = json_stdout(&mut scoped);
-    assert_eq!(value["schema"], "arc-workspace-backlog/10");
+    assert_eq!(value["schema"], "arc-workspace-backlog/11");
     assert_eq!(value["scope"]["mode"], "under");
     assert_eq!(
         value["scope"]["under"],
@@ -754,7 +754,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/10");
+    assert_eq!(value["schema"], "arc-workspace-backlog/11");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {

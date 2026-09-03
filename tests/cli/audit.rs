@@ -774,7 +774,7 @@ fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
         .success();
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/6");
+    assert_eq!(inbox["schema"], "arc-inbox/7");
     let owed = inbox["debt-owed"].as_array().unwrap();
     assert_eq!(owed.len(), 1, "{owed:?}");
     assert_eq!(owed[0]["next_actor"], "reviewer");
@@ -1822,7 +1822,7 @@ fn an_independent_verdict_on_the_shipped_patchset_discharges_the_debt() {
     );
     assert!(
         stdout(repo.arc(&repo.root).args(["show", "reviewed-early"]))
-            .contains("Discharged by: Reviewer (gpt-5.6-premerge#high)")
+            .contains("Discharged by: Reviewer@high (gpt-5.6-premerge#high)")
     );
     let remaining = stdout(repo.arc(&repo.root).args(["query", "--debt"]));
     assert!(!remaining.contains("reviewed-early"), "{remaining}");
@@ -2651,7 +2651,7 @@ fn integrate_debt_records_missing_review_and_model_coverage() {
     );
     let human = stdout(repo.arc(&repo.root).args(["show", "typed-coverage"]));
     assert!(human.contains("Missing: independent-review"), "{human}");
-    assert!(human.contains("Solo (gpt-5.6-luna#max)"), "{human}");
+    assert!(human.contains("Solo@max (gpt-5.6-luna#max)"), "{human}");
 }
 
 #[test]
@@ -2704,7 +2704,7 @@ fn debt_without_verdicts_has_empty_coverage() {
         repo.arc(&repo.root)
             .args(["status", "empty-coverage", "--json"]),
     );
-    assert_eq!(status["debt"]["missing"], "independent-review", "{status}");
+    assert_eq!(status["debt"]["missing"], "nothing-read", "{status}");
     assert!(
         status["debt"]["coverage"]
             .as_array()
@@ -2760,7 +2760,7 @@ fn a_later_audit_discharge_records_its_model_beside_the_debt() {
     );
     let human = stdout(repo.arc(&repo.root).args(["show", "model-discharge"]));
     assert!(
-        human.contains("Discharged by: Reviewer (gpt-5.6-auditor#high)"),
+        human.contains("Discharged by: Reviewer@high (gpt-5.6-auditor#high)"),
         "{human}"
     );
 }
