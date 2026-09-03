@@ -6291,6 +6291,136 @@ fn render_artifact_claims(claims: &[ArtifactClaim], now: DateTime<Utc>) -> Strin
         .collect()
 }
 
+/// The first claim on an artifact whose lease has run out, if any has.
+///
+/// This is what a watch on unattended work waits for. An artifact with no
+/// claim has not stalled: there is nobody to stop hearing from.
+pub(crate) fn stalled_artifact_claim(ctx: &Ctx, file: &str) -> Result<Option<String>> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    let events = read_events(&dir)?;
+    let now = Utc::now();
+    Ok(open_artifact_claims(&events, file)
+        .into_iter()
+        .find(|claim| !state::claim_timing_at(&claim.state, now).active)
+        .map(|claim| claim.state.claim_id))
+}
+
+/// What a successor needs in order to pick up an artifact somebody left.
+#[derive(Serialize)]
+struct ArtifactRescue {
+    file: String,
+    heading: Option<String>,
+    availability: Availability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claim_history: Option<ClaimHistory>,
+    claims: Vec<ArtifactClaim>,
+}
+
+/// Report where work on an artifact stopped, and optionally take it over.
+///
+/// The reading list is the tip checkpoints: the newest ones no later
+/// checkpoint corrects. A superseded checkpoint stays in the record, because
+/// a direction that was reversed is evidence about the one that replaced it.
+pub fn rescue_artifact(ctx: &Ctx, file: &str, json: bool, take: bool) -> Result<i32> {
+    if take {
+        // Rescue recovers work somebody else abandoned. An unclaimed artifact
+        // is taken with `claim`, and a live claim is not abandoned: taking
+        // either here would let `rescue` acquire work nobody had left.
+        let context = claim_context(ctx, file)?;
+        let owner = require_claim_identity(ctx)?;
+        let now = Utc::now();
+        if !open_artifact_claims(&context.events, file)
+            .iter()
+            .any(|claim| {
+                claim.state.owner != owner && !state::claim_timing_at(&claim.state, now).active
+            })
+        {
+            eprintln!(
+                "rescue --take requires a claim owned by another identity whose lease has run out"
+            );
+            return Ok(8);
+        }
+        let code = claim_artifact(ctx, file, None, true)?;
+        if code != 0 {
+            return Ok(code);
+        }
+    }
+    let context = claim_context(ctx, file)?;
+    let events = read_events(&context.dir)?;
+    let now = Utc::now();
+    let claims = artifact_claims(&events, file);
+    let (availability, claim_history) = artifact_availability(&events, file, &claims, now);
+    let report = ArtifactRescue {
+        heading: amended_heading(&events, &context.dir, file),
+        availability,
+        claim_history,
+        claims,
+        file: file.to_string(),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(0);
+    }
+    println!("artifact: {}", report.file);
+    if let Some(heading) = &report.heading {
+        println!("heading: {heading}");
+    }
+    println!("availability: {}", report.availability.label());
+    if let Some(history) = &report.claim_history {
+        println!(
+            "history: {}",
+            match history {
+                ClaimHistory::Unknown => "unknown (filed before claims were recorded)",
+                ClaimHistory::NeverStarted => "never-started",
+            }
+        );
+    }
+    println!("claims:");
+    if report.claims.is_empty() {
+        println!("  (none)");
+    }
+    for claim in &report.claims {
+        let condition = match &claim.closure {
+            Some(closure) => closure
+                .outcome
+                .clone()
+                .or_else(|| closure.ended_by.clone())
+                .unwrap_or_else(|| "ended".to_string()),
+            None => claim_condition(claim, now).to_string(),
+        };
+        println!(
+            "  {}  {} via {} {}  {}",
+            claim.state.claim_id,
+            claim.state.owner.actor,
+            claim.state.owner.harness,
+            claim.state.owner.session,
+            condition
+        );
+        if let Some(progress) = &claim.state.progress {
+            println!("    stage: {}", progress.stage.as_str());
+            if let Some(note) = &progress.note {
+                println!("    note: {note}");
+            }
+        }
+        if let Some(blocker) = &claim.blocker {
+            println!("    blocker: {blocker}");
+        }
+        for checkpoint in claim.tip_checkpoints() {
+            println!("    checkpoint {}:", checkpoint.checkpoint_id);
+            for (label, value) in [
+                ("next", &checkpoint.next),
+                ("gate", &checkpoint.gate),
+                ("blocker", &checkpoint.blocker),
+            ] {
+                if let Some(value) = value {
+                    println!("      {label}: {value}");
+                }
+            }
+        }
+    }
+    Ok(0)
+}
+
 /// Refuse a terminal operation that would end work nobody said they were
 /// ending.
 ///
@@ -6876,6 +7006,40 @@ pub(crate) fn format_age(seconds: u64) -> String {
     }
 }
 
+/// Open claims on journal artifacts, beside the lanes.
+///
+/// A lane is occupancy of a topic and a claim is occupancy of a file. Both
+/// say somebody is working, so a session catching up reads them together;
+/// neither is ever rewritten into the other.
+fn render_catchup_claims(claims: &[ArtifactClaim], now: DateTime<Utc>) {
+    println!("artifact claims:");
+    let open: Vec<&ArtifactClaim> = claims.iter().filter(|claim| claim.is_open()).collect();
+    if open.is_empty() {
+        println!("  (none)");
+    }
+    for claim in open {
+        let idle = now
+            .signed_duration_since(claim.state.last_activity_at)
+            .num_seconds()
+            .max(0) as u64;
+        println!(
+            "  {}  {} via {} {}  {} (idle {}, ttl {})",
+            claim.file,
+            claim.state.owner.actor,
+            claim.state.owner.harness,
+            claim.state.owner.session,
+            claim_condition(claim, now),
+            format_age(idle),
+            format_age(claim.state.ttl_seconds)
+        );
+        for checkpoint in claim.tip_checkpoints() {
+            if let Some(next) = &checkpoint.next {
+                println!("    next: {next}");
+            }
+        }
+    }
+}
+
 fn render_lanes(lanes: &[LaneEntry], now: DateTime<Utc>) {
     println!("lanes:");
     if lanes.is_empty() {
@@ -7095,6 +7259,20 @@ pub(crate) struct ArtifactEntry {
     /// authored here, which is most of them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) sources: Option<Vec<ArtifactSource>>,
+    /// Every claim recorded on this artifact, oldest first, open and ended.
+    /// An ended claim is what says where the last worker stopped, so a
+    /// successor reads it rather than an empty row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) claims: Vec<ArtifactClaim>,
+    /// Whether the item can be picked up. Absent on listings that are not a
+    /// work queue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) availability: Option<Availability>,
+    /// What is known about who has worked it, when nothing has. An artifact
+    /// filed before the facility existed reads `unknown`; one filed after it
+    /// with no claim was never started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) claim_history: Option<ClaimHistory>,
 }
 
 #[derive(Clone, Serialize)]
@@ -7223,6 +7401,10 @@ pub(crate) struct ArtifactLane {
 struct Catchup {
     dir: String,
     lanes: Vec<LaneEntry>,
+    /// Every claim recorded on a listed artifact, ended ones included. A
+    /// claim that has just been ended by a consumption is what tells a
+    /// returning session that the work it left is gone and why.
+    claims: Vec<ArtifactClaim>,
     memories: Vec<ArtifactEntry>,
     files: Vec<ArtifactEntry>,
     journal_tail: Vec<String>,
@@ -7325,6 +7507,9 @@ fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
                 verification: None,
                 amendments: None,
                 sources: None,
+                claims: Vec::new(),
+                availability: None,
+                claim_history: None,
             })
         })
         .collect())
@@ -7376,10 +7561,16 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
     };
     let journal = read_events(&hot_dir)?;
     let mut files: Vec<ArtifactEntry> = Vec::new();
+    let now = Utc::now();
+    let mut claims: Vec<ArtifactClaim> = Vec::new();
     if dir.is_dir() {
         for name in sorted_artifact_names(&dir)?.into_iter().take(limit) {
             if let Some((ts, topic, kind)) = parse_artifact_name(&name) {
                 let heading = amended_heading(&journal, &dir, &name);
+                let file_claims = artifact_claims(&journal, &name);
+                let (availability, claim_history) =
+                    artifact_availability(&journal, &name, &file_claims, now);
+                claims.extend(file_claims.iter().cloned());
                 files.push(ArtifactEntry {
                     file: name,
                     timestamp: ts,
@@ -7392,13 +7583,15 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
                     verification: None,
                     amendments: None,
                     sources: None,
+                    claims: file_claims,
+                    availability: Some(availability),
+                    claim_history,
                 });
             }
         }
     }
 
     let journal_tail = journal_tail(&hot_dir, limit)?;
-    let now = Utc::now();
     let lanes = lanes_from_journal(&journal, now);
     let memories = if archived {
         Vec::new()
@@ -7410,6 +7603,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
         let out = Catchup {
             dir: dir.display().to_string(),
             lanes,
+            claims,
             memories,
             files,
             journal_tail,
@@ -7417,6 +7611,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
         render_lanes(&lanes, now);
+        render_catchup_claims(&claims, now);
         if !archived {
             render_memories(&memories);
         }
@@ -7716,76 +7911,43 @@ pub(crate) fn collect_open_in(
                 }
             }
         }
-        for name in open_names {
-            if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
-                let heading = amended_heading(&journal, &dir, &name);
-                let change = change_annotation(&changes, &topic, &name);
-                let verification = verification_stamp(&journal, &name, current_revision.as_deref());
-                let amendments = standing_amendments(&journal, &name, &file_kind);
-                let sources = queue_sources(&journal, &name);
-                open.push(ArtifactEntry {
-                    lane: lane_for_topic(&lanes, &topic, &caller),
-                    change,
-                    age_seconds: if file_kind == JournalKind::Discussion.as_str() {
-                        discussion_age_seconds(now, &ts, &name, &journal)
-                    } else {
-                        artifact_age_seconds(now, &ts)
-                    },
-                    file: name,
-                    timestamp: ts,
-                    topic,
-                    kind: Some(file_kind),
-                    heading,
-                    verification,
-                    amendments,
-                    sources,
-                });
-            }
-        }
-        for name in later_names {
-            if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
-                let heading = amended_heading(&journal, &dir, &name);
-                let change = change_annotation(&changes, &topic, &name);
-                let verification = verification_stamp(&journal, &name, current_revision.as_deref());
-                let amendments = standing_amendments(&journal, &name, &file_kind);
-                let sources = queue_sources(&journal, &name);
-                later.push(ArtifactEntry {
-                    lane: lane_for_topic(&lanes, &topic, &caller),
-                    change,
-                    age_seconds: artifact_age_seconds(now, &ts),
-                    file: name,
-                    timestamp: ts,
-                    topic,
-                    kind: Some(file_kind),
-                    heading,
-                    verification,
-                    amendments,
-                    sources,
-                });
-            }
-        }
-        for name in feature_request_names {
-            if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
-                let heading = amended_heading(&journal, &dir, &name);
-                let change = change_annotation(&changes, &topic, &name);
-                let verification = verification_stamp(&journal, &name, current_revision.as_deref());
-                let amendments = standing_amendments(&journal, &name, &file_kind);
-                let sources = queue_sources(&journal, &name);
-                feature_requests.push(ArtifactEntry {
-                    lane: lane_for_topic(&lanes, &topic, &caller),
-                    change,
-                    age_seconds: artifact_age_seconds(now, &ts),
-                    file: name,
-                    timestamp: ts,
-                    topic,
-                    kind: Some(file_kind),
-                    heading,
-                    verification,
-                    amendments,
-                    sources,
-                });
-            }
-        }
+        // One row shape for all three tiers. A queue whose tiers derive a
+        // row differently reports the same artifact differently depending on
+        // which list it landed in.
+        let mut row = |name: String| -> Option<ArtifactEntry> {
+            let (ts, topic, file_kind) = parse_artifact_name(&name)?;
+            let heading = amended_heading(&journal, &dir, &name);
+            let change = change_annotation(&changes, &topic, &name);
+            let verification = verification_stamp(&journal, &name, current_revision.as_deref());
+            let amendments = standing_amendments(&journal, &name, &file_kind);
+            let sources = queue_sources(&journal, &name);
+            let claims = artifact_claims(&journal, &name);
+            let (availability, claim_history) =
+                artifact_availability(&journal, &name, &claims, now);
+            Some(ArtifactEntry {
+                lane: lane_for_topic(&lanes, &topic, &caller),
+                change,
+                age_seconds: if file_kind == JournalKind::Discussion.as_str() {
+                    discussion_age_seconds(now, &ts, &name, &journal)
+                } else {
+                    artifact_age_seconds(now, &ts)
+                },
+                file: name,
+                timestamp: ts,
+                topic,
+                kind: Some(file_kind),
+                heading,
+                verification,
+                amendments,
+                sources,
+                claims,
+                availability: Some(availability),
+                claim_history,
+            })
+        };
+        open.extend(open_names.into_iter().filter_map(&mut row));
+        later.extend(later_names.into_iter().filter_map(&mut row));
+        feature_requests.extend(feature_request_names.into_iter().filter_map(&mut row));
     }
 
     Ok(OpenItems {
@@ -7848,7 +8010,7 @@ pub(crate) fn render_open_entry(f: &ArtifactEntry) {
         format!(" ({} old)", format_age(seconds))
     });
     println!(
-        "  {}{}  {}  {}  {}{}{}{}{}",
+        "  {}{}  {}  {}  {}{}{}{}{}{}",
         f.timestamp,
         age,
         f.topic,
@@ -7856,6 +8018,7 @@ pub(crate) fn render_open_entry(f: &ArtifactEntry) {
         f.heading.as_deref().unwrap_or(""),
         render_change(f.change.as_ref()),
         render_artifact_lane(f.lane.as_ref()),
+        render_artifact_claims(&f.claims, Utc::now()),
         render_verification(f.verification.as_ref()),
         render_amendments(f.amendments)
     );

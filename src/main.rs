@@ -2470,10 +2470,20 @@ fn run(cli: Cli) -> Result<i32> {
             transcript,
             tail,
             take,
-        } => {
-            let change = infer(change.as_deref())?;
-            commands::rescue(&ctx, &change, json, take, transcript, tail)
-        }
+        } => match artifact(&ctx, change.as_deref()) {
+            Some(file) => {
+                if transcript {
+                    bail!(
+                        "--transcript reads the session recorded against a change; an                          artifact's record of what happened is its checkpoints"
+                    );
+                }
+                journal::rescue_artifact(&ctx, &file, json, take)
+            }
+            None => {
+                let change = infer(change.as_deref())?;
+                commands::rescue(&ctx, &change, json, take, transcript, tail)
+            }
+        },
         Cmd::Prompt { change } => {
             context::prompt(&ctx, select(change)?.as_deref())?;
             Ok(0)
