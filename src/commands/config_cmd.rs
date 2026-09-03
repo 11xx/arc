@@ -197,7 +197,7 @@ fn probe_signing(ctx: &Ctx) -> WritabilityCheck {
 /// Make one probe commit in a repository that is deleted either way, so the
 /// target repository gains nothing from having been asked.
 fn probe_commit_throwaway(ctx: &Ctx, signed: bool) -> Result<()> {
-    let dir = std::env::temp_dir().join(format!("arc-commit-probe-{}", ids::new_event_id()));
+    let dir = crate::config::temp_dir()?.join(format!("arc-commit-probe-{}", ids::new_event_id()));
     fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let result = probe_commit_in(&dir, ctx, signed);
     let _ = fs::remove_dir_all(&dir);

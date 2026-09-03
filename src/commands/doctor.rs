@@ -26,8 +26,60 @@ struct Finding {
 #[derive(Debug, Serialize)]
 struct Report {
     schema: &'static str,
+    roots: Roots,
     problems: Vec<Finding>,
     advice: Vec<Finding>,
+}
+
+/// Where this invocation reads and writes. Every other diagnostic here is a
+/// statement about state at these paths, so a reader who disagrees with a
+/// finding needs to know which state was inspected — and under a sandbox that
+/// is not where the same command yesterday looked.
+#[derive(Debug, Serialize)]
+struct Roots {
+    /// The prefix standing in for the home directory, when one is in force.
+    sandbox: Option<String>,
+    ai_home: String,
+    config_file: String,
+    worktrees_dir: String,
+    /// The ledger for the repository this ran in.
+    ledger: String,
+    journal_dir: Option<String>,
+}
+
+impl Roots {
+    fn resolve(cwd: &Path, ledger: &Path) -> Result<Roots> {
+        let cfg = crate::config::load()?;
+        Ok(Roots {
+            sandbox: cfg.sandbox.as_ref().map(|path| path.display().to_string()),
+            ai_home: cfg.ai_home.display().to_string(),
+            config_file: cfg.config_path.display().to_string(),
+            worktrees_dir: cfg.worktrees_dir.display().to_string(),
+            ledger: ledger.display().to_string(),
+            // A project whose journal cannot be anchored has no journal root
+            // to report, which is a fact about this directory rather than a
+            // failure of the diagnostic.
+            journal_dir: crate::journal::resolve_dir(cwd)
+                .ok()
+                .map(|dir| dir.display().to_string()),
+        })
+    }
+
+    fn render(&self) {
+        println!("roots:");
+        match &self.sandbox {
+            Some(prefix) => println!("  sandbox: {prefix}"),
+            None => println!("  sandbox: (none)"),
+        }
+        println!("  ai-home: {}", self.ai_home);
+        println!("  config-file: {}", self.config_file);
+        println!("  worktrees-dir: {}", self.worktrees_dir);
+        println!("  ledger: {}", self.ledger);
+        println!(
+            "  journal-dir: {}",
+            self.journal_dir.as_deref().unwrap_or("(unanchored)")
+        );
+    }
 }
 
 pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
@@ -85,13 +137,15 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
 
     let exit = i32::from(!problems.is_empty());
     let report = Report {
-        schema: "arc-doctor/2",
+        schema: "arc-doctor/3",
+        roots: Roots::resolve(&ctx.cwd, &root)?,
         problems,
         advice,
     };
     if json {
         println!("{}", serde_json::to_string(&report)?);
     } else {
+        report.roots.render();
         render("problems", &report.problems);
         render_advice(&report.advice, verbose);
     }
