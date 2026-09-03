@@ -1222,3 +1222,72 @@ fn events_can_follow_a_tagged_program() {
         .failure()
         .stderr(predicates::str::contains("different scopes"));
 }
+
+/// Integrate a change owing a review, recorded as opened from `harness`.
+fn debt_opened_from(repo: &Repo, slug: &str, harness: &str) -> String {
+    let opened = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_HARNESS", harness)
+            .args(["begin", slug]),
+    );
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(&worktree, &format!("{slug}.txt"), "work\n", "feat: work");
+    stdout(repo.arc(&worktree).args(["snapshot", slug]));
+    repo.arc(&repo.root)
+        .args(["review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", slug, "--debt", "no reviewer reachable"])
+        .assert()
+        .success();
+    opened_change_id(&opened)
+}
+
+/// Every session exports its identity, so a read consulting it would answer a
+/// different question in each harness — and `--debt`, which enumerates
+/// obligations, would hide the ones another harness opened. Filters come only
+/// from flags the caller typed.
+#[test]
+fn query_filters_on_typed_flags_not_the_exported_identity() {
+    let repo = Repo::new();
+    let mine = debt_opened_from(&repo, "opened-here", "test");
+    let theirs = debt_opened_from(&repo, "opened-elsewhere", "codex");
+
+    // The fixture exports ARC_HARNESS=test, matching exactly one of the two.
+    let listed = json_stdout(repo.arc(&repo.root).args(["query", "--json"]));
+    let ids = |value: &serde_json::Value| {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|change| change["change_id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&listed).len(), 2, "{listed}");
+    assert!(ids(&listed).contains(&theirs), "{listed}");
+
+    let filtered =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["query", "--harness", "codex", "--json"]),
+        );
+    assert_eq!(ids(&filtered), vec![theirs.clone()], "{filtered}");
+
+    // A typed flag outranks the exported identity in both directions.
+    let filtered = json_stdout(repo.arc(&repo.root).env("ARC_HARNESS", "codex").args([
+        "query",
+        "--harness",
+        "test",
+        "--json",
+    ]));
+    assert_eq!(ids(&filtered), vec![mine.clone()], "{filtered}");
+
+    let debts = json_stdout(repo.arc(&repo.root).args(["query", "--debt", "--json"]));
+    assert_eq!(ids(&debts).len(), 2, "{debts}");
+    assert!(ids(&debts).contains(&theirs), "{debts}");
+
+    // The identity still reaches the ledger: it is recorded, not consulted.
+    let opened_harnesses = json_stdout(repo.arc(&repo.root).args(["show", &theirs, "--json"]));
+    assert_eq!(opened_harnesses["opened_harness"], "codex");
+}

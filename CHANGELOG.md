@@ -225,6 +225,12 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- `arc query` filters only on flags the caller typed. `--actor` and
+  `--harness` name the acting identity on every command and a filter on this
+  one, so the identity exported for recording was narrowing the read: each
+  harness saw only the changes it had opened, and `--debt` hid the
+  obligations owed elsewhere.
+
 - A journal lane's owner is the harness and the session together, not the
   session alone. Two harnesses can mint the same session string, and either
   could previously refresh, replace, renew, close, or be annotated as

@@ -1449,7 +1449,11 @@ whatever branch the invoking worktree happens to be on. Deriving from an
 open change's branch (stacking) requires an explicit `--target`.
 
 `arc query` filters by lifecycle status, target, tags, latest verdict, opening
-actor, and opening harness. `arc list --format compact|wide|json` supplies
+actor, and opening harness. Every filter is an explicit flag: the acting
+identity in `ARC_ACTOR` and `ARC_HARNESS` is recorded on writes and never
+narrows a read, so `arc query --debt` enumerates every outstanding obligation
+whatever session runs it. Narrow to one harness with `--harness <name>`.
+`arc list --format compact|wide|json` supplies
 pipe-friendly IDs, a scannable orchestration table, or structured rows.
 
 ## Storage and data-safety guarantees
