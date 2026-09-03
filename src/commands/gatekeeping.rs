@@ -992,6 +992,138 @@ pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
     check(ctx, reference, false, false)
 }
 
+/// Replay a change's branch onto its target branch and record the result.
+///
+/// The rebase runs in the worktree that holds the branch: its index and reflog
+/// are the only place a stopped rebase can be continued from. A conflict stops
+/// the rebase and leaves it in progress, because the partial resolution is a
+/// person's work and aborting would discard it.
+pub fn rebase(ctx: &Ctx, reference: &str, verify_requested: bool) -> Result<i32> {
+    let store = ctx.store()?;
+    let (change_id, st) = ctx.load_state(&store, reference)?;
+    if st.is_closed() {
+        eprintln!("{change_id} is closed; its branch has nothing left to replay");
+        return Ok(status::Blocker::Closed.exit_code());
+    }
+    let wt = replay_worktree(ctx, &st)?;
+    // Both refusals describe the same worktree, and a stopped rebase is also
+    // dirty, so the more specific state is named first or the advice is wrong.
+    if gitio::rebase_in_progress(&wt)? {
+        let worktree = wt.display();
+        eprintln!(
+            "{change_id} is already mid-rebase in {worktree}; finish it with \
+             `git -C {worktree} rebase --continue` or abandon it with `--abort`"
+        );
+        return Ok(status::Blocker::NeedsRebase.exit_code());
+    }
+    if !gitio::is_clean(&wt)? {
+        let dirt = gitio::dirt(&wt)?;
+        eprintln!(
+            "worktree {} carries {}; commit or stash it before rebasing, or the \
+             replay has uncommitted work to reconcile",
+            wt.display(),
+            describe_dirt(dirt)
+        );
+        return Ok(status::Blocker::NeedsRebase.exit_code());
+    }
+
+    let target_head = gitio::branch_head(&ctx.cwd, &st.target_branch)?;
+    let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
+    if gitio::is_ancestor(&ctx.cwd, &target_head, &head)? {
+        println!(
+            "{} already carries {} at {target_head}; nothing to replay",
+            st.branch, st.target_branch
+        );
+        if st
+            .latest_patchset()
+            .is_none_or(|patchset| patchset.head != head)
+        {
+            println!("head {head} is not recorded; record it with `arc snapshot {change_id}`");
+        }
+        return Ok(0);
+    }
+
+    match gitio::rebase(&wt, &st.target_branch)? {
+        gitio::RebaseOutcome::Stopped => {
+            let conflicts = gitio::unmerged_paths(&wt)?;
+            println!(
+                "rebase of {} onto {} stopped on a conflict; it is left in progress",
+                st.branch, st.target_branch
+            );
+            for path in &conflicts {
+                println!("  - {path}");
+            }
+            let worktree = wt.display();
+            println!("resolve each file, then:");
+            println!("  git -C {worktree} add <path>");
+            println!("  git -C {worktree} rebase --continue");
+            println!("  arc snapshot {change_id}            # record the replayed head");
+            println!("  arc snapshot {change_id} --verify   # and run every required gate");
+            Ok(status::Blocker::NeedsRebase.exit_code())
+        }
+        gitio::RebaseOutcome::Replayed => {
+            let replayed = gitio::branch_head(&ctx.cwd, &st.branch)?;
+            println!(
+                "rebased {} onto {} at {replayed}",
+                st.branch, st.target_branch
+            );
+            crate::journal::auto_log(
+                ctx,
+                &st.slug,
+                &format!(
+                    "rebased {change_id} onto {} at {replayed}",
+                    st.target_branch
+                ),
+            );
+            let code = snapshot_with_verify(
+                ctx,
+                reference,
+                None,
+                None,
+                verify_requested,
+                Vec::new(),
+                false,
+                None,
+                false,
+            )?;
+            let (_, replayed_state) = ctx.load_state(&store, reference)?;
+            let report = ctx.report(&store, &replayed_state)?;
+            print!("{}", render::gates_owed(&report));
+            Ok(code)
+        }
+    }
+}
+
+/// The worktree a change's branch is replayed in.
+///
+/// A checked-out branch names its worktree, and that lookup is authoritative
+/// because it reads Git rather than the ledger. It answers nothing while a
+/// rebase is stopped part-way, though: Git detaches HEAD for the replay, so
+/// the branch belongs to no worktree until the rebase ends, and only the
+/// recorded path still says where the state a person continues from lives.
+fn replay_worktree(ctx: &Ctx, st: &ChangeState) -> Result<PathBuf> {
+    if let Some(checked_out) = gitio::worktree_for_branch(&ctx.cwd, &st.branch)? {
+        return Ok(checked_out);
+    }
+    let recorded = st.worktree.as_deref().map(PathBuf::from);
+    recorded.filter(|path| path.is_dir()).with_context(|| {
+        format!(
+            "no worktree has {:?} checked out; check it out before rebasing",
+            st.branch
+        )
+    })
+}
+
+/// What a worktree carries, in the terms the refusal needs.
+fn describe_dirt(dirt: gitio::Dirt) -> &'static str {
+    match (dirt.tracked, dirt.untracked) {
+        (true, true) => "uncommitted changes and untracked files",
+        (true, false) => "uncommitted changes",
+        (false, true) => "untracked files",
+        (false, false) => "changes Git reports but does not classify",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn verify_all_parallel(
     ctx: &Ctx,

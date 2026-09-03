@@ -246,6 +246,8 @@ RUN A CHANGE
     --falsified-by <id> --predicted <why>
                                      Name the failure this pass answers.
   arc done                           Snapshot, run every gate, print check state.
+  arc rebase [--verify]              Replay the branch onto its target, snapshot
+                                     the new head, name the gates it owes.
   arc review --verdict <v>           Record a verdict (+ --findings-json -).
     --provisional <why>              It gates, and owes a second judgment.
     --relation corroborates          Support the standing verdict, not replace it.
@@ -255,6 +257,12 @@ RUN A CHANGE
   arc integrate [--tag <t>]          Guarded --no-ff merge once the gates are green.
   arc audit <change> --verdict <v>   Review an already-integrated revision.
   arc close                          Terminal outcome arc did not merge itself.
+
+  `arc rebase` is what `check` names when the target moved with conflicting
+  changes. A conflict stops it and leaves the rebase in progress — the partial
+  resolution is yours, and aborting would throw it away — with the conflicting
+  files and the commands that finish the replay. Resolve, `git rebase
+  --continue`, then `arc snapshot --verify`.
 
   `--no-worktree` means in place, not nowhere: a clean checkout already on the
   target is checked out onto the new branch and recorded as the change's

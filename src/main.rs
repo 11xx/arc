@@ -962,6 +962,15 @@ enum Cmd {
         /// then from the worktree the command runs in
         change: Option<String>,
     },
+    /// Replay a change's branch onto its target, then snapshot the new head
+    Rebase {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
+        change: Option<String>,
+        /// Run every required gate at the replayed head
+        #[arg(long)]
+        verify: bool,
+    },
     /// Print shell exports for a detected harness session, for `eval`:
     /// `eval "$(arc env)"`.
     ///
@@ -2431,6 +2440,10 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Done { change } => {
             let change = infer(change.as_deref())?;
             commands::done(&ctx, &change)
+        }
+        Cmd::Rebase { change, verify } => {
+            let change = infer(change.as_deref())?;
+            commands::rebase(&ctx, &change, verify)
         }
         Cmd::Env => Ok(context::print_env()),
         Cmd::Completions { shell } => {

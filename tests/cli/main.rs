@@ -21,6 +21,7 @@ mod orchestrate;
 mod pass;
 mod paths;
 mod provenance;
+mod rebase;
 mod release;
 mod rescue;
 mod review;
