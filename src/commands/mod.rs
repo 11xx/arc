@@ -235,6 +235,26 @@ impl Ctx {
         Store::discover(&self.cwd)
     }
 
+    /// The same invocation pointed at another checkout.
+    ///
+    /// Identity travels with the command, not with the directory, so a run
+    /// that has to happen in a different tree — a batch working from the
+    /// primary worktree, a gate run belonging to the change's own — records
+    /// the same actor, harness, session, and subject it would have recorded
+    /// where it was typed.
+    pub(crate) fn with_cwd(&self, cwd: PathBuf) -> Ctx {
+        Ctx {
+            cwd,
+            actor: self.actor.clone(),
+            actor_source: self.actor_source,
+            fallback_announced: self.fallback_announced.clone(),
+            harness: self.harness.clone(),
+            session: self.session.clone(),
+            model: self.model.clone(),
+            on_behalf_of: self.on_behalf_of.clone(),
+        }
+    }
+
     fn event(&self, store: &Store, change_id: &str, payload: Payload) -> Event {
         self.event_at(store, change_id, chrono::Utc::now(), payload)
     }

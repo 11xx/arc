@@ -1996,14 +1996,15 @@ fn a_gate_run_away_from_the_change_head_is_refused_with_the_step_that_fixes_it()
     assert!(events.trim().is_empty(), "{events}");
 }
 
-/// The same refusal, when the change does have a checkout: the caller is
-/// simply standing in the wrong one, so the tip is a path rather than advice
-/// about creating a worktree.
+/// A change that does have a checkout needs no refusal: its gates belong to
+/// that checkout whichever one the caller stands in, and the evidence lands
+/// at its head where status counts it.
 #[test]
-fn a_gate_run_from_the_wrong_checkout_names_the_change_worktree() {
+fn a_gate_run_from_another_checkout_runs_in_the_change_worktree() {
     let repo = Repo::new();
     write_two_gates(&repo, "true", "true");
     stdout(repo.arc(&repo.root).args(["begin", "elsewhere"]));
+    let worktree = repo.home.join(".worktrees/repo-elsewhere");
     repo.commit(
         &repo.root,
         "moved.txt",
@@ -2014,9 +2015,23 @@ fn a_gate_run_from_the_wrong_checkout_names_the_change_worktree() {
     repo.arc(&repo.root)
         .args(["verify", "elsewhere", "--all"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("would be recorded away from"))
-        .stderr(predicates::str::contains(".worktrees/repo-elsewhere"));
+        .success()
+        .stdout(predicates::str::contains(format!(
+            "running in {}",
+            worktree.display()
+        )))
+        .stdout(predicates::str::contains("gates: 2/2 pass"));
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "elsewhere",
+        "--type",
+        "verification-recorded",
+    ]));
+    let first: serde_json::Value =
+        serde_json::from_str(events.lines().next().expect("alpha ran")).unwrap();
+    assert_eq!(first["revision"], repo.head(&worktree), "{first}");
 }
 
 /// Attestation is the documented escape for evidence arc did not run, and it
@@ -2057,13 +2072,11 @@ fn attested_evidence_is_exempt_from_the_change_head_check() {
         .success();
 }
 
-/// The blocking finding from independent review: exempting every probe from
-/// the head check left `--probe` at its default Final phase recording evidence
-/// status counts only at the patchset head, so a final probe run from the
-/// wrong checkout exited 0 and left `next_action` at `run_probe:` forever.
-/// Only a baseline probe belongs off the head.
+/// A probe at its default Final phase records evidence status counts only at
+/// the patchset head, so it belongs to the change's checkout exactly as a gate
+/// does. Only a baseline probe belongs off the head.
 #[test]
-fn a_final_probe_run_away_from_the_change_head_is_refused_like_a_gate() {
+fn a_final_probe_run_from_another_checkout_records_at_the_change_head() {
     let repo = Repo::new();
     let change_id = opened_change_id(&stdout(
         repo.arc(&repo.root).args(["begin", "final-probe-head"]),
@@ -2097,10 +2110,10 @@ fn a_final_probe_run_away_from_the_change_head_is_refused_like_a_gate() {
     repo.arc(&repo.root)
         .args(["verify", "final-probe-head", "--probe", "marker-exists"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("would be recorded away from"));
+        .failure();
 
-    // Nothing was recorded, so no evidence landed where status ignores it.
+    // The evidence sits at the change's head, where status counts it, rather
+    // than at the head of the checkout the command was typed in.
     let events = stdout(repo.arc(&repo.root).args([
         "events",
         "--change",
@@ -2108,7 +2121,10 @@ fn a_final_probe_run_away_from_the_change_head_is_refused_like_a_gate() {
         "--type",
         "verification-recorded",
     ]));
-    assert!(events.trim().is_empty(), "{events}");
+    let recorded: serde_json::Value =
+        serde_json::from_str(events.lines().next().expect("the probe ran")).unwrap();
+    assert_eq!(recorded["revision"], repo.head(&worktree), "{recorded}");
+    assert_ne!(recorded["revision"], repo.head(&repo.root), "{recorded}");
 }
 
 /// A baseline probe is the one evidence kind that must sit off the change
@@ -2202,13 +2218,21 @@ fn a_detached_head_in_the_change_worktree_is_not_reported_as_having_no_checkout(
     repo.commit(&worktree, "work.txt", "work", "feat: work");
     git(&worktree, &["checkout", "--detach", "HEAD~1"]);
 
-    repo.arc(&worktree)
-        .args(["verify", "detached-here", "--gate", "alpha"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("is checked out here"))
-        .stderr(predicates::str::contains("git checkout arc/detached-here"))
-        .stderr(predicates::str::contains("has no checkout").not());
+    for cwd in [&worktree, &repo.root] {
+        repo.arc(cwd)
+            .args(["verify", "detached-here", "--gate", "alpha"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(format!(
+                "{} but that worktree's HEAD is not its branch head",
+                worktree.display()
+            )))
+            .stderr(predicates::str::contains(format!(
+                "git -C {} checkout arc/detached-here",
+                worktree.display()
+            )))
+            .stderr(predicates::str::contains("has no checkout").not());
+    }
 }
 
 /// The ledger records whatever worktree path it was given, so a change opened
@@ -2239,7 +2263,9 @@ fn a_worktree_recorded_through_a_symlink_still_diagnoses_the_wrong_checkout_stat
         .args(["verify", "linked-here", "--gate", "alpha"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("is checked out here"))
+        .stderr(predicates::str::contains(
+            "but that worktree's HEAD is not its branch head",
+        ))
         .stderr(predicates::str::contains("has no checkout").not());
 }
 
@@ -2907,4 +2933,84 @@ fn a_rebase_that_changes_what_ships_inherits_nothing() {
     assert_eq!(gate["result"], "pending", "{status}");
     assert_eq!(gate["green_at_head"], false, "{status}");
     assert!(gate["inherited_from"].is_null(), "{status}");
+}
+
+/// A gate command that fails unless it can see the change's own commit, so
+/// the evidence proves which tree was read rather than only which revision
+/// was recorded.
+fn commit_gate_reading(repo: &Repo, file: &str) {
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        format!("[gates.alpha]\ncommand = \"test -f {file}\"\n"),
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gates"]);
+}
+
+#[test]
+fn snapshot_verify_from_another_checkout_gates_the_changes_worktree() {
+    let repo = Repo::new();
+    commit_gate_reading(&repo, "anchor-run.txt");
+    let (_, worktree, head) = change_with_patchset(&repo, "anchor-run");
+
+    let out = repo
+        .arc(&repo.root)
+        .args(["snapshot", "anchor-run", "--verify"])
+        .output()
+        .unwrap();
+    let printed = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(0), "{printed}");
+    assert!(
+        printed.contains(&format!("running in {}", worktree.display())),
+        "the run names the checkout it happened in: {printed}"
+    );
+    assert!(printed.contains("gates: 1/1 pass"), "{printed}");
+
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", "anchor-run"]))).unwrap();
+    assert_eq!(status["gates"][0]["name"], "alpha", "{status}");
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "anchor-run",
+        "--type",
+        "verification-recorded",
+    ]));
+    let recorded: serde_json::Value =
+        serde_json::from_str(events.lines().next().expect("one gate ran")).unwrap();
+    assert_eq!(recorded["revision"], head, "{recorded}");
+}
+
+#[test]
+fn verifying_from_another_checkout_refuses_when_the_worktree_is_gone() {
+    let repo = Repo::new();
+    commit_gate_reading(&repo, "gone.txt");
+    let (change_id, worktree, _) = change_with_patchset(&repo, "gone");
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            &worktree.display().to_string(),
+        ],
+    );
+
+    repo.arc(&repo.root)
+        .args(["verify", "gone", "--gate", "alpha"])
+        .assert()
+        .failure()
+        .stderr(
+            predicates::str::contains(worktree.display().to_string()).and(
+                predicates::str::contains(format!(
+                    "git worktree add {} arc/gone",
+                    worktree.display()
+                )),
+            ),
+        );
+    assert!(change_id.starts_with("gone"), "{change_id}");
 }
