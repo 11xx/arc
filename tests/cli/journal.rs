@@ -10186,11 +10186,14 @@ fn outbox(repo: &Repo) -> PathBuf {
 }
 
 fn spool_files(repo: &Repo) -> Vec<String> {
-    let dir = outbox(repo);
+    spool_files_in(&outbox(repo))
+}
+
+fn spool_files_in(dir: &Path) -> Vec<String> {
     if !dir.is_dir() {
         return Vec::new();
     }
-    let mut names: Vec<String> = fs::read_dir(&dir)
+    let mut names: Vec<String> = fs::read_dir(dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
         .filter(|name| name.ends_with(".json"))
@@ -10999,4 +11002,100 @@ fn journal_title_and_an_authored_heading_outrank_the_slug() {
         fs::read_to_string(&file).unwrap(),
         "# Author's Heading\n\nbody.\n"
     );
+}
+
+/// A sandboxed executor spools into the worktree it is confined to, and that
+/// worktree is removed once the change lands. Snapshotting from the anchor
+/// files those writes with the identity each was spooled under.
+#[test]
+fn snapshot_promotes_the_spool_left_in_the_change_worktree() {
+    let repo = Repo::new();
+    let journal = journal_dir(&repo);
+    stdout(repo.arc(&repo.root).args(["begin", "spooled-snapshot"]));
+    let wt = repo.home.join(".worktrees/repo-spooled-snapshot");
+    repo.commit(&wt, "work.txt", "work\n", "feat: work");
+
+    stdout(
+        repo.arc(&wt)
+            .env("ARC_ACTOR", "executor")
+            .env("ARC_HARNESS", "codex")
+            .args([
+                "journal",
+                "todo",
+                "sandboxed",
+                "--body-file",
+                "-",
+                "--spool",
+            ])
+            .write_stdin("what the round deferred\n"),
+    );
+    let worktree_outbox = wt.join(".arc").join("outbox");
+    assert_eq!(spool_files_in(&worktree_outbox).len(), 1);
+    assert!(
+        spool_files(&repo).is_empty(),
+        "the write spools in the worktree, not the anchor"
+    );
+
+    let snapped = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_ACTOR", "lead")
+            .args(["snapshot", "spooled-snapshot"]),
+    );
+    assert!(snapped.contains("spool: 1 write(s)"), "{snapped}");
+    assert!(snapped.contains("promoted 1, kept 0"), "{snapped}");
+    assert!(
+        spool_files_in(&worktree_outbox).is_empty(),
+        "the promoted write leaves the outbox"
+    );
+
+    let events = journal_events(&journal);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["actor"], "executor", "{:?}", events[0]);
+    assert_eq!(events[0]["harness"], "codex", "{:?}", events[0]);
+    assert_eq!(events[0]["promoted_by"], "lead", "{:?}", events[0]);
+    let artifact = journal.join(events[0]["file"].as_str().unwrap());
+    assert_eq!(
+        fs::read_to_string(&artifact).unwrap(),
+        "# Sandboxed\n\nwhat the round deferred\n"
+    );
+}
+
+/// `--cleanup` deletes the change worktree, so integration files whatever is
+/// spooled there before the only copy goes with it.
+#[test]
+fn integrate_promotes_the_spool_before_removing_the_worktree() {
+    let repo = Repo::new();
+    let journal = journal_dir(&repo);
+    stdout(repo.arc(&repo.root).args(["begin", "spooled-integrate"]));
+    let wt = repo.home.join(".worktrees/repo-spooled-integrate");
+    repo.commit(&wt, "work.txt", "work\n", "feat: work");
+    stdout(repo.arc(&wt).args(["snapshot", "spooled-integrate"]));
+    repo.arc(&wt)
+        .args(["review", "spooled-integrate", "--verdict", "approved"])
+        .assert()
+        .success();
+    stdout(repo.arc(&wt).env("ARC_ACTOR", "executor").args([
+        "journal",
+        "log",
+        "sandboxed",
+        "--spool",
+        "a status note",
+    ]));
+    assert_eq!(spool_files_in(&wt.join(".arc").join("outbox")).len(), 1);
+
+    let integrated =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", "spooled-integrate", "--cleanup"]),
+        );
+    assert!(integrated.contains("spool: 1 write(s)"), "{integrated}");
+    assert!(integrated.contains("promoted 1, kept 0"), "{integrated}");
+    assert!(!wt.exists(), "the worktree is removed");
+
+    let events = journal_events(&journal);
+    let logged = events
+        .iter()
+        .find(|event| event["message"] == "a status note")
+        .unwrap_or_else(|| panic!("{events:?}"));
+    assert_eq!(logged["actor"], "executor", "{logged}");
 }
