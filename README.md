@@ -1429,10 +1429,38 @@ Environment variables override the file: `ARC_WORKTREES_DIR`,
 exactly one repository — highest precedence). `data_root` keys each
 repository by its slugged main path (the project-journal convention:
 `/home/x/code/y` → `-home-x-code-y`), so one root safely serves many
-repositories — useful for sandboxing: point the paths somewhere
-isolated and arc never writes outside them (worktrees, ledger) beyond
-ordinary Git operations in the repository itself. `arc config` prints
-the resolved paths as JSON.
+repositories. `arc config` prints the resolved paths as JSON, and
+`arc doctor` opens with them.
+
+### Sandbox
+
+`ARC_SANDBOX=<prefix>`, or `--sandbox <prefix>` on any command, stands in for
+the home directory wherever arc derives a default path, so one value moves
+every root arc writes: journal, registry, configuration, worktrees, temp, and
+the ledger wherever a `data_root` places it. A configured `~/…` path expands
+against the same prefix. A variable naming one exact directory — `AI_HOME`,
+`ARC_WORKTREES_DIR`, `ARC_DATA_ROOT`, `ARC_DATA_DIR`, `ARC_JOURNAL_DIR` — still
+means the directory it names: the prefix replaces defaults, not statements.
+The prefix must be absolute, and `--sandbox` exports the variable, so a gate,
+a hook, or a nested `arc` inherits the sandbox.
+
+The repository arc was pointed at is still read and written as a Git
+repository. So rehearsing something destructive — a history rewrite, a bulk
+debt discharge, a schema migration — runs in a copy:
+
+```
+arc sandbox clone ~/sandboxes/rewrite    # repository, ledger, journal, config
+ARC_SANDBOX=~/sandboxes/rewrite arc catchup   # from the copy's checkout
+arc sandbox diff ~/sandboxes/rewrite     # what its ledger, journal, refs gained
+arc sandbox discard ~/sandboxes/rewrite  # only where arc recorded a sandbox
+```
+
+The copy's refs are the source's under their own names, it has no remote to
+push back through, its objects are copied rather than hardlinked, and it
+inherits no path from the source's configuration — the prefix supplies every
+root instead. It carries committed state: uncommitted work is not copied, and
+an open change's recorded checkout is the source's until one is made in the
+sandbox.
 
 The committed `.arc/policy.toml` may set the same `[provenance]` table for a
 repository. `per-actor` compares the claim actor with the snapshot author and
@@ -1440,11 +1468,12 @@ committer; `shared` omits `provenance_mismatch` because that comparison does
 not apply. A delegated snapshot can instead declare its subject with
 `--on-behalf-of`.
 
-Before starting an executor in a sandbox, run `arc config --check-writable`.
+Before starting an executor in a restricted environment, run
+`arc config --check-writable`.
 It probes the ledger root, lock, event-path, and Git-ref writes without adding
 an event; `--json` emits `arc-writability/1` for automation and stops at the
 first blocked path. It also probes committing, in a throwaway repository so the
-target gains no commit, because a sandbox that cannot commit otherwise
+target gains no commit, because an environment that cannot commit otherwise
 discovers it only once a slice is ready to land.
 
 Committing and signing are reported apart, and only the writability checks
@@ -1964,8 +1993,10 @@ change ledger. Malformed events, store configuration, IDs, and missing open
 events are problems; orphaned temporary files and retention refs, missing open
 branches, long-expired claims, dependency cycles, and future event types are
 non-failing advice. Human output names each affected path or ref; JSON uses the
-versioned `arc-doctor/2` report. The exit status is 0 for a clean or advice-only
-ledger and 1 when problems are present.
+versioned `arc-doctor/3` report. Both open with the roots the invocation reads
+and writes and whether a sandbox is in force, because every finding is a
+statement about state at those paths. The exit status is 0 for a clean or
+advice-only ledger and 1 when problems are present.
 
 ## Roadmap
 

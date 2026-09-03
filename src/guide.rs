@@ -95,6 +95,33 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   Nothing more is said while the stamp holds — that is what verified means;
   the row speaks up once the anchor head has moved past it.
 
+SANDBOX (rehearse something destructive)
+  arc doctor             Opens with the roots this invocation reads and
+                         writes, and whether a sandbox is in force.
+  arc sandbox clone <prefix>
+                         Copy this project — repository, ledger, journal,
+                         configuration — into the prefix, so the copy answers
+                         the way the source does.
+  ARC_SANDBOX=<prefix> arc <command>   (or --sandbox <prefix>, on any command)
+                         Every root arc writes by default lives under the
+                         prefix: journal, registry, configuration, worktrees,
+                         temp, and the ledger wherever a data root places it.
+  arc sandbox diff <prefix>      What the copy's ledger events, journal
+                         events, and refs differ by, in both directions.
+  arc sandbox discard <prefix>   Remove it.
+
+  The prefix stands in for the home directory, so one value moves every root
+  at once and a configured `~/…` path follows it. A variable naming one exact
+  directory — AI_HOME, ARC_WORKTREES_DIR, ARC_DATA_ROOT, ARC_DATA_DIR,
+  ARC_JOURNAL_DIR — still means the directory it names: the prefix replaces
+  defaults, not statements.
+
+  The repository arc was pointed at is still read and written as a Git
+  repository, which is why a rehearsal runs in a clone rather than beside the
+  original. A clone carries committed state: uncommitted work is not copied,
+  and an open change's recorded checkout is the source's until one is made in
+  the sandbox.
+
 SETTLE A QUESTION (before it is work)
   arc journal note <topic> --kind discussion --body-file -
   arc journal position <file> --body-file - [--stance <for|against|amend>]
