@@ -480,6 +480,13 @@ RULES THAT CHANGE WHAT YOU DO
     `spooled: <path>`; `arc journal spool --promote` files it later with the
     identity it was spooled with. `arc config --check-writable` says which of
     the two will happen before you write.
+  - An artifact is named `<timestamp>-<topic>-<kind>.md` at second resolution,
+    so two writes of one topic and kind in one second want one name. The second
+    takes a numeric suffix — `-2`, `-3` — before the extension, and every write
+    prints the name it got. A name counts as taken in cold storage as well as
+    the live directory, so archiving the first never frees its name for a
+    second that would then collide with it. The suffix names no part of the
+    artifact: its timestamp, topic and kind read exactly as written.
   - `arc run dispatch` names exactly one subject: `--change <id>`, `--fork
     <slug>`, or `--range <base>..<head>`. A round is its ordinal within that
     subject, so the loop of bounded rounds records on a fork or a bare commit

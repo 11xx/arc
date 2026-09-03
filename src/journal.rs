@@ -1269,7 +1269,10 @@ fn spool_write(
 ) -> Result<i32> {
     let dir = outbox_dir(&ctx.cwd)?;
     ensure_outbox(&dir)?;
-    let path = dir.join(format!("{stamp}-{kind}-{topic}.json"));
+    let name = uniquified(&format!("{stamp}-{kind}-{topic}.json"), |candidate| {
+        dir.join(candidate).exists()
+    })?;
+    let path = dir.join(&name);
     let spooled = SpooledWrite {
         schema: SPOOL_SCHEMA.to_string(),
         filename: event.file.clone(),
@@ -1278,8 +1281,8 @@ fn spool_write(
     };
     let contents = serde_json::to_string_pretty(&spooled)?;
     // Exclusive creation, like the artifact write it stands in for: a
-    // same-second collision must fail loudly rather than overwrite a write
-    // nobody has filed yet.
+    // collision that survives name allocation must fail loudly rather than
+    // overwrite a write nobody has filed yet.
     {
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new()
@@ -1412,15 +1415,20 @@ fn promote_one(
     promoter: &str,
 ) -> Result<String> {
     let mut filed = String::new();
-    if let (Some(filename), Some(body)) = (&spooled.filename, &spooled.body) {
-        let (_, _) = check_artifact_name(filename)?;
-        let path = journal.join(filename);
-        create_artifact(journal, &path, body)?;
-        filed = format!(" -> {}", path.display());
-    }
     // The identity is carried verbatim: promotion records who filed the write,
     // never who moved it. The promoting caller is named beside it.
     let mut event = spooled.event.clone();
+    if let (Some(filename), Some(body)) = (&spooled.filename, &spooled.body) {
+        let (_, _) = check_artifact_name(filename)?;
+        // The name is allocated where the journal is reachable, which is here
+        // rather than where the write was parked: what a spooled artifact
+        // collides with is whatever was filed while it waited.
+        let filename = allocate_artifact_name(journal, filename)?;
+        let path = journal.join(&filename);
+        create_artifact(journal, &path, body)?;
+        event.file = Some(filename);
+        filed = format!(" -> {}", path.display());
+    }
     event.promoted_by = Some(promoter.to_string());
     append_event(ctx, journal, &event)?;
     Ok(filed)
@@ -3049,7 +3057,7 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
 
     let now = Utc::now();
     let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
-    let filename = format!("{stamp}-{topic}-{}.md", kind.as_str());
+    let filename = allocate_artifact_name(&dir, &format!("{stamp}-{topic}-{}.md", kind.as_str()))?;
     let path = dir.join(&filename);
 
     let contents = match title {
@@ -3080,10 +3088,50 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
     Ok(0)
 }
 
+/// How many artifacts may share one timestamp, topic and kind before a name
+/// stops being derivable. Far above any plausible burst, and low enough that a
+/// caller looping on a jammed directory fails instead of spinning.
+const MAX_SAME_NAME_ARTIFACTS: u32 = 1000;
+
+/// The first free name in the series `<stem>.<ext>`, `<stem>-2.<ext>`,
+/// `<stem>-3.<ext>`, …, given a predicate saying which names are taken.
+fn uniquified(name: &str, taken: impl Fn(&str) -> bool) -> Result<String> {
+    if !taken(name) {
+        return Ok(name.to_string());
+    }
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, extension)) => (stem, format!(".{extension}")),
+        None => (name, String::new()),
+    };
+    for suffix in 2..=MAX_SAME_NAME_ARTIFACTS {
+        let candidate = format!("{stem}-{suffix}{extension}");
+        if !taken(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    bail!("cannot derive a free name for {name}: {MAX_SAME_NAME_ARTIFACTS} are already taken")
+}
+
+/// The name an artifact is filed under, given the name its timestamp, topic
+/// and kind derive.
+///
+/// A timestamp is second-resolution, so two artifacts filed in the same second
+/// under one topic and kind derive one name; the second is filed under a
+/// numeric suffix. A name counts as taken in either the hot or the cold
+/// directory, so an artifact archived between the two writes cannot free its
+/// own name for a successor that would then collide with it on archival.
+fn allocate_artifact_name(hot: &Path, filename: &str) -> Result<String> {
+    let cold = archive_dir(hot);
+    uniquified(filename, |candidate| {
+        hot.join(candidate).exists() || cold.join(candidate).exists()
+    })
+}
+
 /// Write one artifact, creating the journal directory if it is absent.
 ///
-/// Exclusive creation: a same-second same-topic/kind collision must fail
-/// loudly rather than silently overwrite a queued artifact.
+/// Exclusive creation: the caller allocates a free name, and a collision that
+/// survives that allocation must fail loudly rather than silently overwrite a
+/// queued artifact.
 fn create_artifact(dir: &Path, path: &Path, contents: &str) -> Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(dir)
@@ -7424,8 +7472,25 @@ struct Catchup {
 }
 
 /// Split `<ts>-<topic>-<kind>.md` into its parts.
+/// The stem without its trailing `-<digits>` disambiguator, when it carries
+/// one over a recognized kind.
+fn strip_name_suffix(stem: &str) -> Option<&str> {
+    let (head, suffix) = stem.rsplit_once('-')?;
+    if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    recognized_journal_kinds()
+        .any(|kind| head.strip_suffix(kind).is_some_and(|t| t.ends_with('-')))
+        .then_some(head)
+}
+
 pub(crate) fn parse_artifact_name(name: &str) -> Option<(String, String, String)> {
     let stem = name.strip_suffix(".md")?;
+    // A numeric suffix distinguishes artifacts that derive one name; it names
+    // no part of the identity, so it is stripped before the identity is read.
+    // Only a suffix whose removal uncovers a recognized kind is one: a kind
+    // arc does not know is read as written.
+    let stem = strip_name_suffix(stem).unwrap_or(stem);
     let first = stem.find('-')?;
     let ts = &stem[..first];
     let remainder = &stem[first + 1..];
@@ -9727,13 +9792,13 @@ fn transition(
     }
 
     // The successor's body: the caller's body when given, otherwise the
-    // source's own body under a heading that names what changed. Same-second
-    // same-topic collisions are impossible against the source (kinds differ),
-    // but a same-second sibling could collide — exclusive create fails loudly
-    // rather than overwriting.
+    // source's own body under a heading that names what changed. A same-second
+    // sibling of the same topic and kind derives the same name, so the name is
+    // allocated against both stores before anything refers to it.
     let now = Utc::now();
     let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
-    let successor_name = format!("{stamp}-{topic}-{}.md", to.as_str());
+    let derived_name = format!("{stamp}-{topic}-{}.md", to.as_str());
+    let successor_name = allocate_artifact_name(&dir, &derived_name)?;
     let successor_path = dir.join(&successor_name);
     let source_bytes = std::fs::read(&source_path)
         .with_context(|| format!("cannot read {}", source_path.display()))?;
@@ -9819,16 +9884,13 @@ fn transition(
         return Ok(0);
     }
 
-    let successor_name =
-        find_transition_artifact(&dir, &topic, to.as_str(), filename)?.unwrap_or(successor_name);
+    let successor_name = match find_transition_artifact(&dir, &topic, to.as_str(), filename)? {
+        Some(found) => found,
+        // Allocated again under the transition lock, so a name taken between
+        // the first derivation and the lock cannot be written over.
+        None => allocate_artifact_name(&dir, &derived_name)?,
+    };
     let successor_path = dir.join(&successor_name);
-    if successor_path.exists() && artifact_supersedes(&successor_path).as_deref() != Some(filename)
-    {
-        bail!(
-            "cannot create {} (an artifact with this second's timestamp already exists)",
-            successor_path.display()
-        );
-    }
 
     // The relation is the durable intent. If the next write is interrupted,
     // the journal doctor can name it and a retry can finish it without
@@ -9999,6 +10061,32 @@ mod tests {
                 "20260717T062830Z".to_string(),
                 "topic-unknown".to_string(),
                 "kind".to_string()
+            ))
+        );
+        // A numeric suffix disambiguates a name; it is no part of the kind.
+        assert_eq!(
+            parse_artifact_name("20260717T062830Z-topic-note-2.md"),
+            Some((
+                "20260717T062830Z".to_string(),
+                "topic".to_string(),
+                "note".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_artifact_name("20260717T062830Z-topic-feature-request-11.md"),
+            Some((
+                "20260717T062830Z".to_string(),
+                "topic".to_string(),
+                "feature-request".to_string()
+            ))
+        );
+        // Only over a recognized kind: a kind arc does not know reads as written.
+        assert_eq!(
+            parse_artifact_name("20260717T062830Z-topic-unknown-3.md"),
+            Some((
+                "20260717T062830Z".to_string(),
+                "topic-unknown".to_string(),
+                "3".to_string()
             ))
         );
         assert_eq!(parse_artifact_name("journal.md"), None);
