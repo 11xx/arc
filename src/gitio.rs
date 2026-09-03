@@ -751,11 +751,17 @@ fn tag_object_text(tag: &RawTag) -> Vec<u8> {
 
 /// Store an object of the given type and answer with its name.
 fn hash_object(cwd: &Path, kind: &str, object: &[u8]) -> Result<String> {
-    let args = ["hash-object", "-t", kind, "-w", "--stdin"].map(String::from);
-    let out = piped_output("git", &args, object, |command| {
-        command.current_dir(cwd);
-    })?;
+    let out = git_piped(cwd, &["hash-object", "-t", kind, "-w", "--stdin"], object)?;
     Ok(String::from_utf8_lossy(&out).trim().to_string())
+}
+
+/// Git with `input` on its standard input, answering with its standard
+/// output. The editor pins every other Git call here gets apply to these too.
+fn git_piped(cwd: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
+    let owned: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+    let mut command = git_command();
+    command.current_dir(cwd);
+    piped_output_with(command, "git", &owned, input)
 }
 
 /// An armored detached signature over `payload`, made by the OpenPGP program
@@ -822,12 +828,22 @@ fn piped_output(
     setup: impl FnOnce(&mut Command),
 ) -> Result<Vec<u8>> {
     let mut command = Command::new(program);
+    setup(&mut command);
+    piped_output_with(command, program, args, input)
+}
+
+/// The same, for a caller that has already built the command.
+fn piped_output_with(
+    mut command: Command,
+    program: &str,
+    args: &[String],
+    input: &[u8],
+) -> Result<Vec<u8>> {
     command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    setup(&mut command);
     let mut child = command
         .spawn()
         .with_context(|| format!("cannot run {program}"))?;
@@ -1247,6 +1263,53 @@ pub fn primary_worktree(cwd: &Path) -> Result<PathBuf> {
 pub fn update_ref(cwd: &Path, name: &str, value: &str) -> Result<()> {
     git(cwd, &["update-ref", name, value])?;
     Ok(())
+}
+
+/// One ref move: the value the ref is expected to hold, and the one it is to
+/// hold instead.
+pub struct RefUpdate {
+    pub name: String,
+    pub old: String,
+    pub new: String,
+}
+
+/// Move every named ref in one Git transaction: either all of them land or
+/// none of them does.
+///
+/// Each move states the value its ref is expected to hold, so a ref something
+/// else moved in the meantime fails the whole transaction rather than being
+/// overwritten. Moving refs one at a time instead leaves a repository whose
+/// refs sit on two histories whenever anything interrupts the sequence, and
+/// no reader can tell which of them is the one that was meant.
+pub fn update_refs(cwd: &Path, updates: &[RefUpdate]) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let mut input = String::from("start\n");
+    for RefUpdate { name, old, new } in updates {
+        input.push_str(&format!("update {name} {new} {old}\n"));
+    }
+    // `prepare` takes the lock on every ref and `commit` releases it, so a
+    // failure anywhere in between is a transaction Git rolls back itself.
+    input.push_str("prepare\ncommit\n");
+    git_piped(cwd, &["update-ref", "--stdin"], input.as_bytes())?;
+    Ok(())
+}
+
+/// What a ref holds, or nothing where the repository has no such ref. An
+/// annotated tag answers with its tag object, which is what its ref holds.
+pub fn ref_value(cwd: &Path, name: &str) -> Result<Option<String>> {
+    let mut command = git_command();
+    command
+        .args(["rev-parse", "--verify", "--quiet", name])
+        .current_dir(cwd);
+    let out = command_output(&mut command)
+        .with_context(|| format!("failed to read {name} in {}", cwd.display()))?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok((!value.is_empty()).then_some(value))
 }
 
 pub fn delete_ref(cwd: &Path, name: &str) -> Result<()> {

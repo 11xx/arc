@@ -49,6 +49,44 @@ enum Step {
 /// objects, and one names a sixteenth of every object in the repository.
 const ABBREVIATION_FLOOR: usize = 7;
 
+/// One ref move a rewrite has planned: the value the ref held when the
+/// rewrite read it, and the value it is to hold instead.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RefMove {
+    pub old: String,
+    pub new: String,
+}
+
+/// A rewrite's whole result, written down before any of it is applied.
+///
+/// A rewrite recreates commits, then moves refs onto them, then records the
+/// map. Each of those is durable and the sequence is not, so an interruption
+/// between any two leaves a repository that describes two histories at once.
+/// The intent is what makes the sequence finishable: the commits already
+/// exist, the refs each name one of two known values, and the map is here to
+/// be recorded — so the only thing left to decide is which steps remain.
+///
+/// Without it, the second run has to recreate the commits, which signs them
+/// afresh and yields different ids: a second successor for every commit the
+/// first run already moved a ref onto, and a recorded map that contradicts
+/// itself.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RewriteIntent {
+    pub schema_version: u32,
+    /// The branch whose history this rewrites.
+    pub branch: String,
+    /// The oldest commit the rewrite recreated.
+    pub from: String,
+    /// The reason and tool the mapping event is to carry.
+    pub reason: String,
+    pub tool: Option<String>,
+    /// The map exactly as the event will record it.
+    pub mapping: BTreeMap<String, Option<String>>,
+    /// Every ref the rewrite moves, the rewritten branch included.
+    pub refs: BTreeMap<String, RefMove>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Every recorded rewrite, flattened into one old-to-fate mapping.
 #[derive(Debug, Default, Clone)]
 pub struct RewriteMap {

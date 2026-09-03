@@ -200,6 +200,60 @@ impl Store {
         Ok(events)
     }
 
+    /// Where a rewrite writes down what it is about to do, beside the events
+    /// its map will become. One repository, one rewrite at a time.
+    pub fn rewrite_intent_path(&self) -> PathBuf {
+        self.root.join("repository").join("rewrite-intent.json")
+    }
+
+    /// The rewrite an interrupted run left to be finished, if there is one.
+    pub fn rewrite_intent(&self) -> Result<Option<crate::rewrite::RewriteIntent>> {
+        let path = self.rewrite_intent_path();
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", path.display()))
+            }
+        };
+        // An unreadable intent is fatal rather than absent: it stands between
+        // a half-applied rewrite and the run that would finish it, and
+        // treating it as absent is exactly the second rewrite it exists to
+        // prevent.
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .with_context(|| format!("malformed rewrite intent {}", path.display()))
+    }
+
+    /// Write down a rewrite before any of it is applied. Fsynced and linked
+    /// into place, because a rewrite that outlived its own intent file is the
+    /// case the file exists to rule out.
+    pub fn write_rewrite_intent(&self, intent: &crate::rewrite::RewriteIntent) -> Result<()> {
+        let path = self.rewrite_intent_path();
+        create_private_dir_all(
+            path.parent()
+                .context("the rewrite intent path has no parent directory")?,
+        )?;
+        let mut body = serde_json::to_vec_pretty(intent)?;
+        body.push(b'\n');
+        write_exclusive(&path, &body).with_context(|| {
+            format!(
+                "a rewrite is already in progress; finish it with `arc rewrite sign`, or remove {}",
+                path.display()
+            )
+        })
+    }
+
+    /// Drop the intent, which is what says the rewrite finished.
+    pub fn clear_rewrite_intent(&self) -> Result<()> {
+        let path = self.rewrite_intent_path();
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("cannot remove {}", path.display())),
+        }
+    }
+
     /// Serialize state-derived transitions for one change across processes.
     pub fn lock_transition(&self, change_id: &str) -> Result<TransitionLock> {
         ids::validate_id_component(change_id)?;

@@ -11,6 +11,7 @@
 //! revision forward is `rewrite`, and recording the map is `history`.
 
 use super::*;
+use crate::rewrite::{RefMove, RewriteIntent};
 use std::collections::BTreeMap;
 
 pub struct SignArgs {
@@ -37,8 +38,20 @@ pub struct SignArgs {
 /// recorded revision forward.
 pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
     let cwd = ctx.cwd.clone();
+    let store = ctx.store()?;
     let branch = gitio::current_branch(&cwd)?
         .context("HEAD is detached; check out the branch whose history is being rewritten")?;
+    // An interrupted rewrite is finished rather than repeated. Repeating it
+    // recreates the same commits with fresh signatures, so the map would name
+    // a second successor for every commit the first run already moved a ref
+    // onto — a record that contradicts itself about every commit in range.
+    //
+    // This comes before the cleanliness check because an interruption after
+    // the refs moved leaves the index describing the commit the branch moved
+    // off, which reads as a worktree full of edits.
+    if let Some(intent) = store.rewrite_intent()? {
+        return resume(ctx, &store, &branch, &intent);
+    }
     // A rewrite that moved the branch out from under uncommitted work would
     // leave the operator holding a diff against a commit that no longer
     // exists.
@@ -120,38 +133,40 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         .get(&head)
         .and_then(|new| new.clone())
         .unwrap_or_else(|| head.clone());
-    let moves = plan_ref_moves(&cwd, &branch, &from, &mapping, sign, args.retag)?;
-    let event_id = history::record_mapping(
-        ctx,
-        mapping.clone(),
-        format!("re-signed {branch} from {}", short(&from)),
-        Some("arc rewrite sign".to_string()),
-    )?;
-    // The record goes in before the refs move, so an interruption leaves a
-    // repository whose recorded rewrite describes commits that are all
-    // present. The other order leaves refs pointing at commits nothing
-    // resolves back to.
-    for (name, value) in &moves.moved {
-        gitio::update_ref(&cwd, name, value)?;
-    }
-    for retag in &moves.retagged {
-        gitio::update_ref(&cwd, &retag.name, &retag.new)?;
-    }
-    gitio::update_ref(&cwd, &format!("refs/heads/{branch}"), &new_head)?;
-    // The branch just moved under the checkout, whose index still describes
-    // the commit it moved off. Nothing about the tree changed, so this only
-    // teaches the index which commit it is looking at.
-    gitio::git(&cwd, &["reset", "--mixed", "--quiet", &new_head])?;
+    let mut moves = plan_ref_moves(&cwd, &branch, &from, &mapping, sign, args.retag)?;
+    // The branch moves inside the same transaction as everything else. Moving
+    // it last, on its own, is what leaves the refs arc keeps on one history
+    // and the branch on another.
+    moves.moves.insert(
+        format!("refs/heads/{branch}"),
+        RefMove {
+            old: head.clone(),
+            new: new_head.clone(),
+        },
+    );
+    let intent = RewriteIntent {
+        schema_version: crate::model::SCHEMA_VERSION,
+        branch: branch.clone(),
+        from: from.clone(),
+        reason: format!("re-signed {branch} from {}", short(&from)),
+        tool: Some("arc rewrite sign".to_string()),
+        mapping: mapping.clone(),
+        refs: moves.moves.clone(),
+        created_at: chrono::Utc::now(),
+    };
+    // Everything above only wrote objects nothing points at, which change
+    // nothing about what the repository says. From here the rewrite becomes
+    // visible, so what it is about to do is on disk first.
+    store.write_rewrite_intent(&intent)?;
+    interrupted_after("intent")?;
+    let event_id = apply(ctx, &store, &intent)?;
 
     println!(
         "{} rewritten on {branch}; head is now {}",
         plural(mapping.len(), "commit"),
         short(&new_head)
     );
-    println!(
-        "{} moved",
-        plural(moves.moved.len() + moves.retagged.len() + 1, "ref")
-    );
+    println!("{} moved", plural(intent.refs.len(), "ref"));
     println!("rewrite recorded as {event_id}");
     for retag in &moves.retagged {
         println!(
@@ -184,6 +199,138 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         );
     }
     Ok(0)
+}
+
+/// Finish a rewrite an earlier run left half-applied.
+///
+/// The intent names every commit the rewrite produced, so nothing is
+/// recreated: whatever remains is a ref to move, a map to record, or both.
+fn resume(ctx: &Ctx, store: &Store, branch: &str, intent: &RewriteIntent) -> Result<i32> {
+    if branch != intent.branch {
+        bail!(
+            "an unfinished rewrite of {} is on record; check that branch out to finish it, or \
+             remove {}",
+            intent.branch,
+            store.rewrite_intent_path().display()
+        );
+    }
+    println!(
+        "finishing the rewrite of {} from {}, recorded {}",
+        intent.branch,
+        short(&intent.from),
+        intent.created_at.to_rfc3339()
+    );
+    let event_id = apply(ctx, store, intent)?;
+    println!("rewrite recorded as {event_id}");
+    Ok(0)
+}
+
+/// Apply an intent, from wherever it got to: move the refs that have not
+/// moved, record the map unless it is recorded already, then drop the intent.
+///
+/// Answers with the event holding the map, whether this call recorded it or
+/// an interrupted one already had.
+fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent) -> Result<String> {
+    let cwd = &ctx.cwd;
+    // A commit the intent names has to still be here. Objects nothing points
+    // at are pruned, and a map recorded over pruned successors would name
+    // commits no reader can reach.
+    let mut pruned: Vec<&str> = Vec::new();
+    for successor in intent.mapping.values().flatten() {
+        if !gitio::commit_exists(cwd, successor)? {
+            pruned.push(successor);
+        }
+    }
+    if !pruned.is_empty() {
+        bail!(
+            "{} of the commits this rewrite produced are no longer in this repository ({}); the \
+             rewrite cannot be finished. Remove {} and run it again.",
+            pruned.len(),
+            pruned
+                .iter()
+                .take(3)
+                .map(|revision| short(revision))
+                .collect::<Vec<_>>()
+                .join(", "),
+            store.rewrite_intent_path().display()
+        );
+    }
+
+    let mut pending: Vec<gitio::RefUpdate> = Vec::new();
+    for (name, RefMove { old, new }) in &intent.refs {
+        match gitio::ref_value(cwd, name)?.as_deref() {
+            // Already where the rewrite is taking it, from a run that got
+            // this far.
+            Some(value) if value == new => {}
+            Some(value) if value == old => pending.push(gitio::RefUpdate {
+                name: name.clone(),
+                old: old.clone(),
+                new: new.clone(),
+            }),
+            // Something other than this rewrite decided where this ref
+            // points. Choosing between that decision and the rewrite's is
+            // not arc's to make.
+            other => bail!(
+                "{name} holds {}, which is neither what the rewrite read ({}) nor what it writes \
+                 ({}); settle it by hand, then remove {}",
+                other.map_or("nothing".to_string(), |value| short(value).to_string()),
+                short(old),
+                short(new),
+                store.rewrite_intent_path().display()
+            ),
+        }
+    }
+    gitio::update_refs(cwd, &pending)?;
+    interrupted_after("refs")?;
+
+    let event_id = match recorded_as(store, intent)? {
+        Some(event_id) => event_id,
+        None => history::record_mapping(
+            ctx,
+            intent.mapping.clone(),
+            intent.reason.clone(),
+            intent.tool.clone(),
+        )?,
+    };
+    // The map is recorded and every ref names a commit it describes, so
+    // nothing is left to finish.
+    store.clear_rewrite_intent()?;
+
+    // The branch moved under the checkout, whose index still describes the
+    // commit it moved off. Nothing about the tree changed, so this only
+    // teaches the index which commit it is looking at.
+    let branch_ref = format!("refs/heads/{}", intent.branch);
+    if let Some(new_head) = intent.refs.get(&branch_ref) {
+        gitio::git(cwd, &["reset", "--mixed", "--quiet", &new_head.new])?;
+    }
+    Ok(event_id)
+}
+
+/// The event already holding this intent's map, if an interrupted run
+/// recorded it. Recording it a second time would put two events on record
+/// claiming one rewrite.
+fn recorded_as(store: &Store, intent: &RewriteIntent) -> Result<Option<String>> {
+    Ok(store
+        .load_repository_events()?
+        .into_iter()
+        .find(|event| {
+            matches!(
+                &event.payload,
+                Payload::HistoryRewritten { mapping, .. } if mapping == &intent.mapping
+            )
+        })
+        .map(|event| event.event_id))
+}
+
+/// A fault the test suite injects to stop a rewrite between two of its
+/// phases, so the resume path is exercised on a repository a real
+/// interruption could have left. Unset, which is every run that is not a
+/// test, this does nothing.
+fn interrupted_after(phase: &str) -> Result<()> {
+    if std::env::var("ARC_REWRITE_INTERRUPT").as_deref() == Ok(phase) {
+        bail!("interrupted after {phase} by ARC_REWRITE_INTERRUPT");
+    }
+    Ok(())
 }
 
 /// The oldest commit that is not signed by the key being signed with.
@@ -268,9 +415,10 @@ fn map_parents(
 
 /// Which refs a rewrite moves, and which it reports instead.
 struct RefMoves {
-    /// Refname to the commit it moves to. The branch being rewritten is not
-    /// here: it moves last, after everything else is in place.
-    moved: Vec<(String, String)>,
+    /// Every ref that moves, refname to the values it moves between. The
+    /// branch being rewritten is added by the caller, so the plan and the
+    /// transaction that applies it are the same set.
+    moves: BTreeMap<String, RefMove>,
     /// Refs naming a rewritten commit that arc will not move, each with why.
     left: Vec<String>,
     /// Branches whose own commits sit on top of the rewritten range, so
@@ -311,7 +459,7 @@ fn plan_ref_moves(
     retag: bool,
 ) -> Result<RefMoves> {
     let mut moves = RefMoves {
-        moved: Vec::new(),
+        moves: BTreeMap::new(),
         left: Vec::new(),
         stranded: Vec::new(),
         retagged: Vec::new(),
@@ -319,7 +467,7 @@ fn plan_ref_moves(
     let successor = |old: &str| mapping.get(old).and_then(|new| new.clone());
     for (name, value) in gitio::list_refs(cwd, "refs/arc/")? {
         if let Some(new) = successor(&value) {
-            moves.moved.push((name, new));
+            moves.moves.insert(name, RefMove { old: value, new });
         }
     }
     let branch_ref = format!("refs/heads/{branch}");
@@ -346,11 +494,17 @@ fn plan_ref_moves(
             continue;
         };
         if kind == "commit" {
-            moves.moved.push((name, new));
+            moves.moves.insert(name, RefMove { old: object, new });
         } else if retag {
-            moves
-                .retagged
-                .push(retag_onto(cwd, &name, &object, &new, sign)?);
+            let retagged = retag_onto(cwd, &name, &object, &new, sign)?;
+            moves.moves.insert(
+                name,
+                RefMove {
+                    old: retagged.old.clone(),
+                    new: retagged.new.clone(),
+                },
+            );
+            moves.retagged.push(retagged);
         } else {
             moves.left.push(format!(
                 "{name} is an annotated tag naming a replaced commit; `git describe` and the \
