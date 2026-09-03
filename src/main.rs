@@ -920,9 +920,10 @@ enum Cmd {
     /// `eval "$(arc env)"`.
     ///
     /// Detection reads the session variable a harness exports for itself —
-    /// `CLAUDE_SESSION_ID`, `CODEX_THREAD_ID`, `OPENCODE_SESSION`, or
-    /// `PI_SESSION_ID` — and then that harness's own session store for the
-    /// model, and the effort where the store records one. Not every harness
+    /// `CLAUDE_SESSION_ID` or `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`,
+    /// `OPENCODE_SESSION`, or `PI_SESSION_ID` — and then that harness's own
+    /// session store for the model, and the effort where the store records
+    /// one. Not every harness
     /// exports one, and a harness that does may not in every mode. OpenCode
     /// v2 exports none and is recognized by `OPENCODE_TERMINAL` or its
     /// process ancestry, printing the harness export with the session left

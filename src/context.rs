@@ -19,8 +19,14 @@ use std::process::Command;
 
 /// Environment variables recognized for opt-in identity detection, in
 /// precedence order. Explicit identity always wins over detected values.
-const HARNESS_ENV: [(&str, &str); 4] = [
+///
+/// Claude has two spellings: `CLAUDE_CODE_SESSION_ID` is what Claude Code
+/// exports into its tool shells, and `CLAUDE_SESSION_ID` is the hand-set
+/// form. The hand-set one comes first so a deliberately exported id beats
+/// the ambient one.
+const HARNESS_ENV: [(&str, &str); 5] = [
     ("CLAUDE_SESSION_ID", "claude"),
+    ("CLAUDE_CODE_SESSION_ID", "claude"),
     ("CODEX_THREAD_ID", "codex"),
     ("OPENCODE_SESSION", "opencode"),
     ("PI_SESSION_ID", "pi"),

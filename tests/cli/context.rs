@@ -195,6 +195,43 @@ fn env_detects_claude_model_from_transcript() {
 }
 
 #[test]
+fn env_detects_claude_code_session_variable() {
+    let repo = Repo::new();
+    let session = "66666666-7777-8888-9999-000000000000";
+    let project = repo.home.join(".claude/projects/-home-lobo");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{session}.jsonl")),
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fable-5\"}}\n",
+    )
+    .unwrap();
+
+    // Claude Code exports `CLAUDE_CODE_SESSION_ID`, not `CLAUDE_SESSION_ID`;
+    // the same session store lookup serves either spelling.
+    repo.arc(&repo.root)
+        .arg("env")
+        .env_remove("CLAUDE_SESSION_ID")
+        .env("CLAUDE_CODE_SESSION_ID", session)
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n"
+        ));
+}
+
+#[test]
+fn env_prefers_hand_set_claude_session_over_ambient() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("CLAUDE_SESSION_ID", "hand-set")
+        .env("CLAUDE_CODE_SESSION_ID", "ambient")
+        .assert()
+        .success()
+        .stdout("export ARC_HARNESS='claude' ARC_SESSION='hand-set'\n");
+}
+
+#[test]
 fn env_detects_codex_model_and_effort_from_rollout() {
     let repo = Repo::new();
     let session = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
@@ -337,6 +374,7 @@ fn env_detects_opencode2_by_process_ancestry() {
         .arg("env")
         .env("HOME", &repo.home)
         .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("OPENCODE_SESSION")
         .env_remove("PI_SESSION_ID")
