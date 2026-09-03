@@ -1552,6 +1552,13 @@ cannot happen. It never satisfies the emptiness check on its own: the
 mechanical half is the cheap half, and what a successor cannot derive — what
 was learned, what is open, the next action — is what the author is there to
 write.
+Every artifact opens on a heading, because a queue row reads its description
+from the first one and a row that names nothing is a row nobody picks up.
+`--title <t>` writes it; a body that already opens on a heading keeps its own;
+a body that opens on prose is headed from its topic slug, announced on the
+diagnostic stream so stdout stays the artifact path. `journal correct --field
+title` amends a heading afterwards.
+
 `journal open` lists the primary queue first,
 then separate later and feature-request sections, annotating each item with how
 long it has waited (for discussions, since the latest typed position; otherwise

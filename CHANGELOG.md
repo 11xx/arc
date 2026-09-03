@@ -240,6 +240,13 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- Every journal artifact opens on a heading. A kind write with no `--title`
+  whose body opens on prose is headed from its topic slug, announced on the
+  diagnostic stream so stdout stays the artifact path; a body that already
+  opens on a heading and an explicit `--title` are untouched. A queue row
+  reads its description from that heading, and a row naming nothing is one
+  nobody picks up.
+
 - `arc journal verified` run inside a fork worktree stamps the fork's own
   head and records `verified_scope: fork:<slug>`, and the open-queue row
   reads `[verified at <rev> in fork <slug> ...]`. A fork carries commits the

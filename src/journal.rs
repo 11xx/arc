@@ -434,7 +434,8 @@ pub struct KindWrite {
     /// Body source: a file path, or '-' for stdin (written verbatim)
     #[arg(long)]
     pub body_file: Option<String>,
-    /// Optional title; when set, a `# <title>` heading is prepended
+    /// Title for the `# <title>` heading; a body opening on prose is
+    /// otherwise headed from the topic slug
     #[arg(long)]
     pub title: Option<String>,
     /// Scaffold template prepended to the body (.arc/templates/<name>.md or a
@@ -954,7 +955,8 @@ pub enum JournalCmd {
         /// heading naming what changed
         #[arg(long)]
         body_file: Option<String>,
-        /// Optional title; when set, a `# <title>` heading is prepended
+        /// Title for the `# <title>` heading; a body opening on prose is
+        /// otherwise headed from the topic slug
         #[arg(long)]
         title: Option<String>,
         /// Why the kind is changing, recorded in the transition event
@@ -3003,6 +3005,58 @@ pub fn feature_request(ctx: &Ctx, write: KindWrite) -> Result<i32> {
     write_kind(ctx, JournalKind::FeatureRequest, write)
 }
 
+/// Whether an authored body opens on a Markdown heading.
+///
+/// Queue rows read an artifact's description from its first heading, so a body
+/// that opens on prose is what leaves a row naming nothing.
+fn opens_with_heading(body: &str) -> bool {
+    body.lines()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| line.trim_start().starts_with('#'))
+}
+
+/// The heading a kebab-case topic reads as: `queue-row-blank` becomes
+/// `Queue row blank`.
+fn heading_from_topic(topic: &str) -> String {
+    let words = topic.replace('-', " ");
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => words,
+    }
+}
+
+/// The artifact's contents: the authored body under a heading, with any
+/// derived prelude between them.
+///
+/// An explicit title always wins. A body that opens on prose is given a
+/// heading derived from its topic, because an artifact whose queue row names
+/// nothing is one nobody finds again; the derivation is announced so the
+/// author can correct it while the artifact is still in front of them. The
+/// heading is decided from the authored body alone, so a prelude the tool
+/// derived never stands in for one the author wrote.
+fn headed(topic: &str, title: Option<&str>, prelude: Option<&str>, body: &str) -> String {
+    let heading = match title {
+        Some(title) => Some(title.to_string()),
+        None if opens_with_heading(body) => None,
+        None => {
+            let derived = heading_from_topic(topic);
+            // The notice goes beside the result rather than into it: stdout is
+            // the artifact's path, which callers capture.
+            eprintln!("heading derived from slug: # {derived}");
+            Some(derived)
+        }
+    };
+    let body = match prelude {
+        Some(prelude) => crate::commands::scaffold::prepended(prelude, body),
+        None => body.to_string(),
+    };
+    match heading {
+        Some(heading) => format!("# {heading}\n\n{body}"),
+        None => body,
+    }
+}
+
 fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) -> Result<i32> {
     let topic = write.topic.as_str();
     let title = write.title.as_deref();
@@ -3047,23 +3101,15 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
     if body.trim().is_empty() && title.is_none_or(|t| t.trim().is_empty()) {
         bail!("nothing to record: pass --body-file, --scaffold, or --title");
     }
-    // A derived prelude sits above the body and is never enough on its own:
-    // machine-readable state is the cheap half, and an artifact carrying only
-    // that says nothing a successor could not read from the repository.
-    let body = match prelude {
-        Some(prelude) => crate::commands::scaffold::prepended(prelude, &body),
-        None => body,
-    };
-
     let now = Utc::now();
     let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
     let filename = allocate_artifact_name(&dir, &format!("{stamp}-{topic}-{}.md", kind.as_str()))?;
     let path = dir.join(&filename);
 
-    let contents = match title {
-        Some(t) => format!("# {t}\n\n{body}"),
-        None => body,
-    };
+    // A derived prelude sits above the body and is never enough on its own:
+    // machine-readable state is the cheap half, and an artifact carrying only
+    // that says nothing a successor could not read from the repository.
+    let contents = headed(topic, title, prelude, &body);
     let mut event = JournalEvent::base(ctx, now, topic, "note");
     event.file = Some(filename.clone());
     event.title = title.map(str::to_string);
@@ -9814,10 +9860,7 @@ fn transition(
             format!("{inherited}{heading}\n")
         }
     };
-    let contents = match title {
-        Some(t) => format!("# {t}\n\n{body}"),
-        None => body,
-    };
+    let contents = headed(&topic, title, None, &body);
     let supersession = format!("supersedes: {filename}\n\n",);
     if dry_run {
         println!("successor: {}", successor_path.display());
