@@ -346,6 +346,12 @@ pub enum JournalCmd {
     Handoff {
         #[command(flatten)]
         write: KindWrite,
+        /// Prepend a `## State` section read from the repository: branch,
+        /// head, distance from the change's target, dirty or clean, the
+        /// worktree, the change and its claim, open queue depth, and the
+        /// installed build. Refused outside a Git repository
+        #[arg(long)]
+        derive: bool,
     },
     /// Record a plan before it becomes work
     Plan {
@@ -741,7 +747,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
         JournalCmd::Note { write, kind } => write_kind(ctx, kind, write),
         JournalCmd::FeatureRequest { write } => write_kind(ctx, JournalKind::FeatureRequest, write),
         JournalCmd::Todo { write } => write_kind(ctx, JournalKind::Todo, write),
-        JournalCmd::Handoff { write } => write_kind(ctx, JournalKind::Handoff, write),
+        JournalCmd::Handoff { write, derive } => handoff(ctx, write, derive),
         JournalCmd::Plan { write } => write_kind(ctx, JournalKind::Plan, write),
         JournalCmd::Conclusion { write } => write_kind(ctx, JournalKind::Conclusion, write),
         JournalCmd::Decision { write } => write_kind(ctx, JournalKind::Decision, write),
@@ -2151,7 +2157,172 @@ pub(crate) fn write_kind(ctx: &Ctx, kind: JournalKind, write: KindWrite) -> Resu
         write.title.as_deref(),
         write.scaffold.as_deref(),
         write.no_scaffold,
+        None,
     )
+}
+
+/// Write a handoff, optionally with its mechanical half derived rather than
+/// transcribed. The derivation runs before the body is read: with
+/// `--body-file -` a caller standing outside a repository would otherwise
+/// wait on stdin for a write that cannot happen.
+fn handoff(ctx: &Ctx, write: KindWrite, derive: bool) -> Result<i32> {
+    let state = match derive {
+        true => Some(derived_state(ctx, Utc::now())?),
+        false => None,
+    };
+    note(
+        ctx,
+        &write.topic,
+        JournalKind::Handoff,
+        write.body_file.as_deref(),
+        write.title.as_deref(),
+        write.scaffold.as_deref(),
+        write.no_scaffold,
+        state.as_deref(),
+    )
+}
+
+/// The mechanical half of a handoff, read from the repository at the moment
+/// of writing. Branch, head, distance from the target, worktree, change,
+/// queue depth and installed build are all derivable, and transcribing them
+/// by hand is most of what makes a handoff expensive enough to skip; deriving
+/// them leaves a session spending its effort on what it learned.
+///
+/// A fact this repository cannot answer renders as `unknown` rather than
+/// being dropped, because an absent line is indistinguishable from a fact
+/// nobody thought to record. The section is Markdown to be scanned, one fact
+/// per line, and nothing here is meant to be parsed back.
+fn derived_state(ctx: &Ctx, now: DateTime<Utc>) -> Result<String> {
+    let cwd = ctx.cwd.as_path();
+    let worktree = gitio::toplevel(cwd).map_err(|_| {
+        anyhow::anyhow!(
+            "--derive reads repository state; {} is not inside a Git repository",
+            cwd.display()
+        )
+    })?;
+
+    let change = infer_change_state(cwd);
+    let target = change.as_ref().map(|state| state.target_branch.clone());
+    let (ahead, behind) = match &target {
+        Some(target) => (
+            gitio::ahead_count(cwd, target, "HEAD").ok(),
+            gitio::ahead_count(cwd, "HEAD", target).ok(),
+        ),
+        None => (None, None),
+    };
+    let repository = gitio::primary_worktree(cwd).ok();
+    let tree = match gitio::is_clean(cwd) {
+        Ok(true) => Some("clean".to_string()),
+        Ok(false) => Some("dirty".to_string()),
+        Err(_) => None,
+    };
+    let open_items = journal_queue_depth(ctx);
+
+    let mut section = format!(
+        "## State (derived at {})\n\n",
+        now.to_rfc3339_opts(SecondsFormat::Secs, true)
+    );
+    let mut fact = |label: &str, value: Option<String>| {
+        section.push_str(&format!(
+            "- {label}: {}\n",
+            value.unwrap_or_else(|| "unknown".to_string())
+        ));
+    };
+    fact(
+        "repository",
+        repository.as_ref().map(|path| path.display().to_string()),
+    );
+    fact("branch", gitio::current_branch(cwd).ok().flatten());
+    fact(
+        "head",
+        gitio::head_if_present(cwd)
+            .ok()
+            .flatten()
+            .map(|head| short_revision(&head).to_string()),
+    );
+    fact("target", target);
+    fact("ahead", ahead.map(|count| count.to_string()));
+    fact("behind", behind.map(|count| count.to_string()));
+    fact("tree", tree);
+    fact("worktree", Some(worktree.display().to_string()));
+    fact(
+        "change",
+        change.as_ref().map(|state| state.change_id.clone()),
+    );
+    fact("stage", change.as_ref().map(stage_label));
+    fact("claim", change.as_ref().map(|state| claim_label(state, now)));
+    fact("open journal items", open_items.map(|n| n.to_string()));
+    fact("installed", Some(installed_label(cwd)));
+    Ok(section)
+}
+
+/// The change this checkout belongs to, or nothing. A handoff is written
+/// wherever a session stops, including outside every recorded worktree, so
+/// failing to find one is an answer rather than an error.
+fn infer_change_state(cwd: &Path) -> Option<ChangeState> {
+    let store = Store::discover(cwd).ok()?;
+    let change_id = crate::context::infer_change(&store, cwd).ok().flatten()?;
+    let events = store.load_events(&change_id).ok()?;
+    state::reduce(&events).ok()
+}
+
+/// How far a change has got, named the way every other view names it: the
+/// stage its claim is progressing through, or `open` before any claim has
+/// declared one.
+fn stage_label(state: &ChangeState) -> String {
+    match state
+        .claim
+        .as_ref()
+        .and_then(|claim| claim.progress.as_ref())
+    {
+        Some(progress) => format!("{:?}", progress.stage).to_lowercase(),
+        None => "open".to_string(),
+    }
+}
+
+/// Who holds the change and whether that hold still counts, so a successor
+/// knows whether it may pick the work up or must wait for a release.
+fn claim_label(state: &ChangeState, now: DateTime<Utc>) -> String {
+    let Some(claim) = state.claim.as_ref() else {
+        return "none".to_string();
+    };
+    let timing = state::claim_timing_at(claim, now);
+    let standing = match (timing.active, timing.stale) {
+        (false, _) => "expired",
+        (true, true) => "stale",
+        (true, false) => "active",
+    };
+    format!(
+        "{} via {} ({standing})",
+        claim.owner.actor, claim.owner.harness
+    )
+}
+
+/// How many actionable items the journal queue is carrying, which says how
+/// much a successor is walking into beyond this artifact.
+fn journal_queue_depth(ctx: &Ctx) -> Option<usize> {
+    let (open, _, _) = collect_open(ctx, None).ok()?.tier_counts();
+    Some(open)
+}
+
+/// The `arc` on PATH beside the repository head, because the build a
+/// successor will run is not necessarily the one this checkout would produce.
+fn installed_label(cwd: &Path) -> String {
+    let installed = std::process::Command::new("arc")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    let head = gitio::primary_worktree(cwd)
+        .and_then(|primary| gitio::head_if_present(&primary))
+        .ok()
+        .flatten()
+        .map(|head| short_revision(&head).to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("{installed} (repository head {head})")
 }
 
 /// File a feature request: the `arc fr` alias for
@@ -2171,6 +2342,7 @@ fn note(
     title: Option<&str>,
     scaffold: Option<&str>,
     no_scaffold: bool,
+    prelude: Option<&str>,
 ) -> Result<i32> {
     if !valid_topic(topic) {
         bail!("topic {topic:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
@@ -2202,6 +2374,13 @@ fn note(
     if body.trim().is_empty() && title.is_none_or(|t| t.trim().is_empty()) {
         bail!("nothing to record: pass --body-file, --scaffold, or --title");
     }
+    // A derived prelude sits above the body and is never enough on its own:
+    // machine-readable state is the cheap half, and an artifact carrying only
+    // that says nothing a successor could not read from the repository.
+    let body = match prelude {
+        Some(prelude) => crate::commands::scaffold::prepended(prelude, &body),
+        None => body,
+    };
 
     let dir = resolve_dir(&ctx.cwd)?;
     std::fs::create_dir_all(&dir)
@@ -7258,14 +7437,7 @@ fn change_annotation(changes: &[ChangeState], topic: &str, filename: &str) -> Op
     let change = changes
         .iter()
         .find(|state| state.slug == topic || state.journal_ref.as_deref() == Some(filename))?;
-    let status = match change
-        .claim
-        .as_ref()
-        .and_then(|claim| claim.progress.as_ref())
-    {
-        Some(progress) => format!("{:?}", progress.stage).to_lowercase(),
-        None => "open".to_string(),
-    };
+    let status = stage_label(change);
     Some(ChangeRef {
         id: change.change_id.clone(),
         status,
