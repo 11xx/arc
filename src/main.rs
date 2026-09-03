@@ -639,32 +639,43 @@ enum Cmd {
         #[arg(long, conflicts_with = "tag")]
         json: bool,
     },
-    /// Acquire or renew an advisory executor claim
+    /// Acquire or renew an advisory executor claim on a change or a journal
+    /// artifact
     Claim {
-        /// Change to act on. Omitted, it is inferred from the current branch,
-        /// then from the worktree the command runs in
+        /// Change to act on, or a journal artifact filename ending in `.md`.
+        /// Omitted, the change is inferred from the current branch, then from
+        /// the worktree the command runs in
         change: Option<String>,
         /// Lease duration (positive integer with s, m, or h suffix; default 2h)
         #[arg(long)]
         ttl: Option<String>,
-        /// Override one stage budget as <name>=<duration> (repeatable)
+        /// Override one stage budget as <name>=<duration> (repeatable; a
+        /// change's stages are budgeted, an artifact's lease is not)
         #[arg(long = "stage-budget")]
         stage_budget: Vec<String>,
-        /// Explicitly displace an active stale claim
+        /// Explicitly displace a claim that may be taken over: a stale one on
+        /// a change, an expired one on an artifact
         #[arg(long)]
         takeover: bool,
     },
-    /// Release the current advisory executor claim
+    /// Release the advisory executor claim on a change or a journal artifact
     ReleaseClaim {
-        /// Change to act on. Omitted, it is inferred from the current branch,
-        /// then from the worktree the command runs in
+        /// Change to act on, or a journal artifact filename ending in `.md`.
+        /// Omitted, the change is inferred from the current branch, then from
+        /// the worktree the command runs in
         change: Option<String>,
+        /// How work on an artifact stopped (artifacts only; default paused).
+        /// `paused` leaves it open for a successor, `abandoned` ends this
+        /// approach, `expired` closes a lease that has run out
+        #[arg(long, value_parser = ["paused", "abandoned", "expired"])]
+        outcome: Option<String>,
     },
     /// Record typed executor progress (requires an owned live claim)
     #[command(allow_missing_positional = true)]
     Stage {
-        /// Change to act on. Omitted, it is inferred from the current branch,
-        /// then from the worktree the command runs in
+        /// Change to act on, or a journal artifact filename ending in `.md`.
+        /// Omitted, the change is inferred from the current branch, then from
+        /// the worktree the command runs in
         change: Option<String>,
         #[arg(value_enum)]
         stage: commands::StageArg,
@@ -1768,6 +1779,12 @@ fn run(cli: Cli) -> Result<i32> {
         let store = store::Store::discover(&ctx.cwd)?;
         context::resolve_change_or_infer(&store, &ctx.cwd, selected.as_deref())
     };
+    // Which store a subject positional addresses. Only an explicit name can
+    // be an artifact: an omitted subject is inferred from the branch, and a
+    // branch names a change.
+    let artifact = |ctx: &Ctx, subject: Option<&str>| -> Option<String> {
+        subject.and_then(|subject| journal::artifact_subject(&ctx.cwd, subject))
+    };
 
     match cmd {
         Cmd::Begin {
@@ -2157,14 +2174,36 @@ fn run(cli: Cli) -> Result<i32> {
             ttl,
             stage_budget,
             takeover,
-        } => {
-            let change = infer(change.as_deref())?;
-            commands::claim(&ctx, &change, ttl, stage_budget, takeover)
-        }
-        Cmd::ReleaseClaim { change } => {
-            let change = infer(change.as_deref())?;
-            commands::release_claim(&ctx, &change)
-        }
+        } => match artifact(&ctx, change.as_deref()) {
+            Some(file) => {
+                if !stage_budget.is_empty() {
+                    bail!(
+                        "--stage-budget applies to a change; an artifact's lease is the \
+                         whole of what expires"
+                    );
+                }
+                journal::claim_artifact(&ctx, &file, ttl.as_deref(), takeover)
+            }
+            None => {
+                let change = infer(change.as_deref())?;
+                commands::claim(&ctx, &change, ttl, stage_budget, takeover)
+            }
+        },
+        Cmd::ReleaseClaim { change, outcome } => match artifact(&ctx, change.as_deref()) {
+            Some(file) => {
+                journal::release_artifact_claim(&ctx, &file, outcome.as_deref().unwrap_or("paused"))
+            }
+            None => {
+                if outcome.is_some() {
+                    bail!(
+                        "--outcome applies to a journal artifact; a change claim is released \
+                         without one because the change records its own lifecycle"
+                    );
+                }
+                let change = infer(change.as_deref())?;
+                commands::release_claim(&ctx, &change)
+            }
+        },
         Cmd::Stage {
             change,
             stage,
@@ -2173,12 +2212,19 @@ fn run(cli: Cli) -> Result<i32> {
             note_file,
             blocker,
         } => {
-            let change = infer(change.as_deref())?;
             let note = match (note, note_file) {
                 (None, None) => None,
                 (note, note_file) => Some(commands::read_body(note, note_file)?),
             };
-            commands::stage(&ctx, &change, stage, note, blocker, claim)
+            match artifact(&ctx, change.as_deref()) {
+                Some(file) => {
+                    journal::stage_artifact(&ctx, &file, stage.into(), note, blocker, claim)
+                }
+                None => {
+                    let change = infer(change.as_deref())?;
+                    commands::stage(&ctx, &change, stage, note, blocker, claim)
+                }
+            }
         }
         Cmd::Snapshot {
             change,

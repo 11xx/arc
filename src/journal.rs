@@ -16,7 +16,8 @@
 use crate::commands::Ctx;
 use crate::config;
 use crate::gitio;
-use crate::state::{self, ChangeState};
+use crate::model::{BlockerRef, ClaimStage, DisplacedClaim};
+use crate::state::{self, ChangeState, ClaimIdentity, ClaimState, StageProgress};
 use crate::store::Store;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
@@ -680,6 +681,32 @@ pub enum JournalCmd {
         #[arg(long, requires = "settle_by")]
         delegate: Option<String>,
     },
+    /// Append a work checkpoint to an artifact this session has claimed:
+    /// where the work stands, what comes next, and what a successor should
+    /// read. Requires a live claim held by this identity; a correction is
+    /// another checkpoint naming the one it supersedes
+    Checkpoint {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// Body source: a file path, or '-' for stdin (direction, remaining
+        /// work, and rejected approaches, written verbatim below a
+        /// tool-computed `### Work checkpoint` heading)
+        #[arg(long)]
+        body_file: String,
+        /// The action a successor should take next
+        #[arg(long)]
+        next: Option<String>,
+        /// The command that says whether the work is good
+        #[arg(long)]
+        gate: Option<String>,
+        /// What the work waits on: `change:<id>`, or free text for anything
+        /// outside arc
+        #[arg(long)]
+        blocker: Option<String>,
+        /// The checkpoint this one corrects; both stay readable
+        #[arg(long)]
+        supersedes: Option<String>,
+    },
     /// List the scaffolds a write can prepend, and print one before using
     /// it. A journal artifact is append-only, so choosing between
     /// `--scaffold`, a kind's default, and `--no-scaffold` blind makes a
@@ -1072,6 +1099,22 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             body_file,
         } => retract(ctx, &filename, &target, &body_file),
         JournalCmd::Scaffolds { show, json } => scaffolds(ctx, show.as_deref(), json),
+        JournalCmd::Checkpoint {
+            filename,
+            body_file,
+            next,
+            gate,
+            blocker,
+            supersedes,
+        } => checkpoint(
+            ctx,
+            &filename,
+            &body_file,
+            next.as_deref(),
+            gate.as_deref(),
+            blocker.as_deref(),
+            supersedes.as_deref(),
+        ),
         JournalCmd::Questions { json } => questions(ctx, json),
         JournalCmd::Events { limit } => events(ctx, limit),
         JournalCmd::Catchup {
@@ -3518,9 +3561,16 @@ fn verified(ctx: &Ctx, filename: &str, note: Option<&str>) -> Result<i32> {
     Ok(0)
 }
 
+/// The exact bytes a block adds to an artifact. Kept apart from the write so
+/// a caller that must record what it appended digests the same text the file
+/// received rather than a reconstruction of it.
+fn block_bytes(heading: &str, body: &str) -> String {
+    format!("\n{heading}\n\n{}\n", body.trim_end_matches('\n'))
+}
+
 fn append_block(path: &Path, heading: &str, body: &str) -> Result<()> {
     use std::io::Write;
-    let block = format!("\n{heading}\n\n{}\n", body.trim_end_matches('\n'));
+    let block = block_bytes(heading, body);
     let mut f = std::fs::OpenOptions::new()
         .append(true)
         .open(path)
@@ -4758,6 +4808,42 @@ pub(crate) struct JournalEvent {
     /// journal directly, which is what every write without it meant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     promoted_by: Option<String>,
+    /// Stable ID of a claim on the artifact named by `file`. Every event that
+    /// keeps a claim alive names the exact claim it belongs to, so a late or
+    /// misdirected write refreshes nothing: activity on one claim is never
+    /// evidence that a different one is still worked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    claim_id: Option<String>,
+    /// The claim a `claim-set` displaced, recorded in the shape the ledger
+    /// uses so a takeover reads the same whichever store it happened in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    displaced: Option<DisplacedClaim>,
+    /// Typed progress recorded by `claim-stage`, from the ledger's stage
+    /// vocabulary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stage: Option<String>,
+    /// Stable ID of a work checkpoint, carried by the block it appended so
+    /// the visible Markdown and the typed event name the same one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoint_id: Option<String>,
+    /// The action a checkpoint says comes next.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next: Option<String>,
+    /// The command a checkpoint names as its gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gate: Option<String>,
+    /// What a stage or checkpoint says the work waits on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocker: Option<String>,
+    /// The earlier checkpoint this one corrects. A correction is another
+    /// checkpoint rather than an edit, so both remain readable and a reader
+    /// can see that the first was contested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    supersedes_checkpoint: Option<String>,
+    /// Digest of the block a checkpoint appended, so a later reader can tell
+    /// a block that still says what it said from one rewritten underneath.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    digest: Option<String>,
 }
 
 /// Every field a correction may name, over all targets. Which of them a given
@@ -4927,6 +5013,15 @@ impl JournalEvent {
             source: None,
             item_key: None,
             promoted_by: None,
+            claim_id: None,
+            displaced: None,
+            stage: None,
+            checkpoint_id: None,
+            next: None,
+            gate: None,
+            blocker: None,
+            supersedes_checkpoint: None,
+            digest: None,
         }
     }
 
@@ -5072,6 +5167,52 @@ impl JournalEvent {
                         .amend_target()
                         .is_some_and(|target| target.retractable())
             }
+            // A claim names the artifact it occupies and the lease it holds.
+            // Without both it says somebody is working without saying on what
+            // or until when, which no reader can act on.
+            "claim-set" => {
+                self.artifact_file() && self.names_claim() && self.ttl_seconds.is_some()
+            }
+            // Activity is bound to one exact claim. An event that names no
+            // claim cannot refresh one, because "whichever is current" is how
+            // an unrelated write keeps abandoned work alive.
+            "claim-renewed" => self.artifact_file() && self.names_claim(),
+            "claim-stage" => {
+                self.artifact_file()
+                    && self.names_claim()
+                    && self.stage.as_deref().is_some_and(|stage| {
+                        parse_claim_stage(stage).is_some_and(|parsed| {
+                            parsed != ClaimStage::BlockedOn || self.blocker.is_some()
+                        })
+                    })
+            }
+            // A release says how the work ended. `promoted` is written only by
+            // the change that took the artifact up; the rest are what an owner
+            // may declare.
+            "claim-released" => {
+                self.artifact_file()
+                    && self.names_claim()
+                    && self
+                        .outcome
+                        .as_deref()
+                        .is_some_and(|value| CLAIM_RELEASE_OUTCOMES.contains(&value))
+            }
+            // A checkpoint is a block on the artifact and an event about it.
+            // The digest is what binds the two: without it the event describes
+            // prose that may since have been rewritten.
+            "checkpoint" => {
+                self.artifact_file()
+                    && self.names_claim()
+                    && self
+                        .checkpoint_id
+                        .as_deref()
+                        .is_some_and(valid_checkpoint_id)
+                    && self.digest.as_deref().is_some_and(valid_digest)
+                    && self
+                        .supersedes_checkpoint
+                        .as_deref()
+                        .is_none_or(valid_checkpoint_id)
+            }
             "lane-opened" => self.ttl_seconds.is_some() && self.scope.is_some(),
             "lane-renewed" => true,
             "lane-closed" => self
@@ -5096,6 +5237,18 @@ impl JournalEvent {
         self.target.as_deref().and_then(AmendTarget::parse)
     }
 
+    /// Whether `file` names a journal artifact rather than arbitrary text.
+    /// A claim on a name no artifact has is a claim on nothing.
+    fn artifact_file(&self) -> bool {
+        self.file
+            .as_deref()
+            .is_some_and(|file| parse_artifact_name(file).is_some())
+    }
+
+    fn names_claim(&self) -> bool {
+        self.claim_id.as_deref().is_some_and(valid_claim_id)
+    }
+
     fn file_is_discussion(&self) -> bool {
         self.file.as_deref().is_some_and(|file| {
             parse_artifact_name(file)
@@ -5108,6 +5261,48 @@ fn valid_question_id(value: &str) -> bool {
     value.strip_prefix("q-").is_some_and(|suffix| {
         !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_alphanumeric())
     })
+}
+
+/// Every closure a `claim-released` event may declare. `promoted` is reserved
+/// for the change that takes the artifact up and is never offered to a caller
+/// releasing by hand; consumption ends a claim without an owner outcome at
+/// all, so there is no `completed` here to invent one.
+const CLAIM_RELEASE_OUTCOMES: [&str; 4] = ["paused", "abandoned", "expired", "promoted"];
+
+fn valid_claim_id(value: &str) -> bool {
+    prefixed_id(value, "claim-")
+}
+
+fn valid_checkpoint_id(value: &str) -> bool {
+    prefixed_id(value, "cp-")
+}
+
+fn prefixed_id(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_alphanumeric())
+    })
+}
+
+fn valid_digest(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// The ledger's stage vocabulary, read back from an event. Artifact claims
+/// record progress in the same words change claims do, so a reader moving
+/// between the two stores is never asked to learn a second set.
+fn parse_claim_stage(value: &str) -> Option<ClaimStage> {
+    [
+        ClaimStage::Started,
+        ClaimStage::SpecRead,
+        ClaimStage::Implementing,
+        ClaimStage::Verifying,
+        ClaimStage::BlockedOn,
+        ClaimStage::Snapshotted,
+    ]
+    .into_iter()
+    .find(|stage| stage.as_str() == value)
 }
 
 fn valid_position_id(value: &str) -> bool {
@@ -5685,6 +5880,739 @@ fn render_event(event: &JournalEvent) -> String {
         line.push_str(&format!(" [promoted by {promoted_by}]"));
     }
     line
+}
+
+/// The facility marker under which artifact claims are recorded. An artifact
+/// filed before it can say nothing about whether anybody worked on it; one
+/// filed after it, carrying no claim events, was never started.
+const ARTIFACT_CLAIM_CAPABILITY: &str = "artifact-claims";
+
+/// The lease a claim takes when the caller names no other, matching the
+/// ledger's default so a claim means the same span in either store.
+const DEFAULT_ARTIFACT_CLAIM_TTL: u64 = 2 * 60 * 60;
+
+/// One checkpoint recorded against a claim.
+#[derive(Clone, Serialize)]
+pub(crate) struct ArtifactCheckpoint {
+    pub(crate) checkpoint_id: String,
+    pub(crate) ts: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) next: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) gate: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) blocker: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) supersedes_checkpoint: Option<String>,
+    pub(crate) digest: String,
+}
+
+/// How a claim stopped being worked.
+///
+/// Owner closure and effective termination are distinct facts. An owner who
+/// releases says why; an artifact consumed, transitioned, or taken up by a
+/// change ends every claim on it without anybody declaring an outcome, and
+/// inventing one would credit the dead owner with a decision they never made.
+#[derive(Clone, Serialize)]
+pub(crate) struct ClaimClosure {
+    /// The closure the owner declared, when the owner ended it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) outcome: Option<String>,
+    /// The lifecycle event that ended it, when something other than the owner
+    /// did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ended_by: Option<String>,
+    pub(crate) ts: String,
+}
+
+/// One claim on one journal artifact.
+///
+/// The lease itself is a [`ClaimState`], the same value a change claim
+/// reduces to, so both are timed by [`state::claim_timing_at`] and neither
+/// store carries its own idea of when a lease has run out.
+#[derive(Clone, Serialize)]
+pub(crate) struct ArtifactClaim {
+    pub(crate) file: String,
+    #[serde(flatten)]
+    pub(crate) state: ClaimState,
+    /// The blocker reference as the caller wrote it, beside the typed form
+    /// the shared state carries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) blocker: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) displaced: Option<DisplacedClaim>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) checkpoints: Vec<ArtifactCheckpoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) closure: Option<ClaimClosure>,
+}
+
+impl ArtifactClaim {
+    pub(crate) fn is_open(&self) -> bool {
+        self.closure.is_none()
+    }
+
+    /// The checkpoint a successor should read: the newest one no later
+    /// checkpoint corrects.
+    pub(crate) fn tip_checkpoints(&self) -> Vec<&ArtifactCheckpoint> {
+        let superseded: HashSet<&str> = self
+            .checkpoints
+            .iter()
+            .filter_map(|checkpoint| checkpoint.supersedes_checkpoint.as_deref())
+            .collect();
+        self.checkpoints
+            .iter()
+            .filter(|checkpoint| !superseded.contains(checkpoint.checkpoint_id.as_str()))
+            .collect()
+    }
+}
+
+/// Whether an artifact can be picked up, in one word.
+///
+/// Tier, blockers, and open questions are their own fields elsewhere: folding
+/// them in here would make one enum answer several questions at once and
+/// none of them legibly.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Availability {
+    /// Nobody holds it.
+    Available,
+    /// Somebody holds a lease that has not run out.
+    Occupied,
+    /// A lease is held and has run out, so it may be taken over.
+    Reclaimable,
+    /// The artifact has been consumed; no claim on it can be worked.
+    Terminal,
+}
+
+impl Availability {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Occupied => "occupied",
+            Self::Reclaimable => "reclaimable",
+            Self::Terminal => "terminal",
+        }
+    }
+}
+
+/// What is known about who has worked an artifact.
+///
+/// An artifact older than the facility is not an artifact nobody worked; it
+/// is one whose history was never recorded, and the two must not read alike.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ClaimHistory {
+    Unknown,
+    NeverStarted,
+}
+
+/// The identity a claim event records: whoever the invocation represented,
+/// falling back to whoever ran it. A lead claiming for an executor records
+/// both, and it is the executor who holds the claim.
+fn claim_owner(event: &JournalEvent) -> ClaimIdentity {
+    ClaimIdentity {
+        actor: event
+            .on_behalf_of
+            .clone()
+            .or_else(|| event.actor.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
+        harness: event.harness.clone(),
+        session: event.session.clone(),
+    }
+}
+
+/// The caller's own claim identity, in the shape ownership is compared in.
+fn caller_claim_identity(ctx: &Ctx) -> ClaimIdentity {
+    let (harness, session) = identity(ctx);
+    ClaimIdentity {
+        actor: ctx
+            .on_behalf_of
+            .clone()
+            .or_else(|| declared_actor(ctx))
+            .unwrap_or_else(|| "unknown".to_string()),
+        harness,
+        session,
+    }
+}
+
+/// A blocker reference in the ledger's typed shape. A reference naming an
+/// open change is that change; anything else is external to arc, which is
+/// what the free text beside it is for.
+fn artifact_blocker_ref(raw: &str) -> BlockerRef {
+    match raw.split_once(':') {
+        Some(("change", change_id)) if !change_id.is_empty() => BlockerRef::Change {
+            change_id: change_id.to_string(),
+        },
+        _ => BlockerRef::External,
+    }
+}
+
+/// Which lifecycle event ended the claims open on an artifact when it reached
+/// one. A change taking the artifact up is named apart from an ordinary
+/// consumption because a successor reads them differently: one says the work
+/// moved into the ledger, the other says it was disposed of.
+fn terminal_kind(event: &JournalEvent) -> Option<&'static str> {
+    match event.event.as_str() {
+        "consumed" => Some(
+            if event.outcome.as_deref() == Some("superseded")
+                && event
+                    .note
+                    .as_deref()
+                    .is_some_and(|note| note.starts_with("change "))
+            {
+                "change-opened"
+            } else {
+                "consumed"
+            },
+        ),
+        "transition" => Some("transition"),
+        _ => None,
+    }
+}
+
+/// Every claim recorded on one artifact, oldest first.
+///
+/// Only events naming a claim's exact ID move it: an unrelated write by the
+/// same session is not evidence that the work is still being done, and
+/// treating it as activity is how an abandoned lease stays live forever.
+fn artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClaim> {
+    let mut claims: Vec<ArtifactClaim> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    for event in events.iter().filter(|event| event.known()) {
+        let Some(timestamp) = event.timestamp() else {
+            continue;
+        };
+        // A terminal event ends every claim still open at that point, and is
+        // not addressed to any one of them.
+        if event.file.as_deref() == Some(file)
+            || event.supersedes.as_deref() == Some(file)
+        {
+            if let Some(kind) = terminal_kind(event) {
+                for claim in claims.iter_mut().filter(|claim| claim.is_open()) {
+                    claim.closure = Some(ClaimClosure {
+                        outcome: None,
+                        ended_by: Some(kind.to_string()),
+                        ts: event.ts.clone(),
+                    });
+                }
+                continue;
+            }
+        }
+        if event.file.as_deref() != Some(file) {
+            continue;
+        }
+        let Some(claim_id) = event.claim_id.as_deref() else {
+            continue;
+        };
+        if event.event == "claim-set" {
+            // A displaced claim ends here. Nothing else would close it, and a
+            // lease nobody can renew that still reads as held would occupy the
+            // artifact forever.
+            if let Some(displaced) = &event.displaced {
+                if let Some(previous) = index
+                    .get(&displaced.claim_id)
+                    .copied()
+                    .and_then(|at| claims.get_mut(at))
+                    .filter(|claim| claim.is_open())
+                {
+                    previous.closure = Some(ClaimClosure {
+                        outcome: None,
+                        ended_by: Some("displaced".to_string()),
+                        ts: event.ts.clone(),
+                    });
+                }
+            }
+            index.insert(claim_id.to_string(), claims.len());
+            claims.push(ArtifactClaim {
+                file: file.to_string(),
+                state: ClaimState {
+                    claim_id: claim_id.to_string(),
+                    owner: claim_owner(event),
+                    ttl_seconds: event.ttl_seconds.unwrap_or(DEFAULT_ARTIFACT_CLAIM_TTL),
+                    // Artifact work is not staged against per-stage budgets:
+                    // its lease is the whole of what expires.
+                    stage_budgets: std::collections::BTreeMap::new(),
+                    claimed_at: timestamp,
+                    last_activity_at: timestamp,
+                    progress: None,
+                },
+                blocker: None,
+                displaced: event.displaced.clone(),
+                checkpoints: Vec::new(),
+                closure: None,
+            });
+            continue;
+        }
+        let Some(claim) = index
+            .get(claim_id)
+            .copied()
+            .and_then(|at| claims.get_mut(at))
+            .filter(|claim| claim.is_open())
+        else {
+            continue;
+        };
+        match event.event.as_str() {
+            "claim-renewed" => claim.state.last_activity_at = timestamp,
+            "claim-stage" => {
+                let Some(stage) = event.stage.as_deref().and_then(parse_claim_stage) else {
+                    continue;
+                };
+                claim.blocker = event.blocker.clone();
+                claim.state.progress = Some(StageProgress {
+                    stage,
+                    note: event.note.clone(),
+                    blocker: event.blocker.as_deref().map(artifact_blocker_ref),
+                    changed_at: timestamp,
+                });
+                claim.state.last_activity_at = timestamp;
+            }
+            "checkpoint" => {
+                claim.checkpoints.push(ArtifactCheckpoint {
+                    checkpoint_id: event.checkpoint_id.clone().unwrap_or_default(),
+                    ts: event.ts.clone(),
+                    next: event.next.clone(),
+                    gate: event.gate.clone(),
+                    blocker: event.blocker.clone(),
+                    supersedes_checkpoint: event.supersedes_checkpoint.clone(),
+                    digest: event.digest.clone().unwrap_or_default(),
+                });
+                claim.state.last_activity_at = timestamp;
+            }
+            "claim-released" => {
+                claim.closure = Some(ClaimClosure {
+                    outcome: event.outcome.clone(),
+                    ended_by: None,
+                    ts: event.ts.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+    claims
+}
+
+/// The claims on an artifact that nothing has ended, oldest first.
+fn open_artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClaim> {
+    artifact_claims(events, file)
+        .into_iter()
+        .filter(ArtifactClaim::is_open)
+        .collect()
+}
+
+/// Whether an artifact can be picked up, and what is known about who has.
+fn artifact_availability(
+    events: &[JournalEvent],
+    file: &str,
+    claims: &[ArtifactClaim],
+    now: DateTime<Utc>,
+) -> (Availability, Option<ClaimHistory>) {
+    if is_consumed(events, file) {
+        return (Availability::Terminal, None);
+    }
+    let open: Vec<&ArtifactClaim> = claims.iter().filter(|claim| claim.is_open()).collect();
+    if open
+        .iter()
+        .any(|claim| state::claim_timing_at(&claim.state, now).active)
+    {
+        return (Availability::Occupied, None);
+    }
+    if !open.is_empty() {
+        return (Availability::Reclaimable, None);
+    }
+    // Nothing holds it. Whether that means nobody ever worked it depends on
+    // whether this journal was recording claims when the artifact was filed.
+    let history = if claims.is_empty() {
+        Some(match claim_history_covered(events, file) {
+            true => ClaimHistory::NeverStarted,
+            false => ClaimHistory::Unknown,
+        })
+    } else {
+        None
+    };
+    (Availability::Available, history)
+}
+
+/// Whether claim history for this artifact is knowable: the facility marker
+/// must stand before the write that filed it.
+fn claim_history_covered(events: &[JournalEvent], file: &str) -> bool {
+    let Some(marker) = capability(events, ARTIFACT_CLAIM_CAPABILITY) else {
+        return false;
+    };
+    events
+        .iter()
+        .position(|event| event.file.as_deref() == Some(file))
+        .is_some_and(|filed| marker.position < filed)
+}
+
+/// How a claim reads in a queue row: the ledger's own words, so a reader
+/// moving between a change and an artifact is never asked which vocabulary
+/// this one uses.
+fn claim_condition(claim: &ArtifactClaim, now: DateTime<Utc>) -> &'static str {
+    let timing = state::claim_timing_at(&claim.state, now);
+    if timing.expired {
+        "expired"
+    } else if timing.stale {
+        "stale"
+    } else {
+        "active"
+    }
+}
+
+/// `[claimed by <actor> via <harness>: <condition>]` for every claim still
+/// open on a row. Lanes render beside these and are never converted into
+/// them: a lane is occupancy of a topic, a claim is occupancy of a file.
+fn render_artifact_claims(claims: &[ArtifactClaim], now: DateTime<Utc>) -> String {
+    claims
+        .iter()
+        .filter(|claim| claim.is_open())
+        .map(|claim| {
+            format!(
+                " [claimed by {} via {}: {}]",
+                claim.state.owner.actor,
+                claim.state.owner.harness,
+                claim_condition(claim, now)
+            )
+        })
+        .collect()
+}
+
+/// The artifact a subject positional names, when it names one.
+///
+/// A subject that ends in `.md` and is a file in the journal directory is an
+/// artifact; everything else is a change reference. The two namespaces cannot
+/// collide, because a change ID may not contain a dot.
+pub(crate) fn artifact_subject(cwd: &Path, reference: &str) -> Option<String> {
+    if !reference.ends_with(".md") || reference.contains(['/', '\\']) {
+        return None;
+    }
+    let dir = resolve_dir(cwd).ok()?;
+    dir.join(reference).is_file().then(|| reference.to_string())
+}
+
+/// The caller's identity, refused unless every half was declared.
+///
+/// Ownership is compared on all three, so a claim recorded under a fallback
+/// would be a lease nobody can prove they hold and anybody can appear to.
+fn require_claim_identity(ctx: &Ctx) -> Result<ClaimIdentity> {
+    let owner = caller_claim_identity(ctx);
+    if owner.actor == "unknown" {
+        bail!("claiming an artifact requires a declared actor (ARC_ACTOR or --actor)");
+    }
+    if owner.harness == "unknown" {
+        bail!("claiming an artifact requires a declared harness (ARC_HARNESS or --harness)");
+    }
+    if owner.session == "unknown" {
+        bail!("claiming an artifact requires a declared session (ARC_SESSION or --session)");
+    }
+    Ok(owner)
+}
+
+fn print_artifact_claim_conflict(message: &str, claim: &ArtifactClaim, now: DateTime<Utc>) {
+    let timing = state::claim_timing_at(&claim.state, now);
+    eprintln!(
+        "claim conflict: {message}; claim={} owner={} harness={} session={} expires={}",
+        claim.state.claim_id,
+        claim.state.owner.actor,
+        claim.state.owner.harness,
+        claim.state.owner.session,
+        timing.expires_at
+    );
+}
+
+fn new_claim_id() -> String {
+    format!("claim-{}", ulid::Ulid::new().to_string().to_ascii_lowercase())
+}
+
+fn new_checkpoint_id() -> String {
+    format!("cp-{}", ulid::Ulid::new().to_string().to_ascii_lowercase())
+}
+
+/// Refuse to work an artifact that has been disposed of.
+fn refuse_if_consumed(events: &[JournalEvent], file: &str) -> Result<()> {
+    if let Some(outcome) = consumption(events, file) {
+        bail!("{file} was consumed [{outcome}]; work on it ended with the artifact");
+    }
+    Ok(())
+}
+
+/// Everything a claim command needs about an artifact, read under the lock.
+struct ClaimContext {
+    dir: PathBuf,
+    anchor: Option<PathBuf>,
+    topic: String,
+    events: Vec<JournalEvent>,
+}
+
+fn claim_context(ctx: &Ctx, file: &str) -> Result<ClaimContext> {
+    let resolution = resolve(&ctx.cwd)?;
+    let dir = resolution.directory.clone();
+    let Some((_, topic, _)) = parse_artifact_name(file) else {
+        bail!("{file:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+    };
+    if !dir.join(file).is_file() {
+        bail!("no such artifact {} in {}", file, dir.display());
+    }
+    let events = read_events(&dir)?;
+    Ok(ClaimContext {
+        dir,
+        anchor: resolution.anchor,
+        topic,
+        events,
+    })
+}
+
+/// Acquire, renew, or take over the claim on a journal artifact.
+///
+/// The rule is the ledger's, read against a lease with no stage budgets: a
+/// live claim held by somebody else is refused outright, and one whose lease
+/// has run out is displaced only when the caller says so. Silence would let a
+/// second worker start on an artifact whose owner is still writing.
+pub fn claim_artifact(ctx: &Ctx, file: &str, ttl: Option<&str>, takeover: bool) -> Result<i32> {
+    let owner = require_claim_identity(ctx)?;
+    let ttl_seconds = ttl
+        .map(crate::commands::parse_duration)
+        .transpose()?
+        .unwrap_or(DEFAULT_ARTIFACT_CLAIM_TTL);
+    let context = claim_context(ctx, file)?;
+    let _lock = lock_journal_transition(&context.dir)?;
+    let events = read_events(&context.dir)?;
+    refuse_if_consumed(&events, file)?;
+    let now = Utc::now();
+    let open = open_artifact_claims(&events, file);
+
+    // Renewing in place keeps the claim ID stable, so every checkpoint and
+    // stage already filed under it stays attached to the work it describes.
+    if let Some(mine) = open.iter().find(|claim| {
+        claim.state.owner == owner && state::claim_timing_at(&claim.state, now).active
+    }) {
+        let mut event = JournalEvent::base(ctx, now, &context.topic, "claim-renewed");
+        event.file = Some(file.to_string());
+        event.claim_id = Some(mine.state.claim_id.clone());
+        event.ttl_seconds = ttl.is_some().then_some(ttl_seconds);
+        append_event(ctx, &context.dir, &event)?;
+        println!("renewed: {file} claim {}", mine.state.claim_id);
+        return Ok(0);
+    }
+
+    let mut displaced = None;
+    for existing in &open {
+        let timing = state::claim_timing_at(&existing.state, now);
+        if timing.active && existing.state.owner != owner {
+            print_artifact_claim_conflict("claim is already held", existing, now);
+            eprintln!("--takeover is unavailable because the claim has not expired");
+            return Ok(8);
+        }
+        if existing.state.owner != owner && !takeover {
+            print_artifact_claim_conflict("claim has expired", existing, now);
+            eprintln!("--takeover would displace this expired claim");
+            return Ok(8);
+        }
+        displaced = Some(DisplacedClaim {
+            claim_id: existing.state.claim_id.clone(),
+            actor: existing.state.owner.actor.clone(),
+            harness: existing.state.owner.harness.clone(),
+            session: existing.state.owner.session.clone(),
+            stage: timing.stage,
+        });
+    }
+
+    // The marker carries this write's own timestamp so it sorts before the
+    // claim it covers: events are ordered by stamp with file position as the
+    // tiebreak, and a later stamp would place the marker after the entry it
+    // must precede.
+    ensure_capability(
+        ctx,
+        &context.dir,
+        now,
+        context.anchor.as_deref(),
+        &events,
+        ARTIFACT_CLAIM_CAPABILITY,
+    )?;
+    let claim_id = new_claim_id();
+    let mut event = JournalEvent::base(ctx, now, &context.topic, "claim-set");
+    event.file = Some(file.to_string());
+    event.claim_id = Some(claim_id.clone());
+    event.ttl_seconds = Some(ttl_seconds);
+    event.displaced = displaced.clone();
+    append_event(ctx, &context.dir, &event)?;
+    if let Some(displaced) = &displaced {
+        println!(
+            "displaced: claim={} owner={} harness={} session={} stage={}",
+            displaced.claim_id,
+            displaced.actor,
+            displaced.harness,
+            displaced.session,
+            displaced.stage
+        );
+    }
+    println!("claimed: {file} for {ttl_seconds}s");
+    println!("claim: {claim_id}");
+    Ok(0)
+}
+
+/// End the caller's own claim, saying how the work stopped.
+///
+/// Only the holder closes a claim. Another session's lease is taken over
+/// rather than closed on its behalf: a release records an owner's decision,
+/// and nobody else is in a position to make it.
+pub fn release_artifact_claim(ctx: &Ctx, file: &str, outcome: &str) -> Result<i32> {
+    let owner = require_claim_identity(ctx)?;
+    let context = claim_context(ctx, file)?;
+    let _lock = lock_journal_transition(&context.dir)?;
+    let events = read_events(&context.dir)?;
+    let open = open_artifact_claims(&events, file);
+    let Some(mine) = open
+        .iter()
+        .rev()
+        .find(|claim| claim.state.owner == owner)
+    else {
+        eprintln!("claim conflict: {file} has no open claim held by this identity");
+        return Ok(8);
+    };
+    let mut event = JournalEvent::base(ctx, Utc::now(), &context.topic, "claim-released");
+    event.file = Some(file.to_string());
+    event.claim_id = Some(mine.state.claim_id.clone());
+    event.outcome = Some(outcome.to_string());
+    append_event(ctx, &context.dir, &event)?;
+    println!("claim released: {file} [{outcome}]");
+    println!("claim: {}", mine.state.claim_id);
+    Ok(0)
+}
+
+/// Record typed progress against an owned claim on an artifact.
+pub fn stage_artifact(
+    ctx: &Ctx,
+    file: &str,
+    stage: ClaimStage,
+    note: Option<String>,
+    blocker: Option<String>,
+    claim_if_needed: bool,
+) -> Result<i32> {
+    let note = note.filter(|note| !note.trim().is_empty());
+    if stage == ClaimStage::BlockedOn && note.is_none() {
+        bail!("blocked-on requires a nonempty --note");
+    }
+    if stage == ClaimStage::BlockedOn && blocker.is_none() {
+        bail!("blocked-on requires --blocker");
+    }
+    if stage != ClaimStage::BlockedOn && blocker.is_some() {
+        bail!("--blocker is only valid with blocked-on");
+    }
+    let owner = require_claim_identity(ctx)?;
+    let context = claim_context(ctx, file)?;
+    if claim_if_needed {
+        let now = Utc::now();
+        let held = open_artifact_claims(&context.events, file).into_iter().any(
+            |claim| {
+                claim.state.owner == owner && state::claim_timing_at(&claim.state, now).active
+            },
+        );
+        if !held {
+            let code = claim_artifact(ctx, file, None, false)?;
+            if code != 0 {
+                return Ok(code);
+            }
+        }
+    }
+    let _lock = lock_journal_transition(&context.dir)?;
+    let events = read_events(&context.dir)?;
+    refuse_if_consumed(&events, file)?;
+    let now = Utc::now();
+    let open = open_artifact_claims(&events, file);
+    let Some(mine) = open
+        .iter()
+        .rev()
+        .find(|claim| claim.state.owner == owner)
+    else {
+        eprintln!("claim conflict: {file} has no claim held by this identity");
+        return Ok(8);
+    };
+    if !state::claim_timing_at(&mine.state, now).active {
+        print_artifact_claim_conflict("claim is expired", mine, now);
+        return Ok(8);
+    }
+    let mut event = JournalEvent::base(ctx, now, &context.topic, "claim-stage");
+    event.file = Some(file.to_string());
+    event.claim_id = Some(mine.state.claim_id.clone());
+    event.stage = Some(stage.as_str().to_string());
+    event.note = note;
+    event.blocker = blocker;
+    append_event(ctx, &context.dir, &event)?;
+    println!("stage: {} on {file}", stage.as_str());
+    Ok(0)
+}
+
+/// Append a work checkpoint to a claimed artifact.
+///
+/// The block is the semantic half and the event is the structured one; the
+/// digest binds them, so a reader can tell a checkpoint that still says what
+/// it said from one whose prose has been rewritten underneath. A correction
+/// is another checkpoint naming the one it supersedes, because a reader who
+/// cannot see that a direction was contested cannot judge either.
+pub fn checkpoint(
+    ctx: &Ctx,
+    file: &str,
+    body_file: &str,
+    next: Option<&str>,
+    gate: Option<&str>,
+    blocker: Option<&str>,
+    supersedes: Option<&str>,
+) -> Result<i32> {
+    let owner = require_claim_identity(ctx)?;
+    let body = read_body_verbatim(body_file)?;
+    let context = claim_context(ctx, file)?;
+    let _lock = lock_journal_transition(&context.dir)?;
+    let events = read_events(&context.dir)?;
+    refuse_if_consumed(&events, file)?;
+    let now = Utc::now();
+    let claims = artifact_claims(&events, file);
+    let Some(mine) = claims
+        .iter()
+        .rev()
+        .find(|claim| claim.is_open() && claim.state.owner == owner)
+    else {
+        bail!(
+            "a checkpoint records progress on a claim; take one with \
+             `arc claim {file}` before writing it"
+        );
+    };
+    if !state::claim_timing_at(&mine.state, now).active {
+        print_artifact_claim_conflict("claim is expired", mine, now);
+        return Ok(8);
+    }
+    if let Some(target) = supersedes {
+        if !claims
+            .iter()
+            .flat_map(|claim| claim.checkpoints.iter())
+            .any(|checkpoint| checkpoint.checkpoint_id == target)
+        {
+            bail!("no checkpoint {target} on {file}");
+        }
+    }
+    let checkpoint_id = new_checkpoint_id();
+    let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let heading = format!(
+        "### Work checkpoint {checkpoint_id} ({} via {}, {ts})",
+        owner.actor, owner.harness
+    );
+    let path = context.dir.join(file);
+    let block = block_bytes(&heading, &body);
+    append_block(&path, &heading, &body)?;
+
+    let mut event = JournalEvent::base(ctx, now, &context.topic, "checkpoint");
+    event.file = Some(file.to_string());
+    event.claim_id = Some(mine.state.claim_id.clone());
+    event.checkpoint_id = Some(checkpoint_id.clone());
+    event.next = next.map(str::to_string);
+    event.gate = gate.map(str::to_string);
+    event.blocker = blocker.map(str::to_string);
+    event.supersedes_checkpoint = supersedes.map(str::to_string);
+    event.digest = Some(format!("sha256:{}", hex::encode(Sha256::digest(&block))));
+    append_event(ctx, &context.dir, &event)?;
+    println!("checkpoint: {checkpoint_id} on {file}");
+    println!("{}", path.display());
+    Ok(0)
 }
 
 /// Who holds a lane. Session strings are minted by each harness independently,
