@@ -21,6 +21,10 @@ publication, and process-group kill for gate timeouts.
 cargo install --path .          # from a checkout of this repository
 ```
 
+Released versions are the calendar date of publication in the `YYYY.M.D`
+shape, written without leading zeros; a second release on one day appends a
+counter as build metadata, `2026.9.3+1`.
+
 Optional shell completions and man page:
 
 ```sh
