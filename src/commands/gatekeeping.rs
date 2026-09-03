@@ -185,13 +185,12 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             || probe.is_some()
             || attest
             || parallel
-            || skip_green
             || waive_dirty.is_some()
             || falsified_by.is_some())
     {
         bail!(
-            "--against runs the whole required gate set on a synthesized merge, so it cannot \
-             be combined with --gate, --command, --probe, --attest, --parallel, --skip-green, \
+            "--against runs the required gate set on a synthesized merge, so it cannot \
+             be combined with --gate, --command, --probe, --attest, --parallel, \
              --waive-dirty, or --falsified-by"
         );
     }
@@ -209,8 +208,11 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
              sequentially to waive."
         );
     }
-    if skip_green && !all {
-        bail!("--skip-green requires --all");
+    // Reuse is a whole-gate-set question: it needs a set to choose within.
+    // `--all` supplies one at the change's head, `--against` at the merged
+    // tree; a single named check has nothing to select from.
+    if skip_green && !all && against.is_none() {
+        bail!("--skip-green requires --all or --against");
     }
     if probe.is_some() && (gate.is_some() || command.is_some()) {
         bail!("--probe is mutually exclusive with --gate and --command");
@@ -366,7 +368,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     // Evidence for a merge is counted at its tree rather than at the change's
     // head, so the head check below is not the question this path answers.
     if let Some(target) = against {
-        return verify_against(ctx, &store, &change_id, &st, &target, note);
+        return verify_against(ctx, &store, &change_id, &st, &target, note, skip_green);
     }
     // Every path below records gate evidence, which status counts only at the
     // change's head.
@@ -546,6 +548,11 @@ impl Drop for ScratchWorktree {
 /// commit id does not. The target head is recorded beside it, because a merge
 /// with a moved target is a different merge and this evidence is about the
 /// earlier one.
+///
+/// `skip_green` reuses the evidence already recorded at that merged tree
+/// instead of rerunning the gate that produced it. Reuse is keyed by tree
+/// exactly as readiness is, so a gate this run skips is a gate status already
+/// counts as green, and the two never disagree about what is owed.
 fn verify_against(
     ctx: &Ctx,
     store: &Store,
@@ -553,6 +560,7 @@ fn verify_against(
     st: &ChangeState,
     target: &str,
     note: Option<String>,
+    skip_green: bool,
 ) -> Result<i32> {
     let toplevel = gitio::toplevel(&ctx.cwd)?;
     let declarations = gates::load(&toplevel)?;
@@ -588,21 +596,9 @@ fn verify_against(
         &synthesized,
     )?;
 
-    let path = super::lifecycle::worktree_path_for(&ctx.cwd, &format!("{}-against", st.slug))?;
-    let scratch = ScratchWorktree::create(&ctx.cwd, path, &synthesized)?;
     println!("merged tree: {merged_tree}");
     println!("synthesized merge: {synthesized}");
 
-    let scratch_ctx = Ctx {
-        cwd: scratch.path.clone(),
-        actor: ctx.actor.clone(),
-        actor_source: ctx.actor_source,
-        fallback_announced: ctx.fallback_announced.clone(),
-        harness: ctx.harness.clone(),
-        session: ctx.session.clone(),
-        model: ctx.model.clone(),
-        on_behalf_of: ctx.on_behalf_of.clone(),
-    };
     let total = required.len();
     let run_id = start_verification_run(
         ctx,
@@ -610,32 +606,73 @@ fn verify_against(
         change_id,
         &synthesized,
         VerificationRunMode::Sequential,
-        false,
+        skip_green,
         &required,
     )?;
-    let mut passed = 0;
+    let legacy_trees = status::legacy_evidence_trees(st, &ctx.cwd);
+    let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
+    let mut reused = Vec::new();
+    let mut to_run = Vec::new();
     for (name, gate) in required {
-        let code = record_verification(
-            &scratch_ctx,
-            store,
-            change_id,
-            VerificationInput {
-                run_id: Some(run_id.clone()),
-                probe: None,
-                gate: Some(name.clone()),
-                command: gate.command.clone(),
-                timeout_seconds: gate.timeout,
-                attested_result: None,
-                tested_revision: Some(synthesized.clone()),
-                execution_host: None,
-                runner: None,
-                note: note.clone(),
-                falsification: None,
-                against_target: Some(target_head.clone()),
-            },
-        )?;
-        if code == 0 {
-            passed += 1;
+        // Reuse is reuse of a *run*, so the recorded command must be the one
+        // declared now. Skipping on a name match would report a gate as
+        // satisfied by a run of something else.
+        let reusable = skip_green
+            .then(|| st.gate_evidence_at_tree(name, &merged_tree, &resolve_tree))
+            .flatten()
+            .filter(|evidence| {
+                evidence.green_at_head(st.dirty_tree_waiver.as_ref())
+                    && status::matches_declaration(evidence, gate)
+            });
+        if let Some(evidence) = reusable {
+            println!("gate {name}: skipped (green at the merged tree)");
+            reused.push((name.clone(), evidence.event_id.clone()));
+        } else {
+            to_run.push((name, gate));
+        }
+    }
+    append_reuses(ctx, store, change_id, &run_id, &synthesized, &reused)?;
+
+    let mut passed = reused.len();
+    // A checkout exists only to run a command in. Where every gate was
+    // answered at this tree already, there is no command left to run and the
+    // scratch worktree would be created and removed having held nothing.
+    if !to_run.is_empty() {
+        let path = super::lifecycle::worktree_path_for(&ctx.cwd, &format!("{}-against", st.slug))?;
+        let scratch = ScratchWorktree::create(&ctx.cwd, path, &synthesized)?;
+        let scratch_ctx = Ctx {
+            cwd: scratch.path.clone(),
+            actor: ctx.actor.clone(),
+            actor_source: ctx.actor_source,
+            fallback_announced: ctx.fallback_announced.clone(),
+            harness: ctx.harness.clone(),
+            session: ctx.session.clone(),
+            model: ctx.model.clone(),
+            on_behalf_of: ctx.on_behalf_of.clone(),
+        };
+        for (name, gate) in to_run {
+            let code = record_verification(
+                &scratch_ctx,
+                store,
+                change_id,
+                VerificationInput {
+                    run_id: Some(run_id.clone()),
+                    probe: None,
+                    gate: Some(name.clone()),
+                    command: gate.command.clone(),
+                    timeout_seconds: gate.timeout,
+                    attested_result: None,
+                    tested_revision: Some(synthesized.clone()),
+                    execution_host: None,
+                    runner: None,
+                    note: note.clone(),
+                    falsification: None,
+                    against_target: Some(target_head.clone()),
+                },
+            )?;
+            if code == 0 {
+                passed += 1;
+            }
         }
     }
     println!("gates: {passed}/{total} pass at the merged tree");
