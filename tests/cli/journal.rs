@@ -1969,12 +1969,12 @@ fn journal_open_drops_annotation_once_a_lane_goes_stale() {
             "--scope",
             "covered",
             "--ttl",
-            "1s",
+            "30m",
         ])
         .assert()
         .success();
 
-    thread::sleep(Duration::from_secs(2));
+    age_journal_events(&dir, 3_600);
     let stale = stdout(repo.arc(&repo.root).args(["journal", "open"]));
     assert!(!stale.contains("[lane:"), "{stale}");
 }
@@ -2111,10 +2111,10 @@ fn journal_doctor_advice_only_exits_zero() {
         .assert()
         .success();
     repo.arc(&repo.root)
-        .args(["journal", "lane", "open", "idle-work", "--ttl", "1s"])
+        .args(["journal", "lane", "open", "idle-work", "--ttl", "30m"])
         .assert()
         .success();
-    thread::sleep(Duration::from_secs(2));
+    age_journal_events(&journal_dir(&repo), 3_600);
 
     let assert = repo
         .arc(&repo.root)
@@ -10561,7 +10561,7 @@ fn consume_refuses_open_claims_and_ends_acknowledged_ones_without_an_owner_outco
     let repo = Repo::new();
     let (dir, file) = journal_artifact(&repo, "consume-guarded", "todo", "# Queued\n");
     repo.arc(&repo.root)
-        .args(["claim", &file, "--ttl", "1s"])
+        .args(["claim", &file, "--ttl", "30m"])
         .assert()
         .success();
     let live = artifact_claim_ids(&dir, &file).remove(0);
@@ -10575,7 +10575,7 @@ fn consume_refuses_open_claims_and_ends_acknowledged_ones_without_an_owner_outco
 
     // A lease that has run out needs the acknowledgment too: the claim being
     // dead is a fact about the clock, not its holder's consent.
-    thread::sleep(Duration::from_millis(1200));
+    age_journal_events(&dir, 3_600);
     repo.arc(&repo.root)
         .args(["journal", "consume", &file])
         .assert()
@@ -10643,11 +10643,11 @@ fn begin_from_journal_promotes_the_invokers_claim_and_ends_every_other() {
     let repo = Repo::new();
     let (dir, file) = journal_artifact(&repo, "promoted-work", "todo", "# Queued\n");
     repo.arc(&repo.root)
-        .args(["claim", &file, "--ttl", "1s"])
+        .args(["claim", &file, "--ttl", "30m"])
         .assert()
         .success();
     let theirs = artifact_claim_ids(&dir, &file).remove(0);
-    thread::sleep(Duration::from_millis(1200));
+    age_journal_events(&dir, 3_600);
     repo.arc(&repo.root)
         .env("ARC_SESSION", "session-b")
         .env("ARC_ACTOR", "other")
