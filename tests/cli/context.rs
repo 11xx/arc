@@ -391,26 +391,30 @@ fn env_detects_opencode2_by_process_ancestry() {
     );
 }
 
-/// README examples are part of the command contract: stale commands and stale
-/// exit-status claims send a cold session down a path the CLI no longer accepts.
+/// Documented examples are part of the command contract: a stale command or a
+/// stale exit-status claim sends a cold session down a path the CLI does not
+/// accept.
 #[test]
-fn readme_documents_current_debt_and_partial_opencode_identity() {
-    let readme = include_str!("../../README.md");
-    let normalized = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+fn docs_document_current_debt_and_partial_opencode_identity() {
+    let review = include_str!("../../docs/review.md");
+    let normalized = review.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         normalized.contains("arc integrate <change> --debt"),
-        "{readme}"
+        "{review}"
     );
-    assert!(normalized.contains("arc query --debt"), "{readme}");
-    assert!(!normalized.contains("--audit-debt"), "{readme}");
-    assert!(!normalized.contains("audit-debt"), "{readme}");
+    assert!(normalized.contains("arc query --debt"), "{review}");
+    assert!(!normalized.contains("--audit-debt"), "{review}");
+    assert!(!normalized.contains("audit-debt"), "{review}");
+
+    let changes = include_str!("../../docs/changes.md");
+    let normalized = changes.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         normalized.contains("OpenCode v2 is recognized without a session"),
-        "{readme}"
+        "{changes}"
     );
     assert!(
-        normalized.contains("When no harness is detected, it prints placeholders and exits 1"),
-        "{readme}"
+        normalized.contains("`arc env` exits 1 and prints the export template"),
+        "{changes}"
     );
 }
 

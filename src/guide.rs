@@ -631,6 +631,98 @@ RULES THAT CHANGE WHAT YOU DO
   - arc holds no routing opinion. It records the --actor, --harness, and --model
     it is given; who to delegate to is the caller's policy, not arc's.
 
+EXIT CODES
+  `arc check` is the integration preflight and its code names the blocker.
+  `integrate` and `rebase` refuse in the same vocabulary, and a queue exits
+  with the code of the member that stopped it, so one table reads the same
+  way whether one change was integrated or twenty.
+
+    `arc check` exits 0 when the change is ready to integrate.
+    `arc check` exits 2 while a blocking finding is open.
+    `arc check` exits 3 when no valid approval covers the current head.
+    `arc check` exits 4 while a hold is active.
+    `arc check` exits 5 when a required gate is not green at the head.
+    `arc check` exits 6 for a closed change, a missing branch, or malformed
+      state.
+    `arc check` exits 7 while a prerequisite change is unresolved.
+    `arc check` exits 11 when the target moved with conflicting changes and
+      the branch needs rebasing.
+    `arc check` exits 12 when a declared acceptance probe is not
+      discriminating.
+    `arc check` exits 13 while the change declares it is iterating.
+    `arc check` exits 14 when the tree a merge would ship has no gate
+      evidence.
+
+  Codes 1 and 2 are also reachable without a blocker at all: `arc` exits 1 on
+  an internal error and 2 on a usage error, which argument parsing decides
+  before any command runs.
+
+  The other commands a script branches on:
+
+    `arc claim`, `arc stage`, and `arc release-claim` exit 8 on a claim or
+      stage ownership conflict.
+    arc exits 9 when the execution role refused the command, before it takes
+      a lock or writes an event.
+    `arc is-blocked` exits 0 when the change is ready, 1 when it is blocked,
+      and 2 when the lookup or ledger read failed.
+    `arc watch` exits 0 when its condition is reached and 2 on a timeout.
+    `arc take` exits 2 when no change is ready.
+    `arc env` exits 1 and prints the export template when no harness is
+      detected.
+    `arc import` exits 1 and writes nothing when an event conflicts.
+    `arc forge link` exits 10 when the observed tuple or the declared policy
+      does not match, appending no event.
+    `arc history resolve` exits 2 when nothing moved the revision.
+    `arc restack --advise` exits 0 when the change has no dependents.
+    `arc doctor` exits 1 when problems are present and 0 for a clean or
+      advice-only ledger.
+    A rejected self-approval follows the no-valid-approval path and exits 3.
+    An arc-managed Git hook always exits 0, so it can never block a commit.
+    A repeat of a recorded source item writes nothing, prints the existing
+      entry, and exits 0.
+    A spooled write prints `spooled: <path>` and exits 0.
+
+WHAT ARC WILL NOT DO
+  Ledger and repository:
+    arc never deletes or rewrites an event file.
+    arc rewrites a branch only through `arc rewrite`, which records the map
+      it produced, and merges only through `arc integrate` when every
+      required gate is green.
+    arc never force-removes a checkout it did not create. Worktree removal
+      refuses while dirty or untracked content is present, `fork retire
+      --force` is the operator's decision to get past that, and the one
+      forced removal arc performs on its own is the scratch checkout it
+      creates to evaluate a merge.
+    arc never runs `git rebase --abort`.
+    arc never installs a Git hook silently.
+    arc never makes a network call.
+    arc never refuses to create a worktree over disk space.
+    arc records no configuration history, only the inputs to one
+      irreversible decision.
+
+  Refusals worth knowing before they happen:
+    arc refuses a bundle written by a newer arc rather than skipping
+      lifecycle events it does not know.
+    arc refuses a gate run only when the change's recorded worktree is
+      missing or its HEAD is not the branch head. A run started from another
+      checkout of the repository is redirected to the recorded worktree and
+      says so.
+    arc refuses a `--from-journal` source that is missing, non-actionable, or
+      already consumed.
+    arc refuses a delivery naming an audience that cannot settle the
+      question.
+    arc refuses a rewrite map claiming a revision survives as a commit this
+      repository does not hold.
+
+  Judgements arc does not make:
+    arc records the actor, harness, and model it is given, and holds no
+      routing opinion.
+    arc records the displaced owner and the reason a claim was taken over.
+    arc never scores the coordinates a debt records, joins them against a
+      roster, or orders two models against each other.
+    arc never infers an identity from a branch or a directory name.
+    arc never claims a recipient read anything.
+
   arc <command> --help for any command's full contract. arc --help for all of them.
 "#;
 

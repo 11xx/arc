@@ -1,0 +1,70 @@
+# Changing arc
+
+## Changing arc
+
+Rules for working on arc itself, as distinct from working with it.
+
+**Drive non-trivial work through arc.** The tool is its own first
+consumer, and a lifecycle nobody runs is a lifecycle nobody tests. Open a
+change, record a brief, snapshot, verify, review, and integrate through
+the guarded path. Only a one-line, self-evident fix is worth exempting.
+
+**Reinstall after integrating a CLI change.** The binary on `PATH` is not
+the tree; until it is replaced, arc reports the ledger with the code the
+change just replaced:
+
+```sh
+cargo install --path . --locked
+```
+
+**A shape change bumps its schema version.** Every projection, report,
+and bundle is versioned so a consumer can program against it, and any
+change to what one emits takes the next version — adding a field as much
+as removing, renaming, or redefining one. A reader that pinned a version
+can then tell from the version alone whether the shape it parsed is the
+shape it is holding. Mark the new field with the version that introduced
+it, the way the surrounding fields are marked, and update every place the
+version is quoted in prose — a version quoted in three documents goes
+stale in three documents.
+
+A stored input format is the exception, and `journal-events/1` is the one
+that exists. Its version marks what a reader must accept, not what a writer
+emits, so a new optional field that leaves every older file valid keeps the
+version. Removing a field, or making one required, does not.
+
+**Record a behaviour change as a changelog entry on the change that made
+it.** The `[Unreleased]` block is projected from those entries at release
+time; a behaviour change with no entry is a behaviour change the release
+notes cannot mention.
+
+**Keep the instruction surfaces accurate.** arc teaches its own use, so the
+guide `arc` prints with no arguments, each command's `--help`, and the pages
+under `docs/` are load-bearing rather than decorative. A change that alters
+behaviour updates them in the same change. The CLI is the surface an agent
+reads, so a rule stated only in `docs/` is a rule the session acting on it
+never sees; `tests/cli/docs.rs` holds the two surfaces together by asserting
+that every exit code and every refusal or guarantee sentence in `docs/`
+appears in the guide or in a command's help.
+
+## Non-goals
+
+Not a forge or forge clone, no hosted-PR parity claim, no daemon, no web
+UI, no database, and no automatic multi-machine synchronization. arc never
+makes a network call. Every command reads and writes the local repository and
+nothing else, and `git` is the only program it invokes on its own behalf — a
+declared gate command is the project's, not arc's.
+Export/import moves the ledger as one file; Git objects still travel
+separately. A forge-PR projection is planned, while shared Git-ref
+sync remains deferred until a real concurrent multi-machine need exists.
+
+## Roadmap
+
+Shipped: local core +
+policy engine (M1–M2), agent-facing orientation surfaces (M3), deterministic export/import
+bundles (M4), local orchestration foundations (dependencies, tags,
+actionable status, query, and batch views), claims/stages and execution
+roles, messaging and the inbox rollup, project-journal mechanics, and the
+ledger side of forge projection (declare/link/checks/pr-state with
+fail-closed validation). Remaining evidence-driven possibilities live in the
+journal's open items (`arc journal open`).
+
