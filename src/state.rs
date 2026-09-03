@@ -1,4 +1,5 @@
 use crate::model::*;
+use crate::rewrite::RewriteMap;
 use anyhow::{bail, Result};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
@@ -855,6 +856,65 @@ pub struct ChangeState {
 }
 
 impl ChangeState {
+    /// Follow every revision this view holds forward through the recorded
+    /// rewrites, so each one names the commit it names in this repository.
+    ///
+    /// Trees and blobs are deliberately untouched. A rewrite that preserves
+    /// content produces new commits over the same trees, so tree-keyed gate
+    /// evidence must count identically across it; a rewrite that changes
+    /// content produces trees no recorded map describes, and inventing a
+    /// successor for one would vouch for content nobody evaluated.
+    pub fn follow_rewrites(&mut self, rewrites: &RewriteMap) {
+        if rewrites.is_empty() {
+            return;
+        }
+        rewrites.advance(&mut self.base);
+        for patchset in &mut self.patchsets {
+            rewrites.advance(&mut patchset.base);
+            rewrites.advance(&mut patchset.head);
+            rewrites.advance_opt(&mut patchset.merge_base);
+        }
+        for brief in &mut self.briefs {
+            rewrites.advance_opt(&mut brief.base_revision);
+        }
+        for finding in self
+            .findings
+            .values_mut()
+            .chain(self.audit_findings.values_mut())
+        {
+            for disposition in &mut finding.dispositions {
+                rewrites.advance_opt(&mut disposition.commit);
+            }
+        }
+        if let Some(waiver) = &mut self.dirty_tree_waiver {
+            rewrites.advance(&mut waiver.revision);
+        }
+        for audit in &mut self.audit_verdicts {
+            rewrites.advance(&mut audit.revision);
+        }
+        for verification in &mut self.verifications {
+            rewrites.advance(&mut verification.revision);
+            rewrites.advance_opt(&mut verification.against_target);
+            if let Some(falsification) = &mut verification.falsification {
+                rewrites.advance(&mut falsification.revision);
+            }
+        }
+        for run in &mut self.verification_runs {
+            rewrites.advance(&mut run.revision);
+        }
+        if let Some(closure) = &mut self.closure {
+            rewrites.advance_opt(&mut closure.integrated_commit);
+            rewrites.advance_opt(&mut closure.source_head);
+            rewrites.advance_opt(&mut closure.target_before);
+            if let Some(authorization) = &mut closure.authorization {
+                for prerequisite in &mut authorization.prerequisites {
+                    rewrites.advance_opt(&mut prerequisite.integrated_commit);
+                }
+            }
+        }
+        self.forge.follow_rewrites(rewrites);
+    }
+
     pub fn latest_patchset(&self) -> Option<&Patchset> {
         self.patchsets.last()
     }
@@ -1028,6 +1088,21 @@ pub fn resolve_unique_id<'a>(
         1 => Ok(prefixed[0].to_string()),
         _ => bail!("ambiguous {noun} {needle:?}"),
     }
+}
+
+/// The same reduction, with every recorded revision followed forward through
+/// the repository's recorded history rewrites.
+///
+/// The ledger is append-only and stays exactly as written; this is the view,
+/// and a view's job is to answer in terms of the repository the reader has. A
+/// projection that repeated pre-rewrite revisions would report a change whose
+/// head does not match its own patchset, whose gates ran somewhere else, and
+/// whose waiver covers a commit nobody can name — all of it derived from a
+/// rewrite that changed no content.
+pub fn reduce_following(events: &[Event], rewrites: &RewriteMap) -> Result<ChangeState> {
+    let mut state = reduce(events)?;
+    state.follow_rewrites(rewrites);
+    Ok(state)
 }
 
 pub fn reduce(events: &[Event]) -> Result<ChangeState> {

@@ -1,7 +1,6 @@
 use crate::ids;
 use crate::model::{ActorSource, Event, Payload};
 use crate::render;
-use crate::state;
 use crate::store::Store;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -284,7 +283,7 @@ fn validate_members(store: &Store, raw_members: Vec<String>) -> Result<Vec<Strin
         let change_id = store
             .resolve_change(&parts.change_id)
             .with_context(|| format!("pass member {raw:?}"))?;
-        let state = state::reduce(&store.load_events(&change_id)?)
+        let state = store.state(&change_id)
             .with_context(|| format!("pass member {raw:?}"))?;
         if !state
             .patchsets
@@ -393,7 +392,7 @@ fn pass_view(store: &Store, pass: &PassRecord) -> Result<PassView> {
 
 fn member_view(store: &Store, member: &str) -> Result<PassMemberView> {
     let parts = parse_member(member)?;
-    let state = state::reduce(&store.load_events(&parts.change_id)?)?;
+    let state = store.state(&parts.change_id)?;
     let verdict_event_id = state
         .verdicts
         .iter()

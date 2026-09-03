@@ -407,6 +407,9 @@ fn inspect_change(
         });
         return Ok(());
     }
+    // Deliberately the unresolved reduction. Doctor's job includes reporting
+    // which recorded revisions no longer resolve, and a view that had already
+    // followed them forward would have nothing left to report.
     let Ok(state) = state::reduce(&events) else {
         return Ok(());
     };

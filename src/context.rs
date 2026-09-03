@@ -9,7 +9,7 @@ use crate::commands::{self, Ctx, StatusOutput};
 use crate::gitio;
 use crate::journal;
 use crate::session_store;
-use crate::state::{self, ChangeState};
+use crate::state::ChangeState;
 use crate::status::BriefBaseDrift;
 use crate::store::Store;
 use anyhow::{bail, Result};
@@ -168,7 +168,7 @@ fn open_changes(store: &Store) -> Result<Vec<ChangeState>> {
     let states = store
         .list_change_ids()?
         .into_iter()
-        .map(|id| state::reduce(&store.load_events(&id)?))
+        .map(|id| store.state(&id))
         .collect::<Result<Vec<_>>>()?;
     Ok(states
         .into_iter()

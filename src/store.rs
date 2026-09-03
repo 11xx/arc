@@ -617,6 +617,31 @@ impl Store {
         )
     }
 
+    /// The current view of one change: its events reduced, with every
+    /// recorded revision followed forward through the repository's recorded
+    /// history rewrites.
+    ///
+    /// Reducing the events directly answers in the revisions that were
+    /// recorded, which after a rewrite name commits this repository does not
+    /// hold. Both answers are legitimate and they are wanted in different
+    /// places, so the store offers the resolved one and every reader that
+    /// wants the repository's own terms takes it from here rather than
+    /// remembering to resolve.
+    ///
+    /// Recorded rewrites that contradict each other resolve nothing rather
+    /// than making every read fail; `arc doctor` reports the contradiction as
+    /// `invalid-rewrite-mapping`.
+    pub fn state(&self, change_id: &str) -> Result<crate::state::ChangeState> {
+        crate::state::reduce_following(&self.load_events(change_id)?, &self.rewrites())
+    }
+
+    /// Every history rewrite this repository recorded, flattened into one
+    /// old-to-fate mapping. For readers that hold events already and still
+    /// need the repository's own terms.
+    pub fn rewrites(&self) -> crate::rewrite::RewriteMap {
+        crate::rewrite::RewriteMap::load(self).unwrap_or_default()
+    }
+
     /// All events of one change in ULID (i.e. chronological) order.
     pub fn load_events(&self, change_id: &str) -> Result<Vec<Event>> {
         ids::validate_id_component(change_id)?;

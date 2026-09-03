@@ -2982,7 +2982,7 @@ fn infer_change_state(cwd: &Path) -> Option<ChangeState> {
     let store = Store::discover(cwd).ok()?;
     let change_id = crate::context::infer_change(&store, cwd).ok().flatten()?;
     let events = store.load_events(&change_id).ok()?;
-    state::reduce(&events).ok()
+    state::reduce_following(&events, &store.rewrites()).ok()
 }
 
 /// How far a change has got, named the way every other view names it: the
@@ -7925,6 +7925,7 @@ fn verification_stamp(
     events: &[JournalEvent],
     filename: &str,
     current_revision: Option<&str>,
+    rewrites: &crate::rewrite::RewriteMap,
 ) -> Option<VerificationStamp> {
     let event = events
         .iter()
@@ -7933,12 +7934,16 @@ fn verification_stamp(
     // A revision read inside a fork is not on the anchor's line of history,
     // so the anchor having moved says nothing about whether the check still
     // holds. An unanswerable comparison is left unanswered.
+    //
+    // A recorded rewrite moves the anchor without moving the project: the
+    // stamped commit and the current one are the same content under different
+    // names, so the comparison is made after following both forward.
     let moved = match (
         event.verified_scope.as_deref(),
         event.verified_revision.as_deref(),
         current_revision,
     ) {
-        (None, Some(verified), Some(current)) => Some(verified != current),
+        (None, Some(verified), Some(current)) => Some(!rewrites.same(verified, current)),
         _ => None,
     };
     Some(VerificationStamp {
@@ -8105,6 +8110,9 @@ pub(crate) fn collect_open_in(
     } else {
         None
     };
+    let rewrites = Store::discover(project)
+        .map(|store| store.rewrites())
+        .unwrap_or_default();
     let changes = open_changes_for_annotation(project);
     let (caller_harness, caller_session) = identity(ctx);
     let caller = LaneOwner {
@@ -8140,7 +8148,7 @@ pub(crate) fn collect_open_in(
             let (ts, topic, file_kind) = parse_artifact_name(&name)?;
             let heading = amended_heading(&journal, &dir, &name);
             let change = change_annotation(&changes, &topic, &name);
-            let verification = verification_stamp(&journal, &name, current_revision.as_deref());
+            let verification = verification_stamp(&journal, &name, current_revision.as_deref(), &rewrites);
             let amendments = standing_amendments(&journal, &name, &file_kind);
             let sources = queue_sources(&journal, &name);
             let claims = artifact_claims(&journal, &name);
@@ -10125,7 +10133,7 @@ fn open_changes_for_annotation(cwd: &Path) -> Vec<ChangeState> {
     };
     ids.into_iter()
         .filter_map(|id| store.load_events(&id).ok())
-        .filter_map(|events| state::reduce(&events).ok())
+        .filter_map(|events| state::reduce_following(&events, &store.rewrites()).ok())
         .filter(|state| !state.is_closed())
         .collect()
 }

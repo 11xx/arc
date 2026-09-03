@@ -18,7 +18,7 @@ pub fn forge_declare(
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
-    let st = state::reduce(&store.load_events(&change_id)?)?;
+    let st = store.state(&change_id)?;
     let payload = Payload::ForgeProjection {
         host,
         base_repo,
@@ -42,7 +42,7 @@ pub fn forge_link(ctx: &Ctx, reference: &str, args: ForgeLinkArgs) -> Result<i32
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
-    let st = state::reduce(&store.load_events(&change_id)?)?;
+    let st = store.state(&change_id)?;
     let observed = crate::forge::ForgeTuple {
         base_repo: args.base_repo.clone(),
         base_ref: args.base_ref.clone(),
@@ -81,7 +81,7 @@ pub fn forge_checks(
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
-    let st = state::reduce(&store.load_events(&change_id)?)?;
+    let st = store.state(&change_id)?;
     let payload = Payload::ForgeChecks {
         pr_head,
         state: check_state,
@@ -118,7 +118,7 @@ pub fn forge_pr_state(
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
-    let st = state::reduce(&store.load_events(&change_id)?)?;
+    let st = store.state(&change_id)?;
     let Some(current) = st.forge.link.as_ref() else {
         bail!("no forge link recorded on {change_id}; record one before its state");
     };

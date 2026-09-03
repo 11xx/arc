@@ -291,7 +291,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             "dirty-tree waived at {}: {reason}",
             &revision[..revision.len().min(8)]
         );
-        state::reduce(&store.load_events(&change_id)?)?
+        store.state(&change_id)?
     } else {
         st
     };
@@ -849,7 +849,7 @@ fn start_verification_run(
     gates: &[(&String, &gates::Gate)],
 ) -> Result<String> {
     let _transition = store.lock_transition(change_id)?;
-    let state = state::reduce(&store.load_events(change_id)?)?;
+    let state = store.state(change_id)?;
     let payload = Payload::VerificationRunStarted {
         revision: revision.to_owned(),
         mode,
@@ -883,7 +883,7 @@ fn append_reuses(
     }
     let _transition = store.lock_transition(change_id)?;
     let events = store.load_events(change_id)?;
-    let state = state::reduce(&events)?;
+    let state = state::reduce_following(&events, &store.rewrites())?;
     let mut previous_id = events
         .last()
         .context("change has no opening event")?
@@ -1494,7 +1494,7 @@ fn append_verifications(
     // Acquire the append lock only after they return, then re-check closure.
     let _transition = store.lock_transition(change_id)?;
     let events = store.load_events(change_id)?;
-    let st = state::reduce(&events)?;
+    let st = state::reduce_following(&events, &store.rewrites())?;
     let mut previous_id = events
         .last()
         .context("change has no opening event")?
@@ -1938,7 +1938,7 @@ fn integrate_queue(
                 if selected.contains_key(&change_id) {
                     bail!("{change_id} is named more than once in one queue");
                 }
-                let state = state::reduce(&store.load_events(&change_id)?)?;
+                let state = store.state(&change_id)?;
                 selected.insert(change_id, state);
             }
             selected
@@ -1986,7 +1986,7 @@ fn integrate_queue(
 
 /// One change's turn in the queue.
 fn queue_step(ctx: &Ctx, store: &Store, change_id: &str, cleanup: bool) -> Result<QueueStep> {
-    let st = state::reduce(&store.load_events(change_id)?)?;
+    let st = store.state(change_id)?;
     if st.is_closed() {
         println!("{change_id}: {}", change_status(&st));
         return Ok(QueueStep::Skipped(change_status(&st).to_string()));
@@ -2002,7 +2002,7 @@ fn queue_step(ctx: &Ctx, store: &Store, change_id: &str, cleanup: bool) -> Resul
                 reason: format!("replaying onto {} needs a person", st.target_branch),
             });
         }
-        let st = state::reduce(&store.load_events(change_id)?)?;
+        let st = store.state(change_id)?;
         report = ctx.report(store, &st)?;
     }
 
@@ -2015,10 +2015,10 @@ fn queue_step(ctx: &Ctx, store: &Store, change_id: &str, cleanup: bool) -> Resul
             status::Blocker::GatesNotGreen | status::Blocker::MergedTreeUnevaluated
         )
     }) {
-        let st = state::reduce(&store.load_events(change_id)?)?;
+        let st = store.state(change_id)?;
         let target = st.target_branch.clone();
         let code = verify_against(ctx, store, change_id, &st, &target, None, true)?;
-        let st = state::reduce(&store.load_events(change_id)?)?;
+        let st = store.state(change_id)?;
         report = ctx.report(store, &st)?;
         if code != 0 {
             let failed = report
@@ -2035,7 +2035,7 @@ fn queue_step(ctx: &Ctx, store: &Store, change_id: &str, cleanup: bool) -> Resul
         }
     }
 
-    let st = state::reduce(&store.load_events(change_id)?)?;
+    let st = store.state(change_id)?;
     if !report.integrate_ready {
         eprint!("{}", render::blocker_explanation(&st, &report));
         return Ok(QueueStep::Stopped {
@@ -2062,7 +2062,7 @@ fn queue_step(ctx: &Ctx, store: &Store, change_id: &str, cleanup: bool) -> Resul
     // A change can close between this turn's readiness read and the target
     // lock the merge waits on, and the guarded path reports that as a skip
     // rather than an error. The closure it left says which happened.
-    let closed = state::reduce(&store.load_events(change_id)?)?;
+    let closed = store.state(change_id)?;
     match closed
         .closure
         .as_ref()
@@ -2076,7 +2076,7 @@ fn queue_step(ctx: &Ctx, store: &Store, change_id: &str, cleanup: bool) -> Resul
 /// What the queue would do to one change, reading only what is already
 /// recorded. Nothing is replayed, run, merged, or written.
 fn queue_dry_run(ctx: &Ctx, store: &Store, change_id: &str) -> Result<QueueStep> {
-    let st = state::reduce(&store.load_events(change_id)?)?;
+    let st = store.state(change_id)?;
     if st.is_closed() {
         println!("dry-run: would skip {change_id} ({})", change_status(&st));
         return Ok(QueueStep::Skipped(change_status(&st).to_string()));
@@ -2119,7 +2119,7 @@ fn integrate_one(
 ) -> Result<i32> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
-    let initial = state::reduce(&store.load_events(&change_id)?)?;
+    let initial = store.state(&change_id)?;
     if initial.iterating {
         eprintln!(
             "change declares it is iterating; clear it with arc iterating {} --off",
@@ -2140,7 +2140,7 @@ fn integrate_one(
     // target worktree without allowing an integration/metadata lock cycle.
     let target_lock = store.lock_target(&target)?;
     let transition = store.lock_transition(&change_id)?;
-    let st = state::reduce(&store.load_events(&change_id)?)?;
+    let st = store.state(&change_id)?;
     if st.is_closed() && matches!(closed_behavior, ClosedBehavior::SkipTagged) {
         println!("{}: {}", st.change_id, change_status(&st));
         return Ok(0);
@@ -2337,7 +2337,7 @@ fn authorization_basis(
             format!("prerequisite {blocker} cannot be read, so the authorization basis                      would be incomplete")
         })?;
         let mut blocker_id = blocker.clone();
-        let mut blocker_state = state::reduce(&events)?;
+        let mut blocker_state = state::reduce_following(&events, &store.rewrites())?;
         // Dependency readiness follows supersession, so the basis must record
         // the closure that actually satisfied the dependency rather than the
         // superseded one, whose integrated commit is null.
@@ -2356,7 +2356,7 @@ fn authorization_basis(
             };
             seen.push(successor.clone());
             blocker_id = successor;
-            blocker_state = state::reduce(&events)?;
+            blocker_state = state::reduce_following(&events, &store.rewrites())?;
         }
         if let Some(closure) = &blocker_state.closure {
             prerequisites.push(crate::model::PrerequisiteClosure {
@@ -2549,7 +2549,7 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
-    let st = state::reduce(&store.load_events(&change_id)?)?;
+    let st = store.state(&change_id)?;
     if st.is_closed() {
         bail!("change {change_id} is already closed");
     }

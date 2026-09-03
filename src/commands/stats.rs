@@ -202,7 +202,7 @@ pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, by_model_view: bo
             let tag = tag.trim().to_string();
             let mut selected = Vec::new();
             for change_id in store.list_change_ids()? {
-                let state = state::reduce(&store.load_events(&change_id)?)?;
+                let state = store.state(&change_id)?;
                 if state.tags.contains(&tag) {
                     selected.push(change_id);
                 }
@@ -218,9 +218,10 @@ pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, by_model_view: bo
     let mut changes = Vec::new();
     // Per-gate run durations across the selection, for aggregate percentiles.
     let mut gate_runs: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let rewrites = store.rewrites();
     for change_id in change_ids {
         let events = store.load_events(&change_id)?;
-        let state = state::reduce(&events)?;
+        let state = state::reduce_following(&events, &rewrites)?;
         for (gate, seconds) in observed_gate_runs(&events) {
             gate_runs.entry(gate).or_default().push(seconds);
         }
