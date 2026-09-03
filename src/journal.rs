@@ -931,6 +931,11 @@ pub enum JournalCmd {
         /// `--note` where the question went, or it goes nowhere
         #[arg(long)]
         drop_questions: bool,
+        /// Acknowledge one open claim on the artifact by ID (repeatable).
+        /// Consumption ends the work somebody else is doing, so it names
+        /// every claim it ends rather than discovering them afterwards
+        #[arg(long = "acknowledge-claim")]
+        acknowledge_claim: Vec<String>,
     },
     /// Change a live artifact's workflow kind without rewriting history: a
     /// typed successor is written, linked back with `supersedes`, and the
@@ -959,6 +964,11 @@ pub enum JournalCmd {
         /// anything
         #[arg(long)]
         dry_run: bool,
+        /// Acknowledge one open claim on the source artifact by ID
+        /// (repeatable). A kind change retires the source, ending work in
+        /// progress on it
+        #[arg(long = "acknowledge-claim")]
+        acknowledge_claim: Vec<String>,
     },
     /// Move artifacts to the cold sibling archive without deleting history
     Archive {
@@ -1137,6 +1147,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             note,
             decision,
             drop_questions,
+            acknowledge_claim,
         } => consume(
             ctx,
             &filename,
@@ -1144,6 +1155,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             note.as_deref(),
             decision.as_deref(),
             drop_questions,
+            &acknowledge_claim,
         ),
         JournalCmd::Transition {
             filename,
@@ -1152,6 +1164,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             title,
             reason,
             dry_run,
+            acknowledge_claim,
         } => transition(
             ctx,
             &filename,
@@ -1160,6 +1173,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             title.as_deref(),
             reason.as_deref(),
             dry_run,
+            &acknowledge_claim,
         ),
         JournalCmd::Archive {
             filename,
@@ -6277,6 +6291,51 @@ fn render_artifact_claims(claims: &[ArtifactClaim], now: DateTime<Utc>) -> Strin
         .collect()
 }
 
+/// Refuse a terminal operation that would end work nobody said they were
+/// ending.
+///
+/// Consumption, a kind change, and a change opening all stop the work on an
+/// artifact whether or not its holder is watching. Naming each claim is the
+/// caller saying they know what they are ending; a lease that has run out
+/// needs the acknowledgment just the same, because the claim being dead is a
+/// fact about the clock rather than its holder's consent.
+fn ensure_claims_acknowledged(
+    events: &[JournalEvent],
+    file: &str,
+    acknowledged: &[String],
+    verb: &str,
+) -> Result<()> {
+    let open = open_artifact_claims(events, file);
+    let unacknowledged: Vec<&ArtifactClaim> = open
+        .iter()
+        .filter(|claim| !acknowledged.iter().any(|id| id == &claim.state.claim_id))
+        .collect();
+    if unacknowledged.is_empty() {
+        return Ok(());
+    }
+    let now = Utc::now();
+    let listed = unacknowledged
+        .iter()
+        .map(|claim| {
+            format!(
+                "{} ({} via {}, {})",
+                claim.state.claim_id,
+                claim.state.owner.actor,
+                claim.state.owner.harness,
+                claim_condition(claim, now)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!(
+        "{file} carries {} open claim{}: {listed}\n\
+         tip: {verb} it with --acknowledge-claim <id> for each, which ends them \
+         without inventing an outcome their owners never declared",
+        unacknowledged.len(),
+        if unacknowledged.len() == 1 { "" } else { "s" },
+    )
+}
+
 /// The artifact a subject positional names, when it names one.
 ///
 /// A subject that ends in `.md` and is a file in the journal directory is an
@@ -9040,6 +9099,7 @@ pub(crate) fn consume(
     note: Option<&str>,
     decision: Option<&str>,
     drop_questions: bool,
+    acknowledge_claim: &[String],
 ) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&dir)?;
@@ -9152,6 +9212,7 @@ pub(crate) fn consume(
             open.join(", ")
         );
     }
+    ensure_claims_acknowledged(&events, filename, acknowledge_claim, "consume")?;
     let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "consumed");
     event.file = Some(filename.to_string());
     event.outcome = Some(outcome.as_str().to_string());
@@ -9436,6 +9497,7 @@ fn transition(
     title: Option<&str>,
     reason: Option<&str>,
     dry_run: bool,
+    acknowledge_claim: &[String],
 ) -> Result<i32> {
     if !transition_allowed_target(to) {
         bail!(
@@ -9541,6 +9603,7 @@ fn transition(
     if is_consumed(&events, filename) {
         bail!("{filename} is already consumed (see the journal)");
     }
+    ensure_claims_acknowledged(&events, filename, acknowledge_claim, "transition")?;
 
     if let Some(existing) = events
         .iter()
@@ -9622,11 +9685,31 @@ pub fn consume_superseded_by_change(
         bail!("{filename:?} is not a journal artifact name");
     };
     let dir = resolve_dir(&ctx.cwd)?;
-    if is_consumed(&read_events(&dir)?, filename) {
+    let events = read_events(&dir)?;
+    if is_consumed(&events, filename) {
         bail!("{filename} is already consumed (see the journal)");
     }
+    let now = Utc::now();
+    // Opening a change is the invoker saying where their own work on the
+    // artifact went, so their claim closes with the outcome that names it.
+    // Anybody else's claim is ended by the change opening and carries no
+    // outcome: nothing here knows how their work stopped, and guessing would
+    // credit them with a decision they never made.
+    let owner = caller_claim_identity(ctx);
+    if let Some(mine) = open_artifact_claims(&events, filename)
+        .into_iter()
+        .rev()
+        .find(|claim| claim.state.owner == owner)
+    {
+        let mut event = JournalEvent::base(ctx, now, &topic, "claim-released");
+        event.file = Some(filename.to_string());
+        event.claim_id = Some(mine.state.claim_id.clone());
+        event.outcome = Some("promoted".to_string());
+        event.note = Some(format!("change {change_id}"));
+        append_event(ctx, &dir, &event)?;
+    }
     let message = format!("consumed {filename} [superseded]: change {change_id}");
-    append_journal(&dir, ctx, Utc::now(), &topic, &message, None)
+    append_journal(&dir, ctx, now, &topic, &message, None)
 }
 
 /// Best-effort lifecycle narration into the advisory journal. Does nothing
