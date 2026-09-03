@@ -174,7 +174,16 @@ pub fn watch(ctx: &Ctx, reference: Option<&str>, args: WatchArgs) -> Result<i32>
     if let Some(file) =
         reference.and_then(|reference| crate::journal::artifact_subject(&ctx.cwd, reference))
     {
-        return watch_artifact(ctx, &file, tags, quorum, until, timeout_secs, exec_command, json);
+        return watch_artifact(
+            ctx,
+            &file,
+            tags,
+            quorum,
+            until,
+            timeout_secs,
+            exec_command,
+            json,
+        );
     }
     // A single change and a tagged set are different questions, and a quorum is
     // meaningless for one change. Refuse rather than guess, because both wrong

@@ -1261,14 +1261,14 @@ fn artifact_claim_releases_with_each_owner_outcome() {
             .success();
         let released = journal_event_log(&dir)
             .into_iter()
-            .filter(|event| event["event"] == "claim-released" && event["file"] == file)
-            .last()
+            .rfind(|event| event["event"] == "claim-released" && event["file"] == file)
             .unwrap();
         assert_eq!(released["outcome"], outcome);
         // A released claim frees the artifact rather than leaving it held.
-        let open: serde_json::Value =
-            serde_json::from_str(&stdout(repo.arc(&repo.root).args(["journal", "open", "--json"])))
-                .unwrap();
+        let open: serde_json::Value = serde_json::from_str(&stdout(
+            repo.arc(&repo.root).args(["journal", "open", "--json"]),
+        ))
+        .unwrap();
         let row = open["open"]
             .as_array()
             .unwrap()
@@ -1297,16 +1297,21 @@ fn an_artifact_lease_expires_on_its_own_with_no_stage_budget_to_set() {
         .args(["claim", &file, "--ttl", "1s"])
         .assert()
         .success();
-    let occupied: serde_json::Value =
-        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["journal", "open", "--json"])))
-            .unwrap();
+    let occupied: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["journal", "open", "--json"]),
+    ))
+    .unwrap();
     assert_eq!(occupied["open"][0]["availability"], "occupied");
-    assert_eq!(occupied["open"][0]["claims"][0]["stage_budgets"], serde_json::json!({}));
+    assert_eq!(
+        occupied["open"][0]["claims"][0]["stage_budgets"],
+        serde_json::json!({})
+    );
 
     thread::sleep(Duration::from_millis(1200));
-    let reclaimable: serde_json::Value =
-        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["journal", "open", "--json"])))
-            .unwrap();
+    let reclaimable: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["journal", "open", "--json"]),
+    ))
+    .unwrap();
     assert_eq!(reclaimable["open"][0]["availability"], "reclaimable");
     let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
     assert!(
@@ -1353,20 +1358,22 @@ fn artifact_takeover_refuses_a_live_claim_and_displaces_an_expired_one() {
         .args(["claim", &file, "--takeover"])
         .assert()
         .success()
-        .stdout(predicates::str::contains(format!("displaced: claim={first}")));
+        .stdout(predicates::str::contains(format!(
+            "displaced: claim={first}"
+        )));
 
     let displaced = journal_event_log(&dir)
         .into_iter()
-        .filter(|event| event["event"] == "claim-set")
-        .last()
+        .rfind(|event| event["event"] == "claim-set")
         .unwrap();
     assert_eq!(displaced["displaced"]["claim_id"], first.as_str());
     assert_eq!(displaced["displaced"]["actor"], "tester");
     assert_eq!(displaced["displaced"]["session"], "session-a");
     // The displaced claim stops occupying the artifact; only the new one does.
-    let open: serde_json::Value =
-        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["journal", "open", "--json"])))
-            .unwrap();
+    let open: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["journal", "open", "--json"]),
+    ))
+    .unwrap();
     let claims = open["open"][0]["claims"].as_array().unwrap();
     assert_eq!(claims.len(), 2);
     assert_eq!(claims[0]["closure"]["ended_by"], "displaced");
@@ -1382,7 +1389,15 @@ fn rescue_take_requires_an_artifact_claim_another_identity_left_expired() {
         .assert()
         .success();
     repo.arc(&repo.root)
-        .args(["journal", "checkpoint", &file, "--next", "rerun the gate", "--body-file", "-"])
+        .args([
+            "journal",
+            "checkpoint",
+            &file,
+            "--next",
+            "rerun the gate",
+            "--body-file",
+            "-",
+        ])
         .write_stdin("stopped mid-gate\n")
         .assert()
         .success();

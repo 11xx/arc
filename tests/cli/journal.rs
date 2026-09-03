@@ -10412,7 +10412,7 @@ fn checkpoint_records_structured_fields_and_a_digest_of_the_block_it_appended() 
     let body = fs::read_to_string(dir.join(&file)).unwrap();
     let id = checkpoints[1]["checkpoint_id"].as_str().unwrap();
     let start = body.find(&format!("\n### Work checkpoint {id}")).unwrap();
-    let digest = format!("sha256:{:x}", Sha256::digest(body[start..].as_bytes()));
+    let digest = format!("sha256:{:x}", Sha256::digest(&body.as_bytes()[start..]));
     assert_eq!(checkpoints[1]["digest"], digest.as_str());
     assert!(body.contains(&format!("### Work checkpoint {id} (tester via test,")));
 }
@@ -10426,14 +10426,21 @@ fn a_checkpoint_correction_supersedes_the_earlier_one_and_doctor_reports_two_tip
         .assert()
         .success();
     repo.arc(&repo.root)
-        .args(["journal", "checkpoint", &file, "--next", "first", "--body-file", "-"])
+        .args([
+            "journal",
+            "checkpoint",
+            &file,
+            "--next",
+            "first",
+            "--body-file",
+            "-",
+        ])
         .write_stdin("first\n")
         .assert()
         .success();
     let first = journal_event_log(&dir)
         .into_iter()
-        .filter(|event| event["event"] == "checkpoint")
-        .last()
+        .rfind(|event| event["event"] == "checkpoint")
         .unwrap()["checkpoint_id"]
         .as_str()
         .unwrap()
@@ -10468,7 +10475,9 @@ fn a_checkpoint_correction_supersedes_the_earlier_one_and_doctor_reports_two_tip
         .write_stdin("dangling\n")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("no checkpoint cp-nosuchcheckpoint"));
+        .stderr(predicates::str::contains(
+            "no checkpoint cp-nosuchcheckpoint",
+        ));
 
     let body = fs::read_to_string(dir.join(&file)).unwrap();
     assert!(body.contains("first\n") && body.contains("second\n"));
@@ -10485,12 +10494,14 @@ fn a_checkpoint_correction_supersedes_the_earlier_one_and_doctor_reports_two_tip
     // and a view showing one silently hides the other.
     let third = journal_event_log(&dir)
         .into_iter()
-        .filter(|event| event["event"] == "checkpoint")
-        .last()
+        .rfind(|event| event["event"] == "checkpoint")
         .unwrap();
     let mut forked = third.clone();
     forked["checkpoint_id"] = serde_json::json!("cp-contested");
-    forked.as_object_mut().unwrap().remove("supersedes_checkpoint");
+    forked
+        .as_object_mut()
+        .unwrap()
+        .remove("supersedes_checkpoint");
     let mut log = fs::read_to_string(dir.join("events.jsonl")).unwrap();
     log.push_str(&format!("{forked}\n"));
     fs::write(dir.join("events.jsonl"), log).unwrap();
@@ -10510,7 +10521,9 @@ fn a_checkpoint_needs_a_claim_and_is_refused_once_the_artifact_is_consumed() {
         .write_stdin("unclaimed\n")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("a checkpoint records progress on a claim"));
+        .stderr(predicates::str::contains(
+            "a checkpoint records progress on a claim",
+        ));
 
     repo.arc(&repo.root)
         .args(["claim", &file])
@@ -10526,7 +10539,9 @@ fn a_checkpoint_needs_a_claim_and_is_refused_once_the_artifact_is_consumed() {
         .write_stdin("after the end\n")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("work on it ended with the artifact"));
+        .stderr(predicates::str::contains(
+            "work on it ended with the artifact",
+        ));
 }
 
 #[test]
@@ -10632,7 +10647,13 @@ fn begin_from_journal_promotes_the_invokers_claim_and_ends_every_other() {
     repo.arc(&repo.root)
         .env("ARC_SESSION", "session-b")
         .env("ARC_ACTOR", "other")
-        .args(["begin", "promoted-work", "--from-journal", &file, "--no-worktree"])
+        .args([
+            "begin",
+            "promoted-work",
+            "--from-journal",
+            &file,
+            "--no-worktree",
+        ])
         .assert()
         .success();
 
@@ -10702,9 +10723,10 @@ fn the_artifact_claim_capability_is_marked_once_and_separates_unknown_from_never
         .count();
     assert_eq!(markers, 1);
 
-    let open: serde_json::Value =
-        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["journal", "open", "--json"])))
-            .unwrap();
+    let open: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["journal", "open", "--json"]),
+    ))
+    .unwrap();
     let row = |file: &str| -> serde_json::Value {
         open["open"]
             .as_array()
@@ -10739,7 +10761,10 @@ fn a_lane_and_an_artifact_claim_render_on_the_same_row() {
     // neither is ever converted into the other.
     let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
     assert!(text.contains("[lane: lane-and-claim"), "{text}");
-    assert!(text.contains("[claimed by tester via test: active]"), "{text}");
+    assert!(
+        text.contains("[claimed by tester via test: active]"),
+        "{text}"
+    );
     let catchup = stdout(repo.arc(&repo.root).args(["journal", "catchup"]));
     assert!(catchup.contains("lanes:"), "{catchup}");
     assert!(catchup.contains("artifact claims:"), "{catchup}");
@@ -10758,8 +10783,10 @@ fn a_consumed_artifact_reports_terminal_availability() {
         .args(["journal", "consume", &file, "--acknowledge-claim", &claim])
         .assert()
         .success();
-    let rescued: serde_json::Value =
-        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["rescue", &file, "--json"]))).unwrap();
+    let rescued: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["rescue", &file, "--json"]),
+    ))
+    .unwrap();
     assert_eq!(rescued["availability"], "terminal");
     assert_eq!(rescued["claims"][0]["closure"]["ended_by"], "consumed");
 }

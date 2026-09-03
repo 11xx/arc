@@ -5206,9 +5206,7 @@ impl JournalEvent {
             // A claim names the artifact it occupies and the lease it holds.
             // Without both it says somebody is working without saying on what
             // or until when, which no reader can act on.
-            "claim-set" => {
-                self.artifact_file() && self.names_claim() && self.ttl_seconds.is_some()
-            }
+            "claim-set" => self.artifact_file() && self.names_claim() && self.ttl_seconds.is_some(),
             // Activity is bound to one exact claim. An event that names no
             // claim cannot refresh one, because "whichever is current" is how
             // an unrelated write keeps abandoned work alive.
@@ -6121,9 +6119,7 @@ fn artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClaim> {
         };
         // A terminal event ends every claim still open at that point, and is
         // not addressed to any one of them.
-        if event.file.as_deref() == Some(file)
-            || event.supersedes.as_deref() == Some(file)
-        {
+        if event.file.as_deref() == Some(file) || event.supersedes.as_deref() == Some(file) {
             if let Some(kind) = terminal_kind(event) {
                 for claim in claims.iter_mut().filter(|claim| claim.is_open()) {
                     claim.closure = Some(ClaimClosure {
@@ -6532,7 +6528,10 @@ fn print_artifact_claim_conflict(message: &str, claim: &ArtifactClaim, now: Date
 }
 
 fn new_claim_id() -> String {
-    format!("claim-{}", ulid::Ulid::new().to_string().to_ascii_lowercase())
+    format!(
+        "claim-{}",
+        ulid::Ulid::new().to_string().to_ascii_lowercase()
+    )
 }
 
 fn new_checkpoint_id() -> String {
@@ -6673,11 +6672,7 @@ pub fn release_artifact_claim(ctx: &Ctx, file: &str, outcome: &str) -> Result<i3
     let _lock = lock_journal_transition(&context.dir)?;
     let events = read_events(&context.dir)?;
     let open = open_artifact_claims(&events, file);
-    let Some(mine) = open
-        .iter()
-        .rev()
-        .find(|claim| claim.state.owner == owner)
-    else {
+    let Some(mine) = open.iter().rev().find(|claim| claim.state.owner == owner) else {
         eprintln!("claim conflict: {file} has no open claim held by this identity");
         return Ok(8);
     };
@@ -6714,11 +6709,11 @@ pub fn stage_artifact(
     let context = claim_context(ctx, file)?;
     if claim_if_needed {
         let now = Utc::now();
-        let held = open_artifact_claims(&context.events, file).into_iter().any(
-            |claim| {
+        let held = open_artifact_claims(&context.events, file)
+            .into_iter()
+            .any(|claim| {
                 claim.state.owner == owner && state::claim_timing_at(&claim.state, now).active
-            },
-        );
+            });
         if !held {
             let code = claim_artifact(ctx, file, None, false)?;
             if code != 0 {
@@ -6731,11 +6726,7 @@ pub fn stage_artifact(
     refuse_if_consumed(&events, file)?;
     let now = Utc::now();
     let open = open_artifact_claims(&events, file);
-    let Some(mine) = open
-        .iter()
-        .rev()
-        .find(|claim| claim.state.owner == owner)
-    else {
+    let Some(mine) = open.iter().rev().find(|claim| claim.state.owner == owner) else {
         eprintln!("claim conflict: {file} has no claim held by this identity");
         return Ok(8);
     };
