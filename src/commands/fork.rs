@@ -68,6 +68,12 @@ fn journal_marker(ctx: &Ctx, slug: &str, title: &str, body: &str) -> Result<()> 
             title: Some(title.to_string()),
             scaffold: None,
             no_scaffold: true,
+            // A fork marker is authored out of the fork it describes, not
+            // distilled from a recorded session.
+            source: crate::journal::SourceArgs {
+                source: None,
+                item_key: None,
+            },
         },
     );
     let _ = std::fs::remove_file(&temp);
