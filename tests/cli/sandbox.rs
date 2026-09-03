@@ -476,6 +476,178 @@ fn discard_removes_only_a_sandbox_arc_made() {
     assert!(stdout(repo.arc(&repo.root).args(["list", "--open"])).contains("source-change"));
 }
 
+/// A gate to ask for, committed before the copy so both trees declare it.
+fn commit_gates(repo: &Repo) {
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.alpha]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: add gates"]);
+}
+
+/// A clone, and the source paths its copied ledger states. Everything a
+/// sandboxed command must refuse to follow is here: an open change whose
+/// recorded checkout is the source's, and the two trees that must not move.
+struct Cloned {
+    prefix: PathBuf,
+    clone: PathBuf,
+    worktree: PathBuf,
+}
+
+fn cloned_with_an_open_change(repo: &Repo, slug: &str) -> Cloned {
+    commit_gates(repo);
+    let (_, worktree, _) = change_with_patchset(repo, slug);
+    let prefix = repo.home.join("boxed");
+    repo.arc(&repo.root)
+        .args(["sandbox", "clone", prefix.to_str().unwrap()])
+        .assert()
+        .success();
+    Cloned {
+        clone: prefix.join("repo"),
+        prefix,
+        worktree,
+    }
+}
+
+/// The copied ledger states the source's absolute checkout path, so a gate run
+/// that trusted it would run in the source tree. The prefix bounds recorded
+/// paths as well as derived ones: the path is named, and nothing outside moves.
+#[test]
+fn a_sandboxed_gate_run_refuses_the_recorded_checkout_outside_the_prefix() {
+    let repo = Repo::new();
+    let boxed = cloned_with_an_open_change(&repo, "outside-gate");
+
+    let before = (snapshot(&repo.root), snapshot(&boxed.worktree));
+    let refusal = repo
+        .arc(&boxed.clone)
+        .env("ARC_SANDBOX", &boxed.prefix)
+        .args(["verify", "outside-gate", "--gate", "alpha"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&refusal.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains(boxed.worktree.to_str().unwrap()),
+        "the refusal should name the outside path: {stderr}"
+    );
+    assert!(stderr.contains("lies outside the sandbox"), "{stderr}");
+    assert!(
+        stderr.contains(&format!("git worktree add {}/", boxed.prefix.display())),
+        "the tip should name a checkout inside the prefix: {stderr}"
+    );
+    assert_eq!(
+        before,
+        (snapshot(&repo.root), snapshot(&boxed.worktree)),
+        "a sandboxed gate run touched the source"
+    );
+}
+
+/// A replay rewrites the tree it runs in, and the recorded path is the only
+/// thing that names one once Git has no answer. The same bound applies.
+#[test]
+fn a_sandboxed_rebase_refuses_the_recorded_checkout_outside_the_prefix() {
+    let repo = Repo::new();
+    let boxed = cloned_with_an_open_change(&repo, "outside-replay");
+    // Something to replay, in the copy's own target branch.
+    repo.commit(&boxed.clone, "moved.txt", "moved\n", "feat: move target");
+
+    let before = (snapshot(&repo.root), snapshot(&boxed.worktree));
+    let refusal = repo
+        .arc(&boxed.clone)
+        .env("ARC_SANDBOX", &boxed.prefix)
+        .args(["rebase", "outside-replay"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&refusal.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains(boxed.worktree.to_str().unwrap()),
+        "the refusal should name the outside path: {stderr}"
+    );
+    assert!(stderr.contains("lies outside the sandbox"), "{stderr}");
+    assert_eq!(
+        before,
+        (snapshot(&repo.root), snapshot(&boxed.worktree)),
+        "a sandboxed rebase touched the source"
+    );
+}
+
+/// A marker is a file anyone can write, and being parseable is not evidence
+/// that arc built the tree around it. Discard removes a directory only where
+/// the marker and the directory agree about what is there.
+#[test]
+fn discard_refuses_a_marker_that_does_not_describe_its_directory() {
+    let repo = Repo::new();
+    let prefix = repo.home.join("boxed");
+    repo.arc(&repo.root)
+        .args(["sandbox", "clone", prefix.to_str().unwrap()])
+        .assert()
+        .success();
+    let genuine: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(prefix.join(".arc-sandbox.json")).unwrap())
+            .unwrap();
+
+    // A fabricated marker over a directory arc never built: every path it
+    // claims is real, and none of it is in the directory it sits in.
+    let forged = repo.home.join("precious");
+    fs::create_dir_all(&forged).unwrap();
+    fs::write(forged.join("keepme"), "precious\n").unwrap();
+    fs::write(
+        forged.join(".arc-sandbox.json"),
+        serde_json::to_vec_pretty(&genuine).unwrap(),
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args(["sandbox", "discard", forged.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "does not describe this directory",
+        ));
+    assert!(forged.join("keepme").is_file());
+
+    // Corrected to name this directory, the marker still describes a sandbox
+    // that is not here: the repository it claims lies outside the prefix.
+    let mut relabelled = genuine.clone();
+    relabelled["prefix"] = serde_json::Value::String(forged.display().to_string());
+    fs::write(
+        forged.join(".arc-sandbox.json"),
+        serde_json::to_vec_pretty(&relabelled).unwrap(),
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args(["sandbox", "discard", forged.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("outside the prefix"));
+    assert!(forged.join("keepme").is_file());
+
+    // A marker claiming the home directory is refused before its own contents
+    // are weighed: no sandbox is the home directory.
+    let mut at_home = genuine.clone();
+    at_home["prefix"] = serde_json::Value::String(repo.home.display().to_string());
+    fs::write(
+        repo.home.join(".arc-sandbox.json"),
+        serde_json::to_vec_pretty(&at_home).unwrap(),
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args(["sandbox", "discard", repo.home.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is the home directory"));
+    assert!(repo.home.is_dir());
+
+    // The sandbox arc did build still discards.
+    repo.arc(&repo.root)
+        .args(["sandbox", "discard", prefix.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("discarded"));
+    assert!(!prefix.exists());
+}
+
 /// The same slug function the journal keys projects by, so a test names the
 /// directory arc will choose rather than restating the rule.
 fn config_path_slug(path: &Path) -> String {

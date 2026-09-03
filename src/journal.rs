@@ -1413,7 +1413,13 @@ fn promote_outbox(ctx: &Ctx, paths: &[PathBuf]) -> Result<()> {
 /// Promotion therefore belongs to every command that reads a change's
 /// worktree, and it is advisory: a spool that cannot be filed from here is
 /// named and left intact, never a reason to stop the command that found it.
+///
+/// Promotion empties the outbox it reads, so a sandbox bounds which worktree
+/// it will look in: a recorded checkout outside the prefix keeps its spool.
 pub fn promote_worktree_spool(ctx: &Ctx, worktree: &Path) {
+    if !ctx.admits_path(worktree) {
+        return;
+    }
     let Some((dir, paths)) = waiting_spool(worktree) else {
         return;
     };

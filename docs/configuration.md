@@ -51,6 +51,21 @@ root instead. It carries committed state: uncommitted work is not copied, and
 an open change's recorded checkout is the source's until one is made in the
 sandbox.
 
+The prefix bounds recorded paths as well as derived ones. Under a sandbox, arc
+runs commands in and writes beneath the prefix and the repository it was
+pointed at, and nothing else: a checkout the ledger names anywhere else — as a
+copied ledger names the source's — counts as no checkout at all. So a gate run
+and a `rebase` refuse it by name and say to make one inside the prefix with
+`git worktree add`, spooled journal writes there stay where they are, and
+`integrate --cleanup` keeps it rather than removing it.
+
+`arc sandbox discard` removes a whole directory tree, so it acts only where the
+marker arc wrote and the directory agree: the marker must name that exact
+directory, everything it claims to hold must lie inside it, and the repository
+it names must be there with a Git directory. The home directory, the filesystem
+root, and any ancestor of the working directory are refused whatever a marker
+says.
+
 The committed `.arc/policy.toml` may set the same `[provenance]` table for a
 repository. `per-actor` compares the claim actor with the snapshot author and
 committer; `shared` omits `provenance_mismatch` because that comparison does
