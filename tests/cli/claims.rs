@@ -661,6 +661,103 @@ fn takeover_refuses_an_active_claim_that_is_not_stale() {
 }
 
 #[test]
+fn in_budget_refusal_names_the_reason_flag_and_its_evidence() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "takeover-evidence"]));
+    repo.arc(&repo.root)
+        .args(["claim", "takeover-evidence"])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "taker")
+        .env("ARC_SESSION", "session-b")
+        .args(["claim", "takeover-evidence", "--takeover"])
+        .assert()
+        .code(8)
+        .stderr(predicates::str::contains(
+            "--takeover --because <reason> displaces it and records the reason, \
+             such as harness-status-absent or delegate-exit:<handle>",
+        ));
+}
+
+#[test]
+fn a_stated_reason_displaces_a_claim_inside_its_budget() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "takeover-because"]));
+    repo.arc(&repo.root)
+        .args(["claim", "takeover-because"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["stage", "takeover-because", "implementing"])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "taker")
+        .env("ARC_HARNESS", "other")
+        .env("ARC_SESSION", "session-b")
+        .args([
+            "claim",
+            "takeover-because",
+            "--takeover",
+            "--because",
+            "harness-status-absent",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "displaced before its budget: harness-status-absent",
+        ));
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "takeover-because",
+        "--type",
+        "claim-set",
+    ]));
+    let replacement: serde_json::Value =
+        serde_json::from_str(events.lines().last().unwrap()).unwrap();
+    assert_eq!(replacement["displaced"]["actor"], "tester");
+    assert_eq!(replacement["displaced"]["stage"], "implementing");
+    assert_eq!(replacement["displaced"]["reason"], "harness-status-absent");
+
+    let shown = stdout(repo.arc(&repo.root).args(["show", "takeover-because"]));
+    assert!(
+        shown.contains("displaced before its budget: harness-status-absent"),
+        "{shown}"
+    );
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "takeover-because"]),
+    ))
+    .unwrap();
+    assert_eq!(status["claim"]["owner"]["actor"], "taker");
+    assert_eq!(status["claim"]["displaced_reason"], "harness-status-absent");
+}
+
+#[test]
+fn a_reason_without_a_takeover_is_a_usage_error() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "takeover-unasked"]));
+
+    repo.arc(&repo.root)
+        .args([
+            "claim",
+            "takeover-unasked",
+            "--because",
+            "harness-status-absent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--because records why a takeover cut a lease short",
+        ));
+}
+
+#[test]
 fn stale_claim_conflict_names_the_explicit_takeover_path() {
     let repo = Repo::new();
     let opened = stdout(repo.arc(&repo.root).args(["begin", "takeover-offered"]));
@@ -1381,6 +1478,60 @@ fn artifact_takeover_refuses_a_live_claim_and_displaces_an_expired_one() {
     assert_eq!(claims.len(), 2);
     assert_eq!(claims[0]["closure"]["ended_by"], "displaced");
     assert_eq!(open["open"][0]["availability"], "occupied");
+}
+
+#[test]
+fn a_stated_reason_displaces_a_live_artifact_claim() {
+    let repo = Repo::new();
+    let (dir, file) = journal_artifact(&repo, "artifact-because", "todo", "# X\n");
+    repo.arc(&repo.root)
+        .args(["claim", &file])
+        .assert()
+        .success();
+    let first = artifact_claim_ids(&dir, &file).remove(0);
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "other")
+        .env("ARC_SESSION", "session-b")
+        .args(["claim", &file, "--because", "delegate-exit:run-7"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--because records why a takeover cut a lease short",
+        ));
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "other")
+        .env("ARC_SESSION", "session-b")
+        .args(["claim", &file, "--takeover"])
+        .assert()
+        .code(8)
+        .stderr(predicates::str::contains(
+            "--takeover --because <reason> displaces it and records the reason",
+        ));
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "other")
+        .env("ARC_SESSION", "session-b")
+        .args([
+            "claim",
+            &file,
+            "--takeover",
+            "--because",
+            "delegate-exit:run-7",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "displaced before its budget: delegate-exit:run-7",
+        ));
+
+    let displaced = journal_event_log(&dir)
+        .into_iter()
+        .rfind(|event| event["event"] == "claim-set")
+        .unwrap();
+    assert_eq!(displaced["displaced"]["claim_id"], first.as_str());
+    assert_eq!(displaced["displaced"]["reason"], "delegate-exit:run-7");
 }
 
 #[test]

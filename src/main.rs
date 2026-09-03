@@ -658,6 +658,12 @@ enum Cmd {
         /// a change, an expired one on an artifact
         #[arg(long)]
         takeover: bool,
+        /// Why a lease that is not yet reclaimable is cut short, recorded on
+        /// the displaced claim and verified by nobody (requires --takeover;
+        /// `harness-status-absent` and `delegate-exit:<handle>` are the
+        /// expected evidence, and any text is accepted)
+        #[arg(long)]
+        because: Option<String>,
     },
     /// Release the advisory executor claim on a change or a journal artifact
     ReleaseClaim {
@@ -2217,21 +2223,36 @@ fn run(cli: Cli) -> Result<i32> {
             ttl,
             stage_budget,
             takeover,
-        } => match artifact(&ctx, change.as_deref()) {
-            Some(file) => {
-                if !stage_budget.is_empty() {
-                    bail!(
-                        "--stage-budget applies to a change; an artifact's lease is the \
-                         whole of what expires"
-                    );
+            because,
+        } => {
+            if because.is_some() && !takeover {
+                bail!(
+                    "--because records why a takeover cut a lease short; it applies \
+                     only with --takeover"
+                );
+            }
+            match artifact(&ctx, change.as_deref()) {
+                Some(file) => {
+                    if !stage_budget.is_empty() {
+                        bail!(
+                            "--stage-budget applies to a change; an artifact's lease is the \
+                             whole of what expires"
+                        );
+                    }
+                    journal::claim_artifact(
+                        &ctx,
+                        &file,
+                        ttl.as_deref(),
+                        takeover,
+                        because.as_deref(),
+                    )
                 }
-                journal::claim_artifact(&ctx, &file, ttl.as_deref(), takeover)
+                None => {
+                    let change = infer(change.as_deref())?;
+                    commands::claim(&ctx, &change, ttl, stage_budget, takeover, because)
+                }
             }
-            None => {
-                let change = infer(change.as_deref())?;
-                commands::claim(&ctx, &change, ttl, stage_budget, takeover)
-            }
-        },
+        }
         Cmd::ReleaseClaim { change, outcome } => match artifact(&ctx, change.as_deref()) {
             Some(file) => {
                 journal::release_artifact_claim(&ctx, &file, outcome.as_deref().unwrap_or("paused"))

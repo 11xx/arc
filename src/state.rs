@@ -148,6 +148,11 @@ pub struct ClaimState {
     pub claimed_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
     pub progress: Option<StageProgress>,
+    /// The claim this one displaced when it was acquired, kept so a reader
+    /// of the live claim can see whose lease it ended and why. A renewal
+    /// carries it forward: it describes the acquisition, not the last write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub displaced: Option<DisplacedClaim>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1380,6 +1385,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 });
                 let claimed_at = renewal.map_or(ev.created_at, |claim| claim.claimed_at);
                 let progress = renewal.and_then(|claim| claim.progress.clone());
+                let carried = renewal.and_then(|claim| claim.displaced.clone());
                 state.claim = Some(ClaimState {
                     claim_id,
                     owner,
@@ -1388,6 +1394,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     claimed_at,
                     last_activity_at: ev.created_at,
                     progress,
+                    displaced: displaced.clone().or(carried),
                 });
             }
             Payload::ClaimReleased { claim_id } => {
@@ -2972,6 +2979,7 @@ mod tests {
             claimed_at,
             last_activity_at: claimed_at,
             progress: None,
+            displaced: None,
         };
 
         let launch = claim_timing_at(&claim, claimed_at + TimeDelta::seconds(61));

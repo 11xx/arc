@@ -537,6 +537,7 @@ Claims are advisory rather than merge locks:
 arc claim radio-refill-fix \
   --stage-budget launch=60s --stage-budget implementing=30m
 arc claim radio-refill-fix --takeover
+arc claim radio-refill-fix --takeover --because harness-status-absent
 arc stage radio-refill-fix blocked-on \
   --blocker external --note "waiting for test fixture"
 arc release-claim radio-refill-fix
@@ -559,6 +560,11 @@ event and cannot be supplied to `arc stage`. An identified caller may release
 any live claim so a lead can recover stale foreign work. `claim --takeover`
 explicitly replaces an active stale claim, records the displaced owner and
 stage, and refuses active claims that have not exceeded their stage budget.
+`--takeover --because <reason>` displaces one of those too, recording the
+reason on the displaced claim; arc prints it wherever the displacement is
+rendered and verifies none of it, since the evidence that a holder is gone —
+`harness-status-absent`, `delegate-exit:<handle>` — is observed outside the
+ledger. Any text is accepted, and `--because` without `--takeover` is refused.
 Every claim, release,
 and stage event carries its generation (snapshots carry the one observed at
 snapshot time), so imported stale events cannot clear, advance, or claim
@@ -1854,9 +1860,10 @@ Both subjects reduce to the same claim state and are timed by the same
 function, so `active` and `expired` mean what they mean on a change. A change's
 stages carry budgets and a stage over budget reads `stale`; an artifact has no
 stages to budget, so its lease is the whole of what expires and `expired` is
-when it becomes reclaimable. A live claim held by someone else is refused; an
-expired one is displaced only with `--takeover`, which records the displaced
-claim. A lane is occupancy of a topic and a claim is occupancy of a file: both
+when it becomes reclaimable. A live claim held by someone else is refused unless
+`--takeover --because <reason>` states why its holder is gone; an expired one
+is displaced with `--takeover` alone. Either way the displaced claim is
+recorded, with the reason when one was given. A lane is occupancy of a topic and a claim is occupancy of a file: both
 render on a row, and neither is ever rewritten into the other.
 
 `journal checkpoint <file>.md --body-file - [--next <action>] [--gate <cmd>]

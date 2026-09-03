@@ -12,6 +12,15 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `arc claim --takeover --because <reason>` displaces a claim that is not yet
+  reclaimable — inside its stage budget on a change, still leased on a journal
+  artifact — recording the stated reason on the displaced claim and verifying
+  none of it. Without a reason the refusal stands and names the flag and the
+  evidence a caller is expected to have (`harness-status-absent`,
+  `delegate-exit:<handle>`); `--because` without `--takeover` is refused. The
+  reason renders with the displacement in `arc show`, the timeline, the claim
+  listings, and `arc status --json`.
+
 - Work on a journal artifact is a claim, the same object the ledger uses for
   a change with the artifact filename as its subject. `claim`, `release-claim`,
   `stage`, `rescue --take`, and `watch --until stalled` accept an artifact

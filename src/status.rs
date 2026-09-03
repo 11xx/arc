@@ -355,6 +355,10 @@ pub struct ClaimStatus {
     pub age_seconds: u64,
     pub budget_seconds: Option<u64>,
     pub stage_budgets: BTreeMap<crate::model::StageBudget, u64>,
+    /// Why the claim this one displaced had its lease cut short, as the
+    /// taker stated it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub displaced_reason: Option<String>,
     pub snapshot_author: Option<GitIdentity>,
     pub snapshot_committer: Option<GitIdentity>,
     pub snapshot_claim_actor: Option<String>,
@@ -1466,6 +1470,10 @@ pub fn claim_status_at(
         age_seconds: timing.age_seconds,
         budget_seconds: timing.budget_seconds,
         stage_budgets: claim.stage_budgets.clone(),
+        displaced_reason: claim
+            .displaced
+            .as_ref()
+            .and_then(|displaced| displaced.reason.clone()),
         snapshot_author: snapshot.and_then(|patchset| patchset.author.clone()),
         snapshot_committer: snapshot.and_then(|patchset| patchset.committer.clone()),
         snapshot_claim_actor: snapshot.and_then(|patchset| patchset.claim_actor.clone()),
