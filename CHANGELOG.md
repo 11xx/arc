@@ -12,6 +12,17 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `arc journal handoff <topic> --derive` prepends a `## State (derived at
+  <ts>)` section read from the repository: repository and worktree paths,
+  branch and short head, the change's target with commits ahead and behind,
+  clean or dirty, the inferred change with its stage and claim standing, open
+  queue depth, and the installed build beside the repository head. Facts that
+  cannot be read render as `unknown` rather than being omitted. `--derive` is
+  refused outside a Git repository, and refuses before the body is read so
+  `--body-file -` never waits on stdin. Writing that half by hand is most of
+  what made a handoff expensive enough to skip; the guide now also names the
+  four moments at which a session journals rather than leaving it to the end.
+
 - `arc journal correct <file> --target <t> --field <f> --value <v>` and
   `arc journal retract <file> --target <t> --body-file -` amend a recorded
   entry without rewriting it. A wrong entry could only be answered by another

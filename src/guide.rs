@@ -219,7 +219,7 @@ KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)
   exists to replace, at higher cost and in an append-only record.
 
 END A SESSION (what the next one reads)
-  arc journal handoff <topic> --body-file -    Stopped midstream.
+  arc journal handoff <topic> --derive        Stopped midstream.
   arc journal conclusion <topic> --body-file - Finished the thing.
   arc journal memory <topic> --body-file -     Learned a durable fact.
   arc journal consume <file> --outcome done    Drain what you resolved.
@@ -229,11 +229,24 @@ END A SESSION (what the next one reads)
   `journal open` lists what a handoff parked.
 
   Which one is decided by how the work ended, not by how much there is to say.
-  Stopped midstream — a handoff, naming branch, worktree, current head, what
-  is done, what is open, the next action, and the gate command. Finished — a
-  conclusion. Learned something that will be true next month and is not in the
-  code — a memory, which every later `catchup` shows. Never label unfinished
-  work a conclusion.
+  Stopped midstream — a handoff; `--derive` reads branch, worktree, head,
+  distance from the target, change and claim out of the repository, so the
+  author writes only what is done, what is open, the next action, and the gate
+  command. Finished — a conclusion. Learned something that will be true next
+  month and is not in the code — a memory, which every later `catchup` shows.
+  Never label unfinished work a conclusion.
+
+  A session journals at four moments, and none of them is the end. A premise
+  checked or an approach abandoned is kept as it happens (`arc keep`), while
+  the reasoning that produced it is still recoverable. A filed claim found
+  wrong is corrected in the same breath as learning so (`journal correct`, or
+  `journal retract` where the entry should stand withdrawn), because a false
+  artifact read as authoritative is worse than no artifact. A round that
+  closes having deliberately left work records what it left (`run end
+  --note`), since a deferral living only in a transcript was dropped rather
+  than deferred. A session stopping midstream writes a handoff (`journal
+  handoff --derive`), which is cheap enough to write at any interruption
+  because only what was learned has to be written by hand.
 
 PROFILES (--profile, default local)
   direct   Bounded, reversible, one session and checkout. `--no-worktree` uses

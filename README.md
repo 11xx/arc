@@ -1477,6 +1477,21 @@ than work, so it is deliberately not an actionable tier: it exists to be
 counted and cited, and a decision whose revisit trigger reads "when X happens"
 can fire on evidence instead of never. An incident that implies work produces a
 separate artifact of the kind that work actually is.
+`journal handoff <topic> --derive` prepends a `## State (derived at <ts>)`
+section above the body, read from the repository at the moment of writing: the
+repository and worktree paths, the current branch and short head, the change's
+target branch with commits ahead and behind it, whether the tree is clean, the
+inferred change with its stage and claim standing, how many actionable items
+the queue carries, and the installed build beside the repository head. A fact
+that cannot be read renders as `unknown` rather than being dropped, since an
+absent line cannot be told apart from a fact nobody recorded. The section is
+Markdown to be scanned, one fact per line, and nothing in it is meant to be
+parsed back. `--derive` is refused outside a Git repository, and refuses before
+the body is read so `--body-file -` never waits on stdin for a write that
+cannot happen. It never satisfies the emptiness check on its own: the
+mechanical half is the cheap half, and what a successor cannot derive — what
+was learned, what is open, the next action — is what the author is there to
+write.
 `journal open` lists the primary queue first,
 then separate later and feature-request sections, annotating each item with how
 long it has waited (for discussions, since the latest typed position; otherwise
