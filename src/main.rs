@@ -879,7 +879,9 @@ enum Cmd {
         /// Run all declared gates concurrently and append evidence in name order
         #[arg(long)]
         parallel: bool,
-        /// With --all, record reuse of passing evidence already green at the current head
+        /// Record reuse of passing evidence instead of rerunning the gate that
+        /// produced it: with --all, evidence green at the current head; with
+        /// --against, evidence green at the merged tree
         #[arg(long = "skip-green")]
         skip_green: bool,
         /// Gate name from .arc/gates.toml
@@ -950,9 +952,11 @@ enum Cmd {
         /// committed, and evidence at the head says nothing about it. This
         /// synthesizes that merge, checks it out on its own, runs the declared
         /// gates there, and records the result against the merged tree. The
-        /// scratch checkout is removed whatever the gates do. The evidence is
-        /// spent as soon as the target moves again, because that is a
-        /// different merge.
+        /// scratch checkout is removed whatever the gates do, and is not
+        /// created at all when no gate is left to run. The evidence is spent
+        /// as soon as the target moves again, because that is a different
+        /// merge. With --skip-green, a gate already green at that merged tree
+        /// records reuse rather than running a second time.
         #[arg(long, value_name = "BRANCH")]
         against: Option<String>,
     },
