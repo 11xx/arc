@@ -9062,3 +9062,84 @@ fn journal_open_and_catchup_show_a_corrected_title() {
     // The artifact keeps the heading it was filed with.
     assert!(artifact_body(&repo, &file).contains("# Wrong title"));
 }
+
+#[test]
+fn journal_open_counts_positions_standing_on_a_filed_claim() {
+    let repo = Repo::new();
+    let file = todo_fixture(&repo, "amended-claim", "A claim");
+    let plain = todo_fixture(&repo, "plain-claim", "Another claim");
+    for _ in 0..2 {
+        stanced_position(&repo, &file, "amend");
+    }
+
+    let queue = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let row = |name: &str| {
+        queue["open"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["file"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(&file)["amendments"], 2, "{queue}");
+    assert!(row(&plain)["amendments"].is_null(), "{queue}");
+    let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(text.contains("[amended ×2]"), "{text}");
+    assert_eq!(text.matches("[amended ×").count(), 1, "{text}");
+
+    // A retracted position is not an amendment in force.
+    let withdrawn = journal_events(&journal_dir(&repo))
+        .into_iter()
+        .rev()
+        .find(|event| event["event"] == "position")
+        .unwrap()["position_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &withdrawn,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Filed against the wrong claim.\n")
+        .assert()
+        .success();
+    let queue = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert_eq!(
+        row(&file)["amendments"],
+        2,
+        "the earlier queue is unchanged"
+    );
+    assert_eq!(
+        queue["open"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["file"] == file.as_str())
+            .unwrap()["amendments"],
+        1,
+        "{queue}"
+    );
+}
+
+#[test]
+fn journal_open_leaves_a_discussion_without_an_amendment_count() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "argued-not-amended");
+    stanced_position(&repo, &file, "for");
+
+    let queue = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let row = queue["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["file"] == file.as_str())
+        .unwrap();
+    assert!(row["amendments"].is_null(), "{queue}");
+}

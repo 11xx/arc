@@ -4655,6 +4655,11 @@ pub(crate) struct ArtifactEntry {
     /// The latest source check for this artifact, if one was recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) verification: Option<VerificationStamp>,
+    /// Positions standing on a filed claim, which amend what it says. Absent
+    /// on a discussion, which is argued by positions rather than amended by
+    /// them, and on any artifact carrying none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) amendments: Option<usize>,
 }
 
 #[derive(Clone, Serialize)]
@@ -4883,6 +4888,7 @@ fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
                 lane: None,
                 change: None,
                 verification: None,
+                amendments: None,
             })
         })
         .collect())
@@ -4948,6 +4954,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
                     lane: None,
                     change: None,
                     verification: None,
+                    amendments: None,
                 });
             }
         }
@@ -5277,6 +5284,7 @@ pub(crate) fn collect_open_in(
                 let heading = amended_heading(&journal, &dir, &name);
                 let change = change_annotation(&changes, &topic, &name);
                 let verification = verification_stamp(&journal, &name, current_revision.as_deref());
+                let amendments = standing_amendments(&journal, &name, &file_kind);
                 open.push(ArtifactEntry {
                     lane: lane_for_topic(&lanes, &topic, &caller),
                     change,
@@ -5291,6 +5299,7 @@ pub(crate) fn collect_open_in(
                     kind: Some(file_kind),
                     heading,
                     verification,
+                    amendments,
                 });
             }
         }
@@ -5299,6 +5308,7 @@ pub(crate) fn collect_open_in(
                 let heading = amended_heading(&journal, &dir, &name);
                 let change = change_annotation(&changes, &topic, &name);
                 let verification = verification_stamp(&journal, &name, current_revision.as_deref());
+                let amendments = standing_amendments(&journal, &name, &file_kind);
                 later.push(ArtifactEntry {
                     lane: lane_for_topic(&lanes, &topic, &caller),
                     change,
@@ -5309,6 +5319,7 @@ pub(crate) fn collect_open_in(
                     kind: Some(file_kind),
                     heading,
                     verification,
+                    amendments,
                 });
             }
         }
@@ -5317,6 +5328,7 @@ pub(crate) fn collect_open_in(
                 let heading = amended_heading(&journal, &dir, &name);
                 let change = change_annotation(&changes, &topic, &name);
                 let verification = verification_stamp(&journal, &name, current_revision.as_deref());
+                let amendments = standing_amendments(&journal, &name, &file_kind);
                 feature_requests.push(ArtifactEntry {
                     lane: lane_for_topic(&lanes, &topic, &caller),
                     change,
@@ -5327,6 +5339,7 @@ pub(crate) fn collect_open_in(
                     kind: Some(file_kind),
                     heading,
                     verification,
+                    amendments,
                 });
             }
         }
@@ -5392,7 +5405,7 @@ pub(crate) fn render_open_entry(f: &ArtifactEntry) {
         format!(" ({} old)", format_age(seconds))
     });
     println!(
-        "  {}{}  {}  {}  {}{}{}{}",
+        "  {}{}  {}  {}  {}{}{}{}{}",
         f.timestamp,
         age,
         f.topic,
@@ -5400,8 +5413,31 @@ pub(crate) fn render_open_entry(f: &ArtifactEntry) {
         f.heading.as_deref().unwrap_or(""),
         render_change(f.change.as_ref()),
         render_artifact_lane(f.lane.as_ref()),
-        render_verification(f.verification.as_ref())
+        render_verification(f.verification.as_ref()),
+        render_amendments(f.amendments)
     );
+}
+
+/// How many positions still stand on a filed claim.
+///
+/// A claim collects positions as amendments to what it says, so a row that
+/// carries the count distinguishes one amended three times from one filed
+/// once. A discussion is argued by positions rather than amended by them, and
+/// its count is the whole `discussion` view, so it has none here.
+fn standing_amendments(events: &[JournalEvent], filename: &str, kind: &str) -> Option<usize> {
+    if kind == JournalKind::Discussion.as_str() {
+        return None;
+    }
+    let amendments = Amendments::collect(events, filename);
+    let standing = position_events(events, filename)
+        .into_iter()
+        .filter(|event| !amendments.position_retracted(event))
+        .count();
+    (standing > 0).then_some(standing)
+}
+
+fn render_amendments(amendments: Option<usize>) -> String {
+    amendments.map_or_else(String::new, |count| format!(" [amended ×{count}]"))
 }
 
 fn lane_for_topic(lanes: &[LaneEntry], topic: &str, caller: &LaneOwner) -> Option<ArtifactLane> {
