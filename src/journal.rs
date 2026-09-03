@@ -1437,10 +1437,9 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
         advice.push(DoctorFinding {
             code: "stale-lane",
             detail: format!(
-                "{} owned by {} {} idle {}",
+                "{} owned by {} idle {}",
                 lane.topic,
-                lane.owner_harness,
-                lane.owner_session,
+                lane.owner,
                 format_age(age)
             ),
         });
@@ -3489,11 +3488,29 @@ fn render_event(event: &JournalEvent) -> String {
     line
 }
 
+/// Who holds a lane. Session strings are minted by each harness independently,
+/// so two harnesses can present the same one; the harness is therefore part of
+/// the identity rather than a label beside it. Activity, renewal, closure,
+/// takeover, and the one-lane-per-owner rule all key on the pair.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize)]
+pub(crate) struct LaneOwner {
+    #[serde(rename = "owner_harness")]
+    pub(crate) harness: String,
+    #[serde(rename = "owner_session")]
+    pub(crate) session: String,
+}
+
+impl std::fmt::Display for LaneOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.harness, self.session)
+    }
+}
+
 #[derive(Clone, Serialize)]
 pub(crate) struct LaneEntry {
     pub(crate) topic: String,
-    pub(crate) owner_harness: String,
-    pub(crate) owner_session: String,
+    #[serde(flatten)]
+    pub(crate) owner: LaneOwner,
     pub(crate) state: String,
     pub(crate) opened_at: String,
     pub(crate) last_activity: String,
@@ -3509,18 +3526,17 @@ pub(crate) struct LaneEntry {
 fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEntry> {
     struct ActiveLane {
         topic: String,
-        owner_harness: String,
-        owner_session: String,
+        owner: LaneOwner,
         opened_time: DateTime<Utc>,
         ttl_seconds: u64,
         scope: Vec<String>,
         status: Option<String>,
     }
 
-    let mut last_activity = HashMap::new();
+    let mut last_activity: HashMap<LaneOwner, DateTime<Utc>> = HashMap::new();
     for event in events {
         if let Some(timestamp) = event.timestamp() {
-            last_activity.insert(event.session.clone(), timestamp);
+            last_activity.insert(event_owner(event), timestamp);
         }
     }
     let mut active: HashMap<String, ActiveLane> = HashMap::new();
@@ -3549,13 +3565,13 @@ fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEn
         };
         match marker {
             LaneMarker::Opened { ttl, scope, status } => {
-                active.retain(|_, lane| lane.owner_session != event.session);
+                let owner = event_owner(event);
+                active.retain(|_, lane| lane.owner != owner);
                 active.insert(
                     event.topic.clone(),
                     ActiveLane {
                         topic: event.topic.clone(),
-                        owner_harness: event.harness.clone(),
-                        owner_session: event.session.clone(),
+                        owner,
                         opened_time: timestamp,
                         ttl_seconds: ttl,
                         scope,
@@ -3583,14 +3599,13 @@ fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEn
         .into_values()
         .map(|lane| {
             let activity = last_activity
-                .get(&lane.owner_session)
+                .get(&lane.owner)
                 .copied()
                 .unwrap_or(lane.opened_time);
             let elapsed = now.signed_duration_since(activity).num_seconds().max(0) as u64;
             LaneEntry {
                 topic: lane.topic,
-                owner_harness: lane.owner_harness,
-                owner_session: lane.owner_session,
+                owner: lane.owner,
                 state: if elapsed < lane.ttl_seconds {
                     "live".to_string()
                 } else {
@@ -3703,22 +3718,33 @@ fn render_lanes(lanes: &[LaneEntry], now: DateTime<Utc>) {
         } else {
             format!("  +scope: {}", lane.scope.join(", "))
         };
-        println!(
-            "  {}  {} {}  {}{}",
-            lane.topic, lane.owner_harness, lane.owner_session, activity, scope
-        );
+        println!("  {}  {}  {}{}", lane.topic, lane.owner, activity, scope);
         if let Some(status) = &lane.status {
             println!("    {status}");
         }
     }
 }
 
-fn require_lane_session(ctx: &Ctx) -> Result<String> {
-    let (_, session) = identity(ctx);
+/// The owner a recorded event belongs to.
+fn event_owner(event: &JournalEvent) -> LaneOwner {
+    LaneOwner {
+        harness: event.harness.clone(),
+        session: event.session.clone(),
+    }
+}
+
+/// The caller's own lane identity. Both halves must be declared: an undeclared
+/// harness would otherwise let a caller match a lane on its session string
+/// alone, which is exactly the collision the owner pair exists to prevent.
+fn require_lane_owner(ctx: &Ctx) -> Result<LaneOwner> {
+    let (harness, session) = identity(ctx);
     if session == "unknown" {
         bail!("journal lane requires a session identity (--session or ARC_SESSION)");
     }
-    Ok(session)
+    if harness == "unknown" {
+        bail!("journal lane requires a harness identity (--harness or ARC_HARNESS)");
+    }
+    Ok(LaneOwner { harness, session })
 }
 
 fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
@@ -3738,7 +3764,7 @@ fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
                 (None, None) => None,
                 (status, status_file) => Some(crate::commands::read_body(status, status_file)?),
             };
-            let session = require_lane_session(ctx)?;
+            let owner = require_lane_owner(ctx)?;
             if !valid_topic(&topic) {
                 bail!("topic {topic:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
             }
@@ -3752,12 +3778,12 @@ fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
             }
             if let Some(overlap) = lanes.iter().find(|lane| {
                 lane.state == "live"
-                    && lane.owner_session != session
+                    && lane.owner != owner
                     && (lane.topic == topic || lane.scope.contains(&topic))
             }) {
                 eprintln!(
-                    "warning: topic {topic} is covered by live lane {} owned by {} {}",
-                    overlap.topic, overlap.owner_harness, overlap.owner_session
+                    "warning: topic {topic} is covered by live lane {} owned by {}",
+                    overlap.topic, overlap.owner
                 );
             }
             let mut message = format!("lane opened [{ttl}]");
@@ -3781,17 +3807,13 @@ fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
                 (None, None) => None,
                 (status, status_file) => Some(crate::commands::read_body(status, status_file)?),
             };
-            let session = require_lane_session(ctx)?;
+            let owner = require_lane_owner(ctx)?;
             let current = lanes
                 .iter()
                 .find(|lane| lane.topic == topic)
                 .with_context(|| format!("lane {topic} does not exist or is already closed"))?;
-            if current.owner_session != session {
-                bail!(
-                    "lane {topic} is owned by {} {}",
-                    current.owner_harness,
-                    current.owner_session
-                );
+            if current.owner != owner {
+                bail!("lane {topic} is owned by {}", current.owner);
             }
             if let Some(ttl) = &ttl {
                 parse_ttl(ttl).context("ttl must be a positive integer followed by s, m, or h")?;
@@ -3810,22 +3832,21 @@ fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
             outcome,
             note,
         } => {
-            let session = require_lane_session(ctx)?;
+            let owner = require_lane_owner(ctx)?;
             let current = lanes
                 .iter()
                 .find(|lane| lane.topic == topic)
                 .with_context(|| format!("lane {topic} does not exist or is already closed"))?;
-            if current.owner_session != session {
+            if current.owner != owner {
                 let idle = now
                     .signed_duration_since(current.last_activity_time)
                     .num_seconds()
                     .max(0) as u64;
                 if !matches!(outcome, LaneOutcome::Expired) || current.state != "stale" {
                     bail!(
-                        "lane {topic} conflict: owner {} {}, session {}, idle {}, ttl {}",
-                        current.owner_harness,
-                        current.owner_session,
-                        session,
+                        "lane {topic} conflict: owner {}, caller {}, idle {}, ttl {}",
+                        current.owner,
+                        owner,
                         format_age(idle),
                         format_age(current.ttl_seconds)
                     );
@@ -3927,8 +3948,8 @@ impl ContextJournal {
                 println!(
                     "- {}: {}/{}{}",
                     lane.topic,
-                    lane.owner_harness,
-                    lane.owner_session,
+                    lane.owner.harness,
+                    lane.owner.session,
                     lane.status
                         .as_deref()
                         .map(|status| format!(" — {status}"))
@@ -3990,8 +4011,8 @@ pub(crate) fn context_for_change(ctx: &Ctx, slug: &str) -> Result<ContextJournal
 #[derive(Clone, Serialize)]
 pub(crate) struct ArtifactLane {
     topic: String,
-    owner_harness: String,
-    owner_session: String,
+    #[serde(flatten)]
+    owner: LaneOwner,
     this_session: bool,
 }
 
@@ -4408,7 +4429,11 @@ pub(crate) fn collect_open_in(
         None
     };
     let changes = open_changes_for_annotation(project);
-    let (_, caller_session) = identity(ctx);
+    let (caller_harness, caller_session) = identity(ctx);
+    let caller = LaneOwner {
+        harness: caller_harness,
+        session: caller_session,
+    };
     if dir.is_dir() {
         let mut open_names: Vec<String> = Vec::new();
         let mut later_names: Vec<String> = Vec::new();
@@ -4437,7 +4462,7 @@ pub(crate) fn collect_open_in(
                 let change = change_annotation(&changes, &topic, &name);
                 let verification = verification_stamp(&journal, &name, current_revision.as_deref());
                 open.push(ArtifactEntry {
-                    lane: lane_for_topic(&lanes, &topic, &caller_session),
+                    lane: lane_for_topic(&lanes, &topic, &caller),
                     change,
                     age_seconds: if file_kind == JournalKind::Discussion.as_str() {
                         discussion_age_seconds(now, &ts, &name, &journal)
@@ -4459,7 +4484,7 @@ pub(crate) fn collect_open_in(
                 let change = change_annotation(&changes, &topic, &name);
                 let verification = verification_stamp(&journal, &name, current_revision.as_deref());
                 later.push(ArtifactEntry {
-                    lane: lane_for_topic(&lanes, &topic, &caller_session),
+                    lane: lane_for_topic(&lanes, &topic, &caller),
                     change,
                     age_seconds: artifact_age_seconds(now, &ts),
                     file: name,
@@ -4477,7 +4502,7 @@ pub(crate) fn collect_open_in(
                 let change = change_annotation(&changes, &topic, &name);
                 let verification = verification_stamp(&journal, &name, current_revision.as_deref());
                 feature_requests.push(ArtifactEntry {
-                    lane: lane_for_topic(&lanes, &topic, &caller_session),
+                    lane: lane_for_topic(&lanes, &topic, &caller),
                     change,
                     age_seconds: artifact_age_seconds(now, &ts),
                     file: name,
@@ -4563,7 +4588,7 @@ pub(crate) fn render_open_entry(f: &ArtifactEntry) {
     );
 }
 
-fn lane_for_topic(lanes: &[LaneEntry], topic: &str, caller_session: &str) -> Option<ArtifactLane> {
+fn lane_for_topic(lanes: &[LaneEntry], topic: &str, caller: &LaneOwner) -> Option<ArtifactLane> {
     lanes
         .iter()
         .find(|lane| {
@@ -4572,9 +4597,8 @@ fn lane_for_topic(lanes: &[LaneEntry], topic: &str, caller_session: &str) -> Opt
         })
         .map(|lane| ArtifactLane {
             topic: lane.topic.clone(),
-            owner_harness: lane.owner_harness.clone(),
-            owner_session: lane.owner_session.clone(),
-            this_session: lane.owner_session == caller_session,
+            owner: lane.owner.clone(),
+            this_session: lane.owner == *caller,
         })
 }
 
@@ -4592,10 +4616,10 @@ fn render_artifact_lane(lane: Option<&ArtifactLane>) -> String {
     if lane.this_session {
         format!(" [lane: {} — this session]", lane.topic)
     } else {
-        let short_session: String = lane.owner_session.chars().take(8).collect();
+        let short_session: String = lane.owner.session.chars().take(8).collect();
         format!(
             " [lane: {} — {} {}, external]",
-            lane.topic, lane.owner_harness, short_session
+            lane.topic, lane.owner.harness, short_session
         )
     }
 }
