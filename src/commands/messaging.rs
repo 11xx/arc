@@ -684,26 +684,32 @@ fn render_forks(forks: &[crate::commands::fork::ForkEntry]) {
     }
 }
 
-/// What the open changes' worktrees occupy, measured read-only. Build
-/// output is reproducible, so this is cost, not content — the fact a session
-/// of parallel changes fills a filesystem without any command reporting it.
+/// What the open changes' and the forks' worktrees occupy, measured
+/// read-only. Build output is reproducible, so this is cost, not content —
+/// the fact a session of parallel changes fills a filesystem without any
+/// command reporting it. Each total names the method that produced it, and
+/// forks are totalled apart from changes because no integration ever closes
+/// one.
 fn render_worktree_accounting(accounting: &crate::worktree_usage::WorktreeAccounting) {
     if accounting.is_empty() {
         return;
     }
+    let caveat = accounting.measurement.caveat();
     let total_entries = accounting.changes.len() + accounting.unknown.len();
-    match accounting.total_bytes {
-        Some(total) => println!(
-            "worktrees: {} across {} open worktree(s)",
-            crate::worktree_usage::human(total),
-            total_entries
-        ),
-        None if !accounting.unknown.is_empty() => println!(
-            "worktrees: {} open, accounting unavailable for {} (size unknown)",
-            total_entries,
-            accounting.unknown.len()
-        ),
-        None => println!("worktrees: {} open, size unavailable", total_entries),
+    if total_entries > 0 {
+        match accounting.total_bytes {
+            Some(total) => println!(
+                "worktrees: {} across {} open worktree(s) [{caveat}]",
+                crate::worktree_usage::human(total),
+                total_entries
+            ),
+            None if !accounting.unknown.is_empty() => println!(
+                "worktrees: {} open, accounting unavailable for {} (size unknown)",
+                total_entries,
+                accounting.unknown.len()
+            ),
+            None => println!("worktrees: {} open, size unavailable", total_entries),
+        }
     }
     for usage in &accounting.changes {
         let size = usage
@@ -718,6 +724,29 @@ fn render_worktree_accounting(accounting: &crate::worktree_usage::WorktreeAccoun
             usage.change_id, usage.path, usage.reason
         );
     }
+    if !accounting.forks.is_empty() {
+        match accounting.fork_total_bytes {
+            Some(total) => println!(
+                "fork worktrees: {} across {} fork(s) [{caveat}]",
+                crate::worktree_usage::human(total),
+                accounting.forks.len()
+            ),
+            None => println!(
+                "fork worktrees: {} on disk, size unavailable",
+                accounting.forks.len()
+            ),
+        }
+        for usage in &accounting.forks {
+            let size = usage
+                .bytes
+                .map(crate::worktree_usage::human)
+                .unwrap_or_else(|| "size unknown".to_string());
+            println!("  {}  {}  {}", usage.slug, size, usage.path);
+        }
+    }
+    if let Some(root) = accounting.measurement.root_line() {
+        println!("{root}");
+    }
 }
 
 /// Orient a session in one call: the ledger's actionable buckets, then the
@@ -730,7 +759,11 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     let journal = crate::journal::orientation(ctx);
     let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
     let states = ctx.load_all_states(&store)?;
-    let worktrees = crate::worktree_usage::measure(&ctx.cwd, &states);
+    let worktrees = crate::worktree_usage::measure(
+        &ctx.cwd,
+        &states,
+        &crate::commands::fork::checkouts(&forks),
+    );
 
     if json {
         println!(

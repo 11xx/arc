@@ -131,6 +131,9 @@ pub fn begin(ctx: &Ctx, slug: &str, base_branch: Option<&str>) -> Result<i32> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
+    // A fork is the longest-lived checkout arc creates, so the space it will
+    // occupy is reported before it exists rather than discovered later.
+    crate::worktree_usage::report_root_free(&worktree_root);
     // The branch is created by the worktree add itself: one command, no
     // window where a branch exists with no checkout.
     crate::gitio::add_worktree_new_branch(cwd, &worktree, &branch, &base)?;
@@ -405,6 +408,24 @@ pub struct ForkEntry {
     /// The recorded or discovered integration branch. `"unknown"` means no
     /// marker or safe repository-level discovery supplied a branch.
     pub base_branch: String,
+}
+
+/// The fork checkouts on disk, for the accounting that measures them. It
+/// reads a listing rather than resolving again, so the repository answers the
+/// identity question once per command.
+pub fn checkouts(entries: &[ForkEntry]) -> Vec<crate::worktree_usage::ForkWorktree> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .worktree
+                .as_ref()
+                .map(|path| crate::worktree_usage::ForkWorktree {
+                    slug: entry.slug.clone(),
+                    path: std::path::PathBuf::from(path),
+                })
+        })
+        .collect()
 }
 
 /// Render one resolved fork. It takes an identity rather than a slug, so the

@@ -190,6 +190,11 @@ pub fn begin(
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("cannot create {}", parent.display()))?;
             }
+            // What the filesystem has left is reported before the worktree
+            // exists, whether or not the project declared a floor: the cost
+            // of a checkout is spent at creation, and a filesystem that
+            // fills up reports as success everywhere else.
+            crate::worktree_usage::report_root_free(&path);
             warn_below_worktree_floor(&ctx.cwd, &path);
             gitio::add_worktree(&ctx.cwd, &path, &branch_name)?;
             Some(path.display().to_string())
