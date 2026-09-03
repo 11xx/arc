@@ -50,11 +50,12 @@ appears in the guide or in a command's help.
 
 **A version is the calendar date of its publication.** Releases are named
 `YYYY.M.D`, the date written as the three numeric fields Cargo's semver
-parser accepts: no leading zero on the month or the day, because a leading
-zero is rejected outright. A fourth dotted field is rejected too, so a
-second release on one day appends its counter as build metadata —
-`2026.9.3+1`. `arc --version`, the manifest, and the changelog's top
-released heading all carry the same string.
+parser accepts and nothing more: no leading zero on the month or the day,
+and no fourth field, prerelease, or build metadata, all of which Cargo
+either rejects or orders in a way a date does not. One release is cut per
+date; a second waits for the next date rather than qualifying a version.
+`arc --version`, the manifest, and the changelog's top released heading all
+carry the same string.
 
 The checklist a release passes, in order:
 

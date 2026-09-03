@@ -25,17 +25,17 @@ fn mangen_writes_arc_1_into_the_target_dir() {
 }
 
 /// A release is named for the date it is published, so the package version
-/// is a calendar date in the three numeric fields Cargo's semver parser
-/// accepts: `YYYY.M.D`, no leading zeros, with a same-day counter carried as
-/// build metadata rather than a fourth dotted field Cargo would reject.
+/// is a calendar date and nothing else: the three numeric fields Cargo's
+/// semver parser accepts, no leading zeros, and no qualifier. One release is
+/// cut per date, so there is never a counter to carry.
 #[test]
 fn the_package_version_is_a_calendar_date() {
     let version = env!("CARGO_PKG_VERSION");
-    let (date, counter) = match version.split_once('+') {
-        Some((date, counter)) => (date, Some(counter)),
-        None => (version, None),
-    };
-    let fields = date.split('.').collect::<Vec<_>>();
+    assert!(
+        !version.contains('+') && !version.contains('-'),
+        "version {version} carries a qualifier a date has no room for"
+    );
+    let fields = version.split('.').collect::<Vec<_>>();
     assert_eq!(fields.len(), 3, "version {version} is not YYYY.M.D");
     for field in &fields {
         assert!(
@@ -58,12 +58,6 @@ fn the_package_version_is_a_calendar_date() {
         "version {version} has no month"
     );
     assert!((1..=31).contains(&field(2)), "version {version} has no day");
-    if let Some(counter) = counter {
-        assert!(
-            !counter.is_empty() && counter.bytes().all(|byte| byte.is_ascii_digit()),
-            "version {version} has a non-numeric same-day counter"
-        );
-    }
 }
 
 /// `--version` is where an operator reads the release, so it carries the
