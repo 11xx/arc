@@ -336,3 +336,45 @@ pub(crate) fn begin_change(repo: &Repo, slug: &str, blocked_by: Option<&str>) ->
 pub(crate) fn json_stdout(cmd: &mut AssertCommand) -> serde_json::Value {
     serde_json::from_str(&stdout(cmd)).unwrap()
 }
+
+/// Write one journal artifact and return the directory holding it and its
+/// filename, which is how every artifact-subject command addresses it.
+pub(crate) fn journal_artifact(
+    repo: &Repo,
+    topic: &str,
+    kind: &str,
+    body: &str,
+) -> (PathBuf, String) {
+    let source = repo.home.join(format!("{topic}-body.md"));
+    fs::write(&source, body).unwrap();
+    let printed = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        topic,
+        "--kind",
+        kind,
+        "--body-file",
+        source.to_str().unwrap(),
+    ]));
+    let path = PathBuf::from(printed.trim());
+    let file = path.file_name().unwrap().to_string_lossy().to_string();
+    (path.parent().unwrap().to_path_buf(), file)
+}
+
+/// Every typed journal event, in the order they were appended.
+pub(crate) fn journal_event_log(dir: &Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(dir.join("events.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// The claim IDs `claim-set` recorded on one artifact, oldest first.
+pub(crate) fn artifact_claim_ids(dir: &Path, file: &str) -> Vec<String> {
+    journal_event_log(dir)
+        .into_iter()
+        .filter(|event| event["event"] == "claim-set" && event["file"] == file)
+        .map(|event| event["claim_id"].as_str().unwrap().to_string())
+        .collect()
+}

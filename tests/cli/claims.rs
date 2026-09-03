@@ -1189,3 +1189,248 @@ fn matching_git_identity_is_unaffected_by_shared_mode() {
         .get("provenance_mismatch")
         .is_none());
 }
+
+#[test]
+fn artifact_claim_renews_in_place_and_records_typed_progress() {
+    let repo = Repo::new();
+    let (dir, file) = journal_artifact(&repo, "artifact-claim-life", "todo", "# Queued\n");
+
+    repo.arc(&repo.root)
+        .args(["claim", &file])
+        .assert()
+        .success();
+    // Renewing keeps the ID, so a checkpoint filed under it stays attached to
+    // the work it describes.
+    repo.arc(&repo.root)
+        .args(["claim", &file, "--ttl", "30m"])
+        .assert()
+        .success();
+    assert_eq!(artifact_claim_ids(&dir, &file).len(), 1);
+    let claim_id = artifact_claim_ids(&dir, &file).remove(0);
+
+    repo.arc(&repo.root)
+        .args(["stage", &file, "implementing", "--note", "halfway"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "stage",
+            &file,
+            "blocked-on",
+            "--note",
+            "waiting on review",
+            "--blocker",
+            "external",
+        ])
+        .assert()
+        .success();
+
+    let events = journal_event_log(&dir);
+    let renewed = events
+        .iter()
+        .find(|event| event["event"] == "claim-renewed")
+        .unwrap();
+    assert_eq!(renewed["claim_id"], claim_id.as_str());
+    assert_eq!(renewed["ttl_seconds"], 1800);
+    let stages: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["event"] == "claim-stage")
+        .collect();
+    assert_eq!(stages.len(), 2);
+    assert_eq!(stages[0]["stage"], "implementing");
+    assert_eq!(stages[0]["note"], "halfway");
+    assert_eq!(stages[1]["stage"], "blocked-on");
+    assert_eq!(stages[1]["blocker"], "external");
+    for stage in &stages {
+        assert_eq!(stage["claim_id"], claim_id.as_str());
+    }
+}
+
+#[test]
+fn artifact_claim_releases_with_each_owner_outcome() {
+    let repo = Repo::new();
+    for outcome in ["paused", "abandoned", "expired"] {
+        let (dir, file) = journal_artifact(&repo, &format!("released-{outcome}"), "todo", "# X\n");
+        repo.arc(&repo.root)
+            .args(["claim", &file])
+            .assert()
+            .success();
+        repo.arc(&repo.root)
+            .args(["release-claim", &file, "--outcome", outcome])
+            .assert()
+            .success();
+        let released = journal_event_log(&dir)
+            .into_iter()
+            .filter(|event| event["event"] == "claim-released" && event["file"] == file)
+            .last()
+            .unwrap();
+        assert_eq!(released["outcome"], outcome);
+        // A released claim frees the artifact rather than leaving it held.
+        let open: serde_json::Value =
+            serde_json::from_str(&stdout(repo.arc(&repo.root).args(["journal", "open", "--json"])))
+                .unwrap();
+        let row = open["open"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["file"] == file)
+            .unwrap();
+        assert_eq!(row["availability"], "available");
+    }
+}
+
+#[test]
+fn an_artifact_lease_expires_on_its_own_with_no_stage_budget_to_set() {
+    let repo = Repo::new();
+    let (_, file) = journal_artifact(&repo, "artifact-lease", "todo", "# X\n");
+    // A change's stages are budgeted; an artifact has no stages to budget, so
+    // the lease is the whole of what expires.
+    repo.arc(&repo.root)
+        .args(["claim", &file, "--stage-budget", "launch=1s"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "an artifact's lease is the whole of what expires",
+        ));
+
+    repo.arc(&repo.root)
+        .args(["claim", &file, "--ttl", "1s"])
+        .assert()
+        .success();
+    let occupied: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["journal", "open", "--json"])))
+            .unwrap();
+    assert_eq!(occupied["open"][0]["availability"], "occupied");
+    assert_eq!(occupied["open"][0]["claims"][0]["stage_budgets"], serde_json::json!({}));
+
+    thread::sleep(Duration::from_millis(1200));
+    let reclaimable: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["journal", "open", "--json"])))
+            .unwrap();
+    assert_eq!(reclaimable["open"][0]["availability"], "reclaimable");
+    let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(
+        text.contains("[claimed by tester via test: expired]"),
+        "{text}"
+    );
+}
+
+#[test]
+fn artifact_takeover_refuses_a_live_claim_and_displaces_an_expired_one() {
+    let repo = Repo::new();
+    let (dir, file) = journal_artifact(&repo, "artifact-takeover", "todo", "# X\n");
+    repo.arc(&repo.root)
+        .args(["claim", &file, "--ttl", "1s"])
+        .assert()
+        .success();
+    let first = artifact_claim_ids(&dir, &file).remove(0);
+
+    // A claim whose lease is still running is not available at any price.
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "session-b")
+        .env("ARC_ACTOR", "other")
+        .args(["claim", &file, "--takeover"])
+        .assert()
+        .code(8)
+        .stderr(predicates::str::contains(
+            "--takeover is unavailable because the claim has not expired",
+        ));
+
+    thread::sleep(Duration::from_millis(1200));
+    // An expired one is displaced only when the caller says so.
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "session-b")
+        .env("ARC_ACTOR", "other")
+        .args(["claim", &file])
+        .assert()
+        .code(8)
+        .stderr(predicates::str::contains(
+            "--takeover would displace this expired claim",
+        ));
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "session-b")
+        .env("ARC_ACTOR", "other")
+        .args(["claim", &file, "--takeover"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(format!("displaced: claim={first}")));
+
+    let displaced = journal_event_log(&dir)
+        .into_iter()
+        .filter(|event| event["event"] == "claim-set")
+        .last()
+        .unwrap();
+    assert_eq!(displaced["displaced"]["claim_id"], first.as_str());
+    assert_eq!(displaced["displaced"]["actor"], "tester");
+    assert_eq!(displaced["displaced"]["session"], "session-a");
+    // The displaced claim stops occupying the artifact; only the new one does.
+    let open: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["journal", "open", "--json"])))
+            .unwrap();
+    let claims = open["open"][0]["claims"].as_array().unwrap();
+    assert_eq!(claims.len(), 2);
+    assert_eq!(claims[0]["closure"]["ended_by"], "displaced");
+    assert_eq!(open["open"][0]["availability"], "occupied");
+}
+
+#[test]
+fn rescue_take_requires_an_artifact_claim_another_identity_left_expired() {
+    let repo = Repo::new();
+    let (_, file) = journal_artifact(&repo, "artifact-rescue", "todo", "# X\n");
+    repo.arc(&repo.root)
+        .args(["claim", &file, "--ttl", "1s"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "checkpoint", &file, "--next", "rerun the gate", "--body-file", "-"])
+        .write_stdin("stopped mid-gate\n")
+        .assert()
+        .success();
+
+    // Live work is not abandoned work.
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "session-b")
+        .env("ARC_ACTOR", "other")
+        .args(["rescue", &file, "--take"])
+        .assert()
+        .code(8)
+        .stderr(predicates::str::contains(
+            "requires a claim owned by another identity whose lease has run out",
+        ));
+
+    thread::sleep(Duration::from_millis(1200));
+    let taken = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_SESSION", "session-b")
+            .env("ARC_ACTOR", "other")
+            .args(["rescue", &file, "--take"]),
+    );
+    // What a successor reads is the checkpoint the previous holder left.
+    assert!(taken.contains("next: rerun the gate"), "{taken}");
+    assert!(taken.contains("availability: occupied"), "{taken}");
+}
+
+#[test]
+fn watch_reaches_stalled_on_an_expired_artifact_claim_and_refuses_other_conditions() {
+    let repo = Repo::new();
+    let (_, file) = journal_artifact(&repo, "artifact-watch", "todo", "# X\n");
+    repo.arc(&repo.root)
+        .args(["claim", &file, "--ttl", "1s"])
+        .assert()
+        .success();
+    // Every other condition asks about patchsets and verdicts, which an
+    // artifact does not have; never firing would be indistinguishable from
+    // work still in progress.
+    repo.arc(&repo.root)
+        .args(["watch", &file, "--until", "reviewed", "--timeout", "1"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "a journal artifact answers only `stalled`",
+        ));
+    repo.arc(&repo.root)
+        .args(["watch", &file, "--until", "stalled", "--timeout", "10"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("reached: stalled"));
+}

@@ -10363,3 +10363,403 @@ fn a_malformed_spool_file_is_reported_and_kept() {
     );
     assert_eq!(journal_events(&sealed).len(), 1);
 }
+
+#[test]
+fn checkpoint_records_structured_fields_and_a_digest_of_the_block_it_appended() {
+    let repo = Repo::new();
+    let (dir, file) = journal_artifact(&repo, "checkpoint-fields", "todo", "# Queued\n");
+    repo.arc(&repo.root)
+        .args(["claim", &file])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args(["journal", "checkpoint", &file, "--body-file", "-"])
+        .write_stdin("bare direction\n")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "checkpoint",
+            &file,
+            "--next",
+            "rerun the gate",
+            "--gate",
+            "cargo test",
+            "--blocker",
+            "change:abc",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("structured direction\n")
+        .assert()
+        .success();
+
+    let events = journal_event_log(&dir);
+    let checkpoints: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["event"] == "checkpoint")
+        .collect();
+    assert_eq!(checkpoints.len(), 2);
+    assert!(checkpoints[0].get("next").is_none());
+    assert_eq!(checkpoints[1]["next"], "rerun the gate");
+    assert_eq!(checkpoints[1]["gate"], "cargo test");
+    assert_eq!(checkpoints[1]["blocker"], "change:abc");
+
+    // The digest is over exactly the bytes the artifact received, which is
+    // what lets a reader tell a rewritten block from an intact one.
+    let body = fs::read_to_string(dir.join(&file)).unwrap();
+    let id = checkpoints[1]["checkpoint_id"].as_str().unwrap();
+    let start = body.find(&format!("\n### Work checkpoint {id}")).unwrap();
+    let digest = format!("sha256:{:x}", Sha256::digest(body[start..].as_bytes()));
+    assert_eq!(checkpoints[1]["digest"], digest.as_str());
+    assert!(body.contains(&format!("### Work checkpoint {id} (tester via test,")));
+}
+
+#[test]
+fn a_checkpoint_correction_supersedes_the_earlier_one_and_doctor_reports_two_tips() {
+    let repo = Repo::new();
+    let (dir, file) = journal_artifact(&repo, "checkpoint-tips", "todo", "# Queued\n");
+    repo.arc(&repo.root)
+        .args(["claim", &file])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "checkpoint", &file, "--next", "first", "--body-file", "-"])
+        .write_stdin("first\n")
+        .assert()
+        .success();
+    let first = journal_event_log(&dir)
+        .into_iter()
+        .filter(|event| event["event"] == "checkpoint")
+        .last()
+        .unwrap()["checkpoint_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A correction is another checkpoint; both blocks stay readable.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "checkpoint",
+            &file,
+            "--next",
+            "second",
+            "--supersedes",
+            &first,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("second\n")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "checkpoint",
+            &file,
+            "--supersedes",
+            "cp-nosuchcheckpoint",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("dangling\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no checkpoint cp-nosuchcheckpoint"));
+
+    let body = fs::read_to_string(dir.join(&file)).unwrap();
+    assert!(body.contains("first\n") && body.contains("second\n"));
+    // Views follow the uncorrected tip.
+    let rescued = stdout(repo.arc(&repo.root).args(["rescue", &file]));
+    assert!(rescued.contains("next: second"), "{rescued}");
+    assert!(!rescued.contains("next: first"), "{rescued}");
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
+
+    // Two uncorrected tips are two answers to what a successor should read,
+    // and a view showing one silently hides the other.
+    let third = journal_event_log(&dir)
+        .into_iter()
+        .filter(|event| event["event"] == "checkpoint")
+        .last()
+        .unwrap();
+    let mut forked = third.clone();
+    forked["checkpoint_id"] = serde_json::json!("cp-contested");
+    forked.as_object_mut().unwrap().remove("supersedes_checkpoint");
+    let mut log = fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    log.push_str(&format!("{forked}\n"));
+    fs::write(dir.join("events.jsonl"), log).unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("contested-checkpoint-tip"));
+}
+
+#[test]
+fn a_checkpoint_needs_a_claim_and_is_refused_once_the_artifact_is_consumed() {
+    let repo = Repo::new();
+    let (dir, file) = journal_artifact(&repo, "checkpoint-guarded", "todo", "# Queued\n");
+    repo.arc(&repo.root)
+        .args(["journal", "checkpoint", &file, "--body-file", "-"])
+        .write_stdin("unclaimed\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("a checkpoint records progress on a claim"));
+
+    repo.arc(&repo.root)
+        .args(["claim", &file])
+        .assert()
+        .success();
+    let claim = artifact_claim_ids(&dir, &file).remove(0);
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file, "--acknowledge-claim", &claim])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "checkpoint", &file, "--body-file", "-"])
+        .write_stdin("after the end\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("work on it ended with the artifact"));
+}
+
+#[test]
+fn consume_refuses_open_claims_and_ends_acknowledged_ones_without_an_owner_outcome() {
+    let repo = Repo::new();
+    let (dir, file) = journal_artifact(&repo, "consume-guarded", "todo", "# Queued\n");
+    repo.arc(&repo.root)
+        .args(["claim", &file, "--ttl", "1s"])
+        .assert()
+        .success();
+    let live = artifact_claim_ids(&dir, &file).remove(0);
+
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(&live))
+        .stderr(predicates::str::contains("--acknowledge-claim"));
+
+    // A lease that has run out needs the acknowledgment too: the claim being
+    // dead is a fact about the clock, not its holder's consent.
+    thread::sleep(Duration::from_millis(1200));
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("expired)"));
+
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file, "--acknowledge-claim", &live])
+        .assert()
+        .success();
+    let catchup: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["journal", "catchup", "--json"]),
+    ))
+    .unwrap();
+    let claim = catchup["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|claim| claim["claim_id"] == live.as_str())
+        .unwrap();
+    assert_eq!(claim["closure"]["ended_by"], "consumed");
+    assert!(claim["closure"].get("outcome").is_none());
+}
+
+#[test]
+fn transition_refuses_an_open_claim_and_accepts_the_acknowledgment() {
+    let repo = Repo::new();
+    let (dir, file) = journal_artifact(&repo, "transition-guarded", "todo", "# Queued\n");
+    repo.arc(&repo.root)
+        .args(["claim", &file])
+        .assert()
+        .success();
+    let claim = artifact_claim_ids(&dir, &file).remove(0);
+    repo.arc(&repo.root)
+        .args(["journal", "transition", &file, "--to", "plan"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--acknowledge-claim"));
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "transition",
+            &file,
+            "--to",
+            "plan",
+            "--acknowledge-claim",
+            &claim,
+        ])
+        .assert()
+        .success();
+    let ended = stdout(repo.arc(&repo.root).args(["journal", "catchup", "--json"]));
+    let ended: serde_json::Value = serde_json::from_str(&ended).unwrap();
+    let claim = ended["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["claim_id"] == claim.as_str())
+        .unwrap();
+    assert_eq!(claim["closure"]["ended_by"], "transition");
+    assert!(claim["closure"].get("outcome").is_none());
+}
+
+#[test]
+fn begin_from_journal_promotes_the_invokers_claim_and_ends_every_other() {
+    let repo = Repo::new();
+    let (dir, file) = journal_artifact(&repo, "promoted-work", "todo", "# Queued\n");
+    repo.arc(&repo.root)
+        .args(["claim", &file, "--ttl", "1s"])
+        .assert()
+        .success();
+    let theirs = artifact_claim_ids(&dir, &file).remove(0);
+    thread::sleep(Duration::from_millis(1200));
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "session-b")
+        .env("ARC_ACTOR", "other")
+        .args(["claim", &file, "--takeover"])
+        .assert()
+        .success();
+    let mine = artifact_claim_ids(&dir, &file).remove(1);
+
+    repo.arc(&repo.root)
+        .env("ARC_SESSION", "session-b")
+        .env("ARC_ACTOR", "other")
+        .args(["begin", "promoted-work", "--from-journal", &file, "--no-worktree"])
+        .assert()
+        .success();
+
+    let events = journal_event_log(&dir);
+    // The invoker knows where their own work went; nothing here knows how
+    // anybody else's stopped.
+    let promoted = events
+        .iter()
+        .find(|event| event["event"] == "claim-released" && event["claim_id"] == mine.as_str())
+        .unwrap();
+    assert_eq!(promoted["outcome"], "promoted");
+    assert!(promoted["note"].as_str().unwrap().starts_with("change "));
+    assert!(!events
+        .iter()
+        .any(|event| event["event"] == "claim-released" && event["claim_id"] == theirs.as_str()));
+    let catchup: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["journal", "catchup", "--json"]),
+    ))
+    .unwrap();
+    let displaced = catchup["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|claim| claim["claim_id"] == theirs.as_str())
+        .unwrap();
+    assert_eq!(displaced["closure"]["ended_by"], "displaced");
+    let promoted = catchup["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|claim| claim["claim_id"] == mine.as_str())
+        .unwrap();
+    assert_eq!(promoted["closure"]["outcome"], "promoted");
+}
+
+#[test]
+fn the_artifact_claim_capability_is_marked_once_and_separates_unknown_from_never_started() {
+    let repo = Repo::new();
+    // Filed before anything recorded claims: its silence is a missing record.
+    let (dir, before) = journal_artifact(&repo, "filed-before", "todo", "# Before\n");
+    let (_, claimed) = journal_artifact(&repo, "filed-claimed", "todo", "# Claimed\n");
+    repo.arc(&repo.root)
+        .args(["claim", &claimed])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["release-claim", &claimed])
+        .assert()
+        .success();
+    // Filed after the marker and never claimed: nobody started it.
+    let (_, after) = journal_artifact(&repo, "filed-after", "todo", "# After\n");
+    repo.arc(&repo.root)
+        .args(["claim", &after])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["release-claim", &after, "--outcome", "abandoned"])
+        .assert()
+        .success();
+    let (_, untouched) = journal_artifact(&repo, "filed-untouched", "todo", "# Untouched\n");
+
+    // Marked once for the journal, by whichever command first recorded a
+    // claim; every later claim reads the marker rather than writing another.
+    let markers = journal_event_log(&dir)
+        .into_iter()
+        .filter(|event| event["event"] == "capability" && event["name"] == "artifact-claims")
+        .count();
+    assert_eq!(markers, 1);
+
+    let open: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["journal", "open", "--json"])))
+            .unwrap();
+    let row = |file: &str| -> serde_json::Value {
+        open["open"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["file"] == file)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(&before)["claim_history"], "unknown");
+    assert_eq!(row(&untouched)["claim_history"], "never-started");
+    // An artifact that carries claims says so with the claims themselves.
+    assert!(row(&claimed).get("claim_history").is_none());
+    for file in [&before, &untouched, &claimed] {
+        assert_eq!(row(file)["availability"], "available");
+    }
+}
+
+#[test]
+fn a_lane_and_an_artifact_claim_render_on_the_same_row() {
+    let repo = Repo::new();
+    let (_, file) = journal_artifact(&repo, "lane-and-claim", "todo", "# Queued\n");
+    repo.arc(&repo.root)
+        .args(["journal", "lane", "open", "lane-and-claim"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["claim", &file])
+        .assert()
+        .success();
+    // A lane is occupancy of a topic and a claim is occupancy of a file;
+    // neither is ever converted into the other.
+    let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(text.contains("[lane: lane-and-claim"), "{text}");
+    assert!(text.contains("[claimed by tester via test: active]"), "{text}");
+    let catchup = stdout(repo.arc(&repo.root).args(["journal", "catchup"]));
+    assert!(catchup.contains("lanes:"), "{catchup}");
+    assert!(catchup.contains("artifact claims:"), "{catchup}");
+}
+
+#[test]
+fn a_consumed_artifact_reports_terminal_availability() {
+    let repo = Repo::new();
+    let (dir, file) = journal_artifact(&repo, "terminal-artifact", "todo", "# Queued\n");
+    repo.arc(&repo.root)
+        .args(["claim", &file])
+        .assert()
+        .success();
+    let claim = artifact_claim_ids(&dir, &file).remove(0);
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file, "--acknowledge-claim", &claim])
+        .assert()
+        .success();
+    let rescued: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["rescue", &file, "--json"]))).unwrap();
+    assert_eq!(rescued["availability"], "terminal");
+    assert_eq!(rescued["claims"][0]["closure"]["ended_by"], "consumed");
+}
