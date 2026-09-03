@@ -139,7 +139,7 @@ fn a_conflicting_rebase_stops_in_progress_and_names_the_conflicting_files() {
     // The printed recovery finishes the replay and clears the blocker.
     fs::write(wt.join("README.md"), "resolved\n").unwrap();
     git(&wt, &["add", "README.md"]);
-    git(&wt, &["-c", "core.editor=true", "rebase", "--continue"]);
+    git(&wt, &["rebase", "--continue"]);
     repo.arc(&wt)
         .args(["snapshot", "conflict-replay"])
         .assert()
