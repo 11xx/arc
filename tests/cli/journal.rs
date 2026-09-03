@@ -1708,6 +1708,165 @@ fn backdate_journal_events(repo: &Repo, age: chrono::Duration) {
     fs::write(dir.join("events.jsonl"), format!("{contents}\n")).unwrap();
 }
 
+/// A lane belongs to a harness and a session together. Harnesses mint session
+/// strings independently, so the same string under two harnesses is two owners
+/// with their own activity clocks and their own lanes.
+#[test]
+fn journal_lane_owners_with_one_session_string_are_independent_per_harness() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "harness-a")
+        .env("ARC_SESSION", "shared")
+        .args(["journal", "lane", "open", "work-a", "--ttl", "1m"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "harness-b")
+        .env("ARC_SESSION", "shared")
+        .args(["journal", "lane", "open", "work-b", "--ttl", "1m"])
+        .assert()
+        .success();
+
+    // Opening replaces only the opener's own lane, so both owners hold one.
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "lane", "list", "--json"]),
+    ))
+    .unwrap();
+    let lanes = value["lanes"].as_array().unwrap();
+    assert_eq!(lanes.len(), 2, "{value}");
+    let owner_of = |topic: &str| {
+        let lane = lanes
+            .iter()
+            .find(|lane| lane["topic"] == topic)
+            .unwrap_or_else(|| panic!("{topic} missing from {value}"));
+        (
+            lane["owner_harness"].as_str().unwrap().to_string(),
+            lane["owner_session"].as_str().unwrap().to_string(),
+        )
+    };
+    assert_eq!(
+        owner_of("work-a"),
+        ("harness-a".to_string(), "shared".to_string())
+    );
+    assert_eq!(
+        owner_of("work-b"),
+        ("harness-b".to_string(), "shared".to_string())
+    );
+
+    // Age both lanes past their ttl, then let one owner log. Only its own
+    // lane refreshes; the other harness's lane stays stale.
+    backdate_journal_events(&repo, chrono::Duration::minutes(2));
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "harness-a")
+        .env("ARC_SESSION", "shared")
+        .args(["journal", "log", "other-topic", "still active"])
+        .assert()
+        .success();
+    let text = stdout(repo.arc(&repo.root).args(["journal", "lane", "list"]));
+    assert!(text.contains("work-a  harness-a shared  live"), "{text}");
+    assert!(text.contains("work-b  harness-b shared  stale"), "{text}");
+}
+
+#[test]
+fn journal_lane_renew_and_close_reject_a_matching_session_under_another_harness() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "harness-a")
+        .env("ARC_SESSION", "shared")
+        .args(["journal", "lane", "open", "work-a", "--ttl", "1h"])
+        .assert()
+        .success();
+
+    let renewal = repo
+        .arc(&repo.root)
+        .env("ARC_HARNESS", "harness-b")
+        .env("ARC_SESSION", "shared")
+        .args(["journal", "lane", "renew", "work-a"])
+        .output()
+        .unwrap();
+    assert!(!renewal.status.success());
+    let stderr = String::from_utf8_lossy(&renewal.stderr);
+    assert!(stderr.contains("owned by harness-a shared"), "{stderr}");
+
+    let closure = repo
+        .arc(&repo.root)
+        .env("ARC_HARNESS", "harness-b")
+        .env("ARC_SESSION", "shared")
+        .args(["journal", "lane", "close", "work-a"])
+        .output()
+        .unwrap();
+    assert!(!closure.status.success());
+    let stderr = String::from_utf8_lossy(&closure.stderr);
+    assert!(stderr.contains("owner harness-a shared"), "{stderr}");
+
+    // The refusals left the lane untouched, and its owner still commands it.
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "harness-a")
+        .env("ARC_SESSION", "shared")
+        .args(["journal", "lane", "renew", "work-a", "--ttl", "45m"])
+        .assert()
+        .success();
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "lane", "list", "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(value["lanes"][0]["ttl_seconds"], 2700);
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "harness-a")
+        .env("ARC_SESSION", "shared")
+        .args(["journal", "lane", "close", "work-a"])
+        .assert()
+        .success();
+}
+
+/// Staleness, not the session string, is what lets somebody else close a lane.
+#[test]
+fn journal_lane_takeover_of_a_stale_lane_crosses_harnesses() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "harness-a")
+        .env("ARC_SESSION", "shared")
+        .args(["journal", "lane", "open", "takeover", "--ttl", "1m"])
+        .assert()
+        .success();
+    backdate_journal_events(&repo, chrono::Duration::minutes(2));
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "harness-b")
+        .env("ARC_SESSION", "shared")
+        .args([
+            "journal",
+            "lane",
+            "close",
+            "takeover",
+            "--outcome",
+            "expired",
+        ])
+        .assert()
+        .success();
+    let value: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "lane", "list", "--json"]),
+    ))
+    .unwrap();
+    assert!(value["lanes"].as_array().unwrap().is_empty(), "{value}");
+}
+
+/// Matching a lane on a session string alone would let an undeclared harness
+/// impersonate one, so lane writes require both halves of the owner.
+#[test]
+fn journal_lane_requires_harness_identity() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    repo.arc(&repo.root)
+        .env_remove("ARC_HARNESS")
+        .args(["journal", "lane", "open", "work-a"])
+        .assert()
+        .failure();
+    assert!(!dir.exists());
+}
+
 #[test]
 fn journal_open_annotates_items_covered_by_live_lanes() {
     let repo = Repo::new();
@@ -1752,6 +1911,46 @@ fn journal_open_annotates_items_covered_by_live_lanes() {
     assert_eq!(covered["lane"]["topic"], "external-lane");
     assert_eq!(covered["lane"]["owner_session"], "external-session");
     assert_eq!(covered["lane"]["this_session"], false);
+}
+
+/// `this session` means the same harness and the same session. A reader whose
+/// session string happens to match under a different harness is external.
+#[test]
+fn journal_open_marks_this_session_only_for_the_owning_harness_and_session() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("20260101T000000Z-covered-todo.md"), "# Covered\n").unwrap();
+    repo.arc(&repo.root)
+        .env("ARC_HARNESS", "harness-a")
+        .env("ARC_SESSION", "shared")
+        .args([
+            "journal", "lane", "open", "held", "--scope", "covered", "--ttl", "1h",
+        ])
+        .assert()
+        .success();
+
+    let owner = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_HARNESS", "harness-a")
+            .env("ARC_SESSION", "shared")
+            .args(["journal", "open"]),
+    );
+    assert!(
+        owner.contains("[lane: held \u{2014} this session]"),
+        "{owner}"
+    );
+
+    let impostor = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_HARNESS", "harness-b")
+            .env("ARC_SESSION", "shared")
+            .args(["journal", "open"]),
+    );
+    assert!(
+        impostor.contains("[lane: held \u{2014} harness-a shared, external]"),
+        "{impostor}"
+    );
 }
 
 #[test]

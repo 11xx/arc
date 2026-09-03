@@ -64,6 +64,11 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- A journal lane's owner is the harness and the session together, not the
+  session alone. Two harnesses can mint the same session string, and either
+  could previously refresh, replace, renew, close, or be annotated as
+  `this session` on the other's lane; lane writes now require a declared
+  harness as well as a session. Stale takeover is unchanged.
 - `arc env` recognizes `CLAUDE_CODE_SESSION_ID`, the variable Claude Code
   actually exports into its tool shells, beside the hand-set
   `CLAUDE_SESSION_ID`. A Claude Code session that followed the guide's
