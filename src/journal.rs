@@ -2277,6 +2277,28 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
             });
         }
     }
+    // Two uncorrected checkpoints on one claim are two answers to "what
+    // should a successor read". Views follow the tip, so a claim with two of
+    // them silently shows one and hides the other.
+    for name in &hot_files {
+        for claim in artifact_claims(&events, name) {
+            let tips = claim.tip_checkpoints();
+            if tips.len() > 1 {
+                problems.push(DoctorFinding {
+                    code: "contested-checkpoint-tip",
+                    detail: format!(
+                        "{name}: claim {} has {} uncorrected checkpoints ({})",
+                        claim.state.claim_id,
+                        tips.len(),
+                        tips.iter()
+                            .map(|tip| tip.checkpoint_id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                });
+            }
+        }
+    }
     inspect_transition_integrity(&dir, &cold, &hot_files, &events, &mut problems)?;
     inspect_fork_marker_paths(&dir, &hot_files, &mut problems)?;
     inspect_amendments(&dir, &events, &mut problems, &mut advice);

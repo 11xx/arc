@@ -12,6 +12,18 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Work on a journal artifact is a claim, the same object the ledger uses for
+  a change with the artifact filename as its subject. `claim`, `release-claim`,
+  `stage`, `rescue --take`, and `watch --until stalled` accept an artifact
+  filename ending in `.md`; both subjects reduce to one claim state and are
+  timed by one function. `journal checkpoint <file> --body-file -` appends a
+  `### Work checkpoint` block and records its digest with `--next`, `--gate`,
+  `--blocker`, and `--supersedes`. `journal consume` and `journal transition`
+  refuse while a claim is open and take `--acknowledge-claim <id>`; the claims
+  they end carry `ended_by` and no invented owner outcome, while `begin
+  --from-journal` closes the invoker's own as `promoted`. `journal open` rows
+  and `--json` show who holds an artifact and whether it can be picked up.
+
 - `arc run dispatch` binds a delegated run to one subject — `--change <id>`,
   `--fork <slug>`, or `--range <base>..<head>` — and refuses a dispatch naming
   none or two. `arc run end` records what the round reviewed and produced:
