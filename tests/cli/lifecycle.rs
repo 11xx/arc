@@ -958,6 +958,13 @@ fn conflicting_target_movement_requires_rebase_before_integration() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("needs-rebase")));
+    // A conflict is a question for a person, not an unevaluated merge: there
+    // is no single tree the gates could have answered for.
+    assert!(!status["blockers"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("merged-tree-unevaluated")));
+    assert!(status["merged_tree"].is_null(), "{status}");
     assert_eq!(status["next_action"], "rebase");
 
     repo.arc(&repo.root)
@@ -988,6 +995,15 @@ fn non_conflicting_target_movement_stays_ready_and_integrates() {
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "clean-r"]))).unwrap();
     assert_eq!(status["needs_rebase"], false);
+    // The merge ships content neither branch committed, and a profile that
+    // declares no gates has nothing that could have evaluated it — so there is
+    // no obligation to report unmet.
+    assert_ne!(
+        status["merged_tree"].as_str().unwrap(),
+        git_out(&wt, &["rev-parse", "HEAD^{tree}"]),
+        "{status}"
+    );
+    assert!(status["gates"].as_array().unwrap().is_empty(), "{status}");
     repo.arc(&wt).args(["check", "clean-r"]).assert().success();
     repo.arc(&repo.root)
         .args(["integrate", "clean-r"])

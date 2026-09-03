@@ -2730,3 +2730,63 @@ fn a_rerun_at_the_same_head_does_not_retract_discrimination() {
     assert_eq!(plain["discrimination"], "undiscriminated");
     assert!(plain["discrimination_event_id"].is_null());
 }
+
+#[test]
+fn evidence_recorded_before_arc_kept_the_tree_still_counts_at_its_own_head() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.unit]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc"]);
+    git(&repo.root, &["commit", "-m", "test: add unit gate"]);
+    let begun = stdout(repo.arc(&repo.root).args(["begin", "legacy-evidence"]));
+    let change_id = begun
+        .lines()
+        .find_map(|line| line.strip_prefix("change: "))
+        .unwrap()
+        .to_string();
+    let worktree = repo.home.join(".worktrees/repo-legacy-evidence");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    let recorded = stdout(
+        repo.arc(&worktree)
+            .args(["verify", "legacy-evidence", "--all"]),
+    );
+    let event_id = recorded
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap();
+
+    // A ledger written before arc recorded the tree beside the revision. The
+    // revision it names is what resolves the tree back, so the evidence keeps
+    // meaning what it meant.
+    let path = repo
+        .root
+        .join(".git/arc/changes")
+        .join(&change_id)
+        .join("events")
+        .join(format!("{event_id}.json"));
+    let mut event: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(event["tree"].is_string(), "{event}");
+    event.as_object_mut().unwrap().remove("tree");
+    fs::write(&path, json_file_bytes(&event)).unwrap();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "legacy-evidence"]));
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
+    assert!(status["gates"][0]["evaluated_tree"].is_null(), "{status}");
+    repo.arc(&worktree)
+        .args(["snapshot", "legacy-evidence"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["review", "legacy-evidence", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "legacy-evidence"])
+        .assert()
+        .success();
+}

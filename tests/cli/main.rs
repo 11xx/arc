@@ -30,6 +30,7 @@ mod skip_green;
 mod stats;
 mod take;
 mod timeline;
+mod tree_gates;
 mod verify;
 mod workspace;
 
