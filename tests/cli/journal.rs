@@ -2883,7 +2883,8 @@ fn journal_note_scaffold_repo_override_wins_and_unknown_bails() {
         "discussion",
     ]));
     let body = fs::read_to_string(out.trim()).unwrap();
-    assert_eq!(body, "HOUSE STYLE\n");
+    // No `--title` and a template that opens on prose: the heading is the slug.
+    assert_eq!(body, "# House\n\nHOUSE STYLE\n");
 
     // Unknown scaffold: fails cleanly and writes nothing.
     let before = stdout(repo.arc(&repo.root).args(["journal", "list", "--json"]));
@@ -2939,7 +2940,8 @@ fn journal_note_discussion_carries_its_conventions_by_default() {
     let take_at = body.find("my own opening take").unwrap();
     assert!(template_at < take_at, "{body}");
 
-    // --no-scaffold records the body verbatim.
+    // --no-scaffold drops the convention block; the body stands alone under
+    // the heading its slug supplies.
     let out = stdout(repo.arc(&repo.root).args([
         "journal",
         "note",
@@ -2952,7 +2954,7 @@ fn journal_note_discussion_carries_its_conventions_by_default() {
     ]));
     assert_eq!(
         fs::read_to_string(out.trim()).unwrap(),
-        "my own opening take\n"
+        "# Bare\n\nmy own opening take\n"
     );
 
     // Kinds with no convention block of their own are untouched.
@@ -2967,7 +2969,7 @@ fn journal_note_discussion_carries_its_conventions_by_default() {
     ]));
     assert_eq!(
         fs::read_to_string(out.trim()).unwrap(),
-        "my own opening take\n"
+        "# Plain\n\nmy own opening take\n"
     );
 
     // A discussion with neither body nor opt-out records the template alone.
@@ -7292,7 +7294,7 @@ fn a_kind_subcommand_and_note_kind_produce_the_same_artifact_and_event() {
     let repo = Repo::new();
     repo.arc(&repo.root)
         .args(["journal", "todo", "by-verb", "--body-file", "-"])
-        .write_stdin("Same body.\n")
+        .write_stdin("# Same heading\n\nSame body.\n")
         .assert()
         .success();
     repo.arc(&repo.root)
@@ -7305,7 +7307,7 @@ fn a_kind_subcommand_and_note_kind_produce_the_same_artifact_and_event() {
             "--body-file",
             "-",
         ])
-        .write_stdin("Same body.\n")
+        .write_stdin("# Same heading\n\nSame body.\n")
         .assert()
         .success();
 
@@ -7499,7 +7501,7 @@ fn journal_scaffolds_lists_names_kind_defaults_and_prints_one() {
         .unwrap();
     let written = fs::read_to_string(dir.join(name)).unwrap();
     assert!(
-        written.starts_with(body.trim_end_matches('\n')),
+        written.starts_with(&format!("# Seeded\n\n{}", body.trim_end_matches('\n'))),
         "{written}"
     );
 
@@ -9201,7 +9203,11 @@ fn journal_handoff_derives_state_inside_a_change_worktree() {
     ]));
     let text = fs::read_to_string(out.trim()).unwrap();
 
-    assert!(text.starts_with("## State (derived at "), "{text}");
+    // The heading comes first, then the derived state, then the body.
+    assert!(
+        text.starts_with("# Derived state\n\n## State (derived at "),
+        "{text}"
+    );
     let root = fs::canonicalize(&repo.root).unwrap();
     let checkout = fs::canonicalize(&worktree).unwrap();
     let branch = git_out(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -10228,7 +10234,10 @@ fn spool_parks_a_write_in_the_repository() {
     let file: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(outbox(&repo).join(name)).unwrap()).unwrap();
     assert_eq!(file["schema"], "arc-journal-spool/1", "{file}");
-    assert_eq!(file["body"], "what the round deferred\n", "{file}");
+    assert_eq!(
+        file["body"], "# Sandboxed\n\nwhat the round deferred\n",
+        "{file}"
+    );
     assert_eq!(file["event"]["event"], "note", "{file}");
     assert_eq!(file["event"]["actor"], "tester", "{file}");
     assert_eq!(file["filename"], file["event"]["file"], "{file}");
@@ -10316,7 +10325,7 @@ fn promote_files_the_write_with_its_own_identity() {
     let artifact = sealed.join(event["file"].as_str().unwrap());
     assert_eq!(
         fs::read_to_string(&artifact).unwrap(),
-        "what the round deferred\n"
+        "# Sealed\n\nwhat the round deferred\n"
     );
     // A promoted event is valid journal input, not something doctor reports.
     let doctored = stdout(
@@ -10896,4 +10905,98 @@ fn journal_spool_promote_uniquifies_a_name_taken_while_the_write_waited() {
     assert!(!hot.join(&taken).exists());
     let filed = journal_events(&hot).pop().unwrap();
     assert_eq!(filed["file"], expected);
+}
+
+/// A queue row reads its description from the artifact's heading, so a body
+/// that opens on prose is headed from its topic rather than listing blank.
+#[test]
+fn journal_todo_without_a_heading_lists_under_a_slug_heading() {
+    let repo = Repo::new();
+    let out = repo
+        .arc(&repo.root)
+        .args([
+            "journal",
+            "todo",
+            "toolchain-fingerprint-covers-only-qt",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("the fingerprint misses the linker.\n")
+        .assert()
+        .success();
+    let notice = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+    assert!(
+        notice.contains("heading derived from slug: # Toolchain fingerprint covers only qt"),
+        "{notice}"
+    );
+
+    let file = PathBuf::from(
+        String::from_utf8_lossy(&out.get_output().stdout)
+            .trim()
+            .to_owned(),
+    );
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "# Toolchain fingerprint covers only qt\n\nthe fingerprint misses the linker.\n"
+    );
+
+    let open = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(
+        open.contains("Toolchain fingerprint covers only qt"),
+        "{open}"
+    );
+}
+
+/// An explicit title outranks the slug, and a body that supplies its own
+/// heading is left as its author wrote it.
+#[test]
+fn journal_title_and_an_authored_heading_outrank_the_slug() {
+    let repo = Repo::new();
+    let titled = repo
+        .arc(&repo.root)
+        .args([
+            "journal",
+            "todo",
+            "topic-a",
+            "--body-file",
+            "-",
+            "--title",
+            "The Real Name",
+        ])
+        .write_stdin("prose first.\n")
+        .assert()
+        .success();
+    assert!(
+        String::from_utf8_lossy(&titled.get_output().stderr).is_empty(),
+        "an explicit title derives nothing"
+    );
+    let file = PathBuf::from(
+        String::from_utf8_lossy(&titled.get_output().stdout)
+            .trim()
+            .to_owned(),
+    );
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "# The Real Name\n\nprose first.\n"
+    );
+
+    let authored = repo
+        .arc(&repo.root)
+        .args(["journal", "todo", "topic-b", "--body-file", "-"])
+        .write_stdin("# Author's Heading\n\nbody.\n")
+        .assert()
+        .success();
+    assert!(
+        String::from_utf8_lossy(&authored.get_output().stderr).is_empty(),
+        "a body with its own heading derives nothing"
+    );
+    let file = PathBuf::from(
+        String::from_utf8_lossy(&authored.get_output().stdout)
+            .trim()
+            .to_owned(),
+    );
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "# Author's Heading\n\nbody.\n"
+    );
 }

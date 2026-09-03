@@ -144,6 +144,12 @@ SETTLE A QUESTION (before it is work)
   `answer` and the `discussion` summary are its surface, and `note --kind
   discussion` opens one.
 
+  Every artifact opens on a heading, because a queue row reads its description
+  from there and a row that names nothing is a row nobody picks up. `--title`
+  sets it; a body that already opens on a heading keeps its own; a body that
+  opens on prose is headed from its topic slug and the write says so, leaving
+  a name worth correcting rather than a blank one to discover later.
+
   An item distilled out of a recorded session carries where it came from.
   Every write verb and `journal log` take `--source 'harness=<h>
   session=<id> ts=<rfc3339>'`, with optional `turn=`, `schema=`, and
