@@ -1792,6 +1792,38 @@ lines, artifact names, unknown kinds, and dangling references remain problems
 with a failing exit status, while stale lanes and archive housekeeping remain
 non-failing advice. It never creates the journal directory.
 
+### Spooling a write the journal cannot take
+
+The journal lives outside the repository, so a process sandboxed to the
+repository it is editing cannot write one — and the executors running bounded
+rounds are precisely the ones asked to record what they deferred. Every kind
+verb and `journal log` therefore accept `--spool`, and a write also spools on
+its own when the journal directory cannot be created or written. Either way
+the write lands in `<repo toplevel>/.arc/outbox/<ts>-<kind>-<topic>.json`, the
+command prints `spooled: <path>` and exits 0. Arc creates the outbox on first
+use with a `.gitignore` of `*`: a spooled write is in-flight state, not
+project content.
+
+A spool file is `{"schema": "arc-journal-spool/1", "filename": <the artifact
+this write would create, absent for a log>, "event": <the journal event as it
+would have been appended>, "body": <the artifact body, null for a log>}`.
+
+```sh
+arc config --check-writable          # says whether writes go to the journal or the outbox
+arc journal todo deferred-work --body-file - --spool
+arc journal spool                    # what is waiting
+arc journal spool --promote          # file it, oldest first
+```
+
+`--promote` replays each write as a real one: the artifact is written, the
+event is appended with the spooled identity verbatim — actor, harness,
+session, model, and represented subject — plus `promoted_by` naming the
+promoting caller, and the spool file is removed only after the event is
+appended. Promotion adds a carrier, never a new author. A spool file that
+cannot be parsed is reported and left in place, because it is the only copy of
+that write. `promoted_by` is an optional `journal-events/1` field, so an
+events file written before it stays valid.
+
 `arc doctor [--json]` performs the same read-only split for the authoritative
 change ledger. Malformed events, store configuration, IDs, and missing open
 events are problems; orphaned temporary files and retention refs, missing open
