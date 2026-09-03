@@ -8400,3 +8400,155 @@ fn discussion_json_separates_the_actor_from_the_subject() {
         .expect("the position wrote a heading");
     assert!(!heading.contains("executor-x"), "{heading}");
 }
+
+fn append_journal_event(dir: &Path, event: serde_json::Value) {
+    use std::io::Write;
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("events.jsonl"))
+            .unwrap(),
+        "{event}"
+    )
+    .unwrap();
+}
+
+fn amendment_event(
+    topic: &str,
+    file: &str,
+    ts: &str,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut event = serde_json::json!({
+        "schema": "journal-events/1",
+        "ts": ts,
+        "harness": "test",
+        "session": "test",
+        "topic": topic,
+        "file": file,
+    });
+    let object = event.as_object_mut().unwrap();
+    for (key, value) in extra.as_object().unwrap() {
+        object.insert(key.clone(), value.clone());
+    }
+    event
+}
+
+fn doctor_findings(repo: &Repo, bucket: &str) -> Vec<String> {
+    let report = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    report[bucket]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|finding| {
+            format!(
+                "{}: {}",
+                finding["code"].as_str().unwrap(),
+                finding["detail"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn journal_doctor_reports_an_amendment_naming_no_recorded_entry() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "dangling-amendment");
+    let dir = journal_dir(&repo);
+    append_journal_event(
+        &dir,
+        amendment_event(
+            "dangling-amendment",
+            &file,
+            "2026-01-01T00:00:01Z",
+            serde_json::json!({
+                "event": "correction",
+                "target": "pos-absent",
+                "field": "stance",
+                "value": "against",
+            }),
+        ),
+    );
+
+    let problems = doctor_findings(&repo, "problems");
+    assert!(
+        problems
+            .iter()
+            .any(|finding| finding.starts_with("dangling-amendment-target")
+                && finding.contains("pos-absent")),
+        "{problems:?}"
+    );
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn journal_doctor_flags_same_stamp_corrections_of_one_field() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "ambiguous-amendment");
+    let position = add_discussion_position(&repo, &file, None, "test");
+    let dir = journal_dir(&repo);
+    for value in ["against", "amend"] {
+        append_journal_event(
+            &dir,
+            amendment_event(
+                "ambiguous-amendment",
+                &file,
+                "2026-01-01T00:00:01Z",
+                serde_json::json!({
+                    "event": "correction",
+                    "target": position,
+                    "field": "stance",
+                    "value": value,
+                }),
+            ),
+        );
+    }
+
+    let advice = doctor_findings(&repo, "advice");
+    assert!(
+        advice
+            .iter()
+            .any(|finding| finding.starts_with("ambiguous-correction")
+                && finding.contains("2 corrections of stance")),
+        "{advice:?}"
+    );
+    let problems = doctor_findings(&repo, "problems");
+    assert!(
+        !problems
+            .iter()
+            .any(|finding| finding.starts_with("ambiguous-correction")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn journal_doctor_rejects_a_correction_of_a_field_its_target_lacks() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "mismatched-amendment");
+    let dir = journal_dir(&repo);
+    append_journal_event(
+        &dir,
+        amendment_event(
+            "mismatched-amendment",
+            &file,
+            "2026-01-01T00:00:01Z",
+            serde_json::json!({
+                "event": "correction",
+                "target": "artifact",
+                "field": "stance",
+                "value": "for",
+            }),
+        ),
+    );
+
+    let problems = doctor_findings(&repo, "problems");
+    assert!(
+        problems
+            .iter()
+            .any(|finding| finding.starts_with("unknown-jsonl-event")),
+        "{problems:?}"
+    );
+}

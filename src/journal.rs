@@ -1247,6 +1247,130 @@ fn inspect_fork_marker_paths(
     Ok(())
 }
 
+/// Every `correction` and `retraction` recorded against one artifact.
+fn amendment_events<'a>(events: &'a [JournalEvent], filename: &str) -> Vec<&'a JournalEvent> {
+    events
+        .iter()
+        .filter(|event| {
+            event.known()
+                && matches!(event.event.as_str(), "correction" | "retraction")
+                && event.file.as_deref() == Some(filename)
+        })
+        .collect()
+}
+
+/// Whether the entry an amendment names was recorded on its artifact.
+///
+/// A position is recorded either as a typed event or as a heading carrying its
+/// ID, because the stance tally reads the artifact and the reply graph reads
+/// the log; an amendment that either one can resolve is not dangling.
+fn amend_target_exists(
+    events: &[JournalEvent],
+    filename: &str,
+    target: &AmendTarget,
+    body: Option<&str>,
+) -> bool {
+    let typed = |kind: &str, id: &str, on: fn(&JournalEvent) -> Option<&str>| {
+        events.iter().any(|event| {
+            event.known()
+                && event.event == kind
+                && event.file.as_deref() == Some(filename)
+                && on(event) == Some(id)
+        })
+    };
+    match target {
+        AmendTarget::Artifact => true,
+        AmendTarget::Position(id) => {
+            typed("position", id, |event| event.position_id.as_deref())
+                || body.is_some_and(|body| {
+                    body.lines()
+                        .filter_map(position_heading_id)
+                        .any(|heading| &heading == id)
+                })
+        }
+        AmendTarget::Question(id) => typed("question", id, |event| event.question_id.as_deref()),
+        AmendTarget::Answer(id) => typed("answer", id, |event| event.question_id.as_deref()),
+    }
+}
+
+/// Report amendments that cannot take effect.
+///
+/// An amendment naming an entry its artifact never recorded resolves to
+/// nothing and is invisible in every derived view, which is exactly how a
+/// correction that never took would otherwise be discovered. Two corrections
+/// of one field of one entry sharing a timestamp leave which is in force
+/// decided by log order alone, which is a weaker claim than the record makes.
+fn inspect_amendments(
+    dir: &Path,
+    events: &[JournalEvent],
+    problems: &mut Vec<DoctorFinding>,
+    advice: &mut Vec<DoctorFinding>,
+) {
+    let mut files: Vec<&str> = Vec::new();
+    for event in events.iter().filter(|event| {
+        event.known() && matches!(event.event.as_str(), "correction" | "retraction")
+    }) {
+        if let Some(file) = event.file.as_deref() {
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+    }
+    for file in files {
+        let body =
+            artifact_body_path(dir, file).and_then(|path| std::fs::read_to_string(path).ok());
+        for event in amendment_events(events, file) {
+            let target = event
+                .target
+                .as_deref()
+                .expect("a known amendment names a target");
+            let parsed = event
+                .amend_target()
+                .expect("a known amendment names a resolvable target");
+            if !amend_target_exists(events, file, &parsed, body.as_deref()) {
+                problems.push(DoctorFinding {
+                    code: "dangling-amendment-target",
+                    detail: format!(
+                        "{file}: {} names {target}, which it never recorded",
+                        event.event
+                    ),
+                });
+            }
+        }
+    }
+
+    let mut stamps: HashMap<(&str, &str, &str, &str), usize> = HashMap::new();
+    for event in events
+        .iter()
+        .filter(|event| event.known() && event.event == "correction")
+    {
+        let (Some(file), Some(target), Some(field)) = (
+            event.file.as_deref(),
+            event.target.as_deref(),
+            event.field.as_deref(),
+        ) else {
+            continue;
+        };
+        *stamps
+            .entry((file, target, field, event.ts.as_str()))
+            .or_insert(0) += 1;
+    }
+    let mut ambiguous: Vec<String> = stamps
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|((file, target, field, ts), count)| {
+            format!("{file}: {count} corrections of {field} on {target} at {ts}")
+        })
+        .collect();
+    ambiguous.sort();
+    for detail in ambiguous {
+        advice.push(DoctorFinding {
+            code: "ambiguous-correction",
+            detail,
+        });
+    }
+}
+
 fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     let resolution = resolve(&ctx.cwd)?;
     let dir = resolution.directory.clone();
@@ -1358,6 +1482,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     }
     inspect_transition_integrity(&dir, &cold, &hot_files, &events, &mut problems)?;
     inspect_fork_marker_paths(&dir, &hot_files, &mut problems)?;
+    inspect_amendments(&dir, &events, &mut problems, &mut advice);
 
     // A journal is addressed by the slugged path of its project. When that
     // path stops existing the journal becomes unreachable from anywhere, and
@@ -2837,6 +2962,72 @@ pub(crate) struct JournalEvent {
     /// every question written before the field existed keeps its meaning.
     #[serde(skip_serializing_if = "Option::is_none")]
     settle_by: Option<String>,
+    /// What a `correction` or `retraction` acts on, within the artifact named
+    /// by `file`: `artifact`, a position ID, a question ID, or
+    /// `answer:<question id>`. Both events are append-only amendments whose
+    /// effect lives in derived views, so the entry they name is never
+    /// rewritten and stays readable as it was filed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+    /// The one field a `correction` replaces on its target. Which fields a
+    /// target has is closed, so a correction naming a field its target does
+    /// not carry is not a correction of anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    field: Option<String>,
+    /// What a `correction` puts in place of the recorded field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<String>,
+}
+
+/// What a `correction` or `retraction` names inside one artifact.
+///
+/// The vocabulary is closed because an amendment that cannot be resolved to a
+/// recorded entry corrects nothing: `journal doctor` reports one whose target
+/// is absent, and every derived view ignores it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum AmendTarget {
+    /// The artifact itself, rather than any entry inside it.
+    Artifact,
+    Position(String),
+    Question(String),
+    /// The settlement of the named question.
+    Answer(String),
+}
+
+impl AmendTarget {
+    fn parse(value: &str) -> Option<Self> {
+        if value == "artifact" {
+            return Some(Self::Artifact);
+        }
+        if let Some(question) = value.strip_prefix("answer:") {
+            return valid_question_id(question).then(|| Self::Answer(question.to_string()));
+        }
+        if valid_question_id(value) {
+            return Some(Self::Question(value.to_string()));
+        }
+        valid_position_id(value).then(|| Self::Position(value.to_string()))
+    }
+
+    /// The fields this target carries, and so the only ones a correction may
+    /// replace on it. A title belongs to an artifact, a stance and a reply
+    /// reference to a position, a chosen branch to a position or an answer;
+    /// the identity a thing was recorded under belongs to every entry an
+    /// author filed.
+    fn correctable_fields(&self) -> &'static [&'static str] {
+        match self {
+            Self::Artifact => &["title"],
+            Self::Position(_) => &["stance", "option", "actor", "model", "ref"],
+            Self::Question(_) => &["actor", "model"],
+            Self::Answer(_) => &["option", "actor", "model"],
+        }
+    }
+
+    /// A retraction withdraws an argument or a settlement. An artifact is
+    /// withdrawn by consuming it, and a question by answering it, so neither
+    /// is a retraction target.
+    fn retractable(&self) -> bool {
+        matches!(self, Self::Position(_) | Self::Answer(_))
+    }
 }
 
 /// Which project a journal belongs to, recorded append-only in `bindings.jsonl`
@@ -2940,6 +3131,9 @@ impl JournalEvent {
             options: None,
             off_menu: None,
             option: None,
+            target: None,
+            field: None,
+            value: None,
         }
     }
 
@@ -3011,6 +3205,31 @@ impl JournalEvent {
                     && self.placement.is_none()
                     && self.options.is_none()
             }
+            // An amendment names one entry and one replacement for it. Both
+            // halves are required: a correction missing either corrects
+            // nothing, and a retraction without a reason withdraws an argument
+            // while hiding why it no longer holds.
+            "correction" => {
+                self.file.is_some()
+                    && self
+                        .value
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    && match (self.amend_target(), self.field.as_deref()) {
+                        (Some(target), Some(field)) => target.correctable_fields().contains(&field),
+                        _ => false,
+                    }
+            }
+            "retraction" => {
+                self.file.is_some()
+                    && self
+                        .note
+                        .as_deref()
+                        .is_some_and(|note| !note.trim().is_empty())
+                    && self
+                        .amend_target()
+                        .is_some_and(|target| target.retractable())
+            }
             "lane-opened" => self.ttl_seconds.is_some() && self.scope.is_some(),
             "lane-renewed" => true,
             "lane-closed" => self
@@ -3030,6 +3249,11 @@ impl JournalEvent {
         }
     }
 
+    /// The entry this event amends, when it names one that can be resolved.
+    fn amend_target(&self) -> Option<AmendTarget> {
+        self.target.as_deref().and_then(AmendTarget::parse)
+    }
+
     fn file_is_discussion(&self) -> bool {
         self.file.as_deref().is_some_and(|file| {
             parse_artifact_name(file)
@@ -3040,6 +3264,12 @@ impl JournalEvent {
 
 fn valid_question_id(value: &str) -> bool {
     value.strip_prefix("q-").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_alphanumeric())
+    })
+}
+
+fn valid_position_id(value: &str) -> bool {
+    value.strip_prefix("pos-").is_some_and(|suffix| {
         !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_alphanumeric())
     })
 }
@@ -5380,9 +5610,7 @@ fn position_heading_id(line: &str) -> Option<String> {
     // position the heading does not name — and a false match here hides an
     // unplaceable heading, which is the one thing this count exists to show.
     let token = rest.split_whitespace().next()?;
-    let suffix = token.strip_prefix("pos-")?;
-    (!suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_alphanumeric()))
-        .then(|| token.to_string())
+    valid_position_id(token).then(|| token.to_string())
 }
 
 fn position_stance_value(line: &str) -> Option<&str> {
