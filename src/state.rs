@@ -922,6 +922,23 @@ impl ChangeState {
             .rfind(|v| v.gate.as_deref() == Some(gate) && v.revision == revision)
     }
 
+    /// The latest passing evidence that showed this gate able to fail at this
+    /// revision.
+    ///
+    /// Falsification is a fact about the gate at a revision, not about one run
+    /// of it: once a check has been watched to fail and then pass against this
+    /// tree, running it again does not unlearn that. Reading only the newest
+    /// evidence would let any rerun — `verify --all`, and so every `done` —
+    /// silently retract the finding.
+    pub fn gate_falsification_at(&self, gate: &str, revision: &str) -> Option<&VerificationEntry> {
+        self.verifications.iter().rfind(|v| {
+            v.gate.as_deref() == Some(gate)
+                && v.revision == revision
+                && v.result == VerifyResult::Pass
+                && v.falsification.is_some()
+        })
+    }
+
     pub fn resolve_finding_id(&self, needle: &str) -> Result<String> {
         resolve_unique_id(self.findings.keys().map(String::as_str), needle, "finding")
     }

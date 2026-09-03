@@ -2278,6 +2278,24 @@ fn last_verification_event_id(repo: &Repo, slug: &str, result: &str) -> String {
         .to_string()
 }
 
+fn last_gate_verification_event_id(repo: &Repo, slug: &str, gate: &str, result: &str) -> String {
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        slug,
+        "--type",
+        "verification-recorded",
+    ]));
+    events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .rfind(|event| event["result"] == result && event["gate"] == gate)
+        .expect("a verification of that gate with that result")["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 fn gate_row(repo: &Repo, slug: &str, name: &str) -> serde_json::Value {
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", slug]))).unwrap();
@@ -2647,4 +2665,53 @@ fn readiness_codes_are_unaffected_by_discrimination() {
             .code(),
         done_before
     );
+}
+
+/// Falsification is a fact about the gate at a revision, not about one run.
+/// `verify --all` — and so every `arc done` — appends fresh passing evidence
+/// with no reference at the same head; the gate must still read as having been
+/// shown able to fail, with the two ids saying which run proved what.
+#[test]
+fn a_rerun_at_the_same_head_does_not_retract_discrimination() {
+    let repo = Repo::new();
+    let (_, failing) = change_with_a_fixed_gate(&repo, "rerun");
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "rerun",
+            "--gate",
+            "fixable",
+            "--falsified-by",
+            &failing,
+            "--predicted",
+            "marker absent",
+        ])
+        .assert()
+        .success();
+    let discriminating_evidence =
+        last_gate_verification_event_id(&repo, "rerun", "fixable", "pass");
+
+    repo.arc(&repo.root)
+        .args(["verify", "rerun", "--all"])
+        .assert()
+        .success();
+    let counted = last_gate_verification_event_id(&repo, "rerun", "fixable", "pass");
+    assert_ne!(
+        counted, discriminating_evidence,
+        "the rerun must append newer evidence, or this proves nothing"
+    );
+
+    let fixable = gate_row(&repo, "rerun", "fixable");
+    assert_eq!(fixable["discrimination"], "discriminating");
+    assert_eq!(fixable["evidence_event_id"], counted.as_str());
+    assert_eq!(
+        fixable["discrimination_event_id"],
+        discriminating_evidence.as_str()
+    );
+    assert_eq!(fixable["falsification"]["event_id"], failing.as_str());
+
+    // A gate that never carried a reference is untouched by the same rerun.
+    let plain = gate_row(&repo, "rerun", "plain");
+    assert_eq!(plain["discrimination"], "undiscriminated");
+    assert!(plain["discrimination_event_id"].is_null());
 }

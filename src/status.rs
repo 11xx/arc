@@ -152,15 +152,21 @@ pub struct GateStatus {
     pub output_tail: Option<String>,
     #[serde(skip_serializing_if = "is_false")]
     pub timed_out: bool,
-    /// Whether the passing evidence at head was ever shown capable of failing.
-    /// Absent when the head evidence is not a pass: discrimination is a
+    /// Whether this gate was ever shown capable of failing at this revision.
+    /// Absent when the counted evidence is not a pass: discrimination is a
     /// property of a pass, and a failure or a missing run has none to report.
     /// Additive in `arc-status/14`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discrimination: Option<Discrimination>,
-    /// The failure that evidence answers, when it names one.
+    /// The failure that was answered, when one was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub falsification: Option<Falsification>,
+    /// The evidence carrying that reference, named only when it is not the
+    /// evidence that counts. A rerun at the same revision appends newer
+    /// passing evidence without a reference, and the gate stays
+    /// discriminating; the two ids then say which run proved what.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discrimination_event_id: Option<String>,
 }
 
 impl GateStatus {
@@ -973,6 +979,12 @@ fn build_report(
                 .as_deref()
                 .and_then(|head| state.gate_evidence_at(name, head));
             let result = evidence.map(|e| e.result);
+            // Discrimination is asked of the gate at this revision, not of the
+            // newest run, so a rerun that appends a plain pass cannot retract
+            // what an earlier run established against the same tree.
+            let counted_pass = evidence.filter(|e| e.result == crate::model::VerifyResult::Pass);
+            let discriminating =
+                counted_pass.and_then(|e| state.gate_falsification_at(name, &e.revision));
             GateStatus {
                 name: name.clone(),
                 command: gate.command.clone(),
@@ -1019,13 +1031,14 @@ fn build_report(
                     .and_then(|e| e.output_tail.clone()),
                 timed_out: evidence
                     .is_some_and(|e| e.result == crate::model::VerifyResult::Fail && e.timed_out),
-                discrimination: evidence
-                    .filter(|e| e.result == crate::model::VerifyResult::Pass)
-                    .map(|e| match e.falsification {
-                        Some(_) => Discrimination::Discriminating,
-                        None => Discrimination::Undiscriminated,
-                    }),
-                falsification: evidence.and_then(|e| e.falsification.clone()),
+                discrimination: counted_pass.map(|_| match discriminating {
+                    Some(_) => Discrimination::Discriminating,
+                    None => Discrimination::Undiscriminated,
+                }),
+                falsification: discriminating.and_then(|e| e.falsification.clone()),
+                discrimination_event_id: discriminating
+                    .map(|e| e.event_id.clone())
+                    .filter(|id| Some(id.as_str()) != counted_pass.map(|e| e.event_id.as_str())),
             }
         })
         .collect();

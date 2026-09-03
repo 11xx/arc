@@ -801,13 +801,19 @@ the same gate or command on the same change — and reads the revision from the
 referenced event, so the two halves cannot disagree. The flags are valid only
 together, and not with `--all`, which runs several checks at once.
 
-Gate rows carry the result as `discrimination`: `discriminating` when the
-passing evidence at head names a falsification, `undiscriminated` when it does
-not. Human-facing gate lists append `(discriminating: failed at <rev>:
-<reason>)` or `(undiscriminated)` to a passing line. Nothing is inferred: a
-check arc never recorded failing is undiscriminated, which is unknown rather
-than a claim that it cannot detect anything. The whole record is advisory —
-readiness, gate results, and exit codes ignore it.
+Gate rows carry the result as `discrimination`: `discriminating` when any
+passing evidence for that gate at the counted revision names a falsification,
+`undiscriminated` when none does. It is asked of the gate at a revision rather
+than of the newest run, because a check watched to fail and then pass against a
+tree is not unwatched by running it again; otherwise `verify --all`, and so
+every `arc done`, would silently retract the finding. `evidence_event_id` names
+the evidence that counts and `discrimination_event_id` the evidence that
+carried the reference, whenever they differ. Human-facing gate lists append
+`(discriminating: failed at <rev>: <reason>)` or `(undiscriminated)` to a
+passing line. Nothing is inferred: a check arc never recorded failing is
+undiscriminated, which is unknown rather than a claim that it cannot detect
+anything. The whole record is advisory — readiness, gate results, and exit
+codes ignore it.
 
 Executed gates capture combined stdout and stderr, retaining only the final
 4096 bytes. Failed-gate tails appear in `arc show` and `arc status`; successful
