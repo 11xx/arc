@@ -429,3 +429,52 @@ fn stacked_base_floor() {
     let ordinary_merge_base = git_out(&ordinary_worktree, &["merge-base", "HEAD", "master"]);
     assert_eq!(ordinary_patchset["base"], ordinary_merge_base);
 }
+
+/// An approval the gate lets stand still has to say what it is. Where the
+/// reviewer is the identity that wrote the patchset — or one arc invented from
+/// git config — the verdict is a review that happened, and naming the match at
+/// the moment it is written is the only place a reader is guaranteed to see it.
+#[test]
+fn a_verdict_from_the_assumed_author_names_the_patchset_it_wrote() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "assumed-verdict"]));
+    let worktree = repo.home.join(".worktrees").join("repo-assumed-verdict");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    stdout(
+        repo.arc(&worktree)
+            .env_remove("ARC_ACTOR")
+            .args(["snapshot", "assumed-verdict"]),
+    );
+    let reviewed = repo
+        .arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args(["review", "assumed-verdict", "--verdict", "approved"])
+        .assert()
+        .success();
+    let warning = String::from_utf8_lossy(&reviewed.get_output().stderr).into_owned();
+    assert!(warning.contains("recorded as \"Tester\""), "{warning}");
+    assert!(warning.contains("who is the author of ps-01"), "{warning}");
+    assert!(
+        warning.contains("identity assumed from git config"),
+        "{warning}"
+    );
+}
+
+/// The distinction the warning draws is between a reviewer and an author, so a
+/// declared reviewer of work somebody else snapshotted hears nothing.
+#[test]
+fn a_verdict_from_a_declared_reviewer_of_someone_elses_work_is_not_warned_about() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "declared-verdict"]));
+    let worktree = repo.home.join(".worktrees").join("repo-declared-verdict");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    stdout(repo.arc(&worktree).args(["snapshot", "declared-verdict"]));
+    let reviewed = repo
+        .arc(&repo.root)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "declared-verdict", "--verdict", "approved"])
+        .assert()
+        .success();
+    let warning = String::from_utf8_lossy(&reviewed.get_output().stderr).into_owned();
+    assert!(!warning.contains("recorded as"), "{warning}");
+}

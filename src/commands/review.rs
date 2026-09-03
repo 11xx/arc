@@ -804,7 +804,16 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         println!("finding: {id}");
     }
     println!("event: {}", ev.event_id);
-    report_inert_approval(ctx, &store, &change_id)?;
+    // The inert-approval note already names the reviewer's relation to the
+    // work when the gate rejects it. Where the gate lets the approval stand —
+    // a repository that permits self-approval, or a change outside the
+    // dangerous surfaces — the same relation is still what a reader needs to
+    // judge the verdict, so it is said rather than left to be inferred.
+    if !report_inert_approval(ctx, &store, &change_id)? {
+        if let Some(patchset) = st.patchsets.iter().find(|p| p.id == patchset_id) {
+            ctx.warn_verdict_not_independent(patchset, verdict);
+        }
+    }
     Ok(())
 }
 
@@ -814,11 +823,14 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
 /// not a request for permission. Reporting success for an act with no effect
 /// is what teaches an operator the guard is absent, so the write path
 /// evaluates the same policy `check` does and names the outcome on the spot.
-fn report_inert_approval(ctx: &Ctx, store: &Store, change_id: &str) -> Result<()> {
+///
+/// Reports whether it said anything, so a caller can tell an approval the gate
+/// rejected from one it let stand.
+fn report_inert_approval(ctx: &Ctx, store: &Store, change_id: &str) -> Result<bool> {
     let st = state::reduce(&store.load_events(change_id)?)?;
     let report = ctx.report(store, &st)?;
     let Some(reason) = report.approval_rejection_reason.as_deref() else {
-        return Ok(());
+        return Ok(false);
     };
     println!("note: this approval does not gate — {reason}.");
     println!(
@@ -826,7 +838,7 @@ fn report_inert_approval(ctx: &Ctx, store: &Store, change_id: &str) -> Result<()
 `arc integrate {change_id} --debt <reason>`, or obtain a verdict from a \
 different actor."
     );
-    Ok(())
+    Ok(true)
 }
 
 fn build_anchor(

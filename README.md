@@ -1187,6 +1187,12 @@ names that happen to differ do not show that two people acted. Actor identity
 remains advisory; this comparison does not redesign or verify identity.
 Rejected self-approval follows the existing no-valid-approval path and exits 3.
 
+Where the policy is off the approval is recorded, and `arc review` and
+`arc audit` name what the record does not otherwise show: the identity the
+verdict was recorded as, the patchset that identity wrote, and whether arc
+assumed the identity from git config. Such a verdict is a review that happened
+rather than an independent one, and it leaves an independent-review debt owed.
+
 Every event records `actor_source`: `flag`, `env`, or `git-fallback`. The last
 means nobody declared an identity and arc took `git config user.name`, which
 names whoever configured the checkout rather than whoever acted. The

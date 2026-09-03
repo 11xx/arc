@@ -3235,3 +3235,102 @@ fn the_inbox_and_catchup_split_their_debt_count_by_kind() {
         "{catchup}"
     );
 }
+
+/// A change whose snapshot and verdict both took the identity from git config,
+/// the shape a session that exports no actor produces, integrated carrying
+/// debt so an audit has an obligation to answer.
+fn assumed_identity_debt(repo: &Repo, slug: &str) -> String {
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", slug])));
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    stdout(
+        repo.arc(&worktree)
+            .env_remove("ARC_ACTOR")
+            .args(["snapshot", slug]),
+    );
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args(["review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", slug, "--debt", "no reviewer reachable"])
+        .assert()
+        .success();
+    change_id
+}
+
+/// Where policy permits self-approval the audit is recorded, so the record is
+/// the only thing left to tell a reader it was not independent. It has to name
+/// both facts that make it so — the identity arc invented, and the patchset
+/// that identity wrote — because the debt line alone reads as a formality.
+#[test]
+fn an_audit_by_the_assumed_author_names_the_match_and_leaves_the_debt_owed() {
+    let repo = Repo::new();
+    let change_id = assumed_identity_debt(&repo, "assumed-audit");
+    let audited = repo
+        .arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args(["audit", &change_id, "--verdict", "approved"])
+        .assert()
+        .success();
+    let out = audited.get_output();
+    let warning = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(warning.contains("recorded as \"Tester\""), "{warning}");
+    assert!(warning.contains("who is the author of ps-01"), "{warning}");
+    assert!(
+        warning.contains("identity assumed from git config"),
+        "{warning}"
+    );
+    let recorded = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        recorded.contains("the debt still owes an independent review"),
+        "{recorded}"
+    );
+}
+
+/// The policy that refuses to invent an identity binds to the audit like any
+/// other write, so the verdict a permissive repository records is refused here
+/// instead.
+#[test]
+fn require_declared_actor_refuses_an_audit_from_an_assumed_identity() {
+    let repo = Repo::new();
+    let change_id = assumed_identity_debt(&repo, "declared-audit");
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nrequire_declared_actor = true\n",
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .env_remove("ARC_ACTOR")
+        .args(["audit", &change_id, "--verdict", "approved"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("requires a declared actor"));
+    let status = stdout(repo.arc(&repo.root).args(["status", &change_id]));
+    assert!(status.contains("debt"), "{status}");
+}
+
+/// A reviewer who declared themselves and wrote none of the work is exactly
+/// what the warning exists to distinguish, so it says nothing about them.
+#[test]
+fn an_audit_by_a_declared_reviewer_of_someone_elses_work_is_not_warned_about() {
+    let repo = Repo::new();
+    let change_id = integrated_debt(
+        &repo,
+        "declared-reviewer",
+        "work.txt",
+        "work\n",
+        "no reviewer reachable",
+    );
+    let audited = repo
+        .arc(&repo.root)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["audit", &change_id, "--verdict", "approved"])
+        .assert()
+        .success();
+    let warning = String::from_utf8_lossy(&audited.get_output().stderr).into_owned();
+    assert!(!warning.contains("recorded as"), "{warning}");
+    assert!(!warning.contains("assumed"), "{warning}");
+}
