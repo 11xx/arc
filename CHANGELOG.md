@@ -10,6 +10,19 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- Every independence surface reads an assumed identity the same way. An
+  approval is refused when its effective author matches a contributor on the
+  patchset or when arc assumed the reviewing identity from git config; an
+  assumed *authoring* identity no longer refuses a reviewer that declared a
+  different name, so `arc status` before a merge and `arc audit` after it agree
+  on who is independent of whom. Reviewer coverage marks attribution unknown
+  whenever the covering verdict's identity was assumed, which the
+  `reviewer-attribution-unknown` advisory reports. `arc status --json` is
+  `arc-status/17`: `review_map[].attribution_unknown` carries the wider
+  meaning.
+
 ## [2026.9.3] - 2026-09-03
 
 ### Added

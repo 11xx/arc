@@ -51,11 +51,19 @@ finding in `arc show`; comment replies render beneath their parent comment.
 Repository integration policy is declared in `.arc/policy.toml`. Policies are
 disabled when the file or setting is absent. Set
 `[policy] forbid_self_approval = true` to reject an approval when its effective
-author matches the one recorded by `arc snapshot` for that patchset, or when
-arc assumed either identity rather than someone declaring it — two invented
-names that happen to differ do not show that two people acted. Actor identity
-remains advisory; this comparison does not redesign or verify identity.
-A rejected self-approval follows the no-valid-approval path and exits 3.
+author matches a contributor on the patchset it approves, or when arc assumed
+the *reviewing* identity from `git config user.name` rather than someone
+declaring it — an invented name is nobody's claim, so it cannot be the second
+party independence needs.
+
+An assumed *authoring* identity is a different case, and it is read the same
+way before and after integration: a reviewer whose declared identity differs
+from the assumed author's name is independent of it, because declaring a
+different name is the claim to be somebody else that every identity comparison
+here rests on. Two assumed identities are rejected, since neither side made a
+claim. Actor identity remains advisory; this comparison does not redesign or
+verify identity. A rejected self-approval follows the no-valid-approval path
+and exits 3.
 
 Where the policy is off the approval is recorded, and `arc review` and
 `arc audit` name what the record does not otherwise show: the identity the
@@ -79,12 +87,14 @@ a bundle import, whose events are another repository's history being
 transferred rather than this session's claim about who acted. A lead acting for
 a declared `--on-behalf-of` subject satisfies the policy.
 
-After integration the rule narrows: `arc audit` refuses an approving audit from
-an identity arc assumed, which the auditor can fix by declaring itself, but not
-one whose *authoring* identity was assumed — that is already on the ledger and
-cannot be corrected, and refusing would leave the debt undischargeable rather
-than making anyone independent. Such an audit warns that it shows a review
-happened and not that it was independent.
+`arc audit` applies the same rule to the review that discharges a debt: it
+refuses an approving audit from an identity arc assumed, which the auditor can
+fix by declaring itself, and accepts a declared auditor of work whose authoring
+identity was assumed — that identity is already on the ledger and cannot be
+corrected, and refusing would leave the debt undischargeable rather than making
+anyone independent. Such an audit says out loud that arc assumed the identity
+of whoever wrote the work, so a reader can weigh what the pass was independent
+of.
 
 ### Dangerous surfaces
 
@@ -146,8 +156,9 @@ blocking)`. The codes are `reviewer-behind-final-patchset`
 `debt-outstanding`. None of them changes readiness or the exit code:
 plenty of changes legitimately ship with a single reviewer, and an
 orchestrator's review is a valid review unless a project's policy says
-otherwise. A reviewer that cannot be told apart from the patchset author
-(neither side recorded `--on-behalf-of`) is reported as unknown attribution
+otherwise. A reviewer arc cannot place — an identity it assumed from
+`git config user.name`, or the patchset actor's own name with no
+`--on-behalf-of` recorded on either side — is reported as unknown attribution
 rather than counted as independent or as self-review.
 
 When no independent verdict is reachable, declaring **debt** records

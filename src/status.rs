@@ -11,21 +11,22 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/16";
+pub const STATUS_SCHEMA: &str = "arc-status/17";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
-/// Two identities arc assumed cannot establish that two people acted. The
-/// self-approval guard compares effective authors, so an assumed identity on
-/// both sides makes the comparison meaningless rather than passing.
 /// A verdict graph with several tips has no authority to report, so the
 /// change reads as unreviewed unless the blocker says which it is: nobody
 /// reviewed, or several reviewers each replaced the same verdict.
 pub const CONTESTED_VERDICT_REASON: &str =
     "verdicts replace the same earlier verdict, so none is authoritative; record a verdict \
      superseding all of them";
+/// An identity arc invented from `git config user.name` names nobody in
+/// particular, so a verdict recorded under one cannot be the second party
+/// independence needs. The reviewer is the identity this refuses, because it
+/// is the one the caller can still declare.
 pub const UNDECLARED_APPROVAL_REASON: &str =
-    "approval rejected by policy: arc assumed the reviewing or the authoring identity from \
-     git config, so independence is unproven (pass --actor or set ARC_ACTOR)";
+    "approval rejected by policy: arc assumed the reviewing identity from git config, so \
+     independence is unproven (pass --actor or set ARC_ACTOR)";
 
 /// Typed integration blockers, ordered by exit-code precedence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -424,9 +425,12 @@ pub struct ReviewerCoverage {
     /// Whether the patchset used its compatibility attribution or an explicit
     /// contributor declaration.
     pub contributors_source: &'static str,
-    /// The reviewer is indistinguishable from the snapshot actor because no
-    /// `--on-behalf-of` was recorded on either side. Reported as unknown
-    /// rather than as self-review, which it may or may not be.
+    /// The reviewer cannot be placed: arc invented its identity from git
+    /// configuration, or it carries the snapshot actor's name with no
+    /// `--on-behalf-of` recorded on either side. Reported as unknown rather
+    /// than as independence or as self-review, either of which would claim
+    /// more than the ledger holds. True whenever the covering verdict's
+    /// identity was assumed, matching the guard that rejects such an approval.
     pub attribution_unknown: bool,
 }
 
@@ -625,22 +629,38 @@ pub struct VerdictStatus {
     pub valid_for_current_head: bool,
 }
 
-/// Whether an approval fails the self-approval guard: the reviewer matches a
-/// contributor, or an identity arc assumed rather than one somebody declared.
+/// Why an approval fails the self-approval guard, or `None` when it stands.
 ///
-/// An assumed identity is one arc invented from `git config user.name`. Two of
-/// those, or one of those beside a declared name, do not establish that two
-/// people acted. Provenance recorded before arc kept it is *unknown*, not
-/// assumed, and is compared by name as it always was — otherwise upgrading arc
-/// would strand every existing ledger that uses this policy.
-fn undeclared_or_self(
+/// Independence is a relation between two identities, and only a declared one
+/// is a claim somebody made. A reviewer matching a contributor on the work is
+/// self-approval. A reviewing identity arc invented from `git config
+/// user.name` names nobody in particular, so it cannot be the second party
+/// either — two such identities that happen to differ do not show that two
+/// people acted.
+///
+/// An *authoring* identity arc invented is a different case. It is what the
+/// ledger holds, and a reviewer that declared a different name has claimed to
+/// be somebody else, so an approval under that declared name is independent of
+/// it. `arc audit` reads the shipped work the same way, and a debt is
+/// discharged on the same terms: the surfaces before and after integration
+/// answer independence identically.
+///
+/// Provenance recorded before arc kept it is *unknown*, not assumed, and is
+/// compared by name as it always was — otherwise upgrading arc would strand
+/// every existing ledger that uses this policy.
+fn self_approval_rejection(
     patchset: &crate::state::Patchset,
     verdict_author: &str,
-    verdict: &crate::state::VerdictEntry,
-) -> bool {
-    patchset.contributor_match(verdict_author).is_some()
-        || patchset.author_assumed()
-        || verdict.author_assumed()
+    verdict_assumed: bool,
+) -> Option<String> {
+    // Naming the contributor is the more specific fact, so it is the one
+    // reported when both hold.
+    if let Some(contributor) = patchset.contributor_match(verdict_author) {
+        return Some(format!(
+            "{SELF_APPROVAL_REASON}: reviewer matches contributor {contributor}"
+        ));
+    }
+    verdict_assumed.then(|| UNDECLARED_APPROVAL_REASON.to_string())
 }
 
 /// Build the status report: replayed ledger state joined with live Git
@@ -903,8 +923,10 @@ fn build_report(
         // into a recorded obligation. The requirement is carried forward where
         // a query can find it when no independent reviewer is reachable.
         let would_reject_self_approval = danger.requires_independent_review(policy)
-            && approved_patchset
-                .is_some_and(|patchset| undeclared_or_self(patchset, v.effective_author(), v));
+            && approved_patchset.is_some_and(|patchset| {
+                self_approval_rejection(patchset, v.effective_author(), v.author_assumed())
+                    .is_some()
+            });
         // The waiver only authorizes anything when it is what let the approval
         // stand. Recording it otherwise would claim a merge rested on a waiver
         // that changed nothing.
@@ -957,35 +979,25 @@ fn build_report(
                         .as_ref()
                         .is_some_and(|patchset| patchset.id == v.patchset_id)
             }));
+    // The same predicate the validity above reads, so the reason a reader is
+    // given is the reason the gate acted on rather than a second reading of
+    // the same ledger.
     let approval_rejection_reason = verdict.as_ref().and_then(|verdict| {
-        (!verdict.valid_for_current_head
-            && verdict.verdict == Verdict::Approved
-            && latest_patchset.as_ref().is_some_and(|patchset| {
-                let verdict_author = verdict
-                    .on_behalf_of
-                    .as_deref()
-                    .unwrap_or(verdict.actor.as_str());
-                danger.requires_independent_review(policy)
-                    && !debt_waives_current_head
-                    && patchset.id == verdict.patchset_id
-                    && (patchset.contributor_match(verdict_author).is_some()
-                        || patchset.author_assumed()
-                        || verdict.author_assumed)
-            }))
-        .then(|| {
-            let matched_contributor = latest_patchset.as_ref().and_then(|patchset| {
-                let verdict_author = verdict
-                    .on_behalf_of
-                    .as_deref()
-                    .unwrap_or(verdict.actor.as_str());
-                patchset.contributor_match(verdict_author)
-            });
-            if let Some(contributor) = matched_contributor {
-                format!("{SELF_APPROVAL_REASON}: reviewer matches contributor {contributor}")
-            } else {
-                UNDECLARED_APPROVAL_REASON.to_string()
-            }
-        })
+        if verdict.valid_for_current_head
+            || verdict.verdict != Verdict::Approved
+            || debt_waives_current_head
+            || !danger.requires_independent_review(policy)
+        {
+            return None;
+        }
+        let patchset = latest_patchset
+            .as_ref()
+            .filter(|patchset| patchset.id == verdict.patchset_id)?;
+        let verdict_author = verdict
+            .on_behalf_of
+            .as_deref()
+            .unwrap_or(verdict.actor.as_str());
+        self_approval_rejection(patchset, verdict_author, verdict.author_assumed)
     });
     // A contested verdict graph has no single authority, so `latest_verdict`
     // reports none and the change reads as unreviewed. Without this the
@@ -1545,37 +1557,43 @@ pub fn reviewer_coverage(state: &ChangeState) -> Vec<ReviewerCoverage> {
         verdicts: usize,
         findings: usize,
         attributed: bool,
+        declared: bool,
     }
     let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
-    let mut record = |reviewer: &str, patchset_id: &str, attributed: bool, is_verdict: bool| {
-        let Some(index) = position(patchset_id) else {
-            return;
+    let mut record =
+        |reviewer: &str, patchset_id: &str, attributed: bool, declared: bool, is_verdict: bool| {
+            let Some(index) = position(patchset_id) else {
+                return;
+            };
+            let entry = tallies.entry(reviewer.to_string()).or_insert(Tally {
+                best: index,
+                best_id: patchset_id.to_string(),
+                verdicts: 0,
+                findings: 0,
+                attributed,
+                declared,
+            });
+            if index >= entry.best {
+                entry.best = index;
+                entry.best_id = patchset_id.to_string();
+            }
+            // Any explicit attribution anywhere makes this identity legible, and
+            // one event that claimed the name makes it somebody's claim.
+            entry.attributed |= attributed;
+            entry.declared |= declared;
+            if is_verdict {
+                entry.verdicts += 1;
+            } else {
+                entry.findings += 1;
+            }
         };
-        let entry = tallies.entry(reviewer.to_string()).or_insert(Tally {
-            best: index,
-            best_id: patchset_id.to_string(),
-            verdicts: 0,
-            findings: 0,
-            attributed,
-        });
-        if index >= entry.best {
-            entry.best = index;
-            entry.best_id = patchset_id.to_string();
-        }
-        // Any explicit attribution anywhere makes this identity legible.
-        entry.attributed |= attributed;
-        if is_verdict {
-            entry.verdicts += 1;
-        } else {
-            entry.findings += 1;
-        }
-    };
 
     for verdict in &state.verdicts {
         record(
             verdict.effective_author(),
             &verdict.patchset_id,
             verdict.on_behalf_of.is_some(),
+            !verdict.author_assumed(),
             true,
         );
     }
@@ -1585,6 +1603,9 @@ pub fn reviewer_coverage(state: &ChangeState) -> Vec<ReviewerCoverage> {
                 finding.effective_author(),
                 patchset_id,
                 finding.on_behalf_of.is_some(),
+                // A finding carries no provenance, so its identity is unknown
+                // rather than assumed and is read by name as any other is.
+                true,
                 false,
             );
         }
@@ -1608,13 +1629,16 @@ pub fn reviewer_coverage(state: &ChangeState) -> Vec<ReviewerCoverage> {
             let is_author = matched_contributor.is_some();
             ReviewerCoverage {
                 covers_final: final_patchset.is_some_and(|patchset| patchset.id == tally.best_id),
-                // Indistinguishable rather than independent: the identity
-                // matches the snapshot's and neither side declared a subject.
-                attribution_unknown: is_author
-                    && !tally.attributed
-                    && reviewed.is_some_and(|patchset| {
-                        patchset.on_behalf_of.is_none() && patchset.contributors.is_empty()
-                    }),
+                // Unplaceable rather than independent, either way round: an
+                // identity arc invented names nobody in particular, and one
+                // carrying the snapshot actor's name with no subject declared
+                // on either side may or may not be that actor.
+                attribution_unknown: !tally.declared
+                    || (is_author
+                        && !tally.attributed
+                        && reviewed.is_some_and(|patchset| {
+                            patchset.on_behalf_of.is_none() && patchset.contributors.is_empty()
+                        })),
                 is_author,
                 matched_contributor,
                 contributors_source: reviewed

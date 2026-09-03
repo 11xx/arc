@@ -814,7 +814,7 @@ pub fn markdown(
                     row.contributors_source
                 )
             } else if row.attribution_unknown {
-                " — attribution unknown, no `--on-behalf-of` recorded".to_string()
+                " — attribution unknown: nobody declared this identity".to_string()
             } else if row.is_author {
                 " — non-independent".to_string()
             } else {

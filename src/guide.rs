@@ -402,6 +402,16 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   against whatever is newest. Otherwise a later snapshot by somebody else
   would retroactively turn a self-review into an independent one.
 
+  It is also a relation between declared identities. An approval is refused
+  when its effective author matches a contributor on the patchset it approves,
+  or when arc assumed the reviewing identity from git config, which is nobody's
+  claim and so cannot be the second party. An assumed authoring identity
+  refuses nothing on its own: a reviewer that declared a different name is
+  independent of it, before the merge and in an audit after it alike. Two
+  assumed identities are refused, since neither side claimed anything. A
+  reviewer arc cannot place that way is reported as unknown attribution rather
+  than counted as independent or as self-review.
+
   Which changes need one is the project's call, declared in
   `.arc/policy.toml` under `[danger] paths`. A change touching a declared
   path needs a verdict from somebody other than its author; elsewhere a
