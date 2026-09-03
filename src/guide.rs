@@ -97,6 +97,9 @@ SETTLE A QUESTION (before it is work)
   a discussion before it belongs in a change — positions carry the model and
   harness that argued them, so a decision can be read later by who reached it
   and on what grounds, rather than surviving only in one session's transcript.
+  Every journal event records the `--on-behalf-of` subject beside the identity
+  that ran the command, so ceremony a lead performs for an executor is legible
+  as both rather than as the lead alone.
 
   A proposal with one defensible answer is not a discussion, it is a feature
   request: `arc fr` files it, `arc journal open` lists it back, and `begin
