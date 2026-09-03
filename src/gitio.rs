@@ -698,6 +698,56 @@ pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool>
     Ok(out.status.success())
 }
 
+/// Whether a rebase is stopped part-way in this worktree, waiting for a person.
+///
+/// Git records that state as a directory beside the index, and `--git-path`
+/// resolves it for the worktree rather than for the repository's common dir,
+/// so a linked worktree answers about itself.
+pub fn rebase_in_progress(cwd: &Path) -> Result<bool> {
+    for state_dir in ["rebase-merge", "rebase-apply"] {
+        let path = git(cwd, &["rev-parse", "--git-path", state_dir])?;
+        if cwd.join(path).exists() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Paths Git could not reconcile, as the index reports them.
+pub fn unmerged_paths(cwd: &Path) -> Result<Vec<String>> {
+    Ok(git(cwd, &["diff", "--name-only", "--diff-filter=U"])?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// How a rebase ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebaseOutcome {
+    /// Every commit replayed; the branch is on the new base.
+    Replayed,
+    /// Git stopped on a conflict and left the rebase in progress for a person
+    /// to resolve. Nothing is aborted: the partial replay is their work.
+    Stopped,
+}
+
+/// Replay the worktree's branch onto `onto`.
+///
+/// A rebase that stops on a conflict is an outcome, not a failure: it leaves
+/// state a person continues from. Anything else — an unknown revision, a
+/// refusal — is an error, and leaves no rebase in progress to distinguish it.
+pub fn rebase(cwd: &Path, onto: &str) -> Result<RebaseOutcome> {
+    let Err(refusal) = git(cwd, &["rebase", onto]) else {
+        return Ok(RebaseOutcome::Replayed);
+    };
+    if rebase_in_progress(cwd)? {
+        return Ok(RebaseOutcome::Stopped);
+    }
+    Err(refusal)
+}
+
 pub fn commit_count(cwd: &Path, base: &str, head: &str) -> Result<usize> {
     git(cwd, &["rev-list", "--count", &format!("{base}..{head}")])?
         .parse()

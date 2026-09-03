@@ -94,6 +94,17 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   new commit. A head already on the target tip merges to the tree it already
   has and needs nothing new. `needs-rebase` keeps its narrower meaning: the
   text conflicts, so there is no single merged tree to evaluate at all.
+- **`arc rebase [<change>] [--verify]`** is the recovery `needs-rebase` names.
+  It replays the change's branch onto its target in the worktree that holds it,
+  refusing first when that worktree is dirty or already mid-rebase, and saying
+  which. A replay that succeeds records the new head as a patchset through the
+  same path `arc snapshot` uses and names the gates the head still owes;
+  `--verify` runs them the way `arc done` does. A branch already sitting on its
+  target says so and records nothing. A conflict stops the rebase and leaves it
+  in progress — the partial resolution belongs to whoever is doing it — prints
+  the conflicting files and the commands that finish the replay, and exits
+  `11`, the same code the blocker carries, because the change still needs
+  rebasing. arc never runs `git rebase --abort`.
 - **Snapshots record Git author and committer identity.** When a claim is live,
   the snapshot also records its generation and actor at snapshot time. Projects
   using per-actor Git identities report a mismatch as provenance evidence,
@@ -237,6 +248,7 @@ arc resolve radio-refill-fix f01ABC... --status resolved --commit HEAD
 arc review radio-refill-fix --snapshot --verdict approved # fresh ps-02 + verdict
 
 arc check radio-refill-fix             # exit 0 = ready
+arc rebase radio-refill-fix --verify   # target moved: replay, snapshot, rerun gates
 arc integrate radio-refill-fix --cleanup
 
 # Integrate every matching series member in dependency order. --cleanup is
@@ -749,7 +761,7 @@ data loss: available patchset heads are restored under
 `refs/arc/keep/<change>/<patchset>`, while unavailable objects are
 reported for separate transfer.
 
-## Exit codes (`check`, and `integrate` refusals)
+## Exit codes (`check`, and `integrate` / `rebase` refusals)
 
 | Code | Meaning |
 | ---- | ------- |
@@ -764,6 +776,8 @@ reported for separate transfer.
 | 8 | claim or stage ownership/liveness conflict |
 | 9 | execution role refused the command |
 | 10 | forge link refused: observed tuple or policy mismatch |
+| 11 | the target moved with conflicting changes; the branch needs rebasing |
+| 12 | acceptance probes are not discriminating |
 | 13 | change declares it is iterating; clear it before integrating |
 | 14 | the tree a merge would ship has no gate evidence |
 

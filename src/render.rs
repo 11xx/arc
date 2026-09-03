@@ -950,8 +950,9 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
             Blocker::NeedsRebase => {
                 let _ = writeln!(
                     out,
-                    "  - needs rebase: target {} moved with conflicting changes; rebase, rerun gates, re-review",
-                    state.target_branch
+                    "  - needs rebase: target {} moved with conflicting changes; run `arc rebase \
+                     {}`, then rerun the gates and re-review",
+                    state.target_branch, state.change_id
                 );
             }
             Blocker::MergedTreeUnevaluated => {
@@ -1050,6 +1051,35 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
         let _ = writeln!(out);
     }
     let _ = writeln!(out, "Next step: {}", report.next_action);
+    out
+}
+
+/// The required gates that do not answer for the head, and why each does not.
+///
+/// It reads the same gate statuses readiness is decided from, so what it lists
+/// is what `check` refuses for rather than a second opinion about the same
+/// evidence.
+pub fn gates_owed(report: &StatusReport) -> String {
+    let mut out = String::new();
+    let owed: Vec<&GateStatus> = report
+        .gates
+        .iter()
+        .filter(|gate| !gate.green_at_head)
+        .collect();
+    if owed.is_empty() {
+        let _ = writeln!(out, "gates: every required gate is green at head");
+        return out;
+    }
+    let _ = writeln!(out, "gates owed:");
+    for gate in owed {
+        let _ = writeln!(
+            out,
+            "  - `{}` at {}: {}",
+            gate.name,
+            gate_scope(gate),
+            gate.not_green_reason().unwrap_or_default()
+        );
+    }
     out
 }
 
