@@ -1562,9 +1562,12 @@ on a consumed artifact, which is closed to new work but not to being wrong.
 
 The effect lives in the derived views, and the latest correction of a given
 target and field wins in event order. `journal discussion` counts the
-corrected stance and branch, labels participants by the corrected model, and
-follows the corrected reply reference; `journal open` and `catchup` show a
-corrected title while the artifact keeps the heading it was filed with. A
+corrected stance and branch, carries the corrected actor on each round
+position and answer, labels participants by the corrected model, and follows
+the corrected reply reference; `journal open` and `catchup` show a corrected
+title while the artifact keeps the heading it was filed with. Prose headings
+are unchanged throughout: a correction says who argued, never that somebody
+else wrote the block. A
 retracted position leaves the stance tally and the branches argued under a
 question, and the summary lists it under `retracted:` with its reason; a
 retracted answer leaves its question open, so `journal questions` lists it

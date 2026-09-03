@@ -8838,7 +8838,7 @@ fn journal_correct_moves_an_answer_to_the_branch_it_chose() {
         .assert()
         .success();
     assert_eq!(
-        discussion_summary_json(&repo, &file)["questions"][0]["answered"],
+        discussion_summary_json(&repo, &file)["questions"][0]["answered"]["option"],
         "one-go"
     );
 
@@ -8858,7 +8858,10 @@ fn journal_correct_moves_an_answer_to_the_branch_it_chose() {
         .success();
 
     let summary = discussion_summary_json(&repo, &file);
-    assert_eq!(summary["questions"][0]["answered"], "staged", "{summary}");
+    assert_eq!(
+        summary["questions"][0]["answered"]["option"], "staged",
+        "{summary}"
+    );
     // The question stays settled: a correction says what was chosen, not that
     // nothing was.
     let open = json_stdout(
@@ -9142,4 +9145,38 @@ fn journal_open_leaves_a_discussion_without_an_amendment_count() {
         .find(|entry| entry["file"] == file.as_str())
         .unwrap();
     assert!(row["amendments"].is_null(), "{queue}");
+}
+
+#[test]
+fn journal_correct_renames_the_identity_a_position_is_attributed_to() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "corrected-identity");
+    let position = stanced_position(&repo, &file, "for");
+
+    for (field, value) in [("actor", "the-real-author"), ("model", "the-real-model")] {
+        repo.arc(&repo.root)
+            .args([
+                "journal", "correct", &file, "--target", &position, "--field", field, "--value",
+                value,
+            ])
+            .assert()
+            .success();
+    }
+
+    let summary = discussion_summary_json(&repo, &file);
+    assert_eq!(
+        summary["rounds"][0]["positions"][0]["actor"], "the-real-author",
+        "{summary}"
+    );
+    assert_eq!(
+        summary["participants"][0], "the-real-model via test",
+        "{summary}"
+    );
+    // The heading keeps the identity that filed it: a correction says who
+    // argued, never that somebody else wrote the block.
+    assert!(
+        artifact_body(&repo, &file).contains(&format!("### Position {position} (tester,")),
+        "{}",
+        artifact_body(&repo, &file)
+    );
 }
