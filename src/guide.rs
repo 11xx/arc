@@ -419,6 +419,9 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
     arc catchup                     the same, with each reason
     arc query --debt                change IDs alone, for scripting
     arc query --provisional         approvals still owed corroboration
+                                    (query filters on flags alone; the acting
+                                     identity never narrows a read, so --debt
+                                     lists every harness's obligations)
     arc diff <change> --integrated  the exact range that landed, for an audit
     arc audit <change> --verdict <v>          record a post-integration review
     arc findings <change> --audit             what an audit raised

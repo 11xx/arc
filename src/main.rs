@@ -23,7 +23,8 @@ mod store;
 mod worktree_usage;
 
 use anyhow::{bail, Context, Result};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use commands::{fork, AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{
     ActorSource, DebtMissing, DispositionStatus, MessageSeverity, MessageType, ProbePhase,
@@ -1634,6 +1635,30 @@ fn nested_subcommand_path(typed: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// Identity flags such as `--actor` and `--harness` are global and read the
+/// environment, so every command records who is acting without being told. A
+/// command that also filters on one of those names gets a single argument for
+/// both meanings, because clap allows one argument per name. Filters are
+/// explicit: a read narrows only on a value the caller typed, never on the
+/// ambient identity.
+fn parse_cli() -> Result<Cli, clap::Error> {
+    let matches = Cli::command().try_get_matches()?;
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    if let Some(Cmd::Query { actor, harness, .. }) = cli.cmd.as_mut() {
+        let query = matches.subcommand_matches("query");
+        for (id, filter) in [("actor", actor), ("harness", harness)] {
+            if !typed_on_command_line(query, id) {
+                *filter = None;
+            }
+        }
+    }
+    Ok(cli)
+}
+
+fn typed_on_command_line(matches: Option<&ArgMatches>, id: &str) -> bool {
+    matches.and_then(|matches| matches.value_source(id)) == Some(ValueSource::CommandLine)
+}
+
 fn main() {
     // Rust ignores SIGPIPE by default, so a downstream reader closing the
     // pipe (`arc list --format compact | head`) surfaces as a panic on the
@@ -1649,7 +1674,7 @@ fn main() {
         signal(SIGPIPE, SIG_DFL);
     }
 
-    let cli = match Cli::try_parse() {
+    let cli = match parse_cli() {
         Ok(cli) => cli,
         Err(error) => {
             let kind = error.kind();
