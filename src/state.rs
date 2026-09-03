@@ -856,6 +856,101 @@ pub struct ChangeState {
 }
 
 impl ChangeState {
+    /// Every commit this view names, each with what names it.
+    ///
+    /// The enumeration lives beside the projection it enumerates, so a field
+    /// added to one is added to the other rather than to whichever reader
+    /// somebody remembered. A revision nothing can resolve is the difference
+    /// between evidence and a claim, and a checker that silently skipped a
+    /// field would report a ledger sound in exactly the place it is not.
+    ///
+    /// Trees and blobs are not here. They are content, and content survives a
+    /// rewrite that only renames the commits holding it.
+    pub fn recorded_revisions(&self) -> Vec<(String, String)> {
+        let mut found: Vec<(String, String)> = Vec::new();
+        let mut note = |revision: &str, what: String| {
+            let revision = revision.trim();
+            if !revision.is_empty() && revision.chars().all(|c| c.is_ascii_hexdigit()) {
+                found.push((revision.to_string(), what));
+            }
+        };
+        note(&self.base, "base".to_string());
+        for patchset in &self.patchsets {
+            note(&patchset.head, format!("{} head", patchset.id));
+            note(&patchset.base, format!("{} base", patchset.id));
+            if let Some(merge_base) = patchset.merge_base.as_deref() {
+                note(merge_base, format!("{} merge-base", patchset.id));
+            }
+        }
+        for brief in &self.briefs {
+            if let Some(base) = brief.base_revision.as_deref() {
+                note(base, "brief base".to_string());
+            }
+        }
+        for verification in &self.verifications {
+            note(&verification.revision, "verification".to_string());
+            if let Some(target) = verification.against_target.as_deref() {
+                note(target, "verification target".to_string());
+            }
+            if let Some(falsification) = &verification.falsification {
+                note(&falsification.revision, "falsification".to_string());
+            }
+        }
+        for run in &self.verification_runs {
+            note(&run.revision, "verification run".to_string());
+        }
+        for audit in &self.audit_verdicts {
+            note(&audit.revision, "audit".to_string());
+        }
+        if let Some(waiver) = &self.dirty_tree_waiver {
+            note(&waiver.revision, "dirty-tree waiver".to_string());
+        }
+        for finding in self.findings.values().chain(self.audit_findings.values()) {
+            for disposition in &finding.dispositions {
+                if let Some(commit) = disposition.commit.as_deref() {
+                    note(commit, format!("{} disposition", finding.id));
+                }
+            }
+        }
+        if let Some(closure) = &self.closure {
+            if let Some(commit) = closure.integrated_commit.as_deref() {
+                note(commit, "integration".to_string());
+            }
+            if let Some(head) = closure.source_head.as_deref() {
+                note(head, "integrated source head".to_string());
+            }
+            if let Some(before) = closure.target_before.as_deref() {
+                note(before, "integration target".to_string());
+            }
+            if let Some(authorization) = &closure.authorization {
+                for prerequisite in &authorization.prerequisites {
+                    if let Some(commit) = prerequisite.integrated_commit.as_deref() {
+                        note(commit, format!("prerequisite {}", prerequisite.change_id));
+                    }
+                }
+            }
+        }
+        // A forge records revisions the same way, and a rewritten branch
+        // strands them the same way. Every observation is kept rather than the
+        // newest: an earlier head is still recorded, and still named something
+        // that was supposed to exist.
+        for link in &self.forge.links {
+            note(&link.head_sha, "forge link head".to_string());
+        }
+        if let Some(checks) = &self.forge.checks {
+            note(&checks.pr_head, "forge checks head".to_string());
+        }
+        for pr_state in &self.forge.pr_states {
+            if let Some(merge_sha) = pr_state.merge_sha.as_deref() {
+                note(merge_sha, "forge merge".to_string());
+            }
+            if let Some(pr_head) = pr_state.pr_head.as_deref() {
+                note(pr_head, "forge pr head".to_string());
+            }
+        }
+        found
+    }
+
     /// Follow every revision this view holds forward through the recorded
     /// rewrites, so each one names the commit it names in this repository.
     ///

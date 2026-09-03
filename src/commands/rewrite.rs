@@ -125,6 +125,20 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
     for name in &moves.left {
         println!("left alone: {name}");
     }
+    // A stranded branch shares no commit with the branch it was cut from, so
+    // every question that compares the two — how far behind it is, what
+    // merging it would ship — has no answer until it is replayed. Saying which
+    // branches and how to replay them is the difference between a rewrite the
+    // operator finishes and one they discover half-done.
+    for name in &moves.stranded {
+        println!(
+            "stranded: {name} sits on the replaced line; replay it with `git rebase --onto \
+             {} {} {}`",
+            short(&new_head),
+            short(&from),
+            name.trim_start_matches("refs/heads/")
+        );
+    }
     Ok(0)
 }
 
@@ -215,6 +229,9 @@ struct RefMoves {
     moved: Vec<(String, String)>,
     /// Refs naming a rewritten commit that arc will not move, each with why.
     left: Vec<String>,
+    /// Branches whose own commits sit on top of the rewritten range, so
+    /// moving the ref would not help: they need replaying.
+    stranded: Vec<String>,
 }
 
 /// Every ref that points at a rewritten commit, and what becomes of it.
@@ -237,6 +254,7 @@ fn plan_ref_moves(
     let mut moves = RefMoves {
         moved: Vec::new(),
         left: Vec::new(),
+        stranded: Vec::new(),
     };
     let successor = |old: &str| mapping.get(old).and_then(|new| new.clone());
     for (name, value) in gitio::list_refs(cwd, "refs/arc/")? {
@@ -250,13 +268,12 @@ fn plan_ref_moves(
             continue;
         }
         let Some(new) = successor(&value) else {
-            // A branch or tag whose tip was not rewritten still descends from
-            // the range whenever the rewrite reached its history, and it is
-            // then pointing into a line nothing else references.
+            // A branch with commits of its own on top of the range has a tip
+            // the rewrite never reached, so there is no successor to move it
+            // to. Its commits are still built on the line that was replaced,
+            // and only replaying them onto the new one reunites the two.
             if kind == "commit" && gitio::is_ancestor(cwd, from, &value).unwrap_or(false) {
-                moves.left.push(format!(
-                    "{name} descends from the range but its tip was not rewritten"
-                ));
+                moves.stranded.push(name);
             }
             continue;
         };

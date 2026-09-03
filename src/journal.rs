@@ -7937,7 +7937,10 @@ fn verification_stamp(
     //
     // A recorded rewrite moves the anchor without moving the project: the
     // stamped commit and the current one are the same content under different
-    // names, so the comparison is made after following both forward.
+    // names. So the stamp names the commit its anchor is called here, and the
+    // comparison is made after following both forward — a stamp reporting a
+    // commit no checkout can produce, or reporting movement across a rewrite
+    // that moved nothing, is the same defect twice.
     let moved = match (
         event.verified_scope.as_deref(),
         event.verified_revision.as_deref(),
@@ -7947,7 +7950,10 @@ fn verification_stamp(
         _ => None,
     };
     Some(VerificationStamp {
-        revision: event.verified_revision.clone(),
+        revision: event
+            .verified_revision
+            .as_deref()
+            .map(|revision| rewrites.current(revision)),
         scope: event.verified_scope.clone(),
         timestamp: event.ts.clone(),
         actor: event.actor.clone(),
@@ -8148,7 +8154,8 @@ pub(crate) fn collect_open_in(
             let (ts, topic, file_kind) = parse_artifact_name(&name)?;
             let heading = amended_heading(&journal, &dir, &name);
             let change = change_annotation(&changes, &topic, &name);
-            let verification = verification_stamp(&journal, &name, current_revision.as_deref(), &rewrites);
+            let verification =
+                verification_stamp(&journal, &name, current_revision.as_deref(), &rewrites);
             let amendments = standing_amendments(&journal, &name, &file_kind);
             let sources = queue_sources(&journal, &name);
             let claims = artifact_claims(&journal, &name);
