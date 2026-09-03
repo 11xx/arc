@@ -68,14 +68,19 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
     for old in &range {
         let mut commit = gitio::read_commit(&cwd, old)?;
         commit.parents = map_parents(&cwd, old, &commit.parents, &mapping)?;
-        // `commit-tree` writes a fixed set of headers, so a commit carrying
-        // any other one — `mergetag`, on a merge of a signed tag — is
-        // assembled here instead. The common case stays with `commit-tree`,
-        // where Git makes the signature itself.
-        let new = if commit.extra_headers.is_empty() {
+        // `commit-tree` writes a fixed set of headers in a fixed order from
+        // the parts it is given, so a commit whose header text it cannot
+        // spell back — one carrying `mergetag`, one whose headers sit in
+        // another order, one whose identity line has whitespace of its own —
+        // is assembled here instead. The common case stays with
+        // `commit-tree`, where Git makes the signature itself.
+        let new = if commit.commit_tree_writes_it_back() {
             gitio::commit_tree_as(&cwd, &commit, sign)?
         } else {
-            carried.push((old.clone(), commit.extra_header_fields()));
+            let fields = commit.extra_header_fields();
+            if !fields.is_empty() {
+                carried.push((old.clone(), fields));
+            }
             gitio::write_commit_object(&cwd, &commit, sign)?
         };
         // A commit whose parents and content are unchanged and which gained no
