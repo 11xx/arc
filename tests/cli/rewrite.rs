@@ -529,3 +529,265 @@ fn a_rewrite_leading_to_a_missing_commit_is_a_problem() {
     assert!(doctor.contains("unresolved-revision"), "{doctor}");
     repo.arc(&repo.root).args(["doctor"]).assert().failure();
 }
+
+/// A merge of a signed tag carries a `mergetag` header holding the whole tag
+/// object. Recreating the commit from a fixed set of headers would drop it,
+/// so the rewrite assembles such a commit itself and says which ones it did
+/// that for.
+#[test]
+fn a_commit_carrying_another_header_keeps_it() {
+    let repo = Repo::new();
+    let Some(key) = signing_key(&repo) else {
+        return;
+    };
+    // A signed annotated tag on a side branch, merged with a merge commit, is
+    // how Git writes a `mergetag`.
+    git(&repo.root, &["checkout", "-q", "-b", "side"]);
+    repo.commit(&repo.root, "side.txt", "side\n", "feat: side");
+    let signed_tag = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&repo.root)
+            .env("GNUPGHOME", &key.home)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    signed_tag(&[
+        "tag",
+        "-a",
+        "-s",
+        "-u",
+        &key.fingerprint,
+        "-m",
+        "the side release",
+        "vside",
+    ]);
+    git(&repo.root, &["checkout", "-q", "master"]);
+    signed_tag(&["merge", "--no-ff", "-q", "-m", "merge: side", "vside"]);
+
+    let merge = repo.head(&repo.root);
+    let before = git_out(&repo.root, &["cat-file", "commit", &merge]);
+    assert!(before.contains("mergetag object "), "{before}");
+    let tree = git_out(&repo.root, &["rev-parse", &format!("{merge}^{{tree}}")]);
+
+    let out = stdout(arc_signing(&repo, &key, &repo.root).args([
+        "rewrite",
+        "sign",
+        "--key",
+        &key.fingerprint,
+    ]));
+    assert!(
+        out.lines()
+            .any(|line| line.starts_with("carried through on ") && line.contains("mergetag")),
+        "the rewrite says which commits carried a header: {out}"
+    );
+
+    let after = repo.head(&repo.root);
+    let rebuilt = git_out(&repo.root, &["cat-file", "commit", &after]);
+    // The header travels byte for byte: it holds the tag object that was
+    // merged, which is a fact about the merge rather than a reference the
+    // rewrite could remap.
+    let carried = |text: &str| {
+        text.lines()
+            .skip_while(|line| !line.starts_with("mergetag "))
+            .take_while(|line| line.starts_with("mergetag ") || line.starts_with(' '))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(carried(&before), carried(&rebuilt), "{rebuilt}");
+    assert_eq!(
+        tree,
+        git_out(&repo.root, &["rev-parse", &format!("{after}^{{tree}}")]),
+        "a signing rewrite never changes a tree"
+    );
+    // The signature the rewrite made covers the object it assembled, headers
+    // and all.
+    assert_eq!(
+        git_signing(&repo.root, &key, &["log", "-1", "--format=%G?", &after]),
+        "G",
+        "{rebuilt}"
+    );
+    // Every object the rewrite wrote by hand has to satisfy Git itself.
+    let fsck = Command::new("git")
+        .args(["fsck", "--no-progress"])
+        .current_dir(&repo.root)
+        .output()
+        .unwrap();
+    assert!(
+        fsck.status.success(),
+        "git fsck rejected the rewritten objects: {}",
+        String::from_utf8_lossy(&fsck.stderr)
+    );
+}
+
+/// Git, with the fixture keyring in scope, for the writes that make a
+/// signature rather than read one.
+fn git_signing_write(repo: &Repo, key: &Key, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(&repo.root)
+        .env("GNUPGHOME", &key.home)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A history whose second commit carries a signed annotated tag, with a
+/// commit on top of it so the tag is not the branch tip.
+fn repo_with_a_signed_tag(repo: &Repo, key: &Key) -> String {
+    repo.commit(&repo.root, "one.txt", "one\n", "feat: one");
+    git_signing_write(
+        repo,
+        key,
+        &[
+            "tag",
+            "-a",
+            "-s",
+            "-u",
+            &key.fingerprint,
+            "-m",
+            "the first release\n\nwith a body\n",
+            "v0.1.0",
+        ],
+    );
+    repo.commit(&repo.root, "two.txt", "two\n", "feat: two");
+    git_out(&repo.root, &["rev-parse", "v0.1.0"])
+}
+
+/// An annotated tag names its commit through its own object, so a rewrite
+/// that moves refs leaves it naming the commit it named. Reporting that has
+/// to say what it costs, because a release boundary nothing on the branch
+/// reaches is not a visible failure.
+#[test]
+fn an_annotated_tag_left_alone_is_reported_with_the_consequence() {
+    let repo = Repo::new();
+    let Some(key) = signing_key(&repo) else {
+        return;
+    };
+    let old_tag = repo_with_a_signed_tag(&repo, &key);
+
+    let left = stdout(arc_signing(&repo, &key, &repo.root).args([
+        "rewrite",
+        "sign",
+        "--key",
+        &key.fingerprint,
+    ]));
+    let reported = left
+        .lines()
+        .find(|line| line.starts_with("left alone: ") && line.contains("refs/tags/v0.1.0"))
+        .unwrap_or_else(|| panic!("{left}"));
+    assert!(reported.contains("git describe"), "{reported}");
+    assert!(reported.contains("--retag"), "{reported}");
+    assert_eq!(git_out(&repo.root, &["rev-parse", "v0.1.0"]), old_tag);
+    let describe = Command::new("git")
+        .args(["describe", "--tags", "HEAD"])
+        .current_dir(&repo.root)
+        .output()
+        .unwrap();
+    assert!(
+        !describe.status.success(),
+        "a tag left on the replaced line describes nothing on this history: {}",
+        String::from_utf8_lossy(&describe.stdout)
+    );
+}
+
+/// `--retag` recreates the tag on the commit that replaced its target,
+/// carrying everything else the tag said.
+#[test]
+fn an_annotated_tag_is_re_pointed_on_request() {
+    let repo = Repo::new();
+    let Some(key) = signing_key(&repo) else {
+        return;
+    };
+    let old_tag = repo_with_a_signed_tag(&repo, &key);
+    let tagger = git_out(
+        &repo.root,
+        &[
+            "for-each-ref",
+            "--format=%(taggerdate:raw) %(taggeremail)",
+            "refs/tags/v0.1.0",
+        ],
+    );
+
+    let retagged = stdout(arc_signing(&repo, &key, &repo.root).args([
+        "rewrite",
+        "sign",
+        "--key",
+        &key.fingerprint,
+        "--retag",
+    ]));
+    assert!(
+        retagged
+            .lines()
+            .any(|line| line.starts_with("re-pointed refs/tags/v0.1.0:")),
+        "{retagged}"
+    );
+    let new_tag = git_out(&repo.root, &["rev-parse", "v0.1.0"]);
+    assert_ne!(new_tag, old_tag, "a re-pointed tag is a new object");
+    assert!(
+        retagged.contains(&new_tag[..8]) && retagged.contains(&old_tag[..8]),
+        "the report names both tag objects: {retagged}"
+    );
+    // What the tag says is the tag's own: only the commit it names changed.
+    assert_eq!(
+        git_out(
+            &repo.root,
+            &["for-each-ref", "--format=%(contents)", "refs/tags/v0.1.0"]
+        )
+        .lines()
+        .take_while(|line| !line.starts_with("-----BEGIN PGP SIGNATURE-----"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string(),
+        "the first release\n\nwith a body",
+    );
+    assert_eq!(
+        git_out(
+            &repo.root,
+            &[
+                "for-each-ref",
+                "--format=%(taggerdate:raw) %(taggeremail)",
+                "refs/tags/v0.1.0"
+            ]
+        ),
+        tagger,
+        "the tagger and the date are the original's"
+    );
+    assert_eq!(
+        git_signing(
+            &repo.root,
+            &key,
+            &["tag", "--format=%(objectname)", "--verify", "v0.1.0"]
+        ),
+        new_tag,
+        "a tag that was signed is signed again"
+    );
+    // The point of re-pointing: the release boundary is on this history, so
+    // `git describe` measures the branch from the tag again.
+    assert_eq!(
+        git_out(&repo.root, &["describe", "--tags", "HEAD"])
+            .split('-')
+            .next(),
+        Some("v0.1.0")
+    );
+    let fsck = Command::new("git")
+        .args(["fsck", "--no-progress"])
+        .current_dir(&repo.root)
+        .output()
+        .unwrap();
+    assert!(
+        fsck.status.success(),
+        "git fsck rejected the tag object: {}",
+        String::from_utf8_lossy(&fsck.stderr)
+    );
+}

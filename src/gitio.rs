@@ -22,8 +22,27 @@ pub fn with_deadline<T>(deadline: Option<Instant>, f: impl FnOnce() -> Result<T>
     })
 }
 
-pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
+/// A Git subprocess, with no way to reach an editor.
+///
+/// Git launches whatever editor the environment names as soon as it wants a
+/// message it was not given: `rebase --continue`, a merge it cannot
+/// fast-forward, a commit without one. arc runs Git for an agent, where there
+/// is nobody to close a window, and a blocked subprocess is indistinguishable
+/// from a slow one. Accepting the message that is already in the file is what
+/// every one of these calls means, and `GIT_EDITOR` is what settles it for
+/// good: it outranks `core.editor` as well as the environment's own.
+///
+/// Every Git subprocess arc runs is built here, so there is one answer to
+/// this rather than one per call site.
+pub fn git_command() -> Command {
     let mut command = Command::new("git");
+    command.env("GIT_EDITOR", "true");
+    command.env("GIT_SEQUENCE_EDITOR", "true");
+    command
+}
+
+pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
+    let mut command = git_command();
     command.args(args).current_dir(cwd);
     let out = command_output(&mut command)
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
@@ -42,7 +61,7 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
 /// Forwarding preserves Git's diff rendering while keeping command output
 /// visible to callers that capture Arc itself, including the CLI test harness.
 pub fn git_inherit(cwd: &Path, args: &[String]) -> Result<()> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(args)
         .current_dir(cwd)
         .output()
@@ -113,7 +132,7 @@ pub fn head(cwd: &Path) -> Result<String> {
 }
 
 pub fn latest_tag(cwd: &Path) -> Result<Option<String>> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(["describe", "--tags", "--abbrev=0"])
         .current_dir(cwd)
         .output()
@@ -130,7 +149,7 @@ pub fn latest_tag(cwd: &Path) -> Result<Option<String>> {
 /// Resolve HEAD when the repository has one. An unborn repository is a
 /// normal probe condition, while other Git failures remain errors.
 pub fn head_if_present(cwd: &Path) -> Result<Option<String>> {
-    let out = Command::new("git")
+    let out = git_command()
         .args(["rev-parse", "--verify", "-q", "HEAD"])
         .current_dir(cwd)
         .output()
@@ -154,7 +173,7 @@ pub fn branch_head(cwd: &Path, branch: &str) -> Result<String> {
 }
 
 pub fn current_branch(cwd: &Path) -> Result<Option<String>> {
-    let out = Command::new("git")
+    let out = git_command()
         .args(["symbolic-ref", "--short", "-q", "HEAD"])
         .current_dir(cwd)
         .output()?;
@@ -198,7 +217,7 @@ pub struct MergeOutcome {
 }
 
 pub fn merge_outcome(cwd: &Path, target_rev: &str, head_rev: &str) -> Result<MergeOutcome> {
-    let out = Command::new("git")
+    let out = git_command()
         .args([
             "merge-tree",
             "--write-tree",
@@ -278,6 +297,11 @@ impl CommitStamp {
         format!("@{}", self.date)
     }
 
+    /// The identity as a commit or tag object header value spells it.
+    fn git_line(&self) -> String {
+        format!("{} <{}> {}", self.name, self.email, self.date)
+    }
+
     fn parse(line: &str, what: &str) -> Result<Self> {
         let open = line
             .find('<')
@@ -307,7 +331,33 @@ pub struct RawCommit {
     pub author: CommitStamp,
     pub committer: CommitStamp,
     pub encoding: Option<String>,
+    /// Every header this module does not interpret, as the raw block it
+    /// occupies: its `field value` line and each continuation line under it,
+    /// newline-separated and without a trailing newline. `mergetag`, which a
+    /// merge of a signed tag carries, is the common one.
+    ///
+    /// The signature headers are absent by construction: a recreated commit
+    /// is signed afresh or not at all, so carrying the old `gpgsig` forward
+    /// would attest to an object that no longer exists.
+    pub extra_headers: Vec<String>,
     pub message: Vec<u8>,
+}
+
+impl RawCommit {
+    /// The field name of each uninterpreted header, for a caller that has to
+    /// say which headers a commit carries.
+    pub fn extra_header_fields(&self) -> Vec<String> {
+        self.extra_headers
+            .iter()
+            .map(|block| {
+                block
+                    .split([' ', '\n'])
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    }
 }
 
 /// Read one commit object whole.
@@ -320,8 +370,15 @@ pub fn read_commit(cwd: &Path, rev: &str) -> Result<RawCommit> {
 /// Split a commit object into its headers and its message.
 ///
 /// A header value may continue onto following lines, each indented by one
-/// space; that is how a signature is stored. The message begins after the
-/// first empty line and is taken verbatim to the end of the object.
+/// space; that is how a signature and a `mergetag` are stored. The message
+/// begins after the first empty line and is taken verbatim to the end of the
+/// object.
+///
+/// Every header is kept: the ones this module writes from named fields, and
+/// the rest verbatim in the order the object holds them, so a commit is
+/// recreated with the headers it had rather than with the ones arc knows
+/// about. The exceptions are the signature headers, which describe an object
+/// that a recreation replaces.
 fn parse_commit_object(raw: &[u8]) -> Result<RawCommit> {
     let split = raw
         .windows(2)
@@ -334,22 +391,34 @@ fn parse_commit_object(raw: &[u8]) -> Result<RawCommit> {
     let mut author = None;
     let mut committer = None;
     let mut encoding = None;
+    let mut extra_headers: Vec<String> = Vec::new();
+    // Whether the header being read is one to carry verbatim, so its
+    // continuation lines travel with it.
+    let mut carrying = false;
     for line in headers.lines() {
-        // A continuation of the header above it, which is only ever a
-        // signature's remaining lines.
         if line.starts_with(' ') {
+            if carrying {
+                let block = extra_headers
+                    .last_mut()
+                    .expect("a carried header to extend");
+                block.push('\n');
+                block.push_str(line);
+            }
             continue;
         }
-        let Some((field, value)) = line.split_once(' ') else {
-            continue;
-        };
+        let (field, value) = line.split_once(' ').unwrap_or((line, ""));
+        carrying = false;
         match field {
             "tree" => tree = Some(value.to_string()),
             "parent" => parents.push(value.to_string()),
             "author" => author = Some(CommitStamp::parse(value, "author")?),
             "committer" => committer = Some(CommitStamp::parse(value, "committer")?),
             "encoding" => encoding = Some(value.to_string()),
-            _ => {}
+            "gpgsig" | "gpgsig-sha256" => {}
+            _ => {
+                extra_headers.push(line.to_string());
+                carrying = true;
+            }
         }
     }
     Ok(RawCommit {
@@ -358,6 +427,7 @@ fn parse_commit_object(raw: &[u8]) -> Result<RawCommit> {
         author: author.context("commit object names no author")?,
         committer: committer.context("commit object names no committer")?,
         encoding,
+        extra_headers,
         message: message.to_vec(),
     })
 }
@@ -369,6 +439,12 @@ fn parse_commit_object(raw: &[u8]) -> Result<RawCommit> {
 /// Recreating a commit this way changes its signature and its parents and
 /// nothing else, so a commit rebuilt with the same inputs and no signature
 /// has the same object id it started with.
+///
+/// `commit-tree` writes the headers it has flags for and no others, so a
+/// commit carrying a header outside that set is refused here and belongs to
+/// [`write_commit_object`], which assembles the object itself. Refusing keeps
+/// the guarantee above true: a path that silently omitted a header would
+/// produce a commit that is not the one it claims to have only re-signed.
 pub fn commit_tree_as(
     cwd: &Path,
     commit: &RawCommit,
@@ -380,8 +456,16 @@ pub fn commit_tree_as(
         author,
         committer,
         encoding,
+        extra_headers,
         message,
     } = commit;
+    if !extra_headers.is_empty() {
+        bail!(
+            "git commit-tree cannot write the {} header carried by the commit holding tree {}",
+            commit.extra_header_fields().join(" and the "),
+            tree
+        );
+    }
     let mut args: Vec<String> = Vec::new();
     // The encoding header is written from configuration, so it travels as
     // configuration rather than as a flag `commit-tree` does not have.
@@ -401,7 +485,7 @@ pub fn commit_tree_as(
             None => "-S".into(),
         });
     }
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command
         .args(&args)
         .current_dir(cwd)
@@ -434,9 +518,283 @@ pub fn commit_tree_as(
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Write the same commit [`commit_tree_as`] would, by assembling the object
+/// text and hashing it, so every header the commit carries survives.
+///
+/// The header order is Git's own — tree, parents, author, committer,
+/// encoding, then the carried headers in the order they were read, then the
+/// signature last — which is why a commit with nothing to carry comes out
+/// with the object id `commit-tree` would have given it.
+pub fn write_commit_object(
+    cwd: &Path,
+    commit: &RawCommit,
+    sign: Option<Option<&str>>,
+) -> Result<String> {
+    let unsigned = commit_object_text(commit, None);
+    let object = match sign {
+        Some(key) => {
+            let signature = openpgp_sign(cwd, &unsigned, key)?;
+            commit_object_text(commit, Some(&signature))
+        }
+        None => unsigned,
+    };
+    hash_object(cwd, "commit", &object)
+}
+
+/// One commit object, exactly as the database holds it.
+fn commit_object_text(commit: &RawCommit, signature: Option<&[u8]>) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut header = |field: &str, value: &str| {
+        out.extend_from_slice(field.as_bytes());
+        out.push(b' ');
+        out.extend_from_slice(value.as_bytes());
+        out.push(b'\n');
+    };
+    header("tree", &commit.tree);
+    for parent in &commit.parents {
+        header("parent", parent);
+    }
+    header("author", &commit.author.git_line());
+    header("committer", &commit.committer.git_line());
+    if let Some(encoding) = &commit.encoding {
+        header("encoding", encoding);
+    }
+    for block in &commit.extra_headers {
+        out.extend_from_slice(block.as_bytes());
+        out.push(b'\n');
+    }
+    if let Some(signature) = signature {
+        out.extend_from_slice(&folded_header("gpgsig", signature));
+    }
+    out.push(b'\n');
+    out.extend_from_slice(&commit.message);
+    out
+}
+
+/// A header whose value spans lines, written the way Git stores one: the
+/// first line after the field name, every later line indented by one space.
+fn folded_header(field: &str, value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (index, line) in value
+        .strip_suffix(b"\n")
+        .unwrap_or(value)
+        .split(|byte| *byte == b'\n')
+        .enumerate()
+    {
+        if index == 0 {
+            out.extend_from_slice(field.as_bytes());
+        }
+        out.push(b' ');
+        out.extend_from_slice(line);
+        out.push(b'\n');
+    }
+    out
+}
+
+/// An annotated tag object as the database holds it.
+///
+/// The message is bytes for the same reason a commit's is, and the headers
+/// under the tag name — the tagger line, and an `encoding` where there is one
+/// — travel verbatim, so re-pointing a tag carries its authorship and date
+/// rather than restating them.
+#[derive(Debug, Clone)]
+pub struct RawTag {
+    pub object: String,
+    pub kind: String,
+    pub name: String,
+    pub headers: Vec<String>,
+    pub message: Vec<u8>,
+    /// Whether the original carried a signature over its own text.
+    pub signed: bool,
+}
+
+/// Read one annotated tag object whole.
+pub fn read_tag(cwd: &Path, rev: &str) -> Result<RawTag> {
+    let raw = git_bytes(cwd, &["cat-file", "tag", rev])?;
+    parse_tag_object(&raw).with_context(|| format!("cannot read tag {rev} in {}", cwd.display()))
+}
+
+const PGP_SIGNATURE: &[u8] = b"-----BEGIN PGP SIGNATURE-----";
+
+fn parse_tag_object(raw: &[u8]) -> Result<RawTag> {
+    let split = raw
+        .windows(2)
+        .position(|pair| pair == b"\n\n")
+        .context("tag object has no message")?;
+    let (headers, body) = (&raw[..split], &raw[split + 2..]);
+    let headers = std::str::from_utf8(headers).context("tag headers are not UTF-8")?;
+    let mut object = None;
+    let mut kind = None;
+    let mut name = None;
+    let mut carried: Vec<String> = Vec::new();
+    for line in headers.lines() {
+        if line.starts_with(' ') {
+            if let Some(block) = carried.last_mut() {
+                block.push('\n');
+                block.push_str(line);
+            }
+            continue;
+        }
+        let (field, value) = line.split_once(' ').unwrap_or((line, ""));
+        match field {
+            "object" => object = Some(value.to_string()),
+            "type" => kind = Some(value.to_string()),
+            "tag" => name = Some(value.to_string()),
+            _ => carried.push(line.to_string()),
+        }
+    }
+    // A tag's signature is appended to its message rather than held in a
+    // header, so the message is everything up to where the signature starts.
+    let signature = body
+        .windows(PGP_SIGNATURE.len())
+        .position(|window| window == PGP_SIGNATURE);
+    Ok(RawTag {
+        object: object.context("tag object names no object")?,
+        kind: kind.context("tag object names no type")?,
+        name: name.context("tag object names no tag")?,
+        headers: carried,
+        message: body[..signature.unwrap_or(body.len())].to_vec(),
+        signed: signature.is_some(),
+    })
+}
+
+/// Write an annotated tag object, signed when a key is asked for. Touches no
+/// ref.
+pub fn write_tag_object(cwd: &Path, tag: &RawTag, sign: Option<Option<&str>>) -> Result<String> {
+    let mut object = tag_object_text(tag);
+    if let Some(key) = sign {
+        let signature = openpgp_sign(cwd, &object, key)?;
+        object.extend_from_slice(&signature);
+    }
+    hash_object(cwd, "tag", &object)
+}
+
+/// One tag object up to its signature, which is what a tag signature covers.
+fn tag_object_text(tag: &RawTag) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (field, value) in [
+        ("object", &tag.object),
+        ("type", &tag.kind),
+        ("tag", &tag.name),
+    ] {
+        out.extend_from_slice(format!("{field} {value}\n").as_bytes());
+    }
+    for block in &tag.headers {
+        out.extend_from_slice(block.as_bytes());
+        out.push(b'\n');
+    }
+    out.push(b'\n');
+    out.extend_from_slice(&tag.message);
+    out
+}
+
+/// Store an object of the given type and answer with its name.
+fn hash_object(cwd: &Path, kind: &str, object: &[u8]) -> Result<String> {
+    let args = ["hash-object", "-t", kind, "-w", "--stdin"].map(String::from);
+    let out = piped_output("git", &args, object, |command| {
+        command.current_dir(cwd);
+    })?;
+    Ok(String::from_utf8_lossy(&out).trim().to_string())
+}
+
+/// An armored detached signature over `payload`, made by the OpenPGP program
+/// and key Git itself would use.
+///
+/// `--key` names the key when the caller has one; otherwise it is
+/// `user.signingkey`, and where that is unset the signing program's own
+/// default key. A repository configured for a signature format this cannot
+/// produce is refused rather than signed with the wrong one.
+fn openpgp_sign(cwd: &Path, payload: &[u8], key: Option<&str>) -> Result<Vec<u8>> {
+    let format = config_value(cwd, "gpg.format")?.unwrap_or_else(|| "openpgp".to_string());
+    if format != "openpgp" {
+        bail!(
+            "gpg.format is {format}; carrying a commit's other headers through a rewrite \
+             assembles the object here, and only an openpgp signature can be made over it"
+        );
+    }
+    let program = config_value(cwd, "gpg.program")?.unwrap_or_else(|| "gpg".to_string());
+    let key = match key {
+        Some(key) => Some(key.to_string()),
+        None => config_value(cwd, "user.signingkey")?,
+    };
+    let mut args: Vec<String> = vec![
+        "--status-fd=2".into(),
+        "--detach-sign".into(),
+        "--armor".into(),
+    ];
+    if let Some(key) = &key {
+        args.push("--local-user".into());
+        args.push(key.clone());
+    }
+    let signature = piped_output(&program, &args, payload, |command| {
+        command.current_dir(cwd);
+    })
+    .with_context(|| format!("cannot sign with {program}"))?;
+    if !signature.starts_with(PGP_SIGNATURE) {
+        bail!("{program} produced no armored signature");
+    }
+    Ok(signature)
+}
+
+/// One Git configuration value, or nothing where it is unset.
+fn config_value(cwd: &Path, key: &str) -> Result<Option<String>> {
+    let mut command = git_command();
+    command.args(["config", "--get", key]).current_dir(cwd);
+    let out = command_output(&mut command)
+        .with_context(|| format!("failed to read git config in {}", cwd.display()))?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok((!value.is_empty()).then_some(value))
+}
+
+/// Run a program with `input` on its standard input, answering with its
+/// standard output.
+///
+/// The input goes out on its own thread: an input larger than the pipe buffer
+/// deadlocks a writer nobody is reading from.
+fn piped_output(
+    program: &str,
+    args: &[String],
+    input: &[u8],
+    setup: impl FnOnce(&mut Command),
+) -> Result<Vec<u8>> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    setup(&mut command);
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("cannot run {program}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .with_context(|| format!("{program} has no stdin"))?;
+    let input = input.to_vec();
+    let writer = thread::spawn(move || stdin.write_all(&input));
+    let out = child
+        .wait_with_output()
+        .with_context(|| format!("{program} failed"))?;
+    writer
+        .join()
+        .map_err(|_| anyhow::anyhow!("the {program} writer thread panicked"))??;
+    if !out.status.success() {
+        bail!(
+            "{program} {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(out.stdout)
+}
+
 /// Git's raw output, for the callers that read objects rather than text.
 fn git_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let mut command = Command::new("git");
+    let mut command = git_command();
     command.args(args).current_dir(cwd);
     let out = command_output(&mut command)
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
@@ -492,15 +850,28 @@ pub fn commits_from(cwd: &Path, from: &str, rev: &str) -> Result<Vec<String>> {
     Ok(out.lines().map(str::to_string).collect())
 }
 
-/// Every local branch and tag, as (refname, object id, object type) triples.
-/// The type separates a tag pointing straight at a commit from an annotated
-/// tag object, which names a commit but is not one.
-pub fn local_refs(cwd: &Path) -> Result<Vec<(String, String, String)>> {
+/// One local branch or tag.
+#[derive(Debug, Clone)]
+pub struct LocalRef {
+    pub name: String,
+    /// What the ref names, which for an annotated tag is the tag object.
+    pub object: String,
+    /// The object type, which separates a tag pointing straight at a commit
+    /// from an annotated tag object, which names a commit but is not one.
+    pub kind: String,
+    /// The commit the ref leads to: the object itself where that is already a
+    /// commit, and what an annotated tag peels to otherwise. A rewrite maps
+    /// commits, so this is the id to look up.
+    pub commit: String,
+}
+
+/// Every local branch and tag.
+pub fn local_refs(cwd: &Path) -> Result<Vec<LocalRef>> {
     let out = git(
         cwd,
         &[
             "for-each-ref",
-            "--format=%(refname)%00%(objectname)%00%(objecttype)",
+            "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)",
             "refs/heads/",
             "refs/tags/",
         ],
@@ -509,11 +880,21 @@ pub fn local_refs(cwd: &Path) -> Result<Vec<(String, String, String)>> {
         .lines()
         .filter_map(|line| {
             let mut fields = line.split('\0');
-            Some((
-                fields.next()?.to_string(),
-                fields.next()?.to_string(),
-                fields.next()?.to_string(),
-            ))
+            let name = fields.next()?.to_string();
+            let object = fields.next()?.to_string();
+            let kind = fields.next()?.to_string();
+            let peeled = fields.next().unwrap_or_default();
+            let commit = if peeled.is_empty() {
+                object.clone()
+            } else {
+                peeled.to_string()
+            };
+            Some(LocalRef {
+                name,
+                object,
+                kind,
+                commit,
+            })
         })
         .collect())
 }
@@ -549,7 +930,7 @@ pub fn worktree_tree(cwd: &Path) -> Result<String> {
     // rather than the subtree a caller happened to run from.
     let top = toplevel(cwd)?;
     let run = |args: &[&str]| -> Result<String> {
-        let output = std::process::Command::new("git")
+        let output = git_command()
             .args(args)
             .current_dir(&top)
             .env("GIT_INDEX_FILE", &index)
@@ -882,7 +1263,7 @@ pub fn missing_objects<'a>(
     revisions: impl Iterator<Item = &'a str>,
 ) -> Result<Vec<String>> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     // A revision containing a newline would become two queries and shift every
     // later answer, so those are refused rather than silently misaligned.
@@ -892,7 +1273,7 @@ pub fn missing_objects<'a>(
     if revisions.is_empty() {
         return Ok(Vec::new());
     }
-    let mut child = Command::new("git")
+    let mut child = git_command()
         .args(["cat-file", "--batch-check=%(objectname) %(objecttype)"])
         .current_dir(cwd)
         .stdin(Stdio::piped())
@@ -949,7 +1330,7 @@ pub fn missing_objects<'a>(
 }
 
 pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
-    let out = Command::new("git")
+    let out = git_command()
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .current_dir(cwd)
         .output()
@@ -1078,7 +1459,7 @@ pub fn commit_identity(cwd: &Path, rev: &str) -> Result<CommitIdentity> {
 
 pub fn commit_exists(cwd: &Path, oid: &str) -> Result<bool> {
     let object = format!("{oid}^{{commit}}");
-    let out = Command::new("git")
+    let out = git_command()
         .args(["cat-file", "-e", "--", &object])
         .current_dir(cwd)
         .output()
@@ -1089,6 +1470,116 @@ pub fn commit_exists(cwd: &Path, oid: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A repository holding one commit, with the machine's own configuration
+    /// out of scope.
+    fn fixture(tmp: &tempfile::TempDir, config: &[&str]) -> PathBuf {
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut setup: Vec<Vec<&str>> = vec![
+            vec!["init", "-b", "master"],
+            vec!["config", "user.name", "Tester"],
+            vec!["config", "user.email", "tester@example.invalid"],
+            vec!["config", "commit.gpgsign", "false"],
+        ];
+        if !config.is_empty() {
+            let mut line = vec!["config"];
+            line.extend_from_slice(config);
+            setup.push(line);
+        }
+        for args in setup {
+            git(&root, &args).unwrap();
+        }
+        std::fs::write(root.join("one.txt"), "one\n").unwrap();
+        git(&root, &["add", "."]).unwrap();
+        git(
+            &root,
+            &[
+                "commit",
+                "--cleanup=verbatim",
+                "-m",
+                "feat: one  \n\nbody\n",
+            ],
+        )
+        .unwrap();
+        root
+    }
+
+    /// A Git command that wants a message must take the one it already has
+    /// rather than reach for an editor, whatever the repository or the
+    /// environment names as one. `git commit --amend` is the shortest command
+    /// that asks: without a message on the line, it opens an editor.
+    #[test]
+    fn a_git_command_never_reaches_an_editor() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // An editor that fails is how an editor being consulted at all is
+        // made visible; a windowed one would instead block until somebody
+        // closed it.
+        let root = fixture(&tmp, &["core.editor", "false"]);
+        git(&root, &["commit", "--amend"]).expect("an amend must not consult an editor");
+    }
+
+    /// Assembling a commit object here has to agree with `commit-tree` on
+    /// every byte, or the header order, the identity lines or the message
+    /// boundary are wrong and a carried header would come with a silent
+    /// change to something else.
+    #[test]
+    fn a_hand_built_commit_is_the_one_commit_tree_writes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // The fixture's message carries an interior blank line and trailing
+        // whitespace, so the boundary between the headers and the message is
+        // checked rather than assumed.
+        let root = fixture(&tmp, &[]);
+
+        let head = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        let commit = read_commit(&root, &head).unwrap();
+        assert!(commit.extra_headers.is_empty());
+        assert_eq!(write_commit_object(&root, &commit, None).unwrap(), head);
+        assert_eq!(commit_tree_as(&root, &commit, None).unwrap(), head);
+    }
+
+    /// A header outside the set `commit-tree` has flags for is carried, and
+    /// carrying it is the only difference: recreating the commit unsigned
+    /// reproduces its object id.
+    #[test]
+    fn an_uninterpreted_header_is_carried_verbatim() {
+        let raw = b"tree 0000000000000000000000000000000000000000\n\
+                    parent 1111111111111111111111111111111111111111\n\
+                    author A <a@example.invalid> 1700000000 +0000\n\
+                    committer C <c@example.invalid> 1700000001 +0000\n\
+                    mergetag object 2222222222222222222222222222222222222222\n\
+                    \x20type commit\n\
+                    \x20tag v1\n\
+                    \x20\n\
+                    \x20a release\n\
+                    gpgsig -----BEGIN PGP SIGNATURE-----\n\
+                    \x20\n\
+                    \x20abc\n\
+                    \x20-----END PGP SIGNATURE-----\n\
+                    \nthe message\n";
+        let commit = parse_commit_object(raw).unwrap();
+        assert_eq!(commit.extra_header_fields(), vec!["mergetag".to_string()]);
+        assert_eq!(
+            commit.extra_headers[0],
+            "mergetag object 2222222222222222222222222222222222222222\n type commit\n tag v1\n \n a release"
+        );
+        assert_eq!(commit.message, b"the message\n");
+        // The signature covered the object it was read from, so a recreation
+        // carries everything but that.
+        let rebuilt = commit_object_text(&commit, None);
+        assert_eq!(
+            String::from_utf8_lossy(&rebuilt),
+            String::from_utf8_lossy(raw).replace(
+                "gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n -----END PGP SIGNATURE-----\n",
+                ""
+            )
+        );
+        // Signing writes the header Git writes: the first line after the
+        // field name, the rest indented by one space.
+        let signed = commit_object_text(&commit, Some(b"-----BEGIN PGP SIGNATURE-----\n\nabc\n"));
+        assert!(String::from_utf8_lossy(&signed)
+            .contains("gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n\nthe message\n"));
+    }
 
     #[test]
     fn deadline_kills_and_reaps_a_slow_probe() {

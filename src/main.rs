@@ -1552,6 +1552,10 @@ enum RewriteCmd {
         /// signing key
         #[arg(long = "no-sign", conflicts_with = "key")]
         no_sign: bool,
+        /// Recreate each annotated tag whose target was rewritten on the
+        /// commit that replaced it, carrying its message, tagger and signature
+        #[arg(long)]
+        retag: bool,
     },
 }
 
@@ -2834,6 +2838,7 @@ fn run(cli: Cli) -> Result<i32> {
                 from,
                 dry_run,
                 no_sign,
+                retag,
             } => commands::rewrite_sign(
                 &ctx,
                 commands::SignArgs {
@@ -2841,6 +2846,7 @@ fn run(cli: Cli) -> Result<i32> {
                     from,
                     dry_run,
                     no_sign,
+                    retag,
                 },
             ),
         },

@@ -16,6 +16,7 @@ fact it is, and every derived reading follows revisions forward through it:
 ```sh
 arc rewrite sign --dry-run                   # the map this would record
 arc rewrite sign --key <id>                  # re-sign, move the refs, record
+arc rewrite sign --key <id> --retag          # and recreate the annotated tags
 arc history resolve <old-sha>                # exit 2 when nothing moved it
 ```
 
@@ -28,11 +29,33 @@ bytes travel through untouched, so a commit recreated without signing
 the signature changed" checkable rather than hoped for. Trees are identical either
 way, so tree-keyed gate evidence counts the same on both sides.
 
+A commit may carry a header outside that set — `mergetag`, holding the whole
+tag object, on a merge of a signed tag. Those travel too, in the order the
+commit holds them, and the rewrite names each commit that carried one. Such a
+commit is assembled and hashed rather than written by `git commit-tree`, which
+has no flag for a header it does not know; a commit with nothing extra to
+carry goes through `commit-tree`, so the ordinary case is signed by Git
+itself. Both paths produce the same object for the same commit, which is what
+keeps the unsigned recreation identical either way. A `mergetag` is a copy of
+the tag that was merged, so it is carried byte for byte: it records what was
+merged rather than pointing at something the map could follow forward.
+
 It refuses a dirty worktree, a detached HEAD, and an ancestry it cannot
 rebuild because a parent is neither in the map nor a commit here. It moves the
 branch, every ref under `refs/arc/` that pins evidence, and the local branches
-and tags whose tips are rewritten commits. An annotated tag is reported rather
-than re-pointed: rewriting its object is a decision about a release. A branch
+and tags whose tips are rewritten commits.
+
+An annotated tag names its commit through a tag object of its own, so moving
+the ref is not enough and re-pointing it means writing a new tag object —
+which is a decision about a release rather than a consequence of re-signing a
+branch. Left alone, the tag keeps naming a commit on the line that was
+replaced, so `git describe` and the changelog projection have no release
+boundary on the branch; the rewrite says so for each tag it leaves. `--retag`
+recreates each one on the commit that replaced its target, carrying the tag
+name, message, tagger and date, and signing it with the key the commits were
+signed with where the original was signed. The old and the new tag object are
+both named in the summary, so a release can be checked against what it was. A
+branch
 holding commits of its own on top of the range has no successor to move to —
 its commits are still built on the line that was replaced — so the rewrite
 names each such branch and the `git rebase --onto` that replays it. Until a
