@@ -219,3 +219,34 @@ fn the_needs_rebase_blocker_names_the_command_that_clears_it() {
     let out = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
     assert!(out.contains(&format!("arc rebase {change_id}")), "{out}");
 }
+
+#[test]
+fn rebase_verify_from_another_checkout_gates_the_changes_worktree() {
+    let repo = Repo::new();
+    commit_gates(&repo);
+    let (_, wt) = diverged(&repo, "anchor-replay", "branch.txt", "target\n");
+
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["rebase", "anchor-replay", "--verify"]),
+    );
+    assert!(
+        out.contains(&format!("running in {}", wt.display())),
+        "the gate run names the checkout it happened in: {out}"
+    );
+    assert!(
+        out.contains("gates: every required gate is green at head"),
+        "{out}"
+    );
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "anchor-replay"]),
+    ))
+    .unwrap();
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
+    assert_eq!(
+        status["latest_patchset"]["head"],
+        repo.head(&wt),
+        "{status}"
+    );
+}
