@@ -278,6 +278,50 @@ impl Ctx {
         );
     }
 
+    /// Name the identity a verdict is recorded under when that identity also
+    /// wrote the work, or when arc invented it from git config.
+    ///
+    /// A repository that permits self-approval still gets an honest record.
+    /// The verdict stands — it is a fact about what somebody concluded — and
+    /// the line says which fact keeps it from being an independent one, so an
+    /// approval attributed to the author is visible at the moment it is
+    /// written rather than only to whoever later reads the ledger. Reports
+    /// whether it said anything, so a caller can skip a weaker line it made
+    /// redundant.
+    pub(crate) fn warn_verdict_not_independent(
+        &self,
+        patchset: &crate::state::Patchset,
+        verdict: Verdict,
+    ) -> bool {
+        if verdict != Verdict::Approved {
+            return false;
+        }
+        let author = self.on_behalf_of.as_deref().unwrap_or(&self.actor);
+        let assumed = self.on_behalf_of.is_none() && self.actor_source == ActorSource::GitFallback;
+        let matched = patchset.contributor_match(author).is_some();
+        if !matched && !assumed {
+            return false;
+        }
+        let mut line = format!("warning: recorded as {author:?}");
+        if matched {
+            let role = if patchset.contributors.is_empty() {
+                "the author of"
+            } else {
+                "a contributor to"
+            };
+            line.push_str(&format!(", who is {role} {}", patchset.id));
+        }
+        if assumed {
+            line.push_str(" (identity assumed from git config)");
+        }
+        line.push_str(
+            "; this verdict shows that a review happened, not that it was independent of \
+             whoever wrote the work, so it cannot discharge an independent-review debt.",
+        );
+        eprintln!("{line}");
+        true
+    }
+
     fn event_at(
         &self,
         store: &Store,

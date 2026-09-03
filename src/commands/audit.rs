@@ -99,12 +99,20 @@ pub fn audit(ctx: &Ctx, reference: &str, args: AuditArgs) -> Result<()> {
         println!("finding: {id}");
     }
     println!("event: {}", event.event_id);
-    // Said once the audit exists, and only then: an assumed authoring identity
-    // is not refused, because it cannot be corrected after integration and
-    // refusing would leave the debt undischargeable. But it is said out loud,
-    // or debt would look like a way around the independence rule rather
-    // than a way of carrying it.
-    if args.verdict == Verdict::Approved && st.latest_patchset().is_some_and(|p| p.author_assumed())
+    // Said once the audit exists, and only then: an assumed identity is not
+    // refused where policy permits self-approval, because it cannot be
+    // corrected after integration and refusing would leave the debt
+    // undischargeable. But it is said out loud, or debt would look like a way
+    // around the independence rule rather than a way of carrying it.
+    let named_auditor = st
+        .latest_patchset()
+        .is_some_and(|patchset| ctx.warn_verdict_not_independent(patchset, args.verdict));
+    // The auditor's own identity is the stronger fact and subsumes this one.
+    // An audit by a declared reviewer of work whose author arc invented is
+    // still worth saying: the pass was independent of a name nobody claimed.
+    if !named_auditor
+        && args.verdict == Verdict::Approved
+        && st.latest_patchset().is_some_and(|p| p.author_assumed())
     {
         eprintln!(
             "warning: arc assumed the authoring identity of the audited work, so this audit \

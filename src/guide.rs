@@ -421,6 +421,13 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   discharge itself — though anyone may audit into `changes-requested`, since
   raising problems needs no independence.
 
+  Where `forbid_self_approval` is off, an approving verdict from the identity
+  that wrote the work is recorded rather than refused, and `arc review` and
+  `arc audit` both name the match: who it was recorded as, which patchset that
+  identity wrote, and whether arc assumed the identity from git config. Such a
+  verdict is a review that happened, not an independent one, and it leaves an
+  independent-review debt owed.
+
 RULES THAT CHANGE WHAT YOU DO
   - A verdict binds to the exact approved patchset head. Any new commit makes
     the approval stale until a fresh verdict on a new snapshot.
