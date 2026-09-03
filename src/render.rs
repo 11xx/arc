@@ -371,6 +371,9 @@ pub fn markdown(
             "- Activity: claimed {}, last {}, expires {} (TTL {}s)",
             claim.claimed_at, claim.last_activity_at, claim.expires_at, claim.ttl_seconds
         );
+        if let Some(reason) = &claim.displaced_reason {
+            let _ = writeln!(w, "- displaced before its budget: {reason}");
+        }
     }
 
     if !state.patchsets.is_empty() {
@@ -1383,7 +1386,13 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
         } => (
             "claim-set",
             match displaced {
-                Some(displaced) => format!("{claim_id} displaced {}", displaced.claim_id),
+                Some(displaced) => match &displaced.reason {
+                    Some(reason) => format!(
+                        "{claim_id} displaced {} before its budget: {reason}",
+                        displaced.claim_id
+                    ),
+                    None => format!("{claim_id} displaced {}", displaced.claim_id),
+                },
                 None => claim_id.clone(),
             },
         ),

@@ -238,6 +238,13 @@ RUN A CHANGE
     --blocked-by <change> --tag <t>  Declare a chain up front, at planning time.
     --no-worktree                    Take over this checkout, if it can be taken.
   arc claim / stage / release-claim  Advisory liveness while implementing.
+    --takeover                       Displace a claim that may be taken over:
+                                     a stale one on a change, an expired one
+                                     on an artifact.
+    --because <reason>               Displace one that may not be, stating why
+                                     its holder is gone. `harness-status-absent`
+                                     and `delegate-exit:<handle>` are the
+                                     expected evidence; any text is accepted.
   arc snapshot                       Record the current head as a patchset.
   arc verify --gate <name>           Run a declared gate; record the evidence.
   arc verify --command <cmd>         Same, for an ad hoc probe.
@@ -455,6 +462,13 @@ RULES THAT CHANGE WHAT YOU DO
     budgeted and a stage over budget reads `stale`; an artifact has no stages
     to budget, so `expired` is when it becomes reclaimable, and `--takeover`
     is what displaces it.
+  - A claim that is not yet reclaimable is displaced only by `--takeover
+    --because <reason>`, and the reason is recorded on the displaced claim,
+    printed wherever it is rendered, and verified by nobody. The evidence a
+    holder is gone — `harness-status-absent`, `delegate-exit:<handle>` — is
+    observed outside the ledger, and the record is what makes a lease cut
+    short auditable afterwards. Without a reason the refusal stands, because
+    a live lease and a dead one read alike from inside arc.
   - `arc journal consume` and `arc journal transition` refuse while any claim
     on the artifact is open, and take `--acknowledge-claim <id>` for each.
     Those claims then end with `ended_by` naming the event and no owner

@@ -15,6 +15,13 @@ pub struct DisplacedClaim {
     pub harness: String,
     pub session: String,
     pub stage: String,
+    /// Why the lease was cut short, as the caller wrote it. Present when a
+    /// takeover displaced a claim the rules would otherwise have protected;
+    /// absent when the claim was already stale or expired and no reason was
+    /// given. Arc records the text and verifies nothing: the evidence it
+    /// names lives outside the ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

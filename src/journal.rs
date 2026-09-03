@@ -6311,6 +6311,9 @@ fn artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClaim> {
                     claimed_at: timestamp,
                     last_activity_at: timestamp,
                     progress: None,
+                    // The artifact claim records its displacement in its own
+                    // field, beside the lease rather than inside it.
+                    displaced: None,
                 },
                 blocker: None,
                 displaced: event.displaced.clone(),
@@ -6501,7 +6504,7 @@ pub fn rescue_artifact(ctx: &Ctx, file: &str, json: bool, take: bool) -> Result<
             );
             return Ok(8);
         }
-        let code = claim_artifact(ctx, file, None, true)?;
+        let code = claim_artifact(ctx, file, None, true, None)?;
         if code != 0 {
             return Ok(code);
         }
@@ -6718,10 +6721,17 @@ fn claim_context(ctx: &Ctx, file: &str) -> Result<ClaimContext> {
 /// Acquire, renew, or take over the claim on a journal artifact.
 ///
 /// The rule is the ledger's, read against a lease with no stage budgets: a
-/// live claim held by somebody else is refused outright, and one whose lease
-/// has run out is displaced only when the caller says so. Silence would let a
-/// second worker start on an artifact whose owner is still writing.
-pub fn claim_artifact(ctx: &Ctx, file: &str, ttl: Option<&str>, takeover: bool) -> Result<i32> {
+/// live claim held by somebody else is refused unless the caller states why
+/// the lease is being cut short, and one whose lease has run out is displaced
+/// only when the caller says so. Silence would let a second worker start on
+/// an artifact whose owner is still writing.
+pub fn claim_artifact(
+    ctx: &Ctx,
+    file: &str,
+    ttl: Option<&str>,
+    takeover: bool,
+    because: Option<&str>,
+) -> Result<i32> {
     let owner = require_claim_identity(ctx)?;
     let ttl_seconds = ttl
         .map(crate::commands::parse_duration)
@@ -6751,9 +6761,17 @@ pub fn claim_artifact(ctx: &Ctx, file: &str, ttl: Option<&str>, takeover: bool) 
     let mut displaced = None;
     for existing in &open {
         let timing = state::claim_timing_at(&existing.state, now);
-        if timing.active && existing.state.owner != owner {
+        if timing.active && existing.state.owner != owner && !(takeover && because.is_some()) {
+            // A live lease is protected, and a stated reason is the whole of
+            // what lifts the protection: arc records the text and checks none
+            // of it, because the evidence that a worker died lives outside
+            // the journal.
             print_artifact_claim_conflict("claim is already held", existing, now);
             eprintln!("--takeover is unavailable because the claim has not expired");
+            eprintln!(
+                "--takeover --because <reason> displaces it and records the reason, \
+                 such as harness-status-absent or delegate-exit:<handle>"
+            );
             return Ok(8);
         }
         if existing.state.owner != owner && !takeover {
@@ -6767,6 +6785,7 @@ pub fn claim_artifact(ctx: &Ctx, file: &str, ttl: Option<&str>, takeover: bool) 
             harness: existing.state.owner.harness.clone(),
             session: existing.state.owner.session.clone(),
             stage: timing.stage,
+            reason: because.map(str::to_string),
         });
     }
 
@@ -6798,6 +6817,9 @@ pub fn claim_artifact(ctx: &Ctx, file: &str, ttl: Option<&str>, takeover: bool) 
             displaced.session,
             displaced.stage
         );
+        if let Some(reason) = &displaced.reason {
+            println!("displaced before its budget: {reason}");
+        }
     }
     println!("claimed: {file} for {ttl_seconds}s");
     println!("claim: {claim_id}");
@@ -6858,7 +6880,7 @@ pub fn stage_artifact(
                 claim.state.owner == owner && state::claim_timing_at(&claim.state, now).active
             });
         if !held {
-            let code = claim_artifact(ctx, file, None, false)?;
+            let code = claim_artifact(ctx, file, None, false, None)?;
             if code != 0 {
                 return Ok(code);
             }
@@ -7188,6 +7210,9 @@ fn render_catchup_claims(claims: &[ArtifactClaim], now: DateTime<Utc>) {
             format_age(idle),
             format_age(claim.state.ttl_seconds)
         );
+        if let Some(reason) = claim.displaced.as_ref().and_then(|it| it.reason.as_deref()) {
+            println!("    displaced before its budget: {reason}");
+        }
         for checkpoint in claim.tip_checkpoints() {
             if let Some(next) = &checkpoint.next {
                 println!("    next: {next}");

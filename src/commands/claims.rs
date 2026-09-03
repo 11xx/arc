@@ -55,7 +55,7 @@ pub fn take(ctx: &Ctx, tags: Vec<String>, ttl: Option<String>, json: bool) -> Re
         .clone();
     let displaced = candidate.claim.as_ref().map(|claim| {
         let timing = state::claim_timing_at(claim, now);
-        displaced_claim(claim, &timing)
+        displaced_claim(claim, &timing, None)
     });
     let mut event = identity_event_at(
         ctx,
@@ -88,13 +88,17 @@ pub fn claim(
     ttl: Option<String>,
     stage_budgets: Vec<String>,
     takeover: bool,
+    because: Option<String>,
 ) -> Result<i32> {
     let (code, _) = claim_inner(
         ctx,
         reference,
         ttl,
         stage_budgets,
-        ClaimMode::Standard { takeover },
+        ClaimMode::Standard {
+            takeover,
+            because: because.as_deref(),
+        },
     )?;
     Ok(code)
 }
@@ -113,8 +117,14 @@ pub(crate) fn takeover_abandoned(
 }
 
 #[derive(Clone, Copy)]
-enum ClaimMode {
-    Standard { takeover: bool },
+enum ClaimMode<'a> {
+    Standard {
+        takeover: bool,
+        /// Why a lease still inside its stage budget was cut short. Present
+        /// only when the caller supplied one, which is what allows a
+        /// takeover the budget would otherwise protect.
+        because: Option<&'a str>,
+    },
     RequireAbandoned,
 }
 
@@ -123,7 +133,7 @@ fn claim_inner(
     reference: &str,
     ttl: Option<String>,
     stage_budgets: Vec<String>,
-    mode: ClaimMode,
+    mode: ClaimMode<'_>,
 ) -> Result<(i32, Option<ClaimIdentity>)> {
     let owner = command_identity(ctx)?;
     let ttl_seconds = ttl
@@ -143,32 +153,41 @@ fn claim_inner(
     let state = state::reduce(&store.load_events(&change_id)?)?;
     let now = chrono::Utc::now();
     let mut previous_owner = None;
+    let (takeover, because) = match mode {
+        ClaimMode::Standard { takeover, because } => (takeover, because),
+        // Rescue takes only what its own checks have already found abandoned,
+        // so it neither asks for a takeover nor states a reason for one.
+        ClaimMode::RequireAbandoned => (false, None),
+    };
     let displaced = if let Some(existing) = &state.claim {
         let timing = state::claim_timing_at(existing, now);
         if timing.active && existing.owner != owner {
             if !timing.stale {
-                print_claim_conflict("claim is already held", existing, &timing);
-                eprintln!("--takeover is unavailable because the claim is not yet stale");
-                return Ok((8, None));
-            }
-            if matches!(mode, ClaimMode::Standard { takeover: false }) {
+                // A lease still inside its stage budget is protected, and a
+                // stated reason is the whole of what lifts the protection:
+                // arc records the text and checks none of it, because the
+                // evidence that an executor died lives outside the ledger.
+                if !(takeover && because.is_some()) {
+                    print_claim_conflict("claim is already held", existing, &timing);
+                    eprintln!("--takeover is unavailable because the claim is not yet stale");
+                    eprintln!(
+                        "--takeover --because <reason> displaces it and records the reason, \
+                         such as harness-status-absent or delegate-exit:<handle>"
+                    );
+                    return Ok((8, None));
+                }
+            } else if matches!(mode, ClaimMode::Standard { .. }) && !takeover {
                 print_claim_conflict("claim is already held", existing, &timing);
                 eprintln!("--takeover would displace this stale claim");
                 return Ok((8, None));
             }
             previous_owner = Some(existing.owner.clone());
-            Some(DisplacedClaim {
-                claim_id: existing.claim_id.clone(),
-                actor: existing.owner.actor.clone(),
-                harness: existing.owner.harness.clone(),
-                session: existing.owner.session.clone(),
-                stage: timing.stage,
-            })
+            Some(displaced_claim(existing, &timing, because))
         } else if timing.expired
             && (matches!(mode, ClaimMode::Standard { .. }) || existing.owner != owner)
         {
             previous_owner = Some(existing.owner.clone());
-            Some(displaced_claim(existing, &timing))
+            Some(displaced_claim(existing, &timing, because))
         } else if matches!(mode, ClaimMode::RequireAbandoned) {
             eprintln!(
                 "rescue --take requires a claim owned by another identity that is stale or expired"
@@ -209,6 +228,18 @@ fn claim_inner(
                 "displaced: owner={} harness={} session={} stage={}",
                 displaced.actor, displaced.harness, displaced.session, displaced.stage
             );
+            if let Some(reason) = &displaced.reason {
+                println!("displaced before its budget: {reason}");
+                crate::journal::auto_log(
+                    ctx,
+                    &state.slug,
+                    &format!(
+                        "took over change {change_id} from {} via {}/{} \
+                         before its budget: {reason}",
+                        displaced.actor, displaced.harness, displaced.session
+                    ),
+                );
+            }
         }
         println!("claimed: {change_id} for {ttl_seconds}s");
         println!("event: {}", event.event_id);
@@ -298,7 +329,7 @@ pub fn stage(
                 print_claim_conflict("claim is already held", existing, &timing);
                 return Ok(8);
             }
-            Some(displaced_claim(existing, &timing))
+            Some(displaced_claim(existing, &timing, None))
         } else {
             None
         };
@@ -397,13 +428,18 @@ pub(super) fn owns_live_claim(ctx: &Ctx, reference: &str) -> Result<bool> {
     }))
 }
 
-fn displaced_claim(existing: &state::ClaimState, timing: &state::ClaimTiming) -> DisplacedClaim {
+fn displaced_claim(
+    existing: &state::ClaimState,
+    timing: &state::ClaimTiming,
+    reason: Option<&str>,
+) -> DisplacedClaim {
     DisplacedClaim {
         claim_id: existing.claim_id.clone(),
         actor: existing.owner.actor.clone(),
         harness: existing.owner.harness.clone(),
         session: existing.owner.session.clone(),
         stage: timing.stage.clone(),
+        reason: reason.map(str::to_string),
     }
 }
 
