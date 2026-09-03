@@ -12,6 +12,16 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `arc run dispatch` binds a delegated run to one subject — `--change <id>`,
+  `--fork <slug>`, or `--range <base>..<head>` — and refuses a dispatch naming
+  none or two. `arc run end` records what the round reviewed and produced:
+  `--reviewed-head <sha>`, `--raised-json <path|->`, `--deferred-json
+  <path|->`, and repeatable `--collects <deferral-id>`. A deferral requires a
+  `why` and is minted `def-<ulid>` when it names no id, and stays open until a
+  later round on the same subject collects it. `run list` groups by subject
+  and numbers the rounds, showing each round's reviewed head, raised count,
+  and deferrals still open.
+
 - `arc journal delivered <file> --question <id> --to
   person|anyone|delegate:<name> [--handle <opaque>]` records that a caller
   delivered an open question to somebody; arc keeps the fact and sends

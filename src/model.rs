@@ -846,11 +846,24 @@ pub enum Payload {
     /// A caller told arc that a delegated run was dispatched through a
     /// resolved route. arc records the dispatch context but does not choose,
     /// start, or supervise the run.
+    ///
+    /// Exactly one subject is named. A ledger change is one shape a delegation
+    /// takes, not the only one: the loop of bounded rounds runs just as often
+    /// on a fork, which is outside the lifecycle by design, or on a bare
+    /// commit range in a repository whose ledger holds nothing yet. A record
+    /// that could bind only to a change would be unavailable to exactly the
+    /// work that most needs it.
     RunDispatched {
         route: String,
         worktree: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         change: Option<String>,
+        /// The fork slug this run was dispatched against.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fork: Option<String>,
+        /// The commit range this run was dispatched against.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<CommitRange>,
         #[serde(skip_serializing_if = "Option::is_none")]
         brief_event_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -858,9 +871,28 @@ pub enum Payload {
     },
     /// A caller told arc that a dispatched run reached a terminal outcome.
     /// `unknown` records that no more specific outcome is known.
+    ///
+    /// A round additionally carries what it read and what it produced: the
+    /// head it reviewed, the findings it raised, the findings it deliberately
+    /// left, and the earlier deferrals it collected. A deferral recorded
+    /// nowhere is a deferral nobody will honor, so the ending that made the
+    /// decision is where it is written down.
     RunEnded {
         dispatch_event_id: String,
         outcome: RunOutcome,
+        /// The revision the round reviewed, when the caller names one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reviewed_head: Option<String>,
+        /// Findings the round raised for repair.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        raised: Vec<RunFinding>,
+        /// Findings the round decided not to fix, each with the reason.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        deferred: Vec<DeferredFinding>,
+        /// Deferral IDs this round took up. A deferral is open until a later
+        /// round on the same subject collects it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        collects: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
@@ -1351,6 +1383,62 @@ impl RunOutcome {
             Self::Unknown => "unknown",
         }
     }
+}
+
+/// A base and a head, as `<base>..<head>` is written on the command line.
+/// Both ends are recorded verbatim: arc does not resolve, shorten, or verify
+/// them, so a range naming revisions this repository never held is a record
+/// that is wrong rather than one that is missing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitRange {
+    pub base: String,
+    pub head: String,
+}
+
+impl CommitRange {
+    /// Parse the `<base>..<head>` form, refusing anything with an empty end.
+    pub fn parse(value: &str) -> std::result::Result<Self, String> {
+        let Some((base, head)) = value.split_once("..") else {
+            return Err(format!("range {value:?} is not <base>..<head>"));
+        };
+        let (base, head) = (base.trim(), head.trim());
+        if base.is_empty() || head.is_empty() {
+            return Err(format!("range {value:?} needs a base and a head"));
+        }
+        Ok(Self {
+            base: base.to_string(),
+            head: head.to_string(),
+        })
+    }
+
+    pub fn as_str(&self) -> String {
+        format!("{}..{}", self.base, self.head)
+    }
+}
+
+/// One finding a round raised. Severity is optional because a round that
+/// names what it found has said the useful part; ranking it is a second
+/// judgment nobody is obliged to make.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunFinding {
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<Severity>,
+}
+
+/// One finding a round chose not to fix.
+///
+/// The reason is required. A deferral without one is indistinguishable from a
+/// finding that was missed, and the next round inherits no way to tell whether
+/// the decision still holds. The ID is what a later round collects it by, and
+/// arc mints one when the caller supplies none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredFinding {
+    pub id: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<Severity>,
+    pub why: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]

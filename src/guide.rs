@@ -441,6 +441,16 @@ RULES THAT CHANGE WHAT YOU DO
     result and no exit code, and arc infers it from nothing.
   - The journal lives outside the repo, so worktrees stay clean. Cross-session
     context goes there, never into tracked files.
+  - `arc run dispatch` names exactly one subject: `--change <id>`, `--fork
+    <slug>`, or `--range <base>..<head>`. A round is its ordinal within that
+    subject, so the loop of bounded rounds records on a fork or a bare commit
+    range as readily as on a ledger change.
+  - A bounded round records what it deliberately left, so the next round
+    inherits a list instead of a memory: `arc run end <dispatch> --outcome
+    <o> --reviewed-head <sha> --raised-json <path|-> --deferred-json <path|->`.
+    A deferral requires a `why` and gets a `def-<ulid>` when it names no id; a
+    later round on the same subject discharges it with `--collects <id>`.
+    `arc inbox` and `arc catchup` carry the ones still open.
   - arc holds no routing opinion. It records the --actor, --harness, and --model
     it is given; who to delegate to is the caller's policy, not arc's.
 

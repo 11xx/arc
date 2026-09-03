@@ -8,6 +8,11 @@ pub fn new_finding_id() -> String {
     format!("f{}", ulid::Ulid::new().to_string().to_lowercase())
 }
 
+/// A deferred finding's handle, which a later round collects it by.
+pub fn new_deferral_id() -> String {
+    format!("def-{}", ulid::Ulid::new().to_string().to_lowercase())
+}
+
 /// A change ID is the slug plus a short random suffix so re-used slugs
 /// across a repository's lifetime never collide.
 pub fn new_change_id(slug: &str) -> String {

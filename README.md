@@ -693,6 +693,37 @@ See [DELEGATION.md](DELEGATION.md) before generating cross-harness executor
 prompts. In particular, a Codex executor works locally and must never be told
 to invoke `codex exec` on itself.
 
+### Delegated rounds
+
+`arc run` records delegated runs. A dispatch names exactly one subject —
+`--change <id>`, `--fork <slug>`, or `--range <base>..<head>` — and naming
+none or two is refused. A ledger change is one shape a delegation takes, not
+the only one: the loop of brief, review, and targeted change request runs just
+as often on a fork, which is outside the lifecycle by design, or on a bare
+commit range in a repository whose ledger holds nothing yet.
+
+```sh
+arc run dispatch --route 'codex:gpt-5.6-luna#max' --worktree ../wt --fork spool-spike
+arc run end <dispatch-event> --outcome completed --reviewed-head "$(git rev-parse HEAD)" \
+  --raised-json raised.json --deferred-json deferred.json --collects def-01j0z
+arc run list
+```
+
+A round is the ordinal of a dispatch within its subject, derived rather than
+recorded. `run list` groups by subject, numbers the rounds, and shows each
+round's reviewed head, raised count, and deferrals still open.
+
+The ending is where a bounded round says what it left. `--raised-json` and
+`--deferred-json` take a path or `-`, holding a JSON array of objects with a
+`summary` and an optional `severity`; a deferral additionally requires a `why`
+and may name its own `id`, and arc mints `def-<ulid>` when it does not. The
+reason is required because a deferral without one cannot be told from a
+finding that was missed. A deferral stays open until a later round on the same
+subject collects it by ID with `--collects`, which is refused for an ID that
+is not open on that subject. Open deferrals are surfaced by `arc inbox` and
+`arc catchup`, since a deferral absent from the answer to "what is waiting" is
+a deferral nobody will honor.
+
 ## Export / import
 
 Move one change's complete ledger as a deterministic `arc-bundle/2`
