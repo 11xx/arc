@@ -151,6 +151,41 @@ fn a_tilde_path_in_the_configuration_expands_under_the_prefix() {
     assert!(!repo.home.join("trees").exists());
 }
 
+/// The ledger is the one root that stays in the repository by default, so the
+/// prefix has to reach it wherever a data root moves it out.
+#[test]
+fn a_data_root_under_the_prefix_takes_the_ledger_with_it() {
+    let repo = Repo::new();
+    let prefix = repo.home.join("boxed");
+    fs::create_dir_all(prefix.join(".local/ai/arc")).unwrap();
+    fs::write(
+        prefix.join(".local/ai/arc/config.toml"),
+        "data_root = \"~/ledgers\"\n",
+    )
+    .unwrap();
+
+    let arc = || {
+        let mut command = repo.arc(&repo.root);
+        command.env("ARC_SANDBOX", &prefix);
+        command
+    };
+    stdout(arc().args(["begin", "rooted", "--no-worktree"]));
+    let ledger = prefix
+        .join("ledgers")
+        .join(config_path_slug(&repo.root))
+        .join("config.json");
+    assert!(ledger.is_file(), "ledger should be at {}", ledger.display());
+    assert!(!repo.root.join(".git/arc").exists());
+    assert_eq!(
+        json_stdout(arc().args(["doctor", "--json"]))["roots"]["ledger"],
+        prefix
+            .join("ledgers")
+            .join(config_path_slug(&repo.root))
+            .display()
+            .to_string()
+    );
+}
+
 /// The acceptance test for containment: every write verb, run under a prefix,
 /// against a home that holds a real project's roots — and nothing there moves.
 #[test]
