@@ -638,7 +638,6 @@ EXIT CODES
   way whether one change was integrated or twenty.
 
     `arc check` exits 0 when the change is ready to integrate.
-    `arc check` exits 1 on a usage or internal error.
     `arc check` exits 2 while a blocking finding is open.
     `arc check` exits 3 when no valid approval covers the current head.
     `arc check` exits 4 while a hold is active.
@@ -646,8 +645,6 @@ EXIT CODES
     `arc check` exits 6 for a closed change, a missing branch, or malformed
       state.
     `arc check` exits 7 while a prerequisite change is unresolved.
-    `arc check` exits 8 on a claim or stage ownership conflict.
-    `arc check` exits 9 when the execution role refused the command.
     `arc check` exits 11 when the target moved with conflicting changes and
       the branch needs rebasing.
     `arc check` exits 12 when a declared acceptance probe is not
@@ -656,8 +653,16 @@ EXIT CODES
     `arc check` exits 14 when the tree a merge would ship has no gate
       evidence.
 
+  Codes 1 and 2 are also reachable without a blocker at all: `arc` exits 1 on
+  an internal error and 2 on a usage error, which argument parsing decides
+  before any command runs.
+
   The other commands a script branches on:
 
+    `arc claim`, `arc stage`, and `arc release-claim` exit 8 on a claim or
+      stage ownership conflict.
+    arc exits 9 when the execution role refused the command, before it takes
+      a lock or writes an event.
     `arc is-blocked` exits 0 when the change is ready, 1 when it is blocked,
       and 2 when the lookup or ledger read failed.
     `arc watch` exits 0 when its condition is reached and 2 on a timeout.
@@ -680,8 +685,14 @@ EXIT CODES
 WHAT ARC WILL NOT DO
   Ledger and repository:
     arc never deletes or rewrites an event file.
-    arc never rewrites a branch and never merges on its own.
-    arc never passes `--force` to git.
+    arc rewrites a branch only through `arc rewrite`, which records the map
+      it produced, and merges only through `arc integrate` when every
+      required gate is green.
+    arc never force-removes a checkout it did not create. Worktree removal
+      refuses while dirty or untracked content is present, `fork retire
+      --force` is the operator's decision to get past that, and the one
+      forced removal arc performs on its own is the scratch checkout it
+      creates to evaluate a merge.
     arc never runs `git rebase --abort`.
     arc never installs a Git hook silently.
     arc never makes a network call.
@@ -692,7 +703,10 @@ WHAT ARC WILL NOT DO
   Refusals worth knowing before they happen:
     arc refuses a bundle written by a newer arc rather than skipping
       lifecycle events it does not know.
-    arc refuses a gate run outside the change's recorded worktree.
+    arc refuses a gate run only when the change's recorded worktree is
+      missing or its HEAD is not the branch head. A run started from another
+      checkout of the repository is redirected to the recorded worktree and
+      says so.
     arc refuses a `--from-journal` source that is missing, non-actionable, or
       already consumed.
     arc refuses a delivery naming an audience that cannot settle the

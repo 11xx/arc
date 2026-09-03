@@ -7,7 +7,9 @@ change lifecycle: no ledger change, no gates, nothing merged. `arc fork begin
 <slug>` creates it and journals a marker, `arc fork adopt <slug>` records a
 hand-made one, `arc fork list` reports every fork from markers and branches
 together, and `arc fork retire <slug> <outcome>` records the disposition and
-removes the worktree while keeping the branch. `arc integrate` refuses inside
+removes the worktree while keeping the branch; removal refuses while the
+checkout holds work arc cannot see, and `--force` is the operator's decision
+to discard it. `arc integrate` refuses inside
 a fork worktree.
 
 `arc fork thread <slug>` prints the identity the marker recorded — harness,

@@ -33,10 +33,15 @@ recorded worktree and record the evidence at that worktree's head, whichever
 checkout of the repository the command was typed in, and the run names the tree
 it used when that is not the invoking one. The declarations come from the
 invoking checkout instead, the same place `arc status` reads them, so what a
-run discharges and what status still owes cannot disagree. arc refuses a gate run outside the change's recorded worktree. A change whose
+run discharges and what status still owes cannot disagree. arc refuses a gate
+run only when the change's recorded worktree is missing or its HEAD is not the
+branch head. A run started from another checkout of the repository is
+redirected to the recorded worktree and says so. A change whose
 recorded worktree is gone is refused with the path and the `git worktree add`
 that restores it, because a gate run anywhere else would describe another
-tree.
+tree, and a worktree standing off the branch head is refused with the checkout
+that puts it back, because evidence recorded there is evidence status will
+never count.
 
 By default `arc verify` runs the gate and observes the result itself. When
 the gate ran elsewhere — inside a sandbox, or on another host — record that
@@ -126,7 +131,6 @@ the code of the member that stopped it, so one table reads the same way
 whether one change was integrated or twenty.
 
 - `arc check` exits 0 when the change is ready to integrate.
-- `arc check` exits 1 on a usage or internal error.
 - `arc check` exits 2 while a blocking finding is open.
 - `arc check` exits 3 when no valid approval covers the current head.
 - `arc check` exits 4 while a hold is active.
@@ -134,17 +138,25 @@ whether one change was integrated or twenty.
 - `arc check` exits 6 for a closed change, a missing branch, or malformed
   state.
 - `arc check` exits 7 while a prerequisite change is unresolved.
-- `arc check` exits 8 on a claim or stage ownership conflict.
-- `arc check` exits 9 when the execution role refused the command.
 - `arc check` exits 11 when the target moved with conflicting changes and the
   branch needs rebasing.
 - `arc check` exits 12 when a declared acceptance probe is not discriminating.
 - `arc check` exits 13 while the change declares it is iterating.
 - `arc check` exits 14 when the tree a merge would ship has no gate evidence.
 
+Codes 1 and 2 are also reachable without a blocker at all: `arc` exits 1 on
+an internal error and 2 on a usage error, which argument parsing decides
+before any command runs. A caller that must tell a usage mistake from an open
+finding reads the diagnostic rather than the code alone.
+
 Code 10 belongs to the forge projection rather than to readiness. `arc forge
 link` exits 10 when the observed tuple or the declared policy does not match,
 appending no event.
+
+Two codes belong to commands rather than to readiness. `arc claim`, `arc
+stage`, and `arc release-claim` exit 8 on a claim or stage ownership conflict.
+arc exits 9 when the execution role refused the command, before it takes a
+lock or writes an event.
 
 The other commands a script branches on carry their own contracts:
 

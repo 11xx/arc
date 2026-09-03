@@ -101,16 +101,21 @@ pipe-friendly IDs, a scannable orchestration table, or structured rows.
   branch rewind. Pins are released only for heads proven reachable from
   the integration commit; abandoned or externally rewritten work stays
   pinned (release by hand with `git update-ref -d`).
-- arc never passes `--force` to git. Worktree removal refuses when dirty or
-  untracked content is present, branch deletion refuses unmerged branches,
-  and a failed merge is aborted back to the pre-checked clean state.
+- arc never force-removes a checkout it did not create. Worktree removal
+  refuses while dirty or untracked content is present, `fork retire --force`
+  is the operator's decision to get past that, and the one forced removal arc
+  performs on its own is the scratch checkout it creates to evaluate a merge.
+  Branch deletion refuses unmerged branches, and a failed merge is aborted
+  back to the pre-checked clean state.
 - A detected integration race (target moved) is reported, never
   "repaired" by rewriting refs.
 - Git object IDs are stored as variable-length strings (SHA-256 safe).
 - Anchors record path, side, blob OID, and line range; blob identity is
   what survives when line numbers drift.
-- arc never rewrites a branch and never merges on its own. `integrate` is
-  always an explicit invocation.
+- arc rewrites a branch only through `arc rewrite`, which records the map it
+  produced, and merges only through `arc integrate` when every required gate
+  is green. Both are explicit invocations: nothing arc does on the way to
+  either moves a branch by itself.
 - Gates execute repo-committed commands (`.arc/gates.toml`): the trust
   level is the same as running `make` in that repository.
 - Derived views (`list`, `inbox`, `status`, `query`) replay the ledger on

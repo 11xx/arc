@@ -175,7 +175,8 @@ change that was abandoned or superseded has no integration range and says so.
 `arc restack <change> --advise` prints, for each open dependent of a change,
 the exact `git rebase --onto <target> <base>` command to run in that
 dependent's worktree once the change integrates. It only prints and writes no
-events: arc never rewrites a branch. `arc restack --advise` exits 0 when the
+events: rewriting a dependent's branch is the operator's call, made in that
+worktree. `arc restack --advise` exits 0 when the
 change has no dependents. It says so on the way out.
 
 ## Export / import
