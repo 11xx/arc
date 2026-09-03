@@ -7099,7 +7099,7 @@ fn journal_questions_lists_what_is_waiting_on_a_person_with_its_branches() {
         repo.arc(&repo.root)
             .args(["journal", "questions", "--json"]),
     );
-    assert_eq!(value["schema"], "arc-journal-questions/1");
+    assert_eq!(value["schema"], "arc-journal-questions/2");
     assert_eq!(value["questions"][0]["question"], question.as_str());
     assert_eq!(value["questions"][0]["placement"], "opening");
     assert_eq!(value["questions"][0]["heading"], "Paths or properties?");
@@ -9819,4 +9819,294 @@ fn journal_source_report_shape_and_empty_answer() {
         "never",
     ]));
     assert_eq!(none, "no items recorded for claude/never\n");
+}
+
+/// Every question id on one discussion, oldest first.
+fn question_ids(repo: &Repo, file: &str) -> Vec<String> {
+    json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "discussion", file, "--json"]),
+    )["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|question| question["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn pose(repo: &Repo, file: &str, body: &str) {
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            file,
+            "--placement",
+            "closing",
+            "--option",
+            "one-go",
+            "--option",
+            "staged",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin(body.to_string())
+        .assert()
+        .success();
+}
+
+fn deliver(repo: &Repo, file: &str, question: &str, to: &str) -> assert_cmd::assert::Assert {
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "delivered",
+            file,
+            "--question",
+            question,
+            "--to",
+            to,
+        ])
+        .assert()
+}
+
+/// The delivery state of one question in the `questions` queue.
+fn queue_state(repo: &Repo, question: &str) -> String {
+    let queue = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    queue["questions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["question"] == question)
+        .unwrap_or_else(|| panic!("{question} is not in the queue: {queue}"))["delivery"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Who may settle a question and whether anybody was asked are different
+/// facts, and a queue carrying only the first reports a question nobody
+/// prompted and a question waiting on a reply as the same work.
+#[test]
+fn a_question_records_whether_anyone_was_asked() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "rollout", "# One go, or staged?\n");
+    pose(
+        &repo,
+        &file,
+        "Legacy: posed before anything was delivered.\n",
+    );
+    pose(&repo, &file, "The one that gets delivered.\n");
+    let posed = question_ids(&repo, &file);
+    let (legacy, delivered) = (posed[0].clone(), posed[1].clone());
+
+    // Nothing has been delivered in this journal, so both predate the record
+    // and neither absence is evidence that nobody was asked.
+    assert_eq!(queue_state(&repo, &legacy), "unknown");
+    assert_eq!(queue_state(&repo, &delivered), "unknown");
+
+    deliver(&repo, &file, &delivered, "person").success();
+
+    // The facility now exists. The delivered question says so; the one posed
+    // before the marker stays unknown, because arc still cannot say whether
+    // anybody was asked before it began recording.
+    assert_eq!(queue_state(&repo, &delivered), "delivered");
+    assert_eq!(queue_state(&repo, &legacy), "unknown");
+
+    // A question posed after the marker has a real negative: nobody was asked,
+    // and prompting work remains. Every event in this test shares a
+    // second-granular timestamp, so the boundary is the marker's place in the
+    // log rather than a comparison of stamps.
+    pose(&repo, &file, "Posed once deliveries were being recorded.\n");
+    let unasked = question_ids(&repo, &file)[2].clone();
+    assert_eq!(queue_state(&repo, &unasked), "unasked");
+
+    let queue = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert_eq!(queue["schema"], "arc-journal-questions/2", "{queue}");
+    // The boundary is published, because `unknown` cannot be read without it.
+    assert!(queue["question_delivery"]["since"].is_string(), "{queue}");
+    assert!(
+        queue["question_delivery"]["revision"].is_string(),
+        "{queue}"
+    );
+
+    // The text listing leads with the state, and the answer hint stays.
+    let text = stdout(repo.arc(&repo.root).args(["journal", "questions"]));
+    assert!(text.contains("[unasked]"), "{text}");
+    assert!(text.contains("[delivered]"), "{text}");
+    assert!(text.contains("[unknown]"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "answer: arc journal answer {file} --question {delivered}"
+        )),
+        "{text}"
+    );
+}
+
+/// A delivery is recorded for each shape a question's settle-by can take, and
+/// a question waiting on one named delegate is not asked by prompting somebody
+/// else: recording that would report prompting work against an audience that
+/// cannot settle the question.
+#[test]
+fn delivery_matches_the_audience_a_question_waits_on() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "audiences", "# Who settles what?\n");
+
+    for settle in [
+        vec!["--settle-by", "person"],
+        vec!["--settle-by", "anyone"],
+        vec!["--settle-by", "delegate", "--delegate", "sol"],
+    ] {
+        let mut args = vec![
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "one-go",
+            "--option",
+            "staged",
+            "--body-file",
+            "-",
+        ];
+        args.extend(settle);
+        repo.arc(&repo.root)
+            .args(args)
+            .write_stdin("Posed for one audience.\n")
+            .assert()
+            .success();
+    }
+    let posed = question_ids(&repo, &file);
+
+    deliver(&repo, &file, &posed[0], "person").success();
+    deliver(&repo, &file, &posed[1], "anyone").success();
+
+    // A different delegate is refused, and the refusal names the delegate that
+    // may answer rather than only rejecting the value.
+    let refused = deliver(&repo, &file, &posed[2], "delegate:luna").failure();
+    let message = String::from_utf8(refused.get_output().stderr.clone()).unwrap();
+    assert!(message.contains("delegate:sol"), "{message}");
+
+    deliver(&repo, &file, &posed[2], "delegate:sol").success();
+    for question in &posed {
+        assert_eq!(queue_state(&repo, question), "delivered");
+    }
+
+    // A recipient outside the vocabulary is not a recipient.
+    deliver(&repo, &file, &posed[0], "the-team").failure();
+}
+
+/// Asking twice and hearing nothing is a different fact from asking once, so a
+/// repeat delivery is another row and the earlier attempt still stands.
+#[test]
+fn repeated_deliveries_accumulate_and_the_marker_is_written_once() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "repeat", "# Ask again?\n");
+    pose(&repo, &file, "Needs asking more than once.\n");
+    let question = question_id(&repo, &file);
+
+    deliver(&repo, &file, &question, "person").success();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "delivered",
+            &file,
+            "--question",
+            &question,
+            "--to",
+            "anyone",
+            "--handle",
+            "thread/42",
+        ])
+        .assert()
+        .success();
+    deliver(&repo, &file, &question, "person").success();
+
+    let queue = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    let deliveries = queue["questions"][0]["deliveries"].as_array().unwrap();
+    assert_eq!(deliveries.len(), 3, "{queue}");
+    assert_eq!(deliveries[0]["to"], "person", "{queue}");
+    assert_eq!(deliveries[1]["to"], "anyone", "{queue}");
+    // The opaque handle is carried verbatim and only where it was supplied.
+    assert_eq!(deliveries[1]["handle"], "thread/42", "{queue}");
+    assert!(deliveries[0]["handle"].is_null(), "{queue}");
+    assert_eq!(deliveries[2]["to"], "person", "{queue}");
+    for delivery in deliveries {
+        assert_eq!(delivery["actor"], "tester", "{queue}");
+        assert_eq!(delivery["harness"], "test", "{queue}");
+        assert_eq!(delivery["session"], "session-a", "{queue}");
+    }
+
+    // One marker for the facility, however many deliveries it covers.
+    let log = fs::read_to_string(journal_dir(&repo).join("events.jsonl")).unwrap();
+    let markers = log
+        .lines()
+        .filter(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["event"] == "capability" && event["name"] == "question-delivery"
+        })
+        .count();
+    assert_eq!(markers, 1, "{log}");
+}
+
+/// An answer ends the question: what was asked on the way stays listed, but
+/// nothing is waiting on anybody, and asking again would prompt for a
+/// settlement the question already has.
+#[test]
+fn an_answer_settles_a_delivered_question_and_closes_it_to_delivery() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "settled", "# Decide it.\n");
+    pose(&repo, &file, "Delivered, then answered.\n");
+    let question = question_id(&repo, &file);
+    deliver(&repo, &file, &question, "person").success();
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "staged",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Rollback appetite is low.\n")
+        .assert()
+        .success();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    assert_eq!(summary["questions"][0]["delivery"], "answered", "{summary}");
+    // The delivery is not erased by the answer; it is how the answer arrived.
+    assert_eq!(
+        summary["questions"][0]["deliveries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "{summary}"
+    );
+
+    deliver(&repo, &file, &question, "person").failure();
+    // A question nobody posed cannot be delivered either.
+    deliver(&repo, &file, "q-nope", "person").failure();
+
+    // Both new events replay cleanly.
+    let doctor = stdout(repo.arc(&repo.root).args(["journal", "doctor"]));
+    assert!(doctor.contains("problems:"), "{doctor}");
+    assert!(!doctor.contains("unknown-jsonl-event"), "{doctor}");
+    assert!(!doctor.contains("invalid-question-state"), "{doctor}");
 }
