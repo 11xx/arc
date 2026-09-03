@@ -513,7 +513,7 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/13 schema)
+    /// Machine-readable status report (the versioned arc-status/14 schema)
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -914,6 +914,24 @@ enum Cmd {
         /// visible to a reviewer, who is free to disagree with it.
         #[arg(long = "waive-dirty", value_name = "REASON")]
         waive_dirty: Option<String>,
+        /// Earlier failing evidence for this same check that this run answers.
+        ///
+        /// A gate that has only ever passed and a gate watched to fail and
+        /// then fixed leave the same record. Naming the failure separates
+        /// them. The event must be a failing verification of the same gate or
+        /// command on this change; its revision comes from the event itself.
+        /// Requires --predicted, and is advisory: it changes no gate result,
+        /// readiness decision, or exit code.
+        #[arg(long = "falsified-by", value_name = "EVENT_ID")]
+        falsified_by: Option<String>,
+        /// Why the check was expected to fail, stated before it ran.
+        ///
+        /// A reason read off the failure afterwards restates the output; one
+        /// stated beforehand is a claim that could have been wrong, which is
+        /// what makes the pass that followed mean something. Requires
+        /// --falsified-by.
+        #[arg(long, value_name = "REASON")]
+        predicted: Option<String>,
     },
     /// Finish implementation: snapshot, verify all gates, then print check state
     Done {
@@ -2293,6 +2311,8 @@ fn run(cli: Cli) -> Result<i32> {
             runner,
             note,
             waive_dirty,
+            falsified_by,
+            predicted,
         } => {
             let change = infer(change.as_deref())?;
             commands::verify(
@@ -2314,6 +2334,8 @@ fn run(cli: Cli) -> Result<i32> {
                     runner,
                     note,
                     waive_dirty,
+                    falsified_by,
+                    predicted,
                 },
             )
         }

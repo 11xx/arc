@@ -913,6 +913,7 @@ mod tests {
                 probe: None,
                 runner: None,
                 note: None,
+                falsification: None,
             },
         );
         let attested = event(
@@ -939,6 +940,7 @@ mod tests {
                 probe: None,
                 runner: Some("external".into()),
                 note: None,
+                falsification: None,
             },
         );
         let runs = observed_gate_runs(&[timed, attested]);

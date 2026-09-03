@@ -12,6 +12,18 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `arc verify --falsified-by <event-id> --predicted <reason>` lets passing
+  evidence name the failing run it answers, so a gate watched to fail and then
+  fixed stops reading like one that has only ever passed. The reference must be
+  a failing verification of the same gate or command on the same change; its
+  revision is read from that event. Gate rows gain `discrimination`
+  (`discriminating` or `undiscriminated`) plus the reference and, where they
+  differ, `discrimination_event_id` beside `evidence_event_id`; passing gate
+  lines say which they are. Discrimination is derived over every passing
+  record for that gate at the counted revision, so rerunning a gate does not
+  retract what an earlier run established against the same tree. Advisory:
+  readiness, gate results, and exit codes are unchanged. Status JSON is
+  `arc-status/14`.
 - A debt records what kind of deficit it is, what review the work did have, and
   who produced it. `DebtMissing` gains `nothing-read`,
   `merge-resolution-unread`, `repair-unread` and `contributor-only`; arc
@@ -23,7 +35,6 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `arc query --debt` orders by kind then age, and the inbox, catchup and
   workspace summary rows split their count by kind. JSON is `arc-inbox/7` and
   `arc-workspace-backlog/11`.
-
 - Journal events record the `--on-behalf-of` subject beside the invoking
   actor, so a note, position, question, answer, verification, lane, or
   consumption a lead files for an executor no longer reads as the lead's own.
@@ -35,7 +46,6 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   round position is an object carrying its id and that identity pair, where it
   was a bare id string, and an answer is an object carrying its option and the
   same pair.
-
 - `arc catchup` and `arc doctor` measure fork checkouts beside the open
   changes' worktrees, under their own key and total. A fork sits outside the
   change lifecycle, so nothing retires its worktree and it is routinely the
@@ -56,8 +66,6 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   fork's marker recorded, with the command that reopens that session where
   the harness has a stable resume form. Fields the marker does not carry
   print as absent.
-
-
 - `arc workspace backlog --here|--under <path>` gives a non-Git workspace root
   a first command: it filters the registered projects by canonical anchor,
   keeps missing anchors inside that path visible, and states the active scope

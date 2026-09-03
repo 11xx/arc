@@ -30,11 +30,36 @@ fn unusable_gate_evidence_reason(
     })
 }
 
-/// One gate's line in a human-facing gate list: the raw result, plus why a
-/// passing result still does not count at head.
+/// What a passing gate line says about whether that gate could have failed.
+///
+/// A gate that has only ever passed and one watched to fail and then fixed
+/// read identically otherwise, so the line says which it is. Empty for
+/// anything but a pass: a failure has no discrimination to report, and neither
+/// does a gate nobody has run.
+///
+/// Advisory. It qualifies a result; it never changes one.
+pub fn discrimination_suffix(gate: &GateStatus) -> String {
+    match (gate.discrimination, &gate.falsification) {
+        (None, _) => String::new(),
+        (Some(_), Some(falsification)) => format!(
+            " (discriminating: failed at {}: {})",
+            short_revision(&falsification.revision),
+            falsification.predicted_reason
+        ),
+        (Some(_), None) => " (undiscriminated)".to_string(),
+    }
+}
+
+fn short_revision(revision: &str) -> &str {
+    &revision[..revision.len().min(8)]
+}
+
+/// One gate's line in a human-facing gate list: the raw result, why a passing
+/// result still does not count at head, and whether a counted pass was ever
+/// shown capable of failing.
 pub fn gate_line(gate: &GateStatus) -> String {
     match gate.not_green_reason() {
-        None => gate.result.clone(),
+        None => format!("{}{}", gate.result, discrimination_suffix(gate)),
         Some(reason) => format!("{} (not green at head: {reason})", gate.result),
     }
 }
@@ -460,7 +485,7 @@ pub fn markdown(
         for g in &report.gates {
             let _ = writeln!(
                 w,
-                "- {}: `{}` — {}{}",
+                "- {}: `{}` — {}{}{}",
                 g.name,
                 g.command,
                 if g.green_at_head {
@@ -474,7 +499,8 @@ pub fn markdown(
                     " (timed out)"
                 } else {
                     ""
-                }
+                },
+                discrimination_suffix(g)
             );
             if g.attested {
                 let _ = writeln!(
@@ -1633,6 +1659,15 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
     );
+    // A green gate answers whether it passes, not whether it could have
+    // failed. The second question has no blocker and no exit code, so the
+    // checklist is the only place a reader meets it.
+    for gate in &report.gates {
+        let suffix = discrimination_suffix(gate);
+        if !suffix.is_empty() {
+            let _ = writeln!(out, "        gate `{}`:{suffix}", gate.name);
+        }
+    }
     condition(
         &mut out,
         Blocker::AcceptanceProbesNotGreen,

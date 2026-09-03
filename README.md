@@ -76,7 +76,9 @@ arc mangen <dir>                                      # writes <dir>/arc.1
   runs a gate and records command, exact revision, result, exit code, duration,
   and hostname — local evidence with provenance, the local analogue of required
   CI checks. Attested verification records no exit code or duration because arc
-  did not run the command.
+  did not run the command. Passing evidence may also name the failure it
+  answers, which is what distinguishes a gate shown able to fail from one that
+  has only ever passed.
 - **Snapshots record Git author and committer identity.** When a claim is live,
   the snapshot also records its generation and actor at snapshot time. Projects
   using per-actor Git identities report a mismatch as provenance evidence,
@@ -787,7 +789,31 @@ worktree, the advice is the rerun. Once the tree is clean the advice
 becomes `run_gate:<gate>`, since
 evidence already recorded cannot be repaired by cleaning; only a fresh run
 replaces it. The `clean_worktree:<gate>` action arrived in `arc-status/7`;
-the current schema is `arc-status/12`.
+the current schema is `arc-status/14`.
+
+A gate that passed says nothing about whether it could have failed. A check
+watched to fail for a stated reason, then to pass once that reason was removed,
+and a check first run after the code it checks leave the same record. `arc
+verify --falsified-by <event-id> --predicted <reason>` separates them: the
+passing evidence names the failing run it answers and the reason stated before
+that run. arc validates the reference on the way in — a failing verification of
+the same gate or command on the same change — and reads the revision from the
+referenced event, so the two halves cannot disagree. The flags are valid only
+together, and not with `--all`, which runs several checks at once.
+
+Gate rows carry the result as `discrimination`: `discriminating` when any
+passing evidence for that gate at the counted revision names a falsification,
+`undiscriminated` when none does. It is asked of the gate at a revision rather
+than of the newest run, because a check watched to fail and then pass against a
+tree is not unwatched by running it again; otherwise `verify --all`, and so
+every `arc done`, would silently retract the finding. `evidence_event_id` names
+the evidence that counts and `discrimination_event_id` the evidence that
+carried the reference, whenever they differ. Human-facing gate lists append
+`(discriminating: failed at <rev>: <reason>)` or `(undiscriminated)` to a
+passing line. Nothing is inferred: a check arc never recorded failing is
+undiscriminated, which is unknown rather than a claim that it cannot detect
+anything. The whole record is advisory — readiness, gate results, and exit
+codes ignore it.
 
 Executed gates capture combined stdout and stderr, retaining only the final
 4096 bytes. Failed-gate tails appear in `arc show` and `arc status`; successful

@@ -512,7 +512,71 @@ pub struct VerificationEntry {
     pub worktree_dirty_untracked: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false_ref")]
     pub tree_moved: bool,
+    /// The recorded failure this evidence answers, absent when the check was
+    /// never seen to fail before it passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub falsification: Option<Falsification>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Why a falsification reference cannot stand, phrased for whoever offered it.
+///
+/// A reference that names a pass, a different check, or a revision other than
+/// the one the referenced failure was recorded at asserts a discrimination
+/// that did not happen; admitting it would make the record weaker than no
+/// record, because it would read as established. `None` means it holds.
+///
+/// `prior` is the evidence recorded on this change before the evidence being
+/// judged, so a reference can only ever point backwards.
+pub fn falsification_mismatch(
+    prior: &[VerificationEntry],
+    gate: Option<&str>,
+    command: &str,
+    falsification: &Falsification,
+) -> Option<String> {
+    let Some(referenced) = prior
+        .iter()
+        .find(|entry| entry.event_id == falsification.event_id)
+    else {
+        return Some(format!(
+            "{} names no earlier verification on this change",
+            falsification.event_id
+        ));
+    };
+    if referenced.result != VerifyResult::Fail {
+        return Some(format!(
+            "{} recorded a pass; only an observed failure can be answered",
+            falsification.event_id
+        ));
+    }
+    // A gate keeps its identity when its command is edited, so a name match is
+    // enough; two ad hoc runs have no name and must agree on the command.
+    let same_check = matches!(
+        (gate, referenced.gate.as_deref()),
+        (Some(offered), Some(referenced)) if offered == referenced
+    ) || command == referenced.command;
+    if !same_check {
+        return Some(format!(
+            "{} recorded {}, not {}",
+            falsification.event_id,
+            check_label(referenced.gate.as_deref(), &referenced.command),
+            check_label(gate, command)
+        ));
+    }
+    if falsification.revision != referenced.revision {
+        return Some(format!(
+            "{} was recorded at {}, not at {}",
+            falsification.event_id, referenced.revision, falsification.revision
+        ));
+    }
+    None
+}
+
+fn check_label(gate: Option<&str>, command: &str) -> String {
+    match gate {
+        Some(gate) => format!("gate {gate:?}"),
+        None => format!("command {command:?}"),
+    }
 }
 
 impl VerificationEntry {
@@ -856,6 +920,23 @@ impl ChangeState {
         self.verifications
             .iter()
             .rfind(|v| v.gate.as_deref() == Some(gate) && v.revision == revision)
+    }
+
+    /// The latest passing evidence that showed this gate able to fail at this
+    /// revision.
+    ///
+    /// Falsification is a fact about the gate at a revision, not about one run
+    /// of it: once a check has been watched to fail and then pass against this
+    /// tree, running it again does not unlearn that. Reading only the newest
+    /// evidence would let any rerun — `verify --all`, and so every `done` —
+    /// silently retract the finding.
+    pub fn gate_falsification_at(&self, gate: &str, revision: &str) -> Option<&VerificationEntry> {
+        self.verifications.iter().rfind(|v| {
+            v.gate.as_deref() == Some(gate)
+                && v.revision == revision
+                && v.result == VerifyResult::Pass
+                && v.falsification.is_some()
+        })
     }
 
     pub fn resolve_finding_id(&self, needle: &str) -> Result<String> {
@@ -1645,8 +1726,22 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 worktree_dirty_tracked,
                 worktree_dirty_untracked,
                 tree_moved,
+                falsification,
                 ..
             } => {
+                if let Some(falsification) = falsification {
+                    if let Some(mismatch) = falsification_mismatch(
+                        &state.verifications,
+                        gate.as_deref(),
+                        command,
+                        falsification,
+                    ) {
+                        bail!(
+                            "verification {} claims falsification by {mismatch}",
+                            ev.event_id
+                        );
+                    }
+                }
                 if gate.is_some() && probe.is_some() {
                     bail!(
                         "verification {} cannot be both a gate and an acceptance probe",
@@ -1721,6 +1816,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     timed_out: *timed_out,
                     hostname: hostname.clone(),
                     runner: runner.clone(),
+                    falsification: falsification.clone(),
                     created_at: ev.created_at,
                 });
             }
@@ -2751,6 +2847,7 @@ mod tests {
                 probe: None,
                 runner: None,
                 note: None,
+                falsification: None,
                 tested_tree: Some("dirty-tree".into()),
                 worktree_dirty: Some(true),
                 worktree_dirty_tracked: None,

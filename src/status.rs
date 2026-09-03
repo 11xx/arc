@@ -1,6 +1,8 @@
 use crate::gates::GatesFile;
 use crate::gitio;
-use crate::model::{MessageSeverity, MessageType, ProbePhase, Verdict, VerifyResult};
+use crate::model::{
+    Falsification, MessageSeverity, MessageType, ProbePhase, Verdict, VerifyResult,
+};
 use crate::policy::PolicyFile;
 use crate::state::{self, ChangeState, ClaimIdentity, GitIdentity};
 use anyhow::Result;
@@ -9,7 +11,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/13";
+pub const STATUS_SCHEMA: &str = "arc-status/14";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// Two identities arc assumed cannot establish that two people acted. The
@@ -91,6 +93,22 @@ pub struct BlockerStatus {
     pub blockers_ready: Vec<DependencyChangeStatus>,
 }
 
+/// Whether a gate's passing evidence was ever shown capable of failing.
+///
+/// A pass alone cannot say. `Discriminating` means the same check was recorded
+/// failing at an earlier revision of this change, for a reason predicted
+/// before it ran, and this run answers that failure. `Undiscriminated` means
+/// no such failure was recorded — the usual case, and not a defect.
+///
+/// Advisory throughout: nothing here participates in readiness, gate results,
+/// or exit codes.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Discrimination {
+    Discriminating,
+    Undiscriminated,
+}
+
 #[derive(Debug, Serialize)]
 pub struct GateStatus {
     pub name: String,
@@ -134,6 +152,21 @@ pub struct GateStatus {
     pub output_tail: Option<String>,
     #[serde(skip_serializing_if = "is_false")]
     pub timed_out: bool,
+    /// Whether this gate was ever shown capable of failing at this revision.
+    /// Absent when the counted evidence is not a pass: discrimination is a
+    /// property of a pass, and a failure or a missing run has none to report.
+    /// Additive in `arc-status/14`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discrimination: Option<Discrimination>,
+    /// The failure that was answered, when one was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub falsification: Option<Falsification>,
+    /// The evidence carrying that reference, named only when it is not the
+    /// evidence that counts. A rerun at the same revision appends newer
+    /// passing evidence without a reference, and the gate stays
+    /// discriminating; the two ids then say which run proved what.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discrimination_event_id: Option<String>,
 }
 
 impl GateStatus {
@@ -946,6 +979,12 @@ fn build_report(
                 .as_deref()
                 .and_then(|head| state.gate_evidence_at(name, head));
             let result = evidence.map(|e| e.result);
+            // Discrimination is asked of the gate at this revision, not of the
+            // newest run, so a rerun that appends a plain pass cannot retract
+            // what an earlier run established against the same tree.
+            let counted_pass = evidence.filter(|e| e.result == crate::model::VerifyResult::Pass);
+            let discriminating =
+                counted_pass.and_then(|e| state.gate_falsification_at(name, &e.revision));
             GateStatus {
                 name: name.clone(),
                 command: gate.command.clone(),
@@ -992,6 +1031,14 @@ fn build_report(
                     .and_then(|e| e.output_tail.clone()),
                 timed_out: evidence
                     .is_some_and(|e| e.result == crate::model::VerifyResult::Fail && e.timed_out),
+                discrimination: counted_pass.map(|_| match discriminating {
+                    Some(_) => Discrimination::Discriminating,
+                    None => Discrimination::Undiscriminated,
+                }),
+                falsification: discriminating.and_then(|e| e.falsification.clone()),
+                discrimination_event_id: discriminating
+                    .map(|e| e.event_id.clone())
+                    .filter(|id| Some(id.as_str()) != counted_pass.map(|e| e.event_id.as_str())),
             }
         })
         .collect();

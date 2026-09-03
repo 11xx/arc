@@ -165,6 +165,8 @@ RUN A CHANGE
   arc snapshot                       Record the current head as a patchset.
   arc verify --gate <name>           Run a declared gate; record the evidence.
   arc verify --command <cmd>         Same, for an ad hoc probe.
+    --falsified-by <id> --predicted <why>
+                                     Name the failure this pass answers.
   arc done                           Snapshot, run every gate, print check state.
   arc review --verdict <v>           Record a verdict (+ --findings-json -).
     --provisional <why>              It gates, and owes a second judgment.
@@ -354,6 +356,11 @@ RULES THAT CHANGE WHAT YOU DO
     verdict, including a provisional approval and its recorded reason;
     `gates-green` checks every required gate at the current head; `blocked`
     and `brief-recorded` name the events that recorded those facts.
+  - A gate that passed is not evidence that it could have failed. Watch it
+    fail first, then record the pass with `--falsified-by <failing-event>
+    --predicted "<why it should fail>"`; the gate line then reads
+    `discriminating` instead of `undiscriminated`. Advisory: it changes no
+    result and no exit code, and arc infers it from nothing.
   - The journal lives outside the repo, so worktrees stay clean. Cross-session
     context goes there, never into tracked files.
   - arc holds no routing opinion. It records the --actor, --harness, and --model

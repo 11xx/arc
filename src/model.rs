@@ -655,6 +655,11 @@ pub enum Payload {
         /// Optional free-form note recorded alongside the evidence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        /// The failure this evidence answers. Absent means the check was never
+        /// recorded failing before it passed — which is the ordinary case, and
+        /// is unknown rather than a claim the check cannot discriminate.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        falsification: Option<Falsification>,
         /// The tree arc actually ran against, written into the object database
         /// and pinned by a ref, so a recorded tree is one that is still there.
         /// A revision alone describes a tree no checkout reproduces whenever
@@ -1366,6 +1371,31 @@ pub struct ProbeEvidenceRef {
     pub brief_event_id: String,
     pub name: String,
     pub phase: ProbePhase,
+}
+
+/// The observed failure that a passing verification answers.
+///
+/// A gate that passed is not evidence that the gate could have failed. A check
+/// watched to fail for a stated reason, then to pass once that reason was
+/// removed, discriminates; a check first run after the code it checks does
+/// not. In a record of passes alone the two are identical, and this reference
+/// is what separates them. It is advisory: no readiness decision, gate result,
+/// or exit code depends on its presence.
+///
+/// The reason is predicted, not observed. A reason read off the failure
+/// afterwards restates the output; one stated beforehand is a claim that could
+/// have turned out wrong.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Falsification {
+    /// A failing `VerificationRecorded` event on the same change, carrying the
+    /// same gate name or the same command.
+    pub event_id: String,
+    /// The revision that event was recorded at. Carried here so the reference
+    /// reads without resolving it, and checked against the event on the way in
+    /// so the two can never disagree.
+    pub revision: String,
+    /// Why the check was expected to fail, stated before it ran.
+    pub predicted_reason: String,
 }
 
 #[cfg(test)]
