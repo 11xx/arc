@@ -1519,8 +1519,9 @@ position ID, legacy timestamp, or item slug it answers) and, when supplied,
 the explicit stance.
 When `--stance` is supplied, arc writes `Position: <stance>` above the body
 and records it on the event; without the flag, a hand-written first body line
-can provide the stance. Consumed artifacts reject late appends; re-litigation
-starts a successor discussion. The Markdown is for people and block-scoped
+can provide the stance. Consumed artifacts reject late positions, questions,
+and answers; re-litigation starts a successor discussion, while `correct` and
+`retract` stay open on them. The Markdown is for people and block-scoped
 stance parsing; the event supplies activity, identity,
 resolver-participation, and reply edges. The file stays hand-writable, and the
 append is advisory and fail-open like every journal write.
@@ -1543,6 +1544,38 @@ round could not have read one another, so rounds express reply structure rather
 than turn-taking. Once resolved, the view also includes the outcome, optional
 decision artifact, and a resolver-participation flag that surfaces a resolver
 who also argued a side under the same harness-native session identity.
+
+An entry filed wrong is amended rather than rewritten. `journal correct
+<filename> --target <target> --field <field> --value <value> [--note <text>]`
+replaces one field of one entry, and `journal retract <filename> --target
+<target> --body-file <src>` withdraws one with a required reason. `--target`
+is `artifact`, a position ID, a question ID, or `answer:<question id>`; the
+fields a target carries are closed — `title` on the artifact, `stance`,
+`option`, `ref`, `actor`, and `model` on a position, `option`, `actor`, and
+`model` on an answer, `actor` and `model` on a question — so a correction
+naming a field its target lacks is refused rather than recorded where nothing
+will read it. Retraction takes a position or an answer; an artifact is
+withdrawn by consuming it and a question by answering it. Both append a
+`### Correction cor-<ulid>` or `### Retraction ret-<ulid>` block naming the
+target and the change, never rewriting an existing one, and both are accepted
+on a consumed artifact, which is closed to new work but not to being wrong.
+
+The effect lives in the derived views, and the latest correction of a given
+target and field wins in event order. `journal discussion` counts the
+corrected stance and branch, labels participants by the corrected model, and
+follows the corrected reply reference; `journal open` and `catchup` show a
+corrected title while the artifact keeps the heading it was filed with. A
+retracted position leaves the stance tally and the branches argued under a
+question, and the summary lists it under `retracted:` with its reason; a
+retracted answer leaves its question open, so `journal questions` lists it
+again and one further settlement is accepted. `journal doctor` reports an
+amendment naming an entry the artifact never recorded — it resolves to
+nothing and every view ignores it — and advises on two corrections of one
+field of one entry sharing a timestamp. Rows in the open queue carry
+`[amended ×N]` in text and `amendments: N` in JSON for the positions standing
+on a filed claim, so a claim amended three times reads differently from one
+filed once; a discussion is argued by positions rather than amended by them
+and carries no such count.
 
 The journal and the ledger bridge in three advisory ways, none of which can
 gate the authoritative ledger. `arc begin --from-journal <artifact>` opens a

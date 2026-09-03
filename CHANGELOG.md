@@ -12,6 +12,19 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `arc journal correct <file> --target <t> --field <f> --value <v>` and
+  `arc journal retract <file> --target <t> --body-file -` amend a recorded
+  entry without rewriting it. A wrong entry could only be answered by another
+  entry arguing with it, and a consumed artifact could not be corrected at
+  all; both operations stay open on one. The block stays where it was filed
+  and the effect lives in the derived views: the stance tally, the branches
+  argued under a question, and the participant identities read the corrected
+  value, `journal open` and `catchup` read the corrected title, a retracted
+  position leaves the tally, and a retracted answer reopens its question.
+  `journal doctor` reports an amendment naming an entry the artifact never
+  recorded. Open-queue rows carry `[amended ×N]` in text and `amendments: N`
+  in JSON for the positions standing on a filed claim.
+
 - `arc verify --falsified-by <event-id> --predicted <reason>` lets passing
   evidence name the failing run it answers, so a gate watched to fail and then
   fixed stops reading like one that has only ever passed. The reference must be
