@@ -1407,11 +1407,21 @@ Before starting an executor in a sandbox, run `arc config --check-writable`.
 It probes the ledger root, lock, event-path, and Git-ref writes without adding
 an event; `--json` emits `arc-writability/1` for automation and stops at the
 first blocked path. It also probes committing, in a throwaway repository so the
-target gains no commit, because a sandbox that cannot reach the signing agent
-otherwise discovers it only once a slice is ready to land. The probe follows
-the repository's resolved `commit.gpgsign` and carries its signing key, so it
-exercises the credential the real commit will use and ignores a global signing
-policy the repository overrides.
+target gains no commit, because a sandbox that cannot commit otherwise
+discovers it only once a slice is ready to land.
+
+Committing and signing are reported apart, and only the writability checks
+decide the exit code. The `commit` check makes an unsigned commit and answers
+writability alone. The `signing` check is advisory: it says `not required`
+where the repository's resolved `commit.gpgsign` is off, and otherwise carries
+the repository's signing key so it exercises the credential the real commit
+will use, ignoring a global signing policy the repository overrides. An
+unreachable credential prints as `warn: signing: ...` with gpg's own reason and
+leaves the exit code alone, because the process that makes the work need not be
+the one that signs it — but a project whose `commit.gpgsign` is on still needs
+signing working somewhere before its commits can land. In `--json` that row
+keeps `"ok": false` and carries `"advisory": true`, so a consumer can tell a
+warning from a blocked path.
 
 Change derivation: `begin` targets the branch checked out in the
 **primary worktree** (the main checkout — normally master/main), not
@@ -1898,6 +1908,14 @@ appended. Promotion adds a carrier, never a new author. A spool file that
 cannot be parsed is reported and left in place, because it is the only copy of
 that write. `promoted_by` is an optional `journal-events/1` field, so an
 events file written before it stays valid.
+
+The outbox belongs to the checkout that holds it, and a change's worktree is
+its own checkout, so a write an executor spools there disappears when the
+worktree is removed. `arc snapshot` and `arc integrate` therefore promote the
+spool in the change's recorded worktree before the merge that removes it,
+printing what they filed; a spool neither can file is named, left intact, and
+blocks neither the snapshot nor the merge. `arc catchup` lists every spool
+still waiting in an open change's worktree with its count.
 
 `arc doctor [--json]` performs the same read-only split for the authoritative
 change ledger. Malformed events, store configuration, IDs, and missing open

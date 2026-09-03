@@ -291,6 +291,13 @@ pub fn snapshot(
     let _transition = store.lock_transition(&change_id)?;
     let events = store.load_events(&change_id)?;
     let st = state::reduce(&events)?;
+    // Snapshotting is the lead's first read of the change's worktree, and an
+    // executor confined to that worktree spools its journal writes there.
+    // Filing them here puts them in the journal while the worktree still
+    // exists to hold them.
+    if let Some(worktree) = st.worktree.as_deref() {
+        crate::journal::promote_worktree_spool(ctx, std::path::Path::new(worktree));
+    }
     let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
     let merge_base = gitio::branch_head(&ctx.cwd, &st.target_branch)
         .ok()

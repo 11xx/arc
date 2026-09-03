@@ -136,29 +136,37 @@ fn config_check_writable_probes_commit_without_touching_the_repository() {
     );
 }
 
+/// A project that signs nothing has nothing to report about signing, and
+/// says that rather than claiming a capability it never exercised.
 #[test]
-fn config_check_writable_commit_probe_follows_repository_signing_policy() {
+fn config_check_writable_reports_signing_as_not_required_when_it_is_off() {
     let repo = Repo::new();
-    // Unset: the probe proves committing works and says signing was not tried.
     let unsigned = stdout(
         repo.arc(&repo.root)
             .args(["config", "--check-writable", "--json"]),
     );
     let value: serde_json::Value = serde_json::from_str(&unsigned).unwrap();
-    let commit = value["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|check| check["name"] == "commit")
-        .expect("commit check present");
-    assert_eq!(commit["ok"], true);
+    assert_eq!(named_check(&value, "commit")["ok"], true);
+    let signing = named_check(&value, "signing");
+    assert_eq!(signing["ok"], true);
+    assert_eq!(signing["advisory"], true);
     assert!(
-        commit["detail"].as_str().unwrap().contains("unsigned"),
-        "detail should say signing was not exercised: {commit:?}"
+        signing["detail"].as_str().unwrap().contains("not required"),
+        "{signing:?}"
     );
+    repo.arc(&repo.root)
+        .args(["config", "--check-writable"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ok: signing: not required"));
+}
 
-    // Required but unsatisfiable: an unusable key must fail the check and the
-    // detail must carry gpg's own reason, not just the outer context.
+/// The exit code answers what this process can write. Signing is somebody
+/// else's to supply when the work is landed, so an unreachable credential
+/// warns with gpg's own reason and leaves the probe's verdict alone.
+#[test]
+fn config_check_writable_warns_about_unreachable_signing_without_failing() {
+    let repo = Repo::new();
     git_out(&repo.root, &["config", "commit.gpgsign", "true"]);
     git_out(
         &repo.root,
@@ -167,9 +175,28 @@ fn config_check_writable_commit_probe_follows_repository_signing_policy() {
     repo.arc(&repo.root)
         .args(["config", "--check-writable"])
         .assert()
-        .failure()
-        .stdout(predicates::str::contains("fail: commit"))
-        .stdout(predicates::str::contains("gpg"));
+        .success()
+        .stdout(predicates::str::contains("ok: commit"))
+        .stdout(predicates::str::contains("warn: signing"))
+        .stdout(predicates::str::contains(
+            "the signature could not be produced",
+        ))
+        .stdout(predicates::str::contains("gpg"))
+        .stdout(predicates::str::contains("fail:").not());
+
+    let blocked: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&repo.root).args([
+        "config",
+        "--check-writable",
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(named_check(&blocked, "commit")["ok"], true);
+    let signing = named_check(&blocked, "signing");
+    assert_eq!(signing["ok"], false);
+    assert_eq!(
+        signing["advisory"], true,
+        "a consumer must be able to tell a warning from a blocked path: {signing:?}"
+    );
 }
 
 /// Git resolves every boolean spelling, so reading the raw string would report
@@ -186,8 +213,8 @@ fn config_check_writable_honours_every_git_boolean_spelling_for_signing() {
         repo.arc(&repo.root)
             .args(["config", "--check-writable"])
             .assert()
-            .failure()
-            .stdout(predicates::str::contains("fail: commit"))
+            .success()
+            .stdout(predicates::str::contains("warn: signing"))
             .stdout(predicates::str::contains("gpg"));
     }
 }
@@ -209,18 +236,23 @@ fn config_check_writable_probe_ignores_global_signing_the_repository_overrides()
             .args(["config", "--check-writable", "--json"]),
     );
     let value: serde_json::Value = serde_json::from_str(&out).unwrap();
-    let commit = value["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|check| check["name"] == "commit")
-        .expect("commit check present");
+    let commit = named_check(&value, "commit");
     assert_eq!(
         commit["ok"], true,
         "probe should follow the repository, not the global config: {commit:?}"
     );
+    let signing = named_check(&value, "signing");
     assert!(
-        commit["detail"].as_str().unwrap().contains("unsigned"),
-        "probe should not have exercised the global signing key: {commit:?}"
+        signing["detail"].as_str().unwrap().contains("not required"),
+        "probe should not have exercised the global signing key: {signing:?}"
     );
+}
+
+fn named_check<'a>(report: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    report["checks"]
+        .as_array()
+        .expect("checks array")
+        .iter()
+        .find(|check| check["name"] == name)
+        .unwrap_or_else(|| panic!("{name} check present in {report}"))
 }

@@ -1222,11 +1222,18 @@ pub(crate) struct SpooledWrite {
     body: Option<String>,
 }
 
+/// The outbox a checkout rooted at `toplevel` holds. A linked worktree is its
+/// own toplevel, so each change's spool lives inside the worktree that made it
+/// and disappears with that worktree.
+fn outbox_in(toplevel: &Path) -> PathBuf {
+    toplevel.join(".arc").join(OUTBOX_DIR)
+}
+
 /// The repository-local outbox, beside the ledger's other repository state.
 fn outbox_dir(cwd: &Path) -> Result<PathBuf> {
     let toplevel = crate::gitio::toplevel(cwd)
         .context("cannot spool a journal write outside a Git repository")?;
-    Ok(toplevel.join(".arc").join(OUTBOX_DIR))
+    Ok(outbox_in(&toplevel))
 }
 
 /// Create the outbox, ignored by the repository that holds it. A spooled write
@@ -1351,13 +1358,24 @@ fn spool(ctx: &Ctx, promote: bool) -> Result<i32> {
         return Ok(0);
     }
 
+    promote_outbox(ctx, &paths)?;
+    Ok(0)
+}
+
+/// File everything waiting in one outbox, saying what moved and what stayed.
+///
+/// The spool file is the only copy of a write until its event is appended, so
+/// a file that cannot be read or filed is left where it is and reported. The
+/// caller supplies the paths, so the same promotion serves an outbox in this
+/// checkout and one in a change's worktree.
+fn promote_outbox(ctx: &Ctx, paths: &[PathBuf]) -> Result<()> {
     let journal = resolve_dir(&ctx.cwd)?;
     std::fs::create_dir_all(&journal)
         .with_context(|| format!("cannot create archive dir {}", journal.display()))?;
     let promoter = promoting_actor(ctx);
     let mut promoted = 0usize;
     let mut kept = 0usize;
-    for path in &paths {
+    for path in paths {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         // A file arc cannot read is reported and left where it is: deleting a
         // write nobody could file would destroy the only copy of it.
@@ -1385,7 +1403,38 @@ fn spool(ctx: &Ctx, promote: bool) -> Result<i32> {
         }
     }
     println!("promoted {promoted}, kept {kept}");
-    Ok(0)
+    Ok(())
+}
+
+/// File any journal writes an executor spooled in `worktree`.
+///
+/// An executor that cannot reach the journal spools into the outbox of the
+/// worktree it is confined to, and that outbox is deleted with the worktree.
+/// Promotion therefore belongs to every command that reads a change's
+/// worktree, and it is advisory: a spool that cannot be filed from here is
+/// named and left intact, never a reason to stop the command that found it.
+pub fn promote_worktree_spool(ctx: &Ctx, worktree: &Path) {
+    let Some((dir, paths)) = waiting_spool(worktree) else {
+        return;
+    };
+    println!("spool: {} write(s)  {}", paths.len(), dir.display());
+    if let Err(error) = promote_outbox(ctx, &paths) {
+        eprintln!(
+            "warning: spooled journal writes in {} were left unfiled ({error:#}); file them with \
+             `arc journal spool --promote` from {}",
+            dir.display(),
+            worktree.display()
+        );
+    }
+}
+
+/// The outbox of `worktree` and the writes waiting in it, or `None` when none
+/// are. A pure read: reporting a spool must not create the directory that
+/// would hold one, and a pruned worktree simply has nothing waiting.
+pub fn waiting_spool(worktree: &Path) -> Option<(PathBuf, Vec<PathBuf>)> {
+    let dir = outbox_in(worktree);
+    let paths = spooled_paths(&dir).ok()?;
+    (!paths.is_empty()).then_some((dir, paths))
 }
 
 fn read_spooled(path: &Path) -> Result<SpooledWrite> {

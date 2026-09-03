@@ -464,8 +464,13 @@ RULES THAT CHANGE WHAT YOU DO
   - Give every concurrent writer its own branch and worktree. Integration and
     shared refs belong to the lead alone.
   - An executor's first act is `arc config --check-writable`; a nonzero exit
-    means stop, not work around. It releases its claim whenever it stops, for
-    any reason, so a live claim always means live work.
+    means stop, not work around. Only writability decides that exit: the
+    `commit` line says whether a commit can be made at all, while the
+    `signing` line reports whether a signed one can be and never gates the
+    exit, because whoever lands the work signs it. A project whose
+    `commit.gpgsign` is on still needs signing working somewhere before its
+    commits can land. It releases its claim whenever it stops, for any
+    reason, so a live claim always means live work.
   - An executor that hangs never reaches its own release. Before leaving a
     delegated run unattended, arm `arc watch <change> --until stalled`; silence
     is unknown, not healthy. `arc rescue <change> --take` recovers it.
@@ -512,6 +517,11 @@ RULES THAT CHANGE WHAT YOU DO
     the live directory, so archiving the first never frees its name for a
     second that would then collide with it. The suffix names no part of the
     artifact: its timestamp, topic and kind read exactly as written.
+  - A spool made inside a change's worktree is deleted with that worktree, so
+    `snapshot` and `integrate` file it from the change's recorded worktree
+    first and print what they promoted; one they cannot file is named and left
+    intact rather than blocking the command. `arc catchup` lists every spool
+    still waiting in an open change's worktree.
   - `arc run dispatch` names exactly one subject: `--change <id>`, `--fork
     <slug>`, or `--range <base>..<head>`. A round is its ordinal within that
     subject, so the loop of bounded rounds records on a fork or a bare commit

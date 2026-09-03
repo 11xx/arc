@@ -1785,6 +1785,13 @@ fn integrate_one(
         println!("{}: {}", st.change_id, change_status(&st));
         return Ok(0);
     }
+    // Integration is the last command that reads the change's worktree, and
+    // `--cleanup` removes it. Whatever an executor spooled there is filed
+    // before anything can delete the only copy, and before readiness can turn
+    // the integration back: the writes belong in the journal either way.
+    if let Some(worktree) = st.worktree.as_deref() {
+        crate::journal::promote_worktree_spool(ctx, Path::new(worktree));
+    }
     let report = ctx.report(&store, &st)?;
     if let Some(claim) = &st.claim {
         let timing = state::claim_timing_at(claim, chrono::Utc::now());
