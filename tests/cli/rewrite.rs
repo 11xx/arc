@@ -448,6 +448,10 @@ fn a_dry_run_moves_and_records_nothing() {
     assert!(out.contains("nothing was moved or recorded"), "{out}");
     assert!(out.contains(&head), "the map names the head: {out}");
     assert_eq!(repo.head(&repo.root), head);
+    assert!(
+        !intent_path(&repo).exists(),
+        "a dry run commits to nothing, so there is nothing to finish"
+    );
     repo.arc(&repo.root)
         .args(["history", "resolve", &head])
         .assert()
@@ -789,5 +793,389 @@ fn an_annotated_tag_is_re_pointed_on_request() {
         fsck.status.success(),
         "git fsck rejected the tag object: {}",
         String::from_utf8_lossy(&fsck.stderr)
+    );
+}
+
+/// Every repository-scoped event file, oldest first. A repository that has
+/// recorded none has no directory, which is an answer rather than an error.
+fn repository_events(repo: &Repo) -> Vec<PathBuf> {
+    let dir = repo.root.join(".git/arc/repository/events");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Two recorded rewrites that disagree about one revision leave the map
+/// unreadable, and an unreadable map is not an empty one.
+///
+/// Answering as though no rewrite had been recorded is the worst available
+/// answer: every projection reverts to pre-rewrite revisions and presents
+/// commits this repository does not hold as the current state, with nothing
+/// on screen to say the map was even consulted. So a projection refuses, and
+/// says where the contradiction is reported.
+#[test]
+fn a_contradictory_rewrite_record_refuses_a_projection_rather_than_reverting_it() {
+    let repo = Repo::new();
+    let (change, worktree, recorded) = change_with_patchset(&repo, "contested");
+    repo.commit(&worktree, "b.txt", "b\n", "test: a successor");
+    let successor = repo.head(&worktree);
+
+    let map = repo.root.join("commit-map");
+    fs::write(&map, format!("{recorded} {successor}\n")).unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            map.to_str().unwrap(),
+            "--reason",
+            "moved the snapshot",
+        ])
+        .assert()
+        .success();
+    let resolved = stdout(repo.arc(&repo.root).args(["status", &change]));
+    assert!(resolved.contains(&successor[..8]), "{resolved}");
+
+    // A second event naming a different successor for the same revision. The
+    // write paths refuse this pair, so it arrives the only way it can: as an
+    // event file that did not come through them.
+    let recorded_event = repository_events(&repo).pop().unwrap();
+    let body = fs::read_to_string(&recorded_event).unwrap();
+    let other = repo.head(&repo.root);
+    assert_ne!(other, successor);
+    let events = recorded_event.parent().unwrap();
+    fs::write(
+        events.join("01ZZZZZZZZZZZZZZZZZZZZZZZZ.json"),
+        body.replace(&successor, &other).replace(
+            recorded_event.file_stem().unwrap().to_str().unwrap(),
+            "01ZZZZZZZZZZZZZZZZZZZZZZZZ",
+        ),
+    )
+    .unwrap();
+
+    let refused = repo
+        .arc(&repo.root)
+        .args(["status", &change])
+        .output()
+        .unwrap();
+    assert!(
+        !refused.status.success(),
+        "a projection built on an unreadable map must refuse"
+    );
+    let complaint = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        complaint.contains("arc doctor"),
+        "the refusal points at where the contradiction is reported: {complaint}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&refused.stdout).contains(&recorded[..8]),
+        "a refused projection reports no revision at all, least of all the pre-rewrite one"
+    );
+
+    let doctor = stdout(repo.arc(&repo.root).args(["doctor"]));
+    assert!(doctor.contains("invalid-rewrite-mapping"), "{doctor}");
+}
+
+/// An abbreviation two recorded revisions answer names neither.
+///
+/// Resolution answers what a recorded revision is called here, so it has to
+/// distinguish three things: a revision no rewrite touched, one a rewrite
+/// moved, and a query the map cannot resolve. Picking whichever recorded
+/// revision came first would answer the third as the second and send a reader
+/// to somebody else's commit.
+#[test]
+fn an_ambiguous_abbreviation_is_refused_rather_than_resolved() {
+    let repo = Repo::new();
+    let base = repo.head(&repo.root);
+    repo.commit(&repo.root, "a.txt", "a\n", "test: one");
+    let first = repo.head(&repo.root);
+    repo.commit(&repo.root, "b.txt", "b\n", "test: two");
+    let second = repo.head(&repo.root);
+
+    // Two recorded revisions sharing a prefix, which is what makes an
+    // abbreviation of that prefix ambiguous.
+    let shared = format!("{}0", &base[..7]);
+    let map = repo.root.join("commit-map");
+    fs::write(
+        &map,
+        format!("{shared}1 {first}\n{shared}2 {second}\n{base} {first}\n"),
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            map.to_str().unwrap(),
+            "--reason",
+            "two commits sharing a prefix",
+        ])
+        .assert()
+        .success();
+
+    // The full revision resolves; the shared prefix does not.
+    let resolved = stdout(repo.arc(&repo.root).args(["history", "resolve", &base]));
+    assert!(resolved.contains(&first[..8]), "{resolved}");
+    let refused = repo
+        .arc(&repo.root)
+        .args(["history", "resolve", &shared])
+        .output()
+        .unwrap();
+    assert!(
+        !refused.status.success(),
+        "an ambiguous abbreviation is not a resolution"
+    );
+    let complaint = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        complaint.contains(&format!("{shared}1")) && complaint.contains(&format!("{shared}2")),
+        "the refusal names the candidates: {complaint}"
+    );
+
+    // Below the length at which a prefix names a commit it is not an
+    // abbreviation of one, so it resolves to nothing rather than to a refusal.
+    repo.arc(&repo.root)
+        .args(["history", "resolve", &base[..4]])
+        .assert()
+        .code(2);
+}
+
+/// Where a rewrite writes down what it is about to do.
+fn intent_path(repo: &Repo) -> PathBuf {
+    repo.root.join(".git/arc/repository/rewrite-intent.json")
+}
+
+/// A history whose oldest commit is pinned by a retention ref and named by a
+/// tag, so a rewrite of it has refs of three kinds to move at once.
+fn repo_with_pinned_refs(repo: &Repo) -> String {
+    let pinned = repo.head(&repo.root);
+    repo.commit(&repo.root, "one.txt", "one\n", "feat: one");
+    repo.commit(&repo.root, "two.txt", "two\n", "feat: two");
+    git(
+        &repo.root,
+        &["update-ref", "refs/arc/keep/probe/ps-01", &pinned],
+    );
+    git(&repo.root, &["tag", "pinned", &pinned]);
+    pinned
+}
+
+/// A rewrite interrupted before it moved anything leaves every ref where it
+/// was and its map on disk, and the next run finishes it rather than starting
+/// over.
+///
+/// Starting over is the defect: the commits would be signed again, gpg signs
+/// differently every time, and the map would then claim a second successor
+/// for every commit in range.
+#[test]
+fn a_rewrite_interrupted_before_its_refs_move_is_finished_by_the_next_run() {
+    let repo = Repo::new();
+    let Some(key) = signing_key(&repo) else {
+        return;
+    };
+    let pinned = repo_with_pinned_refs(&repo);
+    let before = git_out(&repo.root, &["log", "--format=%H", "master"]);
+
+    let interrupted = arc_signing(&repo, &key, &repo.root)
+        .args(["rewrite", "sign", "--key", &key.fingerprint])
+        .env("ARC_REWRITE_INTERRUPT", "intent")
+        .output()
+        .unwrap();
+    assert!(!interrupted.status.success());
+    assert_eq!(
+        before,
+        git_out(&repo.root, &["log", "--format=%H", "master"]),
+        "an interruption before the transaction moves no ref"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "refs/arc/keep/probe/ps-01"]),
+        pinned,
+        "nor any of the refs that move with it"
+    );
+    assert!(
+        intent_path(&repo).exists(),
+        "the map is on disk to be finished"
+    );
+    // Nothing is recorded yet, so the rewritten commit still resolves to
+    // itself.
+    repo.arc(&repo.root)
+        .args(["history", "resolve", &pinned])
+        .assert()
+        .code(2);
+
+    let finished = stdout(arc_signing(&repo, &key, &repo.root).args([
+        "rewrite",
+        "sign",
+        "--key",
+        &key.fingerprint,
+    ]));
+    assert!(
+        finished.contains("finishing the rewrite of master"),
+        "{finished}"
+    );
+    assert_resumed(&repo, &pinned, &key);
+}
+
+/// A rewrite interrupted after its refs moved and before its map was
+/// recorded leaves the refs where the rewrite put them, and the next run
+/// records the map for those same commits.
+#[test]
+fn a_rewrite_interrupted_before_its_map_is_recorded_records_it_once() {
+    let repo = Repo::new();
+    let Some(key) = signing_key(&repo) else {
+        return;
+    };
+    let pinned = repo_with_pinned_refs(&repo);
+    let before = git_out(&repo.root, &["log", "--format=%H", "master"]);
+
+    let interrupted = arc_signing(&repo, &key, &repo.root)
+        .args(["rewrite", "sign", "--key", &key.fingerprint])
+        .env("ARC_REWRITE_INTERRUPT", "refs")
+        .output()
+        .unwrap();
+    assert!(!interrupted.status.success());
+    let after = git_out(&repo.root, &["log", "--format=%H", "master"]);
+    assert_ne!(
+        before, after,
+        "the transaction committed before the interruption"
+    );
+    // Every ref moved together or none did, so the refs arc keeps are on the
+    // same history as the branch.
+    assert_ne!(
+        git_out(&repo.root, &["rev-parse", "refs/arc/keep/probe/ps-01"]),
+        pinned
+    );
+    assert!(intent_path(&repo).exists());
+    // The refs moved and the map did not, which is the window in which the
+    // ledger and Git disagree.
+    repo.arc(&repo.root)
+        .args(["history", "resolve", &pinned])
+        .assert()
+        .code(2);
+
+    let finished = stdout(arc_signing(&repo, &key, &repo.root).args([
+        "rewrite",
+        "sign",
+        "--key",
+        &key.fingerprint,
+    ]));
+    assert!(
+        finished.contains("finishing the rewrite of master"),
+        "{finished}"
+    );
+    assert_eq!(
+        after,
+        git_out(&repo.root, &["log", "--format=%H", "master"]),
+        "finishing the recording recreates no commit"
+    );
+    assert_resumed(&repo, &pinned, &key);
+}
+
+/// What a finished rewrite must look like however far the interrupted run
+/// got: one recorded map, one successor per rewritten commit, every ref on
+/// the rewritten history, and the whole history signed.
+fn assert_resumed(repo: &Repo, pinned: &str, key: &Key) {
+    assert!(
+        !intent_path(repo).exists(),
+        "a finished rewrite keeps no intent"
+    );
+    let events = repository_events(repo);
+    assert_eq!(
+        events.len(),
+        1,
+        "a rewrite finished in two runs is one recorded rewrite, not two"
+    );
+    let mapping = fs::read_to_string(&events[0]).unwrap();
+    assert_eq!(
+        mapping.matches(pinned).count(),
+        1,
+        "the recorded map names one successor for the rewritten commit: {mapping}"
+    );
+
+    let resolved = stdout(repo.arc(&repo.root).args(["history", "resolve", pinned]));
+    let successor = resolved.split_whitespace().next_back().unwrap().to_string();
+    assert_ne!(successor, pinned);
+    // Every ref that named the rewritten commit names its successor, and the
+    // successor is what the whole history is built on.
+    for name in ["refs/arc/keep/probe/ps-01", "refs/tags/pinned"] {
+        assert_eq!(
+            git_out(&repo.root, &["rev-parse", name]),
+            successor,
+            "{name} was left on the replaced line"
+        );
+    }
+    assert!(git_out(&repo.root, &["log", "--format=%H", "master"]).contains(&successor));
+    let signatures = git_signing(&repo.root, key, &["log", "--format=%G? %GK", "master"]);
+    for line in signatures.lines() {
+        let (verification, signer) = line.split_once(' ').unwrap_or((line, ""));
+        assert_eq!(
+            verification, "G",
+            "a finished rewrite leaves the whole history signed: {signatures}"
+        );
+        assert!(key.fingerprint.ends_with(signer), "{signatures}");
+    }
+    repo.arc(&repo.root).args(["doctor"]).assert().success();
+}
+
+/// A ref an unfinished rewrite is holding, moved by something else in the
+/// meantime, stops the rewrite rather than being overwritten.
+///
+/// The intent says where each ref was and where it is going. A third value
+/// means somebody decided where that ref points, and choosing between their
+/// decision and the rewrite's is not arc's to make — so it says which ref and
+/// leaves everything where it is.
+#[test]
+fn a_ref_moved_out_from_under_an_unfinished_rewrite_is_refused() {
+    let repo = Repo::new();
+    let Some(key) = signing_key(&repo) else {
+        return;
+    };
+    let pinned = repo_with_pinned_refs(&repo);
+    let before = git_out(&repo.root, &["log", "--format=%H", "master"]);
+
+    arc_signing(&repo, &key, &repo.root)
+        .args(["rewrite", "sign", "--key", &key.fingerprint])
+        .env("ARC_REWRITE_INTERRUPT", "intent")
+        .output()
+        .unwrap();
+    let elsewhere = repo.head(&repo.root);
+    git(
+        &repo.root,
+        &["update-ref", "refs/arc/keep/probe/ps-01", &elsewhere],
+    );
+
+    let refused = arc_signing(&repo, &key, &repo.root)
+        .args(["rewrite", "sign", "--key", &key.fingerprint])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    let complaint = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        complaint.contains("refs/arc/keep/probe/ps-01") && complaint.contains(&elsewhere[..8]),
+        "the refusal names the ref and what it holds: {complaint}"
+    );
+    assert_eq!(
+        before,
+        git_out(&repo.root, &["log", "--format=%H", "master"]),
+        "a refused transaction moves nothing"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "refs/tags/pinned"]),
+        pinned
+    );
+    assert!(
+        intent_path(&repo).exists(),
+        "the rewrite is still there to be finished once the ref is settled"
+    );
+    assert!(
+        repository_events(&repo).is_empty(),
+        "and nothing is recorded"
     );
 }

@@ -22,6 +22,32 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `reviewer-attribution-unknown` advisory reports. `arc status --json` is
   `arc-status/17`: `review_map[].attribution_unknown` carries the wider
   meaning.
+### Fixed
+
+- `arc rewrite sign` moves every ref in one Git transaction, the branch
+  included, so a rewrite leaves the branch and arc's evidence refs on one
+  history or leaves them all alone. It writes the computed map and the ref
+  moves to `repository/rewrite-intent.json` before applying any of it, records
+  the mapping event once the transaction has committed, and removes the intent
+  file once it has — so an interrupted rewrite is finished by running it again
+  rather than recreated, which would sign the same commits afresh and record a
+  second successor for each. A ref moved by something else in the meantime
+  stops it, named; `--dry-run` writes no intent.
+
+- Recorded rewrites that contradict each other make the map unreadable, and
+  every projection built on one refuses instead of answering as though no
+  rewrite had been recorded — which reported every revision at its pre-rewrite
+  value with nothing to say the map had been consulted. `arc doctor` reports
+  the contradiction as `invalid-rewrite-mapping`.
+
+- A recorded revision resolves on an exact match, or on an abbreviation of
+  seven hex digits or more that exactly one recorded revision answers; an
+  ambiguous abbreviation is refused naming the candidates rather than resolved
+  to whichever came first.
+
+- A commit is recreated from its own header bytes, so a header order other
+  than the common one, and an identity line with whitespace of its own, survive
+  a rewrite that claims only to have re-signed it.
 
 ## [2026.9.3] - 2026-09-03
 

@@ -196,9 +196,18 @@ fn inspect_dangling_revisions(
     // Every revision that has to resolve, and every successor a rewrite claims
     // for one, in a single batch. A ledger of any age holds thousands, and a
     // doctor that costs a minute stops being run.
+    // A revision the map cannot follow forward is reported below on its own
+    // terms; here it stands for itself, so the batch still asks Git about it.
     let successors: BTreeMap<&String, String> = wanted
         .keys()
-        .map(|revision| (revision, rewrites.current(revision)))
+        .map(|revision| {
+            (
+                revision,
+                rewrites
+                    .current(revision)
+                    .unwrap_or_else(|_| revision.clone()),
+            )
+        })
         .collect();
     let mut queries: BTreeSet<&str> = wanted.keys().map(String::as_str).collect();
     queries.extend(successors.values().map(String::as_str));
@@ -215,7 +224,14 @@ fn inspect_dangling_revisions(
         // still says what it said, and the reader can follow it forward — so
         // long as what it leads to is here.
         match rewrites.fate(revision) {
-            Some(crate::rewrite::Fate::Rewritten(successor)) => {
+            // A map that holds this revision's successor and cannot say which
+            // it is answers nothing about it, and `invalid-rewrite-mapping` is
+            // where the map itself is reported.
+            Err(error) => problems.push(Finding {
+                code: "invalid-rewrite-mapping",
+                detail: format!("{short} cannot be followed forward: {error}: {referents}"),
+            }),
+            Ok(Some(crate::rewrite::Fate::Rewritten(successor))) => {
                 let short_successor = &successor[..successor.len().min(8)];
                 if missing.contains(&successor) {
                     problems.push(Finding {
@@ -232,11 +248,11 @@ fn inspect_dangling_revisions(
                     });
                 }
             }
-            Some(crate::rewrite::Fate::Dropped) => advice.push(Finding {
+            Ok(Some(crate::rewrite::Fate::Dropped)) => advice.push(Finding {
                 code: "revision-dropped",
                 detail: format!("{short} was dropped by a recorded rewrite: {referents}"),
             }),
-            None => advice.push(Finding {
+            Ok(None) => advice.push(Finding {
                 code: "dangling-revision",
                 detail: format!(
                     "{short} is recorded but no longer in this repository: {referents}"
@@ -661,6 +677,19 @@ fn inspect_repository_events(store: &Store, problems: &mut Vec<Finding>) {
                 detail: format!("{event_id} contains a different event_id"),
             });
         }
+    }
+    // Two events, each a valid mapping on its own, can still claim different
+    // successors for one revision. No per-event check sees that, and every
+    // projection refuses until it is resolved, so this is the report the
+    // refusal sends the reader to.
+    if let Err(error) = store
+        .load_repository_events()
+        .and_then(|events| crate::rewrite::RewriteMap::from_events(events.iter()))
+    {
+        problems.push(Finding {
+            code: "invalid-rewrite-mapping",
+            detail: error.to_string(),
+        });
     }
 }
 

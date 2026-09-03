@@ -45,6 +45,27 @@ rebuild because a parent is neither in the map nor a commit here. It moves the
 branch, every ref under `refs/arc/` that pins evidence, and the local branches
 and tags whose tips are rewritten commits.
 
+Those refs move in one Git transaction, so either all of them land on the
+rewritten history or none of them does. A repository whose branch sits on one
+history and whose evidence refs sit on another cannot say which of them was
+meant.
+
+The rewrite is also finishable. Before anything becomes visible, the computed
+map and every ref move go into `repository/rewrite-intent.json`, beside the
+events; the mapping event is recorded once the transaction has committed, and
+the intent file is removed once it is. So an interruption leaves the commits
+already written, the refs at one of two known values, and the map still to be
+recorded — and the next `arc rewrite sign` finishes exactly what remains
+rather than starting over. Starting over is what has to be avoided: recreating
+the commits signs them afresh, gpg signs differently every time, and the map
+would then claim a second successor for every commit already moved onto the
+first. A `--dry-run` commits to nothing and writes no intent.
+
+A ref that holds neither the value the rewrite read nor the value it writes
+was moved by something else, and the rewrite says which ref and stops rather
+than overwriting somebody's decision. Removing the intent file abandons the
+unfinished rewrite; the commits it wrote are unreferenced and Git prunes them.
+
 An annotated tag names its commit through a tag object of its own, so moving
 the ref is not enough and re-pointing it means writing a new tag object —
 which is a decision about a release rather than a consequence of re-signing a
@@ -79,9 +100,12 @@ one arc computed. arc refuses a rewrite map claiming a revision survives as a
 commit this repository does not hold. A map from somewhere else, or one naming
 an object that is not a commit, is refused rather than recorded as fact.
 
-Revisions match by prefix in either direction, so a map may abbreviate what
-the ledger records in full and a caller may abbreviate what the map records;
-an abbreviation matching more than one recorded revision names none of them.
+A query naming a recorded revision exactly resolves to it. Failing that it may
+abbreviate one, or be abbreviated by one — a map may abbreviate what the ledger
+records in full, and a caller may abbreviate what the map records — from seven
+hex digits, the length at which a prefix names a commit. An abbreviation two
+recorded revisions answer is refused naming both, rather than resolved to
+whichever came first or reported as a revision nothing rewrote.
 
 Nothing already written changes. An old event keeps saying exactly what it
 said, and every derived reading answers in the revisions this repository holds:
@@ -108,6 +132,14 @@ at all; a revision mapped to itself; anything that is not a revision. A
 mapping that reached the ledger another way is skipped by readers rather than
 making the whole map unreadable, and `arc doctor` reports it as
 `invalid-rewrite-mapping`.
+
+Two events that are each valid alone can still claim different successors for
+one revision, which no per-event check sees. That map cannot be read, and an
+unreadable map is not an empty one: answering as though no rewrite had been
+recorded would report every revision at its pre-rewrite value, naming commits
+this repository does not hold, with nothing on screen to say the map had been
+consulted. So every projection built on one refuses and points at `arc
+doctor`, which reports the contradiction as `invalid-rewrite-mapping`.
 
 Approval does not survive translation, and should not: a verdict binds to an
 exact patchset head, and only a content comparison could say whether a

@@ -318,12 +318,33 @@ impl CommitStamp {
     }
 }
 
+/// One commit header as the object spells it: the field name, and the whole
+/// block it occupies — its `field value` line plus each continuation line
+/// indented by one space, newline-separated and without a trailing newline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawHeader {
+    pub field: String,
+    pub block: String,
+}
+
+/// The header fields this module reads into named parts. Everything else is
+/// carried and never inspected.
+const INTERPRETED_HEADERS: [&str; 5] = ["tree", "parent", "author", "committer", "encoding"];
+
 /// A commit object as the database holds it: everything a rewrite has to
 /// carry forward unchanged.
 ///
 /// The message is bytes. A commit message is not required to be UTF-8 — that
 /// is what the `encoding` header is for — and a rewrite that decoded and
 /// re-encoded one would change the object it claims to have only re-signed.
+///
+/// The headers are the object's own lines, in the object's own order, and they
+/// are what a recreation writes back. The named fields beside them are the
+/// same information parsed, because `commit-tree` takes the tree, the parents
+/// and the identity stamps as arguments and environment rather than as text.
+/// Two representations of one thing is the price of not being the only writer;
+/// the verbatim one is authoritative, and a commit whose parsed form does not
+/// spell its headers back exactly is recreated from the headers.
 #[derive(Debug, Clone)]
 pub struct RawCommit {
     pub tree: String,
@@ -331,32 +352,56 @@ pub struct RawCommit {
     pub author: CommitStamp,
     pub committer: CommitStamp,
     pub encoding: Option<String>,
-    /// Every header this module does not interpret, as the raw block it
-    /// occupies: its `field value` line and each continuation line under it,
-    /// newline-separated and without a trailing newline. `mergetag`, which a
-    /// merge of a signed tag carries, is the common one.
-    ///
-    /// The signature headers are absent by construction: a recreated commit
-    /// is signed afresh or not at all, so carrying the old `gpgsig` forward
-    /// would attest to an object that no longer exists.
-    pub extra_headers: Vec<String>,
+    /// Every header the object carries, in order. The signature headers are
+    /// absent by construction: a recreated commit is signed afresh or not at
+    /// all, so carrying the old `gpgsig` forward would attest to an object
+    /// that no longer exists.
+    pub headers: Vec<RawHeader>,
     pub message: Vec<u8>,
 }
 
 impl RawCommit {
-    /// The field name of each uninterpreted header, for a caller that has to
-    /// say which headers a commit carries.
+    /// The field name of each header this module does not interpret, for a
+    /// caller that has to say which headers a commit carries. `mergetag`,
+    /// which a merge of a signed tag carries, is the common one.
     pub fn extra_header_fields(&self) -> Vec<String> {
-        self.extra_headers
+        self.headers
             .iter()
-            .map(|block| {
-                block
-                    .split([' ', '\n'])
-                    .next()
-                    .unwrap_or_default()
-                    .to_string()
-            })
+            .filter(|header| !INTERPRETED_HEADERS.contains(&header.field.as_str()))
+            .map(|header| header.field.clone())
             .collect()
+    }
+
+    /// Whether `git commit-tree` writes this object's non-parent bytes back
+    /// exactly.
+    ///
+    /// `commit-tree` emits the headers it has flags for, in its own order,
+    /// with the identity lines rebuilt from the parts it was given. That
+    /// reproduces most commits and not all of them: a carried header, a
+    /// header before `encoding`, or an identity line spelled with unusual
+    /// whitespace all come back as different bytes — a different object,
+    /// presented as the same commit with a new signature. Parent values are
+    /// exempt because replacing them is what a rewrite does; their position
+    /// is not.
+    pub fn commit_tree_writes_it_back(&self) -> bool {
+        let mut wanted: Vec<(&str, String)> = vec![("tree", format!("tree {}", self.tree))];
+        wanted.extend(self.parents.iter().map(|_| ("parent", String::new())));
+        wanted.push(("author", format!("author {}", self.author.git_line())));
+        wanted.push((
+            "committer",
+            format!("committer {}", self.committer.git_line()),
+        ));
+        if let Some(encoding) = &self.encoding {
+            wanted.push(("encoding", format!("encoding {encoding}")));
+        }
+        self.headers.len() == wanted.len()
+            && self
+                .headers
+                .iter()
+                .zip(&wanted)
+                .all(|(have, (field, block))| {
+                    have.field == *field && (*field == "parent" || &have.block == block)
+                })
     }
 }
 
@@ -374,11 +419,10 @@ pub fn read_commit(cwd: &Path, rev: &str) -> Result<RawCommit> {
 /// begins after the first empty line and is taken verbatim to the end of the
 /// object.
 ///
-/// Every header is kept: the ones this module writes from named fields, and
-/// the rest verbatim in the order the object holds them, so a commit is
-/// recreated with the headers it had rather than with the ones arc knows
-/// about. The exceptions are the signature headers, which describe an object
-/// that a recreation replaces.
+/// Every header is kept verbatim, in the order the object holds them, so a
+/// commit is recreated with the headers it had rather than with the ones arc
+/// knows about. The exceptions are the signature headers, which describe an
+/// object that a recreation replaces.
 fn parse_commit_object(raw: &[u8]) -> Result<RawCommit> {
     let split = raw
         .windows(2)
@@ -391,34 +435,35 @@ fn parse_commit_object(raw: &[u8]) -> Result<RawCommit> {
     let mut author = None;
     let mut committer = None;
     let mut encoding = None;
-    let mut extra_headers: Vec<String> = Vec::new();
-    // Whether the header being read is one to carry verbatim, so its
-    // continuation lines travel with it.
-    let mut carrying = false;
+    let mut kept: Vec<RawHeader> = Vec::new();
+    // Whether the header being read is one to keep, so its continuation lines
+    // travel with it. Only a signature is dropped, and its continuation lines
+    // go with it.
+    let mut keeping = false;
     for line in headers.lines() {
         if line.starts_with(' ') {
-            if carrying {
-                let block = extra_headers
-                    .last_mut()
-                    .expect("a carried header to extend");
-                block.push('\n');
-                block.push_str(line);
+            if keeping {
+                let header = kept.last_mut().expect("a kept header to extend");
+                header.block.push('\n');
+                header.block.push_str(line);
             }
             continue;
         }
         let (field, value) = line.split_once(' ').unwrap_or((line, ""));
-        carrying = false;
+        keeping = !matches!(field, "gpgsig" | "gpgsig-sha256");
         match field {
             "tree" => tree = Some(value.to_string()),
             "parent" => parents.push(value.to_string()),
             "author" => author = Some(CommitStamp::parse(value, "author")?),
             "committer" => committer = Some(CommitStamp::parse(value, "committer")?),
             "encoding" => encoding = Some(value.to_string()),
-            "gpgsig" | "gpgsig-sha256" => {}
-            _ => {
-                extra_headers.push(line.to_string());
-                carrying = true;
-            }
+            _ => {}
+        }
+        if keeping {
+            kept.push(RawHeader {
+                field: field.to_string(),
+                block: line.to_string(),
+            });
         }
     }
     Ok(RawCommit {
@@ -427,7 +472,7 @@ fn parse_commit_object(raw: &[u8]) -> Result<RawCommit> {
         author: author.context("commit object names no author")?,
         committer: committer.context("commit object names no committer")?,
         encoding,
-        extra_headers,
+        headers: kept,
         message: message.to_vec(),
     })
 }
@@ -440,11 +485,12 @@ fn parse_commit_object(raw: &[u8]) -> Result<RawCommit> {
 /// nothing else, so a commit rebuilt with the same inputs and no signature
 /// has the same object id it started with.
 ///
-/// `commit-tree` writes the headers it has flags for and no others, so a
-/// commit carrying a header outside that set is refused here and belongs to
-/// [`write_commit_object`], which assembles the object itself. Refusing keeps
-/// the guarantee above true: a path that silently omitted a header would
-/// produce a commit that is not the one it claims to have only re-signed.
+/// `commit-tree` writes the headers it has flags for, in its own order, from
+/// the parts it is given, so a commit whose header text it cannot spell back
+/// is refused here and belongs to [`write_commit_object`], which assembles the
+/// object itself. Refusing keeps the guarantee above true: a path that
+/// silently reordered a header or reformatted an identity line would produce a
+/// commit that is not the one it claims to have only re-signed.
 pub fn commit_tree_as(
     cwd: &Path,
     commit: &RawCommit,
@@ -456,14 +502,18 @@ pub fn commit_tree_as(
         author,
         committer,
         encoding,
-        extra_headers,
+        headers: _,
         message,
     } = commit;
-    if !extra_headers.is_empty() {
+    if !commit.commit_tree_writes_it_back() {
         bail!(
-            "git commit-tree cannot write the {} header carried by the commit holding tree {}",
-            commit.extra_header_fields().join(" and the "),
-            tree
+            "git commit-tree cannot write back the headers of the commit holding tree {tree}: {}",
+            commit
+                .headers
+                .iter()
+                .map(|header| header.field.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
     let mut args: Vec<String> = Vec::new();
@@ -521,10 +571,9 @@ pub fn commit_tree_as(
 /// Write the same commit [`commit_tree_as`] would, by assembling the object
 /// text and hashing it, so every header the commit carries survives.
 ///
-/// The header order is Git's own — tree, parents, author, committer,
-/// encoding, then the carried headers in the order they were read, then the
-/// signature last — which is why a commit with nothing to carry comes out
-/// with the object id `commit-tree` would have given it.
+/// The header order is the object's own, with the signature last, which is
+/// why a commit whose headers `commit-tree` would have written in that same
+/// order comes out with the object id `commit-tree` would have given it.
 pub fn write_commit_object(
     cwd: &Path,
     commit: &RawCommit,
@@ -541,27 +590,39 @@ pub fn write_commit_object(
     hash_object(cwd, "commit", &object)
 }
 
-/// One commit object, exactly as the database holds it.
+/// One commit object, exactly as the database holds it: every header line the
+/// commit carried, in the order it carried them, with the `parent` lines
+/// replaced by the parents the commit now has and the signature written last.
+///
+/// Only two things about the header text are ever arc's own. Parents are, and
+/// they go where the object had them — after `tree` for a commit that had
+/// none, since that is where Git puts the first one. The signature is, and it
+/// goes last, since that is where Git puts it and it covers everything above.
 fn commit_object_text(commit: &RawCommit, signature: Option<&[u8]>) -> Vec<u8> {
     let mut out = Vec::new();
-    let mut header = |field: &str, value: &str| {
-        out.extend_from_slice(field.as_bytes());
-        out.push(b' ');
-        out.extend_from_slice(value.as_bytes());
-        out.push(b'\n');
+    let parents = |out: &mut Vec<u8>| {
+        for parent in &commit.parents {
+            out.extend_from_slice(b"parent ");
+            out.extend_from_slice(parent.as_bytes());
+            out.push(b'\n');
+        }
     };
-    header("tree", &commit.tree);
-    for parent in &commit.parents {
-        header("parent", parent);
-    }
-    header("author", &commit.author.git_line());
-    header("committer", &commit.committer.git_line());
-    if let Some(encoding) = &commit.encoding {
-        header("encoding", encoding);
-    }
-    for block in &commit.extra_headers {
-        out.extend_from_slice(block.as_bytes());
+    let had_parents = commit.headers.iter().any(|header| header.field == "parent");
+    let mut written = commit.parents.is_empty();
+    for header in &commit.headers {
+        if header.field == "parent" {
+            if !written {
+                parents(&mut out);
+                written = true;
+            }
+            continue;
+        }
+        out.extend_from_slice(header.block.as_bytes());
         out.push(b'\n');
+        if !written && !had_parents && header.field == "tree" {
+            parents(&mut out);
+            written = true;
+        }
     }
     if let Some(signature) = signature {
         out.extend_from_slice(&folded_header("gpgsig", signature));
@@ -690,11 +751,17 @@ fn tag_object_text(tag: &RawTag) -> Vec<u8> {
 
 /// Store an object of the given type and answer with its name.
 fn hash_object(cwd: &Path, kind: &str, object: &[u8]) -> Result<String> {
-    let args = ["hash-object", "-t", kind, "-w", "--stdin"].map(String::from);
-    let out = piped_output("git", &args, object, |command| {
-        command.current_dir(cwd);
-    })?;
+    let out = git_piped(cwd, &["hash-object", "-t", kind, "-w", "--stdin"], object)?;
     Ok(String::from_utf8_lossy(&out).trim().to_string())
+}
+
+/// Git with `input` on its standard input, answering with its standard
+/// output. The editor pins every other Git call here gets apply to these too.
+fn git_piped(cwd: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
+    let owned: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+    let mut command = git_command();
+    command.current_dir(cwd);
+    piped_output_with(command, "git", &owned, input)
 }
 
 /// An armored detached signature over `payload`, made by the OpenPGP program
@@ -761,12 +828,22 @@ fn piped_output(
     setup: impl FnOnce(&mut Command),
 ) -> Result<Vec<u8>> {
     let mut command = Command::new(program);
+    setup(&mut command);
+    piped_output_with(command, program, args, input)
+}
+
+/// The same, for a caller that has already built the command.
+fn piped_output_with(
+    mut command: Command,
+    program: &str,
+    args: &[String],
+    input: &[u8],
+) -> Result<Vec<u8>> {
     command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    setup(&mut command);
     let mut child = command
         .spawn()
         .with_context(|| format!("cannot run {program}"))?;
@@ -1188,6 +1265,53 @@ pub fn update_ref(cwd: &Path, name: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// One ref move: the value the ref is expected to hold, and the one it is to
+/// hold instead.
+pub struct RefUpdate {
+    pub name: String,
+    pub old: String,
+    pub new: String,
+}
+
+/// Move every named ref in one Git transaction: either all of them land or
+/// none of them does.
+///
+/// Each move states the value its ref is expected to hold, so a ref something
+/// else moved in the meantime fails the whole transaction rather than being
+/// overwritten. Moving refs one at a time instead leaves a repository whose
+/// refs sit on two histories whenever anything interrupts the sequence, and
+/// no reader can tell which of them is the one that was meant.
+pub fn update_refs(cwd: &Path, updates: &[RefUpdate]) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let mut input = String::from("start\n");
+    for RefUpdate { name, old, new } in updates {
+        input.push_str(&format!("update {name} {new} {old}\n"));
+    }
+    // `prepare` takes the lock on every ref and `commit` releases it, so a
+    // failure anywhere in between is a transaction Git rolls back itself.
+    input.push_str("prepare\ncommit\n");
+    git_piped(cwd, &["update-ref", "--stdin"], input.as_bytes())?;
+    Ok(())
+}
+
+/// What a ref holds, or nothing where the repository has no such ref. An
+/// annotated tag answers with its tag object, which is what its ref holds.
+pub fn ref_value(cwd: &Path, name: &str) -> Result<Option<String>> {
+    let mut command = git_command();
+    command
+        .args(["rev-parse", "--verify", "--quiet", name])
+        .current_dir(cwd);
+    let out = command_output(&mut command)
+        .with_context(|| format!("failed to read {name} in {}", cwd.display()))?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok((!value.is_empty()).then_some(value))
+}
+
 pub fn delete_ref(cwd: &Path, name: &str) -> Result<()> {
     git(cwd, &["update-ref", "-d", name])?;
     Ok(())
@@ -1533,9 +1657,71 @@ mod tests {
 
         let head = git(&root, &["rev-parse", "HEAD"]).unwrap();
         let commit = read_commit(&root, &head).unwrap();
-        assert!(commit.extra_headers.is_empty());
+        assert!(commit.extra_header_fields().is_empty());
+        assert!(commit.commit_tree_writes_it_back());
         assert_eq!(write_commit_object(&root, &commit, None).unwrap(), head);
         assert_eq!(commit_tree_as(&root, &commit, None).unwrap(), head);
+    }
+
+    /// Git's own order is the common one, not the only one. A header before
+    /// `encoding`, or an identity line with whitespace of its own, is part of
+    /// the object: reassembling it in a canonical order, or from parsed name
+    /// and email, yields a different commit presented as the same one
+    /// re-signed. `commit-tree` cannot write either back, and must say so
+    /// rather than produce the tidier object.
+    #[test]
+    fn a_header_order_and_identity_spelling_are_the_object_s_own() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = fixture(&tmp, &[]);
+        let raw = b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n\
+                    author A  <a@example.invalid> 1700000000 +0000\n\
+                    committer C <c@example.invalid> 1700000001 +0000\n\
+                    mergetag object 2222222222222222222222222222222222222222\n\
+                    \x20type commit\n\
+                    encoding ISO-8859-1\n\
+                    \nthe message\n";
+        let commit = parse_commit_object(raw).unwrap();
+        // The author's name ends where the email begins, so the second space
+        // belongs to neither part and only the raw line still holds it.
+        assert_eq!(commit.author.name, "A");
+        assert_eq!(
+            commit
+                .headers
+                .iter()
+                .map(|h| h.field.as_str())
+                .collect::<Vec<_>>(),
+            ["tree", "author", "committer", "mergetag", "encoding"]
+        );
+        assert!(!commit.commit_tree_writes_it_back());
+        assert!(commit_tree_as(&root, &commit, None).is_err());
+        assert_eq!(
+            String::from_utf8_lossy(&commit_object_text(&commit, None)),
+            String::from_utf8_lossy(raw)
+        );
+
+        // Whitespace alone is enough: a commit carrying no unusual header is
+        // still not one `commit-tree` can write back.
+        let plain = parse_commit_object(
+            b"tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\n\
+              author A  <a@example.invalid> 1700000000 +0000\n\
+              committer C <c@example.invalid> 1700000001 +0000\n\
+              \nthe message\n",
+        )
+        .unwrap();
+        assert!(plain.extra_header_fields().is_empty());
+        assert!(!plain.commit_tree_writes_it_back());
+
+        // A rewrite replaces the parents and nothing else, and a commit that
+        // had none takes them where Git writes the first one.
+        let mut reparented = commit.clone();
+        reparented.parents = vec!["1".repeat(40)];
+        assert_eq!(
+            String::from_utf8_lossy(&commit_object_text(&reparented, None)),
+            String::from_utf8_lossy(raw).replace(
+                "author A ",
+                &format!("parent {}\nauthor A ", "1".repeat(40))
+            )
+        );
     }
 
     /// A header outside the set `commit-tree` has flags for is carried, and
@@ -1560,7 +1746,12 @@ mod tests {
         let commit = parse_commit_object(raw).unwrap();
         assert_eq!(commit.extra_header_fields(), vec!["mergetag".to_string()]);
         assert_eq!(
-            commit.extra_headers[0],
+            commit
+                .headers
+                .iter()
+                .find(|header| header.field == "mergetag")
+                .unwrap()
+                .block,
             "mergetag object 2222222222222222222222222222222222222222\n type commit\n tag v1\n \n a release"
         );
         assert_eq!(commit.message, b"the message\n");

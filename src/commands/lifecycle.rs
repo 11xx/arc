@@ -59,7 +59,7 @@ pub fn begin(
     };
     let mut open_change_branches: Vec<String> = Vec::new();
     let mut closed_in_place_target: Option<(String, String)> = None;
-    let rewrites = store.rewrites();
+    let rewrites = store.rewrites()?;
     for existing in store.list_change_ids()? {
         let events = store.load_events(&existing)?;
         let st = state::reduce_following(&events, &rewrites)?;

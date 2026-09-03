@@ -91,7 +91,7 @@ pub fn record_mapping(
 pub fn resolve_rewritten(ctx: &Ctx, revision: &str) -> Result<i32> {
     let store = ctx.store()?;
     let map = RewriteMap::load(&store)?;
-    match map.fate(revision) {
+    match map.fate(revision)? {
         Some(crate::rewrite::Fate::Rewritten(successor)) => {
             println!("{revision} → {successor}");
             Ok(0)

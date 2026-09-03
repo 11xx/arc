@@ -524,7 +524,8 @@ HISTORY REWRITES
                        oldest commit whose signature is missing or made by
                        another key; --dry-run prints the map and stops;
                        --retag recreates the annotated tags whose targets
-                       were rewritten.
+                       were rewritten. Run again to finish one that was
+                       interrupted.
     arc history rewrite --map <file> --reason <why>
                        Record a rewrite performed elsewhere, from its commit
                        map.
@@ -545,9 +546,23 @@ HISTORY REWRITES
   one. `--retag` recreates them, carrying name, message, tagger and date, and
   signing where the original was signed.
 
+  Every ref moves in one Git transaction, so a rewrite leaves the branch and
+  arc's evidence refs on one history or leaves them all alone. The map and
+  the ref moves are written to `repository/rewrite-intent.json` before any of
+  it is applied, and the file is removed once the map is recorded, so an
+  interrupted rewrite is finished by running it again rather than repeated —
+  repeating it would sign the same commits afresh and record a second
+  successor for each. A ref moved by something else in the meantime stops the
+  rewrite, named.
+
   Recorded revisions keep saying what they said; every derived reading follows
   them forward, and `arc doctor` reports `unresolved-revision` where that
-  leads nowhere. A branch with commits of its own on top of the rewritten
+  leads nowhere. A recorded revision resolves on an exact match, or on an
+  abbreviation of seven hex digits or more that exactly one recorded revision
+  answers; an ambiguous one is refused naming the candidates. Rewrite records
+  that contradict each other make the map unreadable, which every projection
+  refuses rather than reading as no rewrite at all — `arc doctor` reports it
+  as `invalid-rewrite-mapping`. A branch with commits of its own on top of the rewritten
   range shares no commit with the branch it was cut from — the rewrite names
   each one and the `git rebase --onto` that replays it, and until then no
   comparison between the two has an answer. Approval does not travel: a

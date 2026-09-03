@@ -218,7 +218,7 @@ pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, by_model_view: bo
     let mut changes = Vec::new();
     // Per-gate run durations across the selection, for aggregate percentiles.
     let mut gate_runs: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-    let rewrites = store.rewrites();
+    let rewrites = store.rewrites()?;
     for change_id in change_ids {
         let events = store.load_events(&change_id)?;
         let state = state::reduce_following(&events, &rewrites)?;
