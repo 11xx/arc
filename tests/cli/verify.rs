@@ -955,7 +955,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
         .code(12);
 
     let status = json_stdout(repo.arc(&worktree).args(["status", "probe-readiness"]));
-    assert_eq!(status["schema"], "arc-status/13");
+    assert_eq!(status["schema"], "arc-status/14");
     assert_eq!(status["probes"][0]["name"], "marker-exists");
     assert_eq!(status["probes"][0]["brief_version"], 2);
     assert_eq!(status["probes"][0]["discriminating_at_head"], false);
@@ -1704,7 +1704,10 @@ fn dirty_gate_evidence_is_named_by_resume_check_and_the_next_action() {
         .assert()
         .success();
     let resume = stdout(repo.arc(&wt).args(["resume", "named"]));
-    assert!(resume.contains("unit: pass\n"), "{resume}");
+    assert!(
+        resume.contains("unit: pass (undiscriminated)\n"),
+        "{resume}"
+    );
 
     // A failing gate on a dirty tree is still told to clean first: while the
     // tree is dirty no run produces usable evidence, whatever the result. The
@@ -2223,4 +2226,425 @@ fn a_worktree_recorded_through_a_symlink_still_diagnoses_the_wrong_checkout_stat
         .failure()
         .stderr(predicates::str::contains("is checked out here"))
         .stderr(predicates::str::contains("has no checkout").not());
+}
+
+/// A change declaring a gate that fails until a marker is committed, beside a
+/// gate that only ever passes. Returns the change ID and the failing
+/// evidence's event ID, with the fix committed and the gate not yet rerun.
+fn change_with_a_fixed_gate(repo: &Repo, slug: &str) -> (String, String) {
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.fixable]\ncommand = \"test -f marker\"\n[gates.plain]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", "."]);
+    git(&repo.root, &["commit", "-m", "gates"]);
+    let begun =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["begin", slug, "--no-worktree", "--target", "master"]),
+        );
+    let change_id = begun
+        .lines()
+        .find_map(|line| line.strip_prefix("change: "))
+        .expect("begin names the change")
+        .to_string();
+
+    repo.arc(&repo.root)
+        .args(["verify", slug, "--gate", "fixable"])
+        .assert()
+        .code(1);
+    let failing = last_verification_event_id(repo, slug, "fail");
+    repo.commit(&repo.root, "marker", "", "fix: add marker");
+    (change_id, failing)
+}
+
+fn last_verification_event_id(repo: &Repo, slug: &str, result: &str) -> String {
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        slug,
+        "--type",
+        "verification-recorded",
+    ]));
+    events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .rfind(|event| event["result"] == result)
+        .expect("a verification with that result")["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn gate_row(repo: &Repo, slug: &str, name: &str) -> serde_json::Value {
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["status", slug]))).unwrap();
+    status["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|gate| gate["name"] == name)
+        .expect("gate row")
+        .clone()
+}
+
+#[test]
+fn a_falsified_pass_records_the_failure_it_answers() {
+    let repo = Repo::new();
+    let (_, failing) = change_with_a_fixed_gate(&repo, "falsified");
+
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "falsified",
+            "--gate",
+            "fixable",
+            "--falsified-by",
+            &failing,
+            "--predicted",
+            "marker absent",
+        ])
+        .assert()
+        .success();
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "falsified",
+        "--type",
+        "verification-recorded",
+    ]));
+    let recorded: serde_json::Value =
+        serde_json::from_str(events.lines().next_back().unwrap()).unwrap();
+    assert_eq!(recorded["result"], "pass");
+    assert_eq!(recorded["falsification"]["event_id"], failing.as_str());
+    assert_eq!(
+        recorded["falsification"]["predicted_reason"],
+        "marker absent"
+    );
+    // The revision is read from the referenced failure, never from the caller,
+    // so the two halves of the reference cannot disagree.
+    let failed_at = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "falsified",
+        "--type",
+        "verification-recorded",
+    ]))
+    .lines()
+    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+    .find(|event| event["event_id"] == failing.as_str())
+    .unwrap()["revision"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(recorded["falsification"]["revision"], failed_at.as_str());
+}
+
+#[test]
+fn a_falsification_reference_to_a_passing_event_is_refused() {
+    let repo = Repo::new();
+    change_with_a_fixed_gate(&repo, "ref-pass");
+    repo.arc(&repo.root)
+        .args(["verify", "ref-pass", "--gate", "plain"])
+        .assert()
+        .success();
+    let passing = last_verification_event_id(&repo, "ref-pass", "pass");
+
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "ref-pass",
+            "--gate",
+            "plain",
+            "--falsified-by",
+            &passing,
+            "--predicted",
+            "anything",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("recorded a pass"));
+}
+
+#[test]
+fn a_falsification_reference_to_another_gate_is_refused() {
+    let repo = Repo::new();
+    let (_, failing) = change_with_a_fixed_gate(&repo, "ref-other-gate");
+
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "ref-other-gate",
+            "--gate",
+            "plain",
+            "--falsified-by",
+            &failing,
+            "--predicted",
+            "marker absent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "recorded gate \"fixable\", not gate \"plain\"",
+        ));
+}
+
+#[test]
+fn a_falsification_reference_to_another_change_is_refused() {
+    let repo = Repo::new();
+    let (_, failing) = change_with_a_fixed_gate(&repo, "ref-source");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "ref-target", "--target", "master"]),
+    );
+    let worktree = repo.home.join(".worktrees").join("repo-ref-target");
+
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "ref-target",
+            "--gate",
+            "plain",
+            "--falsified-by",
+            &failing,
+            "--predicted",
+            "marker absent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "names no earlier verification on this change",
+        ));
+}
+
+/// The revision is derived at write time, so only a ledger edited by hand or
+/// imported from elsewhere can carry a reference whose halves disagree. It is
+/// refused on load rather than believed.
+#[test]
+fn a_falsification_reference_with_a_mismatched_revision_is_refused_on_load() {
+    let repo = Repo::new();
+    let (change_id, failing) = change_with_a_fixed_gate(&repo, "ref-revision");
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "ref-revision",
+            "--gate",
+            "fixable",
+            "--falsified-by",
+            &failing,
+            "--predicted",
+            "marker absent",
+        ])
+        .assert()
+        .success();
+    rewrite_event(&repo, &change_id, "verification-recorded", |event| {
+        event["falsification"]["revision"] = serde_json::Value::String("0".repeat(40));
+    });
+
+    repo.arc(&repo.root)
+        .args(["status", "ref-revision"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("was recorded at"));
+}
+
+#[test]
+fn each_half_of_a_falsification_reference_requires_the_other() {
+    let repo = Repo::new();
+    let (_, failing) = change_with_a_fixed_gate(&repo, "halves");
+
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "halves",
+            "--gate",
+            "plain",
+            "--predicted",
+            "marker absent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--predicted requires --falsified-by",
+        ));
+
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "halves",
+            "--gate",
+            "plain",
+            "--falsified-by",
+            &failing,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--falsified-by requires --predicted",
+        ));
+}
+
+#[test]
+fn a_falsification_is_refused_before_the_gate_runs() {
+    let repo = Repo::new();
+    change_with_a_fixed_gate(&repo, "no-run");
+
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "no-run",
+            "--gate",
+            "plain",
+            "--falsified-by",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--predicted",
+            "marker absent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("running:").not());
+}
+
+#[test]
+fn discrimination_renders_in_both_states_in_json_and_text() {
+    let repo = Repo::new();
+    let (_, failing) = change_with_a_fixed_gate(&repo, "both-states");
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "both-states",
+            "--gate",
+            "fixable",
+            "--falsified-by",
+            &failing,
+            "--predicted",
+            "marker absent",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["verify", "both-states", "--gate", "plain"])
+        .assert()
+        .success();
+
+    let fixable = gate_row(&repo, "both-states", "fixable");
+    assert_eq!(fixable["discrimination"], "discriminating");
+    assert_eq!(fixable["falsification"]["event_id"], failing.as_str());
+    let plain = gate_row(&repo, "both-states", "plain");
+    assert_eq!(plain["discrimination"], "undiscriminated");
+    assert!(plain["falsification"].is_null());
+
+    let shown = stdout(repo.arc(&repo.root).args(["show", "both-states"]));
+    assert!(shown.contains("(discriminating: failed at "));
+    assert!(shown.contains(": marker absent)"));
+    assert!(shown.contains("(undiscriminated)"));
+
+    let explained = stdout(
+        repo.arc(&repo.root)
+            .args(["check", "both-states", "--explain"]),
+    );
+    assert!(explained.contains("gate `fixable`: (discriminating: failed at "));
+    assert!(explained.contains("gate `plain`: (undiscriminated)"));
+}
+
+/// Evidence written before arc recorded falsification carries no such field.
+/// It loads, and reads as undiscriminated rather than as a claim about what
+/// the gate can detect.
+#[test]
+fn evidence_without_the_field_loads_as_undiscriminated() {
+    let repo = Repo::new();
+    let (change_id, failing) = change_with_a_fixed_gate(&repo, "legacy");
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "legacy",
+            "--gate",
+            "fixable",
+            "--falsified-by",
+            &failing,
+            "--predicted",
+            "marker absent",
+        ])
+        .assert()
+        .success();
+    rewrite_event(&repo, &change_id, "verification-recorded", |event| {
+        event.as_object_mut().unwrap().remove("falsification");
+    });
+
+    let fixable = gate_row(&repo, "legacy", "fixable");
+    assert_eq!(fixable["result"], "pass");
+    assert_eq!(fixable["discrimination"], "undiscriminated");
+    assert!(fixable["falsification"].is_null());
+}
+
+/// Discrimination is advisory. Recording one changes what the gate row says
+/// about the evidence and nothing about whether the change may integrate, so
+/// the readiness codes are taken across the same change at the same head with
+/// discrimination as the only thing that moved.
+#[test]
+fn readiness_codes_are_unaffected_by_discrimination() {
+    let repo = Repo::new();
+    let (_, failing) = change_with_a_fixed_gate(&repo, "advisory");
+    for gate in ["fixable", "plain"] {
+        repo.arc(&repo.root)
+            .args(["verify", "advisory", "--gate", gate])
+            .assert()
+            .success();
+    }
+    let before = gate_row(&repo, "advisory", "fixable");
+    assert_eq!(before["discrimination"], "undiscriminated");
+    let check_before = repo
+        .arc(&repo.root)
+        .args(["check", "advisory"])
+        .assert()
+        .get_output()
+        .status
+        .code();
+    let done_before = repo
+        .arc(&repo.root)
+        .args(["done", "advisory"])
+        .assert()
+        .get_output()
+        .status
+        .code();
+
+    repo.arc(&repo.root)
+        .args([
+            "verify",
+            "advisory",
+            "--gate",
+            "fixable",
+            "--falsified-by",
+            &failing,
+            "--predicted",
+            "marker absent",
+        ])
+        .assert()
+        .success();
+
+    // The variable actually moved, so the codes below are evidence rather than
+    // two readings of the same state.
+    let after = gate_row(&repo, "advisory", "fixable");
+    assert_eq!(after["discrimination"], "discriminating");
+    assert_eq!(
+        repo.arc(&repo.root)
+            .args(["check", "advisory"])
+            .assert()
+            .get_output()
+            .status
+            .code(),
+        check_before
+    );
+    assert_eq!(
+        repo.arc(&repo.root)
+            .args(["done", "advisory"])
+            .assert()
+            .get_output()
+            .status
+            .code(),
+        done_before
+    );
 }
