@@ -2823,3 +2823,415 @@ fn a_legacy_debt_event_still_discharge_and_render_without_typed_fields() {
         "{human_after}"
     );
 }
+
+/// A snapshotted change whose file is its own, so successive integrations into
+/// one repository do not leave a later change with nothing to commit.
+fn snapshotted_own_file(repo: &Repo, slug: &str) -> PathBuf {
+    stdout(repo.arc(&repo.root).args(["begin", slug]));
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(
+        &worktree,
+        &format!("{slug}.txt"),
+        &format!("{slug}\n"),
+        "feat: work",
+    );
+    stdout(repo.arc(&worktree).args(["snapshot", slug]));
+    worktree
+}
+
+/// A patchset by `tester`, with a brief recorded first by `Planner`.
+fn briefed_change(repo: &Repo, slug: &str) -> PathBuf {
+    stdout(repo.arc(&repo.root).args(["begin", slug]));
+    let brief = repo.home.join(format!("{slug}-brief.md"));
+    fs::write(&brief, "do the thing\n").unwrap();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Planner")
+        .env("ARC_MODEL", "gpt-5.6-sol#high")
+        .args([
+            "brief",
+            slug,
+            "--title",
+            "Contract",
+            "--body-file",
+            brief.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.commit(
+        &worktree,
+        &format!("{slug}.txt"),
+        &format!("{slug}\n"),
+        "feat: work",
+    );
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_MODEL", "gpt-5.6-luna#max")
+            .args(["snapshot", slug]),
+    );
+    worktree
+}
+
+/// A debt says which obligation it carries, and each shape of ledger names a
+/// different one. One count over every debt cannot answer what any of them
+/// owes, which is the question a reviewer picking the next one is asking.
+#[test]
+fn a_derived_debt_kind_follows_the_shape_of_the_ledger() {
+    let repo = repo_forbidding_self_approval();
+
+    snapshotted_own_file(&repo, "unread");
+    repo.arc(&repo.root)
+        .args(["integrate", "unread", "--debt", "nobody looked"])
+        .assert()
+        .success();
+
+    let repaired = snapshotted_own_file(&repo, "repaired");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["review", "repaired", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.commit(&repaired, "more.txt", "more\n", "fix: repair");
+    stdout(repo.arc(&repaired).args(["snapshot", "repaired"]));
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "repaired",
+            "--debt",
+            "no reviewer for the repair",
+        ])
+        .assert()
+        .success();
+
+    let own = snapshotted_own_file(&repo, "own-read");
+    repo.arc(&own)
+        .args(["review", "own-read", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "own-read", "--debt", "only the author read it"])
+        .assert()
+        .success();
+
+    snapshotted_own_file(&repo, "read-once");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["review", "read-once", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "read-once", "--debt", "a second pass is owed"])
+        .assert()
+        .success();
+
+    for (slug, kind) in [
+        ("unread", "nothing-read"),
+        ("repaired", "repair-unread"),
+        ("own-read", "contributor-only"),
+        ("read-once", "independent-review"),
+    ] {
+        let status = json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]));
+        assert_eq!(status["debt"]["missing"], kind, "{slug}: {status}");
+    }
+}
+
+/// Arc cannot tell a merge resolution from a repair — both are authored work on
+/// top of an approved patchset — so the caller's kind has to win.
+#[test]
+fn a_declared_debt_kind_beats_the_derived_one() {
+    let repo = repo_forbidding_self_approval();
+
+    snapshotted_own_file(&repo, "resolved");
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "resolved",
+            "--debt",
+            "the resolution went unread",
+            "--kind",
+            "merge-resolution-unread",
+        ])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "resolved", "--json"]));
+    assert_eq!(
+        status["debt"]["missing"], "merge-resolution-unread",
+        "{status}"
+    );
+
+    snapshotted_own_file(&repo, "late");
+    repo.arc(&repo.root)
+        .args(["integrate", "late"])
+        .assert()
+        .failure();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["review", "late", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "late"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "debt",
+            "late",
+            "--reason",
+            "the resolution went unread",
+            "--kind",
+            "merge-resolution-unread",
+        ])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "late", "--json"]));
+    assert_eq!(
+        status["debt"]["missing"], "merge-resolution-unread",
+        "{status}"
+    );
+}
+
+/// The effort a routed identity names rides inside the model string, where
+/// nothing can read it without splitting a token. Coverage reads it out and
+/// keeps the string whole, so neither reading loses the other.
+#[test]
+fn coverage_reads_the_effort_and_keeps_the_model_string_whole() {
+    let repo = repo_forbidding_self_approval();
+    snapshotted_change(&repo, "effort");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args([
+            "--model",
+            "gpt-5.6-sol#low",
+            "review",
+            "effort",
+            "--verdict",
+            "approved",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "effort", "--debt", "a second pass is owed"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "effort", "--json"]));
+    let coverage = &status["debt"]["coverage"][0];
+    assert_eq!(coverage["model"], "gpt-5.6-sol#low", "{status}");
+    assert_eq!(coverage["effort"], "low", "{status}");
+    assert!(coverage.get("route_version").is_none(), "{status}");
+    let human = stdout(repo.arc(&repo.root).args(["show", "effort"]));
+    assert!(human.contains("Reviewer@low (gpt-5.6-sol#low)"), "{human}");
+}
+
+/// A verdict says who read the work; the route version says which roster
+/// produced them. Arc records it and joins it against nothing, and an absent
+/// one means unrouted rather than unknown-and-guessable.
+#[test]
+fn a_route_version_reaches_coverage_from_review_and_from_audit() {
+    let repo = repo_forbidding_self_approval();
+    snapshotted_change(&repo, "routed");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args([
+            "--model",
+            "gpt-5.6-sol#low",
+            "review",
+            "routed",
+            "--verdict",
+            "approved",
+            "--route-version",
+            "2026.09",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "routed", "--debt", "a second pass is owed"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "routed", "--json"]));
+    assert_eq!(status["debt"]["coverage"][0]["route_version"], "2026.09");
+    let human = stdout(repo.arc(&repo.root).args(["show", "routed"]));
+    assert!(
+        human.contains("Reviewer@low [route 2026.09] (gpt-5.6-sol#low)"),
+        "{human}"
+    );
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Auditor")
+        .args([
+            "--model",
+            "gpt-5.6-terra#high",
+            "audit",
+            "routed",
+            "--verdict",
+            "approved",
+            "--route-version",
+            "2026.10",
+        ])
+        .assert()
+        .success();
+    let after = json_stdout(repo.arc(&repo.root).args(["status", "routed", "--json"]));
+    assert_eq!(after["debt"]["discharged_by"]["route_version"], "2026.10");
+    assert_eq!(after["debt"]["discharged_by"]["effort"], "high");
+}
+
+/// Who set the contract and who answered it are separate facts, and a reader
+/// weighing a debt needs both. Nothing here ranks either identity.
+#[test]
+fn production_names_the_planner_and_the_implementer() {
+    let repo = repo_forbidding_self_approval();
+    briefed_change(&repo, "briefed");
+    repo.arc(&repo.root)
+        .args(["integrate", "briefed", "--debt", "nobody looked"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "briefed", "--json"]));
+    let production = &status["debt"]["production"];
+    assert_eq!(production["planner"]["actor"], "Planner", "{status}");
+    assert_eq!(
+        production["planner"]["model"], "gpt-5.6-sol#high",
+        "{status}"
+    );
+    assert_eq!(production["planner"]["effort"], "high", "{status}");
+    assert_eq!(production["brief_version"], 1, "{status}");
+    assert_eq!(production["implementer"]["actor"], "tester", "{status}");
+    assert_eq!(production["implementer"]["effort"], "max", "{status}");
+    assert_eq!(production["following_brief"], true, "{status}");
+    let human = stdout(repo.arc(&repo.root).args(["show", "briefed"]));
+    assert!(
+        human.contains("Produced: planned by Planner@high (brief v1), implemented by tester@max"),
+        "{human}"
+    );
+
+    snapshotted_own_file(&repo, "unbriefed");
+    repo.arc(&repo.root)
+        .args(["integrate", "unbriefed", "--debt", "nobody looked"])
+        .assert()
+        .success();
+    let plain = json_stdout(repo.arc(&repo.root).args(["status", "unbriefed", "--json"]));
+    let plain_production = &plain["debt"]["production"];
+    assert!(plain_production.get("planner").is_none(), "{plain}");
+    assert!(plain_production.get("brief_version").is_none(), "{plain}");
+    assert_eq!(
+        plain_production["implementer"]["actor"], "tester",
+        "{plain}"
+    );
+    assert_eq!(plain_production["following_brief"], false, "{plain}");
+}
+
+/// A planner who implements their own brief is following nobody's contract but
+/// their own, and recording otherwise would invent a delegation that never
+/// happened.
+#[test]
+fn following_brief_is_false_when_the_brief_author_implemented() {
+    let repo = repo_forbidding_self_approval();
+    stdout(repo.arc(&repo.root).args(["begin", "solo-brief"]));
+    let brief = repo.home.join("solo-brief.md");
+    fs::write(&brief, "do the thing\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "solo-brief",
+            "--title",
+            "Contract",
+            "--body-file",
+            brief.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let worktree = repo.home.join(".worktrees").join("repo-solo-brief");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    stdout(repo.arc(&worktree).args(["snapshot", "solo-brief"]));
+    repo.arc(&repo.root)
+        .args(["integrate", "solo-brief", "--debt", "nobody looked"])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "solo-brief", "--json"]),
+    );
+    let production = &status["debt"]["production"];
+    assert_eq!(production["planner"]["actor"], "tester", "{status}");
+    assert_eq!(production["following_brief"], false, "{status}");
+}
+
+/// An obligation recorded before production was kept says nothing about how the
+/// work was produced, and reads as the independent review it always meant.
+#[test]
+fn a_debt_recorded_before_production_replays_without_inventing_one() {
+    let repo = repo_forbidding_self_approval();
+    let (change_id, _) = snapshotted_change_with_id(&repo, "pre-production");
+    repo.arc(&repo.root)
+        .args(["integrate", "pre-production", "--debt", "nobody looked"])
+        .assert()
+        .success();
+
+    rewrite_event(&repo, &change_id, "debt-declared", |event| {
+        event["missing"] = serde_json::json!("independent-review");
+        event.as_object_mut().unwrap().remove("production");
+    });
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "pre-production", "--json"]),
+    );
+    assert_eq!(status["debt"]["missing"], "independent-review", "{status}");
+    assert!(status["debt"].get("production").is_none(), "{status}");
+    let human = stdout(repo.arc(&repo.root).args(["show", "pre-production"]));
+    assert!(human.contains("Missing: independent-review"), "{human}");
+    assert!(!human.contains("Produced:"), "{human}");
+}
+
+/// A queue reporting one total says how much is owed and nothing about what any
+/// of it owes, which is exactly what decides which obligation to take next.
+#[test]
+fn the_inbox_and_catchup_split_their_debt_count_by_kind() {
+    let repo = repo_forbidding_self_approval();
+    snapshotted_own_file(&repo, "none-read");
+    repo.arc(&repo.root)
+        .args(["integrate", "none-read", "--debt", "nobody looked"])
+        .assert()
+        .success();
+    let own = snapshotted_own_file(&repo, "self-read");
+    repo.arc(&own)
+        .args(["review", "self-read", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "self-read",
+            "--debt",
+            "only the author read it",
+        ])
+        .assert()
+        .success();
+
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    let split = inbox["debt-owed-by-kind"].as_array().unwrap();
+    assert_eq!(split.len(), 2, "{inbox}");
+    assert_eq!(split[0]["kind"], "nothing-read", "{inbox}");
+    assert_eq!(split[0]["count"], 1, "{inbox}");
+    assert_eq!(split[1]["kind"], "contributor-only", "{inbox}");
+    assert_eq!(split[1]["count"], 1, "{inbox}");
+
+    let text = stdout(repo.arc(&repo.root).args(["inbox"]));
+    assert!(
+        text.contains("by kind: nothing-read 1, contributor-only 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("debt: nothing-read; implemented by tester"),
+        "{text}"
+    );
+
+    let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(
+        catchup.contains("2 outstanding (nothing-read 1, contributor-only 1)"),
+        "{catchup}"
+    );
+}

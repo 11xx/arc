@@ -2976,3 +2976,73 @@ fn begin_prints_no_space_warning_without_a_declared_floor() {
     let out = stdout(repo.arc(&repo.root).args(["begin", "no-floor"]));
     assert!(!out.contains("warning:"), "{out}");
 }
+
+/// Outstanding debt is worked through weakest coverage first. A queue ordered
+/// by change id hands a reviewer whichever obligation sorts first, which is a
+/// fact about the slug rather than about what anything owes.
+#[test]
+fn query_debt_orders_by_kind_then_by_age() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy"]);
+
+    // Declared oldest first within the kind that repeats, so ordering by age
+    // and ordering by declaration are distinguishable from ordering by slug.
+    let owed = |slug: &str, reviewer: Option<&str>| {
+        stdout(repo.arc(&repo.root).args(["begin", slug]));
+        let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+        repo.commit(
+            &worktree,
+            &format!("{slug}.txt"),
+            &format!("{slug}\n"),
+            "feat: work",
+        );
+        stdout(repo.arc(&worktree).args(["snapshot", slug]));
+        if let Some(reviewer) = reviewer {
+            repo.arc(&repo.root)
+                .env("ARC_ACTOR", reviewer)
+                .args(["review", slug, "--verdict", "approved"])
+                .assert()
+                .success();
+        }
+        repo.arc(&repo.root)
+            .args(["integrate", slug, "--debt", "reviewer unavailable"])
+            .assert()
+            .success();
+    };
+
+    // Alphabetically this is a-read, b-unread, z-unread. Kind puts the two
+    // unread ones first, and age puts the older of them ahead of the other, so
+    // neither axis can be mistaken for the change-id order.
+    owed("a-read", Some("Reviewer"));
+    owed("z-unread", None);
+    owed("b-unread", None);
+
+    let ordered: Vec<String> = stdout(repo.arc(&repo.root).args(["query", "--debt"]))
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(ordered.len(), 3, "{ordered:?}");
+    assert!(ordered[0].starts_with("z-unread"), "{ordered:?}");
+    assert!(ordered[1].starts_with("b-unread"), "{ordered:?}");
+    assert!(ordered[2].starts_with("a-read"), "{ordered:?}");
+
+    let rows = json_stdout(repo.arc(&repo.root).args(["query", "--debt", "--json"]));
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows[0]["debt_missing"], "nothing-read", "{rows:?}");
+    assert_eq!(rows[2]["debt_missing"], "independent-review", "{rows:?}");
+    assert_eq!(
+        rows[2]["debt_coverage"][0]["reviewer"], "Reviewer",
+        "{rows:?}"
+    );
+    assert_eq!(
+        rows[2]["debt_production"]["implementer"]["actor"], "tester",
+        "{rows:?}"
+    );
+}

@@ -2205,7 +2205,9 @@ impl ChangeState {
             .closure
             .as_ref()
             .and_then(|closure| closure.source_patchset_id.as_deref())?;
-        self.patchsets.iter().find(|patchset| patchset.id == shipped)
+        self.patchsets
+            .iter()
+            .find(|patchset| patchset.id == shipped)
     }
 
     /// What kind of deficit a debt declared now would carry, read off the

@@ -1225,3 +1225,96 @@ fn workspace_backlog_preserves_an_unreadable_debt_range() {
     let text = stdout(repo.arc(&repo.root).args(["workspace", "backlog"]));
     assert!(text.contains("surfaces unknown"), "{text}");
 }
+
+/// The backlog is read to decide which obligation to open next. A row that says
+/// only that a debt exists cannot answer that; the kind, what review the work
+/// did have, and who produced it are what separate one obligation from another.
+#[test]
+fn workspace_backlog_debt_rows_carry_the_kind_and_its_coordinates() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "feat-owed", "--no-worktree"])
+        .assert()
+        .success();
+    let brief = repo.home.join("owed-brief.md");
+    fs::write(&brief, "do the thing\n").unwrap();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Planner")
+        .env("ARC_MODEL", "gpt-5.6-sol#high")
+        .args([
+            "brief",
+            "feat-owed",
+            "--title",
+            "Contract",
+            "--body-file",
+            brief.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    fs::write(repo.root.join("work.txt"), "work\n").unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "feat: work"]);
+    repo.arc(&repo.root)
+        .env("ARC_MODEL", "gpt-5.6-luna#max")
+        .args(["snapshot"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args([
+            "--model",
+            "gpt-5.6-terra#low",
+            "review",
+            "feat-owed",
+            "--verdict",
+            "approved",
+            "--route-version",
+            "2026.09",
+        ])
+        .assert()
+        .success();
+    git(&repo.root, &["checkout", "master"]);
+    repo.arc(&repo.root)
+        .args(["integrate", "feat-owed", "--debt", "a second pass is owed"])
+        .assert()
+        .success();
+
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "backlog", "--json"]),
+    );
+    let project = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["anchor"].as_str().unwrap().ends_with("repo"))
+        .unwrap_or_else(|| panic!("project missing: {value}"));
+    let debt = project["debt_owed"].as_array().unwrap().first().unwrap();
+    assert_eq!(debt["missing"], "independent-review", "{debt}");
+    assert_eq!(debt["coverage"][0]["reviewer"], "Reviewer", "{debt}");
+    assert_eq!(debt["coverage"][0]["model"], "gpt-5.6-terra#low", "{debt}");
+    assert_eq!(debt["coverage"][0]["effort"], "low", "{debt}");
+    assert_eq!(debt["coverage"][0]["route_version"], "2026.09", "{debt}");
+    assert_eq!(debt["production"]["planner"]["actor"], "Planner", "{debt}");
+    assert_eq!(debt["production"]["brief_version"], 1, "{debt}");
+    assert_eq!(debt["production"]["implementer"]["effort"], "max", "{debt}");
+    assert_eq!(debt["production"]["following_brief"], true, "{debt}");
+    assert_eq!(
+        value["summary"]["debt_owed_by_kind"][0]["kind"], "independent-review",
+        "{value}"
+    );
+    assert_eq!(
+        value["summary"]["debt_owed_by_kind"][0]["count"], 1,
+        "{value}"
+    );
+
+    let text = stdout(repo.arc(&repo.root).args(["workspace", "backlog"]));
+    assert!(
+        text.contains(
+            "debt: independent-review; planned by Planner@high (brief v1), \
+implemented by tester@max; coverage: Reviewer@low [route 2026.09]"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("debt-owed (independent-review 1)"), "{text}");
+}
