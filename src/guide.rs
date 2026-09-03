@@ -503,23 +503,34 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   independent-review debt owed.
 
 HISTORY REWRITES
-    arc rewrite sign [--key <id>] [--from <rev>] [--dry-run]
+    arc rewrite sign [--key <id>] [--from <rev>] [--dry-run] [--retag]
                        Recreate every commit from --from through the branch
                        head so one key signs them all, move the branch, arc's
                        refs and the local branches and tags that point into
                        the range, and record the map. --from defaults to the
                        oldest commit whose signature is missing or made by
-                       another key; --dry-run prints the map and stops.
+                       another key; --dry-run prints the map and stops;
+                       --retag recreates the annotated tags whose targets
+                       were rewritten.
     arc history rewrite --map <file> --reason <why>
                        Record a rewrite performed elsewhere, from its commit
                        map.
     arc history resolve <rev>     Where a recorded revision ended up.
 
   Only the signature and the commit ids change: tree, parents, author,
-  committer, dates, encoding and message travel through untouched, so a
-  commit recreated without signing has the id it started with. Trees are
-  identical either way, which is why tree-keyed gate evidence counts the same
-  on both sides of a signing rewrite.
+  committer, dates, encoding, message and any other header the commit carries
+  — `mergetag`, on a merge of a signed tag — travel through untouched, so a
+  commit recreated without signing has the id it started with. The rewrite
+  names each commit that carried such a header. Trees are identical either
+  way, which is why tree-keyed gate evidence counts the same on both sides of
+  a signing rewrite.
+
+  An annotated tag names its commit through a tag object of its own, so
+  moving the ref would not re-point it. Left alone it keeps naming a replaced
+  commit, and `git describe` and the changelog projection have no release
+  boundary on the branch until it is re-pointed; the rewrite says so for each
+  one. `--retag` recreates them, carrying name, message, tagger and date, and
+  signing where the original was signed.
 
   Recorded revisions keep saying what they said; every derived reading follows
   them forward, and `arc doctor` reports `unresolved-revision` where that

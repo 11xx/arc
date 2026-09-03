@@ -28,6 +28,9 @@ pub struct SignArgs {
     /// exercises the whole rewrite — the walk, the map, the ref moves and the
     /// record — where no signing key is available.
     pub no_sign: bool,
+    /// Recreate each annotated tag whose target the rewrite moved, on the
+    /// commit that replaced it.
+    pub retag: bool,
 }
 
 /// Re-sign this branch's history, or recreate it unsigned, carrying every
@@ -61,16 +64,33 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
 
     let sign = (!args.no_sign).then_some(args.key.as_deref());
     let mut mapping: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut carried: Vec<(String, Vec<String>)> = Vec::new();
     for old in &range {
         let mut commit = gitio::read_commit(&cwd, old)?;
         commit.parents = map_parents(&cwd, old, &commit.parents, &mapping)?;
-        let new = gitio::commit_tree_as(&cwd, &commit, sign)?;
+        // `commit-tree` writes a fixed set of headers, so a commit carrying
+        // any other one — `mergetag`, on a merge of a signed tag — is
+        // assembled here instead. The common case stays with `commit-tree`,
+        // where Git makes the signature itself.
+        let new = if commit.extra_headers.is_empty() {
+            gitio::commit_tree_as(&cwd, &commit, sign)?
+        } else {
+            carried.push((old.clone(), commit.extra_header_fields()));
+            gitio::write_commit_object(&cwd, &commit, sign)?
+        };
         // A commit whose parents and content are unchanged and which gained no
         // signature is the commit it started as. Recording that as a rewrite
         // would claim a move that did not happen.
         if &new != old {
             mapping.insert(old.clone(), Some(new));
         }
+    }
+    for (old, fields) in &carried {
+        println!(
+            "carried through on {}: the {} header",
+            short(old),
+            fields.join(" header and the ")
+        );
     }
     if mapping.is_empty() {
         println!(
@@ -95,7 +115,7 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         .get(&head)
         .and_then(|new| new.clone())
         .unwrap_or_else(|| head.clone());
-    let moves = plan_ref_moves(&cwd, &branch, &from, &mapping)?;
+    let moves = plan_ref_moves(&cwd, &branch, &from, &mapping, sign, args.retag)?;
     let event_id = history::record_mapping(
         ctx,
         mapping.clone(),
@@ -109,6 +129,9 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
     for (name, value) in &moves.moved {
         gitio::update_ref(&cwd, name, value)?;
     }
+    for retag in &moves.retagged {
+        gitio::update_ref(&cwd, &retag.name, &retag.new)?;
+    }
     gitio::update_ref(&cwd, &format!("refs/heads/{branch}"), &new_head)?;
     // The branch just moved under the checkout, whose index still describes
     // the commit it moved off. Nothing about the tree changed, so this only
@@ -120,8 +143,24 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         plural(mapping.len(), "commit"),
         short(&new_head)
     );
-    println!("{} moved", plural(moves.moved.len() + 1, "ref"));
+    println!(
+        "{} moved",
+        plural(moves.moved.len() + moves.retagged.len() + 1, "ref")
+    );
     println!("rewrite recorded as {event_id}");
+    for retag in &moves.retagged {
+        println!(
+            "re-pointed {}: tag object {} is now {}{}",
+            retag.name,
+            short(&retag.old),
+            short(&retag.new),
+            if retag.signature_dropped {
+                ", unsigned because the rewrite signed nothing"
+            } else {
+                ""
+            }
+        );
+    }
     for name in &moves.left {
         println!("left alone: {name}");
     }
@@ -232,6 +271,19 @@ struct RefMoves {
     /// Branches whose own commits sit on top of the rewritten range, so
     /// moving the ref would not help: they need replaying.
     stranded: Vec<String>,
+    /// Annotated tags recreated on the commit that replaced their target.
+    retagged: Vec<Retag>,
+}
+
+/// One annotated tag recreated on a rewritten commit.
+struct Retag {
+    name: String,
+    /// The tag object the ref named, and the one it is to name.
+    old: String,
+    new: String,
+    /// Whether the original carried a signature this recreation could not
+    /// make, which is the case when the rewrite signs nothing.
+    signature_dropped: bool,
 }
 
 /// Every ref that points at a rewritten commit, and what becomes of it.
@@ -241,20 +293,23 @@ struct RefMoves {
 /// evidence, so they all move. Branches and tags move too, since a rewrite
 /// nobody's branch survived is a rewrite that stranded the work.
 ///
-/// An annotated tag is reported rather than moved: its object carries its own
-/// message and possibly its own signature, and re-pointing it means writing a
-/// new tag object, which is a decision about somebody's release rather than a
-/// consequence of re-signing a branch.
+/// An annotated tag is re-pointed only when asked for: re-pointing one means
+/// writing a new tag object, which is a decision about somebody's release
+/// rather than a consequence of re-signing a branch. Left alone, it keeps
+/// naming the commit it named, which is on the line the rewrite replaced.
 fn plan_ref_moves(
     cwd: &Path,
     branch: &str,
     from: &str,
     mapping: &BTreeMap<String, Option<String>>,
+    sign: Option<Option<&str>>,
+    retag: bool,
 ) -> Result<RefMoves> {
     let mut moves = RefMoves {
         moved: Vec::new(),
         left: Vec::new(),
         stranded: Vec::new(),
+        retagged: Vec::new(),
     };
     let successor = |old: &str| mapping.get(old).and_then(|new| new.clone());
     for (name, value) in gitio::list_refs(cwd, "refs/arc/")? {
@@ -263,29 +318,72 @@ fn plan_ref_moves(
         }
     }
     let branch_ref = format!("refs/heads/{branch}");
-    for (name, value, kind) in gitio::local_refs(cwd)? {
+    for reference in gitio::local_refs(cwd)? {
+        let gitio::LocalRef {
+            name,
+            object,
+            kind,
+            commit,
+        } = reference;
         if name == branch_ref {
             continue;
         }
-        let Some(new) = successor(&value) else {
+        // An annotated tag names its commit through its own object, so the
+        // commit it leads to is what the map answers for.
+        let Some(new) = successor(&commit) else {
             // A branch with commits of its own on top of the range has a tip
             // the rewrite never reached, so there is no successor to move it
             // to. Its commits are still built on the line that was replaced,
             // and only replaying them onto the new one reunites the two.
-            if kind == "commit" && gitio::is_ancestor(cwd, from, &value).unwrap_or(false) {
+            if kind == "commit" && gitio::is_ancestor(cwd, from, &commit).unwrap_or(false) {
                 moves.stranded.push(name);
             }
             continue;
         };
         if kind == "commit" {
             moves.moved.push((name, new));
+        } else if retag {
+            moves
+                .retagged
+                .push(retag_onto(cwd, &name, &object, &new, sign)?);
         } else {
             moves.left.push(format!(
-                "{name} is an annotated tag; re-point it deliberately"
+                "{name} is an annotated tag naming a replaced commit; `git describe` and the \
+                 changelog projection have no release boundary until it is re-pointed, which \
+                 `arc rewrite sign --retag` does"
             ));
         }
     }
     Ok(moves)
+}
+
+/// Recreate one annotated tag on the commit that replaced its target.
+///
+/// The tag name, message, tagger and date are the original's, so the only
+/// thing the new object says differently is which commit it names. It is
+/// signed when the original was and a key is available; a rewrite that signs
+/// nothing cannot sign a tag either, and dropping the signature is reported
+/// rather than passed off as the tag it recreated.
+///
+/// The object is written here and the ref moved later, alongside every other
+/// ref: an unreferenced tag object changes nothing about what the repository
+/// says, so a rewrite that fails between the two leaves no tag half-moved.
+fn retag_onto(
+    cwd: &Path,
+    name: &str,
+    object: &str,
+    target: &str,
+    sign: Option<Option<&str>>,
+) -> Result<Retag> {
+    let mut tag = gitio::read_tag(cwd, object)?;
+    tag.object = target.to_string();
+    let sign = if tag.signed { sign } else { None };
+    Ok(Retag {
+        name: name.to_string(),
+        old: object.to_string(),
+        new: gitio::write_tag_object(cwd, &tag, sign)?,
+        signature_dropped: tag.signed && sign.is_none(),
+    })
 }
 
 fn plural(count: usize, noun: &str) -> String {
