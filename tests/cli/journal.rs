@@ -8733,3 +8733,332 @@ fn journal_retract_refuses_an_artifact_target() {
         .failure()
         .stderr(predicates::str::contains("is not an entry to retract"));
 }
+
+fn discussion_summary_json(repo: &Repo, file: &str) -> serde_json::Value {
+    json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "discussion", file, "--json"]),
+    )
+}
+
+fn stanced_position(repo: &Repo, file: &str, stance: &str) -> String {
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            file,
+            "--stance",
+            stance,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("An argument.\n")
+        .assert()
+        .success();
+    journal_events(&journal_dir(repo))
+        .into_iter()
+        .rev()
+        .find(|event| event["event"] == "position")
+        .unwrap()["position_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn branched_discussion(repo: &Repo, topic: &str) -> (String, String) {
+    let file = discussion_named(repo, topic, "# One go, or staged?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "one-go",
+            "--option",
+            "staged",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Only the operator can weigh the rollback appetite.\n")
+        .assert()
+        .success();
+    let question = question_id(repo, &file);
+    (file, question)
+}
+
+#[test]
+fn journal_correct_moves_a_position_stance_in_the_tally() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "corrected-stance");
+    let position = stanced_position(&repo, &file, "for");
+    assert_eq!(discussion_summary_json(&repo, &file)["stances"]["for"], 1);
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "correct",
+            &file,
+            "--target",
+            &position,
+            "--field",
+            "stance",
+            "--value",
+            "against",
+            "--note",
+            "The benchmark it cited measured the wrong thing.",
+        ])
+        .assert()
+        .success();
+
+    let summary = discussion_summary_json(&repo, &file);
+    assert_eq!(summary["stances"]["for"], 0, "{summary}");
+    assert_eq!(summary["stances"]["against"], 1, "{summary}");
+    assert_eq!(summary["positions"], 1, "{summary}");
+}
+
+#[test]
+fn journal_correct_moves_an_answer_to_the_branch_it_chose() {
+    let repo = Repo::new();
+    let (file, question) = branched_discussion(&repo, "corrected-answer");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "one-go",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Chosen.\n")
+        .assert()
+        .success();
+    assert_eq!(
+        discussion_summary_json(&repo, &file)["questions"][0]["answered"],
+        "one-go"
+    );
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "correct",
+            &file,
+            "--target",
+            &format!("answer:{question}"),
+            "--field",
+            "option",
+            "--value",
+            "staged",
+        ])
+        .assert()
+        .success();
+
+    let summary = discussion_summary_json(&repo, &file);
+    assert_eq!(summary["questions"][0]["answered"], "staged", "{summary}");
+    // The question stays settled: a correction says what was chosen, not that
+    // nothing was.
+    let open = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert!(open["questions"].as_array().unwrap().is_empty(), "{open}");
+}
+
+#[test]
+fn journal_retract_removes_a_position_from_the_tally_and_its_branch() {
+    let repo = Repo::new();
+    let (file, question) = branched_discussion(&repo, "retracted-position");
+    for option in ["one-go", "staged"] {
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "position",
+                &file,
+                "--question",
+                &question,
+                "--option",
+                option,
+                "--stance",
+                "for",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("An argument.\n")
+            .assert()
+            .success();
+    }
+    let withdrawn = journal_events(&journal_dir(&repo))
+        .into_iter()
+        .rev()
+        .find(|event| event["event"] == "position")
+        .unwrap()["position_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(discussion_summary_json(&repo, &file)["stances"]["for"], 2);
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &withdrawn,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("The premise it rests on was checked and is false.\n")
+        .assert()
+        .success();
+
+    let summary = discussion_summary_json(&repo, &file);
+    assert_eq!(summary["stances"]["for"], 1, "{summary}");
+    assert_eq!(summary["positions"], 1, "{summary}");
+    assert_eq!(summary["retracted"][0]["target"], withdrawn, "{summary}");
+    assert!(
+        summary["retracted"][0]["note"]
+            .as_str()
+            .unwrap()
+            .contains("checked and is false"),
+        "{summary}"
+    );
+    let staged = summary["questions"][0]["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|branch| branch["option"] == "staged")
+        .unwrap()["positions"]
+        .clone();
+    assert_eq!(staged, 0, "{summary}");
+    // The block itself stays: an argument withdrawn and an argument never made
+    // are different records.
+    assert!(artifact_body(&repo, &file).contains(&format!("### Position {withdrawn}")));
+}
+
+#[test]
+fn journal_retract_of_an_answer_reopens_its_question() {
+    let repo = Repo::new();
+    let (file, question) = branched_discussion(&repo, "retracted-answer");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "one-go",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Chosen.\n")
+        .assert()
+        .success();
+    let open = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert!(open["questions"].as_array().unwrap().is_empty(), "{open}");
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &format!("answer:{question}"),
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Settled on a reading of the benchmark that did not hold.\n")
+        .assert()
+        .success();
+
+    let open = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert_eq!(open["questions"][0]["question"], question, "{open}");
+    assert!(
+        discussion_summary_json(&repo, &file)["questions"][0]["answered"].is_null(),
+        "a retracted answer leaves its question open"
+    );
+    // Reopened means answerable again, and the journal stays clean.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "staged",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Chosen with the benchmark read correctly.\n")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn journal_views_ignore_a_correction_naming_no_recorded_entry() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "ignored-correction");
+    stanced_position(&repo, &file, "for");
+    let before = discussion_summary_json(&repo, &file);
+    append_journal_event(
+        &journal_dir(&repo),
+        amendment_event(
+            "ignored-correction",
+            &file,
+            "2026-01-01T00:00:01Z",
+            serde_json::json!({
+                "event": "correction",
+                "target": "pos-absent",
+                "field": "stance",
+                "value": "against",
+            }),
+        ),
+    );
+
+    let after = discussion_summary_json(&repo, &file);
+    assert_eq!(before["stances"], after["stances"], "{after}");
+    assert_eq!(before["positions"], after["positions"], "{after}");
+    assert!(after["retracted"].is_null(), "{after}");
+}
+
+#[test]
+fn journal_open_and_catchup_show_a_corrected_title() {
+    let repo = Repo::new();
+    let file = todo_fixture(&repo, "corrected-title", "Wrong title");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "correct",
+            &file,
+            "--target",
+            "artifact",
+            "--field",
+            "title",
+            "--value",
+            "Right title",
+        ])
+        .assert()
+        .success();
+
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert_eq!(open["open"][0]["heading"], "# Right title", "{open}");
+    let catchup = json_stdout(repo.arc(&repo.root).args(["journal", "catchup", "--json"]));
+    assert_eq!(catchup["files"][0]["heading"], "# Right title", "{catchup}");
+    // The artifact keeps the heading it was filed with.
+    assert!(artifact_body(&repo, &file).contains("# Wrong title"));
+}

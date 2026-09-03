@@ -1301,6 +1301,176 @@ fn inspect_fork_marker_paths(
     Ok(())
 }
 
+/// The corrections and retractions in force on one artifact.
+///
+/// A correction replaces one field of one entry and a retraction withdraws
+/// one; neither rewrites what was recorded. Every derived view resolves the
+/// current value through here, so the artifact keeps reading as the argument
+/// that happened while the views read as what is true. The latest correction
+/// of a given target and field wins, in event order.
+#[derive(Default)]
+struct Amendments {
+    corrections: Vec<Correction>,
+    retracted: Vec<Retracted>,
+}
+
+struct Correction {
+    target: String,
+    field: String,
+    value: String,
+}
+
+/// One withdrawn entry and the reason it no longer holds.
+#[derive(Serialize)]
+struct Retracted {
+    target: String,
+    note: String,
+}
+
+impl Amendments {
+    fn collect(events: &[JournalEvent], filename: &str) -> Self {
+        let mut amendments = Self::default();
+        for event in amendment_events(events, filename) {
+            amendments.absorb(event);
+        }
+        amendments
+    }
+
+    /// The amendments in force on every artifact one is recorded against, so a
+    /// view spanning the journal resolves each artifact against its own.
+    fn collect_by_file(events: &[JournalEvent]) -> HashMap<String, Self> {
+        let mut by_file: HashMap<String, Self> = HashMap::new();
+        for event in events.iter().filter(|event| {
+            event.known() && matches!(event.event.as_str(), "correction" | "retraction")
+        }) {
+            if let Some(file) = event.file.clone() {
+                by_file.entry(file).or_default().absorb(event);
+            }
+        }
+        by_file
+    }
+
+    fn absorb(&mut self, event: &JournalEvent) {
+        let target = event
+            .target
+            .clone()
+            .expect("a known amendment names a target");
+        if event.event == "correction" {
+            self.corrections.push(Correction {
+                target,
+                field: event
+                    .field
+                    .clone()
+                    .expect("a known correction names a field"),
+                value: event
+                    .value
+                    .clone()
+                    .expect("a known correction carries a value"),
+            });
+        } else if !self.is_retracted(&target) {
+            self.retracted.push(Retracted {
+                note: event
+                    .note
+                    .clone()
+                    .expect("a known retraction carries a note"),
+                target,
+            });
+        }
+    }
+
+    /// A field's value after corrections: the latest correction of it, or what
+    /// was recorded.
+    fn field<'a>(
+        &'a self,
+        target: &str,
+        field: &str,
+        recorded: Option<&'a str>,
+    ) -> Option<&'a str> {
+        self.corrections
+            .iter()
+            .rev()
+            .find(|correction| correction.target == target && correction.field == field)
+            .map(|correction| correction.value.as_str())
+            .or(recorded)
+    }
+
+    fn is_retracted(&self, target: &str) -> bool {
+        self.retracted.iter().any(|entry| entry.target == target)
+    }
+
+    /// The artifact's own title, when a correction replaced it.
+    fn title(&self) -> Option<&str> {
+        self.field("artifact", "title", None)
+    }
+
+    /// Whether the settlement of the named question still stands. A retracted
+    /// answer leaves the question open, which is the state it was in before
+    /// anyone answered it.
+    fn answer_stands(&self, question: &str) -> bool {
+        !self.is_retracted(&format!("answer:{question}"))
+    }
+
+    /// A field of that question's answer, after corrections.
+    fn answer_field<'a>(
+        &'a self,
+        question: &str,
+        field: &str,
+        recorded: Option<&'a str>,
+    ) -> Option<&'a str> {
+        self.field(&format!("answer:{question}"), field, recorded)
+    }
+
+    /// Whether the position an event recorded was withdrawn.
+    fn position_retracted(&self, event: &JournalEvent) -> bool {
+        event
+            .position_id
+            .as_deref()
+            .is_some_and(|id| self.is_retracted(id))
+    }
+
+    /// The branch a position argues, after corrections.
+    fn position_branch(&self, event: &JournalEvent) -> Option<String> {
+        match event.position_id.as_deref() {
+            Some(id) => self
+                .field(id, "option", event.option.as_deref())
+                .map(str::to_string),
+            None => event.option.clone(),
+        }
+    }
+
+    /// The identity a position is attributed to, after corrections: its model,
+    /// qualified by the harness that ran it, and the harness alone when no
+    /// model is known.
+    fn identity_label(&self, event: &JournalEvent) -> String {
+        let Some(id) = event.position_id.as_deref() else {
+            return event_identity_label(event);
+        };
+        match self
+            .field(id, "model", event.model.as_deref())
+            .filter(|model| !model.is_empty())
+        {
+            Some(model) => format!("{model} via {}", event.harness),
+            None => event.harness.clone(),
+        }
+    }
+}
+
+/// Each position's reply target after corrections, parallel to `positions`.
+fn position_references(
+    positions: &[&JournalEvent],
+    amendments: &Amendments,
+) -> Vec<Option<String>> {
+    positions
+        .iter()
+        .map(|event| match event.position_id.as_deref() {
+            Some(id) => amendments
+                .field(id, "ref", event.reference.as_deref())
+                .map(str::to_string),
+            None => event.reference.clone(),
+        })
+        .collect()
+}
+
 /// Every `correction` and `retraction` recorded against one artifact.
 fn amendment_events<'a>(events: &'a [JournalEvent], filename: &str) -> Vec<&'a JournalEvent> {
     events
@@ -2178,11 +2348,13 @@ fn position(
                 offered.join(", ")
             );
         }
-        if existing.iter().any(|event| {
-            event.event == "answer"
-                && event.file.as_deref() == Some(filename)
-                && event.question_id.as_deref() == Some(question.as_str())
-        }) {
+        if Amendments::collect(&existing, filename).answer_stands(question)
+            && existing.iter().any(|event| {
+                event.event == "answer"
+                    && event.file.as_deref() == Some(filename)
+                    && event.question_id.as_deref() == Some(question.as_str())
+            })
+        {
             bail!("{question} is already answered; its branches are closed");
         }
     }
@@ -2499,12 +2671,14 @@ fn answer(
         (None, Some(other)) => Chosen::OffMenu(other.trim()),
         _ => bail!("pass exactly one of --option or --other"),
     };
-    if events.iter().any(|event| {
-        event.known()
-            && event.event == "answer"
-            && event.file.as_deref() == Some(filename)
-            && event.question_id.as_deref() == Some(question_id)
-    }) {
+    if Amendments::collect(&events, filename).answer_stands(question_id)
+        && events.iter().any(|event| {
+            event.known()
+                && event.event == "answer"
+                && event.file.as_deref() == Some(filename)
+                && event.question_id.as_deref() == Some(question_id)
+        })
+    {
         bail!("{question_id} is already answered; open a successor question to revisit it");
     }
     let mut unargued: Vec<String> = Vec::new();
@@ -3011,10 +3185,14 @@ fn scaffolds(ctx: &Ctx, show: Option<&str>, json: bool) -> Result<i32> {
 /// Every unanswered question in one journal, newest first.
 fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
     let events = read_events(dir)?;
+    let by_file = Amendments::collect_by_file(&events);
+    let unamended = Amendments::default();
+    let amendments = |file: &str| by_file.get(file).unwrap_or(&unamended);
     let answered: HashSet<(&str, &str)> = events
         .iter()
         .filter(|event| event.known() && event.event == "answer")
         .filter_map(|event| Some((event.file.as_deref()?, event.question_id.as_deref()?)))
+        .filter(|(file, question)| amendments(file).answer_stands(question))
         .collect();
     let mut open = Vec::new();
     for event in events
@@ -3039,7 +3217,8 @@ fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
                         && event.event == "position"
                         && event.file.as_deref() == Some(file)
                         && event.question_id.as_deref() == Some(question)
-                        && event.option.as_deref() == Some(option)
+                        && !amendments(file).position_retracted(event)
+                        && amendments(file).position_branch(event).as_deref() == Some(option)
                 })
                 .count()
         };
@@ -3640,6 +3819,23 @@ impl QuestionMachine {
                     return false;
                 }
                 progress.answered = true;
+                true
+            }
+            // A retracted answer leaves its question open, so the branches
+            // reopen and one further settlement is in order — the state the
+            // question was in before anyone answered it.
+            "retraction" => {
+                let Some(AmendTarget::Answer(question)) = event.amend_target() else {
+                    return true;
+                };
+                let key = (
+                    event.file.clone().expect("a known retraction has a file"),
+                    question,
+                );
+                let Some(progress) = self.questions.get_mut(&key) else {
+                    return false;
+                };
+                progress.answered = false;
                 true
             }
             _ => true,
@@ -4619,6 +4815,16 @@ pub(crate) fn parse_artifact_name(name: &str) -> Option<(String, String, String)
     Some((ts.to_string(), topic.to_string(), kind.to_string()))
 }
 
+/// The heading a queue row shows: the artifact's title as corrected, and its
+/// first heading otherwise. A correction is written as the heading it replaces
+/// so a corrected row reads exactly like an uncorrected one.
+fn amended_heading(events: &[JournalEvent], dir: &Path, filename: &str) -> Option<String> {
+    Amendments::collect(events, filename)
+        .title()
+        .map(|title| format!("# {title}"))
+        .or_else(|| first_heading(&dir.join(filename)))
+}
+
 fn first_heading(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     text.lines()
@@ -4726,11 +4932,12 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
     } else {
         hot_dir.clone()
     };
+    let journal = read_events(&hot_dir)?;
     let mut files: Vec<ArtifactEntry> = Vec::new();
     if dir.is_dir() {
         for name in sorted_artifact_names(&dir)?.into_iter().take(limit) {
             if let Some((ts, topic, kind)) = parse_artifact_name(&name) {
-                let heading = first_heading(&dir.join(&name));
+                let heading = amended_heading(&journal, &dir, &name);
                 files.push(ArtifactEntry {
                     file: name,
                     timestamp: ts,
@@ -4748,7 +4955,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
 
     let journal_tail = journal_tail(&hot_dir, limit)?;
     let now = Utc::now();
-    let lanes = lanes_from_journal(&read_events(&hot_dir)?, now);
+    let lanes = lanes_from_journal(&journal, now);
     let memories = if archived {
         Vec::new()
     } else {
@@ -5067,7 +5274,7 @@ pub(crate) fn collect_open_in(
         }
         for name in open_names {
             if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
-                let heading = first_heading(&dir.join(&name));
+                let heading = amended_heading(&journal, &dir, &name);
                 let change = change_annotation(&changes, &topic, &name);
                 let verification = verification_stamp(&journal, &name, current_revision.as_deref());
                 open.push(ArtifactEntry {
@@ -5089,7 +5296,7 @@ pub(crate) fn collect_open_in(
         }
         for name in later_names {
             if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
-                let heading = first_heading(&dir.join(&name));
+                let heading = amended_heading(&journal, &dir, &name);
                 let change = change_annotation(&changes, &topic, &name);
                 let verification = verification_stamp(&journal, &name, current_revision.as_deref());
                 later.push(ArtifactEntry {
@@ -5107,7 +5314,7 @@ pub(crate) fn collect_open_in(
         }
         for name in feature_request_names {
             if let Some((ts, topic, file_kind)) = parse_artifact_name(&name) {
-                let heading = first_heading(&dir.join(&name));
+                let heading = amended_heading(&journal, &dir, &name);
                 let change = change_annotation(&changes, &topic, &name);
                 let verification = verification_stamp(&journal, &name, current_revision.as_deref());
                 feature_requests.push(ArtifactEntry {
@@ -5579,9 +5786,15 @@ struct DiscussionSummary {
     topic: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     age_seconds: Option<u64>,
-    /// `### Position` headings in the file — every position, however added.
+    /// `### Position` headings in the file that still stand — every position,
+    /// however added, less the retracted ones.
     positions: usize,
     stances: StanceTally,
+    /// Entries withdrawn on this artifact, with the reason each no longer
+    /// holds. Their blocks stay in the file: an argument withdrawn and an
+    /// argument never made are different records.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    retracted: Vec<Retracted>,
     /// Distinct `<model via harness>` identities from typed `position` events.
     /// Hand-written positions that never ran `journal position` are not counted
     /// here (they still count toward `positions` and `stances`).
@@ -5692,7 +5905,7 @@ const MAX_DISCUSSION_DEPTH: usize = 256;
 
 fn position_depth(
     start: usize,
-    positions: &[&JournalEvent],
+    references: &[Option<String>],
     positions_by_id: &HashMap<&str, usize>,
 ) -> usize {
     let mut current = start;
@@ -5703,8 +5916,7 @@ fn position_depth(
         if let Some(entry_depth) = visited.insert(current, depth) {
             return entry_depth;
         }
-        let Some(parent) = positions[current]
-            .reference
+        let Some(parent) = references[current]
             .as_deref()
             .and_then(|reference| positions_by_id.get(reference))
             .copied()
@@ -5730,10 +5942,10 @@ fn position_events<'a>(events: &'a [JournalEvent], filename: &str) -> Vec<&'a Jo
 }
 
 /// Distinct identities that filed a position, first appearance first.
-fn discussion_participants(positions: &[&JournalEvent]) -> Vec<String> {
+fn discussion_participants(positions: &[&JournalEvent], amendments: &Amendments) -> Vec<String> {
     let mut participants: Vec<String> = Vec::new();
     for event in positions {
-        let label = event_identity_label(event);
+        let label = amendments.identity_label(event);
         if !participants.contains(&label) {
             participants.push(label);
         }
@@ -5753,14 +5965,15 @@ fn untested_discussion(events: &[JournalEvent], filename: &str) -> Vec<String> {
         return Vec::new();
     }
     let mut warnings = Vec::new();
-    let participants = discussion_participants(&positions);
+    let amendments = Amendments::collect(events, filename);
+    let participants = discussion_participants(&positions, &amendments);
     if participants.len() == 1 {
         warnings.push(format!(
             "every position came from one participant ({})",
             participants[0]
         ));
     }
-    let (_, _, answered) = discussion_rounds(&positions);
+    let (_, _, answered) = discussion_rounds(&positions, &amendments);
     if answered.is_empty() {
         warnings.push("no position answered another position".to_string());
     }
@@ -5769,19 +5982,21 @@ fn untested_discussion(events: &[JournalEvent], filename: &str) -> Vec<String> {
 
 fn discussion_rounds(
     positions: &[&JournalEvent],
+    amendments: &Amendments,
 ) -> (Vec<DiscussionRound>, Vec<String>, HashSet<String>) {
     let positions_by_id: HashMap<&str, usize> = positions
         .iter()
         .enumerate()
         .filter_map(|(index, event)| event.position_id.as_deref().map(|id| (id, index)))
         .collect();
+    let references = position_references(positions, amendments);
     let mut rounds: Vec<DiscussionRound> = Vec::new();
 
     for (index, event) in positions.iter().enumerate() {
         let Some(position_id) = event.position_id.as_ref() else {
             continue;
         };
-        let depth = position_depth(index, positions, &positions_by_id);
+        let depth = position_depth(index, &references, &positions_by_id);
         if !rounds.iter().any(|round| round.depth == depth) {
             rounds.push(DiscussionRound {
                 depth,
@@ -5795,21 +6010,23 @@ fn discussion_rounds(
             .find(|round| round.depth == depth)
             .expect("round was inserted");
         round.positions.push(DiscussionPosition {
+            actor: amendments
+                .field(position_id, "actor", event.actor.as_deref())
+                .map(str::to_string),
             id: position_id.clone(),
-            actor: event.actor.clone(),
             on_behalf_of: event.on_behalf_of.clone(),
         });
-        let participant = event_identity_label(event);
+        let participant = amendments.identity_label(event);
         if !round.participants.contains(&participant) {
             round.participants.push(participant);
         }
     }
 
-    let answered: HashSet<&str> = positions
+    let answered: HashSet<&str> = references
         .iter()
         .enumerate()
-        .filter_map(|(index, event)| {
-            let reference = event.reference.as_deref()?;
+        .filter_map(|(index, reference)| {
+            let reference = reference.as_deref()?;
             let target = positions_by_id.get(reference)?;
             (*target != index).then_some(reference)
         })
@@ -5893,21 +6110,14 @@ fn position_stance_value(line: &str) -> Option<&str> {
 /// as `unstated`, so a tally that undercounts says so instead of reading as a
 /// settled result — and a `Position:` line anywhere else, including inside a
 /// fenced example, is prose.
-fn position_structure(body: &str) -> (usize, StanceTally, Vec<Option<String>>) {
-    let mut heading_ids: Vec<Option<String>> = Vec::new();
-    let mut positions = 0;
-    let mut tally = StanceTally::default();
+fn position_blocks(body: &str) -> Vec<PositionBlock> {
+    let mut blocks: Vec<PositionBlock> = Vec::new();
+    // A block ends at the next heading, at a horizontal rule, or at the end of
+    // the file, and one that ended without stating a stance keeps the
+    // `Unstated` it was opened with.
     let mut open_block = false;
     let mut decided = false;
     let mut fence: Option<(u8, usize)> = None;
-    // A block ends at the next heading, at a horizontal rule, or at the end of
-    // the file.
-    let close_block = |open_block: &mut bool, decided: bool, tally: &mut StanceTally| {
-        if *open_block && !decided {
-            tally.unstated += 1;
-        }
-        *open_block = false;
-    };
     for line in body.lines() {
         // A fenced block quotes the conventions rather than exercising them —
         // the scaffold that teaches the stance line is itself such a quote.
@@ -5917,10 +6127,7 @@ fn position_structure(body: &str) -> (usize, StanceTally, Vec<Option<String>>) {
                 fence = Some((marker, run));
                 // A block that opens with a quotation has not opened with a
                 // stance, whatever it says once the quotation ends.
-                if open_block && !decided {
-                    decided = true;
-                    tally.unstated += 1;
-                }
+                decided = true;
                 continue;
             }
             (Some((marker, opened)), Some((closing, run, bare)))
@@ -5944,39 +6151,91 @@ fn position_structure(body: &str) -> (usize, StanceTally, Vec<Option<String>>) {
             (None, None) => {}
         }
         if is_horizontal_rule(trimmed) {
-            close_block(&mut open_block, decided, &mut tally);
+            open_block = false;
             continue;
         }
         if is_position_heading(line) {
-            close_block(&mut open_block, decided, &mut tally);
-            heading_ids.push(position_heading_id(line));
-            positions += 1;
+            blocks.push(PositionBlock {
+                id: position_heading_id(line),
+                stance: BlockStance::Unstated,
+            });
             open_block = true;
             decided = false;
             continue;
         }
         if trimmed.starts_with('#') {
-            close_block(&mut open_block, decided, &mut tally);
+            open_block = false;
             continue;
         }
         if !open_block || decided || trimmed.is_empty() {
             continue;
         }
         decided = true;
+        // The block opens by arguing rather than voting.
         let Some(value) = position_stance_value(trimmed) else {
-            // The block opens by arguing rather than voting.
-            tally.unstated += 1;
             continue;
         };
-        match PositionStance::parse(value) {
-            Some(PositionStance::For) => tally.in_favor += 1,
-            Some(PositionStance::Against) => tally.against += 1,
-            Some(PositionStance::Amend) => tally.amend += 1,
-            None => tally.other += 1,
+        if let Some(block) = blocks.last_mut() {
+            block.stance = parse_block_stance(value);
         }
     }
-    close_block(&mut open_block, decided, &mut tally);
-    (positions, tally, heading_ids)
+    blocks
+}
+
+/// One `### Position` block as the artifact carries it.
+struct PositionBlock {
+    /// The ID its heading names, when the heading names one the reply graph
+    /// can resolve.
+    id: Option<String>,
+    stance: BlockStance,
+}
+
+/// What a position block's first line said.
+#[derive(Clone, Copy)]
+enum BlockStance {
+    Stated(PositionStance),
+    /// A first line shaped like a stance, naming one that does not exist.
+    Other,
+    /// A block that argues instead of voting, kept apart so a tally that
+    /// undercounts says so instead of reading as a settled result.
+    Unstated,
+}
+
+fn parse_block_stance(value: &str) -> BlockStance {
+    match PositionStance::parse(value) {
+        Some(stance) => BlockStance::Stated(stance),
+        None => BlockStance::Other,
+    }
+}
+
+/// The stance each standing position states, after amendments.
+///
+/// A retracted position leaves the tally entirely: it was withdrawn, and a
+/// withdrawn argument counted as a vote is what retraction exists to prevent,
+/// so the count of positions and the tally over them stay the same set. A
+/// corrected stance is the stance counted.
+fn stance_tally(blocks: &[PositionBlock], amendments: &Amendments) -> (usize, StanceTally) {
+    let mut positions = 0;
+    let mut tally = StanceTally::default();
+    for block in blocks {
+        let id = block.id.as_deref();
+        if id.is_some_and(|id| amendments.is_retracted(id)) {
+            continue;
+        }
+        positions += 1;
+        let stance = match id.and_then(|id| amendments.field(id, "stance", None)) {
+            Some(corrected) => parse_block_stance(corrected),
+            None => block.stance,
+        };
+        match stance {
+            BlockStance::Stated(PositionStance::For) => tally.in_favor += 1,
+            BlockStance::Stated(PositionStance::Against) => tally.against += 1,
+            BlockStance::Stated(PositionStance::Amend) => tally.amend += 1,
+            BlockStance::Other => tally.other += 1,
+            BlockStance::Unstated => tally.unstated += 1,
+        }
+    }
+    (positions, tally)
 }
 
 /// Derived summary of a discussion. Structural counts (positions, stances) come
@@ -5997,17 +6256,20 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
     let events = read_events(&dir)?;
 
-    let (positions, stances, heading_ids) = position_structure(&body);
+    let amendments = Amendments::collect(&events, filename);
+    let blocks = position_blocks(&body);
+    let heading_ids: Vec<Option<String>> = blocks.iter().map(|block| block.id.clone()).collect();
+    let (positions, stances) = stance_tally(&blocks, &amendments);
     let (unrecorded_question_blocks, unrecorded_answer_blocks) =
         unrecorded_question_blocks(&body, &events, filename);
 
     let position_events = position_events(&events, filename);
-    let participants = discussion_participants(&position_events);
-    let reply_refs = position_events
+    let participants = discussion_participants(&position_events, &amendments);
+    let reply_refs = position_references(&position_events, &amendments)
         .iter()
-        .filter(|event| event.reference.is_some())
+        .filter(|reference| reference.is_some())
         .count();
-    let (rounds, unanswered, _) = discussion_rounds(&position_events);
+    let (rounds, unanswered, _) = discussion_rounds(&position_events, &amendments);
     // The tally reads the file and the graph reads the event log, so they can
     // disagree about how many positions exist. The difference is the honest
     // denominator gap, and reporting it is what keeps `unanswered` from reading
@@ -6030,10 +6292,15 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
                         && event.file.as_deref() == Some(filename)
                         && event.question_id.as_deref() == Some(id.as_str())
                 })
+                .filter(|_| amendments.answer_stands(&id))
                 .and_then(|event| {
                     Some(DiscussionAnswer {
-                        option: event.option.clone()?,
-                        actor: event.actor.clone(),
+                        option: amendments
+                            .answer_field(&id, "option", event.option.as_deref())?
+                            .to_string(),
+                        actor: amendments
+                            .answer_field(&id, "actor", event.actor.as_deref())
+                            .map(str::to_string),
                         on_behalf_of: event.on_behalf_of.clone(),
                     })
                 });
@@ -6044,8 +6311,10 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
                     positions: position_events
                         .iter()
                         .filter(|event| {
-                            event.question_id.as_deref() == Some(id.as_str())
-                                && event.option.as_deref() == Some(option.as_str())
+                            !amendments.position_retracted(event)
+                                && event.question_id.as_deref() == Some(id.as_str())
+                                && amendments.position_branch(event).as_deref()
+                                    == Some(option.as_str())
                         })
                         .count(),
                 })
@@ -6114,6 +6383,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         topic,
         positions,
         stances,
+        retracted: amendments.retracted,
         participants,
         reply_refs,
         unplaced,
@@ -6155,6 +6425,16 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
              edited by hand opens with it)",
             summary.stances.unstated,
         );
+    }
+    if !summary.retracted.is_empty() {
+        println!("retracted:");
+        for entry in &summary.retracted {
+            println!(
+                "  {}: {}",
+                entry.target,
+                entry.note.lines().next().unwrap_or_default()
+            );
+        }
     }
     let participants = if summary.participants.is_empty() {
         "(none via journal position)".to_string()
@@ -6279,12 +6559,14 @@ fn stamp() -> Result<i32> {
 /// invisible to every derived view, which is the reason the guide asks for the
 /// verb rather than the paragraph.
 fn unanswered_questions(events: &[JournalEvent], filename: &str) -> Vec<String> {
+    let amendments = Amendments::collect(events, filename);
     let answered: HashSet<&str> = events
         .iter()
         .filter(|event| {
             event.known() && event.event == "answer" && event.file.as_deref() == Some(filename)
         })
         .filter_map(|event| event.question_id.as_deref())
+        .filter(|question| amendments.answer_stands(question))
         .collect();
     let mut open = events
         .iter()
