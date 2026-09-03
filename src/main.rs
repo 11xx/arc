@@ -1274,8 +1274,8 @@ enum ForkCmd {
     Begin {
         /// Kebab-case slug naming the fork (and the fork/<slug> branch)
         slug: String,
-        /// Branch to fork from; omitted, the current branch (master when
-        /// standing on a fork, which is not a base)
+        /// Branch to fork from; omitted, the current branch, or the
+        /// repository's integration branch when standing on a fork
         #[arg(long)]
         from: Option<String>,
     },
@@ -2542,7 +2542,8 @@ fn run(cli: Cli) -> Result<i32> {
             Some(file) => {
                 if transcript {
                     bail!(
-                        "--transcript reads the session recorded against a change; an                          artifact's record of what happened is its checkpoints"
+                        "--transcript reads the session recorded against a change; \
+                         an artifact's record of what happened is its checkpoints"
                     );
                 }
                 journal::rescue_artifact(&ctx, &file, json, take)

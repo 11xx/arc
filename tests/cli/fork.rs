@@ -1349,3 +1349,56 @@ fn journal_verified_outside_a_fork_still_stamps_the_anchor() {
     assert!(stamp["scope"].is_null(), "{stamp}");
     assert_eq!(stamp["moved"], false, "{stamp}");
 }
+
+/// The base a fork begins from is discovered from the repository, never
+/// assumed: standing on a fork, the integration branch `origin/HEAD` names
+/// is what the new fork carries.
+#[test]
+fn fork_begin_bases_on_the_discovered_integration_branch() {
+    let repo = Repo::new();
+    repo.commit(&repo.root, "base.txt", "base\n", "test: integration work");
+    git(&repo.root, &["branch", "-m", "master", "main"]);
+    git(
+        &repo.root,
+        &["update-ref", "refs/remotes/origin/main", "main"],
+    );
+    git(
+        &repo.root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    );
+
+    // The primary checkout stands on a fork, which is never a base. Its own
+    // commit must not reach the new fork.
+    git(&repo.root, &["checkout", "-b", "fork/decoy"]);
+    repo.commit(&repo.root, "decoy.txt", "decoy\n", "test: decoy work");
+
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "demo"]));
+    let worktree = fork_worktree(&repo, "demo");
+    assert!(worktree.join("base.txt").is_file(), "base must reach fork");
+    assert!(
+        !worktree.join("decoy.txt").exists(),
+        "decoy must not reach fork"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "fork/demo"]),
+        git_out(&repo.root, &["rev-parse", "main"])
+    );
+}
+
+/// With no branch to stand on and no declared default, there is no base to
+/// guess; the refusal names the flag that supplies one.
+#[test]
+fn fork_begin_refuses_when_no_base_is_discoverable() {
+    let repo = Repo::new();
+    git(&repo.root, &["checkout", "--detach"]);
+
+    repo.arc(&repo.root)
+        .args(["fork", "begin", "demo"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--from <branch>"));
+}

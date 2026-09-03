@@ -372,3 +372,25 @@ fn malformed_transcript_lines_are_skipped() {
     assert_eq!(value["transcript"]["count"], 1);
     assert_eq!(value["transcript"]["turns"][0]["text"], "kept");
 }
+
+/// An artifact keeps checkpoints rather than a claimed session, so
+/// `--transcript` has nothing to read there. The refusal says so in one
+/// readable line.
+#[test]
+fn rescue_refuses_a_transcript_of_an_artifact_in_one_line() {
+    let repo = Repo::new();
+    let (_, file) = journal_artifact(&repo, "no-transcript", "todo", "# Queued\n");
+
+    let out = repo
+        .arc(&repo.root)
+        .args(["rescue", &file, "--transcript"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(stderr.contains("its checkpoints"), "{stderr}");
+    assert!(
+        !stderr.contains("   "),
+        "refusal must not carry a run of spaces: {stderr}"
+    );
+}

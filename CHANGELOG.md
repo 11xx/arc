@@ -234,6 +234,15 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- `arc fork begin` standing on a fork takes its base from the branch the
+  repository presents as its integration branch, and refuses naming
+  `--from <branch>` when none is discoverable, so a repository whose
+  integration branch carries any other name never has an unrelated or
+  missing branch chosen for it.
+
+- The refusal for `arc rescue --transcript` on a journal artifact reads as
+  one sentence instead of carrying a gap of literal spaces.
+
 - `arc query` filters only on flags the caller typed. `--actor` and
   `--harness` name the acting identity on every command and a filter on this
   one, so the identity exported for recording was narrowing the read: each
