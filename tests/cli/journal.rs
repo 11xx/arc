@@ -8400,3 +8400,783 @@ fn discussion_json_separates_the_actor_from_the_subject() {
         .expect("the position wrote a heading");
     assert!(!heading.contains("executor-x"), "{heading}");
 }
+
+fn append_journal_event(dir: &Path, event: serde_json::Value) {
+    use std::io::Write;
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("events.jsonl"))
+            .unwrap(),
+        "{event}"
+    )
+    .unwrap();
+}
+
+fn amendment_event(
+    topic: &str,
+    file: &str,
+    ts: &str,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut event = serde_json::json!({
+        "schema": "journal-events/1",
+        "ts": ts,
+        "harness": "test",
+        "session": "test",
+        "topic": topic,
+        "file": file,
+    });
+    let object = event.as_object_mut().unwrap();
+    for (key, value) in extra.as_object().unwrap() {
+        object.insert(key.clone(), value.clone());
+    }
+    event
+}
+
+fn doctor_findings(repo: &Repo, bucket: &str) -> Vec<String> {
+    let report = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    report[bucket]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|finding| {
+            format!(
+                "{}: {}",
+                finding["code"].as_str().unwrap(),
+                finding["detail"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn journal_doctor_reports_an_amendment_naming_no_recorded_entry() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "dangling-amendment");
+    let dir = journal_dir(&repo);
+    append_journal_event(
+        &dir,
+        amendment_event(
+            "dangling-amendment",
+            &file,
+            "2026-01-01T00:00:01Z",
+            serde_json::json!({
+                "event": "correction",
+                "target": "pos-absent",
+                "field": "stance",
+                "value": "against",
+            }),
+        ),
+    );
+
+    let problems = doctor_findings(&repo, "problems");
+    assert!(
+        problems
+            .iter()
+            .any(|finding| finding.starts_with("dangling-amendment-target")
+                && finding.contains("pos-absent")),
+        "{problems:?}"
+    );
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn journal_doctor_flags_same_stamp_corrections_of_one_field() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "ambiguous-amendment");
+    let position = add_discussion_position(&repo, &file, None, "test");
+    let dir = journal_dir(&repo);
+    for value in ["against", "amend"] {
+        append_journal_event(
+            &dir,
+            amendment_event(
+                "ambiguous-amendment",
+                &file,
+                "2026-01-01T00:00:01Z",
+                serde_json::json!({
+                    "event": "correction",
+                    "target": position,
+                    "field": "stance",
+                    "value": value,
+                }),
+            ),
+        );
+    }
+
+    let advice = doctor_findings(&repo, "advice");
+    assert!(
+        advice
+            .iter()
+            .any(|finding| finding.starts_with("ambiguous-correction")
+                && finding.contains("2 corrections of stance")),
+        "{advice:?}"
+    );
+    let problems = doctor_findings(&repo, "problems");
+    assert!(
+        !problems
+            .iter()
+            .any(|finding| finding.starts_with("ambiguous-correction")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn journal_doctor_rejects_a_correction_of_a_field_its_target_lacks() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "mismatched-amendment");
+    let dir = journal_dir(&repo);
+    append_journal_event(
+        &dir,
+        amendment_event(
+            "mismatched-amendment",
+            &file,
+            "2026-01-01T00:00:01Z",
+            serde_json::json!({
+                "event": "correction",
+                "target": "artifact",
+                "field": "stance",
+                "value": "for",
+            }),
+        ),
+    );
+
+    let problems = doctor_findings(&repo, "problems");
+    assert!(
+        problems
+            .iter()
+            .any(|finding| finding.starts_with("unknown-jsonl-event")),
+        "{problems:?}"
+    );
+}
+
+fn todo_fixture(repo: &Repo, topic: &str, title: &str) -> String {
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "todo",
+                topic,
+                "--title",
+                title,
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("Work waiting for a session.\n"),
+    );
+    PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string()
+}
+
+fn artifact_body(repo: &Repo, file: &str) -> String {
+    fs::read_to_string(journal_dir(repo).join(file)).unwrap()
+}
+
+#[test]
+fn journal_correct_amends_a_consumed_artifact_that_still_refuses_positions() {
+    let repo = Repo::new();
+    let file = todo_fixture(&repo, "consumed-correction", "Wrong title");
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file, "--outcome", "done"])
+        .assert()
+        .success();
+    let before = artifact_body(&repo, &file);
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "correct",
+            &file,
+            "--target",
+            "artifact",
+            "--field",
+            "title",
+            "--value",
+            "Corrected title",
+        ])
+        .assert()
+        .success();
+
+    let after = artifact_body(&repo, &file);
+    assert!(
+        after.starts_with(&before),
+        "correction rewrote the artifact"
+    );
+    assert!(after.contains("### Correction cor-"), "{after}");
+    assert!(after.contains("Value: Corrected title"), "{after}");
+
+    repo.arc(&repo.root)
+        .args(["journal", "position", &file, "--body-file", "-"])
+        .write_stdin("Position: for\n")
+        .assert()
+        .failure()
+        .stderr(
+            predicates::str::contains("consumed artifact")
+                .and(predicates::str::contains("journal correct")),
+        );
+}
+
+#[test]
+fn journal_correct_refuses_a_field_the_target_does_not_carry() {
+    let repo = Repo::new();
+    let file = todo_fixture(&repo, "field-mismatch", "A title");
+    repo.arc(&repo.root)
+        .args([
+            "journal", "correct", &file, "--target", "artifact", "--field", "stance", "--value",
+            "for",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "artifact has no stance to correct",
+        ));
+}
+
+#[test]
+fn journal_correct_refuses_a_target_the_artifact_never_recorded() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "absent-target");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "correct",
+            &file,
+            "--target",
+            "pos-absent",
+            "--field",
+            "stance",
+            "--value",
+            "against",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no pos-absent on"));
+}
+
+#[test]
+fn journal_retract_requires_a_reason_and_refuses_a_second_one() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "retract-guards");
+    let position = add_discussion_position(&repo, &file, None, "test");
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &position,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("   \n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("must say why"));
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &position,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("The premise it rests on was checked and is false.\n")
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &position,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Again.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already retracted"));
+
+    let body = artifact_body(&repo, &file);
+    assert!(body.contains("### Retraction ret-"), "{body}");
+    assert!(body.contains(&format!("Target: {position}")), "{body}");
+}
+
+#[test]
+fn journal_retract_refuses_an_artifact_target() {
+    let repo = Repo::new();
+    let file = todo_fixture(&repo, "retract-artifact", "A title");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            "artifact",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Withdrawn.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is not an entry to retract"));
+}
+
+fn discussion_summary_json(repo: &Repo, file: &str) -> serde_json::Value {
+    json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "discussion", file, "--json"]),
+    )
+}
+
+fn stanced_position(repo: &Repo, file: &str, stance: &str) -> String {
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            file,
+            "--stance",
+            stance,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("An argument.\n")
+        .assert()
+        .success();
+    journal_events(&journal_dir(repo))
+        .into_iter()
+        .rev()
+        .find(|event| event["event"] == "position")
+        .unwrap()["position_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn branched_discussion(repo: &Repo, topic: &str) -> (String, String) {
+    let file = discussion_named(repo, topic, "# One go, or staged?\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "one-go",
+            "--option",
+            "staged",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Only the operator can weigh the rollback appetite.\n")
+        .assert()
+        .success();
+    let question = question_id(repo, &file);
+    (file, question)
+}
+
+#[test]
+fn journal_correct_moves_a_position_stance_in_the_tally() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "corrected-stance");
+    let position = stanced_position(&repo, &file, "for");
+    assert_eq!(discussion_summary_json(&repo, &file)["stances"]["for"], 1);
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "correct",
+            &file,
+            "--target",
+            &position,
+            "--field",
+            "stance",
+            "--value",
+            "against",
+            "--note",
+            "The benchmark it cited measured the wrong thing.",
+        ])
+        .assert()
+        .success();
+
+    let summary = discussion_summary_json(&repo, &file);
+    assert_eq!(summary["stances"]["for"], 0, "{summary}");
+    assert_eq!(summary["stances"]["against"], 1, "{summary}");
+    assert_eq!(summary["positions"], 1, "{summary}");
+}
+
+#[test]
+fn journal_correct_moves_an_answer_to_the_branch_it_chose() {
+    let repo = Repo::new();
+    let (file, question) = branched_discussion(&repo, "corrected-answer");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "one-go",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Chosen.\n")
+        .assert()
+        .success();
+    assert_eq!(
+        discussion_summary_json(&repo, &file)["questions"][0]["answered"]["option"],
+        "one-go"
+    );
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "correct",
+            &file,
+            "--target",
+            &format!("answer:{question}"),
+            "--field",
+            "option",
+            "--value",
+            "staged",
+        ])
+        .assert()
+        .success();
+
+    let summary = discussion_summary_json(&repo, &file);
+    assert_eq!(
+        summary["questions"][0]["answered"]["option"], "staged",
+        "{summary}"
+    );
+    // The question stays settled: a correction says what was chosen, not that
+    // nothing was.
+    let open = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert!(open["questions"].as_array().unwrap().is_empty(), "{open}");
+}
+
+#[test]
+fn journal_retract_removes_a_position_from_the_tally_and_its_branch() {
+    let repo = Repo::new();
+    let (file, question) = branched_discussion(&repo, "retracted-position");
+    for option in ["one-go", "staged"] {
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "position",
+                &file,
+                "--question",
+                &question,
+                "--option",
+                option,
+                "--stance",
+                "for",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("An argument.\n")
+            .assert()
+            .success();
+    }
+    let withdrawn = journal_events(&journal_dir(&repo))
+        .into_iter()
+        .rev()
+        .find(|event| event["event"] == "position")
+        .unwrap()["position_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(discussion_summary_json(&repo, &file)["stances"]["for"], 2);
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &withdrawn,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("The premise it rests on was checked and is false.\n")
+        .assert()
+        .success();
+
+    let summary = discussion_summary_json(&repo, &file);
+    assert_eq!(summary["stances"]["for"], 1, "{summary}");
+    assert_eq!(summary["positions"], 1, "{summary}");
+    assert_eq!(summary["retracted"][0]["target"], withdrawn, "{summary}");
+    assert!(
+        summary["retracted"][0]["note"]
+            .as_str()
+            .unwrap()
+            .contains("checked and is false"),
+        "{summary}"
+    );
+    let staged = summary["questions"][0]["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|branch| branch["option"] == "staged")
+        .unwrap()["positions"]
+        .clone();
+    assert_eq!(staged, 0, "{summary}");
+    // The block itself stays: an argument withdrawn and an argument never made
+    // are different records.
+    assert!(artifact_body(&repo, &file).contains(&format!("### Position {withdrawn}")));
+}
+
+#[test]
+fn journal_retract_of_an_answer_reopens_its_question() {
+    let repo = Repo::new();
+    let (file, question) = branched_discussion(&repo, "retracted-answer");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "one-go",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Chosen.\n")
+        .assert()
+        .success();
+    let open = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert!(open["questions"].as_array().unwrap().is_empty(), "{open}");
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &format!("answer:{question}"),
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Settled on a reading of the benchmark that did not hold.\n")
+        .assert()
+        .success();
+
+    let open = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert_eq!(open["questions"][0]["question"], question, "{open}");
+    assert!(
+        discussion_summary_json(&repo, &file)["questions"][0]["answered"].is_null(),
+        "a retracted answer leaves its question open"
+    );
+    // Reopened means answerable again, and the journal stays clean.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "staged",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Chosen with the benchmark read correctly.\n")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn journal_views_ignore_a_correction_naming_no_recorded_entry() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "ignored-correction");
+    stanced_position(&repo, &file, "for");
+    let before = discussion_summary_json(&repo, &file);
+    append_journal_event(
+        &journal_dir(&repo),
+        amendment_event(
+            "ignored-correction",
+            &file,
+            "2026-01-01T00:00:01Z",
+            serde_json::json!({
+                "event": "correction",
+                "target": "pos-absent",
+                "field": "stance",
+                "value": "against",
+            }),
+        ),
+    );
+
+    let after = discussion_summary_json(&repo, &file);
+    assert_eq!(before["stances"], after["stances"], "{after}");
+    assert_eq!(before["positions"], after["positions"], "{after}");
+    assert!(after["retracted"].is_null(), "{after}");
+}
+
+#[test]
+fn journal_open_and_catchup_show_a_corrected_title() {
+    let repo = Repo::new();
+    let file = todo_fixture(&repo, "corrected-title", "Wrong title");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "correct",
+            &file,
+            "--target",
+            "artifact",
+            "--field",
+            "title",
+            "--value",
+            "Right title",
+        ])
+        .assert()
+        .success();
+
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert_eq!(open["open"][0]["heading"], "# Right title", "{open}");
+    let catchup = json_stdout(repo.arc(&repo.root).args(["journal", "catchup", "--json"]));
+    assert_eq!(catchup["files"][0]["heading"], "# Right title", "{catchup}");
+    // The artifact keeps the heading it was filed with.
+    assert!(artifact_body(&repo, &file).contains("# Wrong title"));
+}
+
+#[test]
+fn journal_open_counts_positions_standing_on_a_filed_claim() {
+    let repo = Repo::new();
+    let file = todo_fixture(&repo, "amended-claim", "A claim");
+    let plain = todo_fixture(&repo, "plain-claim", "Another claim");
+    for _ in 0..2 {
+        stanced_position(&repo, &file, "amend");
+    }
+
+    let queue = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let row = |name: &str| {
+        queue["open"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["file"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(&file)["amendments"], 2, "{queue}");
+    assert!(row(&plain)["amendments"].is_null(), "{queue}");
+    let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(text.contains("[amended ×2]"), "{text}");
+    assert_eq!(text.matches("[amended ×").count(), 1, "{text}");
+
+    // A retracted position is not an amendment in force.
+    let withdrawn = journal_events(&journal_dir(&repo))
+        .into_iter()
+        .rev()
+        .find(|event| event["event"] == "position")
+        .unwrap()["position_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &withdrawn,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Filed against the wrong claim.\n")
+        .assert()
+        .success();
+    let queue = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert_eq!(
+        row(&file)["amendments"],
+        2,
+        "the earlier queue is unchanged"
+    );
+    assert_eq!(
+        queue["open"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["file"] == file.as_str())
+            .unwrap()["amendments"],
+        1,
+        "{queue}"
+    );
+}
+
+#[test]
+fn journal_open_leaves_a_discussion_without_an_amendment_count() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "argued-not-amended");
+    stanced_position(&repo, &file, "for");
+
+    let queue = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let row = queue["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["file"] == file.as_str())
+        .unwrap();
+    assert!(row["amendments"].is_null(), "{queue}");
+}
+
+#[test]
+fn journal_correct_renames_the_identity_a_position_is_attributed_to() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "corrected-identity");
+    let position = stanced_position(&repo, &file, "for");
+
+    for (field, value) in [("actor", "the-real-author"), ("model", "the-real-model")] {
+        repo.arc(&repo.root)
+            .args([
+                "journal", "correct", &file, "--target", &position, "--field", field, "--value",
+                value,
+            ])
+            .assert()
+            .success();
+    }
+
+    let summary = discussion_summary_json(&repo, &file);
+    assert_eq!(
+        summary["rounds"][0]["positions"][0]["actor"], "the-real-author",
+        "{summary}"
+    );
+    assert_eq!(
+        summary["participants"][0], "the-real-model via test",
+        "{summary}"
+    );
+    // The heading keeps the identity that filed it: a correction says who
+    // argued, never that somebody else wrote the block.
+    assert!(
+        artifact_body(&repo, &file).contains(&format!("### Position {position} (tester,")),
+        "{}",
+        artifact_body(&repo, &file)
+    );
+}

@@ -88,6 +88,8 @@ SETTLE A QUESTION (before it is work)
   arc journal answer <file> --question <id> --option <choice> --body-file -
     --other "<answer>"                 Settle it outside the options offered.
   arc journal discussion <file>        Read stances, branches, and open questions.
+  arc journal correct <file> --target <t> --field <f> --value <v> [--note]
+  arc journal retract <file> --target <t> --body-file -
   arc journal consume <file> --outcome done --decision <decision>
   arc journal transition <file> --to discussion [--dry-run]
     Change a live artifact's kind as one guarded operation: a typed successor
@@ -117,6 +119,19 @@ SETTLE A QUESTION (before it is work)
   argued and read far more often than created, so `position`, `question`,
   `answer` and the `discussion` summary are its surface, and `note --kind
   discussion` opens one.
+
+  An entry filed wrong is amended, never rewritten. `correct` replaces one
+  field of one entry — the artifact's `title`, a position's `stance`,
+  `option`, `ref`, `actor` or `model`, an answer's `option` — and `retract`
+  withdraws a position or an answer with a reason. Both append a block naming
+  what changed and leave the original where it was filed, so the artifact
+  still reads as the argument that happened while the tally, the branches,
+  the question queue, and the open queue read the value in force. A retracted
+  position leaves the tally; a retracted answer reopens its question. Both are
+  open on a consumed artifact, which is closed to new work but not to being
+  wrong. A row for a filed claim carries `[amended ×N]` for the positions
+  standing on it, so a claim amended three times is not read as one filed
+  once.
 
   Consuming a discussion names what it shows: every position from one
   participant, or a last position nobody answered. Warnings, never refusals —
