@@ -303,6 +303,8 @@ RULES THAT CHANGE WHAT YOU DO
   - A verdict binds to the exact approved patchset head. Any new commit makes
     the approval stale until a fresh verdict on a new snapshot.
   - The ledger gates; claims, stages, and lanes are advisory signals, never locks.
+  - A lane's owner is a harness and a session together. Harnesses mint session
+    strings independently, so neither half names an owner on its own.
   - Give every concurrent writer its own branch and worktree. Integration and
     shared refs belong to the lead alone.
   - An executor's first act is `arc config --check-writable`; a nonzero exit

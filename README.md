@@ -1460,11 +1460,14 @@ parallel sessions sharing one archive see occupancy instead of guessing:
 `journal lane open <topic> [--scope t1,t2] [--ttl 2h] [--status <text>]`,
 `renew`, `close [--outcome done|handoff|abandoned|expired]`, and `list`.
 Lanes are typed journal events, never locks. Malformed JSONL lines are skipped
-so readers fail open. Liveness needs no heartbeats: any journal event by the
-owning session restarts the ttl window; idle lanes
+so readers fail open. A lane's owner is the declared harness and session
+together: harnesses mint session strings independently, so the same string
+under two harnesses is two owners, and lane writes require both halves.
+Liveness needs no heartbeats: any journal event by the owning
+harness and session restarts the ttl window; idle lanes
 decay to stale, and anyone may close a stale lane `[expired]` — the
-explicit takeover path. Opening a lane implicitly closes the session's
-previous one (a session has at most one). `journal open` annotates items
+explicit takeover path. Opening a lane implicitly closes that owner's
+previous one (an owner has at most one). `journal open` annotates items
 covered by a live lane, distinguishing this-session from external
 occupancy, and `catchup` leads with the lanes block so a newly opened
 session sees who else is here first.

@@ -211,6 +211,10 @@ impl LaneOutcome {
 #[derive(Subcommand)]
 pub enum LaneCmd {
     /// Open or replace an advisory work lane
+    ///
+    /// A lane's owner is the declared harness and session together, so both
+    /// must be given. Opening replaces only that owner's own previous lane;
+    /// another harness presenting the same session string keeps its lane.
     Open {
         /// Kebab-case topic slug naming the lane
         topic: String,
@@ -228,7 +232,7 @@ pub enum LaneCmd {
         #[arg(long, conflicts_with = "status")]
         status_file: Option<String>,
     },
-    /// Renew a lane owned by this session
+    /// Renew a lane owned by this harness and session
     Renew {
         /// The lane to renew
         topic: String,
@@ -243,6 +247,9 @@ pub enum LaneCmd {
         status_file: Option<String>,
     },
     /// Close a lane
+    ///
+    /// A live lane closes only for the owning harness and session; a stale
+    /// one closes for anyone with `--outcome expired`.
     Close {
         /// The lane to close
         topic: String,
