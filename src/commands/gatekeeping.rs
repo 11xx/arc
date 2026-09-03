@@ -894,7 +894,7 @@ fn append_reuses(
     }
     let _transition = store.lock_transition(change_id)?;
     let events = store.load_events(change_id)?;
-    let state = state::reduce_following(&events, &store.rewrites())?;
+    let state = state::reduce_following(&events, &store.rewrites()?)?;
     let mut previous_id = events
         .last()
         .context("change has no opening event")?
@@ -1524,7 +1524,7 @@ fn append_verifications(
     // Acquire the append lock only after they return, then re-check closure.
     let _transition = store.lock_transition(change_id)?;
     let events = store.load_events(change_id)?;
-    let st = state::reduce_following(&events, &store.rewrites())?;
+    let st = state::reduce_following(&events, &store.rewrites()?)?;
     let mut previous_id = events
         .last()
         .context("change has no opening event")?
@@ -2384,7 +2384,7 @@ fn authorization_basis(
             format!("prerequisite {blocker} cannot be read, so the authorization basis                      would be incomplete")
         })?;
         let mut blocker_id = blocker.clone();
-        let mut blocker_state = state::reduce_following(&events, &store.rewrites())?;
+        let mut blocker_state = state::reduce_following(&events, &store.rewrites()?)?;
         // Dependency readiness follows supersession, so the basis must record
         // the closure that actually satisfied the dependency rather than the
         // superseded one, whose integrated commit is null.
@@ -2403,7 +2403,7 @@ fn authorization_basis(
             };
             seen.push(successor.clone());
             blocker_id = successor;
-            blocker_state = state::reduce_following(&events, &store.rewrites())?;
+            blocker_state = state::reduce_following(&events, &store.rewrites()?)?;
         }
         if let Some(closure) = &blocker_state.closure {
             prerequisites.push(crate::model::PrerequisiteClosure {

@@ -533,7 +533,7 @@ fn watch_reached(
     until: WatchUntil,
 ) -> Result<Option<WatchReached>> {
     let events = store.load_events(change_id)?;
-    let state = state::reduce_following(&events, &store.rewrites())?;
+    let state = state::reduce_following(&events, &store.rewrites()?)?;
     let snapshot_event = || {
         events
             .iter()

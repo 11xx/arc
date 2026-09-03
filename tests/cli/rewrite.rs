@@ -791,3 +791,152 @@ fn an_annotated_tag_is_re_pointed_on_request() {
         String::from_utf8_lossy(&fsck.stderr)
     );
 }
+
+/// Every repository-scoped event file, oldest first.
+fn repository_events(repo: &Repo) -> Vec<PathBuf> {
+    let dir = repo.root.join(".git/arc/repository/events");
+    let mut paths: Vec<PathBuf> = fs::read_dir(&dir)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Two recorded rewrites that disagree about one revision leave the map
+/// unreadable, and an unreadable map is not an empty one.
+///
+/// Answering as though no rewrite had been recorded is the worst available
+/// answer: every projection reverts to pre-rewrite revisions and presents
+/// commits this repository does not hold as the current state, with nothing
+/// on screen to say the map was even consulted. So a projection refuses, and
+/// says where the contradiction is reported.
+#[test]
+fn a_contradictory_rewrite_record_refuses_a_projection_rather_than_reverting_it() {
+    let repo = Repo::new();
+    let (change, worktree, recorded) = change_with_patchset(&repo, "contested");
+    repo.commit(&worktree, "b.txt", "b\n", "test: a successor");
+    let successor = repo.head(&worktree);
+
+    let map = repo.root.join("commit-map");
+    fs::write(&map, format!("{recorded} {successor}\n")).unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            map.to_str().unwrap(),
+            "--reason",
+            "moved the snapshot",
+        ])
+        .assert()
+        .success();
+    let resolved = stdout(repo.arc(&repo.root).args(["status", &change]));
+    assert!(resolved.contains(&successor[..8]), "{resolved}");
+
+    // A second event naming a different successor for the same revision. The
+    // write paths refuse this pair, so it arrives the only way it can: as an
+    // event file that did not come through them.
+    let recorded_event = repository_events(&repo).pop().unwrap();
+    let body = fs::read_to_string(&recorded_event).unwrap();
+    let other = repo.head(&repo.root);
+    assert_ne!(other, successor);
+    let events = recorded_event.parent().unwrap();
+    fs::write(
+        events.join("01ZZZZZZZZZZZZZZZZZZZZZZZZ.json"),
+        body.replace(&successor, &other).replace(
+            recorded_event.file_stem().unwrap().to_str().unwrap(),
+            "01ZZZZZZZZZZZZZZZZZZZZZZZZ",
+        ),
+    )
+    .unwrap();
+
+    let refused = repo
+        .arc(&repo.root)
+        .args(["status", &change])
+        .output()
+        .unwrap();
+    assert!(
+        !refused.status.success(),
+        "a projection built on an unreadable map must refuse"
+    );
+    let complaint = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        complaint.contains("arc doctor"),
+        "the refusal points at where the contradiction is reported: {complaint}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&refused.stdout).contains(&recorded[..8]),
+        "a refused projection reports no revision at all, least of all the pre-rewrite one"
+    );
+
+    let doctor = stdout(repo.arc(&repo.root).args(["doctor"]));
+    assert!(doctor.contains("invalid-rewrite-mapping"), "{doctor}");
+}
+
+/// An abbreviation two recorded revisions answer names neither.
+///
+/// Resolution answers what a recorded revision is called here, so it has to
+/// distinguish three things: a revision no rewrite touched, one a rewrite
+/// moved, and a query the map cannot resolve. Picking whichever recorded
+/// revision came first would answer the third as the second and send a reader
+/// to somebody else's commit.
+#[test]
+fn an_ambiguous_abbreviation_is_refused_rather_than_resolved() {
+    let repo = Repo::new();
+    let base = repo.head(&repo.root);
+    repo.commit(&repo.root, "a.txt", "a\n", "test: one");
+    let first = repo.head(&repo.root);
+    repo.commit(&repo.root, "b.txt", "b\n", "test: two");
+    let second = repo.head(&repo.root);
+
+    // Two recorded revisions sharing a prefix, which is what makes an
+    // abbreviation of that prefix ambiguous.
+    let shared = format!("{}0", &base[..7]);
+    let map = repo.root.join("commit-map");
+    fs::write(
+        &map,
+        format!("{shared}1 {first}\n{shared}2 {second}\n{base} {first}\n"),
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            map.to_str().unwrap(),
+            "--reason",
+            "two commits sharing a prefix",
+        ])
+        .assert()
+        .success();
+
+    // The full revision resolves; the shared prefix does not.
+    let resolved = stdout(repo.arc(&repo.root).args(["history", "resolve", &base]));
+    assert!(resolved.contains(&first[..8]), "{resolved}");
+    let refused = repo
+        .arc(&repo.root)
+        .args(["history", "resolve", &shared])
+        .output()
+        .unwrap();
+    assert!(
+        !refused.status.success(),
+        "an ambiguous abbreviation is not a resolution"
+    );
+    let complaint = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        complaint.contains(&format!("{shared}1")) && complaint.contains(&format!("{shared}2")),
+        "the refusal names the candidates: {complaint}"
+    );
+
+    // Below the length at which a prefix names a commit it is not an
+    // abbreviation of one, so it resolves to nothing rather than to a refusal.
+    repo.arc(&repo.root)
+        .args(["history", "resolve", &base[..4]])
+        .assert()
+        .code(2);
+}

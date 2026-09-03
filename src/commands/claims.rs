@@ -307,7 +307,7 @@ pub fn stage(
     let change_id = store.resolve_change(reference)?;
     let _transition = store.lock_transition(&change_id)?;
     let events = store.load_events(&change_id)?;
-    let mut state = state::reduce_following(&events, &store.rewrites())?;
+    let mut state = state::reduce_following(&events, &store.rewrites()?)?;
     let mut previous_event_id = events
         .last()
         .context("change has no opening event")?

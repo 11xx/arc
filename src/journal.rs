@@ -2988,7 +2988,7 @@ fn infer_change_state(cwd: &Path) -> Option<ChangeState> {
     let store = Store::discover(cwd).ok()?;
     let change_id = crate::context::infer_change(&store, cwd).ok().flatten()?;
     let events = store.load_events(&change_id).ok()?;
-    state::reduce_following(&events, &store.rewrites()).ok()
+    state::reduce_following(&events, &store.rewrites().ok()?).ok()
 }
 
 /// How far a change has got, named the way every other view names it: the
@@ -7931,7 +7931,7 @@ fn verification_stamp(
     events: &[JournalEvent],
     filename: &str,
     current_revision: Option<&str>,
-    rewrites: &crate::rewrite::RewriteMap,
+    rewrites: Option<&crate::rewrite::RewriteMap>,
 ) -> Option<VerificationStamp> {
     let event = events
         .iter()
@@ -7946,20 +7946,27 @@ fn verification_stamp(
     // names. So the stamp names the commit its anchor is called here, and the
     // comparison is made after following both forward — a stamp reporting a
     // commit no checkout can produce, or reporting movement across a rewrite
-    // that moved nothing, is the same defect twice.
+    // that moved nothing, is the same defect twice. A rewrite record that
+    // cannot be read leaves the comparison unanswered for the same reason:
+    // comparing revisions nothing followed forward reports movement the
+    // rewrite made and the project did not.
     let moved = match (
         event.verified_scope.as_deref(),
         event.verified_revision.as_deref(),
         current_revision,
+        rewrites,
     ) {
-        (None, Some(verified), Some(current)) => Some(!rewrites.same(verified, current)),
+        (None, Some(verified), Some(current), Some(rewrites)) => {
+            rewrites.same(verified, current).ok().map(|same| !same)
+        }
         _ => None,
     };
     Some(VerificationStamp {
-        revision: event
-            .verified_revision
-            .as_deref()
-            .map(|revision| rewrites.current(revision)),
+        revision: event.verified_revision.as_deref().map(|revision| {
+            rewrites
+                .and_then(|rewrites| rewrites.current(revision).ok())
+                .unwrap_or_else(|| revision.to_string())
+        }),
         scope: event.verified_scope.clone(),
         timestamp: event.ts.clone(),
         actor: event.actor.clone(),
@@ -8123,8 +8130,8 @@ pub(crate) fn collect_open_in(
         None
     };
     let rewrites = Store::discover(project)
-        .map(|store| store.rewrites())
-        .unwrap_or_default();
+        .and_then(|store| store.rewrites())
+        .ok();
     let changes = open_changes_for_annotation(project);
     let (caller_harness, caller_session) = identity(ctx);
     let caller = LaneOwner {
@@ -8160,8 +8167,12 @@ pub(crate) fn collect_open_in(
             let (ts, topic, file_kind) = parse_artifact_name(&name)?;
             let heading = amended_heading(&journal, &dir, &name);
             let change = change_annotation(&changes, &topic, &name);
-            let verification =
-                verification_stamp(&journal, &name, current_revision.as_deref(), &rewrites);
+            let verification = verification_stamp(
+                &journal,
+                &name,
+                current_revision.as_deref(),
+                rewrites.as_ref(),
+            );
             let amendments = standing_amendments(&journal, &name, &file_kind);
             let sources = queue_sources(&journal, &name);
             let claims = artifact_claims(&journal, &name);
@@ -10144,9 +10155,12 @@ fn open_changes_for_annotation(cwd: &Path) -> Vec<ChangeState> {
     let Ok(ids) = store.list_change_ids() else {
         return Vec::new();
     };
+    let Ok(rewrites) = store.rewrites() else {
+        return Vec::new();
+    };
     ids.into_iter()
         .filter_map(|id| store.load_events(&id).ok())
-        .filter_map(|events| state::reduce_following(&events, &store.rewrites()).ok())
+        .filter_map(|events| state::reduce_following(&events, &rewrites).ok())
         .filter(|state| !state.is_closed())
         .collect()
 }

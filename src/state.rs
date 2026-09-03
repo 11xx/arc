@@ -959,18 +959,18 @@ impl ChangeState {
     /// evidence must count identically across it; a rewrite that changes
     /// content produces trees no recorded map describes, and inventing a
     /// successor for one would vouch for content nobody evaluated.
-    pub fn follow_rewrites(&mut self, rewrites: &RewriteMap) {
+    pub fn follow_rewrites(&mut self, rewrites: &RewriteMap) -> Result<()> {
         if rewrites.is_empty() {
-            return;
+            return Ok(());
         }
-        rewrites.advance(&mut self.base);
+        rewrites.advance(&mut self.base)?;
         for patchset in &mut self.patchsets {
-            rewrites.advance(&mut patchset.base);
-            rewrites.advance(&mut patchset.head);
-            rewrites.advance_opt(&mut patchset.merge_base);
+            rewrites.advance(&mut patchset.base)?;
+            rewrites.advance(&mut patchset.head)?;
+            rewrites.advance_opt(&mut patchset.merge_base)?;
         }
         for brief in &mut self.briefs {
-            rewrites.advance_opt(&mut brief.base_revision);
+            rewrites.advance_opt(&mut brief.base_revision)?;
         }
         for finding in self
             .findings
@@ -978,36 +978,36 @@ impl ChangeState {
             .chain(self.audit_findings.values_mut())
         {
             for disposition in &mut finding.dispositions {
-                rewrites.advance_opt(&mut disposition.commit);
+                rewrites.advance_opt(&mut disposition.commit)?;
             }
         }
         if let Some(waiver) = &mut self.dirty_tree_waiver {
-            rewrites.advance(&mut waiver.revision);
+            rewrites.advance(&mut waiver.revision)?;
         }
         for audit in &mut self.audit_verdicts {
-            rewrites.advance(&mut audit.revision);
+            rewrites.advance(&mut audit.revision)?;
         }
         for verification in &mut self.verifications {
-            rewrites.advance(&mut verification.revision);
-            rewrites.advance_opt(&mut verification.against_target);
+            rewrites.advance(&mut verification.revision)?;
+            rewrites.advance_opt(&mut verification.against_target)?;
             if let Some(falsification) = &mut verification.falsification {
-                rewrites.advance(&mut falsification.revision);
+                rewrites.advance(&mut falsification.revision)?;
             }
         }
         for run in &mut self.verification_runs {
-            rewrites.advance(&mut run.revision);
+            rewrites.advance(&mut run.revision)?;
         }
         if let Some(closure) = &mut self.closure {
-            rewrites.advance_opt(&mut closure.integrated_commit);
-            rewrites.advance_opt(&mut closure.source_head);
-            rewrites.advance_opt(&mut closure.target_before);
+            rewrites.advance_opt(&mut closure.integrated_commit)?;
+            rewrites.advance_opt(&mut closure.source_head)?;
+            rewrites.advance_opt(&mut closure.target_before)?;
             if let Some(authorization) = &mut closure.authorization {
                 for prerequisite in &mut authorization.prerequisites {
-                    rewrites.advance_opt(&mut prerequisite.integrated_commit);
+                    rewrites.advance_opt(&mut prerequisite.integrated_commit)?;
                 }
             }
         }
-        self.forge.follow_rewrites(rewrites);
+        self.forge.follow_rewrites(rewrites)
     }
 
     pub fn latest_patchset(&self) -> Option<&Patchset> {
@@ -1196,7 +1196,7 @@ pub fn resolve_unique_id<'a>(
 /// rewrite that changed no content.
 pub fn reduce_following(events: &[Event], rewrites: &RewriteMap) -> Result<ChangeState> {
     let mut state = reduce(events)?;
-    state.follow_rewrites(rewrites);
+    state.follow_rewrites(rewrites)?;
     Ok(state)
 }
 

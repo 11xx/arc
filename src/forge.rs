@@ -209,20 +209,21 @@ impl ForgeState {
     /// branch strands them the same way. The observation itself is unchanged:
     /// what the host reported at a head is still what it reported, and this
     /// says which commit that head is here.
-    pub fn follow_rewrites(&mut self, rewrites: &crate::rewrite::RewriteMap) {
+    pub fn follow_rewrites(&mut self, rewrites: &crate::rewrite::RewriteMap) -> Result<()> {
         if let Some(link) = &mut self.link {
-            rewrites.advance(&mut link.head_sha);
+            rewrites.advance(&mut link.head_sha)?;
         }
         for link in &mut self.links {
-            rewrites.advance(&mut link.head_sha);
+            rewrites.advance(&mut link.head_sha)?;
         }
         if let Some(checks) = &mut self.checks {
-            rewrites.advance(&mut checks.pr_head);
+            rewrites.advance(&mut checks.pr_head)?;
         }
         for state in &mut self.pr_states {
-            rewrites.advance_opt(&mut state.merge_sha);
-            rewrites.advance_opt(&mut state.pr_head);
+            rewrites.advance_opt(&mut state.merge_sha)?;
+            rewrites.advance_opt(&mut state.pr_head)?;
         }
+        Ok(())
     }
 
     /// The lifecycle fact that describes the current link and head, if one

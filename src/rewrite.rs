@@ -34,13 +34,20 @@ fn describe(fate: &Option<String>) -> String {
     }
 }
 
-/// One resolution step. Ambiguity is not the same as no match: the first
-/// means the answer is unknown, the second that the chain ended.
+/// One resolution step. Ambiguity is not a variant: an abbreviation matching
+/// two recorded revisions is a question the map cannot answer, and answering
+/// "nothing rewrote it" would be a wrong answer rather than no answer.
 enum Step {
     Unmapped,
-    Ambiguous,
     Mapped { key: String, fate: Option<String> },
 }
+
+/// The shortest abbreviation that may stand for a revision.
+///
+/// Seven hex digits is what Git itself considers abbreviated, and short of it
+/// a prefix stops naming a commit: six digits collide across sixteen million
+/// objects, and one names a sixteenth of every object in the repository.
+const ABBREVIATION_FLOOR: usize = 7;
 
 /// Every recorded rewrite, flattened into one old-to-fate mapping.
 #[derive(Debug, Default, Clone)]
@@ -96,40 +103,39 @@ impl RewriteMap {
     }
 
     /// What became of a recorded revision, following successive rewrites.
-    /// `None` means no recorded rewrite touched it, so a caller can tell
+    /// `Ok(None)` means no recorded rewrite touched it, so a caller can tell
     /// "unchanged" from "moved" and from "dropped".
     ///
-    /// A recorded revision is matched by prefix in both directions: a map may
+    /// A query that names a recorded revision exactly resolves to it. Failing
+    /// that it may abbreviate one, or be abbreviated by one — a map may
     /// abbreviate what the ledger stores in full, and a caller may abbreviate
-    /// what the map stores in full. An abbreviation matching more than one
-    /// recorded revision names none of them.
-    pub fn fate(&self, revision: &str) -> Option<Fate> {
+    /// what the map stores in full — and then it resolves only when exactly
+    /// one recorded revision answers. An abbreviation that two answer is an
+    /// error naming them: the map holds the answer and cannot say which, and
+    /// reporting the revision as untouched would be a different claim.
+    pub fn fate(&self, revision: &str) -> Result<Option<Fate>> {
         let mut visited: Vec<String> = Vec::new();
         let mut current = revision.to_string();
         loop {
-            match self.step(&current) {
+            match self.step(&current)? {
                 // Nothing rewrote this one. Either the caller asked about a
                 // revision no rewrite touched, or we followed the chain to
                 // its end and this is where it survives.
                 Step::Unmapped => {
-                    return visited
-                        .is_empty()
-                        .then_some(())
-                        .map_or(Some(Fate::Rewritten(current)), |()| None)
+                    return Ok((!visited.is_empty()).then_some(Fate::Rewritten(current)))
                 }
-                // An abbreviation matching two recorded revisions names
-                // neither, and a chain that reaches one cannot be followed —
-                // reporting the ambiguous node as a survivor would be a guess.
-                Step::Ambiguous => return None,
                 Step::Mapped { key, fate } => {
                     // Only a hand-written map can cycle. Visiting a key twice
                     // is what a cycle is, whatever spelling led back to it.
                     if visited.contains(&key) {
-                        return None;
+                        anyhow::bail!(
+                            "recorded rewrites lead {revision} back to {key}; the chain names no \
+                             surviving commit"
+                        );
                     }
                     visited.push(key);
                     match fate {
-                        None => return Some(Fate::Dropped),
+                        None => return Ok(Some(Fate::Dropped)),
                         Some(next) => current = next,
                     }
                 }
@@ -141,57 +147,86 @@ impl RewriteMap {
     /// recorded rewrite touched it, and its successor once every recorded
     /// rewrite has been followed.
     ///
-    /// A revision a rewrite dropped, and one whose chain cannot be read,
-    /// answers itself. Nothing survives it, and answering with the last
-    /// readable link would name a commit the record does not claim.
-    pub fn current(&self, revision: &str) -> String {
-        match self.fate(revision) {
+    /// A revision a rewrite dropped answers itself. Nothing survives it, and
+    /// answering with the last readable link would name a commit the record
+    /// does not claim.
+    pub fn current(&self, revision: &str) -> Result<String> {
+        Ok(match self.fate(revision)? {
             Some(Fate::Rewritten(successor)) => successor,
             Some(Fate::Dropped) | None => revision.to_string(),
-        }
+        })
     }
 
     /// Follow a recorded revision forward in place.
-    pub fn advance(&self, revision: &mut String) {
+    pub fn advance(&self, revision: &mut String) -> Result<()> {
         if self.steps.is_empty() {
-            return;
+            return Ok(());
         }
-        *revision = self.current(revision);
+        *revision = self.current(revision)?;
+        Ok(())
     }
 
     /// Follow an optional recorded revision forward in place.
-    pub fn advance_opt(&self, revision: &mut Option<String>) {
-        if let Some(revision) = revision.as_mut() {
-            self.advance(revision);
+    pub fn advance_opt(&self, revision: &mut Option<String>) -> Result<()> {
+        match revision.as_mut() {
+            Some(revision) => self.advance(revision),
+            None => Ok(()),
         }
     }
 
     /// Whether two revisions name one commit once both are followed forward.
     ///
-    /// Either may abbreviate the other: a recorded map and a Git read of the
-    /// same commit need not agree on length, and a comparison that demanded
-    /// they did would answer "different commit" for one commit.
-    pub fn same(&self, left: &str, right: &str) -> bool {
-        let (left, right) = (self.current(left), self.current(right));
-        !left.is_empty() && (left.starts_with(&right) || right.starts_with(&left))
+    /// Equal resolved ids are one commit. Failing that either may abbreviate
+    /// the other — a recorded map and a Git read of the same commit need not
+    /// agree on length, and a comparison that demanded they did would answer
+    /// "different commit" for one commit — and an abbreviation stands for a
+    /// commit only from the length at which it names one.
+    pub fn same(&self, left: &str, right: &str) -> Result<bool> {
+        let (left, right) = (self.current(left)?, self.current(right)?);
+        if left == right {
+            return Ok(!left.is_empty());
+        }
+        let abbreviation = left.len().min(right.len());
+        Ok(abbreviation >= ABBREVIATION_FLOOR
+            && (left.starts_with(&right) || right.starts_with(&left)))
     }
 
-    /// One hop, resolving `revision` against the map by prefix in either
-    /// direction.
-    fn step(&self, revision: &str) -> Step {
-        let mut matches = self
-            .steps
-            .iter()
-            .filter(|(old, _)| old.starts_with(revision) || revision.starts_with(old.as_str()));
-        let Some((old, fate)) = matches.next() else {
-            return Step::Unmapped;
-        };
-        if matches.next().is_some() {
-            return Step::Ambiguous;
+    /// One hop: the recorded revision `revision` names, exactly where it names
+    /// one and by abbreviation in either direction otherwise.
+    fn step(&self, revision: &str) -> Result<Step> {
+        if let Some(fate) = self.steps.get(revision) {
+            return Ok(Step::Mapped {
+                key: revision.to_string(),
+                fate: fate.clone(),
+            });
         }
-        Step::Mapped {
-            key: old.clone(),
-            fate: fate.clone(),
+        // Short of the floor, or spelled with anything but hex, a query is not
+        // an abbreviation of a commit and matching it against one would be a
+        // coincidence rather than a resolution.
+        if revision.len() < ABBREVIATION_FLOOR
+            || !revision.chars().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Ok(Step::Unmapped);
+        }
+        let candidates: Vec<&String> = self
+            .steps
+            .keys()
+            .filter(|old| old.starts_with(revision) || revision.starts_with(old.as_str()))
+            .collect();
+        match candidates.as_slice() {
+            [] => Ok(Step::Unmapped),
+            [old] => Ok(Step::Mapped {
+                key: (*old).clone(),
+                fate: self.steps[*old].clone(),
+            }),
+            many => anyhow::bail!(
+                "{revision} abbreviates {} recorded revisions ({}); it names none of them",
+                many.len(),
+                many.iter()
+                    .map(|old| old.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -311,70 +346,108 @@ mod tests {
             ("bbbbbbbbbb", Some("cccccccccc")),
         ]);
         assert_eq!(
-            map.fate("aaaaaaaaaa"),
+            map.fate("aaaaaaaaaa").unwrap(),
             Some(Fate::Rewritten("cccccccccc".into()))
         );
-        assert_eq!(map.fate("cccccccccc"), None);
+        assert_eq!(map.fate("cccccccccc").unwrap(), None);
     }
 
     /// A map may abbreviate what the ledger records in full, and a caller may
     /// abbreviate what the map records in full. Byte equality would silently
     /// fail to follow either.
     #[test]
-    fn revisions_match_by_prefix_in_both_directions() {
+    fn revisions_match_by_abbreviation_in_both_directions() {
         let full = map(&[(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
         )]);
-        assert!(full.fate("aaaaaaaaaa").is_some());
+        assert!(full.fate("aaaaaaaaaa").unwrap().is_some());
         let short = map(&[("aaaaaaaaaa", Some("bbbbbbbbbb"))]);
         assert!(short
             .fate("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap()
             .is_some());
     }
 
-    /// An abbreviation that matches two recorded revisions names neither.
+    /// A recorded revision that a longer one abbreviates is still the one the
+    /// query names exactly. Preferring the abbreviation match would make the
+    /// pair ambiguous and refuse a revision the map answers for.
     #[test]
-    fn an_ambiguous_abbreviation_resolves_to_nothing() {
+    fn an_exact_match_wins_over_an_abbreviation_of_it() {
+        let map = map(&[
+            ("aaaaaaaaaa", Some("bbbbbbbbbb")),
+            ("aaaaaaaaaaaa", Some("cccccccccc")),
+        ]);
+        assert_eq!(
+            map.fate("aaaaaaaaaa").unwrap(),
+            Some(Fate::Rewritten("bbbbbbbbbb".into()))
+        );
+        assert_eq!(
+            map.fate("aaaaaaaaaaaa").unwrap(),
+            Some(Fate::Rewritten("cccccccccc".into()))
+        );
+    }
+
+    /// An abbreviation two recorded revisions answer names neither, and the
+    /// refusal has to name them: the map holds the answer and cannot say
+    /// which, which is not the same as no rewrite having touched it.
+    #[test]
+    fn an_ambiguous_abbreviation_is_refused_naming_the_candidates() {
         let map = map(&[
             ("aaaaaaaa11", Some("cccccccccc")),
             ("aaaaaaaa22", Some("dddddddddd")),
         ]);
-        assert_eq!(map.fate("aaaaaaaa"), None);
+        let refusal = map.fate("aaaaaaaa").unwrap_err().to_string();
+        assert!(refusal.contains("aaaaaaaa11"), "{refusal}");
+        assert!(refusal.contains("aaaaaaaa22"), "{refusal}");
+    }
+
+    /// Short of seven hex digits a prefix names a sixteenth of the repository
+    /// per missing digit, so it stands for no commit at all.
+    #[test]
+    fn an_abbreviation_below_the_floor_names_nothing() {
+        let map = map(&[("aaaaaaaaaa", Some("bbbbbbbbbb"))]);
+        assert_eq!(map.fate("aaaaaa").unwrap(), None);
+        assert_eq!(
+            map.fate("aaaaaaa").unwrap(),
+            Some(Fate::Rewritten("bbbbbbbbbb".into()))
+        );
+        assert!(!map.same("aaaaaa", "aaaaaaaaaa").unwrap());
+        assert!(map.same("aaaaaaa", "bbbbbbbbbb").unwrap());
     }
 
     #[test]
     fn a_dropped_revision_is_not_a_survivor() {
         let map = map(&[("aaaaaaaaaa", None)]);
-        assert_eq!(map.fate("aaaaaaaaaa"), Some(Fate::Dropped));
+        assert_eq!(map.fate("aaaaaaaaaa").unwrap(), Some(Fate::Dropped));
     }
 
-    /// Ambiguity anywhere along a chain makes the answer unknown, not the
+    /// Ambiguity anywhere along a chain makes the answer unavailable, not the
     /// ambiguous node a survivor.
     #[test]
-    fn an_ambiguous_chain_resolves_to_nothing() {
+    fn an_ambiguous_chain_is_refused() {
         let map = map(&[
             ("aaaaaaaaaa", Some("bbbbbbbbbb")),
             ("bbbbbbbbbb11", Some("cccccccccc")),
             ("bbbbbbbbbb22", Some("dddddddddd")),
         ]);
-        assert_eq!(map.fate("aaaaaaaaaa"), None);
+        assert!(map.fate("aaaaaaaaaa").is_err());
     }
 
     /// A cycle is visiting a key twice, whatever spelling led back to it.
     #[test]
-    fn a_chain_that_returns_to_a_visited_key_resolves_to_nothing() {
+    fn a_chain_that_returns_to_a_visited_key_is_refused() {
         let map = map(&[("aaaaaaaaaa", Some("aaaaaaaaaaaa"))]);
-        assert_eq!(map.fate("aaaaaaaaaa"), None);
+        assert!(map.fate("aaaaaaaaaa").is_err());
     }
 
     #[test]
-    fn a_cyclic_mapping_resolves_to_nothing_rather_than_a_bogus_survivor() {
+    fn a_cyclic_mapping_is_refused_rather_than_answered_with_a_bogus_survivor() {
         let map = map(&[
             ("aaaaaaaaaa", Some("bbbbbbbbbb")),
             ("bbbbbbbbbb", Some("aaaaaaaaaa")),
         ]);
-        assert_eq!(map.fate("aaaaaaaaaa"), None);
+        assert!(map.fate("aaaaaaaaaa").is_err());
     }
 
     /// The real `git filter-repo` map opens with a column header, records

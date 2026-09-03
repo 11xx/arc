@@ -628,18 +628,23 @@ impl Store {
     /// wants the repository's own terms takes it from here rather than
     /// remembering to resolve.
     ///
-    /// Recorded rewrites that contradict each other resolve nothing rather
-    /// than making every read fail; `arc doctor` reports the contradiction as
-    /// `invalid-rewrite-mapping`.
+    /// A projection whose rewrites cannot be read is refused rather than
+    /// answered without them. An unreadable map and no rewrite at all are
+    /// different facts that look identical in the answer: every revision would
+    /// come back at its pre-rewrite value, naming commits this repository does
+    /// not hold, and every reader would present that as the current state.
+    /// `arc doctor` reports the contradiction as `invalid-rewrite-mapping`,
+    /// which is where the refusal points.
     pub fn state(&self, change_id: &str) -> Result<crate::state::ChangeState> {
-        crate::state::reduce_following(&self.load_events(change_id)?, &self.rewrites())
+        crate::state::reduce_following(&self.load_events(change_id)?, &self.rewrites()?)
     }
 
     /// Every history rewrite this repository recorded, flattened into one
     /// old-to-fate mapping. For readers that hold events already and still
     /// need the repository's own terms.
-    pub fn rewrites(&self) -> crate::rewrite::RewriteMap {
-        crate::rewrite::RewriteMap::load(self).unwrap_or_default()
+    pub fn rewrites(&self) -> Result<crate::rewrite::RewriteMap> {
+        crate::rewrite::RewriteMap::load(self)
+            .context("cannot read the recorded history rewrites; `arc doctor` reports which")
     }
 
     /// All events of one change in ULID (i.e. chronological) order.
