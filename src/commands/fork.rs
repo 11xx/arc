@@ -107,7 +107,11 @@ pub fn begin(ctx: &Ctx, slug: &str, base_branch: Option<&str>) -> Result<i32> {
         Some(branch) => branch.to_string(),
         None => crate::gitio::current_branch(cwd)?
             .filter(|branch| !is_fork_branch(branch))
-            .unwrap_or_else(|| "master".to_string()),
+            .or_else(|| crate::gitio::default_branch(cwd))
+            .context(
+                "no integration branch is discoverable here; name the base with \
+                 `arc fork begin <slug> --from <branch>`",
+            )?,
     };
     if is_fork_branch(&base) {
         bail!("base branch {base:?} is itself a fork; fork from an integrated branch");
