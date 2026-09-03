@@ -283,7 +283,8 @@ fn validate_members(store: &Store, raw_members: Vec<String>) -> Result<Vec<Strin
         let change_id = store
             .resolve_change(&parts.change_id)
             .with_context(|| format!("pass member {raw:?}"))?;
-        let state = store.state(&change_id)
+        let state = store
+            .state(&change_id)
             .with_context(|| format!("pass member {raw:?}"))?;
         if !state
             .patchsets
