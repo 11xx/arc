@@ -17,7 +17,7 @@ arc completions zsh  > ~/.zfunc/_arc          # or: bash | fish
 arc mangen ~/.local/share/man/man1            # writes arc.1
 ```
 
-arc is Unix-only by design (see the README portability note).
+arc is Unix-only by design (see [Configuration, storage, and the sandbox](configuration.md#storage-and-data-safety-guarantees)).
 
 Then run `arc` with no arguments once. It prints the workflow guide — the
 lifecycle, profile selection, and the invariants that change how a session
@@ -114,4 +114,14 @@ repo's changes in one view.
 
 To move every root at once instead of the ledger alone — for a disposable copy
 to rehearse something destructive in — see `ARC_SANDBOX` and `arc sandbox
-clone` in the README's Sandbox section.
+clone` in [Configuration, storage, and the sandbox](configuration.md#sandbox).
+
+## Where the rest is
+
+`arc` with no arguments prints the workflow guide, and `arc <verb> --help` is
+each command's full contract. The long form lives beside this file, one page
+per area: [changes](changes.md), [gates](gates.md), [review](review.md),
+[journal](journal.md), [delegation](delegation.md), [forks](forks.md),
+[workspace](workspace.md), [forge](forge.md), [identity](identity.md),
+[configuration](configuration.md), [history rewrites](history.md),
+[schemas](schemas.md), and [changing arc](changing-arc.md).
