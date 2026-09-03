@@ -50,6 +50,7 @@ impl Repo {
             .env("ARC_ACTOR", "tester")
             .env("ARC_HARNESS", "test")
             .env("ARC_SESSION", "session-a")
+            .envs(NO_EDITOR)
             .env_remove("ARC_ROLE")
             .env_remove("ARC_MODEL")
             .env_remove("ARC_ON_BEHALF_OF")
@@ -80,10 +81,19 @@ impl Repo {
     }
 }
 
+/// Git's editor, for every command this suite runs and every command the
+/// binary under test runs beneath it. A fixture that reaches the operator's
+/// editor stops the whole suite on a modal window it cannot answer, and
+/// `GIT_EDITOR` in the environment outranks the `core.editor` a single
+/// command sets for itself, so the environment is where this has to be said.
+pub(crate) const NO_EDITOR: [(&str, &str); 2] =
+    [("GIT_EDITOR", "true"), ("GIT_SEQUENCE_EDITOR", "true")];
+
 pub(crate) fn git(cwd: &Path, args: &[&str]) {
     let st = Command::new("git")
         .args(args)
         .current_dir(cwd)
+        .envs(NO_EDITOR)
         .output()
         .unwrap();
     assert!(
@@ -97,6 +107,7 @@ pub(crate) fn git_out(cwd: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)
         .current_dir(cwd)
+        .envs(NO_EDITOR)
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -171,6 +182,7 @@ pub(crate) fn spawn_arc_with_session(
         .env("ARC_ACTOR", "tester")
         .env("ARC_HARNESS", "test")
         .env("ARC_SESSION", session)
+        .envs(NO_EDITOR)
         .env_remove("ARC_ROLE")
         .env_remove("ARC_DATA_DIR")
         .env_remove("ARC_DATA_ROOT")
