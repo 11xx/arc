@@ -9332,3 +9332,491 @@ fn journal_handoff_without_derive_writes_the_body_verbatim() {
 
     assert_eq!(fs::read_to_string(out.trim()).unwrap(), body);
 }
+
+/// The spec a source-carrying write declares in these tests.
+const PROBE_SOURCE: &str = "harness=claude session=abc ts=2026-09-03T00:00:00Z";
+
+/// Write one artifact of `kind` under `topic`, declaring a source and key.
+fn source_write(repo: &Repo, kind: &str, topic: &str, spec: &str, item_key: &str) -> String {
+    stdout(repo.arc(&repo.root).args([
+        "journal",
+        kind,
+        topic,
+        "--title",
+        "T",
+        "--source",
+        spec,
+        "--item-key",
+        item_key,
+    ]))
+    .trim()
+    .to_string()
+}
+
+fn file_of(printed: &str) -> String {
+    PathBuf::from(printed)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string()
+}
+
+fn source_json(repo: &Repo, harness: &str, session: &str) -> serde_json::Value {
+    json_stdout(repo.arc(&repo.root).args([
+        "journal",
+        "source",
+        "--harness",
+        harness,
+        "--session",
+        session,
+        "--json",
+    ]))
+}
+
+#[test]
+fn journal_source_reference_is_recorded_by_every_write_kind_and_by_log() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    // Every kind routes through the same write, so a source declared on any of
+    // them lands on the event that filed it.
+    for (index, kind) in [
+        "todo",
+        "handoff",
+        "plan",
+        "conclusion",
+        "decision",
+        "memory",
+        "later",
+        "feature-request",
+        "incident",
+        "review",
+        "note",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let key = format!("k{index}");
+        let printed = source_write(&repo, kind, "sourced", PROBE_SOURCE, &key);
+        let file = file_of(&printed);
+        let event = journal_events(&dir)
+            .into_iter()
+            .find(|event| event["file"] == file.as_str())
+            .unwrap_or_else(|| panic!("no event for {file}"));
+        assert_eq!(event["source"]["harness"], "claude", "{event}");
+        assert_eq!(event["source"]["session"], "abc", "{event}");
+        assert_eq!(event["source"]["ts"], "2026-09-03T00:00:00Z", "{event}");
+        assert_eq!(event["item_key"], key.as_str(), "{event}");
+    }
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "log",
+            "sourced",
+            "a logged item",
+            "--source",
+            PROBE_SOURCE,
+            "--item-key",
+            "logged",
+        ])
+        .assert()
+        .success();
+    let logged = journal_events(&dir)
+        .into_iter()
+        .find(|event| event["item_key"] == "logged")
+        .unwrap();
+    assert_eq!(logged["event"], "log", "{logged}");
+    assert_eq!(logged["source"]["session"], "abc", "{logged}");
+}
+
+#[test]
+fn journal_source_omits_optional_fields_that_were_not_supplied() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    source_write(&repo, "todo", "minimal", PROBE_SOURCE, "bare");
+    let event = journal_events(&dir)
+        .into_iter()
+        .find(|event| event["item_key"] == "bare")
+        .unwrap();
+    // Absent stays absent: a turn reference is never synthesized from the
+    // timestamp that is present.
+    assert!(event["source"].get("turn").is_none(), "{event}");
+    assert!(event["source"].get("schema").is_none(), "{event}");
+    assert!(event["source"].get("coverage").is_none(), "{event}");
+
+    source_write(
+        &repo,
+        "todo",
+        "full",
+        "harness=codex session=zzz ts=2026-09-01T00:00:00Z turn=7 schema=ending/2 coverage=truncated",
+        "rich",
+    );
+    let event = journal_events(&dir)
+        .into_iter()
+        .find(|event| event["item_key"] == "rich")
+        .unwrap();
+    assert_eq!(event["source"]["turn"], 7, "{event}");
+    assert_eq!(event["source"]["schema"], "ending/2", "{event}");
+    assert_eq!(event["source"]["coverage"], "truncated", "{event}");
+}
+
+#[test]
+fn journal_repeating_one_source_item_writes_nothing_and_returns_its_disposition() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    let file = file_of(&source_write(&repo, "todo", "rescan", PROBE_SOURCE, "k1"));
+
+    let before = journal_events(&dir).len();
+    let repeated = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "todo",
+        "rescan",
+        "--title",
+        "T",
+        "--source",
+        PROBE_SOURCE,
+        "--item-key",
+        "k1",
+    ]));
+    assert_eq!(repeated, format!("existing: {file} [open]\n"));
+    assert_eq!(
+        journal_events(&dir).len(),
+        before,
+        "a repeat recorded an event"
+    );
+    let artifacts: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            name.ends_with("-todo.md").then_some(name)
+        })
+        .collect();
+    assert_eq!(artifacts, vec![file], "a repeat wrote a second artifact");
+}
+
+#[test]
+fn journal_two_item_keys_from_one_session_stay_distinct() {
+    let repo = Repo::new();
+    let first = file_of(&source_write(&repo, "todo", "one", PROBE_SOURCE, "k1"));
+    let second = file_of(&source_write(&repo, "todo", "two", PROBE_SOURCE, "k2"));
+    assert_ne!(first, second);
+
+    let report = source_json(&repo, "claude", "abc");
+    let items = report["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "{report}");
+    assert_eq!(items[0]["item_key"], "k1", "{report}");
+    assert_eq!(items[0]["file"], first.as_str(), "{report}");
+    assert_eq!(items[1]["item_key"], "k2", "{report}");
+    assert_eq!(items[1]["file"], second.as_str(), "{report}");
+}
+
+#[test]
+fn journal_consuming_an_item_changes_the_disposition_a_rescan_is_given() {
+    let repo = Repo::new();
+    let file = file_of(&source_write(
+        &repo,
+        "todo",
+        "discharged",
+        PROBE_SOURCE,
+        "k1",
+    ));
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file, "--outcome", "done"])
+        .assert()
+        .success();
+
+    let repeated = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "todo",
+        "discharged",
+        "--title",
+        "T",
+        "--source",
+        PROBE_SOURCE,
+        "--item-key",
+        "k1",
+    ]));
+    assert_eq!(repeated, format!("existing: {file} [consumed:done]\n"));
+    let report = source_json(&repo, "claude", "abc");
+    assert_eq!(
+        report["items"][0]["disposition"], "consumed:done",
+        "{report}"
+    );
+
+    // Every consume outcome spells the same way, so the prefix alone separates
+    // a disposed item from one still waiting.
+    let moved = file_of(&source_write(&repo, "todo", "moved", PROBE_SOURCE, "k2"));
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &moved, "--outcome", "superseded"])
+        .assert()
+        .success();
+    let discarded = file_of(&source_write(&repo, "todo", "dropped", PROBE_SOURCE, "k3"));
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &discarded, "--outcome", "discarded"])
+        .assert()
+        .success();
+    let report = source_json(&repo, "claude", "abc");
+    assert_eq!(
+        report["items"][1]["disposition"], "consumed:superseded",
+        "{report}"
+    );
+    assert_eq!(
+        report["items"][2]["disposition"], "consumed:discarded",
+        "{report}"
+    );
+}
+
+#[test]
+fn journal_no_action_is_recorded_as_a_log_event_and_answers_a_rescan() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "log",
+            "judged",
+            "nothing worth filing",
+            "--source",
+            PROBE_SOURCE,
+            "--item-key",
+            "k1",
+            "--outcome",
+            "no-action",
+        ])
+        .assert()
+        .success();
+    // A no-action judgment must not put an artifact into any queue.
+    let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(!text.contains("judged"), "{text}");
+
+    let event = journal_events(&dir)
+        .into_iter()
+        .find(|event| event["item_key"] == "k1")
+        .unwrap();
+    assert_eq!(event["event"], "log", "{event}");
+    assert_eq!(event["outcome"], "no-action", "{event}");
+    let recorded_ts = event["ts"].as_str().unwrap().to_string();
+
+    let repeated = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "todo",
+        "judged",
+        "--title",
+        "T",
+        "--source",
+        PROBE_SOURCE,
+        "--item-key",
+        "k1",
+    ]));
+    assert_eq!(repeated, format!("existing: {recorded_ts} [no-action]\n"));
+    let report = source_json(&repo, "claude", "abc");
+    assert_eq!(report["items"][0]["disposition"], "no-action", "{report}");
+    assert!(report["items"][0].get("file").is_none(), "{report}");
+}
+
+#[test]
+fn journal_source_attach_adds_a_second_recording_to_one_artifact() {
+    let repo = Repo::new();
+    let file = file_of(&source_write(
+        &repo,
+        "todo",
+        "twice-evidenced",
+        PROBE_SOURCE,
+        "k1",
+    ));
+    let second = "harness=codex session=zzz ts=2026-09-01T00:00:00Z turn=7";
+    let attached = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "source-attach",
+        &file,
+        "--source",
+        second,
+        "--item-key",
+        "j9",
+    ]));
+    assert_eq!(attached, format!("attached: {file}\n"));
+
+    // One artifact, reachable from either recording.
+    let claude = source_json(&repo, "claude", "abc");
+    assert_eq!(claude["items"][0]["file"], file.as_str(), "{claude}");
+    let codex = source_json(&repo, "codex", "zzz");
+    assert_eq!(codex["items"][0]["item_key"], "j9", "{codex}");
+    assert_eq!(codex["items"][0]["file"], file.as_str(), "{codex}");
+    assert_eq!(codex["items"][0]["disposition"], "open", "{codex}");
+    assert_eq!(
+        codex["items"][0]["events"][0]["event"], "source-attach",
+        "{codex}"
+    );
+
+    // Both sources ride the queue row and the artifact view.
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let sources = open["open"][0]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 2, "{open}");
+    assert_eq!(sources[1]["turn"], 7, "{open}");
+
+    let shown = repo
+        .arc(&repo.root)
+        .args(["journal", "show", &file])
+        .output()
+        .unwrap();
+    let annotations = String::from_utf8_lossy(&shown.stderr);
+    assert!(annotations.contains("session=abc"), "{annotations}");
+    assert!(
+        annotations.contains("session=zzz ts=2026-09-01T00:00:00Z turn=7 item-key=j9"),
+        "{annotations}"
+    );
+    // The body is what `show` prints: its stream stays the artifact, verbatim.
+    assert_eq!(String::from_utf8_lossy(&shown.stdout), "# T\n\n");
+}
+
+#[test]
+fn journal_refuses_a_malformed_source_and_a_key_without_one() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    for spec in [
+        "harness=claude session=abc",
+        "harness=claude session=abc ts=not-a-timestamp",
+        "harness=claude session=abc ts=2026-09-03T00:00:00Z bogus=1",
+        "harness=claude session=abc ts=2026-09-03T00:00:00Z turn=seven",
+        "harness=claude session=abc ts=2026-09-03T00:00:00Z harness=other",
+        "harnessclaude",
+        "harness= session=abc ts=2026-09-03T00:00:00Z",
+    ] {
+        repo.arc(&repo.root)
+            .args([
+                "journal", "todo", "refused", "--title", "T", "--source", spec,
+            ])
+            .assert()
+            .failure();
+    }
+    // A key indexes into a source, so it is refused without one.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "todo",
+            "refused",
+            "--title",
+            "T",
+            "--item-key",
+            "k1",
+        ])
+        .assert()
+        .failure();
+    // `no-action` is the only outcome a log line may carry.
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "log",
+            "refused",
+            "m",
+            "--source",
+            PROBE_SOURCE,
+            "--item-key",
+            "k1",
+            "--outcome",
+            "done",
+        ])
+        .assert()
+        .failure();
+    assert!(
+        !dir.join("events.jsonl").exists(),
+        "a refusal wrote an event"
+    );
+}
+
+#[test]
+fn journal_events_without_source_fields_still_load() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    let name = "20260101T000000Z-legacy-todo.md";
+    fs::write(dir.join(name), "# Legacy\n").unwrap();
+    fs::write(
+        dir.join("events.jsonl"),
+        concat!(
+            "{\"schema\":\"journal-events/1\",\"ts\":\"2026-01-01T00:00:00Z\",",
+            "\"harness\":\"test\",\"session\":\"test\",\"topic\":\"legacy\",",
+            "\"event\":\"note\",\"file\":\"20260101T000000Z-legacy-todo.md\"}\n",
+        ),
+    )
+    .unwrap();
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(text.contains("legacy"), "{text}");
+    // An item carrying no source is not a source-less row with an empty list.
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert!(open["open"][0].get("sources").is_none(), "{open}");
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("unknown-jsonl-event").not());
+}
+
+#[test]
+fn journal_doctor_reports_an_unusable_source_reference() {
+    let repo = Repo::new();
+    let dir = journal_dir(&repo);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("events.jsonl"),
+        concat!(
+            // A coordinate whose timestamp resolves to nothing.
+            "{\"schema\":\"journal-events/1\",\"ts\":\"2026-01-01T00:00:00Z\",",
+            "\"harness\":\"test\",\"session\":\"test\",\"topic\":\"broken\",",
+            "\"event\":\"log\",\"message\":\"m\",",
+            "\"source\":{\"harness\":\"c\",\"session\":\"s\",\"ts\":\"whenever\"}}\n",
+            // A key with no source to index into.
+            "{\"schema\":\"journal-events/1\",\"ts\":\"2026-01-01T00:00:01Z\",",
+            "\"harness\":\"test\",\"session\":\"test\",\"topic\":\"broken\",",
+            "\"event\":\"log\",\"message\":\"m\",\"item_key\":\"orphan\"}\n",
+        ),
+    )
+    .unwrap();
+    let text = stdout(repo.arc(&repo.root).args(["journal", "doctor"]));
+    assert_eq!(text.matches("unknown-jsonl-event").count(), 2, "{text}");
+}
+
+#[test]
+fn journal_source_report_shape_and_empty_answer() {
+    let repo = Repo::new();
+    let file = file_of(&source_write(&repo, "todo", "shaped", PROBE_SOURCE, "k1"));
+    let report = source_json(&repo, "claude", "abc");
+    assert_eq!(report["schema"], "journal-source/1", "{report}");
+    assert_eq!(report["harness"], "claude", "{report}");
+    assert_eq!(report["session"], "abc", "{report}");
+    let item = &report["items"][0];
+    assert_eq!(item["item_key"], "k1", "{report}");
+    assert_eq!(item["disposition"], "open", "{report}");
+    assert_eq!(item["file"], file.as_str(), "{report}");
+    let event = &item["events"][0];
+    assert_eq!(event["event"], "note", "{report}");
+    assert_eq!(event["topic"], "shaped", "{report}");
+    assert_eq!(event["file"], file.as_str(), "{report}");
+    assert_eq!(event["source"]["session"], "abc", "{report}");
+
+    // One key can be asked for on its own.
+    let one = json_stdout(repo.arc(&repo.root).args([
+        "journal",
+        "source",
+        "--harness",
+        "claude",
+        "--session",
+        "abc",
+        "--item-key",
+        "k1",
+        "--json",
+    ]));
+    assert_eq!(one["items"].as_array().unwrap().len(), 1, "{one}");
+
+    // A recording that produced nothing here says so rather than failing.
+    let none = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "source",
+        "--harness",
+        "claude",
+        "--session",
+        "never",
+    ]));
+    assert_eq!(none, "no items recorded for claude/never\n");
+}

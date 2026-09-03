@@ -278,6 +278,150 @@ impl ConsumeOutcome {
     }
 }
 
+/// Where an item came from, when it was distilled out of a recorded session
+/// rather than authored here.
+///
+/// The coordinate only: `harness` and `session` name the recording and `ts`
+/// the moment inside it the item was read out of. `turn`, `schema`, and
+/// `coverage` are recorded only when an emitter supplies them, and none of
+/// them is inferred from the fields that are present — a turn reference
+/// invented from a timestamp would point at nothing. Transcript text,
+/// credentials, and content digests are deliberately outside the shape: the
+/// journal records where evidence lives, never a copy of it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct SourceRef {
+    harness: String,
+    session: String,
+    ts: String,
+    /// The turn's native ordinal within the recording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    turn: Option<u64>,
+    /// The emitter's own schema identifier for the record that was read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    schema: Option<String>,
+    /// How complete the evidence behind the item was, in the emitter's
+    /// vocabulary. Absent means the emitter said nothing, never "complete".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    coverage: Option<String>,
+}
+
+/// The fields a `--source` spec accepts, in the order it renders them.
+const SOURCE_FIELDS: [&str; 6] = ["harness", "session", "ts", "turn", "schema", "coverage"];
+
+/// The disposition of an item a caller judged to need no work at all.
+const NO_ACTION: &str = "no-action";
+
+const SOURCE_SCHEMA: &str = "journal-source/1";
+
+impl SourceRef {
+    /// Read the space-separated `key=value` spec.
+    ///
+    /// The vocabulary is closed and every refusal happens here, before a write
+    /// touches the journal: a spec accepted loosely records a coordinate that
+    /// resolves to nothing, which is worse than no source reference at all.
+    fn parse(spec: &str) -> Result<Self> {
+        let fields_help = SOURCE_FIELDS.join(", ");
+        let mut fields: HashMap<&str, &str> = HashMap::new();
+        for pair in spec.split_whitespace() {
+            let Some((key, value)) = pair.split_once('=') else {
+                bail!("source field {pair:?} is not key=value (fields: {fields_help})");
+            };
+            if !SOURCE_FIELDS.contains(&key) {
+                bail!("unknown source field {key:?} (fields: {fields_help})");
+            }
+            if value.is_empty() {
+                bail!("source field {key} has no value");
+            }
+            if fields.insert(key, value).is_some() {
+                bail!("source field {key} is given twice");
+            }
+        }
+        let required = |key: &str| -> Result<String> {
+            fields
+                .get(key)
+                .map(|value| (*value).to_string())
+                .with_context(|| format!("source needs {key}= (required: harness, session, ts)"))
+        };
+        let harness = required("harness")?;
+        let session = required("session")?;
+        let ts = required("ts")?;
+        if DateTime::parse_from_rfc3339(&ts).is_err() {
+            bail!("source ts {ts:?} is not an RFC 3339 timestamp");
+        }
+        let turn = match fields.get("turn") {
+            Some(value) => Some(
+                value
+                    .parse::<u64>()
+                    .with_context(|| format!("source turn {value:?} is not a whole number"))?,
+            ),
+            None => None,
+        };
+        Ok(Self {
+            harness,
+            session,
+            ts,
+            turn,
+            schema: fields.get("schema").map(|value| (*value).to_string()),
+            coverage: fields.get("coverage").map(|value| (*value).to_string()),
+        })
+    }
+
+    /// The spec that would record this reference again, so what a reader sees
+    /// and what a writer types share one grammar.
+    fn spec(&self) -> String {
+        let mut parts = vec![
+            format!("harness={}", self.harness),
+            format!("session={}", self.session),
+            format!("ts={}", self.ts),
+        ];
+        if let Some(turn) = self.turn {
+            parts.push(format!("turn={turn}"));
+        }
+        if let Some(schema) = &self.schema {
+            parts.push(format!("schema={schema}"));
+        }
+        if let Some(coverage) = &self.coverage {
+            parts.push(format!("coverage={coverage}"));
+        }
+        parts.join(" ")
+    }
+
+    /// Whether a recorded reference still names a recording. The journal is
+    /// hand-writable, so an event carrying an unusable coordinate is reported
+    /// by `journal doctor` rather than worked around by every derived view.
+    fn well_formed(&self) -> bool {
+        !self.harness.trim().is_empty()
+            && !self.session.trim().is_empty()
+            && DateTime::parse_from_rfc3339(&self.ts).is_ok()
+    }
+
+    /// Whether two references name the same recording. The timestamp and the
+    /// optional fields describe one reading of it, so item identity ignores
+    /// them: the same item read twice out of one session is one item.
+    fn same_recording(&self, other: &SourceRef) -> bool {
+        self.harness == other.harness && self.session == other.session
+    }
+}
+
+/// The source coordinate a write may declare.
+///
+/// A key names one item inside a source, so it is refused without the source
+/// it indexes into rather than recorded as a bare label.
+#[derive(clap::Args, Clone)]
+pub struct SourceArgs {
+    /// Recorded session this item was distilled from, as space-separated
+    /// `key=value` pairs. `harness=<name> session=<id> ts=<rfc3339>` are
+    /// required; `turn=<n>`, `schema=<name>`, and `coverage=<state>` are
+    /// recorded only when supplied. No transcript text enters the journal
+    #[arg(long, value_name = "SPEC")]
+    pub source: Option<String>,
+    /// This caller's key for one item inside that source. A later write under
+    /// the same harness, session, and key records nothing and reports the
+    /// existing item's disposition instead
+    #[arg(long, value_name = "KEY", requires = "source")]
+    pub item_key: Option<String>,
+}
+
 /// The arguments every kind-writing verb takes. `note --kind <k>` and the
 /// kind's own subcommand are the same write; the subcommand exists so the
 /// closed set is legible from `arc journal --help` rather than from a flag's
@@ -299,6 +443,8 @@ pub struct KindWrite {
     /// Record the body alone, without the kind's default scaffold
     #[arg(long)]
     pub no_scaffold: bool,
+    #[command(flatten)]
+    pub source: SourceArgs,
 }
 
 #[derive(Subcommand)]
@@ -389,12 +535,56 @@ pub enum JournalCmd {
         #[command(flatten)]
         write: KindWrite,
     },
-    /// Append a log-only journal line (no artifact file is created)
+    /// Append a log-only journal line (no artifact file is created).
+    /// With `--source --item-key --outcome no-action` the line is the standing
+    /// answer that this source item needs no work, so a later scan of the same
+    /// session is answered without an artifact entering any queue
     Log {
         /// Kebab-case topic slug
         topic: String,
         /// Free-text journal message
         message: String,
+        #[command(flatten)]
+        source: SourceArgs,
+        /// Record this source item as needing no work at all. `no-action` is
+        /// the only outcome a log line can carry: every other disposition
+        /// belongs to an artifact
+        #[arg(long, value_parser = [NO_ACTION], requires = "item_key")]
+        outcome: Option<String>,
+    },
+    /// Record a second recorded session as a source of an existing artifact.
+    /// One item may be evidenced by several sessions; this appends the extra
+    /// coordinate as an event and never touches the artifact's body
+    SourceAttach {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// Recorded session to attach, as space-separated `key=value` pairs.
+        /// `harness=<name> session=<id> ts=<rfc3339>` are required;
+        /// `turn=<n>`, `schema=<name>`, and `coverage=<state>` are optional
+        #[arg(long, value_name = "SPEC")]
+        source: String,
+        /// This caller's key for the item inside that source
+        #[arg(long, value_name = "KEY")]
+        item_key: Option<String>,
+    },
+    /// What one recorded session already produced here: every item key filed
+    /// against it, its disposition, the artifact when one exists, and the
+    /// events behind it. This is what makes a repeated scan of the same
+    /// endings cheap — an item already filed, discharged, or judged to need
+    /// no action answers for itself instead of being distilled again
+    Source {
+        /// The recording's harness, as the source reference recorded it
+        #[arg(long)]
+        harness: String,
+        /// The native session id, as the source reference recorded it
+        #[arg(long)]
+        session: String,
+        /// Report only this item key
+        #[arg(long, value_name = "KEY")]
+        item_key: Option<String>,
+        /// Emit structured JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
     /// Add a position block to an artifact and emit a typed `position` event.
     /// `--stance` writes the `Position: for | against | amend` line above the
@@ -755,7 +945,23 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
         JournalCmd::Memory { write } => write_kind(ctx, JournalKind::Memory, write),
         JournalCmd::Later { write } => write_kind(ctx, JournalKind::Later, write),
         JournalCmd::Review { write } => write_kind(ctx, JournalKind::Review, write),
-        JournalCmd::Log { topic, message } => log_line(ctx, &topic, &message),
+        JournalCmd::Log {
+            topic,
+            message,
+            source,
+            outcome,
+        } => log_line(ctx, &topic, &message, &source, outcome.as_deref()),
+        JournalCmd::SourceAttach {
+            filename,
+            source,
+            item_key,
+        } => source_attach(ctx, &filename, &source, item_key.as_deref()),
+        JournalCmd::Source {
+            harness,
+            session,
+            item_key,
+            json,
+        } => source_report(ctx, &harness, &session, item_key.as_deref(), json),
         JournalCmd::Position {
             filename,
             reference,
@@ -2147,6 +2353,93 @@ fn default_scaffold(kind: JournalKind) -> Option<&'static str> {
     }
 }
 
+/// The source coordinate and item key a write declared, refused as a pair.
+///
+/// Every verb that accepts them resolves them here, so one grammar and one
+/// set of refusals stand behind `note`, `log`, and `source-attach` alike.
+fn declared_source(args: &SourceArgs) -> Result<(Option<SourceRef>, Option<String>)> {
+    let source = args.source.as_deref().map(SourceRef::parse).transpose()?;
+    let item_key = match args.item_key.as_deref() {
+        Some(key) => {
+            if source.is_none() {
+                bail!("--item-key names an item inside a source; pass --source as well");
+            }
+            if key.split_whitespace().count() != 1 {
+                bail!("item key {key:?} must be one word with no whitespace");
+            }
+            Some(key.to_string())
+        }
+        None => None,
+    };
+    Ok((source, item_key))
+}
+
+/// The event that already recorded this item, if one did.
+///
+/// Identity is the recording and the caller's key together: the same item read
+/// out of a different session is a different item, and one recording carries
+/// as many items as the caller gives it keys. Events arrive oldest first, so
+/// the first match is the one that claimed the key.
+fn recorded_item<'a>(
+    events: &'a [JournalEvent],
+    source: &SourceRef,
+    item_key: &str,
+) -> Option<&'a JournalEvent> {
+    events.iter().find(|event| {
+        event.item_key.as_deref() == Some(item_key)
+            && event
+                .source
+                .as_ref()
+                .is_some_and(|recorded| recorded.same_recording(source))
+    })
+}
+
+/// What a recorded item answers a later scan with.
+///
+/// `open` is work still queued, `no-action` a judgment that the source needed
+/// none, and `consumed:<outcome>` an item an artifact retired, carrying
+/// whichever outcome consumption recorded. Every terminal artifact state
+/// spells the same way, so a scan tells work still waiting from work already
+/// disposed of by the prefix alone, and reads the outcome only when it cares
+/// which disposal it was.
+fn item_disposition(events: &[JournalEvent], anchor: &JournalEvent) -> String {
+    let Some(file) = anchor.file.as_deref() else {
+        return match anchor.outcome.as_deref() {
+            Some(NO_ACTION) => NO_ACTION.to_string(),
+            _ => "open".to_string(),
+        };
+    };
+    match consumption(events, file) {
+        Some(outcome) => format!("consumed:{outcome}"),
+        None => "open".to_string(),
+    }
+}
+
+/// How the `existing:` line names the entry that already holds an item key: by
+/// the artifact when the item produced one, and otherwise by the recorded
+/// moment of the log event that stands for it.
+fn item_label(anchor: &JournalEvent) -> String {
+    anchor.file.clone().unwrap_or_else(|| anchor.ts.clone())
+}
+
+/// Report an item this source already recorded, if it did.
+///
+/// A repeated scan of one recording must cost nothing and change nothing, so
+/// the answer is the existing entry's disposition and the write is skipped
+/// rather than duplicated.
+fn already_recorded(
+    events: &[JournalEvent],
+    source: Option<&SourceRef>,
+    item_key: Option<&str>,
+) -> Option<String> {
+    let existing = recorded_item(events, source?, item_key?)?;
+    Some(format!(
+        "existing: {} [{}]",
+        item_label(existing),
+        item_disposition(events, existing)
+    ))
+}
+
 /// One write, whichever verb named the kind.
 pub(crate) fn write_kind(ctx: &Ctx, kind: JournalKind, write: KindWrite) -> Result<i32> {
     note(ctx, kind, &write, None)
@@ -2325,6 +2618,7 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
     if !valid_topic(topic) {
         bail!("topic {topic:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
     }
+    let (source, item_key) = declared_source(&write.source)?;
     // A discussion carries its own conventions — the stance line the tally is
     // parsed from, the quoting reply form, the resolution vocabulary — so the
     // scaffold that states them is the default rather than something an author
@@ -2334,6 +2628,16 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
         (None, true) => None,
         (None, false) => default_scaffold(kind),
     };
+    let dir = resolve_dir(&ctx.cwd)?;
+    // An item this recording already filed is answered before the body is
+    // read: a rescan repeating the same distillation must neither block on a
+    // stdin body it will not use nor need one at all.
+    if let Some(existing) =
+        already_recorded(&read_events(&dir)?, source.as_ref(), item_key.as_deref())
+    {
+        println!("{existing}");
+        return Ok(0);
+    }
     // Read the body before touching the filesystem so a bad source path or
     // scaffold name leaves nothing written. A scaffold template is prepended
     // to the body; a scaffold with no --body-file records the template alone.
@@ -2360,7 +2664,6 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
         None => body,
     };
 
-    let dir = resolve_dir(&ctx.cwd)?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("cannot create archive dir {}", dir.display()))?;
 
@@ -2394,25 +2697,229 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
     let mut event = JournalEvent::base(ctx, now, topic, "note");
     event.file = Some(filename.clone());
     event.title = title.map(str::to_string);
+    event.source = source;
+    event.item_key = item_key;
     append_event(ctx, &dir, &event)?;
     println!("{}", path.display());
     Ok(0)
 }
 
-fn log_line(ctx: &Ctx, topic: &str, message: &str) -> Result<i32> {
+fn log_line(
+    ctx: &Ctx,
+    topic: &str,
+    message: &str,
+    declared: &SourceArgs,
+    outcome: Option<&str>,
+) -> Result<i32> {
     if !valid_topic(topic) {
         bail!("topic {topic:?} is not kebab-case-safe (use lowercase a-z, 0-9, single hyphens)");
     }
+    let (source, item_key) = declared_source(declared)?;
     let dir = resolve_dir(&ctx.cwd)?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("cannot create archive dir {}", dir.display()))?;
+    if let Some(existing) =
+        already_recorded(&read_events(&dir)?, source.as_ref(), item_key.as_deref())
+    {
+        println!("{existing}");
+        return Ok(0);
+    }
     let now = Utc::now();
     // Free text is always a log event: marker promotion is reserved for the
     // internal consume/archive/lane callers, so a message that happens to
     // begin with "archived " or "consumed " cannot forge a typed event.
     let mut event = JournalEvent::base(ctx, now, topic, "log");
     event.message = Some(message.to_string());
+    event.source = source;
+    event.item_key = item_key;
+    event.outcome = outcome.map(str::to_string);
     append_event(ctx, &dir, &event)?;
+    Ok(0)
+}
+
+/// Record a further recorded session as evidence behind an existing artifact.
+///
+/// One item can be evidenced by several sessions, and the append is explicit
+/// because nothing may attach a source by inferring one from prose. The
+/// artifact's body is never touched: the reference is an event, and an artifact
+/// that has been consumed still accepts one, since where a record came from
+/// stays worth knowing after the work it described is discharged.
+fn source_attach(ctx: &Ctx, filename: &str, source: &str, item_key: Option<&str>) -> Result<i32> {
+    let declared = SourceArgs {
+        source: Some(source.to_string()),
+        item_key: item_key.map(str::to_string),
+    };
+    let (source, item_key) = declared_source(&declared)?;
+    let source = source.context("source-attach needs a source reference")?;
+    let (dir, _, topic) = open_artifact_for_amendment(ctx, filename)?;
+    let _transition = lock_journal_transition(&dir)?;
+    let events = read_events(&dir)?;
+    if let Some(existing) = already_recorded(&events, Some(&source), item_key.as_deref()) {
+        println!("{existing}");
+        return Ok(0);
+    }
+    let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "source-attach");
+    event.file = Some(filename.to_string());
+    event.source = Some(source);
+    event.item_key = item_key;
+    append_event(ctx, &dir, &event)?;
+    println!("attached: {filename}");
+    Ok(0)
+}
+
+/// One recorded session behind one artifact.
+#[derive(Clone, Serialize)]
+pub(crate) struct ArtifactSource {
+    #[serde(flatten)]
+    source: SourceRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item_key: Option<String>,
+}
+
+/// Every recorded session an artifact was distilled from, in the order they
+/// were recorded. An artifact authored here carries none.
+fn artifact_sources(events: &[JournalEvent], filename: &str) -> Vec<ArtifactSource> {
+    events
+        .iter()
+        .filter(|event| event.file.as_deref() == Some(filename))
+        .filter_map(|event| {
+            event.source.as_ref().map(|source| ArtifactSource {
+                source: source.clone(),
+                item_key: event.item_key.clone(),
+            })
+        })
+        .collect()
+}
+
+/// The sources on a queue row: absent rather than empty, so a row for an item
+/// authored here carries no field at all.
+fn queue_sources(events: &[JournalEvent], filename: &str) -> Option<Vec<ArtifactSource>> {
+    let sources = artifact_sources(events, filename);
+    (!sources.is_empty()).then_some(sources)
+}
+
+#[derive(Serialize)]
+struct SourceItemEvent {
+    ts: String,
+    event: String,
+    topic: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
+    source: SourceRef,
+}
+
+#[derive(Serialize)]
+struct SourceItem {
+    /// Absent on a write that declared a source without naming an item inside
+    /// it. Such a write is still reported: a source arc recorded and could not
+    /// list back would send the next scan to distil it again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item_key: Option<String>,
+    disposition: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
+    events: Vec<SourceItemEvent>,
+}
+
+#[derive(Serialize)]
+struct SourceReport {
+    schema: &'static str,
+    harness: String,
+    session: String,
+    items: Vec<SourceItem>,
+}
+
+/// What one recorded session has already produced in this journal.
+///
+/// Derived from the event log rather than a store of its own: the events
+/// already carry every reference and every disposition, and a second index
+/// would be a copy that can disagree with them.
+fn source_report(
+    ctx: &Ctx,
+    harness: &str,
+    session: &str,
+    item_key: Option<&str>,
+    json: bool,
+) -> Result<i32> {
+    let dir = resolve_dir(&ctx.cwd)?;
+    let events = read_events(&dir)?;
+    // Keyed items group under their key; a keyless one stands alone, since
+    // nothing identifies it with any other entry.
+    let mut items: Vec<SourceItem> = Vec::new();
+    let mut keyed: HashMap<String, usize> = HashMap::new();
+    for event in &events {
+        let Some(source) = event.source.as_ref() else {
+            continue;
+        };
+        if source.harness != harness || source.session != session {
+            continue;
+        }
+        if item_key.is_some_and(|wanted| event.item_key.as_deref() != Some(wanted)) {
+            continue;
+        }
+        let entry = SourceItemEvent {
+            ts: event.ts.clone(),
+            event: event.event.clone(),
+            topic: event.topic.clone(),
+            file: event.file.clone(),
+            source: source.clone(),
+        };
+        match event.item_key.as_deref() {
+            Some(key) => match keyed.get(key) {
+                Some(&index) => {
+                    let item: &mut SourceItem = &mut items[index];
+                    if item.file.is_none() {
+                        item.file = event.file.clone();
+                    }
+                    item.events.push(entry);
+                }
+                None => {
+                    keyed.insert(key.to_string(), items.len());
+                    items.push(SourceItem {
+                        item_key: Some(key.to_string()),
+                        disposition: item_disposition(&events, event),
+                        file: event.file.clone(),
+                        events: vec![entry],
+                    });
+                }
+            },
+            None => items.push(SourceItem {
+                item_key: None,
+                disposition: item_disposition(&events, event),
+                file: event.file.clone(),
+                events: vec![entry],
+            }),
+        }
+    }
+
+    if json {
+        let report = SourceReport {
+            schema: SOURCE_SCHEMA,
+            harness: harness.to_string(),
+            session: session.to_string(),
+            items,
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(0);
+    }
+    if items.is_empty() {
+        println!("no items recorded for {harness}/{session}");
+        return Ok(0);
+    }
+    for item in &items {
+        println!(
+            "{} [{}]{}",
+            item.item_key.as_deref().unwrap_or("(no item key)"),
+            item.disposition,
+            item.file
+                .as_deref()
+                .map(|file| format!(" {file}"))
+                .unwrap_or_default()
+        );
+        for event in &item.events {
+            println!("  {} {} {}", event.ts, event.event, event.source.spec());
+        }
+    }
     Ok(0)
 }
 
@@ -3576,6 +4083,17 @@ pub(crate) struct JournalEvent {
     /// identifier a hand-written event may omit.
     #[serde(skip_serializing_if = "Option::is_none")]
     amendment_id: Option<String>,
+    /// The recorded session this entry was distilled out of, when it was
+    /// distilled rather than authored. Absent means the entry was authored
+    /// here, which is what every event written without the field means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<SourceRef>,
+    /// The caller's key for one item inside `source`. Its whole purpose is
+    /// identity across repeated scans of the same recording, so it is
+    /// meaningless without the source it indexes into and is never recorded
+    /// alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    item_key: Option<String>,
 }
 
 /// Every field a correction may name, over all targets. Which of them a given
@@ -3738,6 +4256,8 @@ impl JournalEvent {
             field: None,
             value: None,
             amendment_id: None,
+            source: None,
+            item_key: None,
         }
     }
 
@@ -3752,8 +4272,28 @@ impl JournalEvent {
         {
             return false;
         }
+        // A source reference is what makes an item findable again, so an
+        // unusable coordinate, or a key with no source to index into, is not
+        // a weaker record of the same thing — it is a record of nothing.
+        if !self
+            .source
+            .as_ref()
+            .is_none_or(|source| source.well_formed())
+            || (self.item_key.is_some() && self.source.is_none())
+        {
+            return false;
+        }
         match self.event.as_str() {
-            "log" => self.message.is_some(),
+            // A log line carries an outcome only to stand as the no-action
+            // disposition of a source item, which needs the item it answers
+            // for.
+            "log" => {
+                self.message.is_some()
+                    && self.outcome.as_deref().is_none_or(|outcome| {
+                        outcome == NO_ACTION && self.item_key.is_some() && self.source.is_some()
+                    })
+            }
+            "source-attach" => self.file.is_some() && self.source.is_some(),
             "note" => self.file.is_some(),
             "verified" => self.file.is_some(),
             "position" => {
@@ -4817,6 +5357,10 @@ pub(crate) struct ArtifactEntry {
     /// them, and on any artifact carrying none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) amendments: Option<usize>,
+    /// The recorded sessions this item was distilled from. Absent on an item
+    /// authored here, which is most of them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sources: Option<Vec<ArtifactSource>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -5046,6 +5590,7 @@ fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
                 change: None,
                 verification: None,
                 amendments: None,
+                sources: None,
             })
         })
         .collect())
@@ -5112,6 +5657,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
                     change: None,
                     verification: None,
                     amendments: None,
+                    sources: None,
                 });
             }
         }
@@ -5442,6 +5988,7 @@ pub(crate) fn collect_open_in(
                 let change = change_annotation(&changes, &topic, &name);
                 let verification = verification_stamp(&journal, &name, current_revision.as_deref());
                 let amendments = standing_amendments(&journal, &name, &file_kind);
+                let sources = queue_sources(&journal, &name);
                 open.push(ArtifactEntry {
                     lane: lane_for_topic(&lanes, &topic, &caller),
                     change,
@@ -5457,6 +6004,7 @@ pub(crate) fn collect_open_in(
                     heading,
                     verification,
                     amendments,
+                    sources,
                 });
             }
         }
@@ -5466,6 +6014,7 @@ pub(crate) fn collect_open_in(
                 let change = change_annotation(&changes, &topic, &name);
                 let verification = verification_stamp(&journal, &name, current_revision.as_deref());
                 let amendments = standing_amendments(&journal, &name, &file_kind);
+                let sources = queue_sources(&journal, &name);
                 later.push(ArtifactEntry {
                     lane: lane_for_topic(&lanes, &topic, &caller),
                     change,
@@ -5477,6 +6026,7 @@ pub(crate) fn collect_open_in(
                     heading,
                     verification,
                     amendments,
+                    sources,
                 });
             }
         }
@@ -5486,6 +6036,7 @@ pub(crate) fn collect_open_in(
                 let change = change_annotation(&changes, &topic, &name);
                 let verification = verification_stamp(&journal, &name, current_revision.as_deref());
                 let amendments = standing_amendments(&journal, &name, &file_kind);
+                let sources = queue_sources(&journal, &name);
                 feature_requests.push(ArtifactEntry {
                     lane: lane_for_topic(&lanes, &topic, &caller),
                     change,
@@ -5497,6 +6048,7 @@ pub(crate) fn collect_open_in(
                     heading,
                     verification,
                     amendments,
+                    sources,
                 });
             }
         }
@@ -5784,7 +6336,21 @@ fn show(ctx: &Ctx, filename: &str) -> Result<i32> {
         }
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     }
-    print!("{}", read_artifact_body(ctx, filename)?);
+    let body = read_artifact_body(ctx, filename)?;
+    // Where the artifact came from is arc's record about it, not a line of the
+    // Markdown anybody wrote, so it goes to the diagnostic stream: stdout stays
+    // the body verbatim and `journal show <file> > <file>` still round-trips.
+    for source in artifact_sources(&read_events(&resolve_dir(&ctx.cwd)?)?, filename) {
+        eprintln!(
+            "source: {}{}",
+            source.source.spec(),
+            source
+                .item_key
+                .map(|key| format!(" item-key={key}"))
+                .unwrap_or_default()
+        );
+    }
+    print!("{body}");
     Ok(0)
 }
 

@@ -98,6 +98,12 @@ SETTLE A QUESTION (before it is work)
   arc journal <kind> <topic> --body-file -   One verb per kind; `arc journal
                                        --help` is the registry. `arc fr` is
                                        the top-level alias for one of them.
+  arc journal <kind> <topic> --source 'harness=<h> session=<id> ts=<rfc3339>'
+    --item-key <k>                     Where a distilled item came from; a
+                                       repeat reports the existing item.
+  arc journal source --harness <h> --session <id> [--item-key <k>] [--json]
+                                       What one recording already produced.
+  arc journal source-attach <file> --source '<spec>' [--item-key <k>]
   arc begin <slug> --from-journal <file>
 
   The ledger records what happened and what is allowed; the journal records
@@ -119,6 +125,28 @@ SETTLE A QUESTION (before it is work)
   argued and read far more often than created, so `position`, `question`,
   `answer` and the `discussion` summary are its surface, and `note --kind
   discussion` opens one.
+
+  An item distilled out of a recorded session carries where it came from.
+  Every write verb and `journal log` take `--source 'harness=<h>
+  session=<id> ts=<rfc3339>'`, with optional `turn=`, `schema=`, and
+  `coverage=` recorded only when an emitter supplies them, plus
+  `--item-key <k>` naming one item inside that recording. The coordinate is
+  all that is kept: no transcript text, credential, or digest enters the
+  journal, and arc never opens the recording to infer a project or a body.
+
+  That reference is what makes rescanning the same endings cheap. A write
+  whose recording and key were already recorded writes nothing and prints
+  the existing entry with its disposition — `open`, `no-action`, or
+  `consumed:<outcome>`. `journal log <topic> "<message>"
+  --source .. --item-key .. --outcome no-action` records the judgment that
+  an item needs no work at all, so a later scan is answered without an
+  artifact entering any queue. `journal source --harness <h> --session
+  <id>` lists everything one recording produced here; `journal
+  source-attach <file> --source ..` records a further recording as
+  evidence behind an artifact, since one item can be evidenced by several
+  sessions. Which project the item lands in stays the caller's choice
+  through ordinary anchor resolution: a recorded session directory is
+  evidence, never authority to write there.
 
   An entry filed wrong is amended, never rewritten. `correct` replaces one
   field of one entry — the artifact's `title`, a position's `stance`,

@@ -1567,6 +1567,8 @@ fn nested_subcommand_path(typed: Option<&str>) -> Option<&'static str> {
         Some("answer") => Some("journal answer"),
         Some("position") => Some("journal position"),
         Some("latest") => Some("journal latest"),
+        Some("source") => Some("journal source"),
+        Some("source-attach") => Some("journal source-attach"),
         Some("install") => Some("hooks install"),
         Some("uninstall") => Some("hooks uninstall"),
         _ => None,

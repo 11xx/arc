@@ -12,6 +12,24 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Every `arc journal` write verb and `arc journal log` accept `--source
+  'harness=<h> session=<id> ts=<rfc3339>'` and `--item-key <key>`, so an item
+  distilled out of a recorded session carries where it came from. `turn`,
+  `schema`, and `coverage` are recorded only when an emitter supplies them; no
+  transcript text, credential, or digest enters the journal. A write whose
+  recording and key were already recorded writes nothing and prints the
+  existing entry with its disposition — `open`, `no-action`, or
+  `consumed:<outcome>` — so rescanning the same endings neither duplicates an
+  item nor re-reads one already judged. `--outcome no-action` on `journal log`
+  records that an item needs no work at all, answering a later scan without
+  putting an artifact in any queue. `arc journal source --harness <h>
+  --session <id> [--item-key <k>] [--json]` lists what one recording produced
+  here, versioned `journal-source/1`; `arc journal source-attach <file>
+  --source '<spec>'` records a further recording as evidence behind an
+  existing artifact. `journal show` prints an artifact's sources on the
+  diagnostic stream, leaving stdout the body verbatim, and `journal open
+  --json` carries them as `sources`.
+
 - `arc journal handoff <topic> --derive` prepends a `## State (derived at
   <ts>)` section read from the repository: repository and worktree paths,
   branch and short head, the change's target with commits ahead and behind,
