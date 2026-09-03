@@ -45,6 +45,7 @@ impl Repo {
             .env("ARC_SESSION", "session-a")
             .env_remove("ARC_ROLE")
             .env_remove("ARC_MODEL")
+            .env_remove("ARC_ON_BEHALF_OF")
             .env_remove("ARC_DATA_DIR")
             .env_remove("ARC_DATA_ROOT")
             .env_remove("ARC_WORKTREES_DIR")

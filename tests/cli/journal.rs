@@ -5120,20 +5120,11 @@ fn journal_discussion_groups_three_deep_chain_into_rounds() {
                 .args(["journal", "discussion", &file, "--json"]),
         );
     assert_eq!(summary["rounds"][0]["depth"], 1);
-    assert_eq!(
-        summary["rounds"][0]["positions"],
-        serde_json::json!([first])
-    );
+    assert_eq!(round_position_ids(&summary["rounds"][0]), [first]);
     assert_eq!(summary["rounds"][1]["depth"], 2);
-    assert_eq!(
-        summary["rounds"][1]["positions"],
-        serde_json::json!([second])
-    );
+    assert_eq!(round_position_ids(&summary["rounds"][1]), [second]);
     assert_eq!(summary["rounds"][2]["depth"], 3);
-    assert_eq!(
-        summary["rounds"][2]["positions"],
-        serde_json::json!([third])
-    );
+    assert_eq!(round_position_ids(&summary["rounds"][2]), [third]);
 }
 
 #[test]
@@ -5149,10 +5140,7 @@ fn journal_discussion_groups_sibling_replies_into_one_round() {
             repo.arc(&repo.root)
                 .args(["journal", "discussion", &file, "--json"]),
         );
-    assert_eq!(
-        summary["rounds"][1]["positions"],
-        serde_json::json!([first, second])
-    );
+    assert_eq!(round_position_ids(&summary["rounds"][1]), [first, second]);
 }
 
 #[test]
@@ -5211,10 +5199,7 @@ fn journal_discussion_places_positions_without_refs_in_round_one() {
         );
     assert_eq!(summary["rounds"].as_array().unwrap().len(), 1);
     assert_eq!(summary["rounds"][0]["depth"], 1);
-    assert_eq!(
-        summary["rounds"][0]["positions"],
-        serde_json::json!([first, second])
-    );
+    assert_eq!(round_position_ids(&summary["rounds"][0]), [first, second]);
 }
 
 #[test]
@@ -5245,15 +5230,9 @@ fn journal_discussion_bounds_ref_cycles() {
         );
     assert_eq!(summary["rounds"].as_array().unwrap().len(), 2);
     assert_eq!(summary["rounds"][0]["depth"], 1);
-    assert_eq!(
-        summary["rounds"][0]["positions"],
-        serde_json::json!([first, second])
-    );
+    assert_eq!(round_position_ids(&summary["rounds"][0]), [first, second]);
     assert_eq!(summary["rounds"][1]["depth"], 2);
-    assert_eq!(
-        summary["rounds"][1]["positions"],
-        serde_json::json!([third])
-    );
+    assert_eq!(round_position_ids(&summary["rounds"][1]), [third]);
 }
 
 #[test]
@@ -5292,12 +5271,7 @@ fn journal_discussion_caps_deep_chains_without_inventing_roots() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|round| {
-            round["positions"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!("pos-256"))
-        })
+        .find(|round| round_position_ids(round).iter().any(|id| id == "pos-256"))
         .unwrap();
     assert_eq!(deepest_round["depth"], 256);
 }
@@ -6255,7 +6229,10 @@ fn a_question_carries_its_branches_and_the_answer_picks_one() {
         repo.arc(&repo.root)
             .args(["journal", "discussion", &file, "--json"]),
     );
-    assert_eq!(after["questions"][0]["answered"], "staged", "{after}");
+    assert_eq!(
+        after["questions"][0]["answered"]["option"], "staged",
+        "{after}"
+    );
     assert_eq!(
         after["questions"][0]["branches"][0]["positions"]
             .as_u64()
@@ -6770,6 +6747,17 @@ fn discussion_named(repo: &Repo, topic: &str, body: &str) -> String {
         .unwrap()
         .to_string_lossy()
         .to_string()
+}
+
+/// The position ids in one `discussion --json` round, in the order the view
+/// reports them.
+fn round_position_ids(round: &serde_json::Value) -> Vec<String> {
+    round["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|position| position["id"].as_str().unwrap().to_string())
+        .collect()
 }
 
 fn question_id(repo: &Repo, file: &str) -> String {
@@ -8219,4 +8207,196 @@ fn settle_by_flag_combinations_are_guarded() {
         .failure()
         .stderr(predicates::str::contains("cannot be empty"));
     assert_eq!(fs::read_to_string(events_path).unwrap(), before);
+}
+
+/// Every journal write that records who acted, run with `extra` appended to
+/// each. Returns the journal's events in log order.
+fn identity_bearing_writes(repo: &Repo, extra: &[&str]) -> Vec<serde_json::Value> {
+    let seed = {
+        let mut command = repo.arc(&repo.root);
+        command.args([
+            "journal",
+            "note",
+            "delegated",
+            "--kind",
+            "discussion",
+            "--body-file",
+            "-",
+        ]);
+        command.args(extra);
+        stdout(command.write_stdin("# Debate\n\n## Positions\n"))
+    };
+    let file = PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let run = |args: &[&str], stdin: &'static str| {
+        let mut command = repo.arc(&repo.root);
+        command.args(args);
+        command.args(extra);
+        command.write_stdin(stdin).assert().success();
+    };
+    run(
+        &["journal", "position", &file, "--body-file", "-"],
+        "Position: for\n\nArgued.\n",
+    );
+    run(
+        &[
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "closing",
+            "--option",
+            "yes",
+            "--option",
+            "no",
+            "--body-file",
+            "-",
+        ],
+        "Which way?\n",
+    );
+    let question = question_id(repo, &file);
+    run(
+        &[
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "yes",
+            "--body-file",
+            "-",
+        ],
+        "Because.\n",
+    );
+    run(&["journal", "verified", &file], "");
+    run(&["journal", "lane", "open", "delegated-lane"], "");
+    run(&["journal", "consume", &file, "--outcome", "done"], "");
+    journal_events(&journal_dir(repo))
+}
+
+const IDENTITY_BEARING_EVENTS: [&str; 7] = [
+    "note",
+    "position",
+    "question",
+    "answer",
+    "verified",
+    "lane-opened",
+    "consumed",
+];
+
+/// A lead running ceremony for an executor is two identities, and the log has
+/// to hold both: the subject stands beside the invoker and never replaces it.
+#[test]
+fn journal_writes_record_the_represented_subject() {
+    let repo = Repo::new();
+    let events = identity_bearing_writes(&repo, &["--on-behalf-of", "executor-x"]);
+    for kind in IDENTITY_BEARING_EVENTS {
+        let event = events
+            .iter()
+            .find(|event| event["event"] == kind)
+            .unwrap_or_else(|| panic!("{kind} was recorded"));
+        assert_eq!(event["on_behalf_of"], "executor-x", "{event}");
+        assert_eq!(event["actor"], "tester", "{event}");
+    }
+}
+
+/// Absent means absent: nothing infers a subject from the prose, the model, or
+/// the session that happened to write the event.
+#[test]
+fn journal_writes_without_a_subject_record_none() {
+    let repo = Repo::new();
+    let events = identity_bearing_writes(&repo, &[]);
+    for kind in IDENTITY_BEARING_EVENTS {
+        let event = events
+            .iter()
+            .find(|event| event["event"] == kind)
+            .unwrap_or_else(|| panic!("{kind} was recorded"));
+        assert!(event.get("on_behalf_of").is_none(), "{event}");
+        assert_eq!(event["actor"], "tester", "{event}");
+    }
+}
+
+/// An event written before the field existed carries no subject and is still
+/// a `journal-events/1` event: it loads, renders, and reports nothing.
+#[test]
+fn a_journal_event_without_a_subject_loads_and_renders() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "legacy-subject", "# Debate\n\n## Positions\n");
+    let dir = journal_dir(&repo);
+    let event = serde_json::json!({
+        "schema": "journal-events/1",
+        "ts": "2026-01-01T00:00:00Z",
+        "harness": "test",
+        "session": "session-a",
+        "actor": "tester",
+        "topic": "legacy-subject",
+        "event": "position",
+        "file": file,
+        "position_id": "pos-legacy"
+    });
+    fs::write(dir.join("events.jsonl"), format!("{event}\n")).unwrap();
+
+    let events: Vec<serde_json::Value> = stdout(repo.arc(&repo.root).args(["journal", "events"]))
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].get("on_behalf_of").is_none(), "{}", events[0]);
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    let position = &summary["rounds"][0]["positions"][0];
+    assert_eq!(position["id"], "pos-legacy", "{summary}");
+    assert!(position.get("on_behalf_of").is_none(), "{summary}");
+
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("unknown-jsonl-event").not());
+}
+
+/// The structured view answers who argued and who it was argued for as two
+/// fields. The prose heading answers only the first: substituting the subject
+/// there would erase the identity that actually filed the position.
+#[test]
+fn discussion_json_separates_the_actor_from_the_subject() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "delegated-position", "# Debate\n\n## Positions\n");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &file,
+            "--on-behalf-of",
+            "executor-x",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Position: for\n\nArgued for the executor.\n")
+        .assert()
+        .success();
+
+    let summary =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "discussion", &file, "--json"]),
+        );
+    let position = &summary["rounds"][0]["positions"][0];
+    assert_eq!(position["actor"], "tester", "{summary}");
+    assert_eq!(position["on_behalf_of"], "executor-x", "{summary}");
+
+    let body = fs::read_to_string(journal_dir(&repo).join(&file)).unwrap();
+    let heading = body
+        .lines()
+        .find(|line| line.starts_with("### Position "))
+        .expect("the position wrote a heading");
+    assert!(!heading.contains("executor-x"), "{heading}");
 }

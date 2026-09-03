@@ -1185,6 +1185,13 @@ actor + harness + session tuple, and `on_behalf_of` is recorded and rendered
 but never changes who owns or may release a claim. The field is additive and
 serialized only when set, so existing events and bundles round-trip unchanged.
 
+Journal events carry the same pair. A `journal-events/1` event records
+`on_behalf_of` beside `actor`, and the structured views show both: `journal
+events`, each position and answer in `journal discussion --json`, each question
+in `journal questions --json`, and the verification stamps on `journal open`
+and `catchup`. Prose headings name the identity that argued and never the
+subject, so who a lead recorded work for is a question for the structured view.
+
 ## Configuration
 
 arc treats `~/.local/ai/` as the AI data home (relocate it with

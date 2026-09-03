@@ -2389,6 +2389,14 @@ struct OpenQuestion {
     /// being asked without the caller opening the artifact.
     #[serde(skip_serializing_if = "Option::is_none")]
     heading: Option<String>,
+    /// Who ran the command that posed it, when somebody declared an actor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor: Option<String>,
+    /// The subject it was posed for, when the invocation represented one. A
+    /// delegate reading this queue tells a question a lead posed for it from
+    /// one the lead posed as itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_behalf_of: Option<String>,
     asked_at: String,
     /// The options to offer, each with how many positions argued that branch.
     /// A branch nobody argued is visible before the question is answered,
@@ -2640,6 +2648,8 @@ fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
             question: question.to_string(),
             placement: event.placement.clone().unwrap_or_default(),
             settle_by: event.settle_by.clone(),
+            actor: event.actor.clone(),
+            on_behalf_of: event.on_behalf_of.clone(),
             asked_at: event.ts.clone(),
             options: event
                 .options
@@ -2690,6 +2700,15 @@ pub(crate) struct JournalEvent {
     /// fell back to is not a claim that anyone acted, so it is not recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
     actor: Option<String>,
+    /// The subject a delegated invocation was run for (`--on-behalf-of`),
+    /// recorded beside the actor and never in place of one. A lead filing a
+    /// note or a position for an executor is two facts — who ran the command,
+    /// and whose work it records — and an event keeping only the first names
+    /// the wrong participant to every reader after it. Absent means the
+    /// invocation represented nobody: no subject is inferred from prose,
+    /// model, or session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_behalf_of: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     topic: String,
@@ -2860,6 +2879,7 @@ impl JournalEvent {
             harness,
             session,
             actor: declared_actor(ctx),
+            on_behalf_of: ctx.on_behalf_of.clone(),
             // Model identity is optional end to end: absent means absent,
             // never "unknown".
             model: ctx
@@ -3916,6 +3936,11 @@ pub(crate) struct VerificationStamp {
     pub(crate) timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) actor: Option<String>,
+    /// The subject the check was recorded for, when the invocation
+    /// represented one. It stands beside the actor rather than replacing it,
+    /// so a queue row can say a lead stamped this for an executor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) on_behalf_of: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
     pub(crate) harness: String,
@@ -4277,6 +4302,7 @@ fn verification_stamp(
         revision: event.verified_revision.clone(),
         timestamp: event.ts.clone(),
         actor: event.actor.clone(),
+        on_behalf_of: event.on_behalf_of.clone(),
         model: event.model.clone(),
         harness: event.harness.clone(),
         session: event.session.clone(),
@@ -4916,7 +4942,7 @@ struct DiscussionQuestion {
     options: Vec<String>,
     branches: Vec<DiscussionBranch>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    answered: Option<String>,
+    answered: Option<DiscussionAnswer>,
     /// An opening question is meant to settle a premise before anyone argues.
     /// Set when it is still open and positions exist anyway — the argument
     /// started without the premise it was supposed to rest on.
@@ -4928,6 +4954,32 @@ struct DiscussionQuestion {
 struct DiscussionBranch {
     option: String,
     positions: usize,
+}
+
+/// The branch a question settled on, and who settled it.
+///
+/// `actor` is whoever ran the command; `on_behalf_of` is the subject they ran
+/// it for. Both are carried because collapsing them would credit a delegated
+/// answer to the wrong side of the delegation, and a reader asking whether a
+/// question was answered by someone who argued it needs the pair.
+#[derive(Serialize)]
+struct DiscussionAnswer {
+    option: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_behalf_of: Option<String>,
+}
+
+/// One position in a round: its stable id, and the same identity pair an
+/// answer carries.
+#[derive(Serialize)]
+struct DiscussionPosition {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_behalf_of: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -5033,7 +5085,7 @@ fn unrecorded_question_blocks(
 #[derive(Serialize)]
 struct DiscussionRound {
     depth: usize,
-    positions: Vec<String>,
+    positions: Vec<DiscussionPosition>,
     participants: Vec<String>,
 }
 
@@ -5152,7 +5204,11 @@ fn discussion_rounds(
             .iter_mut()
             .find(|round| round.depth == depth)
             .expect("round was inserted");
-        round.positions.push(position_id.clone());
+        round.positions.push(DiscussionPosition {
+            id: position_id.clone(),
+            actor: event.actor.clone(),
+            on_behalf_of: event.on_behalf_of.clone(),
+        });
         let participant = event_identity_label(event);
         if !round.participants.contains(&participant) {
             round.participants.push(participant);
@@ -5386,7 +5442,13 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
                         && event.file.as_deref() == Some(filename)
                         && event.question_id.as_deref() == Some(id.as_str())
                 })
-                .and_then(|event| event.option.clone());
+                .and_then(|event| {
+                    Some(DiscussionAnswer {
+                        option: event.option.clone()?,
+                        actor: event.actor.clone(),
+                        on_behalf_of: event.on_behalf_of.clone(),
+                    })
+                });
             let branches = options
                 .iter()
                 .map(|option| DiscussionBranch {
@@ -5518,7 +5580,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     );
     for question in &summary.questions {
         let state = match &question.answered {
-            Some(option) => format!("answered {option}"),
+            Some(answer) => format!("answered {}", answer.option),
             None => "open".to_string(),
         };
         println!(
@@ -5557,7 +5619,12 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         println!(
             "  round {}: {} — {}",
             round.depth,
-            round.positions.join(", "),
+            round
+                .positions
+                .iter()
+                .map(|position| position.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             round.participants.join(", ")
         );
     }
