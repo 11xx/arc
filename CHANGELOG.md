@@ -19,7 +19,10 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   and the subject on each position and answer, `questions --json` on each
   question, and the verification stamps in `journal open` and `catchup` on each
   row. Prose headings are unchanged: the subject is never substituted for the
-  identity that argued.
+  identity that argued. `discussion --json` is `journal-discussion/2`: each
+  round position is an object carrying its id and that identity pair, where it
+  was a bare id string, and an answer is an object carrying its option and the
+  same pair.
 
 - `arc workspace backlog --here|--under <path>` gives a non-Git workspace root
   a first command: it filters the registered projects by canonical anchor,

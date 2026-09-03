@@ -4969,7 +4969,7 @@ fn journal_discussion_summarizes_stances_participants_and_resolution() {
             repo.arc(&repo.root)
                 .args(["journal", "discussion", &file, "--json"]),
         );
-    assert_eq!(summary["schema"], "journal-discussion/1");
+    assert_eq!(summary["schema"], "journal-discussion/2");
     assert_eq!(summary["positions"], 3);
     assert_eq!(summary["stances"]["for"], 2);
     assert_eq!(summary["stances"]["against"], 1);

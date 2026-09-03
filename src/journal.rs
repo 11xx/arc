@@ -5520,7 +5520,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         });
 
     let summary = DiscussionSummary {
-        schema: "journal-discussion/1",
+        schema: "journal-discussion/2",
         age_seconds: discussion_age_seconds(Utc::now(), &ts, filename, &events),
         file: filename.to_string(),
         topic,
