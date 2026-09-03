@@ -49,10 +49,10 @@ appears in the guide or in a command's help.
 ## Non-goals
 
 Not a forge or forge clone, no hosted-PR parity claim, no daemon, no web
-UI, no database, and no automatic multi-machine synchronization. arc makes
-no network call anywhere: every command reads and writes the local
-repository and nothing else, and `git` is the only program it invokes on
-its own behalf — a declared gate command is the project's, not arc's.
+UI, no database, and no automatic multi-machine synchronization. arc never
+makes a network call. Every command reads and writes the local repository and
+nothing else, and `git` is the only program it invokes on its own behalf — a
+declared gate command is the project's, not arc's.
 Export/import moves the ledger as one file; Git objects still travel
 separately. A forge-PR projection is planned, while shared Git-ref
 sync remains deferred until a real concurrent multi-machine need exists.

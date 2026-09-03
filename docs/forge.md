@@ -20,10 +20,10 @@ arc forge checks tidal-fix --pr-head <sha> --state not-configured
 arc forge pr-state tidal-fix --state open   # merged requires --merge-sha
 ```
 
-`arc forge link` fails closed with exit 10, appending no event, when the
-observed tuple differs from the declaration on any axis or violates the
-declared policy (`same-repository-only` requires base repo == head repo;
-`allowed-base-repo=X` requires base repo == X). The `forge` status block
+`arc forge link` fails closed. `arc forge link` exits 10 when the observed
+tuple or the declared policy does not match, appending no event. The tuple must
+match the declaration on every axis; `same-repository-only` requires base repo
+== head repo, and `allowed-base-repo=X` requires base repo == X. The `forge` status block
 reports `projection` (undeclared/declared/linked), the observed link,
 `head_match` against the current approved patchset head (the exact-head
 rule), the recorded checks state (`stale` for an older head, `unknown`

@@ -20,9 +20,9 @@ are reported as `wedged`; clear or retarget them with `arc metadata`.
 Missing or still-open changes remain blocked; `arc check` and `arc integrate`
 enforce this boundary.
 `arc blocker-status` exposes the versioned `arc-blocker-status/1` dependency
-payload. `arc is-blocked` has its own polling contract: exit 0 means ready, 1
-means blocked, and 2 means the lookup or ledger read failed, so automation must
-stop rather than keep waiting. Add or remove dependencies and tags append-only
+payload. `arc is-blocked` has its own polling contract. `arc is-blocked` exits 0 when
+the change is ready, 1 when it is blocked, and 2 when the lookup or ledger read
+failed. Automation stops on the error rather than keeping to wait. Add or remove dependencies and tags append-only
 after creation:
 
 ```sh
@@ -80,8 +80,8 @@ directed the work. It reports who wrote what, and stops there.
 
 `arc take` considers open, unheld changes whose blockers are integrated and
 whose claims are absent, expired, or stale. It selects higher priorities first,
-then the oldest change, and exits 2 when nothing is ready. Repeated `--tag`
-filters are conjunctive. `--json` returns the selected change's full status.
+then the oldest change. `arc take` exits 2 when no change is ready. Repeated
+`--tag` filters are conjunctive. `--json` returns the selected change's full status.
 Selection and claim publication share the repository graph lock, so concurrent
 `take` calls serialize and cannot receive the same change.
 
@@ -113,6 +113,9 @@ it names the harness it is addressed to. A Codex executor works locally and
 must never be told to invoke `codex exec` on itself.
 
 ### Delegated rounds
+
+arc records the actor, harness, and model it is given, and holds no routing
+opinion. Who to delegate to is the caller's policy.
 
 `arc run` records delegated runs. A dispatch names exactly one subject —
 `--change <id>`, `--fork <slug>`, or `--range <base>..<head>` — and naming

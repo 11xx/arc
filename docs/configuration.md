@@ -95,23 +95,22 @@ pipe-friendly IDs, a scannable orchestration table, or structured rows.
 
 - Ledger location: `<git-common-dir>/arc/` by default (shared by all
   worktrees), relocatable with the configuration keys above.
-- The ledger is append-only: arc never deletes or rewrites event files.
+- The ledger is append-only. arc never deletes or rewrites an event file.
 - Every reviewed head is pinned by its own `refs/arc/keep/<change>/<patchset>`
   ref, so Git GC cannot collect it — including earlier patchsets after a
   branch rewind. Pins are released only for heads proven reachable from
   the integration commit; abandoned or externally rewritten work stays
   pinned (release by hand with `git update-ref -d`).
-- arc never passes `--force` to git: worktree removal refuses when
-  dirty/untracked content is present, branch deletion refuses unmerged
-  branches, and a failed merge is aborted back to the pre-checked clean
-  state.
+- arc never passes `--force` to git. Worktree removal refuses when dirty or
+  untracked content is present, branch deletion refuses unmerged branches,
+  and a failed merge is aborted back to the pre-checked clean state.
 - A detected integration race (target moved) is reported, never
   "repaired" by rewriting refs.
 - Git object IDs are stored as variable-length strings (SHA-256 safe).
 - Anchors record path, side, blob OID, and line range; blob identity is
   what survives when line numbers drift.
-- `arc` never rewrites source branches and never merges on its own —
-  `integrate` is always an explicit invocation.
+- arc never rewrites a branch and never merges on its own. `integrate` is
+  always an explicit invocation.
 - Gates execute repo-committed commands (`.arc/gates.toml`): the trust
   level is the same as running `make` in that repository.
 - Derived views (`list`, `inbox`, `status`, `query`) replay the ledger on
@@ -135,7 +134,8 @@ saves the original as `<hook>.pre-arc`. `arc hooks uninstall` removes only
 arc-authored scripts (a marker comment identifies them), and `arc hooks
 status` reports whether each hook is absent, arc-managed, or foreign.
 
-Both hooks are advisory and always exit 0, so they can never block a commit.
+Both hooks are advisory. An arc-managed Git hook always exits 0, so it can
+never block a commit.
 The `post-commit` hook, on a change branch, prints a notice when the new
 commit has staled an approval bound to the snapshot it was recorded on, or
 warns when the branch's change is already closed. The `prepare-commit-msg`

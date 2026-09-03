@@ -113,17 +113,18 @@ before anything is written. The event envelope carries the reference as
 without them stays valid `journal-events/1` input, while a key with no source
 to index into or a coordinate that resolves to nothing is reported by
 `journal doctor`. No transcript text, credential, or content digest enters the
-journal, and arc never opens the recording to infer a project or a body: a
+journal. arc never opens the recording to infer a project or a body. A
 recorded session directory is evidence, never authority to write there.
 
 The reference is what makes a repeated scan of the same endings cheap.
 Identity is the recording and the caller's key together — `(harness, session,
 item_key)` — so one recording carries as many items as the caller gives it
 keys, and the same item read out of a different session is a different item.
-A write whose identity was already recorded writes nothing, prints
-`existing: <artifact or event stamp> [<disposition>]`, and exits 0; the check
-runs before the body is read, so a repeat neither blocks on a stdin body nor
-needs one. Nothing deduplicates by title or prose similarity.
+A repeat of a recorded source item writes nothing, prints the existing entry,
+and exits 0. The entry prints as `existing: <artifact or event stamp>
+[<disposition>]`. The
+check runs before the body is read, so a repeat neither blocks on a stdin body
+nor needs one. Nothing deduplicates by title or prose similarity.
 
 A disposition is one of `open`, `no-action`, or `consumed:<outcome>`, where the
 outcome is whichever one consumption recorded — `done`, `superseded`, or
@@ -197,11 +198,12 @@ person|anyone|delegate:<name> [--handle <opaque>]` records a delivery the
 caller already made. Arc keeps the fact and sends nothing — it holds no
 messaging credentials and infers no delivery from prose — and `--handle`
 stores whatever opaque identifier the delivery system returned, verbatim and
-unresolved, so the delivery can be found again outside arc. A delivery is
-refused when the question is unknown, when it is already answered, and when
-the question waits on one named delegate and the delivery names anyone else,
-since that would record prompting done against an audience that cannot settle
-it; who may answer is changed by correcting or superseding the question.
+unresolved, so the delivery can be found again outside arc. arc refuses a
+delivery naming an audience that cannot settle the question. It is refused
+when the question is unknown, when it is already answered, and when the
+question waits on one named delegate and the delivery names anyone else, since
+that would record prompting done against an audience that cannot settle it.
+Who may answer is changed by correcting or superseding the question.
 Deliveries accumulate rather than replace, because a question asked twice and
 still unanswered is more urgent than one asked once.
 
@@ -211,8 +213,8 @@ Every question view reports the resulting state. `journal questions --json`
 once somebody was asked and the reply is merely pending, `answered` once it is
 settled, and `unknown` for a question older than the record itself — plus
 `deliveries`, every recorded attempt with its recipient, handle, identity, and
-timestamp. The text listing leads each question with the same state. Delivery
-never claims the recipient read anything, only that a caller reported sending
+timestamp. The text listing leads each question with the same state. arc never
+claims a recipient read anything. It records that a caller reported sending
 it.
 
 The boundary that makes `unknown` meaningful is a typed `capability` event
@@ -272,7 +274,8 @@ brief, so the same plan can father multiple changes until an explicit
 outcome `superseded` and note `change <id>` (leaving the artifact file
 untouched), then seeds an initial brief threaded from the source body so the
 change starts with the resolution. A missing, non-actionable, or already
-consumed source is refused before anything is written.
+consumed source is refused before anything is written: arc refuses a
+`--from-journal` source that is missing, non-actionable, or already consumed.
 With `[journal] auto_log = true` in the config file, `begin`, `integrate`, and
 `close` append a narrating `log` event (`opened change <id>`,
 `integrated <id> at <sha>`, `closed change <id>`); a failure to write the
@@ -368,8 +371,9 @@ repository it is editing cannot write one — and the executors running bounded
 rounds are precisely the ones asked to record what they deferred. Every kind
 verb and `journal log` therefore accept `--spool`, and a write also spools on
 its own when the journal directory cannot be created or written. Either way
-the write lands in `<repo toplevel>/.arc/outbox/<ts>-<kind>-<topic>.json`, the
-command prints `spooled: <path>` and exits 0. Arc creates the outbox on first
+the write lands in `<repo toplevel>/.arc/outbox/<ts>-<kind>-<topic>.json`. A
+spooled write prints `spooled: <path>` and exits 0. Arc creates the outbox on
+first
 use with a `.gitignore` of `*`: a spooled write is in-flight state, not
 project content.
 
@@ -408,6 +412,6 @@ branches, long-expired claims, dependency cycles, and future event types are
 non-failing advice. Human output names each affected path or ref; JSON uses the
 versioned `arc-doctor/3` report. Both open with the roots the invocation reads
 and writes and whether a sandbox is in force, because every finding is a
-statement about state at those paths. The exit status is 0 for a clean or
-advice-only ledger and 1 when problems are present.
+statement about state at those paths. `arc doctor` exits 1 when problems are
+present and 0 for a clean or advice-only ledger.
 

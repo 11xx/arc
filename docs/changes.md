@@ -112,8 +112,8 @@
   the flag is refused: Git is the better witness, and overriding it would
   record a range the merge did not integrate. A bundle carries the store format
   it was written with. arc refuses a bundle written by a newer arc rather than
-  skipping lifecycle events it does not know, which would read a closed change
-  as open. The same check runs
+  skipping lifecycle events it does not know. Skipping them would read a closed
+  change as open. The same check runs
   on every path that opens a store, not only the one that creates it, and a
   ledger created by an older arc is stamped the moment something writes an
   event that older arc would skip — not on every open, so a build that merely
@@ -127,7 +127,7 @@
   prerequisite's closure, the blocking-finding and hold vectors that had to be
   empty for the event to be written, and the normalized gate and policy values
   actually consumed — including uncommitted ones, which Git cannot recover for
-  an auditor afterwards. This is not a config store: arc records no
+  an auditor afterwards. This is not a config store. arc records no
   configuration history, only the inputs to one irreversible decision.
   It also records the debt declaration when that waiver is what let the
   approval stand, because then it is an authorization input like the verdict
@@ -260,9 +260,10 @@ variant from its SQLite session row when `sqlite3` is available; and Pi reads
 model and thinking-level changes from its JSONL session. Failure while reading
 a session store is a silent omission, never an error. OpenCode v2 is recognized
 without a session when `OPENCODE_TERMINAL` or process ancestry identifies it;
-it prints `ARC_HARNESS` plus a commented `ARC_SESSION` and exits 0. When no
-harness is detected, it prints placeholders and exits 1. It does not inject
-identity into other commands.
+it prints `ARC_HARNESS` plus a commented `ARC_SESSION` and succeeds. `arc env`
+exits 1 and prints the export template when no harness is detected. That is
+the normal path for setting identity by hand rather than a failure. It does not
+inject identity into other commands.
 
 `arc resume [CHANGE]` renders the latest brief, claim and stage, open findings,
 head gate state, next action, live journal lanes, and matching open journal
@@ -303,8 +304,8 @@ arc watch --tag arrears --all --until integrated --json
 `arc events` emits one compact raw ledger event per line. Replay output and
 each observed follow batch are sorted by `event_id`; strict total ordering
 across concurrent cross-change appends is not promised. `arc watch` emits a
-single diagnostic and exits 0 when its condition is reached, or exits 2 on a
-timeout. `snapshot` waits for a patchset, `reviewed` waits for any verdict on
+single diagnostic naming the condition that was reached. `arc watch` exits 0
+when its condition is reached and 2 on a timeout. `snapshot` waits for a patchset, `reviewed` waits for any verdict on
 the latest patchset, and `approved` waits for the latest verdict on that
 patchset to approve, including a provisional approval. `gates-green` waits for
 every required gate to be green at head, `ready` matches `arc check` success,
@@ -323,8 +324,8 @@ condition, and the event that satisfied it — `event_id` is present only when a
 event did, because `ready`, `gates-green`, and `stalled` are derived from
 policy, head evidence, and elapsed time rather than from one originating event.
 Approving verdicts also carry `provisional` when the approval records a reason
-it is owed corroboration. A timeout emits `watch-timeout` and still exits 2, so
-a script branches on the object rather than on the text. Under `--tag --all`
+it is owed corroboration. A timeout emits `watch-timeout` in that object, so a
+script branches on the object rather than on the text. Under `--tag --all`
 the object carries one entry per member and no top-level placeholders.
 
 `arc doctor` reports a `dangling-revision` for any revision the ledger records
@@ -454,9 +455,10 @@ event and cannot be supplied to `arc stage`. An identified caller may release
 any live claim so a lead can recover stale foreign work. `claim --takeover`
 explicitly replaces an active stale claim, records the displaced owner and
 stage, and refuses active claims that have not exceeded their stage budget.
-`--takeover --because <reason>` displaces one of those too, recording the
-reason on the displaced claim; arc prints it wherever the displacement is
-rendered and verifies none of it, since the evidence that a holder is gone —
+`--takeover --because <reason>` displaces one of those too. arc records the
+displaced owner and the reason a claim was taken over. It prints them wherever
+the displacement is rendered and verifies none of it, since the evidence that a
+holder is gone —
 `harness-status-absent`, `delegate-exit:<handle>` — is observed outside the
 ledger. Any text is accepted, and `--because` without `--takeover` is refused.
 Every claim, release,

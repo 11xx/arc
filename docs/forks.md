@@ -13,7 +13,7 @@ a fork worktree.
 `arc fork thread <slug>` prints the identity the marker recorded — harness,
 session, model, actor — and, for a harness with a stable resume form, the
 command that reopens that session. A field the marker does not carry prints
-as absent; no identity is inferred from a branch or directory name.
+as absent: arc never infers an identity from a branch or a directory name.
 
 `arc catchup` and `arc doctor` report what the open changes' worktrees occupy
 and, separately, what the fork checkouts occupy. The two are never summed:
@@ -31,7 +31,7 @@ rather than guessed.
 
 `begin` and `fork begin` print what the worktrees root has left before
 creating a worktree, and warn when the mount is close to full. Both are
-advice: arc never refuses to create a worktree over disk space. A project
+advice. arc never refuses to create a worktree over disk space. A project
 can declare its own floor with `worktree_free_floor_bytes` in policy, which
 adds a second warning against that threshold.
 

@@ -165,9 +165,9 @@ change that was abandoned or superseded has no integration range and says so.
 
 `arc restack <change> --advise` prints, for each open dependent of a change,
 the exact `git rebase --onto <target> <base>` command to run in that
-dependent's worktree once the change integrates. It only prints — arc never
-rewrites a branch — and writes no events; with no dependents it says so and
-exits 0.
+dependent's worktree once the change integrates. It only prints and writes no
+events: arc never rewrites a branch. `arc restack --advise` exits 0 when the
+change has no dependents. It says so on the way out.
 
 ## Export / import
 
@@ -182,8 +182,8 @@ arc import change.json
 
 Use `-` instead of a path for stdout or stdin. Re-exporting unchanged
 events is byte-identical, and importing the same bundle again skips
-identical events. A conflicting event makes the whole import write
-nothing and exit 1. Every event must carry a complete envelope that this
+identical events. `arc import` exits 1 and writes nothing when an event
+conflicts. Every event must carry a complete envelope that this
 build can decode; an unrecognized payload tag is preserved verbatim and
 excluded from typed replay. Missing Git commits are warnings rather than
 data loss: available patchset heads are restored under

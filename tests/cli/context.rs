@@ -413,7 +413,7 @@ fn docs_document_current_debt_and_partial_opencode_identity() {
         "{changes}"
     );
     assert!(
-        normalized.contains("When no harness is detected, it prints placeholders and exits 1"),
+        normalized.contains("`arc env` exits 1 and prints the export template"),
         "{changes}"
     );
 }

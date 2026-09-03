@@ -52,9 +52,9 @@ including its `old`/`new` column header. A new revision of all zeroes records a
 commit the rewrite dropped, which survives at nothing; a line mapping a commit
 to itself is not a move and is not recorded; and a revision mapped twice to
 different successors is refused. A supplied map is judged by the same rules as
-one arc computed: every revision it claims survives must be a commit in this
-repository, so a map from somewhere else, or one naming an object that is not a
-commit, is refused rather than recorded as fact.
+one arc computed. arc refuses a rewrite map claiming a revision survives as a
+commit this repository does not hold. A map from somewhere else, or one naming
+an object that is not a commit, is refused rather than recorded as fact.
 
 Revisions match by prefix in either direction, so a map may abbreviate what
 the ledger records in full and a caller may abbreviate what the map records;

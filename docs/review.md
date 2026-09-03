@@ -55,7 +55,7 @@ author matches the one recorded by `arc snapshot` for that patchset, or when
 arc assumed either identity rather than someone declaring it — two invented
 names that happen to differ do not show that two people acted. Actor identity
 remains advisory; this comparison does not redesign or verify identity.
-Rejected self-approval follows the existing no-valid-approval path and exits 3.
+A rejected self-approval follows the no-valid-approval path and exits 3.
 
 Where the policy is off the approval is recorded, and `arc review` and
 `arc audit` name what the record does not otherwise show: the identity the
@@ -202,8 +202,9 @@ Beside the kind, a debt carries coordinates:
 - **Production**: who recorded the brief version the shipped work answered, who
   recorded the patchset, and whether the two identities differ.
 
-These are coordinates and nothing more. Arc computes no score from them, joins
-them against no roster, and orders no two models against each other.
+These are coordinates and nothing more. arc never scores the coordinates a
+debt records, joins them against a roster, or orders two models against each
+other.
 
 Three rules keep the escape hatch from becoming a hole:
 

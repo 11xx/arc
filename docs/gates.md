@@ -33,7 +33,7 @@ recorded worktree and record the evidence at that worktree's head, whichever
 checkout of the repository the command was typed in, and the run names the tree
 it used when that is not the invoking one. The declarations come from the
 invoking checkout instead, the same place `arc status` reads them, so what a
-run discharges and what status still owes cannot disagree. A change whose
+run discharges and what status still owes cannot disagree. arc refuses a gate run outside the change's recorded worktree. A change whose
 recorded worktree is gone is refused with the path and the `git worktree add`
 that restores it, because a gate run anywhere else would describe another
 tree.
@@ -118,26 +118,50 @@ gates stay compact. A declared timeout terminates and reaps the gate's entire
 process group and records the failure as timed out. Without `timeout`, gate
 execution remains unbounded.
 
-## Exit codes (`check`, and `integrate` / `rebase` refusals)
+## Exit codes
 
-| Code | Meaning |
-| ---- | ------- |
-| 0 | ready / success |
-| 1 | usage or internal error |
-| 2 | open blocking findings |
-| 3 | no valid approval for the current head (stale or missing) |
-| 4 | hold active |
-| 5 | required gates not green at head |
-| 6 | closed change, missing branch, or malformed state |
-| 7 | unresolved prerequisite changes |
-| 8 | claim or stage ownership/liveness conflict |
-| 9 | execution role refused the command |
-| 10 | forge link refused: observed tuple or policy mismatch |
-| 11 | the target moved with conflicting changes; the branch needs rebasing |
-| 12 | acceptance probes are not discriminating |
-| 13 | change declares it is iterating; clear it before integrating |
-| 14 | the tree a merge would ship has no gate evidence |
+`arc check` is the integration preflight and its code names the blocker.
+`integrate` and `rebase` refuse in the same vocabulary, and a queue exits with
+the code of the member that stopped it, so one table reads the same way
+whether one change was integrated or twenty.
 
-A queue exits with the code of the member that stopped it, so the same table
-reads the same way whether one change was integrated or twenty.
+- `arc check` exits 0 when the change is ready to integrate.
+- `arc check` exits 1 on a usage or internal error.
+- `arc check` exits 2 while a blocking finding is open.
+- `arc check` exits 3 when no valid approval covers the current head.
+- `arc check` exits 4 while a hold is active.
+- `arc check` exits 5 when a required gate is not green at the head.
+- `arc check` exits 6 for a closed change, a missing branch, or malformed
+  state.
+- `arc check` exits 7 while a prerequisite change is unresolved.
+- `arc check` exits 8 on a claim or stage ownership conflict.
+- `arc check` exits 9 when the execution role refused the command.
+- `arc check` exits 11 when the target moved with conflicting changes and the
+  branch needs rebasing.
+- `arc check` exits 12 when a declared acceptance probe is not discriminating.
+- `arc check` exits 13 while the change declares it is iterating.
+- `arc check` exits 14 when the tree a merge would ship has no gate evidence.
+
+Code 10 belongs to the forge projection rather than to readiness. `arc forge
+link` exits 10 when the observed tuple or the declared policy does not match,
+appending no event.
+
+The other commands a script branches on carry their own contracts:
+
+- `arc is-blocked` exits 0 when the change is ready, 1 when it is blocked, and
+  2 when the lookup or ledger read failed.
+- `arc watch` exits 0 when its condition is reached and 2 on a timeout.
+- `arc take` exits 2 when no change is ready.
+- `arc env` exits 1 and prints the export template when no harness is
+  detected.
+- `arc import` exits 1 and writes nothing when an event conflicts.
+- `arc history resolve` exits 2 when nothing moved the revision.
+- `arc restack --advise` exits 0 when the change has no dependents.
+- `arc doctor` exits 1 when problems are present and 0 for a clean or
+  advice-only ledger.
+- A rejected self-approval follows the no-valid-approval path and exits 3.
+- An arc-managed Git hook always exits 0, so it can never block a commit.
+- A repeat of a recorded source item writes nothing, prints the existing
+  entry, and exits 0.
+- A spooled write prints `spooled: <path>` and exits 0.
 
