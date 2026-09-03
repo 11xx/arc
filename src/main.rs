@@ -26,8 +26,8 @@ use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use commands::{fork, AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{
-    ActorSource, DispositionStatus, MessageSeverity, MessageType, ProbePhase, ReviewCause,
-    RunOutcome, Severity, Side, Verdict, VerdictRelationKind, VerifyResult,
+    ActorSource, DebtMissing, DispositionStatus, MessageSeverity, MessageType, ProbePhase,
+    ReviewCause, RunOutcome, Severity, Side, Verdict, VerdictRelationKind, VerifyResult,
 };
 use std::path::PathBuf;
 
@@ -848,6 +848,11 @@ enum Cmd {
         /// hold
         #[arg(long, value_name = "REASON")]
         provisional: Option<String>,
+        /// The routing version that selected this reviewer. Recorded as a
+        /// coordinate and nothing else: arc joins it against no roster and
+        /// reads no quality from it. Omitted, the review is unrouted
+        #[arg(long = "route-version", value_name = "VERSION")]
+        route_version: Option<String>,
     },
     /// Run a declared gate (or ad hoc command) and record the evidence. Gate
     /// evidence only counts at the change's own head, so a gate run from
@@ -1040,6 +1045,11 @@ enum Cmd {
         /// with `arc audit`.
         #[arg(long = "debt", value_name = "REASON")]
         debt: Option<String>,
+        /// What kind of deficit the debt records. Omitted, arc derives it from
+        /// the ledger; a declared kind wins, because arc cannot tell a merge
+        /// resolution from a repair
+        #[arg(long = "kind", value_enum, requires = "debt")]
+        debt_kind: Option<DebtMissing>,
     },
     /// Record a review obligation this change carries but has not discharged
     Debt {
@@ -1048,6 +1058,11 @@ enum Cmd {
         /// What review is owed, and why it could not run
         #[arg(long)]
         reason: String,
+        /// What kind of deficit this records. Omitted, arc derives it from the
+        /// ledger; a declared kind wins, because arc cannot tell a merge
+        /// resolution from a repair
+        #[arg(long, value_enum)]
+        kind: Option<DebtMissing>,
     },
     /// Record a review performed after integration (never a late verdict)
     Audit {
@@ -1064,6 +1079,10 @@ enum Cmd {
         /// Findings batch as JSON ('-' for stdin)
         #[arg(long = "findings-json")]
         findings_json: Option<String>,
+        /// The routing version that selected this auditor. Recorded as a
+        /// coordinate and nothing else. Omitted, the audit is unrouted
+        #[arg(long = "route-version", value_name = "VERSION")]
+        route_version: Option<String>,
     },
     /// Close a change without arc performing the merge
     Close {
@@ -2211,6 +2230,7 @@ fn run(cli: Cli) -> Result<i32> {
             cause,
             findings_json,
             provisional,
+            route_version,
         } => {
             let change = infer(change.as_deref())?;
             if let Some(verdict) = verdict {
@@ -2230,6 +2250,7 @@ fn run(cli: Cli) -> Result<i32> {
                         findings_json,
                         snapshot_first: snapshot,
                         provisional,
+                        route_version,
                     },
                 )?;
             } else {
@@ -2373,6 +2394,7 @@ fn run(cli: Cli) -> Result<i32> {
             cleanup,
             dry_run,
             debt,
+            debt_kind,
         } => {
             let change = select(change)?;
             if debt.is_some() && !tag.is_empty() {
@@ -2394,7 +2416,7 @@ fn run(cli: Cli) -> Result<i32> {
                 let change = change
                     .as_deref()
                     .expect("debt selection was validated above");
-                commands::declare_debt(&ctx, change, reason)?;
+                commands::declare_debt(&ctx, change, reason, debt_kind)?;
             }
             commands::integrate(
                 &ctx,
@@ -2406,8 +2428,12 @@ fn run(cli: Cli) -> Result<i32> {
                 dry_run,
             )
         }
-        Cmd::Debt { change, reason } => {
-            commands::declare_debt(&ctx, &change, reason)?;
+        Cmd::Debt {
+            change,
+            reason,
+            kind,
+        } => {
+            commands::declare_debt(&ctx, &change, reason, kind)?;
             Ok(0)
         }
         Cmd::Audit {
@@ -2416,6 +2442,7 @@ fn run(cli: Cli) -> Result<i32> {
             body,
             body_file,
             findings_json,
+            route_version,
         } => {
             // An audit body is optional; read_body refuses an absent one.
             let body = match (&body, &body_file) {
@@ -2429,6 +2456,7 @@ fn run(cli: Cli) -> Result<i32> {
                     verdict,
                     body,
                     findings_json,
+                    route_version,
                 },
             )?;
             Ok(0)

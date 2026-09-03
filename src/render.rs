@@ -1,5 +1,5 @@
 use crate::commands::ArcAlternative;
-use crate::model::{DebtCoverage, Event, Payload};
+use crate::model::{DebtCoverage, DebtIdentity, DebtMissing, DebtProduction, Event, Payload};
 use crate::state::ChangeState;
 use crate::status::{Blocker, BriefBaseDrift, GateStatus, StatusReport};
 use std::fmt::Write;
@@ -765,13 +765,16 @@ pub fn markdown(
             } else {
                 let _ = writeln!(w, "  - Record: legacy");
             }
+            if let Some(production) = &debt.production {
+                let _ = writeln!(w, "  - Produced: {}", debt_production_label(production));
+            }
             if let Some(coverage) = &debt.coverage {
                 if coverage.is_empty() {
                     let _ = writeln!(w, "  - Coverage: none");
                 } else {
                     let _ = writeln!(w, "  - Coverage:");
                     for reviewer in coverage {
-                        let _ = writeln!(w, "    - {}", debt_coverage_label(reviewer));
+                        let _ = writeln!(w, "    - {}", debt_coverage_detail(reviewer));
                     }
                 }
             }
@@ -779,7 +782,7 @@ pub fn markdown(
                 let _ = writeln!(
                     w,
                     "  - Discharged by: {}",
-                    debt_coverage_label(discharged_by)
+                    debt_coverage_detail(discharged_by)
                 );
             }
         }
@@ -973,11 +976,85 @@ fn blocker_title(blocker: Blocker) -> &'static str {
     }
 }
 
+/// One coverage entry as `<reviewer>@<effort> [route <v>]`. A coordinate the
+/// record does not carry is left out rather than filled in.
 fn debt_coverage_label(coverage: &DebtCoverage) -> String {
-    match coverage.model.as_deref() {
-        Some(model) => format!("{} ({model})", coverage.reviewer),
-        None => format!("{} (model unrecorded)", coverage.reviewer),
+    let mut label = coverage.reviewer.clone();
+    if let Some(effort) = &coverage.effort {
+        label.push('@');
+        label.push_str(effort);
     }
+    if let Some(route) = &coverage.route_version {
+        let _ = write!(label, " [route {route}]");
+    }
+    label
+}
+
+/// One coverage entry with the model string it was cast under, kept whole.
+fn debt_coverage_detail(coverage: &DebtCoverage) -> String {
+    match coverage.model.as_deref() {
+        Some(model) => format!("{} ({model})", debt_coverage_label(coverage)),
+        None => format!("{} (model unrecorded)", debt_coverage_label(coverage)),
+    }
+}
+
+/// One production identity as `<actor>@<effort>`, read the way every other
+/// identity comparison reads one: the subject when a lead acted for somebody.
+fn debt_identity_label(identity: &DebtIdentity) -> String {
+    match &identity.effort {
+        Some(effort) => format!("{}@{effort}", identity.effective_actor()),
+        None => identity.effective_actor().to_string(),
+    }
+}
+
+/// How the work was produced, as `planned by <planner> (brief v<n>),
+/// implemented by <implementer>`. Unbriefed work names only its implementer.
+fn debt_production_label(production: &DebtProduction) -> String {
+    let mut parts = Vec::new();
+    if let Some(planner) = &production.planner {
+        let version = production
+            .brief_version
+            .map(|version| format!(" (brief v{version})"))
+            .unwrap_or_default();
+        parts.push(format!(
+            "planned by {}{version}",
+            debt_identity_label(planner)
+        ));
+    }
+    parts.push(format!(
+        "implemented by {}",
+        debt_identity_label(&production.implementer)
+    ));
+    parts.join(", ")
+}
+
+/// One obligation as a line: what kind of deficit, who produced the work it
+/// covers, and what review that work did have. A coordinate the record does
+/// not carry is left out rather than filled in.
+pub fn debt_line(
+    missing: Option<DebtMissing>,
+    production: Option<&DebtProduction>,
+    coverage: Option<&[DebtCoverage]>,
+) -> String {
+    let mut line = format!(
+        "debt: {}",
+        missing.map(DebtMissing::as_str).unwrap_or("unversioned")
+    );
+    if let Some(production) = production {
+        let _ = write!(line, "; {}", debt_production_label(production));
+    }
+    if let Some(coverage) = coverage.filter(|entries| !entries.is_empty()) {
+        let _ = write!(
+            line,
+            "; coverage: {}",
+            coverage
+                .iter()
+                .map(debt_coverage_label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    line
 }
 
 /// One chronological log line for a ledger event:
@@ -1216,10 +1293,11 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             patchset_id,
             missing,
             coverage,
+            production,
         } => (
             "debt-declared",
             format!(
-                "{}; missing {}; coverage: {}",
+                "{}; missing {}; coverage: {}{}",
                 match patchset_id {
                     Some(id) => format!("{id}: {reason}"),
                     None => reason.clone(),
@@ -1230,10 +1308,14 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
                 } else {
                     coverage
                         .iter()
-                        .map(debt_coverage_label)
+                        .map(debt_coverage_detail)
                         .collect::<Vec<_>>()
                         .join(", ")
-                }
+                },
+                production
+                    .as_ref()
+                    .map(|production| format!("; {}", debt_production_label(production)))
+                    .unwrap_or_default()
             ),
         ),
         Payload::AuditVerdictRecorded {
