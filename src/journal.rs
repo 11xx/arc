@@ -516,6 +516,48 @@ pub enum JournalCmd {
         #[arg(long)]
         body_file: String,
     },
+    /// Replace one field of one recorded entry without rewriting it. The entry
+    /// stays in the artifact as it was filed and a `### Correction` block
+    /// records the replacement; derived views read the corrected value.
+    /// `--target` names the entry: `artifact`, a position ID, a question ID,
+    /// or `answer:<question id>`. A consumed artifact accepts corrections — it
+    /// is closed to new work, but a wrong record stays wrong
+    Correct {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// The entry to correct: `artifact`, a position ID, a question ID, or
+        /// `answer:<question id>`
+        #[arg(long)]
+        target: String,
+        /// The field to replace. Which fields exist depends on the target:
+        /// `title` on the artifact; `stance`, `option`, `ref`, `actor`, and
+        /// `model` on a position; `option`, `actor`, and `model` on an answer;
+        /// `actor` and `model` on a question
+        #[arg(long, value_parser = CORRECTABLE_FIELDS)]
+        field: String,
+        /// What the field should have said
+        #[arg(long)]
+        value: String,
+        /// Why the recorded value was wrong
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Withdraw a recorded entry while leaving it visible. A retracted position
+    /// leaves the stance tally and the branches argued under a question; a
+    /// retracted answer reopens the question it settled. The block stays in the
+    /// artifact, because an argument withdrawn is a different record from an
+    /// argument never made. A consumed artifact accepts retractions
+    Retract {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// The entry to withdraw: a position ID or `answer:<question id>`
+        #[arg(long)]
+        target: String,
+        /// Body source: a file path, or '-' for stdin (why it is withdrawn,
+        /// written verbatim below a tool-computed `### Retraction` heading)
+        #[arg(long)]
+        body_file: String,
+    },
     /// Dump the journal event log as newline-delimited JSON
     Events {
         /// Cap the number of events (oldest first)
@@ -755,6 +797,18 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             other.as_deref(),
             &body_file,
         ),
+        JournalCmd::Correct {
+            filename,
+            target,
+            field,
+            value,
+            note,
+        } => correct(ctx, &filename, &target, &field, &value, note.as_deref()),
+        JournalCmd::Retract {
+            filename,
+            target,
+            body_file,
+        } => retract(ctx, &filename, &target, &body_file),
         JournalCmd::Scaffolds { show, json } => scaffolds(ctx, show.as_deref(), json),
         JournalCmd::Questions { json } => questions(ctx, json),
         JournalCmd::Events { limit } => events(ctx, limit),
@@ -2205,7 +2259,10 @@ fn open_artifact(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String,
         bail!("no such artifact {} in {}", filename, dir.display());
     }
     if is_consumed(&read_events(&dir)?, filename) {
-        bail!("cannot append to consumed artifact {filename}; open a successor discussion");
+        bail!(
+            "cannot append to consumed artifact {filename}; open a successor discussion, \
+             or amend the record with `journal correct` or `journal retract`"
+        );
     }
     Ok((dir, path, topic, kind))
 }
@@ -2514,6 +2571,207 @@ fn answer(
             unargued.join(", ")
         );
     }
+    Ok(0)
+}
+
+/// Shared preflight for amending an artifact's record.
+///
+/// Unlike an append, an amendment stays open for as long as the record is
+/// read: a consumed artifact is closed to new work, but a wrong entry inside
+/// it stays wrong. The cold archive is searched after the hot journal, because
+/// consumption is what makes an artifact archivable and its events remain in
+/// the hot journal whichever directory holds the body.
+fn open_artifact_for_amendment(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String)> {
+    let (topic, _kind) = check_artifact_name(filename)?;
+    let hot = resolve_dir(&ctx.cwd)?;
+    let Some(path) = artifact_body_path(&hot, filename) else {
+        bail!("no such artifact {} in {}", filename, hot.display());
+    };
+    Ok((hot, path, topic))
+}
+
+/// One line of replacement text. Every correctable field is a single-line
+/// scalar, and a newline in one would let the value impersonate the next block
+/// heading at exactly the point a reader resumes.
+fn amendment_value(value: &str) -> Result<&str> {
+    if value.contains(['\n', '\r']) {
+        bail!("--value must be a single line; put the reasoning in --note");
+    }
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("--value must say what the field should have said");
+    }
+    Ok(trimmed)
+}
+
+/// A corrected branch still has to name a branch the question offered, which
+/// is what the position had to satisfy when it was filed. An answer is exempt:
+/// settling a question outside its menu is allowed, so a corrected answer may
+/// carry words the menu never did.
+fn check_branch_correction(
+    events: &[JournalEvent],
+    filename: &str,
+    target: &AmendTarget,
+    value: &str,
+) -> Result<()> {
+    let AmendTarget::Position(id) = target else {
+        return Ok(());
+    };
+    let question = position_events(events, filename)
+        .into_iter()
+        .find(|event| event.position_id.as_deref() == Some(id.as_str()))
+        .and_then(|event| event.question_id.clone());
+    let Some(question) = question else {
+        bail!("{id} argues under no question, so it has no branch to correct");
+    };
+    let offered = events
+        .iter()
+        .find(|event| {
+            event.known()
+                && event.event == "question"
+                && event.file.as_deref() == Some(filename)
+                && event.question_id.as_deref() == Some(question.as_str())
+        })
+        .and_then(|event| event.options.clone())
+        .unwrap_or_default();
+    if !offered.iter().any(|option| option == value) {
+        bail!(
+            "{value:?} is not one of the options {question} offered ({})",
+            offered.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Replace one field of one recorded entry.
+///
+/// The entry is never rewritten. A `### Correction` block records what the
+/// field should have said, the typed event carries the same fact, and every
+/// derived view resolves the field through the latest correction of it — so
+/// the artifact still reads as the argument that happened, and the views still
+/// read as what is true.
+fn correct(
+    ctx: &Ctx,
+    filename: &str,
+    target: &str,
+    field: &str,
+    value: &str,
+    note: Option<&str>,
+) -> Result<i32> {
+    let Some(parsed) = AmendTarget::parse(target) else {
+        bail!(
+            "{target:?} is not an entry to correct: pass `artifact`, a position ID, \
+             a question ID, or `answer:<question id>`"
+        );
+    };
+    if !parsed.correctable_fields().contains(&field) {
+        bail!(
+            "{target} has no {field} to correct; it carries {}",
+            parsed.correctable_fields().join(", ")
+        );
+    }
+    let value = amendment_value(value)?;
+    if field == "stance" && PositionStance::parse(value).is_none() {
+        bail!("--field stance takes for, against, or amend, not {value:?}");
+    }
+    let note = note.map(str::trim).filter(|note| !note.is_empty());
+
+    let dir = resolve_dir(&ctx.cwd)?;
+    let _transition = lock_journal_transition(&dir)?;
+    let (dir, path, topic) = open_artifact_for_amendment(ctx, filename)?;
+    let events = read_events(&dir)?;
+    let body = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    if !amend_target_exists(&events, filename, &parsed, Some(&body)) {
+        bail!("no {target} on {filename}");
+    }
+    if field == "option" {
+        check_branch_correction(&events, filename, &parsed, value)?;
+    }
+
+    let now = Utc::now();
+    let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let (harness, _) = identity(ctx);
+    let amendment_id = format!("cor-{}", ulid::Ulid::new().to_string().to_ascii_lowercase());
+    let heading = format!(
+        "### Correction {amendment_id} ({}, {ts})",
+        attribution(ctx, &harness)
+    );
+    let mut block = format!("Target: {target}\nField: {field}\nValue: {value}\n");
+    if let Some(note) = note {
+        block.push_str(&format!("\n{note}\n"));
+    }
+    append_block(&path, &heading, &block)?;
+
+    let mut event = JournalEvent::base(ctx, now, &topic, "correction");
+    event.file = Some(filename.to_string());
+    event.amendment_id = Some(amendment_id);
+    event.target = Some(target.to_string());
+    event.field = Some(field.to_string());
+    event.value = Some(value.to_string());
+    event.note = note.map(str::to_string);
+    append_event(ctx, &dir, &event)?;
+    println!("{}", path.display());
+    Ok(0)
+}
+
+/// Withdraw a recorded entry while leaving it visible.
+///
+/// A retracted position leaves the stance tally and the branches argued under
+/// a question, and a retracted answer reopens the question it settled. The
+/// block stays where it was filed, because an argument withdrawn and an
+/// argument never made are different records and only one of them shows that
+/// somebody changed their mind.
+fn retract(ctx: &Ctx, filename: &str, target: &str, body_file: &str) -> Result<i32> {
+    let Some(parsed) = AmendTarget::parse(target).filter(AmendTarget::retractable) else {
+        bail!(
+            "{target:?} is not an entry to retract: pass a position ID or \
+             `answer:<question id>`"
+        );
+    };
+    // Read the body before touching the filesystem so a bad source path leaves
+    // the artifact untouched, and refuse a malformed target before the read so
+    // a caller passing `-` is told rather than left waiting on stdin.
+    let body = read_body_verbatim(body_file)?;
+    if body.trim().is_empty() {
+        bail!("a retraction must say why the entry no longer holds");
+    }
+
+    let dir = resolve_dir(&ctx.cwd)?;
+    let _transition = lock_journal_transition(&dir)?;
+    let (dir, path, topic) = open_artifact_for_amendment(ctx, filename)?;
+    let events = read_events(&dir)?;
+    let artifact = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    if !amend_target_exists(&events, filename, &parsed, Some(&artifact)) {
+        bail!("no {target} on {filename}");
+    }
+    if events.iter().any(|event| {
+        event.known()
+            && event.event == "retraction"
+            && event.file.as_deref() == Some(filename)
+            && event.target.as_deref() == Some(target)
+    }) {
+        bail!("{target} is already retracted");
+    }
+
+    let now = Utc::now();
+    let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let (harness, _) = identity(ctx);
+    let amendment_id = format!("ret-{}", ulid::Ulid::new().to_string().to_ascii_lowercase());
+    let heading = format!(
+        "### Retraction {amendment_id} ({}, {ts})",
+        attribution(ctx, &harness)
+    );
+    append_block(&path, &heading, &format!("Target: {target}\n\n{body}"))?;
+
+    let mut event = JournalEvent::base(ctx, now, &topic, "retraction");
+    event.file = Some(filename.to_string());
+    event.amendment_id = Some(amendment_id);
+    event.target = Some(target.to_string());
+    event.note = Some(body.trim().to_string());
+    append_event(ctx, &dir, &event)?;
+    println!("{}", path.display());
     Ok(0)
 }
 
@@ -2977,7 +3235,16 @@ pub(crate) struct JournalEvent {
     /// What a `correction` puts in place of the recorded field.
     #[serde(skip_serializing_if = "Option::is_none")]
     value: Option<String>,
+    /// Stable ID of an amendment, carried by the block it wrote so the visible
+    /// Markdown and the typed event name the same one. Optional, like every
+    /// identifier a hand-written event may omit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    amendment_id: Option<String>,
 }
+
+/// Every field a correction may name, over all targets. Which of them a given
+/// target actually carries is `AmendTarget::correctable_fields`.
+const CORRECTABLE_FIELDS: [&str; 6] = ["stance", "option", "actor", "model", "ref", "title"];
 
 /// What a `correction` or `retraction` names inside one artifact.
 ///
@@ -3134,6 +3401,7 @@ impl JournalEvent {
             target: None,
             field: None,
             value: None,
+            amendment_id: None,
         }
     }
 

@@ -8552,3 +8552,184 @@ fn journal_doctor_rejects_a_correction_of_a_field_its_target_lacks() {
         "{problems:?}"
     );
 }
+
+fn todo_fixture(repo: &Repo, topic: &str, title: &str) -> String {
+    let seed = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "todo",
+                topic,
+                "--title",
+                title,
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("Work waiting for a session.\n"),
+    );
+    PathBuf::from(seed.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string()
+}
+
+fn artifact_body(repo: &Repo, file: &str) -> String {
+    fs::read_to_string(journal_dir(repo).join(file)).unwrap()
+}
+
+#[test]
+fn journal_correct_amends_a_consumed_artifact_that_still_refuses_positions() {
+    let repo = Repo::new();
+    let file = todo_fixture(&repo, "consumed-correction", "Wrong title");
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file, "--outcome", "done"])
+        .assert()
+        .success();
+    let before = artifact_body(&repo, &file);
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "correct",
+            &file,
+            "--target",
+            "artifact",
+            "--field",
+            "title",
+            "--value",
+            "Corrected title",
+        ])
+        .assert()
+        .success();
+
+    let after = artifact_body(&repo, &file);
+    assert!(
+        after.starts_with(&before),
+        "correction rewrote the artifact"
+    );
+    assert!(after.contains("### Correction cor-"), "{after}");
+    assert!(after.contains("Value: Corrected title"), "{after}");
+
+    repo.arc(&repo.root)
+        .args(["journal", "position", &file, "--body-file", "-"])
+        .write_stdin("Position: for\n")
+        .assert()
+        .failure()
+        .stderr(
+            predicates::str::contains("consumed artifact")
+                .and(predicates::str::contains("journal correct")),
+        );
+}
+
+#[test]
+fn journal_correct_refuses_a_field_the_target_does_not_carry() {
+    let repo = Repo::new();
+    let file = todo_fixture(&repo, "field-mismatch", "A title");
+    repo.arc(&repo.root)
+        .args([
+            "journal", "correct", &file, "--target", "artifact", "--field", "stance", "--value",
+            "for",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "artifact has no stance to correct",
+        ));
+}
+
+#[test]
+fn journal_correct_refuses_a_target_the_artifact_never_recorded() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "absent-target");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "correct",
+            &file,
+            "--target",
+            "pos-absent",
+            "--field",
+            "stance",
+            "--value",
+            "against",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no pos-absent on"));
+}
+
+#[test]
+fn journal_retract_requires_a_reason_and_refuses_a_second_one() {
+    let repo = Repo::new();
+    let file = discussion_fixture(&repo, "retract-guards");
+    let position = add_discussion_position(&repo, &file, None, "test");
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &position,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("   \n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("must say why"));
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &position,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("The premise it rests on was checked and is false.\n")
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            &position,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Again.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already retracted"));
+
+    let body = artifact_body(&repo, &file);
+    assert!(body.contains("### Retraction ret-"), "{body}");
+    assert!(body.contains(&format!("Target: {position}")), "{body}");
+}
+
+#[test]
+fn journal_retract_refuses_an_artifact_target() {
+    let repo = Repo::new();
+    let file = todo_fixture(&repo, "retract-artifact", "A title");
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            &file,
+            "--target",
+            "artifact",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Withdrawn.\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is not an entry to retract"));
+}
