@@ -2265,6 +2265,16 @@ fn integrate_one(
 
     println!("integrated: {merged}");
     println!("event: {}", ev.event_id);
+    // Advice, not policy: arc holds no opinion about which changes deserve a
+    // release line. It says only that this one closes with nothing for the
+    // projection to emit, which is the moment the file and the ledger start
+    // disagreeing about what shipped.
+    if st.changelog.is_none() {
+        eprintln!(
+            "advice: no changelog entry on {}; record one with arc changelog {} --category CATEGORY --body-file FILE",
+            st.change_id, st.slug
+        );
+    }
     crate::journal::auto_log(
         ctx,
         &st.slug,

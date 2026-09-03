@@ -413,9 +413,15 @@ enum Cmd {
         #[arg(long)]
         since: Option<String>,
         /// Replace the generated [Unreleased] block in CHANGELOG.md; entries
-        /// wrap at 75 columns, continuations indented under their marker
+        /// wrap at 75 columns, continuations indented under their marker.
+        /// Refused, naming each line, while the block holds prose no
+        /// recorded entry produced
         #[arg(long)]
         write: bool,
+        /// Keep the block's unrecorded lines above the projected entries,
+        /// under an unrecorded marker, instead of refusing to write
+        #[arg(long)]
+        keep_unrecorded: bool,
     },
     /// Append a structured cross-change announcement (never policy input)
     Message {
@@ -2107,6 +2113,7 @@ fn run(cli: Cli) -> Result<i32> {
             provenance,
             since,
             write,
+            keep_unrecorded,
         } => commands::changelog(
             &ctx,
             role,
@@ -2117,6 +2124,7 @@ fn run(cli: Cli) -> Result<i32> {
             provenance,
             since,
             write,
+            keep_unrecorded,
         ),
         Cmd::Message {
             change,

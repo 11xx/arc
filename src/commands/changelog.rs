@@ -5,7 +5,7 @@ use crate::state::{ChangeState, ChangelogEntry};
 use crate::ExecutionRole;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -13,6 +13,10 @@ use std::path::{Component, Path, PathBuf};
 const CHANGELOG_SCHEMA: &str = "arc-changelog/1";
 const DEFAULT_CHANGELOG_TARGET: &str = "CHANGELOG.md";
 const CHANGELOG_RENDERER: &str = "keep-a-changelog";
+/// Introduces the lines a release block holds that no recorded entry
+/// produced, so a later projection can tell them from its own output and
+/// carry them forward unchanged.
+const UNRECORDED_MARKER: &str = "<!-- unrecorded -->";
 
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -72,7 +76,11 @@ pub fn changelog(
     provenance: bool,
     since: Option<String>,
     write: bool,
+    keep_unrecorded: bool,
 ) -> Result<i32> {
+    if keep_unrecorded && !write {
+        bail!("--keep-unrecorded applies only to --write");
+    }
     if category.is_some() || body_file.is_some() {
         let reference = reference.context("recording a changelog entry requires CHANGE")?;
         let category = category.context("--body-file requires --category")?;
@@ -175,14 +183,42 @@ pub fn changelog(
     }
 
     let rendered = render_unreleased(&entries, provenance);
-    if write {
-        if !write_changelog(ctx, &config, &rendered)? {
-            print!("{rendered}");
-        }
-    } else {
+    if !write {
         print!("{rendered}");
+        return Ok(0);
     }
-    Ok(0)
+    match write_changelog(ctx, &config, &rendered, keep_unrecorded)? {
+        WriteOutcome::Written => Ok(0),
+        WriteOutcome::NoReleaseBlock => {
+            print!("{rendered}");
+            Ok(0)
+        }
+        WriteOutcome::Unrecorded(lines) => {
+            eprintln!(
+                "{} holds lines no recorded changelog entry produced; nothing was written:",
+                config.target
+            );
+            for line in &lines {
+                eprintln!("  {line}");
+            }
+            eprintln!(
+                "record each on the change that made it with arc changelog CHANGE --category \
+                 CATEGORY --body-file FILE, or keep them with --keep-unrecorded"
+            );
+            Ok(1)
+        }
+    }
+}
+
+/// What one `--write` did to the target file.
+enum WriteOutcome {
+    Written,
+    /// No file, or no `[Unreleased]` block followed by a released section, so
+    /// there is nothing whose bounds a projection could replace.
+    NoReleaseBlock,
+    /// The block holds prose the ledger cannot account for, and replacing it
+    /// would destroy the only copy.
+    Unrecorded(Vec<String>),
 }
 
 fn projected_entry<'a>(
@@ -515,12 +551,39 @@ fn target_path(root: &Path, target: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn write_changelog(ctx: &Ctx, config: &ChangelogConfig, rendered: &str) -> Result<bool> {
+/// The lines of a release block that the projection does not produce,
+/// in the order the file holds them, each without trailing whitespace.
+/// Blank lines and the unrecorded marker carry no prose of their own.
+fn unrecorded_lines(block: &str, projected: &str) -> Vec<String> {
+    let recorded = projected
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<HashSet<_>>();
+    block
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && trimmed != UNRECORDED_MARKER && !recorded.contains(trimmed)
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+fn write_changelog(
+    ctx: &Ctx,
+    config: &ChangelogConfig,
+    rendered: &str,
+    keep_unrecorded: bool,
+) -> Result<WriteOutcome> {
     let root = gitio::toplevel(&ctx.cwd)?;
     let path = target_path(&root, &config.target)?;
     let original = match fs::read_to_string(&path) {
         Ok(original) => original,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(WriteOutcome::NoReleaseBlock)
+        }
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
     let heading = "## [Unreleased]";
@@ -532,7 +595,7 @@ fn write_changelog(ctx: &Ctx, config: &ChangelogConfig, rendered: &str) -> Resul
             .is_none_or(|byte| *byte == b'\n' || *byte == b'\r');
         (line_start && line_end).then_some(offset)
     }) else {
-        return Ok(false);
+        return Ok(WriteOutcome::NoReleaseBlock);
     };
     let after_heading = original[heading_start..]
         .find('\n')
@@ -546,20 +609,38 @@ fn write_changelog(ctx: &Ctx, config: &ChangelogConfig, rendered: &str) -> Resul
                 (absolute == 0 || original.as_bytes()[absolute - 1] == b'\n').then_some(absolute)
             })
     else {
-        return Ok(false);
+        return Ok(WriteOutcome::NoReleaseBlock);
     };
     let replacement = rendered
         .strip_prefix("## [Unreleased]\n")
         .expect("renderer always emits the unreleased heading");
-    let mut updated = String::with_capacity(original.len() + replacement.len());
+    // The projection is authoritative only over the entries it can produce.
+    // Prose the ledger never saw exists in the file and nowhere else, so the
+    // write either keeps it under the marker or declines to run at all.
+    let unrecorded = unrecorded_lines(&original[after_heading..next_release], replacement);
+    if !unrecorded.is_empty() && !keep_unrecorded {
+        return Ok(WriteOutcome::Unrecorded(unrecorded));
+    }
+    let mut block = String::new();
+    if !unrecorded.is_empty() {
+        block.push('\n');
+        block.push_str(UNRECORDED_MARKER);
+        block.push_str("\n\n");
+        for line in &unrecorded {
+            block.push_str(line);
+            block.push('\n');
+        }
+    }
+    block.push_str(replacement);
+    let mut updated = String::with_capacity(original.len() + block.len());
     updated.push_str(&original[..after_heading]);
-    updated.push_str(replacement);
-    if !replacement.ends_with("\n\n") {
+    updated.push_str(&block);
+    if !block.ends_with("\n\n") {
         updated.push('\n');
     }
     updated.push_str(&original[next_release..]);
     fs::write(&path, updated).with_context(|| format!("write {}", path.display()))?;
-    Ok(true)
+    Ok(WriteOutcome::Written)
 }
 
 #[cfg(test)]

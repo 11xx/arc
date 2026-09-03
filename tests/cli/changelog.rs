@@ -20,7 +20,9 @@ fn record(repo: &Repo, cwd: &Path, slug: &str, category: &str, body: &str) {
         .success();
 }
 
-fn integrate(repo: &Repo, slug: &str) {
+/// Integrate the change, handing back what the integration wrote to stderr,
+/// where its advisories appear.
+fn integrate(repo: &Repo, slug: &str) -> String {
     let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
     repo.commit(
         &worktree,
@@ -36,10 +38,13 @@ fn integrate(repo: &Repo, slug: &str) {
         .args(["review", slug, "--verdict", "approved"])
         .assert()
         .success();
-    repo.arc(&repo.root)
+    let out = repo
+        .arc(&repo.root)
         .args(["integrate", slug])
-        .assert()
-        .success();
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
 #[test]
@@ -409,7 +414,7 @@ fn configured_target_uses_keep_a_changelog_renderer() {
     .unwrap();
     fs::write(
         repo.root.join("NEWS.md"),
-        "# News\n\n## [Unreleased]\n\nold\n\n## [1.0.0]\n\nreleased\n",
+        "# News\n\n## [Unreleased]\n\n## [1.0.0]\n\nreleased\n",
     )
     .unwrap();
     git(&repo.root, &["add", "."]);
@@ -491,7 +496,7 @@ fn write_splices_only_unreleased_and_is_idempotent() {
     repo.commit(
         &repo.root,
         "CHANGELOG.md",
-        "# Changelog\n\n## [Unreleased]\n\nold\n\n## [1.0.0]\n\nreleased bytes\n",
+        "# Changelog\n\n## [Unreleased]\n\n## [1.0.0]\n\nreleased bytes\n",
         "docs: add changelog",
     );
     begin(&repo, "write");
@@ -510,6 +515,85 @@ fn write_splices_only_unreleased_and_is_idempotent() {
         .assert()
         .success();
     assert_eq!(fs::read(repo.root.join("CHANGELOG.md")).unwrap(), once);
+}
+
+#[test]
+fn write_refuses_unrecorded_prose_and_keeps_it_on_request() {
+    let repo = Repo::new();
+    repo.commit(
+        &repo.root,
+        "CHANGELOG.md",
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- hand-written prose\n\n## [1.0.0]\n\nreleased\n",
+        "docs: add changelog",
+    );
+    begin(&repo, "guarded");
+    let worktree = repo.home.join(".worktrees/repo-guarded");
+    record(&repo, &worktree, "guarded", "added", "- projected\n");
+    integrate(&repo, "guarded");
+
+    let before = fs::read_to_string(repo.root.join("CHANGELOG.md")).unwrap();
+    repo.arc(&repo.root)
+        .args(["changelog", "--write"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "CHANGELOG.md holds lines no recorded changelog entry produced",
+        ))
+        .stderr(predicate::str::contains("  - hand-written prose"))
+        // A heading the projection emits itself is accounted for.
+        .stderr(predicate::str::contains("### Added").not());
+    assert_eq!(
+        fs::read_to_string(repo.root.join("CHANGELOG.md")).unwrap(),
+        before
+    );
+
+    repo.arc(&repo.root)
+        .args(["changelog", "--write", "--keep-unrecorded"])
+        .assert()
+        .success();
+    let kept = fs::read_to_string(repo.root.join("CHANGELOG.md")).unwrap();
+    assert!(
+        kept.contains(
+            "## [Unreleased]\n\n<!-- unrecorded -->\n\n- hand-written prose\n\n### Added\n\n- projected\n"
+        ),
+        "{kept}"
+    );
+    assert!(kept.ends_with("## [1.0.0]\n\nreleased\n"));
+
+    repo.arc(&repo.root)
+        .args(["changelog", "--write", "--keep-unrecorded"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(repo.root.join("CHANGELOG.md")).unwrap(),
+        kept
+    );
+
+    repo.arc(&repo.root)
+        .args(["changelog", "--keep-unrecorded"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--keep-unrecorded applies only to --write",
+        ));
+}
+
+#[test]
+fn integration_advises_when_the_change_recorded_no_entry() {
+    let repo = Repo::new();
+    begin(&repo, "undocumented");
+    let advice = integrate(&repo, "undocumented");
+    assert!(
+        advice.contains("advice: no changelog entry on")
+            && advice.contains("arc changelog undocumented --category CATEGORY --body-file FILE"),
+        "{advice}"
+    );
+
+    begin(&repo, "documented");
+    let worktree = repo.home.join(".worktrees/repo-documented");
+    record(&repo, &worktree, "documented", "added", "- documented\n");
+    let quiet = integrate(&repo, "documented");
+    assert!(!quiet.contains("advice: no changelog entry"), "{quiet}");
 }
 
 #[test]
