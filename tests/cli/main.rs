@@ -7,6 +7,7 @@ mod claims;
 mod common;
 mod context;
 mod diff;
+mod docs;
 mod doctor;
 mod findings;
 mod forge;
