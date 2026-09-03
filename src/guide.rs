@@ -37,9 +37,10 @@ FROM A WORKSPACE ROOT (outside a project)
   cd <anchor>          Enter one project named by the report, then orient there.
 
 ORIENT INSIDE A PROJECT (start here, in this order)
-  arc catchup            Live state: ledger queue, journal backlog, forks,
-                         and what the change and fork worktrees occupy —
-                         apparent size, with the mount's free space.
+  arc catchup            Live state: ledger queue, deferrals delegated rounds
+                         left open, journal backlog, forks, and what the
+                         change and fork worktrees occupy — apparent size,
+                         with the mount's free space.
   arc fork <slug>        Fork this repository: a worktree on fork/<slug>,
                          outside the change lifecycle — unintegrated by
                          intent; the operator decides what to merge, rebase,

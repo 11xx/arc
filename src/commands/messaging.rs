@@ -572,7 +572,51 @@ fn collect_inbox(
         inbox.absorb(state, &report);
     }
     inbox.sort_by_priority();
+    inbox.deferred = open_deferrals(store);
     Ok(inbox)
+}
+
+/// Deferrals delegated rounds left open, as inbox rows. A deferral binds to
+/// the run's subject rather than to a change, so it is collected once here and
+/// carried by every view that answers what is waiting.
+fn open_deferrals(store: &crate::store::Store) -> Vec<crate::inbox::DeferredRow> {
+    let now = chrono::Utc::now();
+    crate::commands::run::open_deferrals_for(store)
+        .into_iter()
+        .map(|deferral| crate::inbox::DeferredRow {
+            subject: deferral.subject_label(),
+            round: deferral.round,
+            dispatch_event_id: deferral.dispatch_event_id.clone(),
+            age_seconds: deferral.age_seconds(now),
+            id: deferral.finding.id,
+            summary: deferral.finding.summary,
+            severity: deferral.finding.severity,
+            why: deferral.finding.why,
+        })
+        .collect()
+}
+
+/// Open deferrals as one section, in the shape `inbox` and `catchup` share.
+pub(crate) fn render_deferred(deferred: &[crate::inbox::DeferredRow]) {
+    println!("## deferred ({})", deferred.len());
+    if deferred.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    for row in deferred {
+        let round = row
+            .round
+            .map_or_else(String::new, |round| format!(" round {round}"));
+        println!(
+            "  {}  {}{}  [age: {}s]",
+            row.id, row.subject, round, row.age_seconds
+        );
+        println!(
+            "    {} — {}",
+            crate::render::one_line(&row.summary),
+            crate::render::one_line(&row.why)
+        );
+    }
 }
 
 pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
@@ -637,6 +681,7 @@ pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
                 }
             }
         }
+        render_deferred(&inbox.deferred);
         render_journal_backlog(inbox.journal.as_ref());
     }
     Ok(())
@@ -801,7 +846,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-catchup/3",
+                "schema": "arc-catchup/4",
                 "ledger": inbox,
                 "journal": journal.as_ref().ok(),
                 // Open forks only: retired ones are history, and the JSON
@@ -847,6 +892,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     render_forks(&forks);
     render_worktree_accounting(&worktrees);
     render_debts(&debts);
+    render_deferred(&inbox.deferred);
     match journal {
         Ok(journal) => journal.render(),
         Err(error) => println!("journal: unavailable ({error:#})"),

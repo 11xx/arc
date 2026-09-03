@@ -68,9 +68,24 @@ pub struct Round<'a> {
 /// One deferral no later round on its subject has collected.
 pub struct OpenDeferral {
     pub subject: Option<RunSubject>,
+    pub round: Option<usize>,
     pub dispatch_event_id: String,
     pub finding: DeferredFinding,
     pub deferred_at: DateTime<Utc>,
+}
+
+impl OpenDeferral {
+    pub fn age_seconds(&self, now: DateTime<Utc>) -> u64 {
+        (now - self.deferred_at).num_seconds().max(0) as u64
+    }
+
+    /// The subject this deferral is open on, as a reader names it.
+    pub fn subject_label(&self) -> String {
+        self.subject
+            .as_ref()
+            .map(RunSubject::label)
+            .unwrap_or_else(|| "unattributed".to_string())
+    }
 }
 
 /// Every dispatch in the repository, oldest first, numbered within its subject.
@@ -101,6 +116,15 @@ pub fn rounds(events: &[Event]) -> Vec<Round<'_>> {
     rounds
 }
 
+/// Every open deferral this repository holds, or nothing when the repository
+/// event log cannot be read. Orientation views report ledger state either way.
+pub fn open_deferrals_for(store: &Store) -> Vec<OpenDeferral> {
+    store
+        .load_repository_events()
+        .map(|events| open_deferrals(&events))
+        .unwrap_or_default()
+}
+
 /// Deferrals still waiting, newest first.
 ///
 /// A deferral is open until a later round on the same subject collects it.
@@ -127,6 +151,7 @@ pub fn open_deferrals(events: &[Event]) -> Vec<OpenDeferral> {
             }
             open.push(OpenDeferral {
                 subject: round.subject.clone(),
+                round: round.round,
                 dispatch_event_id: round.dispatch.event_id.clone(),
                 finding: finding.clone(),
                 deferred_at: ending.event.created_at,

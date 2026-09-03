@@ -320,7 +320,7 @@ fn inbox_buckets_classify_open_changes() {
     age_event(&repo, &stalled_id, "claim-set", 120);
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/7");
+    assert_eq!(inbox["schema"], "arc-inbox/8");
     assert!(bucket_has(&inbox, "needs-review", &review_id));
     assert!(bucket_has(&inbox, "changes-requested", &cr_id));
     assert!(bucket_has(&inbox, "ready-to-integrate", &ready_id));
@@ -558,7 +558,7 @@ fn catchup_reports_ledger_and_journal_together() {
     let change_id = begin_change(&repo, "catchup-change", None);
 
     let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-    assert_eq!(catchup["schema"], "arc-catchup/3");
+    assert_eq!(catchup["schema"], "arc-catchup/4");
     assert!(catchup["forks"].is_array(), "{catchup}");
     assert!(
         catchup["worktrees"]["changes"]
@@ -756,6 +756,7 @@ fn every_inbox_bucket_key_is_present_when_empty() {
         "stalled",
         "debt-owed",
         "unclassified",
+        "deferred",
     ] {
         assert!(
             inbox[bucket].is_array() && inbox[bucket].as_array().unwrap().is_empty(),
@@ -763,4 +764,129 @@ fn every_inbox_bucket_key_is_present_when_empty() {
             inbox[bucket]
         );
     }
+}
+
+/// A deferral that is not in the answer to "what is waiting" is a deferral
+/// nobody will honor, so both orientation views carry it — including for a
+/// fork, which no ledger bucket could ever hold.
+#[test]
+fn inbox_and_catchup_carry_open_deferrals() {
+    let repo = Repo::new();
+    let dispatch_id = stdout(repo.arc(&repo.root).args([
+        "run",
+        "dispatch",
+        "--route",
+        "r",
+        "--worktree",
+        "w",
+        "--fork",
+        "spike",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("event: ").map(str::to_string))
+    .unwrap();
+    let deferred = repo.root.join("deferred.json");
+    std::fs::write(
+        &deferred,
+        r#"[{"id": "def-waiting", "summary": "the promote path retries forever",
+             "severity": "minor", "why": "the retry only bites an unwritable spool"}]"#,
+    )
+    .unwrap();
+    stdout(repo.arc(&repo.root).args([
+        "run",
+        "end",
+        &dispatch_id,
+        "--outcome",
+        "completed",
+        "--deferred-json",
+        deferred.to_str().unwrap(),
+    ]));
+
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    assert_eq!(inbox["schema"], "arc-inbox/8");
+    let row = &inbox["deferred"][0];
+    assert_eq!(row["id"], "def-waiting", "{inbox}");
+    assert_eq!(row["subject"], "fork spike", "{inbox}");
+    assert_eq!(row["round"], 1, "{inbox}");
+    assert_eq!(row["severity"], "minor", "{inbox}");
+    assert_eq!(row["dispatch_event_id"], dispatch_id, "{inbox}");
+    assert!(row["age_seconds"].is_number(), "{inbox}");
+
+    let text = stdout(repo.arc(&repo.root).args(["inbox"]));
+    assert!(text.contains("## deferred (1)"), "{text}");
+    assert!(text.contains("def-waiting  fork spike round 1"), "{text}");
+    assert!(
+        text.contains("the retry only bites an unwritable spool"),
+        "{text}"
+    );
+
+    let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    assert_eq!(catchup["schema"], "arc-catchup/4", "{catchup}");
+    assert_eq!(catchup["ledger"]["deferred"][0]["id"], "def-waiting");
+    let catchup_text = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(catchup_text.contains("## deferred (1)"), "{catchup_text}");
+    assert!(catchup_text.contains("def-waiting"), "{catchup_text}");
+}
+
+/// Collecting a deferral drains it from the queue: the section exists to be
+/// emptied, not to accumulate.
+#[test]
+fn a_collected_deferral_leaves_the_inbox() {
+    let repo = Repo::new();
+    let dispatch = || {
+        stdout(repo.arc(&repo.root).args([
+            "run",
+            "dispatch",
+            "--route",
+            "r",
+            "--worktree",
+            "w",
+            "--fork",
+            "spike",
+        ]))
+        .lines()
+        .find_map(|line| line.strip_prefix("event: ").map(str::to_string))
+        .unwrap()
+    };
+    let first = dispatch();
+    let deferred = repo.root.join("deferred.json");
+    std::fs::write(
+        &deferred,
+        r#"[{"id": "def-drain", "summary": "a finding", "why": "later"}]"#,
+    )
+    .unwrap();
+    stdout(repo.arc(&repo.root).args([
+        "run",
+        "end",
+        &first,
+        "--outcome",
+        "completed",
+        "--deferred-json",
+        deferred.to_str().unwrap(),
+    ]));
+    assert_eq!(
+        json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]))["deferred"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let second = dispatch();
+    stdout(repo.arc(&repo.root).args([
+        "run",
+        "end",
+        &second,
+        "--outcome",
+        "completed",
+        "--collects",
+        "def-drain",
+    ]));
+
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    assert!(inbox["deferred"].as_array().unwrap().is_empty(), "{inbox}");
+    assert!(
+        stdout(repo.arc(&repo.root).args(["inbox"])).contains("## deferred (0)"),
+        "the section stays visible when it is empty"
+    );
 }

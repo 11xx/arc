@@ -20,7 +20,10 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `why` and is minted `def-<ulid>` when it names no id, and stays open until a
   later round on the same subject collects it. `run list` groups by subject
   and numbers the rounds, showing each round's reviewed head, raised count,
-  and deferrals still open.
+  and deferrals still open. `arc inbox` and `arc catchup` gain a `deferred`
+  section naming each open deferral's subject, round, reason, and age
+  (`arc-inbox/8`, `arc-catchup/4`), since a deferral absent from the answer to
+  "what is waiting" is a deferral nobody will honor.
 
 - `arc journal delivered <file> --question <id> --to
   person|anyone|delegate:<name> [--handle <opaque>]` records that a caller
