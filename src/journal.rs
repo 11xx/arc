@@ -712,6 +712,30 @@ pub enum JournalCmd {
         #[arg(long)]
         body_file: String,
     },
+    /// Record that a caller delivered an open question to somebody. arc keeps
+    /// the fact; it sends nothing, holds no messaging credentials, and infers
+    /// no delivery from prose. Without it a question queue cannot separate
+    /// prompting work still to do from an answer merely pending, so every
+    /// question view reports `delivery: unknown|unasked|delivered|answered`.
+    /// Deliveries accumulate — asking twice records twice and erases nothing —
+    /// and a question waiting on one named delegate accepts only that
+    /// delegate. Use `arc journal delivered <file> --question <id> --to
+    /// person|anyone|delegate:<name> [--handle <opaque>]`
+    Delivered {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// The question that was delivered
+        #[arg(long)]
+        question: String,
+        /// Who was asked: `person`, `anyone`, or `delegate:<name>`
+        #[arg(long = "to", value_name = "RECIPIENT")]
+        to: String,
+        /// Whatever opaque identifier the delivery system handed back — a
+        /// thread id, a ticket, a message URL. Recorded verbatim so the
+        /// delivery can be found again outside arc, and never resolved
+        #[arg(long, value_name = "OPAQUE")]
+        handle: Option<String>,
+    },
     /// Replace one field of one recorded entry without rewriting it. The entry
     /// stays in the artifact as it was filed and a `### Correction` block
     /// records the replacement; derived views read the corrected value.
@@ -1009,6 +1033,12 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             other.as_deref(),
             &body_file,
         ),
+        JournalCmd::Delivered {
+            filename,
+            question,
+            to,
+            handle,
+        } => delivered(ctx, &filename, &question, &to, handle.as_deref()),
         JournalCmd::Correct {
             filename,
             target,
@@ -3412,6 +3442,252 @@ fn answer(
     Ok(0)
 }
 
+/// The facility that records who was asked an open question.
+const QUESTION_DELIVERY_CAPABILITY: &str = "question-delivery";
+
+/// The topic a capability marker is filed under. A marker dates the journal
+/// rather than any one subject in it, so the topic slot carries the only
+/// honest thing available: the kind of fact being marked.
+const CAPABILITY_TOPIC: &str = "capability";
+
+/// A facility the journal has begun recording, and where that began.
+///
+/// Derived state needs the boundary as much as the fact. An entry recorded
+/// before the marker predates the facility, so a view reporting on that
+/// facility has nothing to say about the entry; an entry recorded after it is
+/// described by the facility's silence as much as by what it carries. Without
+/// the boundary those two are the same absence.
+#[derive(Serialize)]
+struct Capability {
+    /// The marker's position in the append-only log, which is the boundary
+    /// itself. Position rather than timestamp: stamps are second-granular and
+    /// a marker is routinely appended in the same second as the entries around
+    /// it, which would collapse the two sides exactly where the distinction is
+    /// the whole point.
+    #[serde(skip)]
+    position: usize,
+    since: String,
+    /// The anchor head the facility began at, when the project had one to
+    /// read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
+}
+
+/// Where a named capability starts, if this journal has recorded it starting.
+///
+/// One reader serves every marker. A facility added later declares its own
+/// name and reads it here; nothing about markers changes to accommodate it.
+fn capability(events: &[JournalEvent], name: &str) -> Option<Capability> {
+    events.iter().enumerate().find_map(|(position, event)| {
+        (event.known() && event.event == "capability" && event.name.as_deref() == Some(name)).then(
+            || Capability {
+                position,
+                since: event.ts.clone(),
+                revision: event.revision.clone(),
+            },
+        )
+    })
+}
+
+/// Record that this journal has begun writing a named kind of fact, once.
+///
+/// The marker separates entries the facility can describe from entries that
+/// predate it, so it is appended before the first write that needs it and
+/// never again for that name.
+fn ensure_capability(
+    ctx: &Ctx,
+    dir: &Path,
+    anchor: Option<&Path>,
+    events: &[JournalEvent],
+    name: &str,
+) -> Result<()> {
+    if capability(events, name).is_some() {
+        return Ok(());
+    }
+    let mut event = JournalEvent::base(ctx, Utc::now(), CAPABILITY_TOPIC, "capability");
+    event.name = Some(name.to_string());
+    event.revision = match anchor {
+        Some(anchor) => gitio::head_if_present(anchor)?,
+        None => None,
+    };
+    append_event(ctx, dir, &event)
+}
+
+/// What is known about whether anybody was asked a question.
+///
+/// Distinct from whether it is answered, because the work each implies is
+/// different: an unasked question needs a prompt, a delivered one needs
+/// patience.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum DeliveryState {
+    /// Posed before the journal recorded deliveries at all, so its silence is
+    /// a missing record rather than a missing delivery.
+    Unknown,
+    /// Recorded under the facility and never delivered: prompting work remains.
+    Unasked,
+    /// Somebody was asked, and nothing here claims they read it.
+    Delivered,
+    /// Settled, whatever was asked on the way.
+    Answered,
+}
+
+impl DeliveryState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Unasked => "unasked",
+            Self::Delivered => "delivered",
+            Self::Answered => "answered",
+        }
+    }
+}
+
+/// One recorded delivery of one question.
+///
+/// Deliveries accumulate rather than replace: a question asked twice with no
+/// answer is a different fact from one asked once, and erasing the earlier
+/// attempt would hide the more urgent of the two.
+#[derive(Serialize)]
+struct QuestionDelivery {
+    to: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actor: Option<String>,
+    harness: String,
+    session: String,
+    ts: String,
+}
+
+/// Every recorded delivery of one question, oldest first.
+fn question_deliveries(
+    events: &[JournalEvent],
+    file: &str,
+    question: &str,
+) -> Vec<QuestionDelivery> {
+    events
+        .iter()
+        .filter(|event| {
+            event.known()
+                && event.event == "question-delivered"
+                && event.file.as_deref() == Some(file)
+                && event.question_id.as_deref() == Some(question)
+        })
+        .map(|event| QuestionDelivery {
+            to: event.delivered_to.clone().unwrap_or_default(),
+            handle: event.handle.clone(),
+            actor: event.actor.clone(),
+            harness: event.harness.clone(),
+            session: event.session.clone(),
+            ts: event.ts.clone(),
+        })
+        .collect()
+}
+
+/// The state one question's delivery record puts it in.
+///
+/// An answer wins over any delivery: what was asked on the way stays listed,
+/// but the question is no longer waiting on anybody.
+fn delivery_state(
+    marker: Option<&Capability>,
+    posed_at: usize,
+    deliveries: usize,
+    answered: bool,
+) -> DeliveryState {
+    if answered {
+        return DeliveryState::Answered;
+    }
+    if deliveries > 0 {
+        return DeliveryState::Delivered;
+    }
+    match marker {
+        Some(marker) if posed_at > marker.position => DeliveryState::Unasked,
+        _ => DeliveryState::Unknown,
+    }
+}
+
+/// Record that a caller delivered an open question to somebody.
+///
+/// Arc keeps the fact and nothing else: it sends no prompt, holds no messaging
+/// credentials, and infers no delivery from prose. The record is append-only,
+/// so a repeat attempt is another row and the earlier one still stands.
+fn delivered(
+    ctx: &Ctx,
+    filename: &str,
+    question_id: &str,
+    to: &str,
+    handle: Option<&str>,
+) -> Result<i32> {
+    let to = to.trim();
+    if !valid_audience(to) {
+        bail!("{to:?} is not a recipient; expected person, anyone, or delegate:<name>");
+    }
+    let handle = handle.map(str::trim).filter(|handle| !handle.is_empty());
+    let resolution = resolve(&ctx.cwd)?;
+    let anchor = resolution.anchor.clone();
+    let _transition = lock_journal_transition(&resolution.directory)?;
+    let (dir, _path, topic) = open_discussion_for_answer(ctx, filename)?;
+    let events = read_events(&dir)?;
+
+    let Some(posed) = events.iter().find(|event| {
+        event.known()
+            && event.event == "question"
+            && event.file.as_deref() == Some(filename)
+            && event.question_id.as_deref() == Some(question_id)
+    }) else {
+        bail!("no question {question_id} on {filename}");
+    };
+    if Amendments::collect(&events, filename).answer_stands(question_id)
+        && events.iter().any(|event| {
+            event.known()
+                && event.event == "answer"
+                && event.file.as_deref() == Some(filename)
+                && event.question_id.as_deref() == Some(question_id)
+        })
+    {
+        bail!("{question_id} is already answered; there is nothing left to ask for");
+    }
+    // A question waiting on one named delegate is not asked by prompting
+    // anybody else. Recording that as a delivery would report prompting work
+    // done against an audience that cannot settle the question, which is the
+    // false "delivered" this record exists to prevent. Who may answer is
+    // changed by correcting or superseding the question, not by delivering it
+    // elsewhere.
+    if let Some(delegate) = posed
+        .settle_by
+        .as_deref()
+        .filter(|value| value.starts_with("delegate:"))
+    {
+        if to != delegate {
+            bail!(
+                "{question_id} may be settled only by {delegate}, so delivery to {to} \
+                 would record prompting that cannot settle it; correct or supersede \
+                 the question to change who may answer"
+            );
+        }
+    }
+
+    ensure_capability(
+        ctx,
+        &dir,
+        anchor.as_deref(),
+        &events,
+        QUESTION_DELIVERY_CAPABILITY,
+    )?;
+
+    let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "question-delivered");
+    event.file = Some(filename.to_string());
+    event.question_id = Some(question_id.to_string());
+    event.delivered_to = Some(to.to_string());
+    event.handle = handle.map(str::to_string);
+    append_event(ctx, &dir, &event)?;
+
+    let recorded = question_deliveries(&events, filename, question_id).len() + 1;
+    println!("delivered {question_id} to {to} ({recorded} recorded)");
+    Ok(0)
+}
+
 /// Shared preflight for amending an artifact's record.
 ///
 /// Unlike an append, an amendment stays open for as long as the record is
@@ -3638,6 +3914,16 @@ struct OpenQuestion {
     #[serde(skip_serializing_if = "Option::is_none")]
     on_behalf_of: Option<String>,
     asked_at: String,
+    /// Whether anybody was asked, which is a different fact from whether the
+    /// question is answered: an unasked question needs a prompt, a delivered
+    /// one needs patience, and a queue that cannot tell them apart reports
+    /// both as work.
+    delivery: DeliveryState,
+    /// Every recorded delivery, oldest first. A repeat attempt is another row
+    /// rather than a replacement: a question asked twice and still unanswered
+    /// is more urgent than one asked once, and erasing the earlier attempt
+    /// would hide exactly that.
+    deliveries: Vec<QuestionDelivery>,
     /// The options to offer, each with how many positions argued that branch.
     /// A branch nobody argued is visible before the question is answered,
     /// which is the point of arguing them first.
@@ -3654,6 +3940,13 @@ struct QuestionOption {
 struct OpenQuestions {
     schema: &'static str,
     dir: String,
+    /// Where this journal began recording deliveries. A reader cannot
+    /// interpret `delivery: unknown` without it: the state means the question
+    /// predates the record, and only the boundary says which questions those
+    /// are. Absent until the first delivery is recorded, when every question
+    /// predates it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    question_delivery: Option<Capability>,
     questions: Vec<OpenQuestion>,
 }
 
@@ -3669,8 +3962,9 @@ fn questions(ctx: &Ctx, json: bool) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&OpenQuestions {
-                schema: "arc-journal-questions/1",
+                schema: "arc-journal-questions/2",
                 dir: dir.display().to_string(),
+                question_delivery: capability(&read_events(&dir)?, QUESTION_DELIVERY_CAPABILITY),
                 questions: open,
             })?
         );
@@ -3687,7 +3981,8 @@ fn questions(ctx: &Ctx, json: bool) -> Result<i32> {
             Some(value) => value.clone(),
         };
         println!(
-            "  {}  {}  {}  {}  settle by: {}",
+            "  [{}]  {}  {}  {}  {}  settle by: {}",
+            question.delivery.label(),
             question.asked_at,
             question.topic,
             question.placement,
@@ -3858,10 +4153,12 @@ fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
         .filter_map(|event| Some((event.file.as_deref()?, event.question_id.as_deref()?)))
         .filter(|(file, question)| amendments(file).answer_stands(question))
         .collect();
+    let marker = capability(&events, QUESTION_DELIVERY_CAPABILITY);
     let mut open = Vec::new();
-    for event in events
+    for (posed_at, event) in events
         .iter()
-        .filter(|event| event.known() && event.event == "question")
+        .enumerate()
+        .filter(|(_, event)| event.known() && event.event == "question")
     {
         let (Some(file), Some(question)) = (event.file.as_deref(), event.question_id.as_deref())
         else {
@@ -3886,7 +4183,13 @@ fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
                 })
                 .count()
         };
+        // Every question here is unanswered by construction, so the answered
+        // state cannot arise: this queue reports what is still waiting, and
+        // delivery says whether it is waiting on a prompt or on a reply.
+        let deliveries = question_deliveries(&events, file, question);
         open.push(OpenQuestion {
+            delivery: delivery_state(marker.as_ref(), posed_at, deliveries.len(), false),
+            deliveries,
             heading: artifact_body_path(dir, file).and_then(|path| question_text(&path, question)),
             file: file.to_string(),
             topic: event.topic.clone(),
@@ -4063,6 +4366,30 @@ pub(crate) struct JournalEvent {
     /// every question written before the field existed keeps its meaning.
     #[serde(skip_serializing_if = "Option::is_none")]
     settle_by: Option<String>,
+    /// Who a `question-delivered` event says was asked, in the same vocabulary
+    /// `settle_by` uses: `person`, `anyone`, or `delegate:<name>`. Arc records
+    /// that a caller delivered the question; it never sends anything, so this
+    /// is a report of prompting already done rather than a claim the recipient
+    /// read it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delivered_to: Option<String>,
+    /// An opaque identifier the delivery system gave the caller for what it
+    /// sent — a thread id, a ticket, a message URL. Arc neither parses nor
+    /// resolves it; it exists so the delivery can be found again outside arc.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handle: Option<String>,
+    /// The facility a `capability` event marks the start of. A journal that
+    /// has never written a kind of fact is silent about it rather than
+    /// negative, so derived state needs the point at which that kind of fact
+    /// began to be recorded. One marker per name, appended by the first write
+    /// that needs it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// The anchor head a `capability` marker was appended at, when the project
+    /// had one to read. Absent on an unborn or headless checkout, which still
+    /// gets the marker; it simply has no revision to compare later.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
     /// What a `correction` or `retraction` acts on, within the artifact named
     /// by `file`: `artifact`, a position ID, a question ID, or
     /// `answer:<question id>`. Both events are append-only amendments whose
@@ -4244,6 +4571,10 @@ impl JournalEvent {
             status: None,
             supersedes: None,
             settle_by: None,
+            delivered_to: None,
+            handle: None,
+            name: None,
+            revision: None,
             position_id: None,
             stance: None,
             reference: None,
@@ -4337,7 +4668,7 @@ impl JournalEvent {
                         .as_ref()
                         .is_some_and(|values| valid_question_options(values))
                     && self.option.is_none()
-                    && self.settle_by.as_deref().is_none_or(valid_settle_by)
+                    && self.settle_by.as_deref().is_none_or(valid_audience)
             }
             "answer" => {
                 self.file_is_discussion()
@@ -4349,6 +4680,26 @@ impl JournalEvent {
                     && self.placement.is_none()
                     && self.options.is_none()
             }
+            // A delivery names one question on one discussion and one audience
+            // that was asked. The handle is optional because most delivery
+            // systems hand back nothing; an empty one is a caller that meant
+            // to supply it and did not, which would read as a handle nobody
+            // can look up.
+            "question-delivered" => {
+                self.file_is_discussion()
+                    && self.question_id.as_deref().is_some_and(valid_question_id)
+                    && self.delivered_to.as_deref().is_some_and(valid_audience)
+                    && self
+                        .handle
+                        .as_deref()
+                        .is_none_or(|handle| !handle.trim().is_empty())
+                    && self.option.is_none()
+                    && self.options.is_none()
+            }
+            // A marker says a facility began, and says nothing else: it binds
+            // to no artifact, because what it dates is the journal rather than
+            // any one file in it.
+            "capability" => self.name.as_deref().is_some_and(valid_capability_name),
             // An amendment names one entry and one replacement for it. Both
             // halves are required: a correction missing either corrects
             // nothing, and a retraction without a reason withdraws an argument
@@ -4426,12 +4777,23 @@ fn valid_question_options(values: &[String]) -> bool {
             .all(|value| !value.trim().is_empty() && seen.insert(value.as_str()))
 }
 
-fn valid_settle_by(value: &str) -> bool {
+/// Who a question may be addressed to: a person, an open audience, or one
+/// named delegate. Posing and delivering share this vocabulary so that a
+/// delivery and the settle-by it is meant to satisfy are directly comparable —
+/// a question waiting on one delegate and a delivery to another are the same
+/// kind of value, and the mismatch is visible without translation.
+fn valid_audience(value: &str) -> bool {
     value == "person"
         || value == "anyone"
         || value
             .strip_prefix("delegate:")
             .is_some_and(|name| !name.trim().is_empty())
+}
+
+/// A capability name is a bare lowercase identifier, the same shape a topic
+/// has, so markers read as one namespace rather than as free text.
+fn valid_capability_name(value: &str) -> bool {
+    valid_topic(value)
 }
 
 /// One question's replay state. Branch coverage is not tracked here: whether
@@ -4517,6 +4879,21 @@ impl QuestionMachine {
                 }
                 progress.answered = true;
                 true
+            }
+            // A delivery is a fact about a question that exists and is still
+            // open. One naming no question resolves to nothing, and one after
+            // settlement reports prompting for an answer already given.
+            "question-delivered" => {
+                let key = (
+                    event.file.clone().expect("a known delivery has a file"),
+                    event
+                        .question_id
+                        .clone()
+                        .expect("a known delivery has a question id"),
+                );
+                self.questions
+                    .get(&key)
+                    .is_some_and(|progress| !progress.answered)
             }
             // A retracted answer leaves its question open, so the branches
             // reopen and one further settlement is in order — the state the
@@ -4853,6 +5230,26 @@ fn event_message(event: &JournalEvent) -> String {
             event.question_id.as_deref().unwrap_or_default(),
             event.option.as_deref().unwrap_or_default(),
             event.file.as_deref().unwrap_or_default(),
+        ),
+        "question-delivered" => format!(
+            "delivered {} to {} on {}{}",
+            event.question_id.as_deref().unwrap_or_default(),
+            event.delivered_to.as_deref().unwrap_or_default(),
+            event.file.as_deref().unwrap_or_default(),
+            event
+                .handle
+                .as_deref()
+                .map(|handle| format!(" [{handle}]"))
+                .unwrap_or_default()
+        ),
+        "capability" => format!(
+            "capability {}{}",
+            event.name.as_deref().unwrap_or_default(),
+            event
+                .revision
+                .as_deref()
+                .map(|revision| format!(" at {revision}"))
+                .unwrap_or_default()
         ),
         "consumed" => format!(
             "consumed {} [{}]{}",
@@ -6499,6 +6896,14 @@ struct DiscussionQuestion {
     branches: Vec<DiscussionBranch>,
     #[serde(skip_serializing_if = "Option::is_none")]
     answered: Option<DiscussionAnswer>,
+    /// Whether anybody was asked. `answered` wins once the question is
+    /// settled; before that the distinction between a question nobody
+    /// prompted and one whose reply is pending is the whole of what is left
+    /// to do.
+    delivery: DeliveryState,
+    /// Every recorded delivery, oldest first, including those made before an
+    /// answer arrived.
+    deliveries: Vec<QuestionDelivery>,
     /// An opening question is meant to settle a premise before anyone argues.
     /// Set when it is still open and positions exist anyway — the argument
     /// started without the premise it was supposed to rest on.
@@ -7035,12 +7440,14 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     // as the whole answer when it is only the part with ids.
     // Questions, oldest first. A question is only ever posed once, so the
     // event log order is the order they were asked.
+    let delivery_marker = capability(&events, QUESTION_DELIVERY_CAPABILITY);
     let questions: Vec<DiscussionQuestion> = events
         .iter()
-        .filter(|event| {
+        .enumerate()
+        .filter(|(_, event)| {
             event.known() && event.event == "question" && event.file.as_deref() == Some(filename)
         })
-        .filter_map(|posed| {
+        .filter_map(|(posed_at, posed)| {
             let id = posed.question_id.clone()?;
             let options = posed.options.clone().unwrap_or_default();
             let answered = events
@@ -7081,7 +7488,15 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
             let argued_before_answered = posed.placement.as_deref() == Some("opening")
                 && answered.is_none()
                 && positions > 0;
+            let deliveries = question_deliveries(&events, filename, &id);
             Some(DiscussionQuestion {
+                delivery: delivery_state(
+                    delivery_marker.as_ref(),
+                    posed_at,
+                    deliveries.len(),
+                    answered.is_some(),
+                ),
+                deliveries,
                 id,
                 placement: posed.placement.clone().unwrap_or_default(),
                 options,
