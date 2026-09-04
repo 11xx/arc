@@ -62,7 +62,7 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
     let (_, state) = ctx.load_state(&store, reference)?;
     let report = ctx.report(&store, &state)?;
     let view = ReviewView {
-        schema: "arc-review/1",
+        schema: "arc-review/2",
         change_id: &state.change_id,
         verdicts: state
             .verdicts

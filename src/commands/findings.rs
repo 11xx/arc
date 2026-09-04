@@ -72,7 +72,7 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool)
             println!(
                 "{}",
                 serde_json::to_string_pretty(&FindingsJson {
-                    schema: "arc-findings/1",
+                    schema: "arc-findings/2",
                     change_id: &state.change_id,
                     audit,
                     findings: selected.values().collect(),
