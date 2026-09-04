@@ -69,6 +69,10 @@ date; a second waits for the next date rather than qualifying a version.
 `arc --version`, the manifest, and the changelog's top released heading all
 carry the same string.
 
+The package is published as `arc-ledger`, because the bare name belongs to
+an unrelated crate; the binary it installs, the repository, and the command
+are `arc`.
+
 The checklist a release passes, in order:
 
 1. Every commit reachable from the release head is signed by one key

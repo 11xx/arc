@@ -1,6 +1,6 @@
 [package]
-name = "arc"
-version = "2026.9.3"
+name = "arc-ledger"
+version = "2026.9.4"
 edition = "2021"
 description = "Change, review, and integration state over plain Git for agentic coding arcs"
 license = "Unlicense"
@@ -8,6 +8,10 @@ readme = "README.md"
 repository = "https://github.com/11xx/arc"
 keywords = ["git", "changelog", "review", "workflow", "agents"]
 categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "arc"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

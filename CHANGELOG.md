@@ -10,6 +10,8 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2026.9.4] - 2026-09-04
+
 ### Added
 
 - `arc rewrite trailers --from <rev> [--drop <key>] [--append <line>]`
@@ -29,6 +31,10 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   preview describes a plan instead of committing to one.
 
 ### Changed
+
+- The package on crates.io is `arc-ledger`; the binary it installs, the
+  repository, and every command are still `arc`. The bare name belongs to an
+  unrelated crate.
 
 - Every independence surface reads an assumed identity the same way. An
   approval is refused when its effective author matches a contributor on
