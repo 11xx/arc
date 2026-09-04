@@ -12,81 +12,102 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- `arc rewrite trailers --from <rev> [--drop <key>] [--append <line>]` edits
-  the trailer block of every commit message in range and carries the result
-  through the same map, ref transaction, intent and record as `arc rewrite
-  sign`. A commit is recreated only where the edit changed its message or its
-  ancestry moved, so a commit the edit did not reach keeps the id it had and
-  stays out of the map. The block is the last paragraph when every line in it
-  is a `Key: value` line or an indented continuation, never the subject, and
-  messages are edited as bytes so a message that is not UTF-8 comes through
-  unchanged.
+- `arc rewrite trailers --from <rev> [--drop <key>] [--append <line>]`
+  edits the trailer block of every commit message in range and carries the
+  result through the same map, ref transaction, intent and record as `arc
+  rewrite sign`. A commit is recreated only where the edit changed its
+  message or its ancestry moved, so a commit the edit did not reach keeps
+  the id it had and stays out of the map. The block is the last paragraph
+  when every line in it is a `Key: value` line or an indented continuation,
+  never the subject, and messages are edited as bytes so a message that is
+  not UTF-8 comes through unchanged.
+
+  `--dry-run` on a rewrite also reports each annotated tag it would
+  re-point, or leave alone, in the words the real run uses — the half of a
+  rewrite that is a decision about a release rather than a consequence of
+  the commits. Planning the ref moves no longer writes tag objects, so a
+  preview describes a plan instead of committing to one.
 
 ### Changed
 
-- `--dry-run` on a rewrite also reports each annotated tag it would re-point,
-  or leave alone, in the words the real run uses — the half of a rewrite that
-  is a decision about a release rather than a consequence of the commits.
-  Planning the ref moves no longer writes tag objects, so a preview describes
-  a plan instead of committing to one.
-
 - Every independence surface reads an assumed identity the same way. An
-  approval is refused when its effective author matches a contributor on the
-  patchset or when arc assumed the reviewing identity from git config; an
-  assumed *authoring* identity no longer refuses a reviewer that declared a
-  different name, so `arc status` before a merge and `arc audit` after it agree
-  on who is independent of whom. Reviewer coverage marks attribution unknown
-  whenever the covering verdict's identity was assumed, which the
-  `reviewer-attribution-unknown` advisory reports. `arc status --json` is
-  `arc-status/17`: `review_map[].attribution_unknown` carries the wider
-  meaning.
+  approval is refused when its effective author matches a contributor on
+  the patchset or when arc assumed the reviewing identity from git config;
+  an assumed *authoring* identity no longer refuses a reviewer that
+  declared a different name, so `arc status` before a merge and `arc audit`
+  after it agree on who is independent of whom. Reviewer coverage marks
+  attribution unknown whenever the covering verdict's identity was assumed,
+  which the `reviewer-attribution-unknown` advisory reports. `arc status
+  --json` is `arc-status/17`: `review_map[].attribution_unknown` carries
+  the wider meaning.
+
+- `arc changelog --write` declines to replace an `[Unreleased]` block that
+  holds a line no recorded entry produced, naming each one, and
+  `--keep-unrecorded` writes the projection below those lines under an
+  `<!-- unrecorded -->` marker instead.
+- Integration advises when a change closes with no changelog entry
+  recorded, naming the command that records one.
+
 ### Fixed
 
-- A finding carries the provenance of the identity that filed it, so reviewer
-  coverage places a reviewer known only from its findings by the same rule it
-  places one that cast a verdict: an identity arc assumed from
+- `arc changelog --write` judges a release block paragraph by paragraph, on
+  the words a paragraph holds rather than the column it is wrapped at, so
+  an entry the file wraps differently from the projection still reads as
+  recorded. The refusal names each unaccounted paragraph, and
+  `--keep-unrecorded` keeps one whole.
+
+- A finding carries the provenance of the identity that filed it, so
+  reviewer coverage places a reviewer known only from its findings by the
+  same rule it places one that cast a verdict: an identity arc assumed from
   `git config user.name` is attribution nobody can place, and it neither
-  satisfies the independent-review advisory nor reads as a self-review by name.
-  `arc findings --format json` is `arc-findings/2` and `arc review --json` is
-  `arc-review/2`, both carrying `actor_source` on a finding.
+  satisfies the independent-review advisory nor reads as a self-review by
+  name. `arc findings --format json` is `arc-findings/2` and `arc review
+  --json` is `arc-review/2`, both carrying `actor_source` on a finding.
 
 - `arc doctor` no longer counts the primary checkout among the registered
   worktrees of closed changes. A change opened with `begin --no-worktree`
-  records the repository itself, and the advice reads as `git worktree remove`
-  on the repository the caller is standing in.
+  records the repository itself, and the advice reads as `git worktree
+  remove` on the repository the caller is standing in.
 
-- `arc catchup` under a sandbox leaves out a waiting spool held in a worktree
-  the prefix does not admit. `arc journal spool --promote` refuses to file from
-  such a worktree, so listing it named a countdown the run could not stop.
+  `arc catchup` under a sandbox leaves out a waiting spool held in a
+  worktree the prefix does not admit. `arc journal spool --promote` refuses
+  to file from such a worktree, so listing it named a countdown the run
+  could not stop.
 
-- `docs/schemas.md` lists the sandbox marker at the version arc writes. Every
-  schema constant the crate defines is asserted to appear in that page, so
-  a version bumped in code and nowhere else fails the test suite.
+  `docs/schemas.md` lists the sandbox marker at the version arc writes.
+  Every schema constant the crate defines is asserted to appear in that
+  page, so a version bumped in code and nowhere else fails the test suite.
 
 - `arc rewrite sign` moves every ref in one Git transaction, the branch
   included, so a rewrite leaves the branch and arc's evidence refs on one
   history or leaves them all alone. It writes the computed map and the ref
-  moves to `repository/rewrite-intent.json` before applying any of it, records
-  the mapping event once the transaction has committed, and removes the intent
-  file once it has — so an interrupted rewrite is finished by running it again
-  rather than recreated, which would sign the same commits afresh and record a
-  second successor for each. A ref moved by something else in the meantime
-  stops it, named; `--dry-run` writes no intent.
+  moves to `repository/rewrite-intent.json` before applying any of it,
+  records the mapping event once the transaction has committed, and removes
+  the intent file once it has — so an interrupted rewrite is finished by
+  running it again rather than recreated, which would sign the same commits
+  afresh and record a second successor for each. A ref moved by something
+  else in the meantime stops it, named; `--dry-run` writes no intent.
 
-- Recorded rewrites that contradict each other make the map unreadable, and
+  Recorded rewrites that contradict each other make the map unreadable, and
   every projection built on one refuses instead of answering as though no
-  rewrite had been recorded — which reported every revision at its pre-rewrite
-  value with nothing to say the map had been consulted. `arc doctor` reports
-  the contradiction as `invalid-rewrite-mapping`.
+  rewrite had been recorded — which reported every revision at its
+  pre-rewrite value with nothing to say the map had been consulted. `arc
+  doctor` reports the contradiction as `invalid-rewrite-mapping`.
 
-- A recorded revision resolves on an exact match, or on an abbreviation of
+  A recorded revision resolves on an exact match, or on an abbreviation of
   seven hex digits or more that exactly one recorded revision answers; an
-  ambiguous abbreviation is refused naming the candidates rather than resolved
-  to whichever came first.
+  ambiguous abbreviation is refused naming the candidates rather than
+  resolved to whichever came first.
 
-- A commit is recreated from its own header bytes, so a header order other
-  than the common one, and an identity line with whitespace of its own, survive
-  a rewrite that claims only to have re-signed it.
+  A commit is recreated from its own header bytes, so a header order other
+  than the common one, and an identity line with whitespace of its own,
+  survive a rewrite that claims only to have re-signed it.
+
+- A command run under a sandbox refuses a recorded checkout that lies
+  outside the prefix and the repository it was pointed at, so a clone can
+  no longer run gates in or rebase the source checkout; `arc sandbox
+  discard` validates the marker's prefix and every recorded path before
+  removing anything.
 
 ## [2026.9.3] - 2026-09-03
 
