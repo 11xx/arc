@@ -518,6 +518,121 @@ fn write_splices_only_unreleased_and_is_idempotent() {
 }
 
 #[test]
+fn write_accepts_a_recorded_entry_wrapped_at_another_column() {
+    let repo = Repo::new();
+    repo.commit(
+        &repo.root,
+        "CHANGELOG.md",
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- an entry whose prose the ledger holds\n  exactly, wrapped in the file at a column the\n  projection does not choose\n\n## [1.0.0]\n\nreleased\n",
+        "docs: add changelog",
+    );
+    begin(&repo, "rewrapped");
+    let worktree = repo.home.join(".worktrees/repo-rewrapped");
+    record(
+        &repo,
+        &worktree,
+        "rewrapped",
+        "added",
+        "an entry whose prose the ledger holds exactly, wrapped in the file at a column \
+         the projection does not choose\n",
+    );
+    integrate(&repo, "rewrapped");
+
+    let projected = stdout(repo.arc(&repo.root).args(["changelog"]));
+    repo.arc(&repo.root)
+        .args(["changelog", "--write"])
+        .assert()
+        .success()
+        .stdout("");
+    let written = fs::read_to_string(repo.root.join("CHANGELOG.md")).unwrap();
+    let block = projected.strip_prefix("## [Unreleased]\n").unwrap();
+    assert!(written.contains(block), "{written}");
+    assert!(!written.contains("ledger holds\n"), "{written}");
+    assert!(!written.contains("<!-- unrecorded -->"), "{written}");
+    assert!(written.ends_with("## [1.0.0]\n\nreleased\n"), "{written}");
+}
+
+#[test]
+fn write_accepts_a_recorded_multi_paragraph_entry_wrapped_at_another_column() {
+    let repo = Repo::new();
+    repo.commit(
+        &repo.root,
+        "CHANGELOG.md",
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n\
+         - the opening paragraph of a body the ledger holds,\n  wrapped here at a column of its own\n\n\
+         \x20 a second paragraph of the same entry, indented\n  under the bullet it belongs to\n\n\
+         ## [1.0.0]\n\nreleased\n",
+        "docs: add changelog",
+    );
+    begin(&repo, "paragraphs");
+    let worktree = repo.home.join(".worktrees/repo-paragraphs");
+    record(
+        &repo,
+        &worktree,
+        "paragraphs",
+        "added",
+        "the opening paragraph of a body the ledger holds, wrapped here at a column of \
+         its own\n\na second paragraph of the same entry, indented under the bullet it \
+         belongs to\n",
+    );
+    integrate(&repo, "paragraphs");
+
+    let projected = stdout(repo.arc(&repo.root).args(["changelog"]));
+    repo.arc(&repo.root)
+        .args(["changelog", "--write"])
+        .assert()
+        .success();
+    let written = fs::read_to_string(repo.root.join("CHANGELOG.md")).unwrap();
+    assert!(
+        written.contains(projected.strip_prefix("## [Unreleased]\n").unwrap()),
+        "{written}"
+    );
+    assert!(!written.contains("<!-- unrecorded -->"), "{written}");
+}
+
+#[test]
+fn write_names_the_paragraph_it_cannot_account_for() {
+    let repo = Repo::new();
+    repo.commit(
+        &repo.root,
+        "CHANGELOG.md",
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n\
+         - hand-written prose the ledger never saw,\n  running past one line\n\n\
+         ### Removed\n\n- an entry no ledger holds\n\n\
+         ## [1.0.0]\n\nreleased\n",
+        "docs: add changelog",
+    );
+    begin(&repo, "named");
+    let worktree = repo.home.join(".worktrees/repo-named");
+    record(&repo, &worktree, "named", "added", "- projected\n");
+    integrate(&repo, "named");
+
+    repo.arc(&repo.root)
+        .args(["changelog", "--write"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "  - hand-written prose the ledger never saw, ...",
+        ))
+        // A heading the projection emits is accounted for; one for a category
+        // holding no recorded entry is not.
+        .stderr(predicate::str::contains("  ### Removed"))
+        .stderr(predicate::str::contains("### Added").not());
+
+    repo.arc(&repo.root)
+        .args(["changelog", "--write", "--keep-unrecorded"])
+        .assert()
+        .success();
+    let kept = fs::read_to_string(repo.root.join("CHANGELOG.md")).unwrap();
+    assert!(
+        kept.contains(
+            "<!-- unrecorded -->\n\n- hand-written prose the ledger never saw,\n  running past one line\n\n### Removed\n\n- an entry no ledger holds\n\n### Added\n\n- projected\n"
+        ),
+        "{kept}"
+    );
+}
+
+#[test]
 fn write_refuses_unrecorded_prose_and_keeps_it_on_request() {
     let repo = Repo::new();
     repo.commit(
@@ -537,7 +652,7 @@ fn write_refuses_unrecorded_prose_and_keeps_it_on_request() {
         .assert()
         .code(1)
         .stderr(predicate::str::contains(
-            "CHANGELOG.md holds lines no recorded changelog entry produced",
+            "CHANGELOG.md holds prose no recorded changelog entry produced",
         ))
         .stderr(predicate::str::contains("  - hand-written prose"))
         // A heading the projection emits itself is accounted for.

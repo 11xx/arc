@@ -413,13 +413,14 @@ enum Cmd {
         #[arg(long)]
         since: Option<String>,
         /// Replace the generated [Unreleased] block in CHANGELOG.md; entries
-        /// wrap at 75 columns, continuations indented under their marker.
-        /// Refused, naming each line, while the block holds prose no
-        /// recorded entry produced
+        /// wrap at 75 columns, continuations indented under their marker. The
+        /// block is judged paragraph by paragraph, on words rather than the
+        /// column they are wrapped at, and refused, naming each paragraph,
+        /// while it holds prose no recorded entry produced
         #[arg(long)]
         write: bool,
-        /// Keep the block's unrecorded lines above the projected entries,
-        /// under an unrecorded marker, instead of refusing to write
+        /// Keep the block's unrecorded paragraphs whole above the projected
+        /// entries, under an unrecorded marker, instead of refusing to write
         #[arg(long)]
         keep_unrecorded: bool,
     },

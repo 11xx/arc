@@ -39,12 +39,15 @@ notes cannot mention. Integration says so as advice when a change closes
 with no entry recorded, naming the command that records one; which changes
 deserve a release line is the author's call, not arc's.
 
-The projection owns only the lines it can produce. `arc changelog --write`
-declines to replace a block holding a line no recorded entry produced, and
-names each one, because that prose lives in the file and nowhere else.
-Either record it on the change that made it, or pass `--keep-unrecorded`,
-which writes the projected entries below the lines it kept under an
-`<!-- unrecorded -->` marker.
+The projection owns only the prose it can produce. `arc changelog --write`
+declines to replace a block holding a paragraph no recorded entry produced,
+and names each one, because that prose lives in the file and nowhere else.
+The unit is the paragraph — a bullet with the lines wrapped under it — and
+the comparison is on its words, so an entry the file wraps at a column of
+its own still reads as recorded. Either record the paragraph on the change
+that made it, or pass `--keep-unrecorded`, which writes the projected
+entries below the paragraphs it kept whole under an `<!-- unrecorded -->`
+marker.
 
 **Keep the instruction surfaces accurate.** arc teaches its own use, so the
 guide `arc` prints with no arguments, each command's `--help`, and the pages
