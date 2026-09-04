@@ -193,13 +193,13 @@ pub fn changelog(
             print!("{rendered}");
             Ok(0)
         }
-        WriteOutcome::Unrecorded(lines) => {
+        WriteOutcome::Unrecorded(paragraphs) => {
             eprintln!(
-                "{} holds lines no recorded changelog entry produced; nothing was written:",
+                "{} holds prose no recorded changelog entry produced; nothing was written:",
                 config.target
             );
-            for line in &lines {
-                eprintln!("  {line}");
+            for paragraph in &paragraphs {
+                eprintln!("  {paragraph}");
             }
             eprintln!(
                 "record each on the change that made it with arc changelog CHANGE --category \
@@ -217,7 +217,8 @@ enum WriteOutcome {
     /// there is nothing whose bounds a projection could replace.
     NoReleaseBlock,
     /// The block holds prose the ledger cannot account for, and replacing it
-    /// would destroy the only copy.
+    /// would destroy the only copy. Each unaccounted paragraph is named by
+    /// enough of itself to find it in the file.
     Unrecorded(Vec<String>),
 }
 
@@ -551,23 +552,90 @@ fn target_path(root: &Path, target: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// The lines of a release block that the projection does not produce,
-/// in the order the file holds them, each without trailing whitespace.
-/// Blank lines and the unrecorded marker carry no prose of their own.
-fn unrecorded_lines(block: &str, projected: &str) -> Vec<String> {
-    let recorded = projected
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
+/// One prose unit of a release block: a heading, a bullet with the lines
+/// wrapped under it, or one paragraph of a body that holds several. A column
+/// is a rendering choice rather than prose, so a paragraph is judged by its
+/// words alone.
+struct Paragraph {
+    /// The lines the file holds, without trailing whitespace.
+    lines: Vec<String>,
+    /// The words of those lines, without the bullet marker, indentation, or
+    /// the columns they happen to be wrapped at.
+    prose: String,
+}
+
+impl Paragraph {
+    /// Enough of the paragraph to find it in the file.
+    fn summary(&self) -> String {
+        match self.lines.split_first() {
+            Some((first, [])) => first.clone(),
+            Some((first, _)) => format!("{first} ..."),
+            None => String::new(),
+        }
+    }
+}
+
+/// Split prose into paragraphs. A blank line ends one; a heading or a bullet
+/// marker starts one, so an author's own list stays as many units as it has
+/// items. The unrecorded marker carries no prose and delimits rather than
+/// joins.
+fn paragraphs(text: &str) -> Vec<Paragraph> {
+    let mut paragraphs = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
+    let mut flush = |lines: &mut Vec<String>| {
+        if !lines.is_empty() {
+            let taken = std::mem::take(lines);
+            paragraphs.push(Paragraph {
+                prose: prose_of(&taken),
+                lines: taken,
+            });
+        }
+    };
+    for line in text.lines() {
+        let line = line.trim_end();
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed == UNRECORDED_MARKER {
+            flush(&mut lines);
+            continue;
+        }
+        if trimmed.starts_with('#') || line_marker(line).is_some() {
+            flush(&mut lines);
+        }
+        lines.push(line.to_owned());
+    }
+    flush(&mut lines);
+    paragraphs
+}
+
+/// The words of one paragraph, each run of whitespace collapsed to a single
+/// space and the leading bullet marker dropped.
+fn prose_of(lines: &[String]) -> String {
+    let mut prose = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        let text = match (index, line_marker(line)) {
+            (0, Some(marker)) => &line[marker.len()..],
+            _ => line.as_str(),
+        };
+        for word in text.split_whitespace() {
+            if !prose.is_empty() {
+                prose.push(' ');
+            }
+            prose.push_str(word);
+        }
+    }
+    prose
+}
+
+/// The paragraphs of a release block whose prose the projection does not
+/// produce, in the order the file holds them.
+fn unrecorded_paragraphs(block: &str, projected: &str) -> Vec<Paragraph> {
+    let recorded = paragraphs(projected)
+        .into_iter()
+        .map(|paragraph| paragraph.prose)
         .collect::<HashSet<_>>();
-    block
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| {
-            let trimmed = line.trim();
-            !trimmed.is_empty() && trimmed != UNRECORDED_MARKER && !recorded.contains(trimmed)
-        })
-        .map(str::to_owned)
+    paragraphs(block)
+        .into_iter()
+        .filter(|paragraph| !recorded.contains(&paragraph.prose))
         .collect()
 }
 
@@ -617,18 +685,25 @@ fn write_changelog(
     // The projection is authoritative only over the entries it can produce.
     // Prose the ledger never saw exists in the file and nowhere else, so the
     // write either keeps it under the marker or declines to run at all.
-    let unrecorded = unrecorded_lines(&original[after_heading..next_release], replacement);
+    let unrecorded = unrecorded_paragraphs(&original[after_heading..next_release], replacement);
     if !unrecorded.is_empty() && !keep_unrecorded {
-        return Ok(WriteOutcome::Unrecorded(unrecorded));
+        return Ok(WriteOutcome::Unrecorded(
+            unrecorded.iter().map(Paragraph::summary).collect(),
+        ));
     }
     let mut block = String::new();
     if !unrecorded.is_empty() {
         block.push('\n');
         block.push_str(UNRECORDED_MARKER);
         block.push_str("\n\n");
-        for line in &unrecorded {
-            block.push_str(line);
-            block.push('\n');
+        for (index, paragraph) in unrecorded.iter().enumerate() {
+            if index > 0 {
+                block.push('\n');
+            }
+            for line in &paragraph.lines {
+                block.push_str(line);
+                block.push('\n');
+            }
         }
     }
     block.push_str(replacement);
