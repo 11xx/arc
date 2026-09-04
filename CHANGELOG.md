@@ -24,6 +24,19 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   meaning.
 ### Fixed
 
+- `arc doctor` no longer counts the primary checkout among the registered
+  worktrees of closed changes. A change opened with `begin --no-worktree`
+  records the repository itself, and the advice reads as `git worktree remove`
+  on the repository the caller is standing in.
+
+- `arc catchup` under a sandbox leaves out a waiting spool held in a worktree
+  the prefix does not admit. `arc journal spool --promote` refuses to file from
+  such a worktree, so listing it named a countdown the run could not stop.
+
+- `docs/schemas.md` lists the sandbox marker at the version arc writes. Every
+  schema constant the crate defines is asserted to appear in that page, so
+  a version bumped in code and nowhere else fails the test suite.
+
 - `arc rewrite sign` moves every ref in one Git transaction, the branch
   included, so a rewrite leaves the branch and arc's evidence refs on one
   history or leaves them all alone. It writes the computed map and the ref

@@ -56,8 +56,9 @@ runs commands in and writes beneath the prefix and the repository it was
 pointed at, and nothing else: a checkout the ledger names anywhere else — as a
 copied ledger names the source's — counts as no checkout at all. So a gate run
 and a `rebase` refuse it by name and say to make one inside the prefix with
-`git worktree add`, spooled journal writes there stay where they are, and
-`integrate --cleanup` keeps it rather than removing it.
+`git worktree add`, spooled journal writes there stay where they are and go
+unlisted by `catchup`, and `integrate --cleanup` keeps it rather than removing
+it.
 
 `arc sandbox discard` removes a whole directory tree, so it acts only where the
 marker arc wrote and the directory agree: the marker must name that exact

@@ -236,3 +236,90 @@ fn names_exit_code(lower: &str) -> bool {
 fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
+
+/// A floor on the schema constants found, so a scan that stopped matching
+/// fails rather than passing over an empty set.
+const MINIMUM_SCHEMAS: usize = 10;
+
+/// `docs/schemas.md` is the register of every versioned surface arc emits, and
+/// a version bumped in code without the row being edited leaves the register
+/// describing a format nothing writes. The constants are the authority: each
+/// one's value must appear in the page verbatim.
+#[test]
+fn every_schema_constant_is_registered_in_the_docs() {
+    let page = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs")
+            .join("schemas.md"),
+    )
+    .unwrap();
+
+    let schemas = schema_constants();
+    assert!(
+        schemas.len() >= MINIMUM_SCHEMAS,
+        "found only {} schema constants in src/; the scan is no longer matching",
+        schemas.len()
+    );
+
+    let missing: Vec<&(String, String)> = schemas
+        .iter()
+        .filter(|(_, value)| !page.contains(&format!("`{value}`")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{} schema constant(s) name a version docs/schemas.md does not list; \
+         update the row for each:\n{}",
+        missing.len(),
+        missing
+            .iter()
+            .map(|(name, value)| format!("{name} = {value}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// Every `…SCHEMA: &str = "…"` in the crate, as constant name and value. The
+/// source is scanned rather than a list kept here, so a constant added or
+/// bumped is covered without anyone remembering to say so twice.
+fn schema_constants() -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let mut sources = Vec::new();
+    collect_sources(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut sources,
+    );
+    sources.sort();
+    for source in &sources {
+        let text = std::fs::read_to_string(source).unwrap();
+        for line in text.lines() {
+            let line = line.trim();
+            let Some((declaration, rest)) = line.split_once(": &str = \"") else {
+                continue;
+            };
+            let declaration = declaration.strip_prefix("pub ").unwrap_or(declaration);
+            let Some(name) = declaration.strip_prefix("const ") else {
+                continue;
+            };
+            let name = name.trim();
+            if !name.contains("SCHEMA") {
+                continue;
+            }
+            let Some((value, _)) = rest.split_once('"') else {
+                continue;
+            };
+            found.push((name.to_string(), value.to_string()));
+        }
+    }
+    found
+}
+
+fn collect_sources(at: &Path, sources: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(at).unwrap().filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_sources(&path, sources);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            sources.push(path);
+        }
+    }
+}
