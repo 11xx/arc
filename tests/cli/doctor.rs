@@ -328,6 +328,18 @@ pub(crate) fn doctor_reports_closed_registered_worktrees_without_removing_them()
         &repo.root,
         &["worktree", "remove", removed_path.to_str().unwrap()],
     );
+    // A change opened in place records the primary checkout, which is
+    // registered for as long as the repository exists and is nobody's to
+    // remove.
+    let in_place = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "doctor-closed-in-place",
+        "--no-worktree",
+    ])));
+    repo.arc(&repo.root)
+        .args(["close", "doctor-closed-in-place", "--abandoned"])
+        .assert()
+        .success();
 
     let registrations_before = git_out(&repo.root, &["worktree", "list", "--porcelain"]);
     let default = stdout(repo.arc(&repo.root).arg("doctor"));
@@ -342,6 +354,7 @@ pub(crate) fn doctor_reports_closed_registered_worktrees_without_removing_them()
     assert!(!default.contains(&first_id), "{default}");
     assert!(!default.contains(&second_id), "{default}");
     assert!(!default.contains(&removed_id), "{default}");
+    assert!(!default.contains(&in_place), "{default}");
 
     let verbose = stdout(repo.arc(&repo.root).args(["doctor", "--verbose"]));
     for (change_id, path) in [(&first_id, &first_path), (&second_id, &second_path)] {
@@ -354,6 +367,11 @@ pub(crate) fn doctor_reports_closed_registered_worktrees_without_removing_them()
         );
     }
     assert!(!verbose.contains(&removed_id), "{verbose}");
+    assert!(!verbose.contains(&in_place), "{verbose}");
+    assert!(
+        !verbose.contains(&format!("closed-change-worktree: {in_place}")),
+        "{verbose}"
+    );
     assert!(first_path.is_dir());
     assert!(second_path.is_dir());
     assert_eq!(

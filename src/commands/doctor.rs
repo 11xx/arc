@@ -5,6 +5,7 @@
 //! the exit status. Inspection never creates, deletes, or rewrites store data.
 
 use crate::commands::{self, Ctx};
+use crate::config;
 use crate::gitio;
 use crate::ids;
 use crate::model::{Closure, Event, Payload};
@@ -713,10 +714,19 @@ fn inspect_closed_worktrees(
         .filter_map(|line| line.strip_prefix("worktree "))
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
+    // A change opened in place records the primary checkout, which is
+    // registered for as long as the repository is and is not a worktree
+    // anybody removes.
+    let primary = gitio::primary_worktree(cwd)
+        .ok()
+        .map(|p| config::resolved(&p));
     for (change_id, state) in states {
         let (Some(closure), Some(worktree)) = (&state.closure, &state.worktree) else {
             continue;
         };
+        if primary.as_deref() == Some(config::resolved(Path::new(worktree)).as_path()) {
+            continue;
+        }
         if registered.contains(worktree) {
             let outcome = match closure.outcome {
                 Closure::Integrated => "integrated",
