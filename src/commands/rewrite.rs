@@ -71,6 +71,80 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
     complete(ctx, &store, walked, sign, args.dry_run, args.retag)
 }
 
+pub struct TrailerArgs {
+    /// The key to sign a recreated commit with. Absent signs with the key Git
+    /// is configured to use.
+    pub key: Option<String>,
+    /// The oldest commit whose trailers are edited. The mode has nothing to
+    /// infer a range from, so it is named rather than defaulted.
+    pub from: String,
+    /// Trailer keys to remove, matched without case.
+    pub drop: Vec<String>,
+    /// Whole trailer lines to add where the block does not carry them.
+    pub append: Vec<String>,
+    /// Compute and print the map, then stop.
+    pub dry_run: bool,
+    /// Recreate the edited commits without signing them.
+    pub no_sign: bool,
+    /// Recreate each annotated tag whose target the rewrite moved, on the
+    /// commit that replaced it.
+    pub retag: bool,
+}
+
+/// Edit the trailers of this branch's commit messages, carrying every
+/// recorded revision forward.
+///
+/// A commit the edit did not reach, sitting under nothing the edit reached,
+/// is left exactly as it is: no new object, and no entry in the map. That is
+/// what separates this from re-signing, where every commit in range is
+/// recreated because the one below it was.
+pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
+    let cwd = ctx.cwd.clone();
+    let store = ctx.store()?;
+    let branch = match open(ctx, &store)? {
+        Opened::Finished(code) => return Ok(code),
+        Opened::Branch(branch) => branch,
+    };
+    let head = gitio::branch_head(&cwd, &branch)?;
+    let from = gitio::rev_parse(&cwd, &args.from)?;
+    let range = gitio::commits_from(&cwd, &from, &head)?;
+    if range.is_empty() {
+        bail!("{from} is not an ancestor of {branch}");
+    }
+
+    let sign = (!args.no_sign).then_some(args.key.as_deref());
+    let mut walked = Walked::over(&range, branch, from, head, "arc rewrite trailers");
+    walked.reason = edit_reason(&args, &walked.branch, &walked.from);
+    for old in &range {
+        let mut commit = gitio::read_commit(&cwd, old)?;
+        let message = crate::trailers::edit(&commit.message, &args.drop, &args.append);
+        let parents = map_parents(&cwd, old, &commit.parents, &walked.mapping)?;
+        // Nothing to say differently and nowhere else to say it from: this is
+        // the commit it already is, and recreating it would sign a fresh
+        // object and record a move nothing asked for.
+        if message == commit.message && parents == commit.parents {
+            continue;
+        }
+        commit.message = message;
+        commit.parents = parents;
+        walked.recreated(&cwd, old, &commit, sign)?;
+    }
+    complete(ctx, &store, walked, sign, args.dry_run, args.retag)
+}
+
+/// What a trailer rewrite did, for the record it leaves: which keys went,
+/// how many lines arrived, and over what.
+fn edit_reason(args: &TrailerArgs, branch: &str, from: &str) -> String {
+    let mut edits: Vec<String> = Vec::new();
+    if !args.drop.is_empty() {
+        edits.push(format!("dropped {}", args.drop.join(", ")));
+    }
+    if !args.append.is_empty() {
+        edits.push(format!("appended {}", plural(args.append.len(), "line")));
+    }
+    format!("{}, on {branch} from {}", edits.join(", "), short(from))
+}
+
 /// The branch a rewrite is to run on, or the exit code of the unfinished one
 /// that was finished instead.
 enum Opened {

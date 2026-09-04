@@ -1,5 +1,5 @@
-//! `arc rewrite sign`: re-signing a branch's history without stranding
-//! anything the ledger recorded about it.
+//! `arc rewrite sign` and `arc rewrite trailers`: rewriting a branch's
+//! history without stranding anything the ledger recorded about it.
 
 use crate::common::*;
 use std::collections::BTreeMap;
@@ -1208,4 +1208,249 @@ fn a_ref_moved_out_from_under_an_unfinished_rewrite_is_refused() {
         repository_events(&repo).is_empty(),
         "and nothing is recorded"
     );
+}
+
+/// Editing trailers recreates a commit only when the edit reached it or its
+/// ancestry moved, which is what separates this mode from re-signing: a
+/// commit the edit does not touch keeps the id it had, and the ledger's
+/// revisions on top of the edit follow the map forward.
+#[test]
+fn editing_trailers_recreates_the_edited_commit_and_everything_on_it() {
+    let repo = repo_with_gates();
+    let lead = "Assisted-by: a:b#c (lead)";
+
+    // The oldest commit in range already carries the appended line and no
+    // dropped key, so the edit has nothing to do to it.
+    repo.commit(
+        &repo.root,
+        "one.txt",
+        "one\n",
+        &format!("feat: one\n\n{lead}\n"),
+    );
+    let untouched = repo.head(&repo.root);
+    repo.commit(
+        &repo.root,
+        "two.txt",
+        "two\n",
+        "feat: two\n\nFoo-Session: x\nReviewed-by: Someone <someone@example.invalid>\n",
+    );
+    let edited = repo.head(&repo.root);
+
+    // An integrated change, so the ledger holds revisions that sit on top of
+    // the edited commit and have to follow the map forward.
+    let alpha = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "alpha"])));
+    let alpha_tree = repo.home.join(".worktrees/repo-alpha");
+    repo.commit(&alpha_tree, "alpha.txt", "alpha\n", "feat: alpha");
+    stdout(repo.arc(&alpha_tree).args(["snapshot", "alpha"]));
+    repo.arc(&alpha_tree)
+        .args(["verify", "alpha", "--all"])
+        .assert()
+        .success();
+    repo.arc(&alpha_tree)
+        .args(["review", "alpha", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "alpha"])
+        .assert()
+        .success();
+
+    let changes = vec![alpha.clone()];
+    let before = dump(&repo, &changes);
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "rewrite",
+        "trailers",
+        "--no-sign",
+        "--drop",
+        "foo-session",
+        "--append",
+        lead,
+        "--from",
+        &untouched,
+    ]));
+    assert!(out.contains("rewritten on master"), "{out}");
+
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", &untouched]),
+        untouched,
+        "a commit the edit did not reach keeps its id: {out}"
+    );
+    assert!(
+        git_out(&repo.root, &["log", "--format=%H", "master"]).contains(&untouched),
+        "and stays on the branch: {out}"
+    );
+    assert!(
+        !git_out(&repo.root, &["log", "--format=%H", "master"]).contains(&edited),
+        "the edited commit is replaced: {out}"
+    );
+
+    // The edit is exactly what was asked for: the named key is gone, the
+    // appended line is there once, and the unrelated trailer is untouched.
+    let messages = git_out(&repo.root, &["log", "--format=%B", "master"]);
+    assert!(!messages.contains("Foo-Session"), "{messages}");
+    let two = git_out(
+        &repo.root,
+        &["log", "-1", "--format=%B", "master", "--", "two.txt"],
+    );
+    assert_eq!(
+        two.trim_end(),
+        format!("feat: two\n\nReviewed-by: Someone <someone@example.invalid>\n{lead}").trim_end(),
+        "the edited message keeps everything the edit did not name"
+    );
+    let one = git_out(
+        &repo.root,
+        &["log", "-1", "--format=%B", &untouched, "--", "one.txt"],
+    );
+    assert_eq!(one.trim_end(), format!("feat: one\n\n{lead}").trim_end());
+
+    // Every revision the ledger recorded still resolves, through the map.
+    let after = dump(&repo, &changes);
+    let recorded: Vec<String> = before
+        .iter()
+        .flat_map(|(_, text)| revisions_in(text))
+        .collect();
+    let map = recorded_map(&repo, &recorded);
+    assert!(!map.is_empty(), "the rewrite recorded no mapping");
+    assert_same(
+        &before,
+        &after,
+        &map,
+        "a recorded revision reads differently than the map accounts for",
+    );
+    repo.arc(&repo.root).args(["doctor"]).assert().success();
+}
+
+/// A trailer dry run answers with the map and the tags the real run would
+/// act on, and writes neither a tag object nor an intent.
+#[test]
+fn a_trailer_dry_run_previews_the_tags_and_writes_nothing() {
+    let repo = Repo::new();
+    repo.commit(&repo.root, "one.txt", "one\n", "feat: one");
+    let tagged = repo.head(&repo.root);
+    git(
+        &repo.root,
+        &["tag", "-a", "-m", "the first release", "v0.1.0"],
+    );
+    let tag_object = git_out(&repo.root, &["rev-parse", "v0.1.0"]);
+    repo.commit(&repo.root, "two.txt", "two\n", "feat: two");
+    let head = repo.head(&repo.root);
+
+    let tag_objects = |repo: &Repo| {
+        git_out(
+            &repo.root,
+            &[
+                "cat-file",
+                "--batch-all-objects",
+                "--batch-check=%(objecttype)",
+            ],
+        )
+        .lines()
+        .filter(|kind| *kind == "tag")
+        .count()
+    };
+
+    let previewed = stdout(repo.arc(&repo.root).args([
+        "rewrite",
+        "trailers",
+        "--no-sign",
+        "--append",
+        "Assisted-by: a:b#c (lead)",
+        "--from",
+        &tagged,
+        "--dry-run",
+        "--retag",
+    ]));
+    assert!(
+        previewed
+            .lines()
+            .any(|line| line.starts_with("would re-point refs/tags/v0.1.0:")),
+        "{previewed}"
+    );
+    assert!(
+        previewed.contains("nothing was moved or recorded"),
+        "{previewed}"
+    );
+    assert_eq!(repo.head(&repo.root), head, "a dry run moves nothing");
+    assert_eq!(git_out(&repo.root, &["rev-parse", "v0.1.0"]), tag_object);
+    assert_eq!(
+        tag_objects(&repo),
+        1,
+        "a dry run writes no tag object: {previewed}"
+    );
+    assert!(!intent_path(&repo).exists());
+
+    // Without --retag the preview says what the real run would leave alone,
+    // in the words the real run uses.
+    let left = stdout(repo.arc(&repo.root).args([
+        "rewrite",
+        "trailers",
+        "--no-sign",
+        "--append",
+        "Assisted-by: a:b#c (lead)",
+        "--from",
+        &tagged,
+        "--dry-run",
+    ]));
+    let reported = left
+        .lines()
+        .find(|line| line.starts_with("would leave alone: ") && line.contains("refs/tags/v0.1.0"))
+        .unwrap_or_else(|| panic!("{left}"));
+    assert!(reported.contains("git describe"), "{reported}");
+}
+
+/// Appending a line every commit in range already carries changes no message,
+/// so nothing is recreated and nothing is recorded.
+#[test]
+fn appending_a_trailer_every_commit_carries_recreates_nothing() {
+    let repo = Repo::new();
+    let lead = "Assisted-by: a:b#c (lead)";
+    repo.commit(
+        &repo.root,
+        "one.txt",
+        "one\n",
+        &format!("feat: one\n\n{lead}\n"),
+    );
+    let from = repo.head(&repo.root);
+    repo.commit(
+        &repo.root,
+        "two.txt",
+        "two\n",
+        &format!("feat: two\n\nReviewed-by: Someone <someone@example.invalid>\n{lead}\n"),
+    );
+    let head = repo.head(&repo.root);
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "rewrite",
+        "trailers",
+        "--no-sign",
+        "--append",
+        lead,
+        "--from",
+        &from,
+    ]));
+    assert!(out.contains("changed none of them"), "{out}");
+    assert_eq!(repo.head(&repo.root), head, "nothing moved");
+    assert!(
+        repository_events(&repo).is_empty(),
+        "and nothing was recorded"
+    );
+}
+
+/// The mode says what it cannot guess: which commit to start at, and what to
+/// do to the trailers once there.
+#[test]
+fn a_trailer_rewrite_without_a_range_or_an_edit_is_refused() {
+    let repo = Repo::new();
+    repo.commit(&repo.root, "one.txt", "one\n", "feat: one");
+    repo.arc(&repo.root)
+        .args(["rewrite", "trailers", "--no-sign", "--drop", "foo"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--from"));
+    repo.arc(&repo.root)
+        .args(["rewrite", "trailers", "--no-sign", "--from", "HEAD"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--append"));
 }

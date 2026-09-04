@@ -20,6 +20,7 @@ mod session_store;
 mod state;
 mod status;
 mod store;
+mod trailers;
 mod worktree_usage;
 
 use anyhow::{bail, Context, Result};
@@ -1557,6 +1558,37 @@ enum RewriteCmd {
         #[arg(long)]
         retag: bool,
     },
+    /// Edit the trailers of every commit message from --from to the branch
+    /// head, recreating only the commits that change and what sits on them
+    Trailers {
+        /// Remove every trailer with this key, matched without case; repeat
+        /// for more than one
+        #[arg(long = "drop", value_name = "KEY", required_unless_present = "append")]
+        drop: Vec<String>,
+        /// Add this `Key: value` line to the trailer block where it is not
+        /// already there; repeat for more than one
+        #[arg(long, value_name = "LINE", required_unless_present = "drop")]
+        append: Vec<String>,
+        /// Oldest commit whose trailers are edited; required, since a trailer
+        /// edit has nothing to infer a range from
+        #[arg(long, required = true)]
+        from: String,
+        /// The key to sign a recreated commit with; Git's configured signing
+        /// key by default
+        #[arg(long)]
+        key: Option<String>,
+        /// Print the map the rewrite would record and stop
+        #[arg(long = "dry-run")]
+        dry_run: bool,
+        /// Recreate the edited commits without signing them, for a repository
+        /// with no signing key
+        #[arg(long = "no-sign", conflicts_with = "key")]
+        no_sign: bool,
+        /// Recreate each annotated tag whose target was rewritten on the
+        /// commit that replaced it, carrying its message, tagger and signature
+        #[arg(long)]
+        retag: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2844,6 +2876,26 @@ fn run(cli: Cli) -> Result<i32> {
                 commands::SignArgs {
                     key,
                     from,
+                    dry_run,
+                    no_sign,
+                    retag,
+                },
+            ),
+            RewriteCmd::Trailers {
+                drop,
+                append,
+                from,
+                key,
+                dry_run,
+                no_sign,
+                retag,
+            } => commands::rewrite_trailers(
+                &ctx,
+                commands::TrailerArgs {
+                    key,
+                    from,
+                    drop,
+                    append,
                     dry_run,
                     no_sign,
                     retag,
