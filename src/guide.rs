@@ -413,7 +413,8 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   independent of it, before the merge and in an audit after it alike. Two
   assumed identities are refused, since neither side claimed anything. A
   reviewer arc cannot place that way is reported as unknown attribution rather
-  than counted as independent or as self-review.
+  than counted as independent or as self-review, whether it cast a verdict or
+  only filed findings.
 
   Which changes need one is the project's call, declared in
   `.arc/policy.toml` under `[danger] paths`. A change touching a declared

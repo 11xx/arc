@@ -23,8 +23,8 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-catchup/4` | `arc catchup --json` — ledger buckets, journal lanes and queue, memories, forks, and worktree cost in one object | commitment |
 | `arc-resume/1` | `arc resume --json` — one change's brief, live state, and journal context | commitment |
 | `arc-rescue/2` | `arc rescue --json` — ledger state joined with worktree divergence and a foreign claim's standing | commitment |
-| `arc-review/1` | `arc review --json` — verdict history, findings, causes, and the next action | commitment |
-| `arc-findings/1` | `arc findings --format json` — the open finding set, or the audit set with `--audit` | commitment |
+| `arc-review/2` | `arc review --json` — verdict history, findings, causes, and the next action | commitment |
+| `arc-findings/2` | `arc findings --format json` — the open finding set, or the audit set with `--audit` | commitment |
 | `arc-blocker-status/1` | `arc blocker-status --json` — dependency detail for one change | commitment |
 | `arc-metadata/1` | `arc metadata --json` — the derived tags, dependencies, and priority | commitment |
 | `arc-chain/4` | `arc chain --json` — a tagged series in dependency order, with plan bindings and review coverage | commitment |

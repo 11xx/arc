@@ -1603,9 +1603,7 @@ pub fn reviewer_coverage(state: &ChangeState) -> Vec<ReviewerCoverage> {
                 finding.effective_author(),
                 patchset_id,
                 finding.on_behalf_of.is_some(),
-                // A finding carries no provenance, so its identity is unknown
-                // rather than assumed and is read by name as any other is.
-                true,
+                !finding.author_assumed(),
                 false,
             );
         }

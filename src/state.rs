@@ -242,6 +242,10 @@ pub struct FindingState {
     /// Subject the finding was filed for when a lead ran the ceremony.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_behalf_of: Option<String>,
+    /// Where `reported_by` came from. `None` on findings recorded before arc
+    /// kept the provenance, which is unknown rather than declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_source: Option<ActorSource>,
     pub dispositions: Vec<DispositionEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replies: Vec<ReplyEntry>,
@@ -257,6 +261,10 @@ pub struct ReplyEntry {
 impl FindingState {
     pub fn effective_author(&self) -> &str {
         self.on_behalf_of.as_deref().unwrap_or(&self.reported_by)
+    }
+
+    pub fn author_assumed(&self) -> bool {
+        author_assumed(self.on_behalf_of.as_deref(), self.actor_source)
     }
 
     /// Disposition tips: dispositions not superseded by any later one.
@@ -1694,6 +1702,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                         origin_event: ev.event_id.clone(),
                         reported_by: ev.actor.clone(),
                         on_behalf_of: ev.on_behalf_of.clone(),
+                        actor_source: ev.actor_source,
                         dispositions: Vec::new(),
                         replies: Vec::new(),
                     },
@@ -1751,6 +1760,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                             origin_event: ev.event_id.clone(),
                             reported_by: ev.actor.clone(),
                             on_behalf_of: ev.on_behalf_of.clone(),
+                            actor_source: ev.actor_source,
                             dispositions: Vec::new(),
                             replies: Vec::new(),
                         },
@@ -1845,6 +1855,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                             origin_event: ev.event_id.clone(),
                             reported_by: ev.actor.clone(),
                             on_behalf_of: ev.on_behalf_of.clone(),
+                            actor_source: ev.actor_source,
                             dispositions: Vec::new(),
                             replies: Vec::new(),
                         },
@@ -1884,6 +1895,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                         origin_event: ev.event_id.clone(),
                         reported_by: ev.actor.clone(),
                         on_behalf_of: ev.on_behalf_of.clone(),
+                        actor_source: ev.actor_source,
                         dispositions: Vec::new(),
                         replies: Vec::new(),
                     },

@@ -24,6 +24,14 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   meaning.
 ### Fixed
 
+- A finding carries the provenance of the identity that filed it, so reviewer
+  coverage places a reviewer known only from its findings by the same rule it
+  places one that cast a verdict: an identity arc assumed from
+  `git config user.name` is attribution nobody can place, and it neither
+  satisfies the independent-review advisory nor reads as a self-review by name.
+  `arc findings --format json` is `arc-findings/2` and `arc review --json` is
+  `arc-review/2`, both carrying `actor_source` on a finding.
+
 - `arc doctor` no longer counts the primary checkout among the registered
   worktrees of closed changes. A change opened with `begin --no-worktree`
   records the repository itself, and the advice reads as `git worktree remove`

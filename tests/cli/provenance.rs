@@ -987,3 +987,81 @@ fn a_legacy_patchset_without_contributors_keeps_the_same_gate_decision() {
         "legacy-author"
     );
 }
+
+/// The advisory codes a status report carries, which are absent altogether
+/// when there are none.
+fn advisory_codes(status: &serde_json::Value) -> Vec<String> {
+    status["advisories"]
+        .as_array()
+        .map(|advisories| {
+            advisories
+                .iter()
+                .filter_map(|advisory| advisory["code"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A reviewer known only from findings is placed by the same rule as one that
+/// cast a verdict: an identity arc took from git configuration is a name
+/// nobody claimed, so coverage reports it as unplaceable and the change still
+/// wants an independent reader.
+#[test]
+fn a_findings_only_reviewer_with_an_assumed_identity_is_unplaceable() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "assumed-finder"]));
+    let wt = repo.home.join(".worktrees/repo-assumed-finder");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    repo.arc(&wt)
+        .args(["--actor", "author", "snapshot", "assumed-finder"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["finding", "assumed-finder", "--summary", "a defect"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&wt).args(["status", "assumed-finder", "--json"]));
+    let row = &status["review_map"][0];
+    assert_eq!(row["reviewer"], "Tester", "{status}");
+    assert_eq!(row["findings"], 1, "{status}");
+    assert_eq!(row["verdicts"], 0, "{status}");
+    assert_eq!(row["is_author"], false, "{status}");
+    assert_eq!(row["attribution_unknown"], true, "{status}");
+    assert!(
+        advisory_codes(&status).contains(&"reviewer-attribution-unknown".to_string()),
+        "{status}"
+    );
+}
+
+/// The invariant the rule above is bounded by, asserted structurally rather
+/// than as a regression: a declared identity is placeable whether it filed a
+/// finding or cast a verdict, and it is the second party independence needs.
+#[test]
+fn a_findings_only_reviewer_that_declared_itself_is_placeable() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "declared-finder"]));
+    let wt = repo.home.join(".worktrees/repo-declared-finder");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    repo.arc(&wt)
+        .args(["--actor", "author", "snapshot", "declared-finder"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["finding", "declared-finder", "--summary", "a defect"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&wt).args(["status", "declared-finder", "--json"]));
+    let row = &status["review_map"][0];
+    assert_eq!(row["reviewer"], "reviewer", "{status}");
+    assert_eq!(row["findings"], 1, "{status}");
+    assert_eq!(row["is_author"], false, "{status}");
+    assert_eq!(row["attribution_unknown"], false, "{status}");
+    assert!(
+        !advisory_codes(&status).contains(&"reviewer-attribution-unknown".to_string()),
+        "{status}"
+    );
+}

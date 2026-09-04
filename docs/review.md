@@ -159,7 +159,9 @@ orchestrator's review is a valid review unless a project's policy says
 otherwise. A reviewer arc cannot place — an identity it assumed from
 `git config user.name`, or the patchset actor's own name with no
 `--on-behalf-of` recorded on either side — is reported as unknown attribution
-rather than counted as independent or as self-review.
+rather than counted as independent or as self-review. A finding carries the
+provenance of the identity that filed it, so a reviewer known only from its
+findings is placed by that same rule rather than by name.
 
 When no independent verdict is reachable, declaring **debt** records
 the missing review instead of pretending it happened. It can stand in for an

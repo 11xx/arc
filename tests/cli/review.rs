@@ -221,7 +221,7 @@ fn read_view_json_has_versioned_schema() {
         .unwrap();
     assert!(output.status.success());
     let view: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(view["schema"], "arc-review/1");
+    assert_eq!(view["schema"], "arc-review/2");
 }
 
 #[test]
