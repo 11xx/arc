@@ -56,7 +56,7 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-bundle/2` | `arc export` / `arc import` — one change's complete ledger as a deterministic JSON file | commitment |
 | `journal-events/1` | `events.jsonl`, streamed by `arc journal events` — the canonical agent-written event log | commitment |
 | `arc-journal-spool/1` | `.arc/outbox/<ts>-<kind>-<topic>.json` — a journal write parked for later promotion | commitment |
-| `arc-sandbox/1` | `.arc-sandbox.json` — the marker naming a prefix as arc's to remove | internal |
+| `arc-sandbox/2` | `.arc-sandbox.json` — the marker naming a prefix as arc's to remove | internal |
 | `journal-binding/1` | `bindings.jsonl` — which anchor a journal directory belongs to | internal |
 
 ## Versioning a stored input format
