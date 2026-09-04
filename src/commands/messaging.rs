@@ -830,12 +830,18 @@ fn render_worktree_accounting(accounting: &crate::worktree_usage::WorktreeAccoun
 /// has filed. The outbox lives inside the worktree, so it is deleted with it:
 /// what is listed here is a countdown, and the promote command travels with
 /// the count so filing it never needs the layout looked up.
-fn render_waiting_spools(states: &BTreeMap<String, crate::state::ChangeState>) {
+///
+/// A worktree the sandbox does not admit is left out: promotion refuses it, so
+/// listing it would name a countdown nothing running here can stop.
+fn render_waiting_spools(ctx: &Ctx, states: &BTreeMap<String, crate::state::ChangeState>) {
     let waiting: Vec<_> = states
         .values()
         .filter(|state| state.closure.is_none())
         .filter_map(|state| {
             let worktree = state.worktree.as_deref()?;
+            if !ctx.admits_path(Path::new(worktree)) {
+                return None;
+            }
             let (dir, paths) = crate::journal::waiting_spool(Path::new(worktree))?;
             Some((state.change_id.clone(), dir, paths.len()))
         })
@@ -914,7 +920,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         println!("  no open changes");
     }
     render_forks(&forks);
-    render_waiting_spools(&states);
+    render_waiting_spools(ctx, &states);
     render_worktree_accounting(&worktrees);
     render_debts(&debts);
     render_deferred(&inbox.deferred);

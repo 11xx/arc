@@ -573,6 +573,40 @@ fn a_sandboxed_rebase_refuses_the_recorded_checkout_outside_the_prefix() {
     );
 }
 
+/// `catchup` lists what a session can act on, and filing a spool is refused
+/// from a worktree the sandbox does not admit. A row naming one would send the
+/// reader to a directory arc will not write, so the display holds the same
+/// boundary the promotion does.
+#[test]
+fn a_sandboxed_catchup_omits_a_spool_outside_the_prefix() {
+    let repo = Repo::new();
+    let boxed = cloned_with_an_open_change(&repo, "outside-spool");
+    stdout(repo.arc(&boxed.worktree).args([
+        "journal",
+        "log",
+        "sandboxed",
+        "--spool",
+        "waiting to be filed",
+    ]));
+    let outbox = boxed.worktree.join(".arc").join("outbox");
+
+    let sandboxed = stdout(
+        repo.arc(&boxed.clone)
+            .env("ARC_SANDBOX", &boxed.prefix)
+            .args(["catchup"]),
+    );
+    assert!(!sandboxed.contains("waiting spools"), "{sandboxed}");
+    assert!(
+        !sandboxed.contains(&outbox.display().to_string()),
+        "{sandboxed}"
+    );
+
+    // The source admits its own worktree, so the same spool is still waiting.
+    let source = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(source.contains("waiting spools (1)"), "{source}");
+    assert!(source.contains(&outbox.display().to_string()), "{source}");
+}
+
 /// A marker is a file anyone can write, and being parseable is not evidence
 /// that arc built the tree around it. Discard removes a directory only where
 /// the marker and the directory agree about what is there.

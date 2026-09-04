@@ -24,6 +24,10 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   meaning.
 ### Fixed
 
+- `arc catchup` under a sandbox leaves out a waiting spool held in a worktree
+  the prefix does not admit. `arc journal spool --promote` refuses to file from
+  such a worktree, so listing it named a countdown the run could not stop.
+
 - `docs/schemas.md` lists the sandbox marker at the version arc writes. Every
   schema constant the crate defines is asserted to appear in that page, so
   a version bumped in code and nowhere else fails the test suite.
