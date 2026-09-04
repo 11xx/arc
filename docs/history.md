@@ -17,6 +17,8 @@ fact it is, and every derived reading follows revisions forward through it:
 arc rewrite sign --dry-run                   # the map this would record
 arc rewrite sign --key <id>                  # re-sign, move the refs, record
 arc rewrite sign --key <id> --retag          # and recreate the annotated tags
+arc rewrite trailers --from <rev> \
+  --drop <key> --append '<Key: value>'       # edit the trailers, move, record
 arc history resolve <old-sha>                # exit 2 when nothing moved it
 ```
 
@@ -59,7 +61,15 @@ recorded — and the next `arc rewrite sign` finishes exactly what remains
 rather than starting over. Starting over is what has to be avoided: recreating
 the commits signs them afresh, gpg signs differently every time, and the map
 would then claim a second successor for every commit already moved onto the
-first. A `--dry-run` commits to nothing and writes no intent.
+first. A `--dry-run` commits to nothing: no intent, and no tag
+object either, so the tags it says it would re-point or leave alone are
+described from a plan rather than from something already written.
+
+`ARC_REWRITE_INTERRUPT=intent|refs` is the suite's fault-injection hook: it
+stops a rewrite after the named phase — the intent written, or the refs moved
+— so the repository is left the way a real interruption leaves it, and the
+next run finishes what remains. Unset, which is every run that is not a test,
+it does nothing.
 
 A ref that holds neither the value the rewrite read nor the value it writes
 was moved by something else, and the rewrite says which ref and stops rather
@@ -82,6 +92,34 @@ its commits are still built on the line that was replaced — so the rewrite
 names each such branch and the `git rebase --onto` that replays it. Until a
 stranded branch is replayed it shares no commit with the branch it was cut
 from, and every question comparing the two is unanswerable.
+
+## Editing trailers
+
+`arc rewrite trailers` edits the `Key: value` lines a commit message ends with
+and carries the result through the same machinery: the same map, the same
+single ref transaction, the same intent, and the same record. `--drop <key>`
+removes every trailer with that key, matched without case; `--append <line>`
+adds a whole trailer line where the block does not already carry it verbatim;
+both repeat, and at least one is required. `--from` is named rather than
+inferred — a trailer edit has nothing to derive a range from — and `--key`,
+`--no-sign`, `--dry-run` and `--retag` mean what they mean for signing.
+
+A commit is recreated only when the edit changed its message or its ancestry
+moved. A commit the edit did not reach, sitting under commits it did not
+reach, keeps the id it had and stays out of the map: recreating it would sign
+a fresh object and put a move on record that nothing asked for. So dropping a
+key nothing carries and appending a line every commit already has changes
+nothing at all, and an edit in the middle of a branch leaves everything below
+it exactly where it was.
+
+The trailer block is the message's last paragraph when every line in it is a
+`Key: value` line — the key spelled with letters, digits and hyphens — or a
+continuation line indented with whitespace. A paragraph holding one line of
+prose is prose, and the first line of a message is the subject rather than a
+trailer, so a one-line `feat: something` gains a block below a blank line
+instead of a trailer inside its summary. Messages are edited as bytes: a
+message that is not UTF-8, which is what a commit's `encoding` header is for,
+travels through with every byte outside an edited line unchanged.
 
 A rewrite performed elsewhere is recorded from its commit map instead:
 

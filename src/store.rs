@@ -238,7 +238,8 @@ impl Store {
         body.push(b'\n');
         write_exclusive(&path, &body).with_context(|| {
             format!(
-                "a rewrite is already in progress; finish it with `arc rewrite sign`, or remove {}",
+                "a rewrite is already in progress; finish it by running `arc rewrite sign` or \
+                 `arc rewrite trailers` again, or remove {}",
                 path.display()
             )
         })

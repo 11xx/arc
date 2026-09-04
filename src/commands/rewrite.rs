@@ -39,25 +39,10 @@ pub struct SignArgs {
 pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
     let cwd = ctx.cwd.clone();
     let store = ctx.store()?;
-    let branch = gitio::current_branch(&cwd)?
-        .context("HEAD is detached; check out the branch whose history is being rewritten")?;
-    // An interrupted rewrite is finished rather than repeated. Repeating it
-    // recreates the same commits with fresh signatures, so the map would name
-    // a second successor for every commit the first run already moved a ref
-    // onto — a record that contradicts itself about every commit in range.
-    //
-    // This comes before the cleanliness check because an interruption after
-    // the refs moved leaves the index describing the commit the branch moved
-    // off, which reads as a worktree full of edits.
-    if let Some(intent) = store.rewrite_intent()? {
-        return resume(ctx, &store, &branch, &intent);
-    }
-    // A rewrite that moved the branch out from under uncommitted work would
-    // leave the operator holding a diff against a commit that no longer
-    // exists.
-    if !gitio::is_clean(&cwd)? {
-        bail!("the worktree has uncommitted changes; commit or stash them first");
-    }
+    let branch = match open(ctx, &store)? {
+        Opened::Finished(code) => return Ok(code),
+        Opened::Branch(branch) => branch,
+    };
     let head = gitio::branch_head(&cwd, &branch)?;
     let survey = gitio::signature_survey(&cwd, &head)?;
     let from = match &args.from {
@@ -76,11 +61,169 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
     }
 
     let sign = (!args.no_sign).then_some(args.key.as_deref());
-    let mut mapping: BTreeMap<String, Option<String>> = BTreeMap::new();
-    let mut carried: Vec<(String, Vec<String>)> = Vec::new();
+    let mut walked = Walked::over(&range, branch, from, head, "arc rewrite sign");
+    walked.reason = format!("re-signed {} from {}", walked.branch, short(&walked.from));
     for old in &range {
         let mut commit = gitio::read_commit(&cwd, old)?;
-        commit.parents = map_parents(&cwd, old, &commit.parents, &mapping)?;
+        commit.parents = map_parents(&cwd, old, &commit.parents, &walked.mapping)?;
+        walked.recreated(&cwd, old, &commit, sign)?;
+    }
+    complete(ctx, &store, walked, sign, args.dry_run, args.retag)
+}
+
+pub struct TrailerArgs {
+    /// The key to sign a recreated commit with. Absent signs with the key Git
+    /// is configured to use.
+    pub key: Option<String>,
+    /// The oldest commit whose trailers are edited. The mode has nothing to
+    /// infer a range from, so it is named rather than defaulted.
+    pub from: String,
+    /// Trailer keys to remove, matched without case.
+    pub drop: Vec<String>,
+    /// Whole trailer lines to add where the block does not carry them.
+    pub append: Vec<String>,
+    /// Compute and print the map, then stop.
+    pub dry_run: bool,
+    /// Recreate the edited commits without signing them.
+    pub no_sign: bool,
+    /// Recreate each annotated tag whose target the rewrite moved, on the
+    /// commit that replaced it.
+    pub retag: bool,
+}
+
+/// Edit the trailers of this branch's commit messages, carrying every
+/// recorded revision forward.
+///
+/// A commit the edit did not reach, sitting under nothing the edit reached,
+/// is left exactly as it is: no new object, and no entry in the map. That is
+/// what separates this from re-signing, where every commit in range is
+/// recreated because the one below it was.
+pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
+    let cwd = ctx.cwd.clone();
+    let store = ctx.store()?;
+    let branch = match open(ctx, &store)? {
+        Opened::Finished(code) => return Ok(code),
+        Opened::Branch(branch) => branch,
+    };
+    let head = gitio::branch_head(&cwd, &branch)?;
+    let from = gitio::rev_parse(&cwd, &args.from)?;
+    let range = gitio::commits_from(&cwd, &from, &head)?;
+    if range.is_empty() {
+        bail!("{from} is not an ancestor of {branch}");
+    }
+
+    let sign = (!args.no_sign).then_some(args.key.as_deref());
+    let mut walked = Walked::over(&range, branch, from, head, "arc rewrite trailers");
+    walked.reason = edit_reason(&args, &walked.branch, &walked.from);
+    for old in &range {
+        let mut commit = gitio::read_commit(&cwd, old)?;
+        let message = crate::trailers::edit(&commit.message, &args.drop, &args.append);
+        let parents = map_parents(&cwd, old, &commit.parents, &walked.mapping)?;
+        // Nothing to say differently and nowhere else to say it from: this is
+        // the commit it already is, and recreating it would sign a fresh
+        // object and record a move nothing asked for.
+        if message == commit.message && parents == commit.parents {
+            continue;
+        }
+        commit.message = message;
+        commit.parents = parents;
+        walked.recreated(&cwd, old, &commit, sign)?;
+    }
+    complete(ctx, &store, walked, sign, args.dry_run, args.retag)
+}
+
+/// What a trailer rewrite did, for the record it leaves: which keys went,
+/// how many lines arrived, and over what.
+fn edit_reason(args: &TrailerArgs, branch: &str, from: &str) -> String {
+    let mut edits: Vec<String> = Vec::new();
+    if !args.drop.is_empty() {
+        edits.push(format!("dropped {}", args.drop.join(", ")));
+    }
+    if !args.append.is_empty() {
+        edits.push(format!("appended {}", plural(args.append.len(), "line")));
+    }
+    format!("{}, on {branch} from {}", edits.join(", "), short(from))
+}
+
+/// The branch a rewrite is to run on, or the exit code of the unfinished one
+/// that was finished instead.
+enum Opened {
+    Branch(String),
+    Finished(i32),
+}
+
+/// Where every rewrite starts: the branch it runs on, an unfinished rewrite
+/// finished before another is begun, and a worktree with nothing in it to
+/// strand.
+fn open(ctx: &Ctx, store: &Store) -> Result<Opened> {
+    let branch = gitio::current_branch(&ctx.cwd)?
+        .context("HEAD is detached; check out the branch whose history is being rewritten")?;
+    // An interrupted rewrite is finished rather than repeated. Repeating it
+    // recreates the same commits with fresh signatures, so the map would name
+    // a second successor for every commit the first run already moved a ref
+    // onto — a record that contradicts itself about every commit in range.
+    //
+    // This comes before the cleanliness check because an interruption after
+    // the refs moved leaves the index describing the commit the branch moved
+    // off, which reads as a worktree full of edits.
+    if let Some(intent) = store.rewrite_intent()? {
+        return Ok(Opened::Finished(resume(ctx, store, &branch, &intent)?));
+    }
+    // A rewrite that moved the branch out from under uncommitted work would
+    // leave the operator holding a diff against a commit that no longer
+    // exists.
+    if !gitio::is_clean(&ctx.cwd)? {
+        bail!("the worktree has uncommitted changes; commit or stash them first");
+    }
+    Ok(Opened::Branch(branch))
+}
+
+/// One mode's walk, in the terms every mode's remainder is the same in: what
+/// the walk considered, what it replaced, and what the record is to say.
+struct Walked {
+    branch: String,
+    from: String,
+    head: String,
+    /// How many commits the walk read, which is what "changed none of them"
+    /// counts.
+    considered: usize,
+    mapping: BTreeMap<String, Option<String>>,
+    /// Commits recreated with a header this module does not interpret, and
+    /// which headers those were.
+    carried: Vec<(String, Vec<String>)>,
+    reason: String,
+    tool: &'static str,
+}
+
+impl Walked {
+    fn over(
+        range: &[String],
+        branch: String,
+        from: String,
+        head: String,
+        tool: &'static str,
+    ) -> Self {
+        Walked {
+            branch,
+            from,
+            head,
+            considered: range.len(),
+            mapping: BTreeMap::new(),
+            carried: Vec::new(),
+            reason: String::new(),
+            tool,
+        }
+    }
+
+    /// Write one commit as the walk now has it, and record the move unless
+    /// the object that came back is the object it started as.
+    fn recreated(
+        &mut self,
+        cwd: &Path,
+        old: &str,
+        commit: &gitio::RawCommit,
+        sign: Option<Option<&str>>,
+    ) -> Result<()> {
         // `commit-tree` writes a fixed set of headers in a fixed order from
         // the parts it is given, so a commit whose header text it cannot
         // spell back — one carrying `mergetag`, one whose headers sit in
@@ -88,21 +231,50 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         // is assembled here instead. The common case stays with
         // `commit-tree`, where Git makes the signature itself.
         let new = if commit.commit_tree_writes_it_back() {
-            gitio::commit_tree_as(&cwd, &commit, sign)?
+            gitio::commit_tree_as(cwd, commit, sign)?
         } else {
             let fields = commit.extra_header_fields();
             if !fields.is_empty() {
-                carried.push((old.clone(), fields));
+                self.carried.push((old.to_string(), fields));
             }
-            gitio::write_commit_object(&cwd, &commit, sign)?
+            gitio::write_commit_object(cwd, commit, sign)?
         };
         // A commit whose parents and content are unchanged and which gained no
         // signature is the commit it started as. Recording that as a rewrite
         // would claim a move that did not happen.
-        if &new != old {
-            mapping.insert(old.clone(), Some(new));
+        if new != old {
+            self.mapping.insert(old.to_string(), Some(new));
         }
+        Ok(())
     }
+}
+
+/// Everything a rewrite does once its commits exist: plan the ref moves,
+/// report a dry run, write the intent, apply it, and say what happened.
+///
+/// This is the whole of a rewrite that has nothing to do with what the mode
+/// changed about a commit, which is why every mode ends here: a second way to
+/// move refs or record a map is a second set of answers to how an
+/// interruption is finished.
+fn complete(
+    ctx: &Ctx,
+    store: &Store,
+    walked: Walked,
+    sign: Option<Option<&str>>,
+    dry_run: bool,
+    retag: bool,
+) -> Result<i32> {
+    let cwd = ctx.cwd.clone();
+    let Walked {
+        branch,
+        from,
+        head,
+        considered,
+        mapping,
+        carried,
+        reason,
+        tool,
+    } = walked;
     for (old, fields) in &carried {
         println!(
             "carried through on {}: the {} header",
@@ -113,12 +285,13 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
     if mapping.is_empty() {
         println!(
             "recreating {} changed none of them",
-            plural(range.len(), "commit")
+            plural(considered, "commit")
         );
         return Ok(0);
     }
 
-    if args.dry_run {
+    let mut moves = plan_ref_moves(&cwd, &branch, &from, &mapping, retag)?;
+    if dry_run {
         for (old, new) in &mapping {
             println!("{old} {}", new.as_deref().unwrap_or("dropped"));
         }
@@ -126,6 +299,24 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
             "{} would be rewritten; nothing was moved or recorded",
             plural(mapping.len(), "commit")
         );
+        // The tags are the half of a rewrite that is a decision rather than a
+        // consequence, so a preview that stopped at the map would leave the
+        // operator to run the real thing to find out what it does to a
+        // release. No tag object is written to say it: the plan names the
+        // commit each tag would be recreated on, which is what the decision
+        // is about.
+        for planned in &moves.retags {
+            println!(
+                "would re-point {}: tag object {} onto {}{}",
+                planned.name,
+                short(&planned.old),
+                short(&planned.target),
+                unsigned_note(planned.signed && sign.is_none())
+            );
+        }
+        for name in &moves.left {
+            println!("would leave alone: {name}");
+        }
         return Ok(0);
     }
 
@@ -133,7 +324,7 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         .get(&head)
         .and_then(|new| new.clone())
         .unwrap_or_else(|| head.clone());
-    let mut moves = plan_ref_moves(&cwd, &branch, &from, &mapping, sign, args.retag)?;
+    let retagged = write_retags(&cwd, &mut moves, sign)?;
     // The branch moves inside the same transaction as everything else. Moving
     // it last, on its own, is what leaves the refs arc keeps on one history
     // and the branch on another.
@@ -148,8 +339,8 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         schema_version: crate::model::SCHEMA_VERSION,
         branch: branch.clone(),
         from: from.clone(),
-        reason: format!("re-signed {branch} from {}", short(&from)),
-        tool: Some("arc rewrite sign".to_string()),
+        reason,
+        tool: Some(tool.to_string()),
         mapping: mapping.clone(),
         refs: moves.moves.clone(),
         created_at: chrono::Utc::now(),
@@ -159,7 +350,7 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
     // visible, so what it is about to do is on disk first.
     store.write_rewrite_intent(&intent)?;
     interrupted_after("intent")?;
-    let event_id = apply(ctx, &store, &intent)?;
+    let event_id = apply(ctx, store, &intent)?;
 
     println!(
         "{} rewritten on {branch}; head is now {}",
@@ -168,17 +359,13 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
     );
     println!("{} moved", plural(intent.refs.len(), "ref"));
     println!("rewrite recorded as {event_id}");
-    for retag in &moves.retagged {
+    for retag in &retagged {
         println!(
             "re-pointed {}: tag object {} is now {}{}",
             retag.name,
             short(&retag.old),
             short(&retag.new),
-            if retag.signature_dropped {
-                ", unsigned because the rewrite signed nothing"
-            } else {
-                ""
-            }
+            unsigned_note(retag.signature_dropped)
         );
     }
     for name in &moves.left {
@@ -199,6 +386,14 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         );
     }
     Ok(0)
+}
+
+/// What a tag recreation says about a signature it could not make.
+fn unsigned_note(dropped: bool) -> &'static str {
+    match dropped {
+        true => ", unsigned because the rewrite signs nothing",
+        false => "",
+    }
 }
 
 /// Finish a rewrite an earlier run left half-applied.
@@ -424,8 +619,18 @@ struct RefMoves {
     /// Branches whose own commits sit on top of the rewritten range, so
     /// moving the ref would not help: they need replaying.
     stranded: Vec<String>,
-    /// Annotated tags recreated on the commit that replaced their target.
-    retagged: Vec<Retag>,
+    /// Annotated tags to recreate on the commit that replaced their target.
+    retags: Vec<PlannedRetag>,
+}
+
+/// One annotated tag a rewrite is to recreate, as the plan knows it: the tag
+/// object the ref names, the commit it is to name instead, and whether it
+/// carries a signature a recreation would have to make again.
+struct PlannedRetag {
+    name: String,
+    old: String,
+    target: String,
+    signed: bool,
 }
 
 /// One annotated tag recreated on a rewritten commit.
@@ -448,21 +653,25 @@ struct Retag {
 ///
 /// An annotated tag is re-pointed only when asked for: re-pointing one means
 /// writing a new tag object, which is a decision about somebody's release
-/// rather than a consequence of re-signing a branch. Left alone, it keeps
+/// rather than a consequence of rewriting a branch. Left alone, it keeps
 /// naming the commit it named, which is on the line the rewrite replaced.
+///
+/// Nothing here writes an object, so a rewrite can be described before it is
+/// performed. The tag objects a re-pointing needs are written by
+/// [`write_retags`], in the phase that is allowed to change what the
+/// repository holds.
 fn plan_ref_moves(
     cwd: &Path,
     branch: &str,
     from: &str,
     mapping: &BTreeMap<String, Option<String>>,
-    sign: Option<Option<&str>>,
     retag: bool,
 ) -> Result<RefMoves> {
     let mut moves = RefMoves {
         moves: BTreeMap::new(),
         left: Vec::new(),
         stranded: Vec::new(),
-        retagged: Vec::new(),
+        retags: Vec::new(),
     };
     let successor = |old: &str| mapping.get(old).and_then(|new| new.clone());
     for (name, value) in gitio::list_refs(cwd, "refs/arc/")? {
@@ -496,53 +705,62 @@ fn plan_ref_moves(
         if kind == "commit" {
             moves.moves.insert(name, RefMove { old: object, new });
         } else if retag {
-            let retagged = retag_onto(cwd, &name, &object, &new, sign)?;
-            moves.moves.insert(
+            moves.retags.push(PlannedRetag {
                 name,
-                RefMove {
-                    old: retagged.old.clone(),
-                    new: retagged.new.clone(),
-                },
-            );
-            moves.retagged.push(retagged);
+                signed: gitio::read_tag(cwd, &object)?.signed,
+                old: object,
+                target: new,
+            });
         } else {
             moves.left.push(format!(
                 "{name} is an annotated tag naming a replaced commit; `git describe` and the \
                  changelog projection have no release boundary until it is re-pointed, which \
-                 `arc rewrite sign --retag` does"
+                 `--retag` does"
             ));
         }
     }
     Ok(moves)
 }
 
-/// Recreate one annotated tag on the commit that replaced its target.
+/// Recreate each planned tag on the commit that replaced its target, and add
+/// the ref move that names the object written for it.
 ///
 /// The tag name, message, tagger and date are the original's, so the only
-/// thing the new object says differently is which commit it names. It is
-/// signed when the original was and a key is available; a rewrite that signs
-/// nothing cannot sign a tag either, and dropping the signature is reported
-/// rather than passed off as the tag it recreated.
+/// thing a new object says differently is which commit it names. It is signed
+/// when the original was and a key is available; a rewrite that signs nothing
+/// cannot sign a tag either, and dropping the signature is reported rather
+/// than passed off as the tag it recreated.
 ///
-/// The object is written here and the ref moved later, alongside every other
-/// ref: an unreferenced tag object changes nothing about what the repository
-/// says, so a rewrite that fails between the two leaves no tag half-moved.
-fn retag_onto(
+/// The objects are written here and the refs moved later, alongside every
+/// other ref: an unreferenced tag object changes nothing about what the
+/// repository says, so a rewrite that fails between the two leaves no tag
+/// half-moved.
+fn write_retags(
     cwd: &Path,
-    name: &str,
-    object: &str,
-    target: &str,
+    moves: &mut RefMoves,
     sign: Option<Option<&str>>,
-) -> Result<Retag> {
-    let mut tag = gitio::read_tag(cwd, object)?;
-    tag.object = target.to_string();
-    let sign = if tag.signed { sign } else { None };
-    Ok(Retag {
-        name: name.to_string(),
-        old: object.to_string(),
-        new: gitio::write_tag_object(cwd, &tag, sign)?,
-        signature_dropped: tag.signed && sign.is_none(),
-    })
+) -> Result<Vec<Retag>> {
+    let mut written = Vec::new();
+    for planned in &moves.retags {
+        let mut tag = gitio::read_tag(cwd, &planned.old)?;
+        tag.object = planned.target.clone();
+        let sign = if tag.signed { sign } else { None };
+        let retag = Retag {
+            name: planned.name.clone(),
+            old: planned.old.clone(),
+            new: gitio::write_tag_object(cwd, &tag, sign)?,
+            signature_dropped: tag.signed && sign.is_none(),
+        };
+        moves.moves.insert(
+            retag.name.clone(),
+            RefMove {
+                old: retag.old.clone(),
+                new: retag.new.clone(),
+            },
+        );
+        written.push(retag);
+    }
+    Ok(written)
 }
 
 fn plural(count: usize, noun: &str) -> String {

@@ -10,7 +10,25 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- `arc rewrite trailers --from <rev> [--drop <key>] [--append <line>]` edits
+  the trailer block of every commit message in range and carries the result
+  through the same map, ref transaction, intent and record as `arc rewrite
+  sign`. A commit is recreated only where the edit changed its message or its
+  ancestry moved, so a commit the edit did not reach keeps the id it had and
+  stays out of the map. The block is the last paragraph when every line in it
+  is a `Key: value` line or an indented continuation, never the subject, and
+  messages are edited as bytes so a message that is not UTF-8 comes through
+  unchanged.
+
 ### Changed
+
+- `--dry-run` on a rewrite also reports each annotated tag it would re-point,
+  or leave alone, in the words the real run uses — the half of a rewrite that
+  is a decision about a release rather than a consequence of the commits.
+  Planning the ref moves no longer writes tag objects, so a preview describes
+  a plan instead of committing to one.
 
 - Every independence surface reads an assumed identity the same way. An
   approval is refused when its effective author matches a contributor on the

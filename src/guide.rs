@@ -523,10 +523,21 @@ HISTORY REWRITES
                        refs and the local branches and tags that point into
                        the range, and record the map. --from defaults to the
                        oldest commit whose signature is missing or made by
-                       another key; --dry-run prints the map and stops;
-                       --retag recreates the annotated tags whose targets
-                       were rewritten. Run again to finish one that was
+                       another key; --dry-run prints the map, the tags it
+                       would re-point or leave alone, and stops; --retag
+                       recreates the annotated tags whose targets were
+                       rewritten. Run again to finish one that was
                        interrupted.
+    arc rewrite trailers --from <rev> [--drop <key>] [--append <line>]
+                       Edit the trailer block of every commit message from
+                       --from through the branch head, and carry the result
+                       through the same map, refs and record. --drop removes
+                       every trailer with that key, matched without case;
+                       --append adds a `Key: value` line the block does not
+                       already carry; both repeat, and at least one is
+                       required. --from is named rather than inferred.
+                       --key, --no-sign, --dry-run and --retag mean what they
+                       mean above.
     arc history rewrite --map <file> --reason <why>
                        Record a rewrite performed elsewhere, from its commit
                        map.
@@ -539,6 +550,16 @@ HISTORY REWRITES
   names each commit that carried such a header. Trees are identical either
   way, which is why tree-keyed gate evidence counts the same on both sides of
   a signing rewrite.
+
+  A trailer edit recreates a commit only when it reached that commit or its
+  ancestry moved: a message the edit leaves alone, under commits it left
+  alone, keeps the id it had and stays out of the map. So a run that names a
+  key nothing carries and a line every commit already has moves nothing. The
+  trailer block is the last paragraph when every line in it is a `Key: value`
+  line or a continuation indented with whitespace, and never the subject; a
+  message with no such paragraph grows one, separated by a blank line.
+  Messages are edited as bytes, so one that is not UTF-8 comes through
+  unchanged.
 
   An annotated tag names its commit through a tag object of its own, so
   moving the ref would not re-point it. Left alone it keeps naming a replaced
