@@ -436,6 +436,11 @@ fn a_dry_run_moves_and_records_nothing() {
         return;
     };
     repo.commit(&repo.root, "one.txt", "one\n", "feat: one");
+    git(
+        &repo.root,
+        &["tag", "-a", "-m", "the first release", "v0.1.0"],
+    );
+    let tag_object = git_out(&repo.root, &["rev-parse", "v0.1.0"]);
     let head = repo.head(&repo.root);
 
     let out = stdout(arc_signing(&repo, &key, &repo.root).args([
@@ -444,6 +449,7 @@ fn a_dry_run_moves_and_records_nothing() {
         "--key",
         &key.fingerprint,
         "--dry-run",
+        "--retag",
     ]));
     assert!(out.contains("nothing was moved or recorded"), "{out}");
     assert!(out.contains(&head), "the map names the head: {out}");
@@ -451,6 +457,30 @@ fn a_dry_run_moves_and_records_nothing() {
     assert!(
         !intent_path(&repo).exists(),
         "a dry run commits to nothing, so there is nothing to finish"
+    );
+    // What a rewrite does to a release is the half of it that is a decision,
+    // so the preview says it — and says it without writing the tag object
+    // that saying it the other way would need.
+    assert!(
+        out.lines()
+            .any(|line| line.starts_with("would re-point refs/tags/v0.1.0:")),
+        "{out}"
+    );
+    assert_eq!(git_out(&repo.root, &["rev-parse", "v0.1.0"]), tag_object);
+    assert_eq!(
+        git_out(
+            &repo.root,
+            &[
+                "cat-file",
+                "--batch-all-objects",
+                "--batch-check=%(objecttype)"
+            ]
+        )
+        .lines()
+        .filter(|kind| *kind == "tag")
+        .count(),
+        1,
+        "a dry run writes no tag object: {out}"
     );
     repo.arc(&repo.root)
         .args(["history", "resolve", &head])
