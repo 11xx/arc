@@ -71,6 +71,9 @@ paths = [
   # and records the map every later reading depends on. A defect here strands
   # the history and the ledger's account of it together.
   "src/commands/rewrite.rs",
+  # Edits the bytes of every commit message a trailer rewrite touches. A wrong
+  # block boundary rewrites prose while claiming to have edited a trailer.
+  "src/trailers.rs",
 ]
 
 # Roots inside which classification is closed: every tracked file under one of
