@@ -154,6 +154,19 @@ struct BacklogSelection {
     show_unreachable: bool,
 }
 
+/// How the journal tiers in this report were selected: the boundary, what the
+/// counts mean, and where the undated rows went.
+#[derive(Serialize)]
+struct JournalSelection {
+    /// The cutoff, normalized to RFC 3339; null reports the whole queue.
+    since: Option<String>,
+    /// `arrivals` under a cutoff, `outstanding` without.
+    journal_counts: &'static str,
+    /// Whether a cutoff is active — exactly `since.is_some()`, carried as a
+    /// field so a consumer need not re-derive presence from a nullable.
+    includes_unknown_time: bool,
+}
+
 impl BacklogSelection {
     /// The command that re-runs this report as itemized JSON. The expanded
     /// form carries the resolved scope — explicit `--under` for a scoped
@@ -343,6 +356,10 @@ fn workspace_inbox(stores: &[(String, Store)], json: bool) -> Result<()> {
 struct Backlog {
     schema: &'static str,
     scope: BacklogScope,
+    /// How the journal tiers were selected: the cutoff, what the counts mean,
+    /// and whether undated rows ride inside them. The scope object stands
+    /// beside it unchanged.
+    selection: JournalSelection,
     summary: BacklogSummary,
     projects: Vec<ProjectBacklog>,
     unreachable: Vec<UnreachableProject>,
@@ -361,6 +378,11 @@ struct BacklogSummary {
     open_items: usize,
     later_items: usize,
     feature_requests: usize,
+    /// Journal rows whose filename stamp does not parse, selected into the
+    /// tiers above. They ride inside the tier counts — a delta that dropped
+    /// what it could not date would under-report — and are counted here so
+    /// the inclusion is visible rather than accidental.
+    unknown_time_items: usize,
     unreachable: usize,
 }
 
@@ -389,13 +411,22 @@ impl BacklogSummary {
                 .iter()
                 .map(|project| project.feature_requests)
                 .sum(),
+            unknown_time_items: projects
+                .iter()
+                .map(|project| project.unknown_time_items.len())
+                .sum(),
             unreachable: unreachable.len(),
         }
     }
 
     fn render(&self) {
+        let unknown = if self.unknown_time_items > 0 {
+            format!(", {} unknown-time", self.unknown_time_items)
+        } else {
+            String::new()
+        };
         println!(
-            "summary: {} projects; {} needs-review; {} debt-owed ({}); {} no-patchset; journal {} open, {} later, {} feature-request; {} unreachable",
+            "summary: {} projects; {} needs-review; {} debt-owed ({}); {} no-patchset; journal {} open, {} later, {} feature-request{unknown}; {} unreachable",
             self.projects,
             self.needs_review,
             self.debt_owed,
@@ -547,6 +578,11 @@ struct ProjectBacklog {
     open_items: usize,
     later_items: usize,
     feature_requests: usize,
+    /// This project's selected rows whose stamp does not parse, included in
+    /// the tier counts above. Empty without an active cutoff, which counts
+    /// everything.
+    #[serde(skip_serializing_if = "TierIsEmpty::is_empty")]
+    unknown_time_items: Vec<crate::journal::ArtifactEntry>,
     /// The primary tier's oldest entry, in days. A one-item queue never looks
     /// like a backlog from inside the project; across projects it is visible.
     oldest_open_days: Option<u64>,
@@ -559,6 +595,15 @@ struct ProjectBacklog {
     /// disagree. Absent unless asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     items: Option<BacklogItems>,
+}
+
+/// `skip_serializing_if` needs a path; a one-arm impl names the predicate.
+struct TierIsEmpty;
+
+impl TierIsEmpty {
+    fn is_empty(tier: &[crate::journal::ArtifactEntry]) -> bool {
+        tier.is_empty()
+    }
 }
 
 #[derive(Serialize)]
@@ -705,27 +750,27 @@ fn workspace_backlog(
         let open_queue = crate::journal::collect_open_in(ctx, &project.journal_dir, &anchor, None)?;
         // Under --since the counts mean "filed since", not "outstanding": a
         // delta that reported the whole queue beside a delta heading would read
-        // as a full report and be believed as one.
-        let (open_items, later_items, feature_requests) = match cutoff {
-            Some(cutoff) => open_queue.tier_counts_since(cutoff),
-            None => open_queue.tier_counts(),
-        };
+        // as a full report and be believed as one. Rows whose stamp does not
+        // parse ride inside the tiers either way and are mirrored into their
+        // own count, so the inclusion is a stated fact.
+        let tiers = crate::journal::TierSelection::of(&open_queue, cutoff);
+        let open_items = tiers.open.len();
+        let later_items = tiers.later.len();
+        let feature_requests = tiers.feature_requests.len();
+        let unknown_rows: Vec<crate::journal::ArtifactEntry> = tiers
+            .unknown_time
+            .iter()
+            .map(|entry| (*entry).clone())
+            .collect();
         let backlog_items = if show_items {
-            let (open, later, feature_requests) = match cutoff {
-                Some(cutoff) => open_queue.tiers_since(cutoff),
-                None => {
-                    let (open, later, feature_requests) = open_queue.tiers();
-                    (
-                        open.iter().collect(),
-                        later.iter().collect(),
-                        feature_requests.iter().collect(),
-                    )
-                }
-            };
             Some(BacklogItems {
-                open: open.into_iter().cloned().collect(),
-                later: later.into_iter().cloned().collect(),
-                feature_requests: feature_requests.into_iter().cloned().collect(),
+                open: tiers.open.iter().map(|entry| (*entry).clone()).collect(),
+                later: tiers.later.iter().map(|entry| (*entry).clone()).collect(),
+                feature_requests: tiers
+                    .feature_requests
+                    .iter()
+                    .map(|entry| (*entry).clone())
+                    .collect(),
             })
         } else {
             None
@@ -740,6 +785,7 @@ fn workspace_backlog(
             open_items,
             later_items,
             feature_requests,
+            unknown_time_items: unknown_rows,
             // Age is a property of the whole queue, so it would contradict
             // counts that mean "filed since". A delta reports arrivals only.
             oldest_open_days: cutoff
@@ -764,8 +810,17 @@ fn workspace_backlog(
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/11",
+                schema: "arc-workspace-backlog/12",
                 scope: scope.view(),
+                selection: JournalSelection {
+                    since: cutoff.map(|c| c.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+                    journal_counts: if cutoff.is_some() {
+                        "arrivals"
+                    } else {
+                        "outstanding"
+                    },
+                    includes_unknown_time: cutoff.is_some(),
+                },
                 summary,
                 projects,
                 unreachable,
@@ -777,6 +832,12 @@ fn workspace_backlog(
     println!("scope: {}", scope.text());
     if let Some(raw) = since {
         println!("since {raw}: journal counts are what was filed since, not what is outstanding");
+        if summary.unknown_time_items > 0 {
+            println!(
+                "  {} item(s) with an unreadable timestamp are included and counted as unknown-time",
+                summary.unknown_time_items
+            );
+        }
     }
     summary.render();
     if projects.is_empty() && unreachable.is_empty() {

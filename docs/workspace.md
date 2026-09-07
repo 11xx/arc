@@ -29,7 +29,17 @@ taken by the slug: it has answered who owns it.
 `arc begin` registers the project, so opening a change is enough to make a
 repository discoverable even if nothing is ever written to its journal. A
 `[journals] dirs` scope registers its project too, which is how a directory
-that is not a Git repository takes part.
+that is not a Git repository takes part. Journal timestamps are read by one
+parser over the canonical `YYYYMMDDTHHMMSSZ` stamp and the legacy form
+without the `Z`; both mean UTC and both filter identically under `--since`.
+A filename whose stamp parses as neither stays visible with `filed_at: null`
+and `timestamp_status: "invalid"`: it rides inside the tier it was filed
+into, and under an active cutoff it is additionally counted as
+`unknown_time_items` — per project and in the summary — because a delta that
+silently dropped what it could not date would under-report. The `selection`
+object states what the journal counts mean (`arrivals` under a cutoff,
+`outstanding` without), the normalized cutoff in `since`, and whether a
+cutoff is active at all.
 
 A cold archive is identified structurally rather than by its name: `<x>-archive`
 is skipped only when journal `<x>` is also present, so a project genuinely
@@ -63,7 +73,7 @@ previous-run marker — the boundary is supplied by the caller, so the command
 stays derived. `--items` names every actionable artifact under each project in
 the same open, later, and feature-request tier order used by `journal open`.
 Each item can include its `verification` stamp, and the text rows use the same
-renderer as `journal open`. JSON is versioned `arc-workspace-backlog/11` and
+renderer as `journal open`. JSON is versioned `arc-workspace-backlog/12` and
 states whether its scope is global or beneath one canonical path. Missing
 anchors are filtered by their recorded path, so an unreachable project inside
 a requested workspace remains visible without unrelated orphans leaking in.

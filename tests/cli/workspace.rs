@@ -156,7 +156,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/11");
+    assert_eq!(value["schema"], "arc-workspace-backlog/12");
     assert_eq!(value["scope"]["mode"], "global");
     assert_backlog_summary_matches_rows(&value);
     let project = value["projects"]
@@ -508,7 +508,7 @@ fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
     let mut scoped = repo.arc(&workspace);
     scoped.args(["workspace", "backlog", "--here", "--json"]);
     let value = json_stdout(&mut scoped);
-    assert_eq!(value["schema"], "arc-workspace-backlog/11");
+    assert_eq!(value["schema"], "arc-workspace-backlog/12");
     assert_eq!(value["scope"]["mode"], "under");
     assert_eq!(
         value["scope"]["under"],
@@ -761,7 +761,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/11");
+    assert_eq!(value["schema"], "arc-workspace-backlog/12");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {
@@ -1438,6 +1438,19 @@ fn workspace_backlog_detail_hint_preserves_selection() {
         .arg("-c")
         .arg(&hint)
         .current_dir(&repo_root)
+        // The hint names bare `arc`; put the binary under test first on PATH
+        // so the follow exercises this build, not an installed one.
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                PathBuf::from(env!("CARGO_BIN_EXE_arc"))
+                    .parent()
+                    .and_then(|dir| dir.to_str())
+                    .unwrap_or_default(),
+                std::env::var("PATH").as_deref().unwrap_or_default(),
+            ),
+        )
         .env("HOME", &repo.home)
         .env("ARC_SANDBOX", &repo.home)
         .env("ARC_ACTOR", "tester")
@@ -1483,4 +1496,159 @@ fn workspace_backlog_detail_hint_preserves_selection() {
             .args(["workspace", "backlog", "--items", "--json"]),
     );
     serde_json::from_str::<serde_json::Value>(&text).unwrap();
+}
+
+/// One timestamp interpretation across the queue: a legacy stamp (no `Z`)
+/// filters under a cutoff exactly as the canonical form of the same instant,
+/// an unreadable stamp stays visible and is counted as unknown time instead
+/// of being dropped or dated, and the JSON states the selection itself.
+#[test]
+fn workspace_backlog_timestamp_interpretation_is_explicit() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+    let journal = journal_dir_of(&repo);
+    // Five July 2026 rows: three canonical, two legacy, all the same month.
+    for (file, kind) in [
+        ("20260701T000000Z-canon-open-todo.md", "todo"),
+        ("20260702T000000-canon-open-todo.md", "todo"),
+        ("20260703T000000Z-canon-open-handoff.md", "handoff"),
+        ("20260704T000000Z-canon-open-later.md", "later"),
+        (
+            "20260705T000000-canon-open-feature-request.md",
+            "feature-request",
+        ),
+        ("20260706T0000XX-strictly-not-a-stamp-todo.md", "todo"),
+    ] {
+        fs::write(journal.join(file), format!("# {}\n\nbody\n", kind)).unwrap();
+    }
+
+    // A cutoff between the two months: five July rows arrive, whatever form
+    // their stamp was written in; the malformed one is unknown time.
+    let mut report = repo.arc(&repo.root);
+    report.args([
+        "workspace",
+        "backlog",
+        "--items",
+        "--json",
+        "--since",
+        "20260601T000000Z",
+    ]);
+    let value = json_stdout(&mut report);
+    assert_eq!(value["schema"], "arc-workspace-backlog/12");
+    let selection = &value["selection"];
+    assert_eq!(selection["since"], "2026-06-01T00:00:00Z", "{}", selection);
+    assert_eq!(selection["journal_counts"], "arrivals");
+    assert_eq!(selection["includes_unknown_time"], true);
+
+    let project = value["projects"].as_array().unwrap().first().unwrap();
+    // The undated row rides inside its tier (fail-open visibility), so open
+    // counts 3 dated + 1 unknown; the separate count states the subset.
+    assert_eq!(project["open_items"], 4, "{}", project);
+    assert_eq!(project["later_items"], 1);
+    assert_eq!(project["feature_requests"], 1);
+    let unknown = project["unknown_time_items"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .clone();
+    assert_eq!(unknown.len(), 1, "{}", project);
+    assert_eq!(
+        unknown[0]["file"],
+        "20260706T0000XX-strictly-not-a-stamp-todo.md"
+    );
+    assert!(unknown[0]["filed_at"].is_null(), "{}", unknown[0]);
+    assert_eq!(unknown[0]["timestamp_status"], "invalid");
+    assert_eq!(value["summary"]["unknown_time_items"], 1);
+
+    // Every emitted row states how its stamp read; the malformed one is the
+    // only invalid row in the whole report.
+    // The undated row appears inside its tier listing and is mirrored by
+    // unknown_time_items, which is a pointer to a subset, not a move.
+    let mut all_rows: Vec<&serde_json::Value> = project["items"]["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .collect();
+    all_rows.extend(project["items"]["later"].as_array().unwrap().iter());
+    all_rows.extend(
+        project["items"]["feature_requests"]
+            .as_array()
+            .unwrap()
+            .iter(),
+    );
+    assert_eq!(all_rows.len(), 6, "{}", project);
+    let invalid: Vec<&&serde_json::Value> = all_rows
+        .iter()
+        .filter(|row| row["timestamp_status"] == "invalid")
+        .collect();
+    assert_eq!(invalid.len(), 1, "{}", project);
+    assert_eq!(invalid[0]["file"], unknown[0]["file"]);
+    assert_eq!(invalid[0]["timestamp_status"], "invalid");
+    // A dated row carries both the raw stamp and its RFC 3339 reading.
+    let canonical_row = all_rows
+        .iter()
+        .find(|row| row["file"] == "20260701T000000Z-canon-open-todo.md")
+        .unwrap();
+    assert_eq!(canonical_row["timestamp_status"], "canonical");
+    assert_eq!(canonical_row["filed_at"], "2026-07-01T00:00:00Z");
+    let legacy_row = all_rows
+        .iter()
+        .find(|row| row["timestamp_status"] == "legacy")
+        .unwrap();
+    assert_eq!(legacy_row["file"], "20260702T000000-canon-open-todo.md");
+    assert_eq!(legacy_row["filed_at"], "2026-07-02T00:00:00Z");
+
+    // Same digits, both forms, in an isolated second journal: the two forms
+    // of one instant are identical to the cutoff logic.
+    let repo2 = Repo::new();
+    repo2
+        .arc(&repo2.root)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+    let journal2 = journal_dir_of(&repo2);
+    fs::write(
+        journal2.join("20260801T000000Z-twin-open-todo.md"),
+        "# twin\n",
+    )
+    .unwrap();
+    fs::write(
+        journal2.join("20260801T000000-twin-2-open-todo.md"),
+        "# twin\n",
+    )
+    .unwrap();
+    // Before the instant: both forms arrive. After it: both drop, and the
+    // report is empty for that project. The two forms of one instant filter
+    // identically on both sides of the boundary.
+    let mut report = repo2.arc(&repo2.root);
+    report.args([
+        "workspace",
+        "backlog",
+        "--items",
+        "--json",
+        "--since",
+        "2026-07-31T23:59:59Z",
+    ]);
+    let value = json_stdout(&mut report);
+    let open_rows = value["projects"].as_array().unwrap()[0]["items"]["open"]
+        .as_array()
+        .unwrap();
+    assert_eq!(open_rows.len(), 2, "{value}");
+    assert_eq!(open_rows[0]["timestamp_status"], "canonical");
+    assert_eq!(open_rows[1]["timestamp_status"], "legacy");
+    assert_eq!(open_rows[0]["filed_at"], open_rows[1]["filed_at"]);
+
+    let mut report = repo2.arc(&repo2.root);
+    report.args([
+        "workspace",
+        "backlog",
+        "--items",
+        "--json",
+        "--since",
+        "2026-08-01T00:00:01Z",
+    ]);
+    let value = json_stdout(&mut report);
+    assert!(value["projects"].as_array().unwrap().is_empty(), "{value}");
 }
