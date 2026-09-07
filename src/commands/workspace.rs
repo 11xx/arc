@@ -8,6 +8,11 @@ use crate::policy::PolicyFile;
 use anyhow::ensure;
 use serde::Serialize;
 
+/// Quote one path as a single POSIX shell argument.
+fn shell_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\\''"))
+}
+
 pub enum WorkspaceView {
     List,
     Inbox,
@@ -133,6 +138,42 @@ fn data_root_stores() -> Result<Vec<(String, Store)>> {
         }
     }
     Ok(stores)
+}
+
+/// The resolved shape of one backlog query, kept so the detail hint can name
+/// the command that reproduces it exactly. `ResolvedWorkspaceScope` holds a
+/// path it owns; this borrows the resolution the report already built.
+enum BacklogScopeRef {
+    Global,
+    Under(String),
+}
+
+struct BacklogSelection {
+    scope: BacklogScopeRef,
+    since: Option<String>,
+    show_unreachable: bool,
+}
+
+impl BacklogSelection {
+    /// The command that re-runs this report as itemized JSON. The expanded
+    /// form carries the resolved scope — explicit `--under` for a scoped
+    /// query, `--global` otherwise — because the bare guide's examples do not
+    /// say where a `--here` report would look if typed elsewhere.
+    fn detail_command(&self) -> String {
+        let mut parts = vec!["arc workspace backlog".to_string()];
+        match &self.scope {
+            BacklogScopeRef::Global => parts.push("--global".to_string()),
+            BacklogScopeRef::Under(path) => parts.push(format!("--under {}", shell_quote(path))),
+        }
+        if let Some(since) = &self.since {
+            parts.push(format!("--since {since}"));
+        }
+        if self.show_unreachable {
+            parts.push("--unreachable".to_string());
+        }
+        parts.push("--items --json".to_string());
+        parts.join(" ")
+    }
 }
 
 fn repo_states(store: &Store) -> Result<BTreeMap<String, ChangeState>> {
@@ -616,6 +657,18 @@ fn workspace_backlog(
         ),
         None => None,
     };
+    // The report is built from `scope` after this; the hint records where it
+    // was resolved to, which is the same fact in the form a command needs.
+    let selection = BacklogSelection {
+        scope: match &scope {
+            ResolvedWorkspaceScope::Global => BacklogScopeRef::Global,
+            ResolvedWorkspaceScope::Under(path) => {
+                BacklogScopeRef::Under(path.display().to_string())
+            }
+        },
+        since: since.map(str::to_string),
+        show_unreachable,
+    };
     let mut projects = Vec::new();
     let mut unreachable = Vec::new();
 
@@ -728,6 +781,9 @@ fn workspace_backlog(
     summary.render();
     if projects.is_empty() && unreachable.is_empty() {
         println!("nothing outstanding in this workspace scope");
+        // Over an empty scope too: this is when a reader is likeliest to
+        // wonder whether the query found nothing or the report was trimmed.
+        println!("detail: {}", selection.detail_command());
         return Ok(());
     }
     for project in &projects {
@@ -862,6 +918,10 @@ fn workspace_backlog(
             }
         }
     }
+    // The footer closes the report, after every project section. Only the
+    // human path carries it: JSON is one parseable value and must not grow a
+    // trailing line.
+    println!("detail: {}", selection.detail_command());
     Ok(())
 }
 

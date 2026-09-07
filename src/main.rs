@@ -2981,18 +2981,29 @@ fn run(cli: Cli) -> Result<i32> {
             let store_root = store::Store::resolve_root(&ctx.cwd)
                 .map(|p| p.display().to_string())
                 .ok();
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "sandbox": cfg.sandbox.as_ref().map(|p| p.display().to_string()),
-                    "ai_home": cfg.ai_home.display().to_string(),
-                    "config_file": cfg.config_path.display().to_string(),
-                    "config_file_exists": cfg.config_path.is_file(),
-                    "worktrees_dir": cfg.worktrees_dir.display().to_string(),
-                    "data_root": cfg.data_root.map(|p| p.display().to_string()),
-                    "store_root_for_cwd": store_root,
-                }))?
-            );
+            // The same resolution `arc journal dir` answers, reported where a
+            // caller already collects paths. Unresolved is a null plus the
+            // resolver's diagnostic, not a failure: config stays usable in a
+            // directory no journal anchors, and answers without creating one.
+            let journal_resolution = journal::resolve_dir(&ctx.cwd);
+            let (journal_dir, journal_error) = match journal_resolution {
+                Ok(dir) => (Some(dir.display().to_string()), None),
+                Err(error) => (None, Some(format!("{error:#}"))),
+            };
+            let mut resolved = serde_json::json!({
+                "sandbox": cfg.sandbox.as_ref().map(|p| p.display().to_string()),
+                "ai_home": cfg.ai_home.display().to_string(),
+                "config_file": cfg.config_path.display().to_string(),
+                "config_file_exists": cfg.config_path.is_file(),
+                "worktrees_dir": cfg.worktrees_dir.display().to_string(),
+                "data_root": cfg.data_root.map(|p| p.display().to_string()),
+                "store_root_for_cwd": store_root,
+                "journal_dir_for_cwd": journal_dir,
+            });
+            if let Some(error) = journal_error {
+                resolved["journal_resolution_error"] = serde_json::json!(error);
+            }
+            println!("{}", serde_json::to_string_pretty(&resolved)?);
             Ok(0)
         }
         Cmd::Sandbox { cmd } => match cmd {

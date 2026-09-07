@@ -34,6 +34,9 @@ SAY WHO YOU ARE (before the first write)
 FROM A WORKSPACE ROOT (outside a project)
   arc workspace backlog --here
                        Discover work beneath this directory without crawling it.
+                       One report ends with the detail command that re-runs it
+                       as itemized JSON for that exact scope; --items selects
+                       the rows and --json selects the rendering.
   cd <anchor>          Enter one project named by the report, then orient there.
 
 ORIENT INSIDE A PROJECT (start here, in this order)
@@ -53,6 +56,11 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          A row occupied by somebody reads `[claimed by <actor>
                          via <harness>: active|expired]`; `--json` carries the
                          same as `availability` and the claims themselves.
+  arc journal dir        The authoritative journal location for the project
+                         you are standing in, honoring ARC_JOURNAL_DIR and
+                         [journals.dirs]; the default path is only a default.
+                         Enter the owning project before resolving another
+                         project's journal.
   arc claim <file.md>    Claim a journal artifact, the way a change is
                          claimed: a lease with a TTL, renewed by working it,
                          released with `arc release-claim <file.md> --outcome

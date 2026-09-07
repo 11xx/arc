@@ -18,8 +18,12 @@ Environment variables override the file: `ARC_WORKTREES_DIR`,
 exactly one repository — highest precedence). `data_root` keys each
 repository by its slugged main path (the project-journal convention:
 `/home/x/code/y` → `-home-x-code-y`), so one root safely serves many
-repositories. `arc config` prints the resolved paths as JSON, and
-`arc doctor` opens with them.
+repositories. `arc config` prints the resolved paths as JSON, including
+`journal_dir_for_cwd` — the string `arc journal dir` resolves from the
+current directory, or null with `journal_resolution_error` carrying the
+resolver's diagnostic when no journal anchors it; config stays usable in an
+unanchored directory and never creates a journal to answer. `arc doctor`
+opens with them.
 
 ### Sandbox
 

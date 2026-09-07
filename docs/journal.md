@@ -10,10 +10,13 @@ journal while artifacts stay plain Markdown any tool-less agent can read and
 write. The canonical agent-written event log is the append-only
 `events.jsonl`, whose versioned `journal-events/1` events can be streamed as
 NDJSON with `journal events [--limit N]`. `dir` prints the resolved journal
-directory (`ARC_JOURNAL_DIR`, then the longest matching absolute path prefix
-in `[journals.dirs]`, then Git identity and
-`<ai_home>/journals/<repo-slug>`, then a recorded anchor in the default
-journal root, then that root's directory for this path's own slug). `dir
+directory for the project you are standing in (`ARC_JOURNAL_DIR`, then the
+longest matching absolute path prefix in `[journals.dirs]`, then Git identity
+and `<ai_home>/journals/<repo-slug>`, then a recorded anchor in the default
+journal root, then that root's directory for this path's own slug) — the
+authoritative location, not merely where arc defaults to creating one. `arc
+config` reports the same resolution as `journal_dir_for_cwd`, so a caller
+collecting paths asks one command. `dir
 --explain` prints the selected source, stable anchor, and directory;
 resolution refuses to guess when no source matches, and refuses ambiguous
 recorded bindings. `note`
