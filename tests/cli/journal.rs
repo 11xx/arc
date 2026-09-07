@@ -11139,14 +11139,21 @@ fn config_reports_journal_dir_for_cwd_across_resolver_sources() {
         serde_json::from_str::<serde_json::Value>(&out).unwrap()
     };
     let got = config_json(&mut repo.arc(&repo.root));
-    assert_eq!(got["journal_dir_for_cwd"], expected_default.display().to_string());
+    assert_eq!(
+        got["journal_dir_for_cwd"],
+        expected_default.display().to_string()
+    );
     assert!(got.get("journal_resolution_error").is_none(), "{got}");
     // Resolution answers without creating the journal.
     assert!(!expected_default.exists());
 
     let env_dir = repo.home.join("env-journal-dir");
-    let got = config_json(&mut repo.arc(&repo.root).env("ARC_JOURNAL_DIR", &env_dir));
-    assert_eq!(got["journal_dir_for_cwd"], env_dir.display().to_string(), "{got}");
+    let got = config_json(repo.arc(&repo.root).env("ARC_JOURNAL_DIR", &env_dir));
+    assert_eq!(
+        got["journal_dir_for_cwd"],
+        env_dir.display().to_string(),
+        "{got}"
+    );
 
     // A linked worktree resolves through the repository's shared root.
     let linked = repo.home.join("linked-config-worktree");
@@ -11176,7 +11183,11 @@ fn config_reports_journal_dir_for_cwd_across_resolver_sources() {
     )
     .unwrap();
     let got = config_json(&mut repo.arc(&repo.root));
-    assert_eq!(got["journal_dir_for_cwd"], override_dir.display().to_string(), "{got}");
+    assert_eq!(
+        got["journal_dir_for_cwd"],
+        override_dir.display().to_string(),
+        "{got}"
+    );
     let dir_out = stdout(repo.arc(&repo.root).args(["journal", "dir"]));
     assert_eq!(PathBuf::from(dir_out.trim()), override_dir);
 
@@ -11190,7 +11201,10 @@ fn config_reports_journal_dir_for_cwd_across_resolver_sources() {
     let got: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(got["journal_dir_for_cwd"].is_null(), "{got}");
     let error = got["journal_resolution_error"].as_str().unwrap();
-    assert!(error.contains("cannot resolve a stable journal anchor"), "{error}");
+    assert!(
+        error.contains("cannot resolve a stable journal anchor"),
+        "{error}"
+    );
     cmd.assert().success();
     assert!(!unanchored.join(".arc").exists(), "config created state");
     assert!(

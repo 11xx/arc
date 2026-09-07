@@ -1343,21 +1343,23 @@ fn workspace_backlog_detail_hint_preserves_selection() {
         .args(["journal", "log", "registered", "the project exists"])
         .assert()
         .success();
-    fs::rename(&repo.root, &scope.join("repo")).unwrap();
+    fs::rename(&repo.root, scope.join("repo")).unwrap();
     let repo_root = scope.join("repo");
     // The quoting under test: a single quote becomes '\'' inside a
     // single-quoted POSIX shell argument.
-    let quoted_scope = format!(
-        "'{}'",
-        scope.display().to_string().replace('\'', "'\\''")
-    );
+    let quoted_scope = format!("'{}'", scope.display().to_string().replace('\'', "'\\''"));
 
     let command_line = |args: &[&str], cwd: &Path| {
         let text = stdout(repo.arc(cwd).args(args));
         text.lines()
             .rev()
             .find(|line| line.trim_start().starts_with("detail:"))
-            .map(|line| line.trim_start().strip_prefix("detail: ").unwrap().to_string())
+            .map(|line| {
+                line.trim_start()
+                    .strip_prefix("detail: ")
+                    .unwrap()
+                    .to_string()
+            })
             .unwrap_or_else(|| panic!("no detail hint in:\n{text}"))
     };
 
@@ -1368,9 +1370,7 @@ fn workspace_backlog_detail_hint_preserves_selection() {
     );
     assert_eq!(
         hint,
-        format!(
-            "arc workspace backlog --under {quoted_scope} --items --json",
-        )
+        format!("arc workspace backlog --under {quoted_scope} --items --json",)
     );
 
     // --here resolves to the caller's directory; --since survives.
@@ -1448,10 +1448,9 @@ fn workspace_backlog_detail_hint_preserves_selection() {
         .env_remove("ARC_DATA_ROOT");
     let followed_out = shell.output().unwrap();
     assert!(followed_out.status.success(), "{hint}: {followed_out:?}");
-    let actual: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&followed_out.stdout).unwrap(),
-    )
-    .unwrap_or_else(|error| panic!("{hint}: {error}"));
+    let actual: serde_json::Value =
+        serde_json::from_str(std::str::from_utf8(&followed_out.stdout).unwrap())
+            .unwrap_or_else(|error| panic!("{hint}: {error}"));
     assert_eq!(actual["scope"], expected["scope"], "{hint}");
     assert_eq!(actual["summary"], expected["summary"], "{hint}");
     assert_eq!(actual["projects"], expected["projects"], "{hint}");
@@ -1460,10 +1459,12 @@ fn workspace_backlog_detail_hint_preserves_selection() {
     // An empty report still names the command that would itemize it.
     let empty = outer.path().join("empty");
     fs::create_dir_all(&empty).unwrap();
-    let text = stdout(
-        repo.arc(&repo_root)
-            .args(["workspace", "backlog", "--under", empty.to_str().unwrap()]),
-    );
+    let text = stdout(repo.arc(&repo_root).args([
+        "workspace",
+        "backlog",
+        "--under",
+        empty.to_str().unwrap(),
+    ]));
     assert!(
         text.contains(&format!(
             "arc workspace backlog --under '{}' --items --json",
@@ -1477,6 +1478,9 @@ fn workspace_backlog_detail_hint_preserves_selection() {
         .args(["workspace", "backlog", "--items", "--json"])
         .assert()
         .success();
-    let text = stdout(repo.arc(&repo_root).args(["workspace", "backlog", "--items", "--json"]));
+    let text = stdout(
+        repo.arc(&repo_root)
+            .args(["workspace", "backlog", "--items", "--json"]),
+    );
     serde_json::from_str::<serde_json::Value>(&text).unwrap();
 }

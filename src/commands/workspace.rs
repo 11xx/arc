@@ -163,9 +163,7 @@ impl BacklogSelection {
         let mut parts = vec!["arc workspace backlog".to_string()];
         match &self.scope {
             BacklogScopeRef::Global => parts.push("--global".to_string()),
-            BacklogScopeRef::Under(path) => {
-                parts.push(format!("--under {}", shell_quote(path)))
-            }
+            BacklogScopeRef::Under(path) => parts.push(format!("--under {}", shell_quote(path))),
         }
         if let Some(since) = &self.since {
             parts.push(format!("--since {since}"));
