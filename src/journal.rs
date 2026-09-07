@@ -4082,7 +4082,7 @@ fn ensure_capability(
 /// patience.
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum DeliveryState {
+pub(crate) enum DeliveryState {
     /// Posed before the journal recorded deliveries at all, so its silence is
     /// a missing record rather than a missing delivery.
     Unknown,
@@ -4111,12 +4111,12 @@ impl DeliveryState {
 /// answer is a different fact from one asked once, and erasing the earlier
 /// attempt would hide the more urgent of the two.
 #[derive(Serialize)]
-struct QuestionDelivery {
+pub(crate) struct QuestionDelivery {
     to: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     handle: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    actor: Option<String>,
+    pub(crate) actor: Option<String>,
     harness: String,
     session: String,
     ts: String,
@@ -4454,48 +4454,48 @@ fn retract(ctx: &Ctx, filename: &str, target: &str, body_file: &str) -> Result<i
 }
 
 #[derive(Serialize)]
-struct OpenQuestion {
-    file: String,
-    topic: String,
-    question: String,
-    placement: String,
+pub(crate) struct OpenQuestion {
+    pub(crate) file: String,
+    pub(crate) topic: String,
+    pub(crate) question: String,
+    pub(crate) placement: String,
     /// Who may settle it: `person` when absent (the classic default),
     /// `anyone`, or `delegate:<name>`. An agent reading this view knows
     /// whether it may answer or must prompt; a delegate knows the question
     /// is waiting on it specifically.
     #[serde(skip_serializing_if = "Option::is_none")]
-    settle_by: Option<String>,
+    pub(crate) settle_by: Option<String>,
     /// The prose the question was posed with, so a prompt can show what is
     /// being asked without the caller opening the artifact.
     #[serde(skip_serializing_if = "Option::is_none")]
-    heading: Option<String>,
+    pub(crate) heading: Option<String>,
     /// Who ran the command that posed it, when somebody declared an actor.
     #[serde(skip_serializing_if = "Option::is_none")]
-    actor: Option<String>,
+    pub(crate) actor: Option<String>,
     /// The subject it was posed for, when the invocation represented one. A
     /// delegate reading this queue tells a question a lead posed for it from
     /// one the lead posed as itself.
     #[serde(skip_serializing_if = "Option::is_none")]
-    on_behalf_of: Option<String>,
-    asked_at: String,
+    pub(crate) on_behalf_of: Option<String>,
+    pub(crate) asked_at: String,
     /// Whether anybody was asked, which is a different fact from whether the
     /// question is answered: an unasked question needs a prompt, a delivered
     /// one needs patience, and a queue that cannot tell them apart reports
     /// both as work.
-    delivery: DeliveryState,
+    pub(crate) delivery: DeliveryState,
     /// Every recorded delivery, oldest first. A repeat attempt is another row
     /// rather than a replacement: a question asked twice and still unanswered
     /// is more urgent than one asked once, and erasing the earlier attempt
     /// would hide exactly that.
-    deliveries: Vec<QuestionDelivery>,
+    pub(crate) deliveries: Vec<QuestionDelivery>,
     /// The options to offer, each with how many positions argued that branch.
     /// A branch nobody argued is visible before the question is answered,
     /// which is the point of arguing them first.
-    options: Vec<QuestionOption>,
+    pub(crate) options: Vec<QuestionOption>,
 }
 
 #[derive(Serialize)]
-struct QuestionOption {
+pub(crate) struct QuestionOption {
     option: String,
     positions: usize,
 }
@@ -4779,6 +4779,62 @@ fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
     Ok(open)
 }
 
+/// Where the artifact a question sits on stands in its lifecycle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum QuestionDisposition {
+    /// The artifact is still in the hot queue.
+    Open,
+    /// The artifact was consumed with an outcome; the question is an
+    /// unresolved record on a closed file, not permission to reopen it.
+    Consumed,
+    /// The hot file is gone and the cold archive does not hold it either.
+    Missing,
+    /// The file sits in the cold archive.
+    Archived,
+}
+
+/// One unanswered question projected for a cross-project view, with the
+/// disposition of the artifact it sits on.
+#[derive(Serialize)]
+pub(crate) struct WorkspaceQuestion {
+    #[serde(flatten)]
+    pub(crate) question: OpenQuestion,
+    pub(crate) disposition: QuestionDisposition,
+}
+
+/// The read-only question projection over one explicit journal directory,
+/// shared by `journal questions` and the workspace backlog. The existing
+/// reducer is the only reading: no Markdown reinterpretation, no recount.
+/// All unanswered questions are returned whatever became of their artifact;
+/// the disposition is what lets a caller count only the ones worth acting on.
+pub(crate) fn open_questions_with_disposition(dir: &Path) -> Result<Vec<WorkspaceQuestion>> {
+    let events = read_events(dir)?;
+    let questions = open_questions(dir)?;
+    Ok(questions
+        .into_iter()
+        .map(|question| {
+            let file = &question.file;
+            let disposition = if is_consumed(&events, file) {
+                QuestionDisposition::Consumed
+            } else if dir.join(file).is_file() {
+                QuestionDisposition::Open
+            } else {
+                let archived = archive_dir(dir).join(file);
+                if archived.is_file() {
+                    QuestionDisposition::Archived
+                } else {
+                    QuestionDisposition::Missing
+                }
+            };
+            WorkspaceQuestion {
+                question,
+                disposition,
+            }
+        })
+        .collect())
+}
+
 /// Which side of the offered menu an answer came from.
 #[derive(Clone, Copy)]
 enum Chosen<'a> {
@@ -4811,7 +4867,7 @@ pub(crate) struct JournalEvent {
     /// so by omission instead of naming a person nobody named. An actor arc
     /// fell back to is not a claim that anyone acted, so it is not recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
-    actor: Option<String>,
+    pub(crate) actor: Option<String>,
     /// The subject a delegated invocation was run for (`--on-behalf-of`),
     /// recorded beside the actor and never in place of one. A lead filing a
     /// note or a position for an executor is two facts — who ran the command,
@@ -4820,7 +4876,7 @@ pub(crate) struct JournalEvent {
     /// invocation represented nobody: no subject is inferred from prose,
     /// model, or session.
     #[serde(skip_serializing_if = "Option::is_none")]
-    on_behalf_of: Option<String>,
+    pub(crate) on_behalf_of: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     topic: String,
@@ -4929,7 +4985,7 @@ pub(crate) struct JournalEvent {
     /// was a narrower rule than the mechanism ever enforced. Optional, so
     /// every question written before the field existed keeps its meaning.
     #[serde(skip_serializing_if = "Option::is_none")]
-    settle_by: Option<String>,
+    pub(crate) settle_by: Option<String>,
     /// Who a `question-delivered` event says was asked, in the same vocabulary
     /// `settle_by` uses: `person`, `anyone`, or `delegate:<name>`. Arc records
     /// that a caller delivered the question; it never sends anything, so this
@@ -8713,10 +8769,10 @@ struct DiscussionQuestion {
     /// settled; before that the distinction between a question nobody
     /// prompted and one whose reply is pending is the whole of what is left
     /// to do.
-    delivery: DeliveryState,
+    pub(crate) delivery: DeliveryState,
     /// Every recorded delivery, oldest first, including those made before an
     /// answer arrived.
-    deliveries: Vec<QuestionDelivery>,
+    pub(crate) deliveries: Vec<QuestionDelivery>,
     /// An opening question is meant to settle a premise before anyone argues.
     /// Set when it is still open and positions exist anyway — the argument
     /// started without the premise it was supposed to rest on.
@@ -8740,9 +8796,9 @@ struct DiscussionBranch {
 struct DiscussionAnswer {
     option: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    actor: Option<String>,
+    pub(crate) actor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    on_behalf_of: Option<String>,
+    pub(crate) on_behalf_of: Option<String>,
 }
 
 /// One position in a round: its stable id, and the same identity pair an
@@ -8751,9 +8807,9 @@ struct DiscussionAnswer {
 struct DiscussionPosition {
     id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    actor: Option<String>,
+    pub(crate) actor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    on_behalf_of: Option<String>,
+    pub(crate) on_behalf_of: Option<String>,
 }
 
 #[derive(Serialize)]

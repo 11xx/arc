@@ -380,6 +380,12 @@ struct BacklogSummary {
     /// no kind, and the meaning every reader gives them is independent-review
     /// debt. A subset of `debt_owed`, not a separate population.
     legacy_debt_owed: usize,
+    /// Unanswered questions sitting on open artifacts across all projects:
+    /// decisions a person could settle now.
+    decision_questions: usize,
+    /// Unanswered questions on consumed, archived, or missing artifacts:
+    /// unresolved records, reported but not ranked as waiting decisions.
+    unresolved_question_records: usize,
     open_items: usize,
     later_items: usize,
     feature_requests: usize,
@@ -415,6 +421,14 @@ impl BacklogSummary {
                 .flat_map(|project| project.debt_owed.iter())
                 .filter(|debt| debt.missing_basis == DebtMissingBasis::LegacyDefault)
                 .count(),
+            decision_questions: projects
+                .iter()
+                .map(|project| project.decision_questions)
+                .sum(),
+            unresolved_question_records: projects
+                .iter()
+                .map(|project| project.open_questions.len() - project.decision_questions)
+                .sum(),
             open_items: projects.iter().map(|project| project.open_items).sum(),
             later_items: projects.iter().map(|project| project.later_items).sum(),
             feature_requests: projects
@@ -440,8 +454,18 @@ impl BacklogSummary {
         } else {
             String::new()
         };
+        let questions = if self.unresolved_question_records > 0 {
+            format!(
+                "; {} decision question(s), {} unresolved record(s)",
+                self.decision_questions, self.unresolved_question_records
+            )
+        } else if self.decision_questions > 0 {
+            format!("; {} decision question(s)", self.decision_questions)
+        } else {
+            String::new()
+        };
         println!(
-            "summary: {} projects; {} needs-review; {} debt-owed{} ({}); {} no-patchset; journal {} open, {} later, {} feature-request{unknown}; {} unreachable",
+            "summary: {} projects; {} needs-review; {} debt-owed{} ({}); {} no-patchset; journal {} open, {} later, {} feature-request{unknown}{questions}; {} unreachable",
             self.projects,
             self.needs_review,
             self.debt_owed,
@@ -598,19 +622,13 @@ enum DebtMissingBasis {
     LegacyDefault,
 }
 
-impl DebtMissingBasis {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Recorded => "recorded",
-            Self::LegacyDefault => "legacy-default",
-        }
-    }
-}
-
 #[derive(Serialize)]
 struct ProjectBacklog {
     project: String,
     anchor: String,
+    /// The journal directory this project's questions and items were read
+    /// from: the same path `arc journal dir` resolves inside the project.
+    journal_dir: String,
     /// Changes whose next step is a verdict rather than more work: a
     /// patchset exists and no verdict answers it.
     needs_review: Vec<ReviewOwed>,
@@ -627,6 +645,20 @@ struct ProjectBacklog {
     /// everything.
     #[serde(skip_serializing_if = "TierIsEmpty::is_empty")]
     unknown_time_items: Vec<crate::journal::ArtifactEntry>,
+    /// Every unanswered question in this project's journal, whatever became
+    /// of the artifact it sits on. A question on an open artifact is waiting
+    /// on a person; one on a consumed or archived artifact is an unresolved
+    /// record, reported rather than silently dropped, and never read as
+    /// permission to reopen the artifact.
+    open_questions: Vec<crate::journal::WorkspaceQuestion>,
+    /// The subset of `open_questions` sitting on open artifacts: waiting
+    /// decisions, the count project priority uses.
+    decision_questions: usize,
+    /// How many of those came from the opening half versus the closing half
+    /// of their debates, so a reader can tell a premise still unsettled from
+    /// a verdict being held open.
+    opening_question_count: usize,
+    closing_question_count: usize,
     /// The primary tier's oldest entry, in days. A one-item queue never looks
     /// like a backlog from inside the project; across projects it is visible.
     oldest_open_days: Option<u64>,
@@ -659,8 +691,10 @@ struct BacklogItems {
 
 impl ProjectBacklog {
     /// Whether anything here is waiting on a person rather than on work.
+    /// A question sitting on an open artifact is exactly that, so a project
+    /// holding only unanswered questions cannot disappear from the report.
     fn blocked(&self) -> usize {
-        self.needs_review.len() + self.debt_owed.len()
+        self.needs_review.len() + self.debt_owed.len() + self.decision_questions
     }
 
     fn is_empty(&self) -> bool {
@@ -669,6 +703,7 @@ impl ProjectBacklog {
             && self.open_items == 0
             && self.later_items == 0
             && self.feature_requests == 0
+            && self.open_questions.is_empty()
     }
 }
 
@@ -819,9 +854,23 @@ fn workspace_backlog(
         } else {
             None
         };
+        // Question obligations are reported in full, like review and debt:
+        // only the journal artifact tiers are filtered by --since, because a
+        // decision that predates a delta can still be blocking work now.
+        let questions = crate::journal::open_questions_with_disposition(&project.journal_dir)?;
+        let decision_questions = questions
+            .iter()
+            .filter(|entry| entry.disposition == crate::journal::QuestionDisposition::Open)
+            .count();
+        let opening_question_count = questions
+            .iter()
+            .filter(|entry| entry.question.placement == "opening")
+            .count();
+        let closing_question_count = questions.len() - opening_question_count;
         let entry = ProjectBacklog {
             project: project.label(),
             anchor: anchor.display().to_string(),
+            journal_dir: project.journal_dir.display().to_string(),
             needs_review: queues.needs_review,
             no_patchset: queues.no_patchset,
             shared_surfaces: queues.shared_surfaces,
@@ -830,6 +879,10 @@ fn workspace_backlog(
             later_items,
             feature_requests,
             unknown_time_items: unknown_rows,
+            open_questions: questions,
+            decision_questions,
+            opening_question_count,
+            closing_question_count,
             // Age is a property of the whole queue, so it would contradict
             // counts that mean "filed since". A delta reports arrivals only.
             oldest_open_days: cutoff
@@ -987,6 +1040,30 @@ fn workspace_backlog(
             "  journal       {} open, {} later, {} feature-request{}",
             project.open_items, project.later_items, project.feature_requests, age
         );
+        if project.decision_questions > 0 || !project.open_questions.is_empty() {
+            println!(
+                "  questions     {} waiting on open artifact(s) ({} opening, {} closing), {} on consumed/archived",
+                project.decision_questions,
+                project.opening_question_count,
+                project.closing_question_count,
+                project.open_questions.len() - project.decision_questions,
+            );
+            for question in &project.open_questions {
+                let disposition = match question.disposition {
+                    crate::journal::QuestionDisposition::Open => "open",
+                    crate::journal::QuestionDisposition::Consumed => "consumed",
+                    crate::journal::QuestionDisposition::Archived => "archived",
+                    crate::journal::QuestionDisposition::Missing => "missing",
+                };
+                println!(
+                    "    [{}] {}  {}  {}",
+                    disposition,
+                    question.question.file,
+                    question.question.question,
+                    question.question.heading.as_deref().unwrap_or(""),
+                );
+            }
+        }
         if show_items {
             if let Some(items) = &project.items {
                 for item in items

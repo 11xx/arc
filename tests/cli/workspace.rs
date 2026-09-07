@@ -1775,3 +1775,230 @@ fn workspace_backlog_distinguishes_recorded_debt_from_legacy_default() {
     );
     assert_eq!(status["debt_outstanding"], false, "{status}");
 }
+
+/// Questions and project journal paths: every reachable project names its
+/// journal directory and carries its unanswered questions; a project with
+/// zero positions but an open question ranks above an artifact-only project;
+/// the rollup moves exactly as the local question view moves; and questions
+/// survive a --since filter, which applies only to artifact arrivals.
+#[test]
+fn workspace_backlog_carries_questions_and_journal_paths() {
+    // Three projects: two with an unanswered question and nothing else, one
+    // with an ordinary todo artifact only. They share one registry home so a
+    // global report discovers all of them, which is what one AI home is on a
+    // real machine.
+    let outer = TempDir::new().unwrap();
+    let shared_home = outer.path().join("home");
+    fs::create_dir_all(&shared_home).unwrap();
+    let shared = |repo: &Repo| {
+        let mut cmd = repo.arc(&repo.root);
+        cmd.env("HOME", &shared_home)
+            .env("ARC_SANDBOX", &shared_home);
+        cmd
+    };
+    let mut question_repos = Vec::new();
+    for slug in ["question-alpha", "question-beta"] {
+        let repo = Repo::new();
+        shared(&repo)
+            .args(["journal", "log", "registered", "the project exists"])
+            .assert()
+            .success();
+        let path = stdout(
+            shared(&repo)
+                .args([
+                    "journal",
+                    "note",
+                    slug,
+                    "--kind",
+                    "discussion",
+                    "--body-file",
+                    "-",
+                ])
+                .write_stdin(format!("# {slug}\n\nAn open question needs an answer.\n")),
+        )
+        .trim()
+        .to_string();
+        let file = PathBuf::from(path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        shared(&repo)
+            .args([
+                "journal",
+                "question",
+                &file,
+                "--placement",
+                "opening",
+                "--option",
+                "yes",
+                "--option",
+                "no",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin(format!("Which way for {slug}?\n"))
+            .assert()
+            .success();
+        // Sanity: the local view sees it.
+        let local = json_stdout(shared(&repo).args(["journal", "questions", "--json"]));
+        assert_eq!(local["questions"].as_array().unwrap().len(), 1, "{local}");
+        question_repos.push((repo, file));
+    }
+    let plain = Repo::new();
+    shared(&plain)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+    let plain_journal = PathBuf::from(stdout(shared(&plain).args(["journal", "dir"])).trim());
+    fs::write(
+        plain_journal.join("20260101T000000Z-plain-open-todo.md"),
+        "# Plain\n",
+    )
+    .unwrap();
+
+    // All three must be discoverable from one scope: everything sits under
+    // the same sandbox home, so a global report from one of them finds the
+    // rest through the registry.
+    let repo = &question_repos[0].0;
+    let mut report = shared(repo);
+    report.args(["workspace", "backlog", "--items", "--json"]);
+    let value = json_stdout(&mut report);
+    let projects = value["projects"].as_array().unwrap();
+    // Every fixture names its repo directory `repo`, so the rows are
+    // distinguished by the question each carries rather than by label.
+    let by_question = |part: &str| {
+        projects
+            .iter()
+            .find(|project| {
+                project["open_questions"].as_array().is_some_and(|rows| {
+                    rows.iter()
+                        .any(|row| row["heading"].as_str().unwrap_or("").contains(part))
+                })
+            })
+            .unwrap_or_else(|| panic!("{part} missing from {value}"))
+    };
+    // Ranking: question projects above the artifact-only project, which has
+    // no questions at all. Each row names its journal dir.
+    let alpha = by_question("question-alpha");
+    let beta = by_question("question-beta");
+    let plain_project = projects
+        .iter()
+        .find(|project| {
+            project["open_questions"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        })
+        .unwrap();
+    assert_eq!(alpha["decision_questions"], 1, "{alpha}");
+    assert_eq!(beta["decision_questions"], 1);
+    assert_eq!(plain_project["decision_questions"], 0);
+    assert_eq!(value["summary"]["decision_questions"], 2);
+    let rank = |project: &serde_json::Value| {
+        projects
+            .iter()
+            .position(|candidate| candidate["anchor"] == project["anchor"])
+            .unwrap()
+    };
+    assert!(rank(alpha) < rank(plain_project), "{}", value);
+    assert!(rank(beta) < rank(plain_project), "{}", value);
+
+    // Question shape: placement, file, and the artifact disposition.
+    let question = &alpha["open_questions"][0];
+    assert_eq!(question["placement"], "opening", "{}", question);
+    assert_eq!(question["disposition"], "open");
+    // settle_by is absent on the classic default, which reads as a person.
+    assert!(question.get("settle_by").is_none(), "{}", question);
+    assert_eq!(alpha["opening_question_count"], 1);
+    assert_eq!(alpha["closing_question_count"], 0);
+    // The journal dir points at a real directory in the registry home.
+    assert!(
+        PathBuf::from(alpha["journal_dir"].as_str().unwrap()).is_dir(),
+        "{}",
+        alpha
+    );
+
+    // The rollup moves exactly as the local view: answering removes it,
+    // retracting the answer puts it back.
+    let (beta_repo, beta_file) = &question_repos[1];
+    let local = json_stdout(shared(beta_repo).args(["journal", "questions", "--json"]));
+    let question_id = local["questions"][0]["question"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    shared(beta_repo)
+        .args([
+            "journal",
+            "answer",
+            beta_file,
+            "--question",
+            &question_id,
+            "--option",
+            "yes",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Going with yes.\n")
+        .assert()
+        .success();
+    let mut report = shared(repo);
+    report.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut report);
+    assert_eq!(
+        value["summary"]["decision_questions"], 1,
+        "answered question left the rollup: {}",
+        value
+    );
+    // A question on a consumed artifact is visible but not ranked.
+    let (_, alpha_file) = &question_repos[0];
+    // Consume with the question deliberately dropped: the decision moves to
+    // its own artifact, and the old question becomes an unresolved record.
+    shared(repo)
+        .args([
+            "journal",
+            "consume",
+            alpha_file,
+            "--outcome",
+            "done",
+            "--drop-questions",
+            "--note",
+            "the decision moved to its own artifact",
+        ])
+        .assert()
+        .success();
+    let mut report = shared(repo);
+    report.args(["workspace", "backlog", "--items", "--json"]);
+    let value = json_stdout(&mut report);
+    // Alpha's question was answered and its artifact consumed, so its
+    // decision no longer counts as waiting. A question on a consumed
+    // artifact is still visible, carried as an unresolved record.
+    let decisions = value["summary"]["decision_questions"].as_u64().unwrap();
+    assert_eq!(
+        decisions, 0,
+        "consumed artifact's question still counted: {}",
+        value
+    );
+    assert_eq!(
+        value["summary"]["unresolved_question_records"], 1,
+        "{}",
+        value
+    );
+
+    // --since retains unanswered decisions: only artifact arrivals filter.
+    // Alpha's unresolved record survives under a cutoff every artifact
+    // predates; the artifact tiers empty out.
+    let mut report = shared(repo);
+    report.args([
+        "workspace",
+        "backlog",
+        "--json",
+        "--since",
+        "20990101T000000Z",
+    ]);
+    let value = json_stdout(&mut report);
+    let alpha_only = value["projects"].as_array().unwrap().first().unwrap();
+    assert_eq!(alpha_only["decision_questions"], 0, "{}", value);
+    assert_eq!(alpha_only["open_questions"].as_array().unwrap().len(), 1);
+    assert_eq!(value["summary"]["unresolved_question_records"], 1);
+    assert_eq!(value["summary"]["open_items"], 0);
+}
