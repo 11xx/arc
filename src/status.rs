@@ -527,6 +527,13 @@ pub struct StatusReport {
     #[serde(skip_serializing_if = "is_false")]
     pub approval_waived_by_debt: bool,
     pub next_action: String,
+    /// The allowed guidance actions for the current state, in the order a
+    /// lead should weigh them. Empty where a single action is the only
+    /// correct one. Guidance, not an authorization token: nothing is written
+    /// by reading this list, and the user or lead executes the action
+    /// themselves. Additive in arc-status/18.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub review_options: Vec<&'static str>,
     /// Facts sessions kept while working, oldest first. Carried on the report
     /// so `resume` and `status --json` hand them back without a second read.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1406,8 +1413,43 @@ fn build_report(
         // readiness this same report computes. The debt record and the
         // approval_waived_by_debt flag still say what authorized this.
         "integrate".into()
-    } else {
+    } else if danger.requires_independent_review(policy) {
+        // Policy requires an independent verdict; debt is not an option the
+        // lead may take from guidance alone, and unknown danger stays
+        // dangerous.
         "request_review".into()
+    } else {
+        // Ordinary scope with no valid approval: the lead may declare debt
+        // with the specific coverage and deferral, or request review. The
+        // choice is the caller's; reading this list writes nothing.
+        "declare_debt".into()
+    };
+    // The options list beside the action: an empty list says the action is
+    // the only correct one, which is most states. A required-review case
+    // names review alone; a satisfied approval, an iterating change, a
+    // refusal the waiver does not cover, or any higher-priority work names
+    // nothing at all.
+    let higher_priority_work = state.is_closed()
+        || current_head.is_none()
+        || dependency_status.blocked
+        || needs_rebase
+        || !head_matches
+        || !open_blocking.is_empty()
+        || !state.holds.is_empty()
+        || gate_statuses.iter().any(|gate| !gate.green_at_head)
+        || probe_statuses
+            .iter()
+            .any(|probe| !probe.discriminating_at_head);
+    let review_options: Vec<&'static str> = if higher_priority_work
+        || state.iterating
+        || approval_satisfied
+        || approval_rejection_reason.is_some()
+    {
+        Vec::new()
+    } else if danger.requires_independent_review(policy) {
+        vec!["request_review"]
+    } else {
+        vec!["declare_debt", "request_review"]
     };
 
     let forge = crate::forge::build_status(
@@ -1486,6 +1528,7 @@ fn build_report(
         verdict_contested,
         approval_waived_by_debt,
         next_action,
+        review_options,
         kept: state.kept.clone(),
         danger,
         ready_reason,

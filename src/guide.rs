@@ -414,6 +414,12 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   contributor set, and whether it was declared or synthesized. `arc show` and
   `arc check` name them beside an approval rejection.
 
+  For ordinary work outside the independent-review scope, status offers the
+  lead a choice: review_options carries declare_debt first, then
+  request_review. The list is guidance — reading it writes nothing, and the
+  user or lead runs arc debt themselves. A required-review or unknown-danger
+  change offers review alone.
+
   Repairing a patchset's attribution happens only before any verdict:
   `snapshot --amend <ps> --contributors ...` replaces the whole set, and the
   refusal after a verdict or closure names the blocker. A run dispatch is

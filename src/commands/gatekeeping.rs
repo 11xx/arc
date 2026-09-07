@@ -2718,7 +2718,13 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
     let states = ctx.load_all_states(&store)?;
     let debts = super::messaging::collect_debts(ctx, &states)?;
     report.advisories.extend(debts.advisories_for(ctx, &st));
-    let review_queue = if report.next_action == "request_review" {
+    // Capacity information for the review action: shown when review is the
+    // current action or one of the offered options, so an ordinary change
+    // routed debt-first still sees what a review would cost, and a change
+    // whose approval is satisfied names no queue at all.
+    let review_is_live =
+        report.next_action == "request_review" || report.review_options.contains(&"request_review");
+    let review_queue = if review_is_live {
         Some(super::messaging::collect_review_queue(&store, &states)?)
     } else {
         None

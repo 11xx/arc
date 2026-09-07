@@ -163,7 +163,7 @@ everything not yet opened as a change. `arc inbox` therefore reports the
 journal's tier counts and newest primary items beside its own buckets, and
 `arc begin <slug> --from-journal <file>` turns a queued artifact into a change,
 consuming it.
-`arc inbox --json` uses `arc-inbox/8`; a change opened with `--iterating` is
+`arc inbox --json` uses `arc-inbox/9`; a change opened with `--iterating` is
 classified in the separate `iterating` bucket rather than in review or ready
 queues. Both `arc inbox` and `arc catchup` also carry a `deferred` section:
 the findings delegated rounds left open, each with the subject and round that
