@@ -446,7 +446,10 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   a directory, since declared paths are matched against changed files.
 
   If no independent verdict is available, integrate with
-  `arc integrate <change> --debt "<why>"`. The debt can stand in for an
+  `arc integrate <change> --debt "<why>"`. A debt already in force routes to
+  integration: status says integrate beside the flagged waiver, check drops
+  the review-queue advisory, and the inbox keeps one lead row — until the
+  head moves past the covered patchset, which restores request_review. The debt can stand in for an
   absent verdict or rescue a self-approval rejected by repository policy. It
   binds to the exact patchset head declared, so new work needs a new
   declaration — it does not excuse the rest of the change's life.

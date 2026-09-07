@@ -1343,6 +1343,14 @@ fn build_report(
         approval_reason: approval_rejection_reason.clone(),
     };
 
+    // One approval-satisfied value for every consumer: the existing
+    // valid-approval or in-force-waiver predicates, combined exactly as the
+    // blocker derivation combines them. A verdict the head cannot use — a
+    // changes-requested or comment-only verdict on this patchset — blocks
+    // the waiver, and no Approved verdict is fabricated to align displays:
+    // a missing verdict remains missing.
+    let approval_satisfied = approval_valid || waiver_satisfies_approval;
+
     let next_action = if state.is_closed() {
         "none:closed".into()
     } else if current_head.is_none() {
@@ -1389,15 +1397,17 @@ fn build_report(
             "iterating:clear".into()
         }
     } else if let Some(reason) = approval_rejection_reason.as_ref() {
+        // A rejection the waiver does not cover is a real refusal, not a
+        // routing question; it keeps the policy's own reason as the action.
         reason.clone()
-    } else if !verdict
-        .as_ref()
-        .map(|v| v.valid_for_current_head)
-        .unwrap_or(false)
-    {
-        "request_review".into()
-    } else {
+    } else if approval_satisfied {
+        // The waiver is already in force and everything above is clear, so
+        // steering the caller back into a review queue would contradict the
+        // readiness this same report computes. The debt record and the
+        // approval_waived_by_debt flag still say what authorized this.
         "integrate".into()
+    } else {
+        "request_review".into()
     };
 
     let forge = crate::forge::build_status(

@@ -3334,3 +3334,163 @@ fn an_audit_by_a_declared_reviewer_of_someone_elses_work_is_not_warned_about() {
     assert!(!warning.contains("recorded as"), "{warning}");
     assert!(!warning.contains("assumed"), "{warning}");
 }
+
+fn bucket_has(inbox: &serde_json::Value, bucket: &str, change_id: &str) -> bool {
+    inbox[bucket]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["change_id"] == change_id)
+}
+
+/// A current changes-requested or comment-only verdict still blocks the
+/// waiver from satisfying approval, and stale waiver coverage does not
+/// travel to a new head. Preservation cases for the waiver routing.
+#[test]
+fn waiver_never_overrides_a_refusing_verdict_or_a_stale_head() {
+    let repo = repo_forbidding_self_approval();
+
+    // Comment-only verdict on the patchset: no approval, no waiver routing.
+    let (change_id, _) = snapshotted_change_with_id(&repo, "comment-only");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Commenter")
+        .args([
+            "review",
+            "comment-only",
+            "--verdict",
+            "comment-only",
+            "--body",
+            "notes",
+        ])
+        .assert()
+        .success();
+    // The refusal boundary holds: a debt cannot stand in for an approval a
+    // refusing verdict blocks, so integration refuses.
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "comment-only",
+            "--debt",
+            "reviewer unavailable",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("missing or stale approval"));
+    // Declaring debt standalone does not route to integration either.
+    repo.arc(&repo.root)
+        .args(["debt", "comment-only", "--reason", "reviewer unavailable"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "comment-only"]));
+    assert_eq!(status["ready_to_integrate"], false, "{status}");
+    assert_eq!(status["next_action"], "request_review", "{status}");
+    // Absent: the flag is skipped when false, and a refusing verdict keeps
+    // the waiver from satisfying approval.
+    assert!(
+        !status["approval_waived_by_debt"].as_bool().unwrap_or(false),
+        "{status}"
+    );
+
+    // Fresh open change with debt, then a new head: the old waiver stops
+    // affecting guidance the moment the head moves.
+    let (waived_id, _) = snapshotted_change_with_id(&repo, "waived-then-moved");
+    repo.arc(&repo.root)
+        .args([
+            "debt",
+            "waived-then-moved",
+            "--reason",
+            "reviewer unavailable",
+        ])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "waived-then-moved"]));
+    assert_eq!(status["approval_waived_by_debt"], true, "{status}");
+
+    let worktree = repo.home.join(".worktrees").join("repo-waived-then-moved");
+    repo.commit(&worktree, "later.txt", "later\n", "feat: later");
+    repo.arc(&worktree)
+        .args(["snapshot", "waived-then-moved"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "waived-then-moved"]));
+    assert!(
+        !status["approval_waived_by_debt"].as_bool().unwrap_or(false),
+        "stale waiver still flags: {status}"
+    );
+    assert_eq!(status["next_action"], "request_review", "{status}");
+    assert_eq!(status["ready_to_integrate"], false, "{status}");
+}
+
+/// A clean change whose approval requirement is already satisfied by an
+/// in-force waiver routes to integration: status says integrate with the
+/// waiver flagged, check attaches no review-queue advisory, the inbox keeps
+/// the ready-to-integrate lead row without a reviewer assignment, and the
+/// debt survives into the audit queue. A later snapshot restores the ordinary
+/// request_review path.
+#[test]
+fn declared_debt_routes_ready_change_to_integration() {
+    let repo = repo_forbidding_self_approval();
+    let (change_id, _) = snapshotted_change_with_id(&repo, "waived-ready");
+
+    // Before the debt: no valid approval and request_review.
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "waived-ready"]));
+    assert_eq!(status["ready_to_integrate"], false, "{status}");
+    assert_eq!(status["next_action"], "request_review", "{status}");
+
+    // Declaring the debt is the routine next step; it writes no verdict.
+    repo.arc(&repo.root)
+        .args(["debt", "waived-ready", "--reason", "reviewer unavailable"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "waived-ready"]));
+    assert_eq!(status["ready_to_integrate"], true, "{status}");
+    assert_eq!(status["integrate_ready"], true, "{status}");
+    assert_eq!(status["next_action"], "integrate", "{status}");
+    assert_eq!(status["approval_waived_by_debt"], true, "{status}");
+    // The debt record still exists: the waiver did not erase the obligation.
+    // While the change is open the outstanding flag reads false by
+    // construction (it gates on a closed, integrated change); the record
+    // itself is what survives, and after integration it lands in the audit
+    // queue below.
+    assert_eq!(status["debt"]["missing"], "nothing-read", "{status}");
+    assert_eq!(status["approval_waived_by_debt"], true, "{status}");
+
+    // Check: exit 0 and no review-queue advisory, because review is not the
+    // current action.
+    let check = json_stdout(
+        repo.arc(&repo.root)
+            .args(["check", "waived-ready", "--json"]),
+    );
+    assert_eq!(check["exit_code"], 0, "{check}");
+    let advisories = check["advisories"].as_array().unwrap();
+    assert!(
+        !advisories
+            .iter()
+            .any(|advisory| advisory["code"] == "review-queue"),
+        "{check}"
+    );
+
+    // Inbox: the lead-facing ready row appears and no reviewer is assigned.
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    assert!(
+        bucket_has(&inbox, "ready-to-integrate", &change_id),
+        "{inbox}"
+    );
+    assert!(
+        !inbox["needs-review"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["change_id"] == change_id),
+        "reviewer assignment reappeared: {inbox}"
+    );
+
+    // Integration works and the debt survives into the audit queue.
+    repo.arc(&repo.root)
+        .args(["integrate", "waived-ready"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("integrated:"));
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    assert!(bucket_has(&inbox, "debt-owed", &change_id), "{inbox}");
+}

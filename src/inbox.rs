@@ -246,7 +246,15 @@ impl Inbox {
             self.iterating.push(row("implementer"));
             classified = true;
         } else {
-            if needs_review(state) {
+            // A reviewer assignment exists to produce an approval. When the
+            // report is already ready under an in-force waiver, assigning a
+            // reviewer would route the same change into two buckets — one
+            // asking for a review nobody needs and one asking for the merge
+            // that is next. The pending obligation stays visible through the
+            // status approval_waived_by_debt flag and the debt row, which
+            // absorb_debt records whether or not this change is still open.
+            let ready_under_waiver = report.ready_to_integrate && report.approval_waived_by_debt;
+            if needs_review(state) && !ready_under_waiver {
                 let actor = if state.latest_patchset().is_none() {
                     "implementer"
                 } else {

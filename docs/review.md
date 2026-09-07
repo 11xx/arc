@@ -220,6 +220,17 @@ findable instead of living in prose. `arc inbox` carries it in the one bucket
 that includes integrated changes, `arc doctor` reports it as
 `debt-outstanding`, and `arc chain` shows it beside reviewer coverage.
 
+A debt that is already in force changes the guidance instead of re-routing it:
+`arc status` reports `integrate_ready` with `approval_waived_by_debt` flagged
+and `next_action: integrate`, `arc check` attaches no review-queue advisory
+because review is not the current action, and `arc inbox` keeps the single
+ready-to-integrate lead row rather than assigning a reviewer for a verdict
+nobody needs. The debt record itself is unchanged, and the moment the head
+moves past the waiver's patchset the ordinary `request_review` guidance
+returns. A current changes-requested or comment-only verdict blocks the
+waiver from satisfying approval: the refusal stands and debt declares no
+route past it.
+
 ### What a debt records
 
 A debt is a record a later reader can weigh, not a count. It names what kind of
