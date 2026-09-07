@@ -774,7 +774,7 @@ fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
         .success();
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/8");
+    assert_eq!(inbox["schema"], "arc-inbox/9");
     let owed = inbox["debt-owed"].as_array().unwrap();
     assert_eq!(owed.len(), 1, "{owed:?}");
     assert_eq!(owed[0]["next_actor"], "reviewer");
@@ -3333,4 +3333,382 @@ fn an_audit_by_a_declared_reviewer_of_someone_elses_work_is_not_warned_about() {
     let warning = String::from_utf8_lossy(&audited.get_output().stderr).into_owned();
     assert!(!warning.contains("recorded as"), "{warning}");
     assert!(!warning.contains("assumed"), "{warning}");
+}
+
+fn bucket_has(inbox: &serde_json::Value, bucket: &str, change_id: &str) -> bool {
+    inbox[bucket]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["change_id"] == change_id)
+}
+
+/// A current changes-requested or comment-only verdict still blocks the
+/// waiver from satisfying approval, and stale waiver coverage does not
+/// travel to a new head. Preservation cases for the waiver routing.
+#[test]
+fn waiver_never_overrides_a_refusing_verdict_or_a_stale_head() {
+    let repo = repo_forbidding_self_approval();
+
+    // Comment-only verdict on the patchset: no approval, no waiver routing.
+    let (_, _) = snapshotted_change_with_id(&repo, "comment-only");
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Commenter")
+        .args([
+            "review",
+            "comment-only",
+            "--verdict",
+            "comment-only",
+            "--body",
+            "notes",
+        ])
+        .assert()
+        .success();
+    // The refusal boundary holds: a debt cannot stand in for an approval a
+    // refusing verdict blocks, so integration refuses.
+    repo.arc(&repo.root)
+        .args([
+            "integrate",
+            "comment-only",
+            "--debt",
+            "reviewer unavailable",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("missing or stale approval"));
+    // Declaring debt standalone does not route to integration either.
+    repo.arc(&repo.root)
+        .args(["debt", "comment-only", "--reason", "reviewer unavailable"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "comment-only"]));
+    assert_eq!(status["ready_to_integrate"], false, "{status}");
+    assert_eq!(status["next_action"], "request_review", "{status}");
+    // Absent: the flag is skipped when false, and a refusing verdict keeps
+    // the waiver from satisfying approval.
+    assert!(
+        !status["approval_waived_by_debt"].as_bool().unwrap_or(false),
+        "{status}"
+    );
+
+    // Fresh open change with debt, then a new head: the old waiver stops
+    // affecting guidance the moment the head moves.
+    let (_, _) = snapshotted_change_with_id(&repo, "waived-then-moved");
+    repo.arc(&repo.root)
+        .args([
+            "debt",
+            "waived-then-moved",
+            "--reason",
+            "reviewer unavailable",
+        ])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "waived-then-moved"]));
+    assert_eq!(status["approval_waived_by_debt"], true, "{status}");
+
+    let worktree = repo.home.join(".worktrees").join("repo-waived-then-moved");
+    repo.commit(&worktree, "later.txt", "later\n", "feat: later");
+    repo.arc(&worktree)
+        .args(["snapshot", "waived-then-moved"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "waived-then-moved"]));
+    assert!(
+        !status["approval_waived_by_debt"].as_bool().unwrap_or(false),
+        "stale waiver still flags: {status}"
+    );
+    assert_eq!(status["next_action"], "request_review", "{status}");
+    assert_eq!(status["ready_to_integrate"], false, "{status}");
+}
+
+/// A clean change whose approval requirement is already satisfied by an
+/// in-force waiver routes to integration: status says integrate with the
+/// waiver flagged, check attaches no review-queue advisory, the inbox keeps
+/// the ready-to-integrate lead row without a reviewer assignment, and the
+/// debt survives into the audit queue. A later snapshot restores the ordinary
+/// request_review path.
+#[test]
+fn declared_debt_routes_ready_change_to_integration() {
+    let repo = repo_forbidding_self_approval();
+    let (change_id, _) = snapshotted_change_with_id(&repo, "waived-ready");
+
+    // Before the debt: no valid approval and request_review.
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "waived-ready"]));
+    assert_eq!(status["ready_to_integrate"], false, "{status}");
+    assert_eq!(status["next_action"], "request_review", "{status}");
+
+    // Declaring the debt is the routine next step; it writes no verdict.
+    repo.arc(&repo.root)
+        .args(["debt", "waived-ready", "--reason", "reviewer unavailable"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "waived-ready"]));
+    assert_eq!(status["ready_to_integrate"], true, "{status}");
+    assert_eq!(status["integrate_ready"], true, "{status}");
+    assert_eq!(status["next_action"], "integrate", "{status}");
+    assert_eq!(status["approval_waived_by_debt"], true, "{status}");
+    // The debt record still exists: the waiver did not erase the obligation.
+    // While the change is open the outstanding flag reads false by
+    // construction (it gates on a closed, integrated change); the record
+    // itself is what survives, and after integration it lands in the audit
+    // queue below.
+    assert_eq!(status["debt"]["missing"], "nothing-read", "{status}");
+    assert_eq!(status["approval_waived_by_debt"], true, "{status}");
+
+    // Check: exit 0 and no review-queue advisory, because review is not the
+    // current action.
+    let check = json_stdout(
+        repo.arc(&repo.root)
+            .args(["check", "waived-ready", "--json"]),
+    );
+    assert_eq!(check["exit_code"], 0, "{check}");
+    let advisories = check["advisories"].as_array().unwrap();
+    assert!(
+        !advisories
+            .iter()
+            .any(|advisory| advisory["code"] == "review-queue"),
+        "{check}"
+    );
+
+    // Inbox: the lead-facing ready row appears and no reviewer is assigned.
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    assert!(
+        bucket_has(&inbox, "ready-to-integrate", &change_id),
+        "{inbox}"
+    );
+    assert!(
+        !inbox["needs-review"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["change_id"] == change_id),
+        "reviewer assignment reappeared: {inbox}"
+    );
+
+    // Integration works and the debt survives into the audit queue.
+    repo.arc(&repo.root)
+        .args(["integrate", "waived-ready"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("integrated:"));
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    assert!(bucket_has(&inbox, "debt-owed", &change_id), "{inbox}");
+}
+
+/// The optional-review choice: for a current, snapshotted, non-iterating
+/// change with no higher-priority work and no valid approval, ordinary scope
+/// names the lead with debt first, policy-required scope names review alone,
+/// and every higher-priority action still wins. Status and check are
+/// read-only: the ledger and journal event counts do not move.
+#[test]
+fn review_options_route_the_lead_without_writing() {
+    let policy = |repo: &Repo, danger: bool| {
+        fs::create_dir_all(repo.root.join(".arc")).unwrap();
+        let table = if danger {
+            "[danger]\npaths = [\"dangerous.rs\"]\n"
+        } else {
+            ""
+        };
+        fs::write(
+            repo.root.join(".arc/policy.toml"),
+            format!("[policy]\nforbid_self_approval = true\n\n{table}"),
+        )
+        .unwrap();
+        git(&repo.root, &["add", ".arc/policy.toml"]);
+        git(&repo.root, &["commit", "-m", "policy"]);
+    };
+    let journal_dir_of =
+        |repo: &Repo| PathBuf::from(stdout(repo.arc(&repo.root).args(["journal", "dir"])).trim());
+
+    // Ordinary surface (declared table, change touches none of it):
+    // next_actor is the lead and debt comes first.
+    let repo = Repo::new();
+    policy(&repo, true);
+    stdout(repo.arc(&repo.root).args(["begin", "ordinary"]));
+    let worktree = repo.home.join(".worktrees").join("repo-ordinary");
+    repo.commit(&worktree, "safe.txt", "safe\n", "feat: safe");
+    repo.arc(&worktree)
+        .args(["snapshot", "ordinary"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "ordinary"]));
+    assert_eq!(status["next_action"], "declare_debt", "{status}");
+    assert_eq!(
+        status["review_options"],
+        serde_json::json!(["declare_debt", "request_review"]),
+        "{status}"
+    );
+    assert_eq!(status["danger"]["dangerous"], false, "{status}");
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    let row = inbox["needs-review"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["next_actor"] == "lead")
+        .unwrap_or_else(|| panic!("no lead row: {inbox}"));
+    assert_eq!(
+        row["review_options"],
+        serde_json::json!(["declare_debt", "request_review"]),
+        "{row}"
+    );
+
+    // Declared dangerous surface: review alone, no debt option.
+    let repo = Repo::new();
+    policy(&repo, true);
+    stdout(repo.arc(&repo.root).args(["begin", "dangerous-surface"]));
+    let worktree = repo.home.join(".worktrees").join("repo-dangerous-surface");
+    repo.commit(&worktree, "dangerous.rs", "danger\n", "feat: danger");
+    repo.arc(&worktree)
+        .args(["snapshot", "dangerous-surface"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "dangerous-surface"]));
+    assert_eq!(status["next_action"], "request_review", "{status}");
+    assert_eq!(
+        status["review_options"],
+        serde_json::json!(["request_review"]),
+        "{status}"
+    );
+
+    // Undeclared danger table: unknown danger stays dangerous.
+    let repo = Repo::new();
+    policy(&repo, false);
+    stdout(repo.arc(&repo.root).args(["begin", "unknown-danger"]));
+    let worktree = repo.home.join(".worktrees").join("repo-unknown-danger");
+    repo.commit(&worktree, "anything.txt", "x\n", "feat: x");
+    repo.arc(&worktree)
+        .args(["snapshot", "unknown-danger"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "unknown-danger"]));
+    assert_eq!(status["danger"]["rule"], "not-declared", "{status}");
+    assert_eq!(status["next_action"], "request_review", "{status}");
+    assert_eq!(
+        status["review_options"],
+        serde_json::json!(["request_review"]),
+        "{status}"
+    );
+
+    // Current valid approval: empty options; integrate is the one action.
+    let repo = Repo::new();
+    policy(&repo, false);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "approved", "--dangerous"]),
+    );
+    let worktree = repo.home.join(".worktrees").join("repo-approved");
+    repo.commit(&worktree, "x.txt", "x\n", "feat: x");
+    repo.arc(&worktree)
+        .args(["snapshot", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["review", "approved", "--verdict", "approved"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "approved"]));
+    assert_eq!(status["next_action"], "integrate", "{status}");
+    let options = status["review_options"].as_array().map_or(0, Vec::len);
+    assert_eq!(options, 0, "{status}");
+
+    // A higher-priority action wins and options stay empty: a hold.
+    let repo = Repo::new();
+    policy(&repo, false);
+    stdout(repo.arc(&repo.root).args(["begin", "held"]));
+    let worktree = repo.home.join(".worktrees").join("repo-held");
+    repo.commit(&worktree, "x.txt", "x\n", "feat: x");
+    repo.arc(&worktree)
+        .args(["snapshot", "held"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["hold", "held", "--reason", "waiting on upstream"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "held"]));
+    assert!(
+        status["next_action"]
+            .as_str()
+            .unwrap()
+            .starts_with("release_hold"),
+        "{status}"
+    );
+    let options = status["review_options"].as_array().map_or(0, Vec::len);
+    assert_eq!(options, 0, "{status}");
+
+    // Iterating keeps its own behavior and names no options.
+    let repo = Repo::new();
+    policy(&repo, false);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "iterating", "--iterating"]),
+    );
+    let worktree = repo.home.join(".worktrees").join("repo-iterating");
+    repo.commit(&worktree, "x.txt", "x\n", "feat: x");
+    repo.arc(&worktree)
+        .args(["snapshot", "iterating"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "iterating"]));
+    assert_eq!(status["iterating"], true, "{status}");
+    let options = status["review_options"].as_array().map_or(0, Vec::len);
+    assert_eq!(options, 0, "{status}");
+
+    // No patchset: nothing to review or declare debt on; options are empty
+    // and the action is work, not a verdict.
+    let repo = Repo::new();
+    policy(&repo, false);
+    stdout(repo.arc(&repo.root).args(["begin", "no-patchset"]));
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "no-patchset"]));
+    let options = status["review_options"].as_array().map_or(0, Vec::len);
+    assert_eq!(options, 0, "{status}");
+
+    // Guidance is read-only: repeated status, inbox, and check calls write
+    // no ledger or journal events.
+    let repo = Repo::new();
+    policy(&repo, false);
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "readonly"])));
+    let worktree = repo.home.join(".worktrees").join("repo-readonly");
+    repo.commit(&worktree, "x.txt", "x\n", "feat: x");
+    repo.arc(&worktree)
+        .args(["snapshot", "readonly"])
+        .assert()
+        .success();
+    let journal_dir = journal_dir_of(&repo);
+    let journal_before = fs::read_to_string(journal_dir.join("events.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .count();
+    let ledger_before = event_count(&repo, &change_id);
+    for _ in 0..3 {
+        repo.arc(&repo.root)
+            .args(["status", "readonly", "--json"])
+            .assert()
+            .success();
+        repo.arc(&repo.root)
+            .args(["inbox", "--json"])
+            .assert()
+            .success();
+        // Exit 3 is check's no-valid-approval answer — the guidance itself.
+        repo.arc(&repo.root)
+            .args(["check", "readonly"])
+            .assert()
+            .failure()
+            .code(3);
+        let _ = stdout(repo.arc(&repo.root).args(["check", "readonly", "--json"]));
+    }
+    let journal_after = fs::read_to_string(journal_dir.join("events.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .count();
+    assert_eq!(ledger_before, event_count(&repo, &change_id), "ledger grew");
+    assert_eq!(journal_before, journal_after, "journal grew");
+
+    // The debt choice writes nothing by itself; only arc debt does.
+    repo.arc(&repo.root)
+        .args(["status", "readonly"])
+        .assert()
+        .success();
+    assert_eq!(ledger_before, event_count(&repo, &change_id), "ledger grew");
 }

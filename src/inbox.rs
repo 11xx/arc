@@ -4,7 +4,7 @@ use crate::status::{ClaimStatus, StatusReport};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-pub const INBOX_SCHEMA: &str = "arc-inbox/8";
+pub const INBOX_SCHEMA: &str = "arc-inbox/9";
 
 /// One finding a delegated round deferred and no later round has collected.
 ///
@@ -60,6 +60,12 @@ pub struct InboxRow {
     pub priority: i32,
     /// Who should act next on this change while it sits in this bucket.
     pub next_actor: String,
+    /// The allowed guidance actions for this change, carried when the bucket
+    /// routes to the lead with more than one legitimate next step. Guidance,
+    /// not an authorization: acting on it is still the caller's own command.
+    /// Additive in arc-inbox/9.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub review_options: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assigned_to: Option<String>,
     /// The active claim owner when this is a claim-backed row.
@@ -199,6 +205,7 @@ impl Inbox {
             debt_coverage: None,
             debt_production: None,
             reason: None,
+            review_options: report.review_options.clone(),
         };
         let claim_row = |claim: &ClaimStatus| {
             let next_actor = if claim.owner.harness.is_empty() {
@@ -220,6 +227,7 @@ impl Inbox {
                 debt_coverage: None,
                 debt_production: None,
                 reason: None,
+                review_options: Vec::new(),
             }
         };
 
@@ -246,9 +254,21 @@ impl Inbox {
             self.iterating.push(row("implementer"));
             classified = true;
         } else {
-            if needs_review(state) {
+            // A reviewer assignment exists to produce an approval. When the
+            // report is already ready under an in-force waiver, assigning a
+            // reviewer would route the same change into two buckets — one
+            // asking for a review nobody needs and one asking for the merge
+            // that is next. The pending obligation stays visible through the
+            // status approval_waived_by_debt flag and the debt row, which
+            // absorb_debt records whether or not this change is still open.
+            let ready_under_waiver = report.ready_to_integrate && report.approval_waived_by_debt;
+            if needs_review(state) && !ready_under_waiver {
                 let actor = if state.latest_patchset().is_none() {
                     "implementer"
+                } else if report.next_action == "declare_debt" {
+                    // The debt choice is the lead's: it records a judgment
+                    // about coverage, which is exactly the role boundary.
+                    "lead"
                 } else {
                     "reviewer"
                 };
@@ -318,6 +338,7 @@ impl Inbox {
             debt_coverage: debt.and_then(|debt| debt.coverage.clone()),
             debt_production: debt.and_then(|debt| debt.production.clone()),
             reason: None,
+            review_options: Vec::new(),
         });
         // Recomputed from the rows themselves rather than tallied alongside
         // them, so the split can never disagree with what it splits.

@@ -414,6 +414,12 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   contributor set, and whether it was declared or synthesized. `arc show` and
   `arc check` name them beside an approval rejection.
 
+  For ordinary work outside the independent-review scope, status offers the
+  lead a choice: review_options carries declare_debt first, then
+  request_review. The list is guidance — reading it writes nothing, and the
+  user or lead runs arc debt themselves. A required-review or unknown-danger
+  change offers review alone.
+
   Repairing a patchset's attribution happens only before any verdict:
   `snapshot --amend <ps> --contributors ...` replaces the whole set, and the
   refusal after a verdict or closure names the blocker. A run dispatch is
@@ -446,7 +452,10 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   a directory, since declared paths are matched against changed files.
 
   If no independent verdict is available, integrate with
-  `arc integrate <change> --debt "<why>"`. The debt can stand in for an
+  `arc integrate <change> --debt "<why>"`. A debt already in force routes to
+  integration: status says integrate beside the flagged waiver, check drops
+  the review-queue advisory, and the inbox keeps one lead row — until the
+  head moves past the covered patchset, which restores request_review. The debt can stand in for an
   absent verdict or rescue a self-approval rejected by repository policy. It
   binds to the exact patchset head declared, so new work needs a new
   declaration — it does not excuse the rest of the change's life.
