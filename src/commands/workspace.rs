@@ -373,8 +373,13 @@ struct BacklogSummary {
     debt_owed: usize,
     /// The debt count split by what each obligation says is missing, in
     /// severity order. A workspace total says how much is owed and nothing
-    /// about what any of it owes.
+    /// about what any of it owes. Derived from each row's effective kind, so
+    /// grouping rows by `effective_missing` reproduces this split.
     debt_owed_by_kind: Vec<crate::inbox::DebtKindCount>,
+    /// Obligations counted under the legacy default: their events recorded
+    /// no kind, and the meaning every reader gives them is independent-review
+    /// debt. A subset of `debt_owed`, not a separate population.
+    legacy_debt_owed: usize,
     open_items: usize,
     later_items: usize,
     feature_requests: usize,
@@ -403,8 +408,13 @@ impl BacklogSummary {
                 projects
                     .iter()
                     .flat_map(|project| project.debt_owed.iter())
-                    .map(|debt| debt.missing),
+                    .map(|debt| Some(debt.effective_missing)),
             ),
+            legacy_debt_owed: projects
+                .iter()
+                .flat_map(|project| project.debt_owed.iter())
+                .filter(|debt| debt.missing_basis == DebtMissingBasis::LegacyDefault)
+                .count(),
             open_items: projects.iter().map(|project| project.open_items).sum(),
             later_items: projects.iter().map(|project| project.later_items).sum(),
             feature_requests: projects
@@ -425,11 +435,17 @@ impl BacklogSummary {
         } else {
             String::new()
         };
+        let legacy = if self.legacy_debt_owed > 0 {
+            format!(", {} legacy-untyped", self.legacy_debt_owed)
+        } else {
+            String::new()
+        };
         println!(
-            "summary: {} projects; {} needs-review; {} debt-owed ({}); {} no-patchset; journal {} open, {} later, {} feature-request{unknown}; {} unreachable",
+            "summary: {} projects; {} needs-review; {} debt-owed{} ({}); {} no-patchset; journal {} open, {} later, {} feature-request{unknown}; {} unreachable",
             self.projects,
             self.needs_review,
             self.debt_owed,
+            legacy,
             crate::inbox::DebtKindCount::render(&self.debt_owed_by_kind),
             self.no_patchset,
             self.open_items,
@@ -542,6 +558,14 @@ struct DebtOwed {
     /// independent-review debt.
     #[serde(skip_serializing_if = "Option::is_none")]
     missing: Option<DebtMissing>,
+    /// What this report counts the obligation as, whether or not the event
+    /// recorded a kind: a legacy shape is independent-review debt by the
+    /// meaning every reader already gives it. Grouping rows by this field
+    /// reproduces the summary's kind split.
+    effective_missing: DebtMissing,
+    /// Whether `effective_missing` came from a recorded kind or from the
+    /// legacy default.
+    missing_basis: DebtMissingBasis,
     /// Whether the obligation carries its kind. An obligation without one
     /// cannot be filtered by what it owes.
     typed: bool,
@@ -561,6 +585,26 @@ struct DebtOwed {
     /// Paths the unreviewed revision changed. Two obligations naming one path
     /// are two unread readings of the same code.
     surfaces: Option<Vec<String>>,
+}
+
+/// Where an obligation's effective kind came from.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum DebtMissingBasis {
+    /// The event recorded a kind; effective_missing is that kind.
+    Recorded,
+    /// The event predates kinds; effective_missing is the legacy default,
+    /// independent-review.
+    LegacyDefault,
+}
+
+impl DebtMissingBasis {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Recorded => "recorded",
+            Self::LegacyDefault => "legacy-default",
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -883,14 +927,20 @@ fn workspace_backlog(
         }
         for change in &project.debt_owed {
             println!(
-                "  debt-owed     {}  {}d, {}, {}{}",
+                "  debt-owed     {}  {}d, {}, {}{}{}",
                 change.change_id,
                 change.age_days,
                 crate::render::debt_line(
-                    change.missing,
+                    Some(change.effective_missing),
                     change.production.as_ref(),
                     change.coverage.as_deref()
-                ),
+                )
+                .trim_end_matches(','),
+                if change.missing_basis == DebtMissingBasis::LegacyDefault {
+                    " (legacy event, no kind recorded), "
+                } else {
+                    ""
+                },
                 identity_text(
                     "declared",
                     &change.declared_by,
@@ -1017,6 +1067,12 @@ fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
                     declared_at: debt.declared_at,
                     age_days: days_between(debt.declared_at, now),
                     missing: debt.missing,
+                    effective_missing: debt.missing.unwrap_or(DebtMissing::IndependentReview),
+                    missing_basis: if debt.missing.is_some() {
+                        DebtMissingBasis::Recorded
+                    } else {
+                        DebtMissingBasis::LegacyDefault
+                    },
                     typed: debt.missing.is_some(),
                     coverage: debt.coverage.clone(),
                     production: debt.production.clone(),

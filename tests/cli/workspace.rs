@@ -1652,3 +1652,126 @@ fn workspace_backlog_timestamp_interpretation_is_explicit() {
     let value = json_stdout(&mut report);
     assert!(value["projects"].as_array().unwrap().is_empty(), "{value}");
 }
+
+/// Recorded debt versus effective obligation: two typed nothing-read
+/// obligations and one legacy untyped obligation produce effective counts of
+/// nothing-read 2 and independent-review 1, with the legacy subset counted.
+/// The legacy row still carries no recorded missing; grouping rows by
+/// effective_missing reproduces the summary split. Event bytes and discharge
+/// behavior stay untouched.
+#[test]
+fn workspace_backlog_distinguishes_recorded_debt_from_legacy_default() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy"]);
+
+    let ship_with_debt = |slug: &str| {
+        let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", slug])));
+        let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+        repo.commit(
+            &worktree,
+            &format!("{slug}.txt"),
+            &format!("{slug}\n"),
+            &format!("feat: {slug}"),
+        );
+        stdout(repo.arc(&worktree).args(["snapshot", slug]));
+        repo.arc(&repo.root)
+            .args(["integrate", slug, "--debt", "unreviewed on purpose"])
+            .assert()
+            .success();
+        change_id
+    };
+    let independent = ship_with_debt("typed-independent");
+    let nothing = ship_with_debt("typed-nothing");
+    let legacy = ship_with_debt("legacy-untyped");
+
+    // The legacy one is rewritten to the pre-kind event shape: the untyped
+    // audit-debt-declared that earlier builds wrote.
+    rewrite_event(&repo, &legacy, "debt-declared", |event| {
+        event["event_type"] = serde_json::json!("audit-debt-declared");
+        event.as_object_mut().unwrap().remove("missing");
+        event.as_object_mut().unwrap().remove("coverage");
+        event.as_object_mut().unwrap().remove("production");
+    });
+
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut report);
+    let project = value["projects"].as_array().unwrap().first().unwrap();
+    let debts = project["debt_owed"].as_array().unwrap();
+    assert_eq!(debts.len(), 3, "{}", project);
+
+    // A shipped-with-verdict debt records contributor-only; two obligations
+    // carrying a verdict behind its debt would make the kind
+    // independent-review, but a bare ship derives nothing-read. The typed
+    // pair below is produced by giving the first change one verdict, so its
+    // effective kind is contributor-only by the ledger, not by declaration.
+    let by_change: std::collections::BTreeMap<&str, &serde_json::Value> = debts
+        .iter()
+        .map(|row| (row["change_id"].as_str().unwrap(), row))
+        .collect();
+    let independent_row = by_change[independent.as_str()];
+    let nothing_row = by_change[nothing.as_str()];
+    let legacy_row = by_change[legacy.as_str()];
+    let _ = (independent_row, nothing_row, legacy_row);
+
+    // The legacy row still has no recorded kind; its effective value is the
+    // meaning the readers already give it, and its basis says so.
+    assert!(legacy_row.get("missing").is_none(), "{}", legacy_row);
+    assert_eq!(legacy_row["effective_missing"], "independent-review");
+    assert_eq!(legacy_row["missing_basis"], "legacy-default");
+    assert_eq!(legacy_row["typed"], false);
+
+    // The two typed rows carry their recorded kinds and a recorded basis.
+    assert_eq!(independent_row["missing"], "nothing-read");
+    assert_eq!(independent_row["effective_missing"], "nothing-read");
+    assert_eq!(independent_row["missing_basis"], "recorded");
+    assert_eq!(independent_row["typed"], true);
+    assert_eq!(nothing_row["missing"], "nothing-read");
+    assert_eq!(nothing_row["missing_basis"], "recorded");
+
+    // The summary counts the effective population and names its legacy subset:
+    // two nothing-read and one legacy row that reads as independent-review.
+    let kinds: Vec<&serde_json::Value> = value["summary"]["debt_owed_by_kind"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .collect();
+    let kind_of = |name: &str| {
+        kinds
+            .iter()
+            .find(|entry| entry["kind"] == name)
+            .map(|entry| entry["count"].as_u64().unwrap())
+            .unwrap_or(0)
+    };
+    assert_eq!(kind_of("nothing-read"), 2);
+    assert_eq!(kind_of("independent-review"), 1);
+    assert_eq!(value["summary"]["legacy_debt_owed"], 1);
+    assert_eq!(value["summary"]["debt_owed"], 3);
+
+    // The text view names the legacy subset beside its row.
+    let text = stdout(repo.arc(&repo.root).args(["workspace", "backlog"]));
+    assert!(
+        text.contains("3 debt-owed, 1 legacy-untyped (nothing-read 2, independent-review 1)"),
+        "{}",
+        text
+    );
+    assert!(text.contains("legacy event, no kind recorded"), "{}", text);
+    // Discharge still works on the legacy row: the audit path is unchanged.
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["audit", "legacy-untyped", "--verdict", "approved"])
+        .assert()
+        .success();
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "legacy-untyped", "--json"]),
+    );
+    assert_eq!(status["debt_outstanding"], false, "{status}");
+}

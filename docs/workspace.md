@@ -97,11 +97,16 @@ patchsets exist, how many days the newest has waited, and the verdict a newer
 patchset superseded — absent when the change has never been reviewed at all. A
 debt entry names when it was declared, its age in days, who declared it, what
 it says is missing, the coverage the shipped work did have, and who planned and
-who implemented it; an obligation declared before the kind was recorded carries
-no `missing` and reads as `unversioned`, which is independent-review debt that
-cannot be filtered by what it owes. The debt count is split by kind alongside
-the total, because one number over every obligation says how many exist and
-nothing about what any of them owes.
+who implemented it. Every row also carries its effective kind and the basis it
+came from: an obligation declared before the kind was recorded still reads as
+`independent-review` debt — the meaning every reader gives the legacy shape —
+with `missing_basis: "legacy-default"`, while a typed row reads `"recorded"`.
+The debt count is split by effective kind alongside the total, so grouping
+rows by `effective_missing` reproduces the summary split, and the summary
+names the legacy subset as `legacy_debt_owed`, because one number over every
+obligation says how many exist and nothing about what any of them owes.
+Discharge behavior and recorded event bytes are unchanged: the projection
+distinguishes what the report counts, not what the history says.
 
 Only a change carrying a patchset can be answered by a verdict. An open change
 with none is reported under `no_patchset`, and does not count as blocked: its
