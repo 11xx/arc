@@ -29,7 +29,17 @@ taken by the slug: it has answered who owns it.
 `arc begin` registers the project, so opening a change is enough to make a
 repository discoverable even if nothing is ever written to its journal. A
 `[journals] dirs` scope registers its project too, which is how a directory
-that is not a Git repository takes part.
+that is not a Git repository takes part. Journal timestamps are read by one
+parser over the canonical `YYYYMMDDTHHMMSSZ` stamp and the legacy form
+without the `Z`; both mean UTC and both filter identically under `--since`.
+A filename whose stamp parses as neither stays visible with `filed_at: null`
+and `timestamp_status: "invalid"`: it rides inside the tier it was filed
+into, and under an active cutoff it is additionally counted as
+`unknown_time_items` — per project and in the summary — because a delta that
+silently dropped what it could not date would under-report. The `selection`
+object states what the journal counts mean (`arrivals` under a cutoff,
+`outstanding` without), the normalized cutoff in `since`, and whether a
+cutoff is active at all.
 
 A cold archive is identified structurally rather than by its name: `<x>-archive`
 is skipped only when journal `<x>` is also present, so a project genuinely
@@ -63,7 +73,7 @@ previous-run marker — the boundary is supplied by the caller, so the command
 stays derived. `--items` names every actionable artifact under each project in
 the same open, later, and feature-request tier order used by `journal open`.
 Each item can include its `verification` stamp, and the text rows use the same
-renderer as `journal open`. JSON is versioned `arc-workspace-backlog/11` and
+renderer as `journal open`. JSON is versioned `arc-workspace-backlog/12` and
 states whether its scope is global or beneath one canonical path. Missing
 anchors are filtered by their recorded path, so an unreachable project inside
 a requested workspace remains visible without unrelated orphans leaking in.
@@ -87,11 +97,16 @@ patchsets exist, how many days the newest has waited, and the verdict a newer
 patchset superseded — absent when the change has never been reviewed at all. A
 debt entry names when it was declared, its age in days, who declared it, what
 it says is missing, the coverage the shipped work did have, and who planned and
-who implemented it; an obligation declared before the kind was recorded carries
-no `missing` and reads as `unversioned`, which is independent-review debt that
-cannot be filtered by what it owes. The debt count is split by kind alongside
-the total, because one number over every obligation says how many exist and
-nothing about what any of them owes.
+who implemented it. Every row also carries its effective kind and the basis it
+came from: an obligation declared before the kind was recorded still reads as
+`independent-review` debt — the meaning every reader gives the legacy shape —
+with `missing_basis: "legacy-default"`, while a typed row reads `"recorded"`.
+The debt count is split by effective kind alongside the total, so grouping
+rows by `effective_missing` reproduces the summary split, and the summary
+names the legacy subset as `legacy_debt_owed`, because one number over every
+obligation says how many exist and nothing about what any of them owes.
+Discharge behavior and recorded event bytes are unchanged: the projection
+distinguishes what the report counts, not what the history says.
 
 Only a change carrying a patchset can be answered by a verdict. An open change
 with none is reported under `no_patchset`, and does not count as blocked: its
@@ -105,6 +120,22 @@ file-overlap signal. A semantic conflict can cross different files and is
 established only by evaluating the combined tree. Either report value is
 `null` when its Git range cannot be read; the text view says `unknown` rather
 than presenting a failed probe as zero or an empty set.
+
+Per project the report also inventories active forks with the same read-only
+projection `arc fork list` uses — slug, branch, ahead count, base — and sums
+them in the summary. Forks are orientation, never obligation: they add nothing
+to the blocked or decision score, a fork-only project still appears, an
+unreadable ahead count stays null rather than zero, and retired forks remain
+history. Every project row names its `journal_dir`, the directory its
+questions and items were read from.
+
+The report is an observation, not a snapshot protocol: `observation` carries
+when the pass started and finished, and `consistency: "sequential"` states how
+it was built — projects read one after another in one pass. Arithmetic
+agreement between project rows and the summary is checked over the emitted
+rows; it cannot establish that the underlying state did not move mid-read, and
+the report does not claim it did. A report writes nothing: no ledger event, no
+journal file, no tracked tree change.
 
 `shared_surfaces` names each path more than one outstanding obligation
 changed, with the changes that changed it. Debt is recorded per change, so a

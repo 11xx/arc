@@ -154,6 +154,19 @@ struct BacklogSelection {
     show_unreachable: bool,
 }
 
+/// How the journal tiers in this report were selected: the boundary, what the
+/// counts mean, and where the undated rows went.
+#[derive(Serialize)]
+struct JournalSelection {
+    /// The cutoff, normalized to RFC 3339; null reports the whole queue.
+    since: Option<String>,
+    /// `arrivals` under a cutoff, `outstanding` without.
+    journal_counts: &'static str,
+    /// Whether a cutoff is active — exactly `since.is_some()`, carried as a
+    /// field so a consumer need not re-derive presence from a nullable.
+    includes_unknown_time: bool,
+}
+
 impl BacklogSelection {
     /// The command that re-runs this report as itemized JSON. The expanded
     /// form carries the resolved scope — explicit `--under` for a scoped
@@ -343,6 +356,16 @@ fn workspace_inbox(stores: &[(String, Store)], json: bool) -> Result<()> {
 struct Backlog {
     schema: &'static str,
     scope: BacklogScope,
+    /// When this observation ran and over what interval. Sequential
+    /// construction — projects are read one after another — means the
+    /// timestamp on one project's rows is not the timestamp on another's:
+    /// these are the bounds of the reading, not a freshness guarantee, and
+    /// no atomic-snapshot claim is made.
+    observation: Observation,
+    /// How the journal tiers were selected: the cutoff, what the counts mean,
+    /// and whether undated rows ride inside them. The scope object stands
+    /// beside it unchanged.
+    selection: JournalSelection,
     summary: BacklogSummary,
     projects: Vec<ProjectBacklog>,
     unreachable: Vec<UnreachableProject>,
@@ -356,11 +379,30 @@ struct BacklogSummary {
     debt_owed: usize,
     /// The debt count split by what each obligation says is missing, in
     /// severity order. A workspace total says how much is owed and nothing
-    /// about what any of it owes.
+    /// about what any of it owes. Derived from each row's effective kind, so
+    /// grouping rows by `effective_missing` reproduces this split.
     debt_owed_by_kind: Vec<crate::inbox::DebtKindCount>,
+    /// Obligations counted under the legacy default: their events recorded
+    /// no kind, and the meaning every reader gives them is independent-review
+    /// debt. A subset of `debt_owed`, not a separate population.
+    legacy_debt_owed: usize,
+    /// Unanswered questions sitting on open artifacts across all projects:
+    /// decisions a person could settle now.
+    decision_questions: usize,
+    /// Unanswered questions on consumed, archived, or missing artifacts:
+    /// unresolved records, reported but not ranked as waiting decisions.
+    unresolved_question_records: usize,
+    /// Active forks across every project. Orientation only: a fork is work
+    /// somebody chose to keep unintegrated, not a queue waiting to merge.
+    fork_count: usize,
     open_items: usize,
     later_items: usize,
     feature_requests: usize,
+    /// Journal rows whose filename stamp does not parse, selected into the
+    /// tiers above. They ride inside the tier counts — a delta that dropped
+    /// what it could not date would under-report — and are counted here so
+    /// the inclusion is visible rather than accidental.
+    unknown_time_items: usize,
     unreachable: usize,
 }
 
@@ -381,24 +423,63 @@ impl BacklogSummary {
                 projects
                     .iter()
                     .flat_map(|project| project.debt_owed.iter())
-                    .map(|debt| debt.missing),
+                    .map(|debt| Some(debt.effective_missing)),
             ),
+            legacy_debt_owed: projects
+                .iter()
+                .flat_map(|project| project.debt_owed.iter())
+                .filter(|debt| debt.missing_basis == DebtMissingBasis::LegacyDefault)
+                .count(),
+            decision_questions: projects
+                .iter()
+                .map(|project| project.decision_questions)
+                .sum(),
+            unresolved_question_records: projects
+                .iter()
+                .map(|project| project.open_questions.len() - project.decision_questions)
+                .sum(),
+            fork_count: projects.iter().map(|project| project.fork_count).sum(),
             open_items: projects.iter().map(|project| project.open_items).sum(),
             later_items: projects.iter().map(|project| project.later_items).sum(),
             feature_requests: projects
                 .iter()
                 .map(|project| project.feature_requests)
                 .sum(),
+            unknown_time_items: projects
+                .iter()
+                .map(|project| project.unknown_time_items.len())
+                .sum(),
             unreachable: unreachable.len(),
         }
     }
 
     fn render(&self) {
+        let unknown = if self.unknown_time_items > 0 {
+            format!(", {} unknown-time", self.unknown_time_items)
+        } else {
+            String::new()
+        };
+        let legacy = if self.legacy_debt_owed > 0 {
+            format!(", {} legacy-untyped", self.legacy_debt_owed)
+        } else {
+            String::new()
+        };
+        let questions = if self.unresolved_question_records > 0 {
+            format!(
+                "; {} decision question(s), {} unresolved record(s)",
+                self.decision_questions, self.unresolved_question_records
+            )
+        } else if self.decision_questions > 0 {
+            format!("; {} decision question(s)", self.decision_questions)
+        } else {
+            String::new()
+        };
         println!(
-            "summary: {} projects; {} needs-review; {} debt-owed ({}); {} no-patchset; journal {} open, {} later, {} feature-request; {} unreachable",
+            "summary: {} projects; {} needs-review; {} debt-owed{} ({}); {} no-patchset; journal {} open, {} later, {} feature-request{unknown}{questions}; {} unreachable",
             self.projects,
             self.needs_review,
             self.debt_owed,
+            legacy,
             crate::inbox::DebtKindCount::render(&self.debt_owed_by_kind),
             self.no_patchset,
             self.open_items,
@@ -407,6 +488,18 @@ impl BacklogSummary {
             self.unreachable,
         );
     }
+}
+
+#[derive(Serialize)]
+struct Observation {
+    started_at: String,
+    finished_at: String,
+    /// How the report was built: projects read one after another in one
+    /// pass. Arithmetic agreement between project rows and the summary is
+    /// checked over the emitted rows; it cannot establish that the
+    /// underlying state did not move mid-read, and this report does not
+    /// claim it did.
+    consistency: &'static str,
 }
 
 #[derive(Serialize)]
@@ -511,6 +604,14 @@ struct DebtOwed {
     /// independent-review debt.
     #[serde(skip_serializing_if = "Option::is_none")]
     missing: Option<DebtMissing>,
+    /// What this report counts the obligation as, whether or not the event
+    /// recorded a kind: a legacy shape is independent-review debt by the
+    /// meaning every reader already gives it. Grouping rows by this field
+    /// reproduces the summary's kind split.
+    effective_missing: DebtMissing,
+    /// Whether `effective_missing` came from a recorded kind or from the
+    /// legacy default.
+    missing_basis: DebtMissingBasis,
     /// Whether the obligation carries its kind. An obligation without one
     /// cannot be filtered by what it owes.
     typed: bool,
@@ -532,10 +633,24 @@ struct DebtOwed {
     surfaces: Option<Vec<String>>,
 }
 
+/// Where an obligation's effective kind came from.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum DebtMissingBasis {
+    /// The event recorded a kind; effective_missing is that kind.
+    Recorded,
+    /// The event predates kinds; effective_missing is the legacy default,
+    /// independent-review.
+    LegacyDefault,
+}
+
 #[derive(Serialize)]
 struct ProjectBacklog {
     project: String,
     anchor: String,
+    /// The journal directory this project's questions and items were read
+    /// from: the same path `arc journal dir` resolves inside the project.
+    journal_dir: String,
     /// Changes whose next step is a verdict rather than more work: a
     /// patchset exists and no verdict answers it.
     needs_review: Vec<ReviewOwed>,
@@ -547,6 +662,31 @@ struct ProjectBacklog {
     open_items: usize,
     later_items: usize,
     feature_requests: usize,
+    /// This project's selected rows whose stamp does not parse, included in
+    /// the tier counts above. Empty without an active cutoff, which counts
+    /// everything.
+    #[serde(skip_serializing_if = "TierIsEmpty::is_empty")]
+    unknown_time_items: Vec<crate::journal::ArtifactEntry>,
+    /// Every unanswered question in this project's journal, whatever became
+    /// of the artifact it sits on. A question on an open artifact is waiting
+    /// on a person; one on a consumed or archived artifact is an unresolved
+    /// record, reported rather than silently dropped, and never read as
+    /// permission to reopen the artifact.
+    open_questions: Vec<crate::journal::WorkspaceQuestion>,
+    /// The subset of `open_questions` sitting on open artifacts: waiting
+    /// decisions, the count project priority uses.
+    decision_questions: usize,
+    /// How many of those came from the opening half versus the closing half
+    /// of their debates, so a reader can tell a premise still unsettled from
+    /// a verdict being held open.
+    opening_question_count: usize,
+    closing_question_count: usize,
+    /// Active forks of this project, using the read-only fork projection.
+    /// Forks are orientation, never obligation: they add nothing to the
+    /// blocked/decision score, and retired forks remain history.
+    #[serde(skip_serializing_if = "TierIsEmpty::forks_empty")]
+    forks: Vec<crate::commands::fork::ForkEntry>,
+    fork_count: usize,
     /// The primary tier's oldest entry, in days. A one-item queue never looks
     /// like a backlog from inside the project; across projects it is visible.
     oldest_open_days: Option<u64>,
@@ -561,6 +701,19 @@ struct ProjectBacklog {
     items: Option<BacklogItems>,
 }
 
+/// `skip_serializing_if` needs a path; a one-arm impl names the predicate.
+struct TierIsEmpty;
+
+impl TierIsEmpty {
+    fn is_empty(tier: &[crate::journal::ArtifactEntry]) -> bool {
+        tier.is_empty()
+    }
+
+    fn forks_empty(forks: &[crate::commands::fork::ForkEntry]) -> bool {
+        forks.is_empty()
+    }
+}
+
 #[derive(Serialize)]
 struct BacklogItems {
     open: Vec<crate::journal::ArtifactEntry>,
@@ -570,8 +723,10 @@ struct BacklogItems {
 
 impl ProjectBacklog {
     /// Whether anything here is waiting on a person rather than on work.
+    /// A question sitting on an open artifact is exactly that, so a project
+    /// holding only unanswered questions cannot disappear from the report.
     fn blocked(&self) -> usize {
-        self.needs_review.len() + self.debt_owed.len()
+        self.needs_review.len() + self.debt_owed.len() + self.decision_questions
     }
 
     fn is_empty(&self) -> bool {
@@ -580,6 +735,7 @@ impl ProjectBacklog {
             && self.open_items == 0
             && self.later_items == 0
             && self.feature_requests == 0
+            && self.open_questions.is_empty()
     }
 }
 
@@ -671,6 +827,7 @@ fn workspace_backlog(
     };
     let mut projects = Vec::new();
     let mut unreachable = Vec::new();
+    let observed_at = chrono::Utc::now();
 
     for project in crate::registry::projects(&cfg)? {
         if !scope.includes(project.anchor.as_deref()) {
@@ -705,34 +862,60 @@ fn workspace_backlog(
         let open_queue = crate::journal::collect_open_in(ctx, &project.journal_dir, &anchor, None)?;
         // Under --since the counts mean "filed since", not "outstanding": a
         // delta that reported the whole queue beside a delta heading would read
-        // as a full report and be believed as one.
-        let (open_items, later_items, feature_requests) = match cutoff {
-            Some(cutoff) => open_queue.tier_counts_since(cutoff),
-            None => open_queue.tier_counts(),
-        };
+        // as a full report and be believed as one. Rows whose stamp does not
+        // parse ride inside the tiers either way and are mirrored into their
+        // own count, so the inclusion is a stated fact.
+        let tiers = crate::journal::TierSelection::of(&open_queue, cutoff);
+        let open_items = tiers.open.len();
+        let later_items = tiers.later.len();
+        let feature_requests = tiers.feature_requests.len();
+        let unknown_rows: Vec<crate::journal::ArtifactEntry> = tiers
+            .unknown_time
+            .iter()
+            .map(|entry| (*entry).clone())
+            .collect();
         let backlog_items = if show_items {
-            let (open, later, feature_requests) = match cutoff {
-                Some(cutoff) => open_queue.tiers_since(cutoff),
-                None => {
-                    let (open, later, feature_requests) = open_queue.tiers();
-                    (
-                        open.iter().collect(),
-                        later.iter().collect(),
-                        feature_requests.iter().collect(),
-                    )
-                }
-            };
             Some(BacklogItems {
-                open: open.into_iter().cloned().collect(),
-                later: later.into_iter().cloned().collect(),
-                feature_requests: feature_requests.into_iter().cloned().collect(),
+                open: tiers.open.iter().map(|entry| (*entry).clone()).collect(),
+                later: tiers.later.iter().map(|entry| (*entry).clone()).collect(),
+                feature_requests: tiers
+                    .feature_requests
+                    .iter()
+                    .map(|entry| (*entry).clone())
+                    .collect(),
             })
         } else {
             None
         };
+        // Question obligations are reported in full, like review and debt:
+        // only the journal artifact tiers are filtered by --since, because a
+        // decision that predates a delta can still be blocking work now.
+        let questions = crate::journal::open_questions_with_disposition(&project.journal_dir)?;
+        let decision_questions = questions
+            .iter()
+            .filter(|entry| entry.disposition == crate::journal::QuestionDisposition::Open)
+            .count();
+        let opening_question_count = questions
+            .iter()
+            .filter(|entry| entry.question.placement == "opening")
+            .count();
+        let closing_question_count = questions.len() - opening_question_count;
+        // Fork inventory uses the same read-only resolver as `fork list`,
+        // run from the project's anchor: no checkouts are created, no forks
+        // retired, and no readiness is inferred. An unreadable probe stays
+        // null rather than zeroing out; retired forks remain history.
+        let fork_ctx = ctx.with_cwd(anchor.clone());
+        let forks: Vec<crate::commands::fork::ForkEntry> =
+            crate::commands::fork::list_entries(&fork_ctx)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|entry| entry.retired.is_none())
+                .collect();
+        let fork_count = forks.len();
         let entry = ProjectBacklog {
             project: project.label(),
             anchor: anchor.display().to_string(),
+            journal_dir: project.journal_dir.display().to_string(),
             needs_review: queues.needs_review,
             no_patchset: queues.no_patchset,
             shared_surfaces: queues.shared_surfaces,
@@ -740,6 +923,13 @@ fn workspace_backlog(
             open_items,
             later_items,
             feature_requests,
+            unknown_time_items: unknown_rows,
+            open_questions: questions,
+            decision_questions,
+            opening_question_count,
+            closing_question_count,
+            forks,
+            fork_count,
             // Age is a property of the whole queue, so it would contradict
             // counts that mean "filed since". A delta reports arrivals only.
             oldest_open_days: cutoff
@@ -764,8 +954,23 @@ fn workspace_backlog(
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/11",
+                schema: "arc-workspace-backlog/12",
                 scope: scope.view(),
+                observation: Observation {
+                    started_at: observed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    finished_at: chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    consistency: "sequential",
+                },
+                selection: JournalSelection {
+                    since: cutoff.map(|c| c.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+                    journal_counts: if cutoff.is_some() {
+                        "arrivals"
+                    } else {
+                        "outstanding"
+                    },
+                    includes_unknown_time: cutoff.is_some(),
+                },
                 summary,
                 projects,
                 unreachable,
@@ -777,6 +982,12 @@ fn workspace_backlog(
     println!("scope: {}", scope.text());
     if let Some(raw) = since {
         println!("since {raw}: journal counts are what was filed since, not what is outstanding");
+        if summary.unknown_time_items > 0 {
+            println!(
+                "  {} item(s) with an unreadable timestamp are included and counted as unknown-time",
+                summary.unknown_time_items
+            );
+        }
     }
     summary.render();
     if projects.is_empty() && unreachable.is_empty() {
@@ -822,14 +1033,20 @@ fn workspace_backlog(
         }
         for change in &project.debt_owed {
             println!(
-                "  debt-owed     {}  {}d, {}, {}{}",
+                "  debt-owed     {}  {}d, {}, {}{}{}",
                 change.change_id,
                 change.age_days,
                 crate::render::debt_line(
-                    change.missing,
+                    Some(change.effective_missing),
                     change.production.as_ref(),
                     change.coverage.as_deref()
-                ),
+                )
+                .trim_end_matches(','),
+                if change.missing_basis == DebtMissingBasis::LegacyDefault {
+                    " (legacy event, no kind recorded), "
+                } else {
+                    ""
+                },
                 identity_text(
                     "declared",
                     &change.declared_by,
@@ -876,6 +1093,40 @@ fn workspace_backlog(
             "  journal       {} open, {} later, {} feature-request{}",
             project.open_items, project.later_items, project.feature_requests, age
         );
+        if project.decision_questions > 0 || !project.open_questions.is_empty() {
+            println!(
+                "  questions     {} waiting on open artifact(s) ({} opening, {} closing), {} on consumed/archived",
+                project.decision_questions,
+                project.opening_question_count,
+                project.closing_question_count,
+                project.open_questions.len() - project.decision_questions,
+            );
+            for question in &project.open_questions {
+                let disposition = match question.disposition {
+                    crate::journal::QuestionDisposition::Open => "open",
+                    crate::journal::QuestionDisposition::Consumed => "consumed",
+                    crate::journal::QuestionDisposition::Archived => "archived",
+                    crate::journal::QuestionDisposition::Missing => "missing",
+                };
+                println!(
+                    "    [{}] {}  {}  {}",
+                    disposition,
+                    question.question.file,
+                    question.question.question,
+                    question.question.heading.as_deref().unwrap_or(""),
+                );
+            }
+        }
+        for fork in &project.forks {
+            let ahead = fork
+                .ahead
+                .map(|count| format!("+{count}"))
+                .unwrap_or_else(|| "+?".to_string());
+            println!(
+                "  fork          {}  {}  {} over {}",
+                fork.slug, fork.branch, ahead, fork.base_branch
+            );
+        }
         if show_items {
             if let Some(items) = &project.items {
                 for item in items
@@ -956,6 +1207,12 @@ fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
                     declared_at: debt.declared_at,
                     age_days: days_between(debt.declared_at, now),
                     missing: debt.missing,
+                    effective_missing: debt.missing.unwrap_or(DebtMissing::IndependentReview),
+                    missing_basis: if debt.missing.is_some() {
+                        DebtMissingBasis::Recorded
+                    } else {
+                        DebtMissingBasis::LegacyDefault
+                    },
                     typed: debt.missing.is_some(),
                     coverage: debt.coverage.clone(),
                     production: debt.production.clone(),

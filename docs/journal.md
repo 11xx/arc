@@ -36,7 +36,10 @@ artifact's raw Markdown body, resolving the hot directory first and then the
 cold archive. Dated inline headings (positions, conclusions, review stamps)
 take the house timestamp from `journal stamp` — RFC 3339 seconds in UTC, the
 same spelling as the event log's `ts`, so prose and log cross-grep — never
-an agent-authored date.
+an agent-authored date. Artifact filenames carry a `YYYYMMDDTHHMMSSZ` UTC
+stamp, read by one parser that also accepts the legacy form without the `Z`;
+a filename whose stamp parses as neither keeps its row visible with a null
+time rather than being dropped or dated from its digits.
 Work waiting for a future session uses the primary actionable kinds — `todo`,
 `handoff`, `plan`, `discussion` — plus lower-priority `later` and
 `feature-request`. A feature request describes a wanted capability without

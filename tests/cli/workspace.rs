@@ -156,7 +156,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/11");
+    assert_eq!(value["schema"], "arc-workspace-backlog/12");
     assert_eq!(value["scope"]["mode"], "global");
     assert_backlog_summary_matches_rows(&value);
     let project = value["projects"]
@@ -508,7 +508,7 @@ fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
     let mut scoped = repo.arc(&workspace);
     scoped.args(["workspace", "backlog", "--here", "--json"]);
     let value = json_stdout(&mut scoped);
-    assert_eq!(value["schema"], "arc-workspace-backlog/11");
+    assert_eq!(value["schema"], "arc-workspace-backlog/12");
     assert_eq!(value["scope"]["mode"], "under");
     assert_eq!(
         value["scope"]["under"],
@@ -761,7 +761,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/11");
+    assert_eq!(value["schema"], "arc-workspace-backlog/12");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {
@@ -846,6 +846,13 @@ fn workspace_backlog_items() {
 #[test]
 fn workspace_backlog_items_surface_the_same_verification_annotation() {
     let repo = Repo::new();
+    // The moved comparison reads the anchor's ledger for rewrite records.
+    // A ledger comes from opening a change, the way every real project has
+    // one; a queue rendering must not create it as a side effect.
+    repo.arc(&repo.root)
+        .args(["begin", "ledger-holder", "--no-worktree"])
+        .assert()
+        .success();
     let seed = stdout(
         repo.arc(&repo.root)
             .args([
@@ -1438,6 +1445,19 @@ fn workspace_backlog_detail_hint_preserves_selection() {
         .arg("-c")
         .arg(&hint)
         .current_dir(&repo_root)
+        // The hint names bare `arc`; put the binary under test first on PATH
+        // so the follow exercises this build, not an installed one.
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                PathBuf::from(env!("CARGO_BIN_EXE_arc"))
+                    .parent()
+                    .and_then(|dir| dir.to_str())
+                    .unwrap_or_default(),
+                std::env::var("PATH").as_deref().unwrap_or_default(),
+            ),
+        )
         .env("HOME", &repo.home)
         .env("ARC_SANDBOX", &repo.home)
         .env("ARC_ACTOR", "tester")
@@ -1483,4 +1503,625 @@ fn workspace_backlog_detail_hint_preserves_selection() {
             .args(["workspace", "backlog", "--items", "--json"]),
     );
     serde_json::from_str::<serde_json::Value>(&text).unwrap();
+}
+
+/// One timestamp interpretation across the queue: a legacy stamp (no `Z`)
+/// filters under a cutoff exactly as the canonical form of the same instant,
+/// an unreadable stamp stays visible and is counted as unknown time instead
+/// of being dropped or dated, and the JSON states the selection itself.
+#[test]
+fn workspace_backlog_timestamp_interpretation_is_explicit() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+    let journal = journal_dir_of(&repo);
+    // Five July 2026 rows: three canonical, two legacy, all the same month.
+    for (file, kind) in [
+        ("20260701T000000Z-canon-open-todo.md", "todo"),
+        ("20260702T000000-canon-open-todo.md", "todo"),
+        ("20260703T000000Z-canon-open-handoff.md", "handoff"),
+        ("20260704T000000Z-canon-open-later.md", "later"),
+        (
+            "20260705T000000-canon-open-feature-request.md",
+            "feature-request",
+        ),
+        ("20260706T0000XX-strictly-not-a-stamp-todo.md", "todo"),
+    ] {
+        fs::write(journal.join(file), format!("# {}\n\nbody\n", kind)).unwrap();
+    }
+
+    // A cutoff between the two months: five July rows arrive, whatever form
+    // their stamp was written in; the malformed one is unknown time.
+    let mut report = repo.arc(&repo.root);
+    report.args([
+        "workspace",
+        "backlog",
+        "--items",
+        "--json",
+        "--since",
+        "20260601T000000Z",
+    ]);
+    let value = json_stdout(&mut report);
+    assert_eq!(value["schema"], "arc-workspace-backlog/12");
+    let selection = &value["selection"];
+    assert_eq!(selection["since"], "2026-06-01T00:00:00Z", "{}", selection);
+    assert_eq!(selection["journal_counts"], "arrivals");
+    assert_eq!(selection["includes_unknown_time"], true);
+
+    let project = value["projects"].as_array().unwrap().first().unwrap();
+    // The undated row rides inside its tier (fail-open visibility), so open
+    // counts 3 dated + 1 unknown; the separate count states the subset.
+    assert_eq!(project["open_items"], 4, "{}", project);
+    assert_eq!(project["later_items"], 1);
+    assert_eq!(project["feature_requests"], 1);
+    let unknown = project["unknown_time_items"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .clone();
+    assert_eq!(unknown.len(), 1, "{}", project);
+    assert_eq!(
+        unknown[0]["file"],
+        "20260706T0000XX-strictly-not-a-stamp-todo.md"
+    );
+    assert!(unknown[0]["filed_at"].is_null(), "{}", unknown[0]);
+    assert_eq!(unknown[0]["timestamp_status"], "invalid");
+    assert_eq!(value["summary"]["unknown_time_items"], 1);
+
+    // Every emitted row states how its stamp read; the malformed one is the
+    // only invalid row in the whole report.
+    // The undated row appears inside its tier listing and is mirrored by
+    // unknown_time_items, which is a pointer to a subset, not a move.
+    let mut all_rows: Vec<&serde_json::Value> = project["items"]["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .collect();
+    all_rows.extend(project["items"]["later"].as_array().unwrap().iter());
+    all_rows.extend(
+        project["items"]["feature_requests"]
+            .as_array()
+            .unwrap()
+            .iter(),
+    );
+    assert_eq!(all_rows.len(), 6, "{}", project);
+    let invalid: Vec<&&serde_json::Value> = all_rows
+        .iter()
+        .filter(|row| row["timestamp_status"] == "invalid")
+        .collect();
+    assert_eq!(invalid.len(), 1, "{}", project);
+    assert_eq!(invalid[0]["file"], unknown[0]["file"]);
+    assert_eq!(invalid[0]["timestamp_status"], "invalid");
+    // A dated row carries both the raw stamp and its RFC 3339 reading.
+    let canonical_row = all_rows
+        .iter()
+        .find(|row| row["file"] == "20260701T000000Z-canon-open-todo.md")
+        .unwrap();
+    assert_eq!(canonical_row["timestamp_status"], "canonical");
+    assert_eq!(canonical_row["filed_at"], "2026-07-01T00:00:00Z");
+    let legacy_row = all_rows
+        .iter()
+        .find(|row| row["timestamp_status"] == "legacy")
+        .unwrap();
+    assert_eq!(legacy_row["file"], "20260702T000000-canon-open-todo.md");
+    assert_eq!(legacy_row["filed_at"], "2026-07-02T00:00:00Z");
+
+    // Same digits, both forms, in an isolated second journal: the two forms
+    // of one instant are identical to the cutoff logic.
+    let repo2 = Repo::new();
+    repo2
+        .arc(&repo2.root)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+    let journal2 = journal_dir_of(&repo2);
+    fs::write(
+        journal2.join("20260801T000000Z-twin-open-todo.md"),
+        "# twin\n",
+    )
+    .unwrap();
+    fs::write(
+        journal2.join("20260801T000000-twin-2-open-todo.md"),
+        "# twin\n",
+    )
+    .unwrap();
+    // Before the instant: both forms arrive. After it: both drop, and the
+    // report is empty for that project. The two forms of one instant filter
+    // identically on both sides of the boundary.
+    let mut report = repo2.arc(&repo2.root);
+    report.args([
+        "workspace",
+        "backlog",
+        "--items",
+        "--json",
+        "--since",
+        "2026-07-31T23:59:59Z",
+    ]);
+    let value = json_stdout(&mut report);
+    let open_rows = value["projects"].as_array().unwrap()[0]["items"]["open"]
+        .as_array()
+        .unwrap();
+    assert_eq!(open_rows.len(), 2, "{value}");
+    assert_eq!(open_rows[0]["timestamp_status"], "canonical");
+    assert_eq!(open_rows[1]["timestamp_status"], "legacy");
+    assert_eq!(open_rows[0]["filed_at"], open_rows[1]["filed_at"]);
+
+    let mut report = repo2.arc(&repo2.root);
+    report.args([
+        "workspace",
+        "backlog",
+        "--items",
+        "--json",
+        "--since",
+        "2026-08-01T00:00:01Z",
+    ]);
+    let value = json_stdout(&mut report);
+    assert!(value["projects"].as_array().unwrap().is_empty(), "{value}");
+}
+
+/// Recorded debt versus effective obligation: two typed nothing-read
+/// obligations and one legacy untyped obligation produce effective counts of
+/// nothing-read 2 and independent-review 1, with the legacy subset counted.
+/// The legacy row still carries no recorded missing; grouping rows by
+/// effective_missing reproduces the summary split. Event bytes and discharge
+/// behavior stay untouched.
+#[test]
+fn workspace_backlog_distinguishes_recorded_debt_from_legacy_default() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy"]);
+
+    let ship_with_debt = |slug: &str| {
+        let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", slug])));
+        let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+        repo.commit(
+            &worktree,
+            &format!("{slug}.txt"),
+            &format!("{slug}\n"),
+            &format!("feat: {slug}"),
+        );
+        stdout(repo.arc(&worktree).args(["snapshot", slug]));
+        repo.arc(&repo.root)
+            .args(["integrate", slug, "--debt", "unreviewed on purpose"])
+            .assert()
+            .success();
+        change_id
+    };
+    let independent = ship_with_debt("typed-independent");
+    let nothing = ship_with_debt("typed-nothing");
+    let legacy = ship_with_debt("legacy-untyped");
+
+    // The legacy one is rewritten to the pre-kind event shape: the untyped
+    // audit-debt-declared that earlier builds wrote.
+    rewrite_event(&repo, &legacy, "debt-declared", |event| {
+        event["event_type"] = serde_json::json!("audit-debt-declared");
+        event.as_object_mut().unwrap().remove("missing");
+        event.as_object_mut().unwrap().remove("coverage");
+        event.as_object_mut().unwrap().remove("production");
+    });
+
+    let mut report = repo.arc(&repo.root);
+    report.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut report);
+    let project = value["projects"].as_array().unwrap().first().unwrap();
+    let debts = project["debt_owed"].as_array().unwrap();
+    assert_eq!(debts.len(), 3, "{}", project);
+
+    // A shipped-with-verdict debt records contributor-only; two obligations
+    // carrying a verdict behind its debt would make the kind
+    // independent-review, but a bare ship derives nothing-read. The typed
+    // pair below is produced by giving the first change one verdict, so its
+    // effective kind is contributor-only by the ledger, not by declaration.
+    let by_change: std::collections::BTreeMap<&str, &serde_json::Value> = debts
+        .iter()
+        .map(|row| (row["change_id"].as_str().unwrap(), row))
+        .collect();
+    let independent_row = by_change[independent.as_str()];
+    let nothing_row = by_change[nothing.as_str()];
+    let legacy_row = by_change[legacy.as_str()];
+    let _ = (independent_row, nothing_row, legacy_row);
+
+    // The legacy row still has no recorded kind; its effective value is the
+    // meaning the readers already give it, and its basis says so.
+    assert!(legacy_row.get("missing").is_none(), "{}", legacy_row);
+    assert_eq!(legacy_row["effective_missing"], "independent-review");
+    assert_eq!(legacy_row["missing_basis"], "legacy-default");
+    assert_eq!(legacy_row["typed"], false);
+
+    // The two typed rows carry their recorded kinds and a recorded basis.
+    assert_eq!(independent_row["missing"], "nothing-read");
+    assert_eq!(independent_row["effective_missing"], "nothing-read");
+    assert_eq!(independent_row["missing_basis"], "recorded");
+    assert_eq!(independent_row["typed"], true);
+    assert_eq!(nothing_row["missing"], "nothing-read");
+    assert_eq!(nothing_row["missing_basis"], "recorded");
+
+    // The summary counts the effective population and names its legacy subset:
+    // two nothing-read and one legacy row that reads as independent-review.
+    let kinds: Vec<&serde_json::Value> = value["summary"]["debt_owed_by_kind"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .collect();
+    let kind_of = |name: &str| {
+        kinds
+            .iter()
+            .find(|entry| entry["kind"] == name)
+            .map(|entry| entry["count"].as_u64().unwrap())
+            .unwrap_or(0)
+    };
+    assert_eq!(kind_of("nothing-read"), 2);
+    assert_eq!(kind_of("independent-review"), 1);
+    assert_eq!(value["summary"]["legacy_debt_owed"], 1);
+    assert_eq!(value["summary"]["debt_owed"], 3);
+
+    // The text view names the legacy subset beside its row.
+    let text = stdout(repo.arc(&repo.root).args(["workspace", "backlog"]));
+    assert!(
+        text.contains("3 debt-owed, 1 legacy-untyped (nothing-read 2, independent-review 1)"),
+        "{}",
+        text
+    );
+    assert!(text.contains("legacy event, no kind recorded"), "{}", text);
+    // Discharge still works on the legacy row: the audit path is unchanged.
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["audit", "legacy-untyped", "--verdict", "approved"])
+        .assert()
+        .success();
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "legacy-untyped", "--json"]),
+    );
+    assert_eq!(status["debt_outstanding"], false, "{status}");
+}
+
+/// Questions and project journal paths: every reachable project names its
+/// journal directory and carries its unanswered questions; a project with
+/// zero positions but an open question ranks above an artifact-only project;
+/// the rollup moves exactly as the local question view moves; and questions
+/// survive a --since filter, which applies only to artifact arrivals.
+#[test]
+fn workspace_backlog_carries_questions_and_journal_paths() {
+    // Three projects: two with an unanswered question and nothing else, one
+    // with an ordinary todo artifact only. They share one registry home so a
+    // global report discovers all of them, which is what one AI home is on a
+    // real machine.
+    let outer = TempDir::new().unwrap();
+    let shared_home = outer.path().join("home");
+    fs::create_dir_all(&shared_home).unwrap();
+    let shared = |repo: &Repo| {
+        let mut cmd = repo.arc(&repo.root);
+        cmd.env("HOME", &shared_home)
+            .env("ARC_SANDBOX", &shared_home);
+        cmd
+    };
+    let mut question_repos = Vec::new();
+    for slug in ["question-alpha", "question-beta"] {
+        let repo = Repo::new();
+        shared(&repo)
+            .args(["journal", "log", "registered", "the project exists"])
+            .assert()
+            .success();
+        let path = stdout(
+            shared(&repo)
+                .args([
+                    "journal",
+                    "note",
+                    slug,
+                    "--kind",
+                    "discussion",
+                    "--body-file",
+                    "-",
+                ])
+                .write_stdin(format!("# {slug}\n\nAn open question needs an answer.\n")),
+        )
+        .trim()
+        .to_string();
+        let file = PathBuf::from(path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        shared(&repo)
+            .args([
+                "journal",
+                "question",
+                &file,
+                "--placement",
+                "opening",
+                "--option",
+                "yes",
+                "--option",
+                "no",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin(format!("Which way for {slug}?\n"))
+            .assert()
+            .success();
+        // Sanity: the local view sees it.
+        let local = json_stdout(shared(&repo).args(["journal", "questions", "--json"]));
+        assert_eq!(local["questions"].as_array().unwrap().len(), 1, "{local}");
+        question_repos.push((repo, file));
+    }
+    let plain = Repo::new();
+    shared(&plain)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+    let plain_journal = PathBuf::from(stdout(shared(&plain).args(["journal", "dir"])).trim());
+    fs::write(
+        plain_journal.join("20260101T000000Z-plain-open-todo.md"),
+        "# Plain\n",
+    )
+    .unwrap();
+
+    // All three must be discoverable from one scope: everything sits under
+    // the same sandbox home, so a global report from one of them finds the
+    // rest through the registry.
+    let repo = &question_repos[0].0;
+    let mut report = shared(repo);
+    report.args(["workspace", "backlog", "--items", "--json"]);
+    let value = json_stdout(&mut report);
+    let projects = value["projects"].as_array().unwrap();
+    // Every fixture names its repo directory `repo`, so the rows are
+    // distinguished by the question each carries rather than by label.
+    let by_question = |part: &str| {
+        projects
+            .iter()
+            .find(|project| {
+                project["open_questions"].as_array().is_some_and(|rows| {
+                    rows.iter()
+                        .any(|row| row["heading"].as_str().unwrap_or("").contains(part))
+                })
+            })
+            .unwrap_or_else(|| panic!("{part} missing from {value}"))
+    };
+    // Ranking: question projects above the artifact-only project, which has
+    // no questions at all. Each row names its journal dir.
+    let alpha = by_question("question-alpha");
+    let beta = by_question("question-beta");
+    let plain_project = projects
+        .iter()
+        .find(|project| {
+            project["open_questions"]
+                .as_array()
+                .is_some_and(Vec::is_empty)
+        })
+        .unwrap();
+    assert_eq!(alpha["decision_questions"], 1, "{alpha}");
+    assert_eq!(beta["decision_questions"], 1);
+    assert_eq!(plain_project["decision_questions"], 0);
+    assert_eq!(value["summary"]["decision_questions"], 2);
+    let rank = |project: &serde_json::Value| {
+        projects
+            .iter()
+            .position(|candidate| candidate["anchor"] == project["anchor"])
+            .unwrap()
+    };
+    assert!(rank(alpha) < rank(plain_project), "{}", value);
+    assert!(rank(beta) < rank(plain_project), "{}", value);
+
+    // Question shape: placement, file, and the artifact disposition.
+    let question = &alpha["open_questions"][0];
+    assert_eq!(question["placement"], "opening", "{}", question);
+    assert_eq!(question["disposition"], "open");
+    // settle_by is absent on the classic default, which reads as a person.
+    assert!(question.get("settle_by").is_none(), "{}", question);
+    assert_eq!(alpha["opening_question_count"], 1);
+    assert_eq!(alpha["closing_question_count"], 0);
+    // The journal dir points at a real directory in the registry home.
+    assert!(
+        PathBuf::from(alpha["journal_dir"].as_str().unwrap()).is_dir(),
+        "{}",
+        alpha
+    );
+
+    // The rollup moves exactly as the local view: answering removes it,
+    // retracting the answer puts it back.
+    let (beta_repo, beta_file) = &question_repos[1];
+    let local = json_stdout(shared(beta_repo).args(["journal", "questions", "--json"]));
+    let question_id = local["questions"][0]["question"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    shared(beta_repo)
+        .args([
+            "journal",
+            "answer",
+            beta_file,
+            "--question",
+            &question_id,
+            "--option",
+            "yes",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Going with yes.\n")
+        .assert()
+        .success();
+    let mut report = shared(repo);
+    report.args(["workspace", "backlog", "--json"]);
+    let value = json_stdout(&mut report);
+    assert_eq!(
+        value["summary"]["decision_questions"], 1,
+        "answered question left the rollup: {}",
+        value
+    );
+    // A question on a consumed artifact is visible but not ranked.
+    let (_, alpha_file) = &question_repos[0];
+    // Consume with the question deliberately dropped: the decision moves to
+    // its own artifact, and the old question becomes an unresolved record.
+    shared(repo)
+        .args([
+            "journal",
+            "consume",
+            alpha_file,
+            "--outcome",
+            "done",
+            "--drop-questions",
+            "--note",
+            "the decision moved to its own artifact",
+        ])
+        .assert()
+        .success();
+    let mut report = shared(repo);
+    report.args(["workspace", "backlog", "--items", "--json"]);
+    let value = json_stdout(&mut report);
+    // Alpha's question was answered and its artifact consumed, so its
+    // decision no longer counts as waiting. A question on a consumed
+    // artifact is still visible, carried as an unresolved record.
+    let decisions = value["summary"]["decision_questions"].as_u64().unwrap();
+    assert_eq!(
+        decisions, 0,
+        "consumed artifact's question still counted: {}",
+        value
+    );
+    assert_eq!(
+        value["summary"]["unresolved_question_records"], 1,
+        "{}",
+        value
+    );
+
+    // --since retains unanswered decisions: only artifact arrivals filter.
+    // Alpha's unresolved record survives under a cutoff every artifact
+    // predates; the artifact tiers empty out.
+    let mut report = shared(repo);
+    report.args([
+        "workspace",
+        "backlog",
+        "--json",
+        "--since",
+        "20990101T000000Z",
+    ]);
+    let value = json_stdout(&mut report);
+    let alpha_only = value["projects"].as_array().unwrap().first().unwrap();
+    assert_eq!(alpha_only["decision_questions"], 0, "{}", value);
+    assert_eq!(alpha_only["open_questions"].as_array().unwrap().len(), 1);
+    assert_eq!(value["summary"]["unresolved_question_records"], 1);
+    assert_eq!(value["summary"]["open_items"], 0);
+}
+
+/// Fork inventory and observation boundaries: an active fork appears with its
+/// metadata and adds no decision weight, retiring it removes it, and the JSON
+/// report carries ordered observation timestamps with the sequential
+/// consistency it actually has. The report writes no repository or journal
+/// files.
+#[test]
+fn workspace_backlog_inventories_forks_without_obligation() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["fork", "begin", "demo"])
+        .assert()
+        .success();
+
+    // Fork-only project: the fork is visible even with nothing outstanding.
+    let value = {
+        let mut report = repo.arc(&repo.root);
+        report.args(["workspace", "backlog", "--items", "--json"]);
+        json_stdout(&mut report)
+    };
+    let project = value["projects"].as_array().unwrap().first().unwrap();
+    let forks = project["forks"].as_array().unwrap();
+    assert_eq!(forks.len(), 1, "{}", project);
+    assert_eq!(forks[0]["slug"], "demo");
+    assert_eq!(forks[0]["branch"], "fork/demo");
+    assert_eq!(project["fork_count"], 1);
+    assert_eq!(value["summary"]["fork_count"], 1);
+    // Forks add nothing to the blocked/decision score.
+    assert_eq!(project["decision_questions"], 0);
+    assert_eq!(project["needs_review"].as_array().unwrap().len(), 0);
+    assert_eq!(project["debt_owed"].as_array().unwrap().len(), 0);
+
+    // Observation bounds are present, ordered, and sequential.
+    let started = value["observation"]["started_at"].as_str().unwrap();
+    let finished = value["observation"]["finished_at"].as_str().unwrap();
+    assert!(started <= finished, "{started} > {finished}");
+    assert_eq!(value["observation"]["consistency"], "sequential");
+
+    // Retiring the fork removes it from the inventory.
+    repo.arc(&repo.root)
+        .args(["fork", "retire", "demo", "dropped: not wanted"])
+        .assert()
+        .success();
+    let value = {
+        let mut report = repo.arc(&repo.root);
+        report.args(["workspace", "backlog", "--json"]);
+        json_stdout(&mut report)
+    };
+    assert_eq!(value["summary"]["fork_count"], 0, "{value}");
+    assert!(value["projects"].as_array().unwrap().is_empty(), "{value}");
+}
+
+/// A report writes nothing: the repository's tracked tree, its ledger, and
+/// the journal are byte-identical across a backlog run.
+#[test]
+fn workspace_backlog_writes_nothing() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+    // The journal write above creates the journal; the ledger root comes
+    // with `journal log` registering the project.
+    let journal = journal_dir_of(&repo);
+    assert!(journal.is_dir(), "journal dir should exist after log");
+    let snapshot_dir = |dir: &Path| -> Vec<(String, [u8; 32])> {
+        let mut entries: Vec<(String, [u8; 32])> = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            // A root that does not exist yet is part of the before-state.
+            Err(_) if !dir.exists() => return Vec::new(),
+            Err(error) => panic!("cannot read {}: {error}", dir.display()),
+        }
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                (format!("{:?}", path), [0u8; 32])
+            } else {
+                let bytes = fs::read(&path).unwrap();
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&Sha256::digest(&bytes));
+                (path.display().to_string(), hash)
+            }
+        })
+        .collect();
+        entries.sort();
+        entries
+    };
+    let ledger_root = repo.root.join(".git/arc");
+    let before = snapshot_dir(&journal);
+    let before_git = snapshot_dir(&ledger_root);
+    let before_status = git_out(&repo.root, &["status", "--porcelain"]);
+
+    repo.arc(&repo.root)
+        .args(["workspace", "backlog", "--items", "--json"])
+        .assert()
+        .success();
+
+    assert_eq!(snapshot_dir(&journal), before, "journal changed");
+    let after_git = snapshot_dir(&ledger_root);
+    assert_eq!(after_git.len(), before_git.len(), "ledger changed");
+    for ((before_path, before_hash), (after_path, after_hash)) in
+        before_git.iter().zip(after_git.iter())
+    {
+        assert_eq!(before_path, after_path, "ledger changed");
+        assert_eq!(before_hash, after_hash, "ledger changed: {before_path}");
+    }
+    assert_eq!(
+        git_out(&repo.root, &["status", "--porcelain"]),
+        before_status,
+        "tracked tree changed"
+    );
 }

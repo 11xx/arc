@@ -4082,7 +4082,7 @@ fn ensure_capability(
 /// patience.
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum DeliveryState {
+pub(crate) enum DeliveryState {
     /// Posed before the journal recorded deliveries at all, so its silence is
     /// a missing record rather than a missing delivery.
     Unknown,
@@ -4111,12 +4111,12 @@ impl DeliveryState {
 /// answer is a different fact from one asked once, and erasing the earlier
 /// attempt would hide the more urgent of the two.
 #[derive(Serialize)]
-struct QuestionDelivery {
+pub(crate) struct QuestionDelivery {
     to: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     handle: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    actor: Option<String>,
+    pub(crate) actor: Option<String>,
     harness: String,
     session: String,
     ts: String,
@@ -4454,48 +4454,48 @@ fn retract(ctx: &Ctx, filename: &str, target: &str, body_file: &str) -> Result<i
 }
 
 #[derive(Serialize)]
-struct OpenQuestion {
-    file: String,
-    topic: String,
-    question: String,
-    placement: String,
+pub(crate) struct OpenQuestion {
+    pub(crate) file: String,
+    pub(crate) topic: String,
+    pub(crate) question: String,
+    pub(crate) placement: String,
     /// Who may settle it: `person` when absent (the classic default),
     /// `anyone`, or `delegate:<name>`. An agent reading this view knows
     /// whether it may answer or must prompt; a delegate knows the question
     /// is waiting on it specifically.
     #[serde(skip_serializing_if = "Option::is_none")]
-    settle_by: Option<String>,
+    pub(crate) settle_by: Option<String>,
     /// The prose the question was posed with, so a prompt can show what is
     /// being asked without the caller opening the artifact.
     #[serde(skip_serializing_if = "Option::is_none")]
-    heading: Option<String>,
+    pub(crate) heading: Option<String>,
     /// Who ran the command that posed it, when somebody declared an actor.
     #[serde(skip_serializing_if = "Option::is_none")]
-    actor: Option<String>,
+    pub(crate) actor: Option<String>,
     /// The subject it was posed for, when the invocation represented one. A
     /// delegate reading this queue tells a question a lead posed for it from
     /// one the lead posed as itself.
     #[serde(skip_serializing_if = "Option::is_none")]
-    on_behalf_of: Option<String>,
-    asked_at: String,
+    pub(crate) on_behalf_of: Option<String>,
+    pub(crate) asked_at: String,
     /// Whether anybody was asked, which is a different fact from whether the
     /// question is answered: an unasked question needs a prompt, a delivered
     /// one needs patience, and a queue that cannot tell them apart reports
     /// both as work.
-    delivery: DeliveryState,
+    pub(crate) delivery: DeliveryState,
     /// Every recorded delivery, oldest first. A repeat attempt is another row
     /// rather than a replacement: a question asked twice and still unanswered
     /// is more urgent than one asked once, and erasing the earlier attempt
     /// would hide exactly that.
-    deliveries: Vec<QuestionDelivery>,
+    pub(crate) deliveries: Vec<QuestionDelivery>,
     /// The options to offer, each with how many positions argued that branch.
     /// A branch nobody argued is visible before the question is answered,
     /// which is the point of arguing them first.
-    options: Vec<QuestionOption>,
+    pub(crate) options: Vec<QuestionOption>,
 }
 
 #[derive(Serialize)]
-struct QuestionOption {
+pub(crate) struct QuestionOption {
     option: String,
     positions: usize,
 }
@@ -4779,6 +4779,62 @@ fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
     Ok(open)
 }
 
+/// Where the artifact a question sits on stands in its lifecycle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum QuestionDisposition {
+    /// The artifact is still in the hot queue.
+    Open,
+    /// The artifact was consumed with an outcome; the question is an
+    /// unresolved record on a closed file, not permission to reopen it.
+    Consumed,
+    /// The hot file is gone and the cold archive does not hold it either.
+    Missing,
+    /// The file sits in the cold archive.
+    Archived,
+}
+
+/// One unanswered question projected for a cross-project view, with the
+/// disposition of the artifact it sits on.
+#[derive(Serialize)]
+pub(crate) struct WorkspaceQuestion {
+    #[serde(flatten)]
+    pub(crate) question: OpenQuestion,
+    pub(crate) disposition: QuestionDisposition,
+}
+
+/// The read-only question projection over one explicit journal directory,
+/// shared by `journal questions` and the workspace backlog. The existing
+/// reducer is the only reading: no Markdown reinterpretation, no recount.
+/// All unanswered questions are returned whatever became of their artifact;
+/// the disposition is what lets a caller count only the ones worth acting on.
+pub(crate) fn open_questions_with_disposition(dir: &Path) -> Result<Vec<WorkspaceQuestion>> {
+    let events = read_events(dir)?;
+    let questions = open_questions(dir)?;
+    Ok(questions
+        .into_iter()
+        .map(|question| {
+            let file = &question.file;
+            let disposition = if is_consumed(&events, file) {
+                QuestionDisposition::Consumed
+            } else if dir.join(file).is_file() {
+                QuestionDisposition::Open
+            } else {
+                let archived = archive_dir(dir).join(file);
+                if archived.is_file() {
+                    QuestionDisposition::Archived
+                } else {
+                    QuestionDisposition::Missing
+                }
+            };
+            WorkspaceQuestion {
+                question,
+                disposition,
+            }
+        })
+        .collect())
+}
+
 /// Which side of the offered menu an answer came from.
 #[derive(Clone, Copy)]
 enum Chosen<'a> {
@@ -4811,7 +4867,7 @@ pub(crate) struct JournalEvent {
     /// so by omission instead of naming a person nobody named. An actor arc
     /// fell back to is not a claim that anyone acted, so it is not recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
-    actor: Option<String>,
+    pub(crate) actor: Option<String>,
     /// The subject a delegated invocation was run for (`--on-behalf-of`),
     /// recorded beside the actor and never in place of one. A lead filing a
     /// note or a position for an executor is two facts — who ran the command,
@@ -4820,7 +4876,7 @@ pub(crate) struct JournalEvent {
     /// invocation represented nobody: no subject is inferred from prose,
     /// model, or session.
     #[serde(skip_serializing_if = "Option::is_none")]
-    on_behalf_of: Option<String>,
+    pub(crate) on_behalf_of: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     topic: String,
@@ -4929,7 +4985,7 @@ pub(crate) struct JournalEvent {
     /// was a narrower rule than the mechanism ever enforced. Optional, so
     /// every question written before the field existed keeps its meaning.
     #[serde(skip_serializing_if = "Option::is_none")]
-    settle_by: Option<String>,
+    pub(crate) settle_by: Option<String>,
     /// Who a `question-delivered` event says was asked, in the same vocabulary
     /// `settle_by` uses: `person`, `anyone`, or `delegate:<name>`. Arc records
     /// that a caller delivered the question; it never sends anything, so this
@@ -7157,17 +7213,55 @@ fn lanes_from_journal(events: &[JournalEvent], now: DateTime<Utc>) -> Vec<LaneEn
 /// filename component) and `now`. `None` when the stamp does not parse, so a
 /// malformed name degrades to no age rather than a bogus one.
 fn artifact_age_seconds(now: DateTime<Utc>, stamp: &str) -> Option<u64> {
-    let created = NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%SZ")
-        .ok()?
-        .and_utc();
+    let created = parse_artifact_timestamp(stamp)?;
     Some(now.signed_duration_since(created).num_seconds().max(0) as u64)
 }
 
 /// An artifact's filing time, read from the stamp its name carries.
-fn parse_artifact_timestamp(stamp: &str) -> Option<DateTime<Utc>> {
+///
+/// One parser for every stamp reading in the codebase. The supported forms
+/// are the canonical `%Y%m%dT%H%M%SZ` (which the journal itself writes) and
+/// the legacy `%Y%m%dT%H%M%S` without a `Z`, which some pre-facility writers
+/// produced; both name the same instant for the same digits and UTC is the
+/// only zone either has ever meant. A stamp in neither form returns `None`,
+/// and every caller treats that as "unknown time", never as a date guessed
+/// from the digits.
+pub(crate) fn parse_artifact_timestamp(stamp: &str) -> Option<DateTime<Utc>> {
     NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%SZ")
+        .or_else(|_| NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%S"))
         .ok()
         .map(|naive| naive.and_utc())
+}
+
+/// How an artifact's filename stamp read: canonical with the `Z`, legacy
+/// without it, or neither. `invalid` fails open everywhere — the row stays
+/// visible, its time is null — so a malformed name is seen rather than
+/// dropped, while a legacy stamp filters under a cutoff like any other.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+pub(crate) enum TimestampStatus {
+    Canonical,
+    Legacy,
+    Invalid,
+}
+
+impl TimestampStatus {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Canonical => "canonical",
+            Self::Legacy => "legacy",
+            Self::Invalid => "invalid",
+        }
+    }
+
+    fn classify(stamp: &str) -> Self {
+        if NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%SZ").is_ok() {
+            Self::Canonical
+        } else if parse_artifact_timestamp(stamp).is_some() {
+            Self::Legacy
+        } else {
+            Self::Invalid
+        }
+    }
 }
 
 /// A caller-supplied boundary for "what is new", in either the journal's own
@@ -7445,6 +7539,13 @@ fn lane(ctx: &Ctx, command: LaneCmd) -> Result<i32> {
 pub(crate) struct ArtifactEntry {
     pub(crate) file: String,
     pub(crate) timestamp: String,
+    /// The raw filename stamp parsed into time, or null when it does not
+    /// parse. Kept beside `timestamp`, which stays the raw filename text.
+    pub(crate) filed_at: Option<String>,
+    /// How the raw stamp read: `canonical` with the `Z` the journal writes,
+    /// `legacy` without it, or `invalid`. An invalid stamp is not a reason to
+    /// drop the row: the artifact stays visible with null time.
+    pub(crate) timestamp_status: &'static str,
     pub(crate) topic: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) kind: Option<String>,
@@ -7724,6 +7825,8 @@ fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
         .filter_map(|name| {
             let (timestamp, topic, _) = parse_artifact_name(&name)?;
             Some(ArtifactEntry {
+                filed_at: filed_at_of(&timestamp),
+                timestamp_status: TimestampStatus::classify(&timestamp).as_str(),
                 heading: first_heading(&dir.join(&name)),
                 file: name,
                 timestamp,
@@ -7800,6 +7903,8 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
                     artifact_availability(&journal, &name, &file_claims, now);
                 claims.extend(file_claims.iter().cloned());
                 files.push(ArtifactEntry {
+                    filed_at: filed_at_of(&ts),
+                    timestamp_status: TimestampStatus::classify(&ts).as_str(),
                     file: name,
                     timestamp: ts,
                     topic,
@@ -7991,12 +8096,6 @@ impl OpenItems {
         &self.dir
     }
 
-    /// Every actionable artifact, by tier, for a caller that surfaces the
-    /// queue rather than its size.
-    pub(crate) fn tiers(&self) -> (&[ArtifactEntry], &[ArtifactEntry], &[ArtifactEntry]) {
-        (&self.open, &self.later, &self.feature_requests)
-    }
-
     pub(crate) fn tier_counts(&self) -> (usize, usize, usize) {
         (
             self.open.len(),
@@ -8016,52 +8115,6 @@ impl OpenItems {
             .map(|seconds| seconds / 86_400)
     }
 
-    /// Tier counts restricted to artifacts filed at or after `cutoff` — the
-    /// delta question, what is new, asked of one project's queue.
-    ///
-    /// An artifact whose stamp cannot be read is counted as new. A delta that
-    /// silently drops what it cannot date would under-report, and this queue
-    /// exists to stop work going unseen.
-    pub(crate) fn tier_counts_since(&self, cutoff: DateTime<Utc>) -> (usize, usize, usize) {
-        let count = |entries: &Vec<ArtifactEntry>| {
-            entries
-                .iter()
-                .filter(|entry| artifact_is_since(entry, cutoff))
-                .count()
-        };
-        (
-            count(&self.open),
-            count(&self.later),
-            count(&self.feature_requests),
-        )
-    }
-
-    /// The same three tiers restricted to artifacts filed at or after
-    /// `cutoff`, by the same rule `tier_counts_since` counts by.
-    pub(crate) fn tiers_since(
-        &self,
-        cutoff: DateTime<Utc>,
-    ) -> (
-        Vec<&ArtifactEntry>,
-        Vec<&ArtifactEntry>,
-        Vec<&ArtifactEntry>,
-    ) {
-        (
-            self.open
-                .iter()
-                .filter(|entry| artifact_is_since(entry, cutoff))
-                .collect(),
-            self.later
-                .iter()
-                .filter(|entry| artifact_is_since(entry, cutoff))
-                .collect(),
-            self.feature_requests
-                .iter()
-                .filter(|entry| artifact_is_since(entry, cutoff))
-                .collect(),
-        )
-    }
-
     /// The primary tier's newest entries as `(file, kind, heading-or-topic)`,
     /// for callers that surface a pointer rather than the whole queue.
     pub(crate) fn primary_preview(&self, limit: usize) -> Vec<(String, String, String)> {
@@ -8079,8 +8132,68 @@ impl OpenItems {
     }
 }
 
-fn artifact_is_since(entry: &ArtifactEntry, cutoff: DateTime<Utc>) -> bool {
-    parse_artifact_timestamp(&entry.timestamp).is_none_or(|filed| filed >= cutoff)
+/// `filed_at` for a filename stamp: RFC 3339, or null when it does not parse.
+fn filed_at_of(stamp: &str) -> Option<String> {
+    parse_artifact_timestamp(stamp)
+        .map(|filed| filed.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
+/// The workspace-side view of one project's tier selection: the same three
+/// tiers as `OpenItems`, with the delta's boundary stated instead of implied
+/// and the rows whose time could not be read counted instead of left
+/// invisible inside the totals.
+#[derive(Serialize)]
+pub(crate) struct TierSelection<'a> {
+    pub(crate) open: Vec<&'a ArtifactEntry>,
+    pub(crate) later: Vec<&'a ArtifactEntry>,
+    pub(crate) feature_requests: Vec<&'a ArtifactEntry>,
+    /// The selected rows whose filename stamp does not parse. They ride
+    /// inside their tier — a selection that silently dropped what it could
+    /// not date would under-report — and are counted here so the inclusion
+    /// is a stated fact rather than an accident of the filter.
+    pub(crate) unknown_time: Vec<&'a ArtifactEntry>,
+    /// The cutoff the selection was made under, normalized to RFC 3339.
+    pub(crate) since: Option<String>,
+    /// What the counts mean: `arrivals` under a cutoff, `outstanding` without.
+    pub(crate) journal_counts: &'static str,
+}
+
+impl<'a> TierSelection<'a> {
+    pub(crate) fn of(items: &'a OpenItems, cutoff: Option<DateTime<Utc>>) -> Self {
+        let select = |entries: &'a Vec<ArtifactEntry>| {
+            let mut selected = Vec::new();
+            let mut unknown = Vec::new();
+            for entry in entries {
+                let filed = parse_artifact_timestamp(&entry.timestamp);
+                let keep = cutoff.is_none_or(|cutoff| filed.is_none_or(|filed| filed >= cutoff));
+                if keep {
+                    selected.push(entry);
+                    if filed.is_none() {
+                        unknown.push(entry);
+                    }
+                }
+            }
+            (selected, unknown)
+        };
+        let (open, mut open_unknown) = select(&items.open);
+        let (later, mut later_unknown) = select(&items.later);
+        let (feature_requests, mut fr_unknown) = select(&items.feature_requests);
+        let mut unknown_time = std::mem::take(&mut open_unknown);
+        unknown_time.append(&mut later_unknown);
+        unknown_time.append(&mut fr_unknown);
+        Self {
+            open,
+            later,
+            feature_requests,
+            unknown_time,
+            since: cutoff.map(|cutoff| cutoff.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            journal_counts: if cutoff.is_some() {
+                "arrivals"
+            } else {
+                "outstanding"
+            },
+        }
+    }
 }
 
 /// The actionable journal queue, split into its three tiers. Shared by
@@ -8129,10 +8242,17 @@ pub(crate) fn collect_open_in(
     } else {
         None
     };
-    let rewrites = Store::discover(project)
-        .and_then(|store| store.rewrites())
-        .ok();
-    let changes = open_changes_for_annotation(project);
+    // Read-only ledger lookups for the annotations: a repository with no
+    // ledger yet renders without change and rewrite annotations instead of
+    // creating one as a side effect of listing a queue.
+    let ledger_root = Store::resolve_root(project).ok();
+    let store = ledger_root
+        .as_deref()
+        .and_then(|root| Store::open_at(root).ok().flatten());
+    let rewrites = store.as_ref().and_then(|store| store.rewrites().ok());
+    let changes = store
+        .map(|store| open_changes_in(&store))
+        .unwrap_or_default();
     let (caller_harness, caller_session) = identity(ctx);
     let caller = LaneOwner {
         harness: caller_harness,
@@ -8179,6 +8299,8 @@ pub(crate) fn collect_open_in(
             let (availability, claim_history) =
                 artifact_availability(&journal, &name, &claims, now);
             Some(ArtifactEntry {
+                filed_at: filed_at_of(&ts),
+                timestamp_status: TimestampStatus::classify(&ts).as_str(),
                 lane: lane_for_topic(&lanes, &topic, &caller),
                 change,
                 age_seconds: if file_kind == JournalKind::Discussion.as_str() {
@@ -8654,10 +8776,10 @@ struct DiscussionQuestion {
     /// settled; before that the distinction between a question nobody
     /// prompted and one whose reply is pending is the whole of what is left
     /// to do.
-    delivery: DeliveryState,
+    pub(crate) delivery: DeliveryState,
     /// Every recorded delivery, oldest first, including those made before an
     /// answer arrived.
-    deliveries: Vec<QuestionDelivery>,
+    pub(crate) deliveries: Vec<QuestionDelivery>,
     /// An opening question is meant to settle a premise before anyone argues.
     /// Set when it is still open and positions exist anyway — the argument
     /// started without the premise it was supposed to rest on.
@@ -8681,9 +8803,9 @@ struct DiscussionBranch {
 struct DiscussionAnswer {
     option: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    actor: Option<String>,
+    pub(crate) actor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    on_behalf_of: Option<String>,
+    pub(crate) on_behalf_of: Option<String>,
 }
 
 /// One position in a round: its stable id, and the same identity pair an
@@ -8692,9 +8814,9 @@ struct DiscussionAnswer {
 struct DiscussionPosition {
     id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    actor: Option<String>,
+    pub(crate) actor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    on_behalf_of: Option<String>,
+    pub(crate) on_behalf_of: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -9707,16 +9829,13 @@ fn archive(
 }
 
 fn timestamp_older_than(timestamp: &str, days: u64) -> bool {
-    let parsed = NaiveDateTime::parse_from_str(timestamp, "%Y%m%dT%H%M%SZ")
-        .or_else(|_| NaiveDateTime::parse_from_str(timestamp, "%Y%m%dT%H%M%S"));
-    let Ok(parsed) = parsed else {
+    let Some(parsed) = parse_artifact_timestamp(timestamp) else {
         return false;
     };
-    let timestamp = DateTime::<Utc>::from_naive_utc_and_offset(parsed, Utc);
     let Ok(days) = i64::try_from(days) else {
         return false;
     };
-    timestamp < Utc::now() - chrono::Duration::days(days)
+    parsed < Utc::now() - chrono::Duration::days(days)
 }
 
 fn archive_one(ctx: &Ctx, hot: &Path, filename: &str, note: Option<&str>) -> Result<()> {
@@ -10148,10 +10267,9 @@ fn try_auto_log(ctx: &Ctx, topic: &str, message: &str) -> Result<()> {
 /// Open changes in this repo, for annotating journal items. Empty on any
 /// lookup failure (outside a repo, unreadable ledger): annotation is a
 /// convenience layer that must never make `journal open` fail.
-fn open_changes_for_annotation(cwd: &Path) -> Vec<ChangeState> {
-    let Ok(store) = Store::discover(cwd) else {
-        return Vec::new();
-    };
+/// Open change states over a store that already exists. Listing never
+/// creates one.
+fn open_changes_in(store: &Store) -> Vec<ChangeState> {
     let Ok(ids) = store.list_change_ids() else {
         return Vec::new();
     };
@@ -10477,5 +10595,53 @@ mod heading_id_tests {
         // A heading with no id at all: the ordinary hand-written case.
         assert_eq!(position_heading_id("### Position (m via h, t)"), None);
         assert_eq!(position_heading_id("## Position pos-01abc"), None);
+    }
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::{parse_artifact_timestamp, parse_since, TimestampStatus};
+
+    /// The canonical and legacy forms of one instant filter identically:
+    /// a stamp without the `Z` names the same UTC time as the same digits
+    /// with it, so no reading of a filename can depend on which form a
+    /// writer produced.
+    #[test]
+    fn legacy_and_canonical_forms_of_one_instant_agree() {
+        let canonical = parse_artifact_timestamp("20260701T120000Z").unwrap();
+        let legacy = parse_artifact_timestamp("20260701T120000").unwrap();
+        assert_eq!(canonical, legacy);
+        assert_eq!(
+            TimestampStatus::classify("20260701T120000Z"),
+            TimestampStatus::Canonical
+        );
+        assert_eq!(
+            TimestampStatus::classify("20260701T120000"),
+            TimestampStatus::Legacy
+        );
+    }
+
+    /// A stamp in neither form is invalid, not zero, not "now", not a date
+    /// guessed from the digits that do parse.
+    #[test]
+    fn a_neither_form_stamp_is_invalid() {
+        assert_eq!(parse_artifact_timestamp("not-a-stamp"), None);
+        assert_eq!(parse_artifact_timestamp("20260701T120000+05:00"), None);
+        assert_eq!(
+            TimestampStatus::classify("not-a-stamp"),
+            TimestampStatus::Invalid
+        );
+    }
+
+    /// The archive-age rule (accepts both forms) and the open-age rule must
+    /// agree on legacy dates, which they do by sharing this one parser; the
+    /// probe asserts the shared input convention itself.
+    #[test]
+    fn parse_since_takes_both_stamp_forms_and_rfc3339() {
+        let from_stamp = parse_since("20260701T120000Z").unwrap();
+        let from_legacy = parse_since("20260701T120000").unwrap();
+        let from_rfc = parse_since("2026-07-01T12:00:00Z").unwrap();
+        assert_eq!(from_stamp, from_rfc);
+        assert_eq!(from_legacy, from_rfc);
     }
 }
