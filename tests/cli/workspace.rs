@@ -399,6 +399,13 @@ fn workspace_backlog_compacts_temporary_unreachable_journals() {
     let repo = Repo::new();
     let journals = repo.home.join(".local/ai/journals");
     for index in 0..5 {
+        // A temporary anchor is one under the environment's temp directory,
+        // which is what the classification reads; the fixture names one
+        // there instead of assuming /tmp so the case holds under any TMPDIR.
+        let anchor = std::env::temp_dir()
+            .join(format!("arc-scratch-{index}"))
+            .display()
+            .to_string();
         let journal = journals.join(format!("-tmp-noise-{index}"));
         fs::create_dir_all(&journal).unwrap();
         fs::write(
@@ -409,7 +416,7 @@ fn workspace_backlog_compacts_temporary_unreachable_journals() {
         fs::write(
             journal.join("bindings.jsonl"),
             format!(
-                "{{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\"event\":\"bound\",\"anchor\":\"/tmp/arc-scratch-{index}\"}}\n"
+                "{{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\"event\":\"bound\",\"anchor\":\"{anchor}\"}}\n"
             ),
         )
         .unwrap();
@@ -1317,4 +1324,159 @@ implemented by tester@max; coverage: Reviewer@low [route 2026.09]"
         "{text}"
     );
     assert!(text.contains("debt-owed (independent-review 1)"), "{text}");
+}
+
+/// The human report ends with the one command that re-runs its exact scope
+/// as itemized JSON, so a reader following the bare guide never reassembles
+/// per-project reports by hand. The hint names the resolved scope, the
+/// normalized cutoff, and the caller's --unreachable choice, and quotes
+/// paths so awkward names survive the shell.
+#[test]
+fn workspace_backlog_detail_hint_preserves_selection() {
+    // Space and apostrophe in one scope path: the hint must quote both.
+    let outer = TempDir::new().unwrap();
+    let scope = outer.path().join("ws it's");
+    fs::create_dir_all(&scope).unwrap();
+
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+    fs::rename(&repo.root, &scope.join("repo")).unwrap();
+    let repo_root = scope.join("repo");
+    // The quoting under test: a single quote becomes '\'' inside a
+    // single-quoted POSIX shell argument.
+    let quoted_scope = format!(
+        "'{}'",
+        scope.display().to_string().replace('\'', "'\\''")
+    );
+
+    let command_line = |args: &[&str], cwd: &Path| {
+        let text = stdout(repo.arc(cwd).args(args));
+        text.lines()
+            .rev()
+            .find(|line| line.trim_start().starts_with("detail:"))
+            .map(|line| line.trim_start().strip_prefix("detail: ").unwrap().to_string())
+            .unwrap_or_else(|| panic!("no detail hint in:\n{text}"))
+    };
+
+    // Ordinary scoped run: --under names the requested path canonically.
+    let hint = command_line(
+        &["workspace", "backlog", "--under", scope.to_str().unwrap()],
+        &repo_root,
+    );
+    assert_eq!(
+        hint,
+        format!(
+            "arc workspace backlog --under {quoted_scope} --items --json",
+        )
+    );
+
+    // --here resolves to the caller's directory; --since survives.
+    let hint = command_line(
+        &[
+            "workspace",
+            "backlog",
+            "--here",
+            "--since",
+            "20990101T000000Z",
+        ],
+        &repo_root,
+    );
+    let quoted_cwd = format!(
+        "'{}'",
+        repo_root.display().to_string().replace('\'', "'\\''")
+    );
+    assert_eq!(
+        hint,
+        format!(
+            "arc workspace backlog --under {quoted_cwd} --since 20990101T000000Z --items --json",
+        )
+    );
+
+    // Global scope stays global, and --unreachable travels with it.
+    let hint = command_line(
+        &[
+            "workspace",
+            "backlog",
+            "--global",
+            "--unreachable",
+            "--since",
+            "2026-01-01T00:00:00Z",
+        ],
+        &repo_root,
+    );
+    assert_eq!(
+        hint,
+        "arc workspace backlog --global --since 2026-01-01T00:00:00Z --unreachable --items --json"
+    );
+
+    // Following the hint in an isolated fixture reproduces this report's
+    // scope, item set, and counts exactly.
+    let mut direct = repo.arc(&repo_root);
+    direct
+        .args([
+            "workspace",
+            "backlog",
+            "--under",
+            scope.to_str().unwrap(),
+            "--items",
+            "--json",
+        ])
+        .env_remove("ARC_JOURNAL_DIR");
+    let expected = json_stdout(&mut direct);
+
+    let hint = command_line(
+        &["workspace", "backlog", "--under", scope.to_str().unwrap()],
+        &repo_root,
+    );
+    // The hint is a POSIX shell command line, so it is followed the way a
+    // shell would read it — quoting included — rather than re-split by hand.
+    let mut shell = Command::new("sh");
+    shell
+        .arg("-c")
+        .arg(&hint)
+        .current_dir(&repo_root)
+        .env("HOME", &repo.home)
+        .env("ARC_SANDBOX", &repo.home)
+        .env("ARC_ACTOR", "tester")
+        .env("ARC_HARNESS", "test")
+        .env("ARC_SESSION", "session-a")
+        .env_remove("ARC_JOURNAL_DIR")
+        .env_remove("ARC_MODEL")
+        .env_remove("ARC_DATA_ROOT");
+    let followed_out = shell.output().unwrap();
+    assert!(followed_out.status.success(), "{hint}: {followed_out:?}");
+    let actual: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&followed_out.stdout).unwrap(),
+    )
+    .unwrap_or_else(|error| panic!("{hint}: {error}"));
+    assert_eq!(actual["scope"], expected["scope"], "{hint}");
+    assert_eq!(actual["summary"], expected["summary"], "{hint}");
+    assert_eq!(actual["projects"], expected["projects"], "{hint}");
+    assert_eq!(actual["unreachable"], expected["unreachable"], "{hint}");
+
+    // An empty report still names the command that would itemize it.
+    let empty = outer.path().join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    let text = stdout(
+        repo.arc(&repo_root)
+            .args(["workspace", "backlog", "--under", empty.to_str().unwrap()]),
+    );
+    assert!(
+        text.contains(&format!(
+            "arc workspace backlog --under '{}' --items --json",
+            empty.display()
+        )),
+        "{text}"
+    );
+
+    // JSON stays one parseable value: no footer may ride along.
+    repo.arc(&repo_root)
+        .args(["workspace", "backlog", "--items", "--json"])
+        .assert()
+        .success();
+    let text = stdout(repo.arc(&repo_root).args(["workspace", "backlog", "--items", "--json"]));
+    serde_json::from_str::<serde_json::Value>(&text).unwrap();
 }

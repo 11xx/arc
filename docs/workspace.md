@@ -47,7 +47,11 @@ verdict, changes carrying audit debt, the journal's three tiers, and the
 primary tier's oldest entry — a one-item queue never looks like a backlog from
 inside its own project. Projects are ranked by what is blocked; items are never
 ranked against each other across projects, because arc records no priority that
-spans repositories. A project whose journal holds work but whose anchor no
+spans repositories. The human report ends with a `detail:` footer naming the
+command that re-runs the same report as itemized JSON — the resolved scope, the
+normalized `--since`, and `--unreachable` exactly as the report used them, with
+paths quoted for the shell. The footer appears over an empty scope too, and
+never on `--json`, whose whole stdout must stay one parseable value. A project whose journal holds work but whose anchor no
 longer resolves is reported under `unreachable` with the `journal rebind` that
 adopts it; `list` and `inbox` cannot report it, so they name what they skipped
 on stderr rather than dropping it silently, and say so plainly when no

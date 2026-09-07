@@ -34,6 +34,9 @@ SAY WHO YOU ARE (before the first write)
 FROM A WORKSPACE ROOT (outside a project)
   arc workspace backlog --here
                        Discover work beneath this directory without crawling it.
+                       One report ends with the detail command that re-runs it
+                       as itemized JSON for that exact scope; --items selects
+                       the rows and --json selects the rendering.
   cd <anchor>          Enter one project named by the report, then orient there.
 
 ORIENT INSIDE A PROJECT (start here, in this order)
