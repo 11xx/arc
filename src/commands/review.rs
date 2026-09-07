@@ -438,14 +438,33 @@ pub fn amend_attribution(
         .iter()
         .find(|patchset| patchset.id == patchset_id)
         .with_context(|| format!("unknown patchset {patchset_id}"))?;
+    // The refusal names the concrete blocker from loaded state — the first
+    // verdict on this patchset, or the terminal closure — rather than
+    // attempting a mutation that the append policy will refuse anyway.
     if let Some(verdict) = st
         .verdicts
         .iter()
         .find(|verdict| verdict.patchset_id == patchset_id)
     {
         bail!(
-            "patchset {patchset_id} attribution cannot be amended after verdict {}",
-            verdict.event_id
+            "patchset {patchset_id} attribution cannot be amended after verdict {} by {}; \
+             attribution is repairable only before any verdict, because a verdict binds to \
+             the authorship it judged",
+            verdict.event_id,
+            verdict.effective_author(),
+        );
+    }
+    if st.closure.is_some() {
+        let outcome = match st.closure.as_ref().map(|closure| closure.outcome) {
+            Some(Closure::Integrated) => "integrated",
+            Some(Closure::Abandoned) => "abandoned",
+            Some(Closure::Superseded) => "superseded",
+            None => "closed",
+        };
+        bail!(
+            "patchset {patchset_id} attribution cannot be amended after the change is {outcome}; \
+             the shipped revision keeps the authorship that authorized it, and the unresolved \
+             identities stay recorded as debt with the exact patchset"
         );
     }
     warn_fewer_contributors_than_hands(ctx, &patchset.base, &patchset.head, &contributors);

@@ -409,6 +409,16 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   or when nobody distinguishable from the author covers it. Warnings, never
   blockers — one reviewer is a legitimate way to ship.
 
+  `arc status --json` carries the exact identities the independence check
+  compares as `review_subject`: invoker, effective author, the effective
+  contributor set, and whether it was declared or synthesized. `arc show` and
+  `arc check` name them beside an approval rejection.
+
+  Repairing a patchset's attribution happens only before any verdict:
+  `snapshot --amend <ps> --contributors ...` replaces the whole set, and the
+  refusal after a verdict or closure names the blocker. A run dispatch is
+  activity, not authorship — it repairs no patchset.
+
   Independence is judged against the patchset a reviewer actually read, not
   against whatever is newest. Otherwise a later snapshot by somebody else
   would retroactively turn a self-review into an independent one.
