@@ -10883,18 +10883,13 @@ fn journal_spool_promote_uniquifies_a_name_taken_while_the_write_waited() {
 
     // The name the parked write derived belongs to an artifact that reached
     // cold storage while it waited.
-    let spooled: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(
-            fs::read_dir(repo.root.join(".arc/outbox"))
-                .unwrap()
-                .next()
-                .unwrap()
-                .unwrap()
-                .path(),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let spool_file = fs::read_dir(repo.root.join(".arc/outbox"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .unwrap_or_else(|| panic!("no spooled write in {:?}", repo.root.join(".arc/outbox")));
+    let spooled: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&spool_file).unwrap()).unwrap();
     let taken = spooled["filename"].as_str().unwrap().to_string();
     fs::write(cold.join(&taken), "# Filed earlier\n").unwrap();
 
@@ -11123,4 +11118,83 @@ fn catchup_lists_a_spool_waiting_in_a_change_worktree() {
         "{caught}"
     );
     assert!(caught.contains("arc journal spool --promote"), "{caught}");
+}
+
+/// `arc config` answers the same journal location `arc journal dir` resolves,
+/// in the JSON block a caller collecting paths already reads. Every resolver
+/// source agrees across the two commands, an unanchored directory succeeds
+/// with null plus a diagnostic, and neither command creates anything.
+#[test]
+fn config_reports_journal_dir_for_cwd_across_resolver_sources() {
+    // Normal repository and ARC_JOURNAL_DIR.
+    let repo = Repo::new();
+    let canon = fs::canonicalize(&repo.root).unwrap();
+    let expected_default = repo
+        .home
+        .join(".local/ai/journals")
+        .join(journal_slug(&canon));
+
+    let config_json = |cmd: &mut AssertCommand| {
+        let out = stdout(cmd.args(["config"]));
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()
+    };
+    let got = config_json(&mut repo.arc(&repo.root));
+    assert_eq!(got["journal_dir_for_cwd"], expected_default.display().to_string());
+    assert!(got.get("journal_resolution_error").is_none(), "{got}");
+    // Resolution answers without creating the journal.
+    assert!(!expected_default.exists());
+
+    let env_dir = repo.home.join("env-journal-dir");
+    let got = config_json(&mut repo.arc(&repo.root).env("ARC_JOURNAL_DIR", &env_dir));
+    assert_eq!(got["journal_dir_for_cwd"], env_dir.display().to_string(), "{got}");
+
+    // A linked worktree resolves through the repository's shared root.
+    let linked = repo.home.join("linked-config-worktree");
+    git(&repo.root, &["branch", "linked-config"]);
+    git(
+        &repo.root,
+        &["worktree", "add", linked.to_str().unwrap(), "linked-config"],
+    );
+    let got = config_json(&mut repo.arc(&linked));
+    assert_eq!(
+        got["journal_dir_for_cwd"],
+        expected_default.display().to_string(),
+        "{got}"
+    );
+
+    // A configured path-prefix mapping wins over Git identity.
+    let cfg_dir = repo.home.join(".local/ai/arc");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    let override_dir = repo.home.join("custom-journal-dir");
+    fs::write(
+        cfg_dir.join("config.toml"),
+        format!(
+            "[journals]\ndirs = {{ \"{}\" = \"{}\" }}\n",
+            canon.display(),
+            override_dir.display()
+        ),
+    )
+    .unwrap();
+    let got = config_json(&mut repo.arc(&repo.root));
+    assert_eq!(got["journal_dir_for_cwd"], override_dir.display().to_string(), "{got}");
+    let dir_out = stdout(repo.arc(&repo.root).args(["journal", "dir"]));
+    assert_eq!(PathBuf::from(dir_out.trim()), override_dir);
+
+    // An unanchored directory: config succeeds with null plus a diagnostic
+    // and creates nothing.
+    let unanchored = repo.home.join("unanchored");
+    fs::create_dir_all(&unanchored).unwrap();
+    let mut cmd = repo.arc(&unanchored);
+    cmd.env_remove("ARC_JOURNAL_DIR").args(["config"]);
+    let out = stdout(&mut cmd);
+    let got: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(got["journal_dir_for_cwd"].is_null(), "{got}");
+    let error = got["journal_resolution_error"].as_str().unwrap();
+    assert!(error.contains("cannot resolve a stable journal anchor"), "{error}");
+    cmd.assert().success();
+    assert!(!unanchored.join(".arc").exists(), "config created state");
+    assert!(
+        !expected_default.exists() && !override_dir.exists(),
+        "config created a journal"
+    );
 }
