@@ -105,6 +105,33 @@ anyone independent. Such an audit says out loud that arc assumed the identity
 of whoever wrote the work, so a reader can weigh what the pass was independent
 of.
 
+### Repairing attribution before review
+
+Attribution is repairable only before any verdict, because a verdict binds to
+the authorship it judged. The sequence a lead drives, with one shared Git
+identity and distinct declared actors:
+
+```sh
+arc snapshot <slug> --contributors executor-a          # capture the work, at least the executor
+arc status <slug> --json                               # review_subject names what the gate compares
+arc snapshot <slug> --amend ps-01 --contributors executor-a --contributors executor-b
+                                                       # replace the whole set, before any verdict
+arc review <slug> --verdict approved                   # an actually independent identity
+```
+
+An explicit set replaces the whole set rather than adding one member, so an
+amendment names the full set every time. The lead's own repair commits require
+the lead in the declared full set. After any verdict, or once the change is
+integrated, abandoned, or superseded, the amendment refuses naming the
+concrete blocker — the verdict event and its author, or the terminal closure —
+and changes neither the ledger length nor the contributor fields: the shipped
+revision keeps the authorship that authorized it, and unresolved identities
+stay recorded as debt with the exact patchset.
+
+A run dispatch recorded after a snapshot is repository-scoped activity: it
+proves an invocation, not authorship, so it repairs no patchset and changes no
+status review subject.
+
 ### Dangerous surfaces
 
 Which changes need an independent verdict is the project's call, declared in
