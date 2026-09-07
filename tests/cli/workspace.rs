@@ -846,6 +846,13 @@ fn workspace_backlog_items() {
 #[test]
 fn workspace_backlog_items_surface_the_same_verification_annotation() {
     let repo = Repo::new();
+    // The moved comparison reads the anchor's ledger for rewrite records.
+    // A ledger comes from opening a change, the way every real project has
+    // one; a queue rendering must not create it as a side effect.
+    repo.arc(&repo.root)
+        .args(["begin", "ledger-holder", "--no-worktree"])
+        .assert()
+        .success();
     let seed = stdout(
         repo.arc(&repo.root)
             .args([
@@ -2001,4 +2008,120 @@ fn workspace_backlog_carries_questions_and_journal_paths() {
     assert_eq!(alpha_only["open_questions"].as_array().unwrap().len(), 1);
     assert_eq!(value["summary"]["unresolved_question_records"], 1);
     assert_eq!(value["summary"]["open_items"], 0);
+}
+
+/// Fork inventory and observation boundaries: an active fork appears with its
+/// metadata and adds no decision weight, retiring it removes it, and the JSON
+/// report carries ordered observation timestamps with the sequential
+/// consistency it actually has. The report writes no repository or journal
+/// files.
+#[test]
+fn workspace_backlog_inventories_forks_without_obligation() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["fork", "begin", "demo"])
+        .assert()
+        .success();
+
+    // Fork-only project: the fork is visible even with nothing outstanding.
+    let value = {
+        let mut report = repo.arc(&repo.root);
+        report.args(["workspace", "backlog", "--items", "--json"]);
+        json_stdout(&mut report)
+    };
+    let project = value["projects"].as_array().unwrap().first().unwrap();
+    let forks = project["forks"].as_array().unwrap();
+    assert_eq!(forks.len(), 1, "{}", project);
+    assert_eq!(forks[0]["slug"], "demo");
+    assert_eq!(forks[0]["branch"], "fork/demo");
+    assert_eq!(project["fork_count"], 1);
+    assert_eq!(value["summary"]["fork_count"], 1);
+    // Forks add nothing to the blocked/decision score.
+    assert_eq!(project["decision_questions"], 0);
+    assert_eq!(project["needs_review"].as_array().unwrap().len(), 0);
+    assert_eq!(project["debt_owed"].as_array().unwrap().len(), 0);
+
+    // Observation bounds are present, ordered, and sequential.
+    let started = value["observation"]["started_at"].as_str().unwrap();
+    let finished = value["observation"]["finished_at"].as_str().unwrap();
+    assert!(started <= finished, "{started} > {finished}");
+    assert_eq!(value["observation"]["consistency"], "sequential");
+
+    // Retiring the fork removes it from the inventory.
+    repo.arc(&repo.root)
+        .args(["fork", "retire", "demo", "dropped: not wanted"])
+        .assert()
+        .success();
+    let value = {
+        let mut report = repo.arc(&repo.root);
+        report.args(["workspace", "backlog", "--json"]);
+        json_stdout(&mut report)
+    };
+    assert_eq!(value["summary"]["fork_count"], 0, "{value}");
+    assert!(value["projects"].as_array().unwrap().is_empty(), "{value}");
+}
+
+/// A report writes nothing: the repository's tracked tree, its ledger, and
+/// the journal are byte-identical across a backlog run.
+#[test]
+fn workspace_backlog_writes_nothing() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+    // The journal write above creates the journal; the ledger root comes
+    // with `journal log` registering the project.
+    let journal = journal_dir_of(&repo);
+    assert!(journal.is_dir(), "journal dir should exist after log");
+    let snapshot_dir = |dir: &Path| -> Vec<(String, [u8; 32])> {
+        let mut entries: Vec<(String, [u8; 32])> = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            // A root that does not exist yet is part of the before-state.
+            Err(_) if !dir.exists() => return Vec::new(),
+            Err(error) => panic!("cannot read {}: {error}", dir.display()),
+        }
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                (format!("{:?}", path), [0u8; 32])
+            } else {
+                let bytes = fs::read(&path).unwrap();
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&Sha256::digest(&bytes));
+                (path.display().to_string(), hash)
+            }
+        })
+        .collect();
+        entries.sort();
+        entries
+    };
+    let ledger_root = repo.root.join(".git/arc");
+    let before = snapshot_dir(&journal);
+    let before_git = snapshot_dir(&ledger_root);
+    let before_status = git_out(&repo.root, &["status", "--porcelain"]);
+
+    repo.arc(&repo.root)
+        .args(["workspace", "backlog", "--items", "--json"])
+        .assert()
+        .success();
+
+    assert_eq!(snapshot_dir(&journal), before, "journal changed");
+    let after_git = snapshot_dir(&ledger_root);
+    assert_eq!(after_git.len(), before_git.len(), "ledger changed");
+    for ((before_path, before_hash), (after_path, after_hash)) in
+        before_git.iter().zip(after_git.iter())
+    {
+        assert_eq!(before_path, after_path, "ledger changed");
+        assert_eq!(before_hash, after_hash, "ledger changed: {before_path}");
+    }
+    assert_eq!(
+        git_out(&repo.root, &["status", "--porcelain"]),
+        before_status,
+        "tracked tree changed"
+    );
 }

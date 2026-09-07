@@ -121,6 +121,22 @@ established only by evaluating the combined tree. Either report value is
 `null` when its Git range cannot be read; the text view says `unknown` rather
 than presenting a failed probe as zero or an empty set.
 
+Per project the report also inventories active forks with the same read-only
+projection `arc fork list` uses — slug, branch, ahead count, base — and sums
+them in the summary. Forks are orientation, never obligation: they add nothing
+to the blocked or decision score, a fork-only project still appears, an
+unreadable ahead count stays null rather than zero, and retired forks remain
+history. Every project row names its `journal_dir`, the directory its
+questions and items were read from.
+
+The report is an observation, not a snapshot protocol: `observation` carries
+when the pass started and finished, and `consistency: "sequential"` states how
+it was built — projects read one after another in one pass. Arithmetic
+agreement between project rows and the summary is checked over the emitted
+rows; it cannot establish that the underlying state did not move mid-read, and
+the report does not claim it did. A report writes nothing: no ledger event, no
+journal file, no tracked tree change.
+
 `shared_surfaces` names each path more than one outstanding obligation
 changed, with the changes that changed it. Debt is recorded per change, so a
 file several obligations carry is invisible from any one of them: reviewing

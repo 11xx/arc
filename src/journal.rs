@@ -8242,10 +8242,17 @@ pub(crate) fn collect_open_in(
     } else {
         None
     };
-    let rewrites = Store::discover(project)
-        .and_then(|store| store.rewrites())
-        .ok();
-    let changes = open_changes_for_annotation(project);
+    // Read-only ledger lookups for the annotations: a repository with no
+    // ledger yet renders without change and rewrite annotations instead of
+    // creating one as a side effect of listing a queue.
+    let ledger_root = Store::resolve_root(project).ok();
+    let store = ledger_root
+        .as_deref()
+        .and_then(|root| Store::open_at(root).ok().flatten());
+    let rewrites = store.as_ref().and_then(|store| store.rewrites().ok());
+    let changes = store
+        .map(|store| open_changes_in(&store))
+        .unwrap_or_default();
     let (caller_harness, caller_session) = identity(ctx);
     let caller = LaneOwner {
         harness: caller_harness,
@@ -10260,10 +10267,9 @@ fn try_auto_log(ctx: &Ctx, topic: &str, message: &str) -> Result<()> {
 /// Open changes in this repo, for annotating journal items. Empty on any
 /// lookup failure (outside a repo, unreadable ledger): annotation is a
 /// convenience layer that must never make `journal open` fail.
-fn open_changes_for_annotation(cwd: &Path) -> Vec<ChangeState> {
-    let Ok(store) = Store::discover(cwd) else {
-        return Vec::new();
-    };
+/// Open change states over a store that already exists. Listing never
+/// creates one.
+fn open_changes_in(store: &Store) -> Vec<ChangeState> {
     let Ok(ids) = store.list_change_ids() else {
         return Vec::new();
     };

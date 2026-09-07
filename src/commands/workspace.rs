@@ -356,6 +356,12 @@ fn workspace_inbox(stores: &[(String, Store)], json: bool) -> Result<()> {
 struct Backlog {
     schema: &'static str,
     scope: BacklogScope,
+    /// When this observation ran and over what interval. Sequential
+    /// construction — projects are read one after another — means the
+    /// timestamp on one project's rows is not the timestamp on another's:
+    /// these are the bounds of the reading, not a freshness guarantee, and
+    /// no atomic-snapshot claim is made.
+    observation: Observation,
     /// How the journal tiers were selected: the cutoff, what the counts mean,
     /// and whether undated rows ride inside them. The scope object stands
     /// beside it unchanged.
@@ -386,6 +392,9 @@ struct BacklogSummary {
     /// Unanswered questions on consumed, archived, or missing artifacts:
     /// unresolved records, reported but not ranked as waiting decisions.
     unresolved_question_records: usize,
+    /// Active forks across every project. Orientation only: a fork is work
+    /// somebody chose to keep unintegrated, not a queue waiting to merge.
+    fork_count: usize,
     open_items: usize,
     later_items: usize,
     feature_requests: usize,
@@ -429,6 +438,7 @@ impl BacklogSummary {
                 .iter()
                 .map(|project| project.open_questions.len() - project.decision_questions)
                 .sum(),
+            fork_count: projects.iter().map(|project| project.fork_count).sum(),
             open_items: projects.iter().map(|project| project.open_items).sum(),
             later_items: projects.iter().map(|project| project.later_items).sum(),
             feature_requests: projects
@@ -478,6 +488,18 @@ impl BacklogSummary {
             self.unreachable,
         );
     }
+}
+
+#[derive(Serialize)]
+struct Observation {
+    started_at: String,
+    finished_at: String,
+    /// How the report was built: projects read one after another in one
+    /// pass. Arithmetic agreement between project rows and the summary is
+    /// checked over the emitted rows; it cannot establish that the
+    /// underlying state did not move mid-read, and this report does not
+    /// claim it did.
+    consistency: &'static str,
 }
 
 #[derive(Serialize)]
@@ -659,6 +681,12 @@ struct ProjectBacklog {
     /// a verdict being held open.
     opening_question_count: usize,
     closing_question_count: usize,
+    /// Active forks of this project, using the read-only fork projection.
+    /// Forks are orientation, never obligation: they add nothing to the
+    /// blocked/decision score, and retired forks remain history.
+    #[serde(skip_serializing_if = "TierIsEmpty::forks_empty")]
+    forks: Vec<crate::commands::fork::ForkEntry>,
+    fork_count: usize,
     /// The primary tier's oldest entry, in days. A one-item queue never looks
     /// like a backlog from inside the project; across projects it is visible.
     oldest_open_days: Option<u64>,
@@ -679,6 +707,10 @@ struct TierIsEmpty;
 impl TierIsEmpty {
     fn is_empty(tier: &[crate::journal::ArtifactEntry]) -> bool {
         tier.is_empty()
+    }
+
+    fn forks_empty(forks: &[crate::commands::fork::ForkEntry]) -> bool {
+        forks.is_empty()
     }
 }
 
@@ -795,6 +827,7 @@ fn workspace_backlog(
     };
     let mut projects = Vec::new();
     let mut unreachable = Vec::new();
+    let observed_at = chrono::Utc::now();
 
     for project in crate::registry::projects(&cfg)? {
         if !scope.includes(project.anchor.as_deref()) {
@@ -867,6 +900,18 @@ fn workspace_backlog(
             .filter(|entry| entry.question.placement == "opening")
             .count();
         let closing_question_count = questions.len() - opening_question_count;
+        // Fork inventory uses the same read-only resolver as `fork list`,
+        // run from the project's anchor: no checkouts are created, no forks
+        // retired, and no readiness is inferred. An unreadable probe stays
+        // null rather than zeroing out; retired forks remain history.
+        let fork_ctx = ctx.with_cwd(anchor.clone());
+        let forks: Vec<crate::commands::fork::ForkEntry> =
+            crate::commands::fork::list_entries(&fork_ctx)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|entry| entry.retired.is_none())
+                .collect();
+        let fork_count = forks.len();
         let entry = ProjectBacklog {
             project: project.label(),
             anchor: anchor.display().to_string(),
@@ -883,6 +928,8 @@ fn workspace_backlog(
             decision_questions,
             opening_question_count,
             closing_question_count,
+            forks,
+            fork_count,
             // Age is a property of the whole queue, so it would contradict
             // counts that mean "filed since". A delta reports arrivals only.
             oldest_open_days: cutoff
@@ -909,6 +956,12 @@ fn workspace_backlog(
             serde_json::to_string_pretty(&Backlog {
                 schema: "arc-workspace-backlog/12",
                 scope: scope.view(),
+                observation: Observation {
+                    started_at: observed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    finished_at: chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    consistency: "sequential",
+                },
                 selection: JournalSelection {
                     since: cutoff.map(|c| c.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
                     journal_counts: if cutoff.is_some() {
@@ -1063,6 +1116,16 @@ fn workspace_backlog(
                     question.question.heading.as_deref().unwrap_or(""),
                 );
             }
+        }
+        for fork in &project.forks {
+            let ahead = fork
+                .ahead
+                .map(|count| format!("+{count}"))
+                .unwrap_or_else(|| "+?".to_string());
+            println!(
+                "  fork          {}  {}  {} over {}",
+                fork.slug, fork.branch, ahead, fork.base_branch
+            );
         }
         if show_items {
             if let Some(items) = &project.items {

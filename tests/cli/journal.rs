@@ -4384,6 +4384,12 @@ fn journal_position_rejects_consumed_artifact() {
 #[test]
 fn journal_verified_records_anchor_revision_and_provenance() {
     let repo = Repo::new();
+    // The moved comparison reads the anchor's ledger; a real project has
+    // one, and a queue rendering never creates it as a side effect.
+    repo.arc(&repo.root)
+        .args(["begin", "ledger-holder", "--no-worktree"])
+        .assert()
+        .success();
     let seed = stdout(
         repo.arc(&repo.root)
             .args([
@@ -4440,6 +4446,12 @@ fn journal_verified_records_anchor_revision_and_provenance() {
 #[test]
 fn journal_verified_marks_current_and_older_stamps() {
     let repo = Repo::new();
+    // The moved comparison reads the anchor's ledger; a real project has
+    // one, and a queue rendering never creates it as a side effect.
+    repo.arc(&repo.root)
+        .args(["begin", "ledger-holder", "--no-worktree"])
+        .assert()
+        .success();
     let seed = stdout(
         repo.arc(&repo.root)
             .args([

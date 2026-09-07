@@ -1326,6 +1326,12 @@ fn journal_verified_outside_a_fork_still_stamps_the_anchor() {
         .unwrap()
         .to_string_lossy()
         .to_string();
+    // The anchor's ledger comes from a change, the way a real project has
+    // one; the moved comparison reads it and never creates it.
+    repo.arc(&repo.root)
+        .args(["begin", "ledger-holder", "--no-worktree"])
+        .assert()
+        .success();
     // A fork exists but is not where the check is made.
     repo.arc(&repo.root)
         .args(["fork", "begin", "elsewhere"])
