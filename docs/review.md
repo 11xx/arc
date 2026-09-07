@@ -65,6 +65,15 @@ claim. Actor identity remains advisory; this comparison does not redesign or
 verify identity. A rejected self-approval follows the no-valid-approval path
 and exits 3.
 
+`arc status --json` carries the comparison itself as `review_subject`: the
+invoker, the effective author, the effective contributor set the check
+compares, and whether that set was explicitly declared or synthesized from
+the effective author. A synthesized fallback is not a declaration — it is the
+compatibility reading for patchsets recorded before contributor sets existed
+or without one. `arc show` and `arc check` name the same identities beside an
+approval rejection, so a lead reading the refusal sees the exact sets that
+were compared.
+
 Where the policy is off the approval is recorded, and `arc review` and
 `arc audit` name what the record does not otherwise show: the identity the
 verdict was recorded as, the patchset that identity wrote, and whether arc

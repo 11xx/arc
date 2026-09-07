@@ -1065,3 +1065,138 @@ fn a_findings_only_reviewer_that_declared_itself_is_placeable() {
         "{status}"
     );
 }
+
+/// The review subject: the exact identities the independence check compares,
+/// projected from the same Patchset methods the check calls. Driven through
+/// the CLI for explicit executor-only, explicit executor-plus-lead, legacy
+/// on-behalf-of, and legacy invoker patchsets.
+#[test]
+fn status_names_the_review_subject_for_every_attribution_shape() {
+    let policy = |repo: &Repo| {
+        fs::create_dir_all(repo.root.join(".arc")).unwrap();
+        fs::write(
+            repo.root.join(".arc/policy.toml"),
+            "[policy]\nforbid_self_approval = true\n",
+        )
+        .unwrap();
+        git(&repo.root, &["add", ".arc/policy.toml"]);
+        git(&repo.root, &["commit", "-m", "policy"]);
+    };
+    let snap = |repo: &Repo, slug: &str, args: &[&str]| {
+        let wt = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+        repo.commit(
+            &wt,
+            &format!("{slug}.txt"),
+            "work\n",
+            &format!("feat: {slug}"),
+        );
+        let mut cmd = repo.arc(&wt);
+        cmd.args(["snapshot", slug]);
+        cmd.args(args);
+        cmd.assert().success();
+        wt
+    };
+
+    // Explicit executor-only: a lead snapshots naming only the executor.
+    let repo = Repo::new();
+    policy(&repo);
+    stdout(repo.arc(&repo.root).args(["begin", "executor-only"]));
+    snap(
+        &repo,
+        "executor-only",
+        &[
+            "--contributors",
+            "executor-a",
+            "--on-behalf-of",
+            "executor-a",
+        ],
+    );
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "executor-only"]));
+    let subject = &status["review_subject"];
+    assert_eq!(subject["effective_author"], "executor-a", "{subject}");
+    assert_eq!(subject["contributors"], serde_json::json!(["executor-a"]));
+    assert_eq!(subject["basis"], "explicit-contributors");
+    assert_eq!(subject["invoker"], "tester");
+    // The patchset's own recorded fields are untouched.
+    assert_eq!(
+        status["latest_patchset"]["contributors"],
+        serde_json::json!(["executor-a"])
+    );
+    // The executor-only lead approval passes the independence gate.
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Lead")
+        .args(["review", "executor-only", "--verdict", "approved"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "executor-only"]));
+    assert!(status["approval_rejection_reason"].is_null(), "{status}");
+
+    // Explicit executor-plus-lead: the lead is in the set, so a dangerous
+    // change rejects the lead's own approval and names the comparison. The
+    // escalation makes the change dangerous without a declared paths table.
+    let repo = Repo::new();
+    policy(&repo);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "executor-lead", "--dangerous"]),
+    );
+    // Repeatable flags: each names one contributor.
+    snap(
+        &repo,
+        "executor-lead",
+        &["--contributors", "executor-a", "--contributors", "Lead"],
+    );
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Lead")
+        .args(["review", "executor-lead", "--verdict", "approved"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "executor-lead"]));
+    assert_eq!(status["review_subject"]["basis"], "explicit-contributors");
+    // One flag value names both contributors, space-separated in the CLI
+    // surface, so the effective set is the two of them.
+    // The set is the two contributors, sorted by the declaration normalizer.
+    assert_eq!(
+        status["review_subject"]["contributors"],
+        serde_json::json!(["Lead", "executor-a"])
+    );
+    let reason = status["approval_rejection_reason"].as_str().unwrap();
+    assert!(reason.contains("Lead"), "{reason}");
+    // The text projection names the same identities beside the rejection.
+    let show = stdout(repo.arc(&repo.root).args(["show", "executor-lead"]));
+    assert!(show.contains("review subject:"), "{show}");
+    assert!(show.contains("Lead, executor-a"), "{show}");
+    assert!(show.contains("explicit-contributors"), "{show}");
+    let check = stdout(repo.arc(&repo.root).args(["check", "executor-lead"]));
+    assert!(check.contains("review subject:"), "{check}");
+
+    // Legacy on-behalf-of: no contributor set, so the subject is the
+    // synthesized fallback of the effective author.
+    let repo = Repo::new();
+    policy(&repo);
+    stdout(repo.arc(&repo.root).args(["begin", "legacy-obo"]));
+    snap(&repo, "legacy-obo", &["--on-behalf-of", "Executor"]);
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "legacy-obo"]));
+    let subject = &status["review_subject"];
+    assert_eq!(subject["effective_author"], "Executor", "{subject}");
+    assert_eq!(subject["contributors"], serde_json::json!(["Executor"]));
+    assert_eq!(subject["basis"], "effective-author");
+
+    // Legacy invoker: no set, no subject; the invoker is both.
+    let repo = Repo::new();
+    policy(&repo);
+    stdout(repo.arc(&repo.root).args(["begin", "legacy-invoker"]));
+    snap(&repo, "legacy-invoker", &[]);
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "legacy-invoker"]));
+    let subject = &status["review_subject"];
+    assert_eq!(subject["effective_author"], "tester", "{subject}");
+    assert_eq!(subject["contributors"], serde_json::json!(["tester"]));
+    assert_eq!(subject["basis"], "effective-author");
+
+    // An unsnapshotted change has no author set to report.
+    let repo = Repo::new();
+    policy(&repo);
+    stdout(repo.arc(&repo.root).args(["begin", "unsnapshotted"]));
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "unsnapshotted"]));
+    assert!(status.get("review_subject").is_none(), "{status}");
+}

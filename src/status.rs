@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/17";
+pub const STATUS_SCHEMA: &str = "arc-status/18";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// A verdict graph with several tips has no authority to report, so the
@@ -437,6 +437,24 @@ pub struct ReviewerCoverage {
 /// The versioned machine-readable contract agent harnesses program against.
 /// Everything here is derivable from the ledger plus Git.
 #[derive(Debug, Serialize)]
+pub struct ReviewSubject {
+    pub patchset_id: String,
+    /// The identity that ran the snapshot command.
+    pub invoker: String,
+    /// Who the attribution policy treats the work as by: the represented
+    /// subject when the snapshot was on behalf of one, else the invoker.
+    pub effective_author: String,
+    /// The effective contributor set the independence check compares: the
+    /// explicitly declared set when the patchset carries one, else the
+    /// single-element fallback of the effective author.
+    pub contributors: Vec<String>,
+    /// Where `contributors` came from: an explicitly recorded set, or the
+    /// compatibility fallback. A synthesized fallback is not a declaration,
+    /// and reporting it as one would let a lead mistake a guess for a claim.
+    pub basis: &'static str,
+}
+
+#[derive(Debug, Serialize)]
 pub struct StatusReport {
     pub schema: &'static str,
     pub change_id: String,
@@ -470,6 +488,15 @@ pub struct StatusReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merged_tree: Option<String>,
     pub latest_patchset: Option<crate::state::Patchset>,
+    /// The identities the independence check compares on the latest
+    /// patchset: the effective author and the effective contributor set,
+    /// with which of the two supplied them. Derived from the same Patchset
+    /// methods the rejection check uses, so text and JSON cannot disagree
+    /// about who is being compared. Absent with no patchset: an
+    /// unsnapshotted change has no author set to report, and inventing one
+    /// would put words in nobody's mouth. Additive in arc-status/18.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_subject: Option<ReviewSubject>,
     pub brief: Option<BriefStatus>,
     pub head_matches_latest_patchset: bool,
     pub worktree_dirty: Option<bool>,
@@ -901,6 +928,23 @@ fn build_report(
             patchset.committer.as_ref(),
         );
     }
+    // The review subject derives from the same methods the independence
+    // check calls, so the projection cannot drift from what the gate does.
+    let review_subject = latest_patchset.as_ref().map(|patchset| ReviewSubject {
+        patchset_id: patchset.id.clone(),
+        invoker: patchset.actor.clone(),
+        effective_author: patchset.effective_author().to_string(),
+        contributors: if patchset.contributors.is_empty() {
+            vec![patchset.effective_author().to_string()]
+        } else {
+            patchset.contributors.clone()
+        },
+        basis: if patchset.contributors.is_empty() {
+            "effective-author"
+        } else {
+            "explicit-contributors"
+        },
+    });
     let head_matches = match (&current_head, &latest_patchset) {
         (Some(h), Some(p)) => *h == p.head,
         _ => false,
@@ -1406,6 +1450,7 @@ fn build_report(
         needs_rebase,
         merged_tree,
         latest_patchset,
+        review_subject,
         brief: state.latest_brief().map(|brief| BriefStatus {
             version: state.briefs.len(),
             title: brief.title.clone(),

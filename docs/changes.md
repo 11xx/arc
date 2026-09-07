@@ -351,10 +351,13 @@ condition is reached, with a JSON diagnostic containing the winning
 watch conditions are checked in their supplied order and the first reached
 condition wins.
 
-`arc status <change>` prints the versioned `arc-status/17` JSON report —
+`arc status <change>` prints the versioned `arc-status/18` JSON report —
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, claim owner/activity/stage timing, snapshot
-provenance, a blocker summary, a machine-readable `next_action`, an additive
+provenance, a `review_subject` naming the exact identities the independence
+check compares on the latest patchset (the invoker, the effective author, the
+effective contributor set, and whether that set was declared or synthesized),
+a blocker summary, a machine-readable `next_action`, an additive
 `forge` projection block ([forge projection](forge.md)), and ready
 alternative open changes while the requested change is blocked. Actively
 claimed non-stale changes and held changes are never suggested; stale and

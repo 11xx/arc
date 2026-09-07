@@ -487,6 +487,11 @@ pub fn markdown(
         if let Some(reason) = &report.approval_rejection_reason {
             let _ = writeln!(w, "- {reason}");
         }
+        if report.approval_rejection_reason.is_some() {
+            if let Some(line) = review_subject_line(report) {
+                let _ = writeln!(w, "- {line}");
+            }
+        }
         if let Some(body) = &v.body {
             let _ = writeln!(w, "\n{body}");
         }
@@ -918,6 +923,19 @@ pub fn markdown(
 /// single-reviewer changes that make up most of the work, and an
 /// orchestrator's review is a valid review unless a project's policy says
 /// otherwise; the point is that nobody integrates without having been told.
+/// One line naming the identities the independence check compares on the
+/// latest patchset. Shown beside approval rejection and in check output so a
+/// lead reading the refusal sees the exact sets that were compared, without
+/// re-deriving them from snapshot events.
+pub fn review_subject_line(report: &StatusReport) -> Option<String> {
+    let subject = report.review_subject.as_ref()?;
+    let contributors = subject.contributors.join(", ");
+    Some(format!(
+        "review subject: `{}` compares reviewer against contributors [{}] ({})",
+        subject.patchset_id, contributors, subject.basis,
+    ))
+}
+
 pub fn advisories(report: &StatusReport) {
     if report.advisories.is_empty() {
         return;
@@ -1028,6 +1046,9 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                         .as_deref()
                         .unwrap_or("Current head has no valid approval")
                 );
+                if let Some(line) = review_subject_line(report) {
+                    let _ = writeln!(out, "  - {line}");
+                }
             }
             Blocker::GatesNotGreen => {
                 for gate in report.gates.iter().filter(|gate| !gate.green_at_head) {
