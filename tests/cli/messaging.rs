@@ -576,6 +576,17 @@ fn catchup_reports_ledger_and_journal_together() {
 }
 
 #[test]
+fn catchup_names_the_open_review_subject() {
+    let repo = Repo::new();
+    let (_, _, _) = change_with_patchset(&repo, "catchup-subject");
+    let text = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(
+        text.contains("review subject: `ps-01` compares reviewer against contributors [tester]"),
+        "{text}"
+    );
+}
+
+#[test]
 fn review_queue_groups_uncovered_changes_and_names_an_open_pass() {
     let repo = Repo::new();
     let changes = (1..=4)

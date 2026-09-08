@@ -92,8 +92,10 @@ consumed event. A `verified` event records the checked anchor revision in
 `verified_revision` when the anchor has a Git head; an unborn or headless
 anchor still records the check without a revision. Open rows and
 `workspace backlog --items` name the checked revision, its age, and who
-checked it, and say that the anchor moved once it no longer matches — a stamp
-that still holds needs no further word. `--json` carries the whole stamp,
+checked it, and compare it with the current anchor. A repository with no Arc
+ledger uses an empty rewrite map, so matching and moved anchors remain
+distinguishable without creating ledger data; an unreadable ledger or rewrite
+map leaves the movement comparison unknown. `--json` carries the whole stamp,
 including the session. A decision link is valid only with outcome `done`.
 `<artifact>.md` names a local decision; `<project>::<artifact>.md` names one in
 another registered project's journal, matched against the registry by slug or
@@ -420,4 +422,3 @@ versioned `arc-doctor/3` report. Both open with the roots the invocation reads
 and writes and whether a sandbox is in force, because every finding is a
 statement about state at those paths. `arc doctor` exits 1 when problems are
 present and 0 for a clean or advice-only ledger.
-

@@ -4384,12 +4384,6 @@ fn journal_position_rejects_consumed_artifact() {
 #[test]
 fn journal_verified_records_anchor_revision_and_provenance() {
     let repo = Repo::new();
-    // The moved comparison reads the anchor's ledger; a real project has
-    // one, and a queue rendering never creates it as a side effect.
-    repo.arc(&repo.root)
-        .args(["begin", "ledger-holder", "--no-worktree"])
-        .assert()
-        .success();
     let seed = stdout(
         repo.arc(&repo.root)
             .args([
@@ -4446,12 +4440,6 @@ fn journal_verified_records_anchor_revision_and_provenance() {
 #[test]
 fn journal_verified_marks_current_and_older_stamps() {
     let repo = Repo::new();
-    // The moved comparison reads the anchor's ledger; a real project has
-    // one, and a queue rendering never creates it as a side effect.
-    repo.arc(&repo.root)
-        .args(["begin", "ledger-holder", "--no-worktree"])
-        .assert()
-        .success();
     let seed = stdout(
         repo.arc(&repo.root)
             .args([
@@ -4470,6 +4458,7 @@ fn journal_verified_marks_current_and_older_stamps() {
         .unwrap()
         .to_string_lossy()
         .to_string();
+    assert!(!repo.root.join(".git/arc").exists());
     let initial = repo.head(&repo.root);
     repo.arc(&repo.root)
         .args(["journal", "verified", &file])
@@ -4492,6 +4481,7 @@ fn journal_verified_marks_current_and_older_stamps() {
         "{current_text}"
     );
     assert!(!current_text.contains("anchor moved"), "{current_text}");
+    assert!(!repo.root.join(".git/arc").exists());
 
     repo.commit(
         &repo.root,
@@ -4510,6 +4500,40 @@ fn journal_verified_marks_current_and_older_stamps() {
     assert_eq!(moved_item["verification"]["moved"], true);
     let moved_text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
     assert!(moved_text.contains("; anchor moved since]"), "{moved_text}");
+    assert!(!repo.root.join(".git/arc").exists());
+}
+
+#[test]
+fn journal_verified_keeps_comparison_unknown_when_rewrite_events_are_unreadable() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "ledger-holder", "--no-worktree"])
+        .assert()
+        .success();
+    let (dir, file) = journal_artifact(&repo, "unreadable-rewrites", "todo", "# Check\n");
+    let revision = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args(["journal", "verified", &file])
+        .assert()
+        .success();
+
+    let repository_events = repo.root.join(".git/arc/repository/events");
+    fs::create_dir_all(&repository_events).unwrap();
+    fs::write(repository_events.join("malformed.json"), b"not json\n").unwrap();
+
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let stamp = &open["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file"] == file)
+        .unwrap()["verification"];
+    assert_eq!(stamp["revision"], revision);
+    assert!(stamp["moved"].is_null(), "{stamp}");
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(text.contains("anchor comparison unknown"), "{text}");
+    assert!(dir.join(&file).is_file());
 }
 
 #[test]

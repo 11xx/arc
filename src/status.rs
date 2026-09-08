@@ -454,6 +454,28 @@ pub struct ReviewSubject {
     pub basis: &'static str,
 }
 
+/// Build the identity comparison for the patchset a report is reviewing.
+/// Closed reports pass the shipped patchset here, while open reports pass the
+/// current patchset; the comparison therefore follows the same subject the
+/// gate and debt projection use.
+pub(crate) fn review_subject_for_patchset(patchset: &state::Patchset) -> ReviewSubject {
+    ReviewSubject {
+        patchset_id: patchset.id.clone(),
+        invoker: patchset.actor.clone(),
+        effective_author: patchset.effective_author().to_string(),
+        contributors: if patchset.contributors.is_empty() {
+            vec![patchset.effective_author().to_string()]
+        } else {
+            patchset.contributors.clone()
+        },
+        basis: if patchset.contributors.is_empty() {
+            "effective-author"
+        } else {
+            "explicit-contributors"
+        },
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct StatusReport {
     pub schema: &'static str,
@@ -937,21 +959,11 @@ fn build_report(
     }
     // The review subject derives from the same methods the independence
     // check calls, so the projection cannot drift from what the gate does.
-    let review_subject = latest_patchset.as_ref().map(|patchset| ReviewSubject {
-        patchset_id: patchset.id.clone(),
-        invoker: patchset.actor.clone(),
-        effective_author: patchset.effective_author().to_string(),
-        contributors: if patchset.contributors.is_empty() {
-            vec![patchset.effective_author().to_string()]
-        } else {
-            patchset.contributors.clone()
-        },
-        basis: if patchset.contributors.is_empty() {
-            "effective-author"
-        } else {
-            "explicit-contributors"
-        },
-    });
+    // Once closed, the closure's source patchset is the subject that shipped;
+    // latest_patchset remains the separate history projection.
+    let review_subject = state
+        .debt_subject_patchset()
+        .map(review_subject_for_patchset);
     let head_matches = match (&current_head, &latest_patchset) {
         (Some(h), Some(p)) => *h == p.head,
         _ => false,
@@ -1357,6 +1369,16 @@ fn build_report(
     // the waiver, and no Approved verdict is fabricated to align displays:
     // a missing verdict remains missing.
     let approval_satisfied = approval_valid || waiver_satisfies_approval;
+    let refusing_verdict_action = verdict.as_ref().and_then(|verdict| {
+        if !verdict_refuses_this_head {
+            return None;
+        }
+        Some(match verdict.verdict {
+            Verdict::ChangesRequested => "changes-requested",
+            Verdict::CommentOnly => "comment-only",
+            Verdict::Approved => unreachable!("approved verdict cannot refuse this head"),
+        })
+    });
 
     let next_action = if state.is_closed() {
         "none:closed".into()
@@ -1403,6 +1425,11 @@ fn build_report(
         } else {
             "iterating:clear".into()
         }
+    } else if let Some(action) = refusing_verdict_action {
+        // A current refusal is an action in its own right. Debt defers a
+        // missing review; it cannot route around a reviewer who read this
+        // patchset and declined it.
+        action.into()
     } else if let Some(reason) = approval_rejection_reason.as_ref() {
         // A rejection the waiver does not cover is a real refusal, not a
         // routing question; it keeps the policy's own reason as the action.
@@ -1443,6 +1470,7 @@ fn build_report(
     let review_options: Vec<&'static str> = if higher_priority_work
         || state.iterating
         || approval_satisfied
+        || verdict_refuses_this_head
         || approval_rejection_reason.is_some()
     {
         Vec::new()

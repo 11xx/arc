@@ -411,14 +411,23 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
 
   `arc status --json` carries the exact identities the independence check
   compares as `review_subject`: invoker, effective author, the effective
-  contributor set, and whether it was declared or synthesized. `arc show` and
-  `arc check` name them beside an approval rejection.
+  contributor set, and whether it was declared or synthesized. For a closed
+  integrated change, it names the patchset recorded as shipped while
+  `latest_patchset` remains the later history. `arc show` and `arc check` name
+  them beside an approval rejection, and `arc catchup` repeats the subject
+  beneath each open change and each integrated debt item.
 
   For ordinary work outside the independent-review scope, status offers the
   lead a choice: review_options carries declare_debt first, then
   request_review. The list is guidance — reading it writes nothing, and the
   user or lead runs arc debt themselves. A required-review or unknown-danger
-  change offers review alone.
+  change offers review alone. A current `changes-requested` or `comment-only`
+  verdict is its own next action and offers no debt route: a waiver records a
+  missing review, not a way past a refusal.
+
+  `arc review <change>` prints the same current `review_options` alongside the
+  verdict history, so a reader does not have to switch views to find the
+  available guidance.
 
   Repairing a patchset's attribution happens only before any verdict:
   `snapshot --amend <ps> --contributors ...` replaces the whole set, and the
@@ -514,7 +523,7 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   Coming back to owed work:
 
     arc inbox                       debt-owed bucket, including closed changes
-    arc catchup                     the same, with each reason
+    arc catchup                     the same, with each reason and review subject
     arc query --debt                change IDs alone, for scripting
     arc query --provisional         approvals still owed corroboration
                                     (query filters on flags alone; the acting

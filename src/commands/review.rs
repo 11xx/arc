@@ -15,6 +15,10 @@ struct ReviewView<'a> {
     verdicts: Vec<ReviewVerdict<'a>>,
     open_findings: Vec<&'a FindingSummary>,
     has_valid_approval: bool,
+    /// The current status guidance, carried here so a review reader sees the
+    /// same available actions as `status` and `inbox`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    review_options: Vec<&'static str>,
     #[serde(skip_serializing_if = "is_false")]
     verdict_contested: bool,
     next_action: &'a str,
@@ -79,6 +83,7 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
             .verdict
             .as_ref()
             .is_some_and(|verdict| verdict.valid_for_current_head),
+        review_options: report.review_options.clone(),
         verdict_contested: state.verdict_contested(),
         next_action: &report.next_action,
     };
@@ -167,6 +172,14 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
     println!(
         "Valid approval for current head: {}",
         if view.has_valid_approval { "yes" } else { "no" }
+    );
+    println!(
+        "Review options: {}",
+        if view.review_options.is_empty() {
+            "none".to_string()
+        } else {
+            view.review_options.join(", ")
+        }
     );
     println!("Next action: {}", view.next_action);
     Ok(())
