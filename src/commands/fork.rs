@@ -77,6 +77,8 @@ fn journal_marker(ctx: &Ctx, slug: &str, title: &str, body: &str) -> Result<()> 
             // It is journaled from the repository it names, which is
             // reachable whenever the fork's worktree is.
             spool: false,
+            planned_by: Vec::new(),
+            no_planner: false,
         },
     );
     let _ = std::fs::remove_file(&temp);

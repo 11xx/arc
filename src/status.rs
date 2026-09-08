@@ -613,6 +613,8 @@ pub struct BriefStatus {
     pub plan_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_slice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_source: Option<crate::model::PlanSource>,
     pub recorded_at: DateTime<Utc>,
 }
 
@@ -1539,6 +1541,7 @@ fn build_report(
             acceptance_probes: brief.acceptance_probes.clone(),
             plan_ref: brief.plan_ref.clone(),
             plan_slice: brief.plan_slice.clone(),
+            plan_source: brief.plan_source.clone(),
             recorded_at: brief.ts,
         }),
         head_matches_latest_patchset: head_matches,

@@ -47,6 +47,49 @@ pub struct AcceptanceProbe {
     pub command: String,
 }
 
+/// A planner coordinate carried by a portable plan header and its typed
+/// journal event. Missing coordinates are genuinely unavailable and are
+/// omitted rather than replaced with an invented identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlannerIdentity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl PlannerIdentity {
+    pub fn key(
+        &self,
+    ) -> (
+        &Option<String>,
+        &Option<String>,
+        &Option<String>,
+        &Option<String>,
+    ) {
+        (&self.actor, &self.harness, &self.session, &self.model)
+    }
+}
+
+/// The immutable plan bytes and planner metadata captured by a selected
+/// brief. A later edit to the source plan cannot change this snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanSource {
+    pub anchor: Option<String>,
+    pub journal_dir: String,
+    pub filename: String,
+    pub slice: String,
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub planners: Vec<PlannerIdentity>,
+    pub planner_status: String,
+    pub provenance_basis: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum BlockerRef {
@@ -368,6 +411,8 @@ pub enum Payload {
         plan_ref: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_slice: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_source: Option<PlanSource>,
     },
     ChangelogRecorded {
         #[serde(alias = "section")]

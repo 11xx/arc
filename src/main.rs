@@ -392,6 +392,9 @@ enum Cmd {
         /// External cause, when no earlier ledger object represents the reason
         #[arg(long)]
         cause_note: Option<String>,
+        /// Emit the versioned structured brief projection.
+        #[arg(long)]
+        json: bool,
     },
     /// Record, read, or project changelog entries
     Changelog {
@@ -2124,6 +2127,7 @@ fn run(cli: Cli) -> Result<i32> {
             probes_json,
             caused_by,
             cause_note,
+            json,
         } => {
             let change = infer(change.as_deref())?;
             commands::brief(
@@ -2140,6 +2144,7 @@ fn run(cli: Cli) -> Result<i32> {
                 probes_json,
                 caused_by,
                 cause_note,
+                json,
             )
         }
         Cmd::Changelog {

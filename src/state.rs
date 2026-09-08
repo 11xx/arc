@@ -97,6 +97,8 @@ pub struct Brief {
     pub acceptance_probes: Vec<AcceptanceProbe>,
     pub plan_ref: Option<String>,
     pub plan_slice: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_source: Option<PlanSource>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1357,6 +1359,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 acceptance_probes,
                 plan_ref,
                 plan_slice,
+                plan_source,
             } => state.briefs.push(Brief {
                 event_id: ev.event_id.clone(),
                 ts: ev.created_at,
@@ -1372,6 +1375,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 acceptance_probes: acceptance_probes.clone(),
                 plan_ref: plan_ref.clone(),
                 plan_slice: plan_slice.clone(),
+                plan_source: plan_source.clone(),
             }),
             Payload::ChangelogRecorded {
                 category,
