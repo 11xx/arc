@@ -8,9 +8,16 @@ use crate::policy::PolicyFile;
 use anyhow::ensure;
 use serde::Serialize;
 
-/// Quote one path as a single POSIX shell argument.
-fn shell_quote(path: &str) -> String {
-    format!("'{}'", path.replace('\'', "'\\''"))
+/// Quote one value as a single POSIX shell argument.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Render a parsed cutoff without discarding the precision that selected the
+/// journal rows. UTC is rendered with `Z` so the value is accepted by the same
+/// parser when a report's detail command is replayed.
+fn normalized_cutoff(cutoff: chrono::DateTime<chrono::Utc>) -> String {
+    cutoff.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
 }
 
 pub enum WorkspaceView {
@@ -150,6 +157,7 @@ enum BacklogScopeRef {
 
 struct BacklogSelection {
     scope: BacklogScopeRef,
+    /// The parsed cutoff in replayable RFC 3339 form, when one was supplied.
     since: Option<String>,
     show_unreachable: bool,
 }
@@ -158,7 +166,8 @@ struct BacklogSelection {
 /// counts mean, and where the undated rows went.
 #[derive(Serialize)]
 struct JournalSelection {
-    /// The cutoff, normalized to RFC 3339; null reports the whole queue.
+    /// The cutoff, normalized to RFC 3339 with accepted fractional precision;
+    /// null reports the whole queue.
     since: Option<String>,
     /// `arrivals` under a cutoff, `outstanding` without.
     journal_counts: &'static str,
@@ -171,7 +180,8 @@ impl BacklogSelection {
     /// The command that re-runs this report as itemized JSON. The expanded
     /// form carries the resolved scope — explicit `--under` for a scoped
     /// query, `--global` otherwise — because the bare guide's examples do not
-    /// say where a `--here` report would look if typed elsewhere.
+    /// say where a `--here` report would look if typed elsewhere. Every value
+    /// supplied to the shell is quoted, including the normalized cutoff.
     fn detail_command(&self) -> String {
         let mut parts = vec!["arc workspace backlog".to_string()];
         match &self.scope {
@@ -179,7 +189,7 @@ impl BacklogSelection {
             BacklogScopeRef::Under(path) => parts.push(format!("--under {}", shell_quote(path))),
         }
         if let Some(since) = &self.since {
-            parts.push(format!("--since {since}"));
+            parts.push(format!("--since {}", shell_quote(since)));
         }
         if self.show_unreachable {
             parts.push("--unreachable".to_string());
@@ -676,9 +686,9 @@ struct ProjectBacklog {
     /// The subset of `open_questions` sitting on open artifacts: waiting
     /// decisions, the count project priority uses.
     decision_questions: usize,
-    /// How many of those came from the opening half versus the closing half
-    /// of their debates, so a reader can tell a premise still unsettled from
-    /// a verdict being held open.
+    /// How many active decisions came from the opening half versus the closing
+    /// half of their debates, so a reader can tell a premise still unsettled
+    /// from a verdict being held open.
     opening_question_count: usize,
     closing_question_count: usize,
     /// Active forks of this project, using the read-only fork projection.
@@ -729,6 +739,9 @@ impl ProjectBacklog {
         self.needs_review.len() + self.debt_owed.len() + self.decision_questions
     }
 
+    /// A fork is not an obligation, but its presence is still a project fact
+    /// that the workspace report must retain when every obligation tier is
+    /// empty.
     fn is_empty(&self) -> bool {
         self.blocked() == 0
             && self.no_patchset.is_empty()
@@ -736,6 +749,7 @@ impl ProjectBacklog {
             && self.later_items == 0
             && self.feature_requests == 0
             && self.open_questions.is_empty()
+            && self.fork_count == 0
     }
 }
 
@@ -822,7 +836,7 @@ fn workspace_backlog(
                 BacklogScopeRef::Under(path.display().to_string())
             }
         },
-        since: since.map(str::to_string),
+        since: cutoff.map(normalized_cutoff),
         show_unreachable,
     };
     let mut projects = Vec::new();
@@ -891,23 +905,26 @@ fn workspace_backlog(
         // only the journal artifact tiers are filtered by --since, because a
         // decision that predates a delta can still be blocking work now.
         let questions = crate::journal::open_questions_with_disposition(&project.journal_dir)?;
-        let decision_questions = questions
+        let (opening_question_count, closing_question_count) = questions
             .iter()
             .filter(|entry| entry.disposition == crate::journal::QuestionDisposition::Open)
-            .count();
-        let opening_question_count = questions
-            .iter()
-            .filter(|entry| entry.question.placement == "opening")
-            .count();
-        let closing_question_count = questions.len() - opening_question_count;
+            .fold((0, 0), |(opening, closing), entry| {
+                if entry.question.placement == "opening" {
+                    (opening + 1, closing)
+                } else {
+                    (opening, closing + 1)
+                }
+            });
+        let decision_questions = opening_question_count + closing_question_count;
         // Fork inventory uses the same read-only resolver as `fork list`,
         // run from the project's anchor: no checkouts are created, no forks
-        // retired, and no readiness is inferred. An unreadable probe stays
-        // null rather than zeroing out; retired forks remain history.
+        // retired, and no readiness is inferred. A failed inventory is
+        // returned with project context; an unreadable ahead count stays null
+        // rather than becoming zero, and retired forks remain history.
         let fork_ctx = ctx.with_cwd(anchor.clone());
         let forks: Vec<crate::commands::fork::ForkEntry> =
             crate::commands::fork::list_entries(&fork_ctx)
-                .unwrap_or_default()
+                .with_context(|| format!("cannot inventory forks for {}", anchor.display()))?
                 .into_iter()
                 .filter(|entry| entry.retired.is_none())
                 .collect();
@@ -963,7 +980,7 @@ fn workspace_backlog(
                     consistency: "sequential",
                 },
                 selection: JournalSelection {
-                    since: cutoff.map(|c| c.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+                    since: cutoff.map(normalized_cutoff),
                     journal_counts: if cutoff.is_some() {
                         "arrivals"
                     } else {
