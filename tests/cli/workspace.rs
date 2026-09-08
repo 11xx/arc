@@ -1371,17 +1371,13 @@ fn workspace_backlog_detail_hint_preserves_selection() {
     };
 
     // Ordinary scoped run: --under names the requested path canonically.
-    let hint = command_line(
+    let under_hint = command_line(
         &["workspace", "backlog", "--under", scope.to_str().unwrap()],
         &repo_root,
     );
-    assert_eq!(
-        hint,
-        format!("arc workspace backlog --under {quoted_scope} --items --json",)
-    );
 
     // --here resolves to the caller's directory; --since survives.
-    let hint = command_line(
+    let here_hint = command_line(
         &[
             "workspace",
             "backlog",
@@ -1395,15 +1391,9 @@ fn workspace_backlog_detail_hint_preserves_selection() {
         "'{}'",
         repo_root.display().to_string().replace('\'', "'\\''")
     );
-    assert_eq!(
-        hint,
-        format!(
-            "arc workspace backlog --under {quoted_cwd} --since 20990101T000000Z --items --json",
-        )
-    );
 
     // Global scope stays global, and --unreachable travels with it.
-    let hint = command_line(
+    let global_hint = command_line(
         &[
             "workspace",
             "backlog",
@@ -1414,9 +1404,67 @@ fn workspace_backlog_detail_hint_preserves_selection() {
         ],
         &repo_root,
     );
+
+    // Chrono accepts the RFC 3339 form with a space between date and time.
+    // Following the emitted shell command must preserve that one argument.
+    let spaced_hint = command_line(
+        &[
+            "workspace",
+            "backlog",
+            "--global",
+            "--since",
+            "2026-01-01 00:00:00Z",
+        ],
+        &repo_root,
+    );
+    let mut spaced_shell = Command::new("sh");
+    spaced_shell
+        .arg("-c")
+        .arg(&spaced_hint)
+        .current_dir(&repo_root)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                PathBuf::from(env!("CARGO_BIN_EXE_arc"))
+                    .parent()
+                    .and_then(|dir| dir.to_str())
+                    .unwrap_or_default(),
+                std::env::var("PATH").as_deref().unwrap_or_default(),
+            ),
+        )
+        .env("HOME", &repo.home)
+        .env("ARC_SANDBOX", &repo.home)
+        .env("ARC_ACTOR", "tester")
+        .env("ARC_HARNESS", "test")
+        .env("ARC_SESSION", "session-a")
+        .env_remove("ARC_JOURNAL_DIR")
+        .env_remove("ARC_MODEL")
+        .env_remove("ARC_DATA_ROOT");
+    let spaced_output = spaced_shell.output().unwrap();
+    assert!(
+        spaced_output.status.success(),
+        "{spaced_hint}: {spaced_output:?}"
+    );
+    serde_json::from_slice::<serde_json::Value>(&spaced_output.stdout)
+        .unwrap_or_else(|error| panic!("{spaced_hint}: {error}"));
     assert_eq!(
-        hint,
-        "arc workspace backlog --global --since 2026-01-01T00:00:00Z --unreachable --items --json"
+        under_hint,
+        format!("arc workspace backlog --under {quoted_scope} --items --json",)
+    );
+    assert_eq!(
+        here_hint,
+        format!(
+            "arc workspace backlog --under {quoted_cwd} --since '2099-01-01T00:00:00Z' --items --json",
+        )
+    );
+    assert_eq!(
+        global_hint,
+        "arc workspace backlog --global --since '2026-01-01T00:00:00Z' --unreachable --items --json"
+    );
+    assert_eq!(
+        spaced_hint,
+        "arc workspace backlog --global --since '2026-01-01T00:00:00Z' --items --json"
     );
 
     // Following the hint in an isolated fixture reproduces this report's
@@ -1646,6 +1694,59 @@ fn workspace_backlog_timestamp_interpretation_is_explicit() {
     assert_eq!(open_rows[0]["timestamp_status"], "canonical");
     assert_eq!(open_rows[1]["timestamp_status"], "legacy");
     assert_eq!(open_rows[0]["filed_at"], open_rows[1]["filed_at"]);
+
+    // Fractional RFC 3339 precision is part of the filtering boundary. The
+    // emitted cutoff must replay the same file set, not round down to the
+    // second and re-admit both exact-second rows.
+    let mut report = repo2.arc(&repo2.root);
+    report.args([
+        "workspace",
+        "backlog",
+        "--items",
+        "--json",
+        "--since",
+        "2026-08-01T00:00:00.500Z",
+    ]);
+    let fractional = json_stdout(&mut report);
+    let emitted_since = fractional["selection"]["since"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let files = |value: &serde_json::Value| {
+        let mut files = Vec::new();
+        if let Some(projects) = value["projects"].as_array() {
+            for project in projects {
+                for tier in ["open", "later", "feature_requests"] {
+                    if let Some(items) = project["items"][tier].as_array() {
+                        files.extend(
+                            items
+                                .iter()
+                                .map(|item| item["file"].as_str().unwrap().to_string()),
+                        );
+                    }
+                }
+            }
+        }
+        files.sort();
+        files
+    };
+    let fractional_files = files(&fractional);
+    let mut replay = repo2.arc(&repo2.root);
+    replay.args([
+        "workspace",
+        "backlog",
+        "--items",
+        "--json",
+        "--since",
+        &emitted_since,
+    ]);
+    let replayed = json_stdout(&mut replay);
+    assert_eq!(
+        files(&replayed),
+        fractional_files,
+        "emitted cutoff {emitted_since:?} changed the selected files"
+    );
+    assert_eq!(emitted_since, "2026-08-01T00:00:00.500Z");
 
     let mut report = repo2.arc(&repo2.root);
     report.args([
@@ -2045,6 +2146,23 @@ fn workspace_backlog_inventories_forks_without_obligation() {
     assert_eq!(project["needs_review"].as_array().unwrap().len(), 0);
     assert_eq!(project["debt_owed"].as_array().unwrap().len(), 0);
 
+    // The journal marker is filtered out by a future cutoff, but the active
+    // branch inventory remains an independently observed orientation fact.
+    let mut report = repo.arc(&repo.root);
+    report.args([
+        "workspace",
+        "backlog",
+        "--items",
+        "--json",
+        "--since",
+        "2099-01-01T00:00:00Z",
+    ]);
+    let value = json_stdout(&mut report);
+    let project = value["projects"].as_array().unwrap().first().unwrap();
+    assert_eq!(project["open_items"], 0, "{}", project);
+    assert_eq!(project["fork_count"], 1, "{}", project);
+    assert_eq!(value["summary"]["fork_count"], 1, "{}", value);
+
     // Observation bounds are present, ordered, and sequential.
     let started = value["observation"]["started_at"].as_str().unwrap();
     let finished = value["observation"]["finished_at"].as_str().unwrap();
@@ -2063,6 +2181,168 @@ fn workspace_backlog_inventories_forks_without_obligation() {
     };
     assert_eq!(value["summary"]["fork_count"], 0, "{value}");
     assert!(value["projects"].as_array().unwrap().is_empty(), "{value}");
+}
+
+/// A fork branch made without a marker is still part of the read-only fork
+/// inventory, and its project must remain visible when it has no other work.
+#[test]
+fn workspace_backlog_keeps_unjournaled_forks_visible() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+    git(&repo.root, &["branch", "fork/manual"]);
+
+    let value =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "backlog", "--items", "--json"]),
+        );
+    let project = value["projects"].as_array().unwrap().first().unwrap();
+    assert_eq!(project["fork_count"], 1, "{}", project);
+    assert_eq!(project["forks"][0]["slug"], "manual", "{}", project);
+    assert_eq!(project["forks"][0]["branch"], "fork/manual");
+    assert_eq!(value["summary"]["fork_count"], 1, "{}", value);
+}
+
+/// A failed branch inventory is an unreadable observation, not an empty fork
+/// list. The workspace command carries the project context to its caller.
+#[test]
+fn workspace_backlog_propagates_fork_inventory_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["journal", "log", "registered", "the project exists"])
+        .assert()
+        .success();
+    git(&repo.root, &["branch", "fork/manual"]);
+
+    let real_git = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|dir| dir.join("git"))
+        .find(|candidate| candidate.is_file())
+        .expect("git must be on PATH for this test");
+    let shim_dir = repo.home.join("git-shim");
+    fs::create_dir_all(&shim_dir).unwrap();
+    let shim = shim_dir.join("git");
+    fs::write(
+        &shim,
+        "#!/bin/sh\n\
+if [ \"$1\" = branch ] && [ \"$2\" = --list ] && [ \"$3\" = \"--format=%(refname:short)\" ] && [ \"$4\" = \"fork/*\" ]; then\n\
+  echo simulated-fork-inventory-failure >&2\n\
+  exit 42\n\
+fi\n\
+exec \"$ARC_REAL_GIT\" \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", shim_dir.display(), std::env::var("PATH").unwrap());
+
+    repo.arc(&repo.root)
+        .env("PATH", &path)
+        .env("ARC_REAL_GIT", &real_git)
+        .args(["fork", "list", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "simulated-fork-inventory-failure",
+        ));
+    repo.arc(&repo.root)
+        .env("PATH", &path)
+        .env("ARC_REAL_GIT", &real_git)
+        .args(["workspace", "backlog", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot inventory forks for"))
+        .stderr(predicates::str::contains(
+            "simulated-fork-inventory-failure",
+        ));
+}
+
+/// Opening and closing question subtotals describe the active decision set;
+/// a consumed question remains visible as history but is not a subtotal.
+#[test]
+fn workspace_backlog_counts_active_question_subtotals() {
+    let repo = Repo::new();
+    let (_, active_file) = journal_artifact(
+        &repo,
+        "active-question",
+        "discussion",
+        "# Active question\n\nBody.\n",
+    );
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &active_file,
+            "--placement",
+            "opening",
+            "--option",
+            "yes",
+            "--option",
+            "no",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Which opening should remain active?\n")
+        .assert()
+        .success();
+
+    let (_, consumed_file) = journal_artifact(
+        &repo,
+        "consumed-question",
+        "discussion",
+        "# Consumed question\n\nBody.\n",
+    );
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &consumed_file,
+            "--placement",
+            "closing",
+            "--option",
+            "yes",
+            "--option",
+            "no",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Which closing answer should be recorded?\n")
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "consume",
+            &consumed_file,
+            "--outcome",
+            "done",
+            "--drop-questions",
+            "--note",
+            "the closing record is retained as history",
+        ])
+        .assert()
+        .success();
+
+    let value =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["workspace", "backlog", "--items", "--json"]),
+        );
+    let project = value["projects"].as_array().unwrap().first().unwrap();
+    assert_eq!(project["decision_questions"], 1, "{}", project);
+    assert_eq!(project["opening_question_count"], 1, "{}", project);
+    assert_eq!(project["closing_question_count"], 0, "{}", project);
+    assert_eq!(
+        project["opening_question_count"].as_u64().unwrap()
+            + project["closing_question_count"].as_u64().unwrap(),
+        project["decision_questions"].as_u64().unwrap(),
+        "active question subtotals do not add up: {project}"
+    );
 }
 
 /// A report writes nothing: the repository's tracked tree, its ledger, and

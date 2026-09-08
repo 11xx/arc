@@ -32,6 +32,8 @@ repository discoverable even if nothing is ever written to its journal. A
 that is not a Git repository takes part. Journal timestamps are read by one
 parser over the canonical `YYYYMMDDTHHMMSSZ` stamp and the legacy form
 without the `Z`; both mean UTC and both filter identically under `--since`.
+RFC 3339 cutoffs may include fractional seconds, which are retained by the
+normalized value in `selection.since` and by the detail command.
 A filename whose stamp parses as neither stays visible with `filed_at: null`
 and `timestamp_status: "invalid"`: it rides inside the tier it was filed
 into, and under an active cutoff it is additionally counted as
@@ -59,8 +61,9 @@ inside its own project. Projects are ranked by what is blocked; items are never
 ranked against each other across projects, because arc records no priority that
 spans repositories. The human report ends with a `detail:` footer naming the
 command that re-runs the same report as itemized JSON — the resolved scope, the
-normalized `--since`, and `--unreachable` exactly as the report used them, with
-paths quoted for the shell. The footer appears over an empty scope too, and
+normalized and shell-quoted `--since`, and `--unreachable` exactly as the
+report used them, with values quoted for the shell. The footer appears over an
+empty scope too, and
 never on `--json`, whose whole stdout must stay one parseable value. A project whose journal holds work but whose anchor no
 longer resolves is reported under `unreachable` with the `journal rebind` that
 adopts it; `list` and `inbox` cannot report it, so they name what they skipped
@@ -126,8 +129,18 @@ projection `arc fork list` uses — slug, branch, ahead count, base — and sums
 them in the summary. Forks are orientation, never obligation: they add nothing
 to the blocked or decision score, a fork-only project still appears, an
 unreadable ahead count stays null rather than zero, and retired forks remain
-history. Every project row names its `journal_dir`, the directory its
-questions and items were read from.
+history. This visibility is independent of the journal-arrival cutoff, so an
+active fork remains visible when its marker is older than `--since`. If the
+fork inventory itself cannot be read, the report fails with the affected
+project rather than treating the repository as having no forks. Every project
+row names its `journal_dir`, the directory its questions and items were read
+from.
+
+`decision_questions`, `opening_question_count`, and `closing_question_count`
+are all calculated over unanswered questions whose artifact is still open.
+Questions on consumed, archived, or missing artifacts remain in
+`open_questions` as unresolved records but do not inflate the active decision
+breakdown.
 
 The report is an observation, not a snapshot protocol: `observation` carries
 when the pass started and finished, and `consistency: "sequential"` states how
@@ -234,4 +247,3 @@ excluded from typed replay. Missing Git commits are warnings rather than
 data loss: available patchset heads are restored under
 `refs/arc/keep/<change>/<patchset>`, while unavailable objects are
 reported for separate transfer.
-
