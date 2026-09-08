@@ -52,6 +52,10 @@ existing brief.
 it, and `unarchive <filename>` restores cold storage without reopening claims
 or changing terminal resolution. Shelved discussions stay out of active work
 until restored; terminal artifacts remain terminal in either store.
+`journal catchup --archived --json` uses `arc-catchup/5` and marks each row's
+storage, resolution, resolution basis, latest position, and whether archived
+positions exist; unknown legacy facts remain explicit rather than becoming
+empty values.
 Work waiting for a future session uses the primary actionable kinds — `todo`,
 `handoff`, `plan`, `discussion` — plus lower-priority `later` and
 `feature-request`. A feature request describes a wanted capability without

@@ -645,6 +645,9 @@ pub enum JournalCmd {
         /// The option this position argues under; requires `--question`
         #[arg(long)]
         option: Option<String>,
+        /// Explicitly append to an unresolved discussion in cold storage.
+        #[arg(long)]
+        archived: bool,
     },
     /// Record that an artifact was checked against the project's source at the
     /// current anchor revision. The revision is omitted when the anchor has no
@@ -1000,6 +1003,9 @@ pub enum JournalCmd {
         /// Optional context appended to each journal line
         #[arg(long)]
         note: Option<String>,
+        /// Acknowledge one open claim being ended by the shelf operation.
+        #[arg(long = "acknowledge-claim")]
+        acknowledge_claim: Vec<String>,
         /// Explicitly shelve an unresolved discussion without consuming it.
         #[arg(long, conflicts_with_all = ["consumed", "older_than_days"])]
         unresolved: bool,
@@ -1074,6 +1080,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             stance,
             question,
             option,
+            archived,
         } => position(
             ctx,
             &filename,
@@ -1082,6 +1089,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             stance,
             question.as_deref(),
             option.as_deref(),
+            archived,
         ),
         JournalCmd::Verified { filename, note } => verified(ctx, &filename, note.as_deref()),
         JournalCmd::Question {
@@ -1205,6 +1213,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             older_than_days,
             note,
             unresolved,
+            acknowledge_claim,
         } => archive(
             ctx,
             filename.as_deref(),
@@ -1212,6 +1221,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             older_than_days,
             note.as_deref(),
             unresolved,
+            &acknowledge_claim,
         ),
         JournalCmd::Unarchive { filename } => unarchive(ctx, &filename),
     }
@@ -2344,6 +2354,26 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
     // Semantic checks run on the event stream: consumption, lane liveness,
     // and artifact references all derive from it.
     let events = read_events(&dir)?;
+    for intent in events
+        .iter()
+        .filter(|event| event.event == "storage-intent")
+    {
+        let complete = events.iter().any(|event| {
+            event.event == "storage-completed"
+                && event.storage_operation == intent.storage_operation
+        });
+        if !complete {
+            problems.push(DoctorFinding {
+                code: "pending-storage-operation",
+                detail: format!(
+                    "{} {} → {}",
+                    intent.storage_operation.as_deref().unwrap_or("unknown"),
+                    intent.storage_source.as_deref().unwrap_or("unknown"),
+                    intent.storage_destination.as_deref().unwrap_or("unknown")
+                ),
+            });
+        }
+    }
     for name in &hot_files {
         if !parse_artifact_name(name)
             .is_some_and(|(_, _, kind)| kind == JournalKind::Discussion.as_str())
@@ -3710,6 +3740,7 @@ fn source_report(
 /// stable position ID, activity time, identity, and reply edge. Advisory and
 /// fail-open like every journal write — the block is appended even if the
 /// identity is only partially known, and the file stays hand-writable.
+#[allow(clippy::too_many_arguments)]
 fn position(
     ctx: &Ctx,
     filename: &str,
@@ -3718,6 +3749,7 @@ fn position(
     stance: Option<PositionStance>,
     question: Option<&str>,
     option: Option<&str>,
+    archived: bool,
 ) -> Result<i32> {
     // A branch needs both halves: which question, and which of its answers.
     // Refusing here keeps a half-declared branch out of the log, where it
@@ -3764,7 +3796,19 @@ fn position(
     // artifact is a closed record, not an append target.
     let dir = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&dir)?;
-    let (dir, path, topic, _kind) = open_artifact(ctx, filename)?;
+    let (dir, path, topic, _kind, storage) = if archived {
+        let (dir, path, topic) = open_archived_discussion(ctx, filename)?;
+        (
+            dir,
+            path,
+            topic,
+            JournalKind::Discussion.as_str().to_string(),
+            "archived",
+        )
+    } else {
+        let (dir, path, topic, kind) = open_artifact(ctx, filename)?;
+        (dir, path, topic, kind, "hot")
+    };
     let existing = read_events(&dir)?;
     // A branch naming a question that was never posed, or an option it never
     // offered, is an orphan: it renders under nothing and silently drops out of
@@ -3843,6 +3887,7 @@ fn position(
     event.position_id = Some(position_id);
     event.reference = reference.map(str::to_string);
     event.stance = stance.map(|stance| stance.as_str().to_string());
+    event.storage_at_write = Some(storage.to_string());
     if let Some((question, option)) = branch {
         event.question_id = Some(question);
         event.option = Some(option);
@@ -3882,6 +3927,26 @@ fn open_artifact(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String,
         );
     }
     Ok((dir, path, topic, kind))
+}
+
+/// Explicit cold-storage preflight for a new discussion position. Shelving
+/// keeps unresolved discussions appendable, but the caller must name the cold
+/// store so an accidental write cannot silently resurrect ordinary history.
+fn open_archived_discussion(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String)> {
+    let (topic, kind) = check_artifact_name(filename)?;
+    if kind != JournalKind::Discussion.as_str() {
+        bail!("{filename} is a {kind}, not a discussion");
+    }
+    let hot = resolve_dir(&ctx.cwd)?;
+    let cold = archive_dir(&hot);
+    let path = cold.join(filename);
+    if !path.is_file() {
+        bail!("no archived artifact {filename} in {}", cold.display());
+    }
+    if is_consumed(&read_events(&hot)?, filename) {
+        bail!("cannot append to consumed archived artifact {filename}");
+    }
+    Ok((hot, path, topic))
 }
 
 /// Shared preflight for appending to an open discussion, including the
@@ -5109,6 +5174,18 @@ pub(crate) struct JournalEvent {
     /// from explicitly attributed ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) planners: Option<Vec<PlannerIdentity>>,
+    /// Storage selected when an argument was appended. Legacy positions do
+    /// not carry this field and remain readable with unknown provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) storage_at_write: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    storage_operation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    storage_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    storage_destination: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    storage_digest: Option<String>,
     topic: String,
     pub(crate) event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5475,6 +5552,11 @@ impl JournalEvent {
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
             planners: None,
+            storage_at_write: None,
+            storage_operation: None,
+            storage_source: None,
+            storage_destination: None,
+            storage_digest: None,
             topic: topic.to_string(),
             event: event.to_string(),
             message: None,
@@ -6318,6 +6400,18 @@ fn event_message(event: &JournalEvent) -> String {
                 .map(|v| format!(": {v}"))
                 .unwrap_or_default()
         ),
+        "storage-intent" => format!(
+            "storage intent {} {} → {}",
+            event.storage_operation.as_deref().unwrap_or_default(),
+            event.storage_source.as_deref().unwrap_or_default(),
+            event.storage_destination.as_deref().unwrap_or_default()
+        ),
+        "storage-completed" => format!(
+            "storage completed {} {}",
+            event.storage_operation.as_deref().unwrap_or_default(),
+            event.file.as_deref().unwrap_or_default()
+        ),
+        "unarchived" => format!("unarchived {}", event.file.as_deref().unwrap_or_default()),
         "lane-opened" => format!(
             "lane opened [{}]{}{}",
             format_age(event.ttl_seconds.unwrap_or(DEFAULT_LANE_TTL)),
@@ -6563,6 +6657,7 @@ fn terminal_kind(event: &JournalEvent) -> Option<&'static str> {
             },
         ),
         "transition" => Some("transition"),
+        "archived" if event.outcome.as_deref() == Some("unresolved") => Some("archived"),
         _ => None,
     }
 }
@@ -7818,6 +7913,17 @@ pub(crate) struct ArtifactEntry {
     /// with no claim was never started.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) claim_history: Option<ClaimHistory>,
+    /// Whether the body was read from the active journal or its cold archive.
+    pub(crate) storage: String,
+    /// Terminal or explicit unresolved classification, when recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolution_basis: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_position_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) has_archived_positions: Option<bool>,
 }
 
 #[derive(Clone, Serialize)]
@@ -7944,6 +8050,7 @@ pub(crate) struct ArtifactLane {
 
 #[derive(Serialize)]
 struct Catchup {
+    schema: &'static str,
     dir: String,
     lanes: Vec<LaneEntry>,
     /// Every claim recorded on a listed artifact, ended ones included. A
@@ -8016,6 +8123,42 @@ fn first_heading(path: &Path) -> Option<String> {
         .map(|l| l.trim().to_string())
 }
 
+fn artifact_resolution(
+    events: &[JournalEvent],
+    filename: &str,
+) -> (Option<String>, Option<String>) {
+    if let Some(outcome) = events.iter().rev().find_map(|event| {
+        (event.known() && event.event == "consumed" && event.file.as_deref() == Some(filename))
+            .then(|| event.outcome.clone())
+            .flatten()
+    }) {
+        return (Some(outcome), Some("consumption".to_string()));
+    }
+    if let Some(_event) = events.iter().rev().find(|event| {
+        event.known()
+            && event.event == "archived"
+            && event.file.as_deref() == Some(filename)
+            && event.outcome.as_deref() == Some("unresolved")
+    }) {
+        return (Some("unresolved".to_string()), Some("explicit".to_string()));
+    }
+    (None, None)
+}
+
+fn position_metadata(events: &[JournalEvent], filename: &str) -> (Option<String>, Option<bool>) {
+    let positions: Vec<&JournalEvent> = events
+        .iter()
+        .filter(|event| {
+            event.known() && event.event == "position" && event.file.as_deref() == Some(filename)
+        })
+        .collect();
+    let last = positions.last().map(|event| event.ts.clone());
+    let archived = positions
+        .iter()
+        .any(|event| event.storage_at_write.as_deref() == Some("archived"));
+    (last, (!positions.is_empty()).then_some(archived))
+}
+
 /// All artifact filenames in `dir`, newest first: filenames lead with a
 /// lexically sortable UTC stamp, so descending string order is newest-first.
 /// `events.jsonl` and other non-artifact files never parse and drop out.
@@ -8057,6 +8200,8 @@ fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
         .into_iter()
         .filter_map(|name| {
             let (timestamp, topic, _) = parse_artifact_name(&name)?;
+            let (resolution, resolution_basis) = artifact_resolution(&journal, &name);
+            let (last_position_at, has_archived_positions) = position_metadata(&journal, &name);
             Some(ArtifactEntry {
                 filed_at: filed_at_of(&timestamp),
                 timestamp_status: TimestampStatus::classify(&timestamp).as_str(),
@@ -8074,6 +8219,11 @@ fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
                 claims: Vec::new(),
                 availability: None,
                 claim_history: None,
+                storage: "hot".to_string(),
+                resolution,
+                resolution_basis,
+                last_position_at,
+                has_archived_positions,
             })
         })
         .collect())
@@ -8130,6 +8280,8 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
     if dir.is_dir() {
         for name in sorted_artifact_names(&dir)?.into_iter().take(limit) {
             if let Some((ts, topic, kind)) = parse_artifact_name(&name) {
+                let (resolution, resolution_basis) = artifact_resolution(&journal, &name);
+                let (last_position_at, has_archived_positions) = position_metadata(&journal, &name);
                 let heading = amended_heading(&journal, &dir, &name);
                 let file_claims = artifact_claims(&journal, &name);
                 let (availability, claim_history) =
@@ -8152,6 +8304,15 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
                     claims: file_claims,
                     availability: Some(availability),
                     claim_history,
+                    storage: if archived {
+                        "archived".to_string()
+                    } else {
+                        "hot".to_string()
+                    },
+                    resolution,
+                    resolution_basis,
+                    last_position_at,
+                    has_archived_positions,
                 });
             }
         }
@@ -8167,6 +8328,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
 
     if json {
         let out = Catchup {
+            schema: "arc-catchup/5",
             dir: dir.display().to_string(),
             lanes,
             claims,
@@ -8537,6 +8699,8 @@ pub(crate) fn collect_open_in(
             let claims = artifact_claims(&journal, &name);
             let (availability, claim_history) =
                 artifact_availability(&journal, &name, &claims, now);
+            let (resolution, resolution_basis) = artifact_resolution(&journal, &name);
+            let (last_position_at, has_archived_positions) = position_metadata(&journal, &name);
             Some(ArtifactEntry {
                 filed_at: filed_at_of(&ts),
                 timestamp_status: TimestampStatus::classify(&ts).as_str(),
@@ -8558,6 +8722,11 @@ pub(crate) fn collect_open_in(
                 claims,
                 availability: Some(availability),
                 claim_history,
+                storage: "hot".to_string(),
+                resolution,
+                resolution_basis,
+                last_position_at,
+                has_archived_positions,
             })
         };
         open.extend(open_names.into_iter().filter_map(&mut row));
@@ -10149,6 +10318,7 @@ fn archive(
     older_than_days: Option<u64>,
     note: Option<&str>,
     unresolved: bool,
+    acknowledge_claim: &[String],
 ) -> Result<i32> {
     let hot = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&hot)?;
@@ -10163,7 +10333,7 @@ fn archive(
         let reason = note
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .context("archive --unresolved requires a nonempty --unresolved-note")?;
+            .context("archive --unresolved requires a nonempty --note")?;
         let cold = archive_dir(&hot);
         if !hot.join(filename).is_file() && !cold.join(filename).is_file() {
             bail!(
@@ -10171,20 +10341,39 @@ fn archive(
                 hot.display()
             );
         }
-        if is_consumed(&read_events(&hot)?, filename) {
+        let events = read_events(&hot)?;
+        if is_consumed(&events, filename) {
             bail!("{filename} is already consumed (see the journal)");
         }
-        if hot.join(filename).is_file() {
+        ensure_claims_acknowledged(&events, filename, acknowledge_claim, "archive")?;
+        let source = hot.join(filename);
+        let destination = cold.join(filename);
+        if source.is_file() {
             std::fs::create_dir_all(&cold)
                 .with_context(|| format!("cannot create archive dir {}", cold.display()))?;
-            if cold.join(filename).exists() {
+            if destination.exists() {
                 bail!(
                     "archive destination already exists: {}",
-                    cold.join(filename).display()
+                    destination.display()
                 );
             }
-            std::fs::rename(hot.join(filename), cold.join(filename))
+            let digest = format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(std::fs::read(&source)?))
+            );
+            let intent = pending_storage(&events, filename)
+                .cloned()
+                .unwrap_or_else(|| {
+                    storage_intent(ctx, &topic, "archive", &source, &destination, &digest)
+                });
+            if pending_storage(&events, filename).is_none() {
+                append_event(ctx, &hot, &intent)?;
+            }
+            std::fs::rename(&source, &destination)
                 .with_context(|| format!("cannot move {filename} to cold archive"))?;
+            append_event(ctx, &hot, &storage_completed(ctx, &topic, &intent))?;
+        } else if let Some(intent) = pending_storage(&events, filename) {
+            append_event(ctx, &hot, &storage_completed(ctx, &topic, intent))?;
         }
         let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "archived");
         event.file = Some(filename.to_string());
@@ -10215,14 +10404,14 @@ fn archive(
         }
         names.sort();
         for name in names {
-            archive_one(ctx, &hot, &name, note)?;
+            archive_one(ctx, &hot, &name, note, acknowledge_claim)?;
             println!("{name}");
         }
         return Ok(0);
     }
 
     let filename = filename.context("archive requires a filename or --consumed")?;
-    archive_one(ctx, &hot, filename, note)?;
+    archive_one(ctx, &hot, filename, note, acknowledge_claim)?;
     println!("{filename}");
     Ok(0)
 }
@@ -10239,16 +10428,37 @@ fn unarchive(ctx: &Ctx, filename: &str) -> Result<i32> {
         bail!("no archived artifact {filename} in {}", cold.display());
     }
     let destination = hot.join(filename);
+    let events = read_events(&hot)?;
     if destination.exists() {
+        if let Some(intent) = pending_storage(&events, filename) {
+            let topic = parse_artifact_name(filename)
+                .map(|(_, topic, _)| topic)
+                .context("invalid artifact filename")?;
+            append_event(ctx, &hot, &storage_completed(ctx, &topic, intent))?;
+            return Ok(0);
+        }
         bail!("hot artifact already exists: {}", destination.display());
     }
-    std::fs::create_dir_all(&hot)
-        .with_context(|| format!("cannot create journal dir {}", hot.display()))?;
-    std::fs::rename(&source, &destination)
-        .with_context(|| format!("cannot restore {filename} to hot storage"))?;
     let topic = parse_artifact_name(filename)
         .map(|(_, topic, _)| topic)
         .context("invalid artifact filename")?;
+    std::fs::create_dir_all(&hot)
+        .with_context(|| format!("cannot create journal dir {}", hot.display()))?;
+    let digest = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(std::fs::read(&source)?))
+    );
+    let intent = pending_storage(&events, filename)
+        .cloned()
+        .unwrap_or_else(|| {
+            storage_intent(ctx, &topic, "unarchive", &source, &destination, &digest)
+        });
+    if pending_storage(&events, filename).is_none() {
+        append_event(ctx, &hot, &intent)?;
+    }
+    std::fs::rename(&source, &destination)
+        .with_context(|| format!("cannot restore {filename} to hot storage"))?;
+    append_event(ctx, &hot, &storage_completed(ctx, &topic, &intent))?;
     let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "unarchived");
     event.file = Some(filename.to_string());
     append_event(ctx, &hot, &event)?;
@@ -10266,7 +10476,54 @@ fn timestamp_older_than(timestamp: &str, days: u64) -> bool {
     parsed < Utc::now() - chrono::Duration::days(days)
 }
 
-fn archive_one(ctx: &Ctx, hot: &Path, filename: &str, note: Option<&str>) -> Result<()> {
+fn storage_intent(
+    ctx: &Ctx,
+    topic: &str,
+    operation: &str,
+    source: &Path,
+    destination: &Path,
+    digest: &str,
+) -> JournalEvent {
+    let mut event = JournalEvent::base(ctx, Utc::now(), topic, "storage-intent");
+    event.file = source
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string());
+    event.storage_operation = Some(operation.to_string());
+    event.storage_source = Some(source.display().to_string());
+    event.storage_destination = Some(destination.display().to_string());
+    event.storage_digest = Some(digest.to_string());
+    event
+}
+
+fn storage_completed(ctx: &Ctx, topic: &str, intent: &JournalEvent) -> JournalEvent {
+    let mut event = JournalEvent::base(ctx, Utc::now(), topic, "storage-completed");
+    event.file = intent.file.clone();
+    event.storage_operation = intent.storage_operation.clone();
+    event.storage_source = intent.storage_source.clone();
+    event.storage_destination = intent.storage_destination.clone();
+    event.storage_digest = intent.storage_digest.clone();
+    event
+}
+
+fn pending_storage<'a>(events: &'a [JournalEvent], filename: &str) -> Option<&'a JournalEvent> {
+    events.iter().rev().find(|event| {
+        event.event == "storage-intent"
+            && event.file.as_deref() == Some(filename)
+            && event.storage_operation.is_some()
+            && !events.iter().any(|done| {
+                done.event == "storage-completed"
+                    && done.storage_operation == event.storage_operation
+            })
+    })
+}
+
+fn archive_one(
+    ctx: &Ctx,
+    hot: &Path,
+    filename: &str,
+    note: Option<&str>,
+    acknowledge_claim: &[String],
+) -> Result<()> {
     if filename.contains(['/', '\\']) {
         bail!("archive takes an artifact filename inside the hot dir, not a path");
     }
@@ -10274,10 +10531,20 @@ fn archive_one(ctx: &Ctx, hot: &Path, filename: &str, note: Option<&str>) -> Res
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     };
     let source = hot.join(filename);
+    let cold = archive_dir(hot);
+    let destination = cold.join(filename);
+    let events = read_events(hot)?;
     if !source.is_file() {
+        if destination.is_file() {
+            if let Some(intent) = pending_storage(&events, filename) {
+                append_event(ctx, hot, &storage_completed(ctx, &topic, intent))?;
+                return Ok(());
+            }
+        }
         bail!("no such artifact {} in {}", filename, hot.display());
     }
-    let consumed = is_consumed(&read_events(hot)?, filename);
+    let consumed = is_consumed(&events, filename);
+    ensure_claims_acknowledged(&events, filename, acknowledge_claim, "archive")?;
     if is_actionable_kind(&kind) && !consumed {
         bail!("{filename} is actionable and must be consumed before it can be archived");
     }
@@ -10285,8 +10552,6 @@ fn archive_one(ctx: &Ctx, hot: &Path, filename: &str, note: Option<&str>) -> Res
         bail!("{filename} must be consumed before it can be archived");
     }
 
-    let cold = archive_dir(hot);
-    let destination = cold.join(filename);
     if destination.exists() {
         bail!(
             "archive destination already exists: {}",
@@ -10295,6 +10560,16 @@ fn archive_one(ctx: &Ctx, hot: &Path, filename: &str, note: Option<&str>) -> Res
     }
     std::fs::create_dir_all(&cold)
         .with_context(|| format!("cannot create archive dir {}", cold.display()))?;
+    let digest = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(std::fs::read(&source)?))
+    );
+    let intent = pending_storage(&events, filename)
+        .cloned()
+        .unwrap_or_else(|| storage_intent(ctx, &topic, "archive", &source, &destination, &digest));
+    if pending_storage(&events, filename).is_none() {
+        append_event(ctx, hot, &intent)?;
+    }
     std::fs::rename(&source, &destination).with_context(|| {
         format!(
             "cannot move {} to {}",
@@ -10302,6 +10577,7 @@ fn archive_one(ctx: &Ctx, hot: &Path, filename: &str, note: Option<&str>) -> Res
             destination.display()
         )
     })?;
+    append_event(ctx, hot, &storage_completed(ctx, &topic, &intent))?;
     let mut message = format!("archived {filename}");
     if let Some(note) = note {
         message.push_str(&format!(": {note}"));
