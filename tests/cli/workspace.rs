@@ -2231,6 +2231,10 @@ fn workspace_backlog_propagates_fork_inventory_failure() {
     fs::write(
         &shim,
         "#!/bin/sh\n\
+if [ \"$ARC_FAIL_GIT_DISCOVERY\" = 1 ] && [ \"$1\" = rev-parse ] && [ \"$2\" = --git-common-dir ]; then\n\
+  echo simulated-git-discovery-failure >&2\n\
+  exit 42\n\
+fi\n\
 if [ \"$1\" = branch ] && [ \"$2\" = --list ] && [ \"$3\" = \"--format=%(refname:short)\" ] && [ \"$4\" = \"fork/*\" ]; then\n\
   echo simulated-fork-inventory-failure >&2\n\
   exit 42\n\
@@ -2260,6 +2264,14 @@ exec \"$ARC_REAL_GIT\" \"$@\"\n",
         .stderr(predicates::str::contains(
             "simulated-fork-inventory-failure",
         ));
+    repo.arc(&repo.root)
+        .env("PATH", &path)
+        .env("ARC_REAL_GIT", &real_git)
+        .env("ARC_FAIL_GIT_DISCOVERY", "1")
+        .args(["workspace", "backlog", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("simulated-git-discovery-failure"));
 }
 
 /// Opening and closing question subtotals describe the active decision set;

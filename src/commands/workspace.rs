@@ -20,6 +20,30 @@ fn normalized_cutoff(cutoff: chrono::DateTime<chrono::Utc>) -> String {
     cutoff.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
 }
 
+/// Only Git's explicit non-repository answer means there is no fork namespace.
+fn has_git_repository(anchor: &Path) -> Result<bool> {
+    let output = crate::gitio::git_command()
+        .args(["rev-parse", "--git-common-dir"])
+        .env("LC_ALL", "C")
+        .current_dir(anchor)
+        .output()
+        .with_context(|| format!("cannot inspect Git repository at {}", anchor.display()))?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    if output.status.code() == Some(128)
+        && diagnostic.starts_with("fatal: not a git repository (or any")
+    {
+        return Ok(false);
+    }
+    anyhow::bail!(
+        "cannot inspect Git repository at {}: {}",
+        anchor.display(),
+        diagnostic.trim()
+    )
+}
+
 pub enum WorkspaceView {
     List,
     Inbox,
@@ -918,16 +942,23 @@ fn workspace_backlog(
         let decision_questions = opening_question_count + closing_question_count;
         // Fork inventory uses the same read-only resolver as `fork list`,
         // run from the project's anchor: no checkouts are created, no forks
-        // retired, and no readiness is inferred. A failed inventory is
-        // returned with project context; an unreadable ahead count stays null
-        // rather than becoming zero, and retired forks remain history.
-        let fork_ctx = ctx.with_cwd(anchor.clone());
-        let forks: Vec<crate::commands::fork::ForkEntry> =
-            crate::commands::fork::list_entries(&fork_ctx)
-                .with_context(|| format!("cannot inventory forks for {}", anchor.display()))?
-                .into_iter()
-                .filter(|entry| entry.retired.is_none())
-                .collect();
+        // retired, and no readiness is inferred. A reachable non-Git anchor
+        // has journal facts but no repository fork namespace, so it has no
+        // inventory to query. A Git repository is probed independently of
+        // its ledger: a failed inventory is returned with project context,
+        // an unreadable ahead count stays null rather than becoming zero,
+        // and retired forks remain history.
+        let forks: Vec<crate::commands::fork::ForkEntry> = match has_git_repository(&anchor)? {
+            false => Vec::new(),
+            true => {
+                let fork_ctx = ctx.with_cwd(anchor.clone());
+                crate::commands::fork::list_entries(&fork_ctx)
+                    .with_context(|| format!("cannot inventory forks for {}", anchor.display()))?
+                    .into_iter()
+                    .filter(|entry| entry.retired.is_none())
+                    .collect()
+            }
+        };
         let fork_count = forks.len();
         let entry = ProjectBacklog {
             project: project.label(),
