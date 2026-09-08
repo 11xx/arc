@@ -8243,13 +8243,19 @@ pub(crate) fn collect_open_in(
         None
     };
     // Read-only ledger lookups for the annotations: a repository with no
-    // ledger yet renders without change and rewrite annotations instead of
-    // creating one as a side effect of listing a queue.
-    let ledger_root = Store::resolve_root(project).ok();
-    let store = ledger_root
-        .as_deref()
-        .and_then(|root| Store::open_at(root).ok().flatten());
-    let rewrites = store.as_ref().and_then(|store| store.rewrites().ok());
+    // ledger has an empty rewrite map, while a ledger or rewrite map that
+    // cannot be read leaves comparisons unknown. Neither path creates data.
+    let (store, rewrites) = match Store::resolve_root(project) {
+        Ok(root) => match Store::open_at(&root) {
+            Ok(Some(store)) => {
+                let rewrites = store.rewrites().ok();
+                (Some(store), rewrites)
+            }
+            Ok(None) => (None, Some(crate::rewrite::RewriteMap::default())),
+            Err(_) => (None, None),
+        },
+        Err(_) => (None, None),
+    };
     let changes = store
         .map(|store| open_changes_in(&store))
         .unwrap_or_default();
