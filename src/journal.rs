@@ -1003,12 +1003,12 @@ pub enum JournalCmd {
         /// Explicitly shelve an unresolved discussion without consuming it.
         #[arg(long, conflicts_with_all = ["consumed", "older_than_days"])]
         unresolved: bool,
-        /// Reason for an explicit unresolved classification.
-        #[arg(long, requires = "unresolved")]
-        unresolved_note: Option<String>,
     },
     /// Restore one archived artifact to hot storage.
-    Unarchive { filename: String },
+    Unarchive {
+        /// Archived artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+    },
 }
 
 pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
@@ -1205,7 +1205,6 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             older_than_days,
             note,
             unresolved,
-            unresolved_note,
         } => archive(
             ctx,
             filename.as_deref(),
@@ -1213,7 +1212,6 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             older_than_days,
             note.as_deref(),
             unresolved,
-            unresolved_note.as_deref(),
         ),
         JournalCmd::Unarchive { filename } => unarchive(ctx, &filename),
     }
@@ -3146,16 +3144,17 @@ fn planner_from_value(value: &serde_json::Value) -> Result<PlannerIdentity> {
         }
     }
     let field = |name: &str| -> Result<Option<String>> {
-        object
-            .get(name)
-            .map(|value| {
-                value
-                    .as_str()
-                    .filter(|text| !text.trim().is_empty())
-                    .map(str::to_string)
-                    .context(format!("planner {name} must be a nonempty string"))
-            })
-            .transpose()
+        let Some(value) = object.get(name) else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        let value = value
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+            .context(format!("planner {name} must be a nonempty string"))?;
+        Ok(Some(value.to_string()))
     };
     let planner = PlannerIdentity {
         actor: field("actor")?,
@@ -3174,13 +3173,18 @@ fn planner_from_value(value: &serde_json::Value) -> Result<PlannerIdentity> {
 }
 
 fn planner_header(planner: &PlannerIdentity) -> String {
-    serde_json::json!({
-        "actor": planner.actor,
-        "harness": planner.harness,
-        "session": planner.session,
-        "model": planner.model,
-    })
-    .to_string()
+    let mut object = serde_json::Map::new();
+    for (name, value) in [
+        ("actor", &planner.actor),
+        ("harness", &planner.harness),
+        ("session", &planner.session),
+        ("model", &planner.model),
+    ] {
+        if let Some(value) = value {
+            object.insert(name.to_string(), serde_json::Value::String(value.clone()));
+        }
+    }
+    serde_json::Value::Object(object).to_string()
 }
 
 fn planner_identity(ctx: &Ctx) -> Option<PlannerIdentity> {
@@ -3373,7 +3377,9 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
     let mut contents = headed(topic, title, prelude, &body);
     let planners = planners_for_write(ctx, kind, write, &contents)?;
     if let Some(planners) = planners.as_ref() {
-        contents = apply_planner_headers(&contents, planners);
+        if !write.planned_by.is_empty() || write.no_planner || planner_headers(&contents).2 {
+            contents = apply_planner_headers(&contents, planners);
+        }
     }
     let mut event = JournalEvent::base(ctx, now, topic, "note");
     event.file = Some(filename.clone());
@@ -9028,7 +9034,7 @@ pub fn plan_source(ctx: &Ctx, filename: &str, slice: &str) -> Result<PlanSource>
         (archive_dir(&hot).join(filename), "archived")
     } else {
         bail!(
-            "no such plan artifact {filename} in {} or its cold archive",
+            "no such artifact {filename} (plan) in {} or its cold archive",
             hot.display()
         );
     };
@@ -10142,7 +10148,6 @@ fn archive(
     older_than_days: Option<u64>,
     note: Option<&str>,
     unresolved: bool,
-    unresolved_note: Option<&str>,
 ) -> Result<i32> {
     let hot = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&hot)?;
@@ -10154,7 +10159,7 @@ fn archive(
         if kind != JournalKind::Discussion.as_str() {
             bail!("--unresolved is valid only for discussion artifacts");
         }
-        let reason = unresolved_note
+        let reason = note
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .context("archive --unresolved requires a nonempty --unresolved-note")?;

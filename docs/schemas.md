@@ -17,11 +17,13 @@ Parsing an internal shape means tracking arc's implementation.
 
 | Schema | Surface | Stability |
 | --- | --- | --- |
-| `arc-status/18` | `arc status` — the actionable state of one change, including dependencies, claim timing, blockers, `next_action`, the current review subject, the review map, advisories, and the forge block | commitment |
+| `arc-status/19` | `arc status` — the actionable state of one change, including dependencies, claim timing, blockers, `next_action`, the current review subject, the review map, advisories, the forge block, and captured plan provenance | commitment |
 | `arc-check/3` | `arc check --json` — every blocker with its exit code, plus never-blocking advisories | commitment |
 | `arc-inbox/9` | `arc inbox --json` — the lead-facing queue buckets across open changes | commitment |
 | `arc-catchup/4` | `arc catchup --json` — ledger buckets, journal lanes and queue, memories, forks, and worktree cost in one object | commitment |
-| `arc-resume/1` | `arc resume --json` — one change's brief, live state, and journal context | commitment |
+| `arc-resume/2` | `arc resume --json` — one change's brief, live state, and journal context, including captured plan provenance | commitment |
+| `arc-brief/1` | `arc brief --json` — one selected brief and its immutable plan-source snapshot | commitment |
+| `arc-journal-artifact/1` | `arc journal show --json` — raw artifact bytes and planner metadata | commitment |
 | `arc-rescue/2` | `arc rescue --json` — ledger state joined with worktree divergence and a foreign claim's standing | commitment |
 | `arc-review/3` | `arc review --json` — verdict history, findings, causes, current review options, and the next action | commitment |
 | `arc-findings/2` | `arc findings --format json` — the open finding set, or the audit set with `--audit` | commitment |

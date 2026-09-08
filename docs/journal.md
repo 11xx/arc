@@ -40,6 +40,18 @@ an agent-authored date. Artifact filenames carry a `YYYYMMDDTHHMMSSZ` UTC
 stamp, read by one parser that also accepts the legacy form without the `Z`;
 a filename whose stamp parses as neither keeps its row visible with a null
 time rather than being dropped or dated from its digits.
+Plan artifacts may carry repeatable `planned-by: <JSON object>` lines directly
+after their first title. `--planned-by` supplies those lines explicitly and
+`--no-planner` records that authorship is intentionally unknown; an ordinary
+new plan captures its declared invoker coordinates. `journal show --json`
+reports the planner list and whether body and event metadata agree. A brief
+selected with `--plan-ref` and `--plan-slice` stores the complete plan digest,
+source location, and planner snapshot, so later plan edits do not rewrite an
+existing brief.
+`archive --unresolved --note <reason>` shelves a discussion without consuming
+it, and `unarchive <filename>` restores cold storage without reopening claims
+or changing terminal resolution. Shelved discussions stay out of active work
+until restored; terminal artifacts remain terminal in either store.
 Work waiting for a future session uses the primary actionable kinds — `todo`,
 `handoff`, `plan`, `discussion` — plus lower-priority `later` and
 `feature-request`. A feature request describes a wanted capability without
