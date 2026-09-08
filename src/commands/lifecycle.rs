@@ -325,6 +325,7 @@ pub fn begin(
                         acceptance_probes: Vec::new(),
                         plan_ref: None,
                         plan_slice: None,
+                        plan_source: None,
                     },
                 );
                 if let Err(error) = store.append_event(&event) {
@@ -595,6 +596,7 @@ pub fn brief(
     probes_json: Option<String>,
     caused_by: Vec<String>,
     cause_note: Option<String>,
+    json: bool,
 ) -> Result<i32> {
     if plan_ref.is_some() != plan_slice.is_some() {
         bail!("--plan-ref and --plan-slice must be provided together");
@@ -613,9 +615,14 @@ pub fn brief(
         if version.is_some() {
             bail!("--version cannot be used when recording a brief");
         }
-        if let (Some(plan_ref), Some(plan_slice)) = (&plan_ref, &plan_slice) {
-            crate::journal::validate_plan_artifact(ctx, plan_ref)?;
-            crate::ids::validate_slug(plan_slice)?;
+        let plan_source = if let (Some(plan_ref), Some(plan_slice)) = (&plan_ref, &plan_slice) {
+            let _journal_lock = crate::journal::lock_transition(ctx)?;
+            Some(crate::journal::plan_source(ctx, plan_ref, plan_slice)?)
+        } else {
+            None
+        };
+        if plan_source.is_some() {
+            crate::ids::validate_slug(plan_slice.as_deref().unwrap_or_default())?;
         }
         // A scaffold template is prepended to the body being recorded;
         // --scaffold with no --body-file records the template alone.
@@ -643,6 +650,8 @@ pub fn brief(
         let next_version = state.briefs.len() + 1;
         let causes = resolve_brief_causes(&state, &caused_by, cause_note.as_deref())?;
         let has_causes = !causes.is_empty();
+        let output_plan_ref = plan_ref.clone();
+        let output_plan_slice = plan_slice.clone();
         let payload = Payload::BriefRecorded {
             title,
             body,
@@ -651,6 +660,7 @@ pub fn brief(
             acceptance_probes,
             plan_ref,
             plan_slice,
+            plan_source: plan_source.clone(),
         };
         ensure_append_allowed(&state, &payload)?;
         // A first brief has nothing to be caused by. Every later version is a
@@ -662,9 +672,27 @@ pub fn brief(
             bail!("brief v1 cannot have a cause");
         }
         let event = ctx.event(&store, &change_id, payload);
+        let event_id = event.event_id.clone();
+        let event_plan_source = plan_source.clone();
         store.append_event(&event)?;
-        println!("brief: v{next_version}");
-        println!("event: {}", event.event_id);
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema": "arc-brief/1",
+                    "brief": {
+                        "version": next_version,
+                        "event_id": event_id,
+                        "plan_ref": output_plan_ref,
+                        "plan_slice": output_plan_slice,
+                        "plan_source": event_plan_source,
+                    }
+                }))?
+            );
+        } else {
+            println!("brief: v{next_version}");
+            println!("event: {}", event.event_id);
+        }
         return Ok(0);
     }
 
@@ -697,6 +725,16 @@ pub fn brief(
         selected.base_revision.as_deref(),
         current_head.as_deref(),
     );
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": "arc-brief/1",
+                "brief": selected,
+            }))?
+        );
+        return Ok(0);
+    }
     if let Some(base_revision) = &selected.base_revision {
         let drift = base_drift
             .as_ref()

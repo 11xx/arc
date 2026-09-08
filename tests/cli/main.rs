@@ -21,6 +21,7 @@ mod observe;
 mod orchestrate;
 mod pass;
 mod paths;
+mod planners;
 mod provenance;
 mod queue;
 mod rebase;

@@ -16,7 +16,7 @@
 use crate::commands::Ctx;
 use crate::config;
 use crate::gitio;
-use crate::model::{BlockerRef, ClaimStage, DisplacedClaim};
+use crate::model::{BlockerRef, ClaimStage, DisplacedClaim, PlanSource, PlannerIdentity};
 use crate::state::{self, ChangeState, ClaimIdentity, ClaimState, StageProgress};
 use crate::store::Store;
 use anyhow::{bail, Context, Result};
@@ -452,6 +452,17 @@ pub struct KindWrite {
     /// --promote` files it later, keeping this write's identity
     #[arg(long)]
     pub spool: bool,
+    /// Portable planner identity metadata for plan artifacts. Repeat for
+    /// multiple planners; values are one-line JSON objects.
+    #[arg(
+        long = "planned-by",
+        value_name = "JSON",
+        conflicts_with = "no_planner"
+    )]
+    pub planned_by: Vec<String>,
+    /// Preserve unknown planner authorship when transporting a plan.
+    #[arg(long, conflicts_with = "planned_by")]
+    pub no_planner: bool,
 }
 
 #[derive(Subcommand)]
@@ -870,6 +881,9 @@ pub enum JournalCmd {
     Show {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
+        /// Emit the versioned artifact metadata projection.
+        #[arg(long)]
+        json: bool,
     },
     /// Resolve the newest artifact filed under one topic and print it, so a
     /// workflow that appends continuations under a stable topic can read its
@@ -986,6 +1000,14 @@ pub enum JournalCmd {
         /// Optional context appended to each journal line
         #[arg(long)]
         note: Option<String>,
+        /// Explicitly shelve an unresolved discussion without consuming it.
+        #[arg(long, conflicts_with_all = ["consumed", "older_than_days"])]
+        unresolved: bool,
+    },
+    /// Restore one archived artifact to hot storage.
+    Unarchive {
+        /// Archived artifact filename inside the journal dir (a name, not a path)
+        filename: String,
     },
 }
 
@@ -1137,7 +1159,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
         JournalCmd::Memories { json } => memories(ctx, json),
         JournalCmd::Open { kind, json } => open(ctx, kind, json),
         JournalCmd::List { kind, json } => list(ctx, kind, json),
-        JournalCmd::Show { filename } => show(ctx, &filename),
+        JournalCmd::Show { filename, json } => show(ctx, &filename, json),
         JournalCmd::Latest { topic, kind, json } => latest(ctx, &topic, kind.as_deref(), json),
         JournalCmd::Discussion { filename, json } => discussion_summary(ctx, &filename, json),
         JournalCmd::Rebind { from } => rebind(ctx, &from),
@@ -1182,13 +1204,16 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             consumed,
             older_than_days,
             note,
+            unresolved,
         } => archive(
             ctx,
             filename.as_deref(),
             consumed,
             older_than_days,
             note.as_deref(),
+            unresolved,
         ),
+        JournalCmd::Unarchive { filename } => unarchive(ctx, &filename),
     }
 }
 
@@ -3069,6 +3094,192 @@ fn opens_with_heading(body: &str) -> bool {
         .is_some_and(|line| line.trim_start().starts_with('#'))
 }
 
+/// Parse only the metadata immediately following the first Markdown title.
+/// Examples later in a plan are ordinary prose and are never interpreted.
+fn planner_headers(body: &str) -> (Vec<PlannerIdentity>, bool, bool) {
+    let mut lines = body.lines();
+    let mut title_seen = false;
+    for line in lines.by_ref() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("# ") {
+            title_seen = true;
+            break;
+        }
+    }
+    if !title_seen {
+        return (Vec::new(), false, false);
+    }
+    let mut planners = Vec::new();
+    let mut found = false;
+    let mut malformed = false;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(raw) = trimmed.strip_prefix("planned-by:") else {
+            break;
+        };
+        found = true;
+        match serde_json::from_str::<serde_json::Value>(raw.trim()) {
+            Ok(value) => match planner_from_value(&value) {
+                Ok(planner) => planners.push(planner),
+                Err(_) => malformed = true,
+            },
+            Err(_) => malformed = true,
+        }
+    }
+    planners.sort_by(|a, b| a.key().cmp(&b.key()));
+    planners.dedup_by(|a, b| a == b);
+    (planners, malformed, found)
+}
+
+fn planner_from_value(value: &serde_json::Value) -> Result<PlannerIdentity> {
+    let object = value
+        .as_object()
+        .context("planner metadata must be a JSON object")?;
+    for key in object.keys() {
+        if !matches!(key.as_str(), "actor" | "harness" | "session" | "model") {
+            bail!("unknown planner field {key}");
+        }
+    }
+    let field = |name: &str| -> Result<Option<String>> {
+        let Some(value) = object.get(name) else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        let value = value
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+            .context(format!("planner {name} must be a nonempty string"))?;
+        Ok(Some(value.to_string()))
+    };
+    let planner = PlannerIdentity {
+        actor: field("actor")?,
+        harness: field("harness")?,
+        session: field("session")?,
+        model: field("model")?,
+    };
+    if planner.actor.is_none()
+        && planner.harness.is_none()
+        && planner.session.is_none()
+        && planner.model.is_none()
+    {
+        bail!("planner metadata must name at least one coordinate");
+    }
+    Ok(planner)
+}
+
+fn planner_header(planner: &PlannerIdentity) -> String {
+    let mut object = serde_json::Map::new();
+    for (name, value) in [
+        ("actor", &planner.actor),
+        ("harness", &planner.harness),
+        ("session", &planner.session),
+        ("model", &planner.model),
+    ] {
+        if let Some(value) = value {
+            object.insert(name.to_string(), serde_json::Value::String(value.clone()));
+        }
+    }
+    serde_json::Value::Object(object).to_string()
+}
+
+fn planner_identity(ctx: &Ctx) -> Option<PlannerIdentity> {
+    let planner = PlannerIdentity {
+        actor: declared_actor(ctx),
+        harness: ctx.harness.clone().filter(|v| !v.trim().is_empty()),
+        session: ctx.session.clone().filter(|v| !v.trim().is_empty()),
+        model: ctx.model.clone().filter(|v| !v.trim().is_empty()),
+    };
+    (planner.actor.is_some()
+        || planner.harness.is_some()
+        || planner.session.is_some()
+        || planner.model.is_some())
+    .then_some(planner)
+}
+
+/// Insert explicit planner headers immediately after the first title. Existing
+/// leading planner headers are replaced so repeated transitions do not stack
+/// duplicate declarations.
+fn apply_planner_headers(body: &str, planners: &[PlannerIdentity]) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    let Some(title) = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("# "))
+    else {
+        return body.to_string();
+    };
+    let mut end = title + 1;
+    while end < lines.len() {
+        let trimmed = lines[end].trim();
+        if trimmed.is_empty() || trimmed.starts_with("planned-by:") {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    let mut out = lines[..=title].join("\n");
+    out.push_str("\n\n");
+    for planner in planners {
+        out.push_str("planned-by: ");
+        out.push_str(&planner_header(planner));
+        out.push('\n');
+    }
+    if !planners.is_empty() {
+        out.push('\n');
+    }
+    let rest = lines[end..].join("\n");
+    out.push_str(&rest);
+    if body.ends_with('\n') && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+fn planners_for_write(
+    ctx: &Ctx,
+    kind: JournalKind,
+    write: &KindWrite,
+    body: &str,
+) -> Result<Option<Vec<PlannerIdentity>>> {
+    let explicit = !write.planned_by.is_empty() || write.no_planner;
+    if explicit && kind != JournalKind::Plan {
+        bail!("--planned-by and --no-planner are valid only for plan artifacts");
+    }
+    if write.no_planner {
+        return Ok(Some(Vec::new()));
+    }
+    if !write.planned_by.is_empty() {
+        let mut planners = write
+            .planned_by
+            .iter()
+            .map(|raw| {
+                planner_from_value(
+                    &serde_json::from_str(raw)
+                        .with_context(|| format!("invalid --planned-by JSON: {raw}"))?,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        planners.sort_by(|a, b| a.key().cmp(&b.key()));
+        planners.dedup();
+        return Ok(Some(planners));
+    }
+    let (headers, malformed, found) = planner_headers(body);
+    if malformed {
+        bail!("malformed planned-by metadata in plan body");
+    }
+    if found {
+        return Ok(Some(headers));
+    }
+    Ok((kind == JournalKind::Plan)
+        .then(|| planner_identity(ctx))
+        .flatten()
+        .map(|planner| vec![planner]))
+}
+
 /// The heading a kebab-case topic reads as: `queue-row-blank` becomes
 /// `Queue row blank`.
 fn heading_from_topic(topic: &str) -> String {
@@ -3163,12 +3374,19 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
     // A derived prelude sits above the body and is never enough on its own:
     // machine-readable state is the cheap half, and an artifact carrying only
     // that says nothing a successor could not read from the repository.
-    let contents = headed(topic, title, prelude, &body);
+    let mut contents = headed(topic, title, prelude, &body);
+    let planners = planners_for_write(ctx, kind, write, &contents)?;
+    if let Some(planners) = planners.as_ref() {
+        if !write.planned_by.is_empty() || write.no_planner || planner_headers(&contents).2 {
+            contents = apply_planner_headers(&contents, planners);
+        }
+    }
     let mut event = JournalEvent::base(ctx, now, topic, "note");
     event.file = Some(filename.clone());
     event.title = title.map(str::to_string);
     event.source = source;
     event.item_key = item_key;
+    event.planners = planners;
 
     if write.spool {
         return spool_write(ctx, &stamp, kind.as_str(), topic, &event, Some(&contents));
@@ -4352,6 +4570,13 @@ fn correct(
     if field == "stance" && PositionStance::parse(value).is_none() {
         bail!("--field stance takes for, against, or amend, not {value:?}");
     }
+    if field == "planners" {
+        let values: Vec<serde_json::Value> = serde_json::from_str(value)
+            .context("--field planners takes a JSON array of planner objects")?;
+        for planner in &values {
+            planner_from_value(planner)?;
+        }
+    }
     let note = note.map(str::trim).filter(|note| !note.is_empty());
 
     let dir = resolve_dir(&ctx.cwd)?;
@@ -4879,6 +5104,11 @@ pub(crate) struct JournalEvent {
     pub(crate) on_behalf_of: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    /// Planner identities asserted for a plan artifact. Optional so older
+    /// journal events remain valid and headerless legacy plans stay distinct
+    /// from explicitly attributed ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) planners: Option<Vec<PlannerIdentity>>,
     topic: String,
     pub(crate) event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5088,7 +5318,9 @@ pub(crate) struct JournalEvent {
 
 /// Every field a correction may name, over all targets. Which of them a given
 /// target actually carries is `AmendTarget::correctable_fields`.
-const CORRECTABLE_FIELDS: [&str; 6] = ["stance", "option", "actor", "model", "ref", "title"];
+const CORRECTABLE_FIELDS: [&str; 7] = [
+    "stance", "option", "actor", "model", "ref", "title", "planners",
+];
 
 /// What a `correction` or `retraction` names inside one artifact.
 ///
@@ -5126,7 +5358,7 @@ impl AmendTarget {
     /// author filed.
     fn correctable_fields(&self) -> &'static [&'static str] {
         match self {
-            Self::Artifact => &["title"],
+            Self::Artifact => &["title", "planners"],
             Self::Position(_) => &["stance", "option", "actor", "model", "ref"],
             Self::Question(_) => &["actor", "model"],
             Self::Answer(_) => &["option", "actor", "model"],
@@ -5242,6 +5474,7 @@ impl JournalEvent {
                 .as_deref()
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
+            planners: None,
             topic: topic.to_string(),
             event: event.to_string(),
             message: None,
@@ -8601,7 +8834,7 @@ fn list(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
 
 /// Print one artifact's raw Markdown body: the read side of `note`. Resolves
 /// the hot journal dir first, then the cold sibling archive.
-fn show(ctx: &Ctx, filename: &str) -> Result<i32> {
+fn show(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     if parse_artifact_name(filename).is_none() {
         // Somebody holding a topic rather than a filename is one command from
         // the answer, so the error names it. Teaching the grammar and stopping
@@ -8616,6 +8849,47 @@ fn show(ctx: &Ctx, filename: &str) -> Result<i32> {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     }
     let body = read_artifact_body(ctx, filename)?;
+    if json {
+        let hot = resolve_dir(&ctx.cwd)?;
+        let events = read_events(&hot)?;
+        let (planners, malformed, found) = planner_headers(&body);
+        let event_planners = events.iter().find_map(|event| {
+            (event.file.as_deref() == Some(filename) && event.event == "note")
+                .then_some(event.planners.clone())
+                .flatten()
+        });
+        let status = if malformed {
+            "malformed"
+        } else if event_planners
+            .as_ref()
+            .is_some_and(|p| found && p != &planners)
+        {
+            "conflict"
+        } else if event_planners.is_some() || found {
+            "ok"
+        } else {
+            "unknown"
+        };
+        let effective = event_planners.unwrap_or(planners);
+        let recorded = recorded_identity(&events, filename);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": "arc-journal-artifact/1",
+                "file": filename,
+                "body": body,
+                "planners": effective,
+                "planner_status": status,
+                "recorded_by": recorded.map(|identity| serde_json::json!({
+                    "actor": identity.actor,
+                    "harness": identity.harness,
+                    "session": identity.session,
+                    "model": identity.model,
+                })),
+            }))?
+        );
+        return Ok(0);
+    }
     // Where the artifact came from is arc's record about it, not a line of the
     // Markdown anybody wrote, so it goes to the diagnostic stream: stdout stays
     // the body verbatim and `journal show <file> > <file>` still round-trips.
@@ -8724,6 +8998,7 @@ pub fn read_artifact_body(ctx: &Ctx, filename: &str) -> Result<String> {
 
 /// Validate that a filename identifies an existing plan in the hot journal or
 /// its cold archive.
+#[allow(dead_code)]
 pub fn validate_plan_artifact(ctx: &Ctx, filename: &str) -> Result<()> {
     if filename.contains(['/', '\\']) {
         bail!("plan reference must be a journal artifact filename, not a path");
@@ -8736,6 +9011,81 @@ pub fn validate_plan_artifact(ctx: &Ctx, filename: &str) -> Result<()> {
     }
     read_artifact_body(ctx, filename)?;
     Ok(())
+}
+
+/// Read a plan once and capture the exact bytes and planner coordinates used
+/// by a brief. The snapshot is immutable state on the brief event, so later
+/// edits or corrections to the plan do not rewrite an existing brief.
+pub fn plan_source(ctx: &Ctx, filename: &str, slice: &str) -> Result<PlanSource> {
+    if filename.contains(['/', '\\']) {
+        bail!("plan reference must be a journal artifact filename, not a path");
+    }
+    crate::ids::validate_slug(slice)?;
+    let Some((_, _, kind)) = parse_artifact_name(filename) else {
+        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+    };
+    if kind != "plan" {
+        bail!("{filename:?} is a {kind} artifact, not a plan");
+    }
+    let resolution = resolve(&ctx.cwd)?;
+    let hot = resolution.directory;
+    let (path, storage) = if hot.join(filename).is_file() {
+        (hot.join(filename), "hot")
+    } else if archive_dir(&hot).join(filename).is_file() {
+        (archive_dir(&hot).join(filename), "archived")
+    } else {
+        bail!(
+            "no such artifact {filename} (plan) in {} or its cold archive",
+            hot.display()
+        );
+    };
+    let bytes = std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
+    let body = String::from_utf8(bytes.clone()).context("plan body is not valid UTF-8")?;
+    let (headers, malformed, found) = planner_headers(&body);
+    if malformed {
+        bail!("malformed planned-by metadata in {filename}");
+    }
+    let events = read_events(&hot)?;
+    let amendments = Amendments::collect(&events, filename);
+    let corrected = amendments
+        .field("artifact", "planners", None)
+        .and_then(|value| serde_json::from_str::<Vec<serde_json::Value>>(value).ok())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| planner_from_value(value).ok())
+                .collect::<Vec<_>>()
+        });
+    let event_planners = events.iter().rev().find_map(|event| {
+        (event.file.as_deref() == Some(filename) && event.event == "note")
+            .then_some(event.planners.clone())
+            .flatten()
+    });
+    let (planners, planner_status, provenance_basis) = match (corrected, event_planners, found) {
+        (Some(corrected), _, _) => (corrected, "corrected".to_string(), "correction".to_string()),
+        (None, Some(recorded), true) if recorded != headers => (
+            Vec::new(),
+            "conflict".to_string(),
+            "header-and-event".to_string(),
+        ),
+        (None, Some(recorded), _) => (recorded, "ok".to_string(), "journal-event".to_string()),
+        (None, None, true) => (headers, "ok".to_string(), "body-header".to_string()),
+        (None, None, false) => (
+            Vec::new(),
+            "unknown".to_string(),
+            "unattributed".to_string(),
+        ),
+    };
+    Ok(PlanSource {
+        anchor: resolution.anchor.map(|path| path.display().to_string()),
+        journal_dir: hot.display().to_string(),
+        filename: filename.to_string(),
+        slice: slice.to_string(),
+        sha256: hex::encode(Sha256::digest(&bytes)),
+        planners,
+        planner_status,
+        provenance_basis: format!("{provenance_basis}:{storage}"),
+    })
 }
 
 #[derive(Default, Serialize)]
@@ -9798,9 +10148,52 @@ fn archive(
     consumed: bool,
     older_than_days: Option<u64>,
     note: Option<&str>,
+    unresolved: bool,
 ) -> Result<i32> {
     let hot = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&hot)?;
+    if unresolved {
+        let filename = filename.context("archive --unresolved requires a filename")?;
+        let Some((_, topic, kind)) = parse_artifact_name(filename) else {
+            bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+        };
+        if kind != JournalKind::Discussion.as_str() {
+            bail!("--unresolved is valid only for discussion artifacts");
+        }
+        let reason = note
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .context("archive --unresolved requires a nonempty --unresolved-note")?;
+        let cold = archive_dir(&hot);
+        if !hot.join(filename).is_file() && !cold.join(filename).is_file() {
+            bail!(
+                "no such artifact {filename} in {} or its cold archive",
+                hot.display()
+            );
+        }
+        if is_consumed(&read_events(&hot)?, filename) {
+            bail!("{filename} is already consumed (see the journal)");
+        }
+        if hot.join(filename).is_file() {
+            std::fs::create_dir_all(&cold)
+                .with_context(|| format!("cannot create archive dir {}", cold.display()))?;
+            if cold.join(filename).exists() {
+                bail!(
+                    "archive destination already exists: {}",
+                    cold.join(filename).display()
+                );
+            }
+            std::fs::rename(hot.join(filename), cold.join(filename))
+                .with_context(|| format!("cannot move {filename} to cold archive"))?;
+        }
+        let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "archived");
+        event.file = Some(filename.to_string());
+        event.outcome = Some("unresolved".to_string());
+        event.note = Some(reason.to_string());
+        append_event(ctx, &hot, &event)?;
+        println!("{filename}");
+        return Ok(0);
+    }
     if consumed {
         let journal = read_events(&hot)?;
         let mut names = Vec::new();
@@ -9831,6 +10224,35 @@ fn archive(
     let filename = filename.context("archive requires a filename or --consumed")?;
     archive_one(ctx, &hot, filename, note)?;
     println!("{filename}");
+    Ok(0)
+}
+
+fn unarchive(ctx: &Ctx, filename: &str) -> Result<i32> {
+    if filename.contains(['/', '\\']) {
+        bail!("unarchive takes an artifact filename, not a path");
+    }
+    let hot = resolve_dir(&ctx.cwd)?;
+    let _transition = lock_journal_transition(&hot)?;
+    let cold = archive_dir(&hot);
+    let source = cold.join(filename);
+    if !source.is_file() {
+        bail!("no archived artifact {filename} in {}", cold.display());
+    }
+    let destination = hot.join(filename);
+    if destination.exists() {
+        bail!("hot artifact already exists: {}", destination.display());
+    }
+    std::fs::create_dir_all(&hot)
+        .with_context(|| format!("cannot create journal dir {}", hot.display()))?;
+    std::fs::rename(&source, &destination)
+        .with_context(|| format!("cannot restore {filename} to hot storage"))?;
+    let topic = parse_artifact_name(filename)
+        .map(|(_, topic, _)| topic)
+        .context("invalid artifact filename")?;
+    let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "unarchived");
+    event.file = Some(filename.to_string());
+    append_event(ctx, &hot, &event)?;
+    println!("unarchived: {filename}");
     Ok(0)
 }
 
