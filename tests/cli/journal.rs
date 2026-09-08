@@ -1435,6 +1435,95 @@ fn journal_archive_refuses_unconsumed_later_then_accepts_consumed() {
 }
 
 #[test]
+fn unresolved_discussion_can_be_shelved_and_explicitly_amended_in_cold_storage() {
+    let repo = Repo::new();
+    let hot = journal_dir(&repo);
+    let body = repo.home.join("discussion.md");
+    fs::write(&body, "A question\n").unwrap();
+    let name = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "shelved",
+        "--kind",
+        "discussion",
+        "--body-file",
+        body.to_str().unwrap(),
+    ]));
+    let name = Path::new(name.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            &name,
+            "--placement",
+            "closing",
+            "--option",
+            "keep",
+            "--option",
+            "drop",
+            "--body-file",
+            body.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "archive",
+            &name,
+            "--unresolved",
+            "--note",
+            "awaiting design owner",
+        ])
+        .assert()
+        .success();
+    let cold = PathBuf::from(format!("{}-archive", hot.display()));
+    assert!(cold.join(&name).is_file());
+    let archived =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "catchup", "--archived", "--json"]),
+        );
+    let row = archived["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["file"] == name)
+        .unwrap();
+    assert_eq!(row["storage"], "archived");
+    assert_eq!(row["resolution"], "unresolved");
+    let position = repo
+        .arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            &name,
+            "--archived",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Position: for\nThe shelf remains the right boundary.\n")
+        .assert();
+    position.success();
+    let event = journal_events(&hot)
+        .into_iter()
+        .find(|event| event["event"] == "position")
+        .unwrap();
+    assert_eq!(event["storage_at_write"], "archived");
+    repo.arc(&repo.root)
+        .args(["journal", "unarchive", &name])
+        .assert()
+        .success();
+    assert!(hot.join(&name).is_file());
+    let open = stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    assert!(open.contains(&name));
+}
+
+#[test]
 fn journal_archive_consumed_bulk_filters_age_and_rejects_flag_misuse() {
     let repo = Repo::new();
     let hot = journal_dir(&repo);
