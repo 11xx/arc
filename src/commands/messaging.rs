@@ -11,6 +11,7 @@ struct DebtEntry {
     missing: Option<DebtMissing>,
     production: Option<DebtProduction>,
     coverage: Option<Vec<DebtCoverage>>,
+    review_subject: Option<crate::status::ReviewSubject>,
     declared_at: DateTime<Utc>,
     surfaces: Option<Vec<String>>,
 }
@@ -26,7 +27,7 @@ impl DebtEntry {
 
     fn detail(&self) -> String {
         format!(
-            "{} ({}): owed: {}; {}; surfaces: {}",
+            "{} ({}): owed: {}; {}; surfaces: {}{}",
             self.change_id,
             crate::render::one_line(&self.title),
             crate::render::one_line(&self.reason),
@@ -35,7 +36,11 @@ impl DebtEntry {
                 self.production.as_ref(),
                 self.coverage.as_deref()
             ),
-            self.surface_detail()
+            self.surface_detail(),
+            self.review_subject
+                .as_ref()
+                .map(|subject| format!("; {}", crate::render::review_subject_detail(subject)))
+                .unwrap_or_default()
         )
     }
 }
@@ -86,6 +91,15 @@ impl DebtSummary {
                 self.entries.len(),
                 self.detail()
             );
+            for entry in &self.entries {
+                if let Some(subject) = &entry.review_subject {
+                    println!(
+                        "  {}: {}",
+                        entry.change_id,
+                        crate::render::review_subject_detail(subject)
+                    );
+                }
+            }
         }
     }
 
@@ -151,6 +165,9 @@ pub(crate) fn collect_debts(
             missing: debt.missing,
             production: debt.production.clone(),
             coverage: debt.coverage.clone(),
+            review_subject: state
+                .debt_subject_patchset()
+                .map(crate::status::review_subject_for_patchset),
             declared_at: debt.declared_at,
             surfaces: debt_surfaces(&ctx.cwd, state, debt),
         });
@@ -909,6 +926,16 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         println!("{name} ({}):", rows.len());
         for row in rows.iter().take(limit) {
             println!("  {}  {} → {}", row.change_id, row.title, row.next_actor);
+            if let Some(state) = states.get(&row.change_id) {
+                if let Some(line) = ctx
+                    .report(&store, state)?
+                    .review_subject
+                    .as_ref()
+                    .map(crate::render::review_subject_detail)
+                {
+                    println!("    {line}");
+                }
+            }
             if rendered_debt_details.insert(row.change_id.clone()) {
                 if let Some(state) = states.get(&row.change_id) {
                     debts.render_touched(ctx, state);

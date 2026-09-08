@@ -15,6 +15,19 @@ fn repo_forbidding_self_approval() -> Repo {
     repo
 }
 
+fn repo_with_ordinary_review_scope() -> Repo {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n\n[danger]\npaths = [\"dangerous.rs\"]\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy"]);
+    repo
+}
+
 fn self_approved_change(repo: &Repo, slug: &str) -> PathBuf {
     stdout(repo.arc(&repo.root).args(["begin", slug]));
     let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
@@ -798,6 +811,7 @@ fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
     assert!(catchup.contains("debt-owed (1):"), "{catchup}");
     assert!(catchup.contains("1 outstanding"), "{catchup}");
     assert!(catchup.contains("surfaces (1): work.txt"), "{catchup}");
+    assert!(catchup.contains("review subject: `ps-01`"), "{catchup}");
     assert!(catchup.contains("arc audit"), "{catchup}");
 
     // Discharging it empties the queue.
@@ -808,6 +822,44 @@ fn outstanding_debt_appears_in_the_inbox_and_catchup_after_closure() {
         .success();
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
     assert!(inbox["debt-owed"].as_array().unwrap().is_empty());
+}
+
+/// A current refusal is an implementer's next action, not an optional debt
+/// route. Ordinary scope exercises both non-approval verdicts because neither
+/// one is covered by the policy rejection reason used for dangerous work.
+#[test]
+fn ordinary_refusing_verdicts_keep_their_action_out_of_debt_guidance() {
+    for (slug, verdict, cause) in [
+        ("ordinary-comment", "comment-only", None),
+        ("ordinary-changes", "changes-requested", Some("executor")),
+    ] {
+        let repo = repo_with_ordinary_review_scope();
+        stdout(repo.arc(&repo.root).args(["begin", slug]));
+        let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+        repo.commit(&worktree, "safe.txt", "safe\n", "feat: safe");
+        stdout(repo.arc(&worktree).args(["snapshot", slug]));
+
+        let mut review = vec!["review", slug, "--verdict", verdict];
+        if let Some(cause) = cause {
+            review.extend(["--cause", cause]);
+        }
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "Reviewer")
+            .args(review)
+            .assert()
+            .success();
+
+        let status = json_stdout(repo.arc(&repo.root).args(["status", slug]));
+        assert_eq!(status["danger"]["dangerous"], false, "{status}");
+        assert_eq!(status["next_action"], verdict, "{status}");
+        assert!(
+            status["review_options"]
+                .as_array()
+                .is_none_or(Vec::is_empty),
+            "{status}"
+        );
+        repo.arc(&repo.root).args(["check", slug]).assert().code(3);
+    }
 }
 
 #[test]
@@ -3383,7 +3435,7 @@ fn waiver_never_overrides_a_refusing_verdict_or_a_stale_head() {
         .success();
     let status = json_stdout(repo.arc(&repo.root).args(["status", "comment-only"]));
     assert_eq!(status["ready_to_integrate"], false, "{status}");
-    assert_eq!(status["next_action"], "request_review", "{status}");
+    assert_eq!(status["next_action"], "comment-only", "{status}");
     // Absent: the flag is skipped when false, and a refusing verdict keeps
     // the waiver from satisfying approval.
     assert!(
@@ -3537,6 +3589,16 @@ fn review_options_route_the_lead_without_writing() {
         status["review_options"],
         serde_json::json!(["declare_debt", "request_review"]),
         "{status}"
+    );
+    let review = json_stdout(repo.arc(&repo.root).args(["review", "ordinary", "--json"]));
+    assert_eq!(
+        review["review_options"], status["review_options"],
+        "{review}"
+    );
+    let review_text = stdout(repo.arc(&repo.root).args(["review", "ordinary"]));
+    assert!(
+        review_text.contains("Review options: declare_debt, request_review"),
+        "{review_text}"
     );
     assert_eq!(status["danger"]["dangerous"], false, "{status}");
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));

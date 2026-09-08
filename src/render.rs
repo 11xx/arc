@@ -924,16 +924,22 @@ pub fn markdown(
 /// orchestrator's review is a valid review unless a project's policy says
 /// otherwise; the point is that nobody integrates without having been told.
 /// One line naming the identities the independence check compares on the
-/// latest patchset. Shown beside approval rejection and in check output so a
-/// lead reading the refusal sees the exact sets that were compared, without
-/// re-deriving them from snapshot events.
+/// current review subject. Shown beside approval rejection and in check
+/// output so a lead reading the refusal sees the exact sets that were compared,
+/// without re-deriving them from snapshot events.
 pub fn review_subject_line(report: &StatusReport) -> Option<String> {
     let subject = report.review_subject.as_ref()?;
+    Some(review_subject_detail(subject))
+}
+
+/// One identity-comparison line for a review subject carried outside a full
+/// status report, such as an integrated debt row in `catchup`.
+pub fn review_subject_detail(subject: &crate::status::ReviewSubject) -> String {
     let contributors = subject.contributors.join(", ");
-    Some(format!(
+    format!(
         "review subject: `{}` compares reviewer against contributors [{}] ({})",
         subject.patchset_id, contributors, subject.basis,
-    ))
+    )
 }
 
 pub fn advisories(report: &StatusReport) {

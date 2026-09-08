@@ -163,6 +163,9 @@ everything not yet opened as a change. `arc inbox` therefore reports the
 journal's tier counts and newest primary items beside its own buckets, and
 `arc begin <slug> --from-journal <file>` turns a queued artifact into a change,
 consuming it.
+Queue rows include review-subject guidance for open changes, and integrated
+debt names the shipped subject so a reviewer can select the exact patchset and
+contributors rather than following the latest history.
 `arc inbox --json` uses `arc-inbox/9`; a change opened with `--iterating` is
 classified in the separate `iterating` bucket rather than in review or ready
 queues. Both `arc inbox` and `arc catchup` also carry a `deferred` section:
@@ -355,8 +358,10 @@ condition wins.
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, claim owner/activity/stage timing, snapshot
 provenance, a `review_subject` naming the exact identities the independence
-check compares on the latest patchset (the invoker, the effective author, the
-effective contributor set, and whether that set was declared or synthesized),
+check compares on the current review subject (the shipped patchset for a
+closed integrated change, otherwise the current patchset; the invoker,
+effective author, effective contributor set, and whether that set was
+declared or synthesized),
 a blocker summary, a machine-readable `next_action`, an additive
 `forge` projection block ([forge projection](forge.md)), and ready
 alternative open changes while the requested change is blocked. Actively
@@ -471,4 +476,3 @@ provenance for a replacement lease; a claim event without a generation is
 rejected as malformed rather than replayed through inference.
 Integration warns on an active foreign claim, including a stale one, but
 proceeds when the normal integration gates pass.
-

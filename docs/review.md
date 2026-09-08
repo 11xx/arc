@@ -70,9 +70,12 @@ invoker, the effective author, the effective contributor set the check
 compares, and whether that set was explicitly declared or synthesized from
 the effective author. A synthesized fallback is not a declaration — it is the
 compatibility reading for patchsets recorded before contributor sets existed
-or without one. `arc show` and `arc check` name the same identities beside an
-approval rejection, so a lead reading the refusal sees the exact sets that
-were compared.
+or without one. Open changes use their current patchset; a closed integrated
+change uses the patchset recorded as shipped while `latest_patchset` remains
+history. `arc show` and `arc check` name the same identities beside an
+approval rejection, and `arc catchup` carries the subject under open changes
+and integrated debt, so a lead reading the queue sees the exact sets that were
+compared.
 
 Where the policy is off the approval is recorded, and `arc review` and
 `arc audit` name what the record does not otherwise show: the identity the
@@ -208,7 +211,7 @@ arc integrate <change> --debt "no independent reviewer reachable"
 
 # later, when a reviewer is available
 arc inbox                                    # debt-owed bucket
-arc catchup                                  # the same, with reasons
+arc catchup                                  # the same, with reasons and subjects
 arc query --debt                             # IDs alone, for scripting
 arc diff <change> --integrated               # the exact range that landed
 arc audit <change> --verdict approved --body-file -
@@ -230,6 +233,10 @@ approval or any higher-priority action offers nothing. The list is guidance,
 not an authorization token: reading it writes nothing, and the user or lead
 still runs `arc debt <change> --reason <specific coverage and deferral>`
 themselves. Instructions from the user override a suggested optional route.
+The review-read surface exposes the same `review_options` beside its verdict
+history. A current changes-requested or comment-only verdict is the action
+itself and carries no debt option; debt records a missing review and does not
+override a refusal.
 
 A debt that is already in force changes the guidance instead of re-routing it:
 `arc status` reports `integrate_ready` with `approval_waived_by_debt` flagged
@@ -295,4 +302,3 @@ Three rules keep the escape hatch from becoming a hole:
   finding kind, while `arc resolve` records an integrated-only audit
   disposition for an audit finding. The ordinary disposition event remains
   open-only, so later audit work cannot rewrite shipped finding state.
-

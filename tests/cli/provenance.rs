@@ -32,6 +32,71 @@ fn on_behalf_of_round_trips_through_status_json() {
     assert_eq!(status["latest_patchset"]["on_behalf_of"], "Executor");
 }
 
+/// A closed change can retain later patchsets in its history, but the review
+/// subject must stay bound to the patchset the closure says shipped.
+#[test]
+fn closed_status_review_subject_names_the_shipped_patchset() {
+    let repo = Repo::new();
+    let slug = "closed-subject";
+    stdout(repo.arc(&repo.root).args(["begin", slug]));
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+
+    repo.commit(&worktree, "first.txt", "first\n", "feat: first");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Lead")
+        .args(["snapshot", slug, "--on-behalf-of", "executor-a"])
+        .assert()
+        .success();
+    let shipped_head = repo.head(&worktree);
+
+    repo.commit(&worktree, "second.txt", "second\n", "feat: second");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Lead")
+        .args(["snapshot", slug, "--on-behalf-of", "executor-b"])
+        .assert()
+        .success();
+
+    git(&repo.root, &["merge", "--ff-only", &shipped_head]);
+    repo.arc(&repo.root)
+        .args([
+            "close",
+            slug,
+            "--assert-integrated",
+            &shipped_head,
+            "--patchset",
+            "ps-01",
+            "--into",
+            "master",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["debt", slug, "--reason", "review after integration"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", slug]));
+    assert_eq!(status["latest_patchset"]["id"], "ps-02", "{status}");
+    assert_eq!(status["review_subject"]["patchset_id"], "ps-01", "{status}");
+    assert_eq!(
+        status["review_subject"]["effective_author"], "executor-a",
+        "{status}"
+    );
+    let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(
+        catchup.contains(
+            "review subject: `ps-01` compares reviewer against contributors [executor-a]"
+        ),
+        "{catchup}"
+    );
+    assert!(
+        !catchup.contains(
+            "review subject: `ps-02` compares reviewer against contributors [executor-b]"
+        ),
+        "{catchup}"
+    );
+}
+
 #[test]
 fn ledger_events_record_optional_model_identity_and_render_it_in_log() {
     let repo = Repo::new();
