@@ -3099,7 +3099,7 @@ fn opens_with_heading(body: &str) -> bool {
 fn planner_headers(body: &str) -> (Vec<PlannerIdentity>, bool, bool) {
     let mut lines = body.lines();
     let mut title_seen = false;
-    while let Some(line) = lines.next() {
+    for line in lines.by_ref() {
         let trimmed = line.trim();
         if trimmed.starts_with("# ") {
             title_seen = true;
@@ -8998,6 +8998,7 @@ pub fn read_artifact_body(ctx: &Ctx, filename: &str) -> Result<String> {
 
 /// Validate that a filename identifies an existing plan in the hot journal or
 /// its cold archive.
+#[allow(dead_code)]
 pub fn validate_plan_artifact(ctx: &Ctx, filename: &str) -> Result<()> {
     if filename.contains(['/', '\\']) {
         bail!("plan reference must be a journal artifact filename, not a path");
