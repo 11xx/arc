@@ -23,7 +23,7 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-catchup/4` | `arc catchup --json` — ledger buckets, journal lanes and queue, memories, forks, and worktree cost in one object | commitment |
 | `arc-resume/1` | `arc resume --json` — one change's brief, live state, and journal context | commitment |
 | `arc-rescue/2` | `arc rescue --json` — ledger state joined with worktree divergence and a foreign claim's standing | commitment |
-| `arc-review/2` | `arc review --json` — verdict history, findings, causes, current review options, and the next action | commitment |
+| `arc-review/3` | `arc review --json` — verdict history, findings, causes, current review options, and the next action | commitment |
 | `arc-findings/2` | `arc findings --format json` — the open finding set, or the audit set with `--audit` | commitment |
 | `arc-blocker-status/1` | `arc blocker-status --json` — dependency detail for one change | commitment |
 | `arc-metadata/1` | `arc metadata --json` — the derived tags, dependencies, and priority | commitment |
@@ -48,6 +48,9 @@ Parsing an internal shape means tracking arc's implementation.
 | `journal-source/1` | `arc journal source --json` — what one recorded session produced here | commitment |
 | `arc-journal-latest/1` | `arc journal latest --json` — the newest artifact under one topic, with the resolved identity beside its body | commitment |
 | `arc-journal-scaffolds/1` | `arc journal scaffolds --json` — the scaffolds a write can prepend, and one scaffold's body | commitment |
+
+`arc-review/3` includes the optional `review_options` field. The schema is
+`arc-review/3` even when no options apply and the field is omitted.
 
 ## Files
 
