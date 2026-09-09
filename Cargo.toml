@@ -1,6 +1,6 @@
 [package]
 name = "arc-ledger"
-version = "2026.9.4"
+version = "2026.9.9"
 edition = "2021"
 description = "Durable project context and change coordination for humans and coding agents, built on plain Git"
 license = "Unlicense"
