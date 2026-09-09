@@ -6,12 +6,18 @@
 //! handful of rules that change what a session should do. Anything that
 //! belongs to one command's contract stays in that command's `--help`.
 
-pub const GUIDE: &str = r#"arc — change, review, and integration state over plain Git.
+pub const GUIDE: &str = r#"arc — durable project context and change coordination over plain Git.
 
-Git owns content, branches, and history. arc owns what Git lacks: changes,
-patchsets, findings, verdicts, verification evidence, claims, holds, and a
-guarded merge — one append-only JSON event per fact, under the repo's Git
-common dir. Every list, status, and inbox is derived; nothing is rewritten.
+A project outlives any one session. arc keeps decisions, open questions,
+pending work, and verification evidence available to the next person or
+coding agent, across the repository's worktrees and AI harnesses.
+
+The journal holds reasoning and the backlog in Markdown artifacts and
+append-only events. The change ledger tracks implementation, patchsets,
+review findings, verdicts, gates, claims, holds, and guarded integration.
+Git owns files, branches, and history; arc records the context around them.
+Run `arc catchup` for live project state and `arc journal open` for work
+waiting for a session.
 
 SAY WHO YOU ARE (before the first write)
   eval "$(arc env)"                    Detect harness, session, and model.
