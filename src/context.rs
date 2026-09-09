@@ -429,7 +429,7 @@ pub fn resume(
     if json || get.is_some() || fields.is_some() {
         commands::print_projected(
             serde_json::to_value(ResumeOutput {
-                schema: "arc-resume/2",
+                schema: "arc-resume/3",
                 status,
                 journal,
             })?,

@@ -53,6 +53,21 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          thread <slug>` names the harness, session, and model
                          that opened it, and how to resume that session.
   arc journal open       The actionable backlog — work waiting for a session.
+  arc journal inventory --json
+                         Shared artifact facts, claims, questions, promotions,
+                         and explicit ledger coverage. --archived selects cold
+                         storage; a filename inspects one exact artifact.
+
+  Plans carry portable planned-by metadata. A brief selecting --plan-ref and
+  --plan-slice captures the body digest and declared planners; reading the
+  brief prints available credit suggestions. Conflicting or malformed
+  metadata grants no credit, and corrections leave existing briefs unchanged.
+
+  Shelve a discussion with journal archive FILE --unresolved --note REASON.
+  Use journal position FILE --archived to argue there, and journal unarchive
+  FILE to restore storage. Terminal resolution remains terminal. Pending
+  storage moves appear in journal doctor and must be retried before other
+  writes; the retry validates the operation's paths and body digest.
                          A row occupied by somebody reads `[claimed by <actor>
                          via <harness>: active|expired]`; `--json` carries the
                          same as `availability` and the claims themselves.

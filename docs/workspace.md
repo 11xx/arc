@@ -76,7 +76,9 @@ previous-run marker — the boundary is supplied by the caller, so the command
 stays derived. `--items` names every actionable artifact under each project in
 the same open, later, and feature-request tier order used by `journal open`.
 Each item can include its `verification` stamp, and the text rows use the same
-renderer as `journal open`. JSON is versioned `arc-workspace-backlog/12` and
+renderer as `journal open`. Item rows share the journal inventory projection,
+including exact promotions, question history, checkpoint tips, and explicit
+ledger read coverage. JSON is versioned `arc-workspace-backlog/13` and
 states whether its scope is global or beneath one canonical path. Missing
 anchors are filtered by their recorded path, so an unreachable project inside
 a requested workspace remains visible without unrelated orphans leaking in.

@@ -90,6 +90,29 @@ pub struct PlanSource {
     pub provenance_basis: String,
 }
 
+impl PlanSource {
+    pub fn planner_trailers(&self) -> Vec<String> {
+        if !matches!(self.planner_status.as_str(), "ok" | "corrected") {
+            return Vec::new();
+        }
+        let mut lines: Vec<_> = self
+            .planners
+            .iter()
+            .filter_map(|p| {
+                let harness = p.harness.as_deref()?;
+                let model = p.model.as_deref()?;
+                if harness.contains(['\n', '\r']) || model.contains(['\n', '\r']) {
+                    return None;
+                }
+                Some(format!("Assisted-by: {harness}:{model} (planner)"))
+            })
+            .collect();
+        lines.sort();
+        lines.dedup();
+        lines
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum BlockerRef {

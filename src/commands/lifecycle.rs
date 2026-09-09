@@ -747,6 +747,19 @@ pub fn brief(
         println!("plan-slice: {plan_slice}");
         println!();
     }
+    if let Some(source) = &selected.plan_source {
+        println!("plan-sha256: {}", source.sha256);
+        println!(
+            "planner-status: {} ({})",
+            source.planner_status, source.provenance_basis
+        );
+        for planner in &source.planners {
+            println!("planned-by: {}", serde_json::to_string(planner)?);
+        }
+        for trailer in source.planner_trailers() {
+            println!("suggested-credit: {trailer}");
+        }
+    }
     for probe in &selected.acceptance_probes {
         println!("acceptance-probe: {} = {}", probe.name, probe.command);
     }

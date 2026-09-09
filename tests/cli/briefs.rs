@@ -81,9 +81,13 @@ fn brief_record_and_read_round_trip() {
         .args(["brief", "brief-roundtrip"])
         .assert()
         .success()
-        .stdout(format!(
-            "base-revision: {base_revision}\nplan-ref: {first_plan}\nplan-slice: first-slice\n\n{v1}"
-        ));
+        .stdout(
+            predicates::str::starts_with(format!(
+                "base-revision: {base_revision}\nplan-ref: {first_plan}\nplan-slice: first-slice\n"
+            ))
+            .and(predicates::str::contains("plan-sha256:"))
+            .and(predicates::str::ends_with(v1)),
+        );
 
     repo.arc(&repo.root)
         .args([
@@ -105,16 +109,20 @@ fn brief_record_and_read_round_trip() {
         .args(["brief", "brief-roundtrip"])
         .assert()
         .success()
-        .stdout(format!(
-            "base-revision: {base_revision}\nplan-ref: {second_plan}\nplan-slice: second-slice\n\n{v2}"
-        ));
+        .stdout(predicates::str::starts_with(format!("base-revision: {base_revision}\nplan-ref: {second_plan}\nplan-slice: second-slice\n"))
+            .and(predicates::str::contains("plan-sha256:"))
+            .and(predicates::str::ends_with(v2)));
     repo.arc(&repo.root)
         .args(["brief", "brief-roundtrip", "--version", "1"])
         .assert()
         .success()
-        .stdout(format!(
-            "base-revision: {base_revision}\nplan-ref: {first_plan}\nplan-slice: first-slice\n\n{v1}"
-        ));
+        .stdout(
+            predicates::str::starts_with(format!(
+                "base-revision: {base_revision}\nplan-ref: {first_plan}\nplan-slice: first-slice\n"
+            ))
+            .and(predicates::str::contains("plan-sha256:"))
+            .and(predicates::str::ends_with(v1)),
+        );
     repo.arc(&repo.root)
         .args(["brief", "brief-roundtrip", "--version", "3"])
         .assert()

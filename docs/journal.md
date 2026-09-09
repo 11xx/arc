@@ -48,20 +48,43 @@ reports the planner list and whether body and event metadata agree. A brief
 selected with `--plan-ref` and `--plan-slice` stores the complete plan digest,
 source location, and planner snapshot, so later plan edits do not rewrite an
 existing brief.
+Planner headers travel with ordinary plan creation, explicit copies, and
+transitions. A plan transition accepts `--planned-by` for additional authors
+and `--no-planner` for intentional unknown authorship. Represented humans
+receive only their declared coordinates. `journal show --json` exposes header
+and event sources independently; conflicts and malformed headers provide no
+credit. `journal correct FILE --target artifact --field planners --value
+'[{"actor":"author"}]' --note REASON` supplies an append-only correction.
+Malformed metadata warns when selecting a brief; the brief still records its
+digest and metadata status. Text briefs display the captured digest, planners,
+and deduplicated `Assisted-by` suggestions when harness and model are known.
 `archive --unresolved --note <reason>` shelves a discussion without consuming
 it, and `unarchive <filename>` restores cold storage without reopening claims
 or changing terminal resolution. Shelved discussions stay out of active work
 until restored; terminal artifacts remain terminal in either store.
-`journal catchup --archived --json` uses `arc-catchup/5` and marks each row's
+Storage moves record an operation ID, source, destination, and body digest.
+The destination is created exclusively before the source link is removed;
+retry validates the recorded paths and bytes and completes the same operation.
+Pending operations block competing writes and appear in `journal doctor`.
+Unclassified cold discussions require explicit `archive --unresolved --note`
+adoption before accepting positions. Duplicate bodies are reported as conflicts.
+`journal catchup --archived --json` uses `arc-journal-catchup/6` and marks each row's
 storage, resolution, resolution basis, latest position, and whether archived
 positions exist; unknown legacy facts remain explicit rather than becoming
 empty values.
 `journal inventory [FILE] [--archived] [--kind KIND] --json` emits
-`arc-journal-inventory/1`. It selects one hot or cold store from one observed
+`arc-journal-inventory/2`. It selects one hot or cold store from one observed
 set of events, keeps availability separate from storage and resolution, and
 reports claims, questions, exact change/brief promotions, source references,
 and whether the ledger was absent, readable, or unreadable. An exact file is
 inspected even when terminal; a missing exact file is an error.
+Inventory, `journal open`, journal catchup, and workspace item rows share the
+artifact projection. Rows include tier, checkpoint tips, current and historical
+blocker references, unanswered questions and complete question history, and
+exact promotions with the selected plan snapshot and change closure/stage.
+Unreadable ledger coverage produces `promotions: null` with an explanation;
+an absent ledger produces an empty array. Body read failures and conflicting
+stores are errors. These observations write no ledger or journal state.
 Work waiting for a future session uses the primary actionable kinds — `todo`,
 `handoff`, `plan`, `discussion` — plus lower-priority `later` and
 `feature-request`. A feature request describes a wanted capability without
