@@ -52,6 +52,12 @@ existing brief.
 it, and `unarchive <filename>` restores cold storage without reopening claims
 or changing terminal resolution. Shelved discussions stay out of active work
 until restored; terminal artifacts remain terminal in either store.
+Storage moves record an operation ID, source, destination, and body digest.
+The destination is created exclusively before the source link is removed;
+retry validates the recorded paths and bytes and completes the same operation.
+Pending operations block competing writes and appear in `journal doctor`.
+Unclassified cold discussions require explicit `archive --unresolved --note`
+adoption before accepting positions. Duplicate bodies are reported as conflicts.
 `journal catchup --archived --json` uses `arc-catchup/5` and marks each row's
 storage, resolution, resolution basis, latest position, and whether archived
 positions exist; unknown legacy facts remain explicit rather than becoming

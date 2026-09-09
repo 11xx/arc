@@ -74,6 +74,8 @@ paths = [
   # Edits the bytes of every commit message a trailer rewrite touches. A wrong
   # block boundary rewrites prose while claiming to have edited a trailer.
   "src/trailers.rs",
+  # Artifact storage operations move the only copy of journal history.
+  "src/journal.rs",
 ]
 
 # Roots inside which classification is closed: every tracked file under one of
@@ -106,7 +108,6 @@ acknowledged_safe = [
   "src/guide.rs",
   # The journal and the liveness signals over it are advisory by construction:
   # claims, lanes, and messages never gate, and the ledger stays authoritative.
-  "src/journal.rs",
   "src/commands/claims.rs",
   "src/commands/messaging.rs",
   "src/commands/scaffold.rs",

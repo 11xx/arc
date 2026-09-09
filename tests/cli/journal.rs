@@ -39,6 +39,150 @@ fn journal_events(dir: &Path) -> Vec<serde_json::Value> {
 }
 
 #[test]
+fn storage_round_trip_keeps_typed_operation_identity() {
+    let repo = Repo::new();
+    let path = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "storage-probe",
+        "--title",
+        "Storage",
+    ]));
+    let file = Path::new(path.trim())
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "archive", file])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "unarchive", file])
+        .assert()
+        .success();
+    let rows = stdout(repo.arc(&repo.root).args(["journal", "events"]));
+    assert!(rows.contains("storage-intent"), "{rows}");
+    assert!(rows.contains("storage-completed"), "{rows}");
+    assert!(rows.contains("storage_id"), "{rows}");
+    assert!(rows.contains("unarchived"), "{rows}");
+}
+
+#[test]
+fn cold_legacy_requires_classification_and_inventory_refuses_duplicates() {
+    let repo = Repo::new();
+    let hot = journal_dir(&repo);
+    let cold = PathBuf::from(format!("{}-archive", hot.display()));
+    fs::create_dir_all(&cold).unwrap();
+    let file = "20260101T000000Z-legacy-discussion.md";
+    fs::write(cold.join(file), "# Legacy\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            file,
+            "--archived",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Position: for\nArgument\n")
+        .assert()
+        .failure();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "archive",
+            file,
+            "--unresolved",
+            "--note",
+            "adopt legacy discussion",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "position",
+            file,
+            "--archived",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Position: for\nArgument\n")
+        .assert()
+        .success();
+    fs::write(hot.join(file), "# Conflicting copy\n").unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "inventory", file, "--json"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn storage_interruptions_retry_only_matching_bodies_and_operations() {
+    for phase in ["intent", "linked", "moved"] {
+        let repo = Repo::new();
+        let hot = journal_dir(&repo);
+        let path = stdout(repo.arc(&repo.root).args([
+            "journal",
+            "note",
+            "interrupted",
+            "--title",
+            "Keep",
+        ]));
+        let source = PathBuf::from(path.trim());
+        let file = source.file_name().unwrap().to_str().unwrap();
+        let bytes = fs::read(&source).unwrap();
+        repo.arc(&repo.root)
+            .args(["journal", "archive", file])
+            .assert()
+            .success();
+        let cold = PathBuf::from(format!("{}-archive", hot.display()));
+        let rows = journal_events(&hot);
+        let intent = rows
+            .iter()
+            .find(|e| e["event"] == "storage-intent")
+            .unwrap();
+        let log = rows
+            .iter()
+            .filter(|e| e["event"] == "note" || e["event"] == "storage-intent")
+            .map(|e| format!("{e}\n"))
+            .collect::<String>();
+        fs::write(hot.join("events.jsonl"), log).unwrap();
+        if phase != "moved" {
+            fs::rename(cold.join(file), &source).unwrap();
+            if phase == "linked" {
+                fs::hard_link(&source, cold.join(file)).unwrap();
+            }
+        }
+        let diagnostic = repo
+            .arc(&repo.root)
+            .args(["journal", "doctor", "--json"])
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&diagnostic.stdout).contains("pending-storage-operation"));
+        repo.arc(&repo.root)
+            .args(["journal", "unarchive", file])
+            .assert()
+            .failure();
+        repo.arc(&repo.root)
+            .args(["journal", "archive", file])
+            .assert()
+            .success();
+        assert!(!source.exists());
+        assert_eq!(fs::read(cold.join(file)).unwrap(), bytes);
+        let rows = journal_events(&hot);
+        assert_eq!(
+            rows.iter()
+                .filter(|e| e["event"] == "storage-completed"
+                    && e["storage_id"] == intent["storage_id"])
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
 fn journal_log_writes_typed_jsonl_events() {
     let repo = Repo::new();
     let body = repo.home.join("body.md");
