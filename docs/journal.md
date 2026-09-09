@@ -56,6 +56,12 @@ until restored; terminal artifacts remain terminal in either store.
 storage, resolution, resolution basis, latest position, and whether archived
 positions exist; unknown legacy facts remain explicit rather than becoming
 empty values.
+`journal inventory [FILE] [--archived] [--kind KIND] --json` emits
+`arc-journal-inventory/1`. It selects one hot or cold store from one observed
+set of events, keeps availability separate from storage and resolution, and
+reports claims, questions, exact change/brief promotions, source references,
+and whether the ledger was absent, readable, or unreadable. An exact file is
+inspected even when terminal; a missing exact file is an error.
 Work waiting for a future session uses the primary actionable kinds — `todo`,
 `handoff`, `plan`, `discussion` — plus lower-priority `later` and
 `feature-request`. A feature request describes a wanted capability without

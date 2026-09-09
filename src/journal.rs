@@ -880,6 +880,21 @@ pub enum JournalCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Project one observation of journal artifacts and their orthogonal
+    /// lifecycle facts. Hot storage is the default; `--archived` is explicit.
+    Inventory {
+        /// Inspect one exact artifact instead of the selected actionable set.
+        file: Option<String>,
+        /// Select the cold archive, including terminal and unresolved rows.
+        #[arg(long)]
+        archived: bool,
+        /// Restrict the selected set to one actionable kind.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Emit the versioned JSON projection.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print one artifact's raw Markdown body to stdout (read-only)
     Show {
         /// Artifact filename inside the journal dir (a name, not a path)
@@ -1167,6 +1182,12 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
         JournalCmd::Memories { json } => memories(ctx, json),
         JournalCmd::Open { kind, json } => open(ctx, kind, json),
         JournalCmd::List { kind, json } => list(ctx, kind, json),
+        JournalCmd::Inventory {
+            file,
+            archived,
+            kind,
+            json,
+        } => inventory(ctx, file.as_deref(), archived, kind.as_deref(), json),
         JournalCmd::Show { filename, json } => show(ctx, &filename, json),
         JournalCmd::Latest { topic, kind, json } => latest(ctx, &topic, kind.as_deref(), json),
         JournalCmd::Discussion { filename, json } => discussion_summary(ctx, &filename, json),
@@ -4393,7 +4414,7 @@ impl DeliveryState {
 /// Deliveries accumulate rather than replace: a question asked twice with no
 /// answer is a different fact from one asked once, and erasing the earlier
 /// attempt would hide the more urgent of the two.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct QuestionDelivery {
     to: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4743,7 +4764,7 @@ fn retract(ctx: &Ctx, filename: &str, target: &str, body_file: &str) -> Result<i
     Ok(0)
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct OpenQuestion {
     pub(crate) file: String,
     pub(crate) topic: String,
@@ -4784,7 +4805,7 @@ pub(crate) struct OpenQuestion {
     pub(crate) options: Vec<QuestionOption>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct QuestionOption {
     option: String,
     positions: usize,
@@ -5086,7 +5107,7 @@ pub(crate) enum QuestionDisposition {
 
 /// One unanswered question projected for a cross-project view, with the
 /// disposition of the artifact it sits on.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct WorkspaceQuestion {
     #[serde(flatten)]
     pub(crate) question: OpenQuestion,
@@ -7924,6 +7945,25 @@ pub(crate) struct ArtifactEntry {
     pub(crate) last_position_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) has_archived_positions: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) questions: Vec<WorkspaceQuestion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) promotions: Vec<InventoryPromotion>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct InventoryPromotion {
+    pub(crate) change_id: String,
+    pub(crate) status: String,
+    pub(crate) basis: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) brief_event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) brief_version: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) slice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_digest: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -8224,6 +8264,8 @@ fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
                 resolution_basis,
                 last_position_at,
                 has_archived_positions,
+                questions: Vec::new(),
+                promotions: Vec::new(),
             })
         })
         .collect())
@@ -8313,6 +8355,8 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
                     resolution_basis,
                     last_position_at,
                     has_archived_positions,
+                    questions: Vec::new(),
+                    promotions: Vec::new(),
                 });
             }
         }
@@ -8727,6 +8771,8 @@ pub(crate) fn collect_open_in(
                 resolution_basis,
                 last_position_at,
                 has_archived_positions,
+                questions: Vec::new(),
+                promotions: Vec::new(),
             })
         };
         open.extend(open_names.into_iter().filter_map(&mut row));
@@ -8769,6 +8815,250 @@ fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
         }
         for f in &items.feature_requests {
             render_open_entry(f);
+        }
+    }
+    Ok(0)
+}
+
+#[derive(Serialize)]
+struct JournalInventory {
+    schema: &'static str,
+    journal_dir: String,
+    anchor: Option<String>,
+    observed_at: String,
+    ledger: InventoryLedger,
+    items: Vec<ArtifactEntry>,
+}
+
+#[derive(Serialize)]
+struct InventoryLedger {
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+fn all_changes_in(store: &Store) -> Vec<ChangeState> {
+    let Ok(ids) = store.list_change_ids() else {
+        return Vec::new();
+    };
+    let Ok(rewrites) = store.rewrites() else {
+        return Vec::new();
+    };
+    ids.into_iter()
+        .filter_map(|id| store.load_events(&id).ok())
+        .filter_map(|events| state::reduce_following(&events, &rewrites).ok())
+        .collect()
+}
+
+fn inventory_promotions(changes: &[ChangeState], filename: &str) -> Vec<InventoryPromotion> {
+    let mut promotions = Vec::new();
+    for change in changes {
+        if change.journal_ref.as_deref() == Some(filename) {
+            promotions.push(InventoryPromotion {
+                change_id: change.change_id.clone(),
+                status: if change.is_closed() { "closed" } else { "open" }.to_string(),
+                basis: "journal_ref".to_string(),
+                brief_event_id: None,
+                brief_version: None,
+                slice: None,
+                source_digest: None,
+            });
+        }
+        for (version, brief) in change.briefs.iter().enumerate() {
+            if brief.plan_ref.as_deref() != Some(filename) {
+                continue;
+            }
+            promotions.push(InventoryPromotion {
+                change_id: change.change_id.clone(),
+                status: if change.is_closed() { "closed" } else { "open" }.to_string(),
+                basis: "brief.plan_ref".to_string(),
+                brief_event_id: Some(brief.event_id.clone()),
+                brief_version: Some(version + 1),
+                slice: brief.plan_slice.clone(),
+                source_digest: brief
+                    .plan_source
+                    .as_ref()
+                    .map(|source| source.sha256.clone()),
+            });
+        }
+    }
+    promotions
+        .sort_by(|a, b| (&a.change_id, a.brief_version).cmp(&(&b.change_id, b.brief_version)));
+    promotions
+}
+
+fn inventory(
+    ctx: &Ctx,
+    file: Option<&str>,
+    archived: bool,
+    kind: Option<&str>,
+    json: bool,
+) -> Result<i32> {
+    if let Some(kind) = kind {
+        if !is_actionable_kind(kind) {
+            bail!("--kind {kind} is not actionable; inventory accepts todo|handoff|plan|discussion|later|feature-request");
+        }
+    }
+    if let Some(file) = file {
+        if file.contains(['/', '\\']) || parse_artifact_name(file).is_none() {
+            bail!("{file:?} is not a journal artifact filename");
+        }
+    }
+    let resolution = resolve(&ctx.cwd)?;
+    let hot = resolution.directory;
+    let selected_dir = if archived {
+        archive_dir(&hot)
+    } else {
+        hot.clone()
+    };
+    let events = read_events(&hot)?;
+    let observed = Utc::now();
+    let project = resolution.anchor.clone().unwrap_or_else(|| ctx.cwd.clone());
+    let (ledger, changes, rewrites) = match Store::resolve_root(&project) {
+        Ok(root) => match Store::open_at(&root) {
+            Ok(Some(store)) => {
+                let rewrites = store.rewrites().ok();
+                let changes = all_changes_in(&store);
+                let state = if rewrites.is_some() {
+                    "readable"
+                } else {
+                    "unreadable"
+                };
+                (
+                    InventoryLedger {
+                        state,
+                        reason: (state == "unreadable")
+                            .then(|| "rewrite map unreadable".to_string()),
+                    },
+                    changes,
+                    rewrites,
+                )
+            }
+            Ok(None) => (
+                InventoryLedger {
+                    state: "absent",
+                    reason: None,
+                },
+                Vec::new(),
+                Some(crate::rewrite::RewriteMap::default()),
+            ),
+            Err(error) => (
+                InventoryLedger {
+                    state: "unreadable",
+                    reason: Some(error.to_string()),
+                },
+                Vec::new(),
+                None,
+            ),
+        },
+        Err(error) => (
+            InventoryLedger {
+                state: "unreadable",
+                reason: Some(error.to_string()),
+            },
+            Vec::new(),
+            None,
+        ),
+    };
+    let lanes = lanes_from_journal(&events, observed);
+    let caller = {
+        let (harness, session) = identity(ctx);
+        LaneOwner { harness, session }
+    };
+    let question_rows = open_questions_with_disposition(&hot)?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let names = if let Some(file) = file {
+        if !selected_dir.join(file).is_file() {
+            bail!("no such artifact {file} in {}", selected_dir.display());
+        }
+        vec![file.to_string()]
+    } else {
+        sorted_artifact_names(&selected_dir)?
+            .into_iter()
+            .filter(|name| {
+                parse_artifact_name(name).is_some_and(|(_, _, file_kind)| {
+                    kind.is_none_or(|wanted| wanted == file_kind)
+                        && is_actionable_kind(&file_kind)
+                        && (archived || !is_consumed(&events, name))
+                })
+            })
+            .collect()
+    };
+    let mut items = Vec::new();
+    for name in names {
+        let Some((ts, topic, file_kind)) = parse_artifact_name(&name) else {
+            continue;
+        };
+        let claims = artifact_claims(&events, &name);
+        let (availability, claim_history) =
+            artifact_availability(&events, &name, &claims, observed);
+        let (resolution_value, resolution_basis) = artifact_resolution(&events, &name);
+        let (last_position_at, has_archived_positions) = position_metadata(&events, &name);
+        let questions = question_rows
+            .iter()
+            .filter(|question| question.question.file == name)
+            .cloned()
+            .collect();
+        items.push(ArtifactEntry {
+            file: name.clone(),
+            timestamp: ts.clone(),
+            filed_at: filed_at_of(&ts),
+            timestamp_status: TimestampStatus::classify(&ts).as_str(),
+            topic: topic.clone(),
+            kind: Some(file_kind),
+            heading: amended_heading(&events, &selected_dir, &name),
+            age_seconds: artifact_age_seconds(observed, &ts),
+            lane: lane_for_topic(&lanes, &topic, &caller),
+            change: change_annotation(&changes, &topic, &name),
+            verification: verification_stamp(
+                &events,
+                &name,
+                gitio::head_if_present(&project).ok().flatten().as_deref(),
+                rewrites.as_ref(),
+            ),
+            amendments: standing_amendments(
+                &events,
+                &name,
+                &parse_artifact_name(&name)
+                    .map(|(_, _, kind)| kind)
+                    .unwrap_or_default(),
+            ),
+            sources: queue_sources(&events, &name),
+            claims,
+            availability: Some(availability),
+            claim_history,
+            storage: if archived {
+                "archived".to_string()
+            } else {
+                "hot".to_string()
+            },
+            resolution: resolution_value,
+            resolution_basis,
+            last_position_at,
+            has_archived_positions,
+            questions,
+            promotions: inventory_promotions(&changes, &name),
+        });
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&JournalInventory {
+                schema: "arc-journal-inventory/1",
+                journal_dir: hot.display().to_string(),
+                anchor: resolution.anchor.map(|path| path.display().to_string()),
+                observed_at: observed.to_rfc3339_opts(SecondsFormat::AutoSi, true),
+                ledger,
+                items,
+            })?
+        );
+    } else {
+        for item in &items {
+            render_open_entry(item);
+        }
+        if items.is_empty() {
+            println!("no inventory items");
         }
     }
     Ok(0)
