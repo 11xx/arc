@@ -5308,6 +5308,10 @@ pub(crate) struct JournalEvent {
     storage_operation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     storage_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    storage_claims: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    storage_resolution: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     storage_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5683,6 +5687,8 @@ impl JournalEvent {
             storage_at_write: None,
             storage_operation: None,
             storage_id: None,
+            storage_claims: Vec::new(),
+            storage_resolution: None,
             storage_source: None,
             storage_destination: None,
             storage_digest: None,
@@ -10775,6 +10781,8 @@ fn storage_completed(ctx: &Ctx, topic: &str, intent: &JournalEvent) -> JournalEv
     let mut event = JournalEvent::base(ctx, Utc::now(), topic, "storage-completed");
     event.file = intent.file.clone();
     event.storage_id = intent.storage_id.clone();
+    event.storage_claims = intent.storage_claims.clone();
+    event.storage_resolution = intent.storage_resolution.clone();
     event.storage_operation = intent.storage_operation.clone();
     event.storage_source = intent.storage_source.clone();
     event.storage_destination = intent.storage_destination.clone();
@@ -10907,6 +10915,11 @@ fn move_artifact(
         );
         intent.outcome = outcome.map(str::to_string);
         intent.note = note.map(str::to_string);
+        intent.storage_claims = open_artifact_claims(events, filename)
+            .iter()
+            .map(|claim| claim.state.claim_id.clone())
+            .collect();
+        intent.storage_resolution = artifact_resolution(events, filename).0;
         append_event(ctx, hot, &intent)?;
         intent
     };
@@ -11177,7 +11190,13 @@ fn transition(
     if from_kind == to.as_str() {
         bail!("{} is already a {} artifact", filename, from_kind);
     }
+    let supplied_body = body_file.map(read_body_verbatim).transpose()?;
     let dir = resolve_dir(&ctx.cwd)?;
+    let _transition = if dry_run {
+        None
+    } else {
+        Some(lock_journal_transition(&dir)?)
+    };
     let source_path = dir.join(filename);
     if !source_path.is_file() {
         bail!("no such artifact {} in {}", filename, dir.display());
@@ -11212,8 +11231,8 @@ fn transition(
     let source_bytes = std::fs::read(&source_path)
         .with_context(|| format!("cannot read {}", source_path.display()))?;
     let inherited = String::from_utf8_lossy(&source_bytes).into_owned();
-    let body = match body_file {
-        Some(source) => read_body_verbatim(source)?,
+    let body = match supplied_body {
+        Some(body) => body,
         None => {
             let heading = format!(
                 "\nTransitioned from `{filename}`: kind {} → {}.",
@@ -11268,7 +11287,6 @@ fn transition(
         );
         return Ok(0);
     }
-    let _transition = lock_journal_transition(&dir)?;
     let events = read_events(&dir)?;
     ensure_storage_settled(&dir, &events, filename)?;
     if is_consumed(&events, filename) {

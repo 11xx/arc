@@ -296,14 +296,32 @@ fn storage_interruptions_retry_only_matching_bodies_and_operations() {
             .iter()
             .find(|e| e["event"] == "storage-intent")
             .unwrap();
-        let log = rows
+        let mut log = rows
             .iter()
             .filter(|e| e["event"] == "note" || e["event"] == "storage-intent")
             .map(|e| format!("{e}\n"))
             .collect::<String>();
+        let mut unrelated = rows
+            .iter()
+            .find(|e| e["event"] == "storage-completed")
+            .unwrap()
+            .clone();
+        unrelated["file"] = serde_json::json!("20260101T000000Z-unrelated-note.md");
+        unrelated["storage_id"] = serde_json::json!("storage-other");
+        log.push_str(&format!("{unrelated}\n"));
         fs::write(hot.join("events.jsonl"), log).unwrap();
         if phase != "moved" {
             fs::rename(cold.join(file), &source).unwrap();
+            if phase == "intent" {
+                fs::write(&source, "modified body").unwrap();
+                repo.arc(&repo.root)
+                    .args(["journal", "archive", file])
+                    .assert()
+                    .failure()
+                    .stderr(predicates::str::contains("digest mismatch"));
+                assert_eq!(fs::read(&source).unwrap(), b"modified body");
+                fs::write(&source, &bytes).unwrap();
+            }
             if phase == "linked" {
                 fs::hard_link(&source, cold.join(file)).unwrap();
             }
@@ -3090,10 +3108,13 @@ fn journal_show_prints_body_and_resolves_cold_archive() {
     let shown = stdout(repo.arc(&repo.root).args(["journal", "show", &file]));
     assert_eq!(shown, "# Show me\n\nexact body, verbatim\n");
 
-    // With the same filename in both dirs, hot takes precedence.
+    // Two stores claiming the same filename require reconciliation.
     fs::write(hot.join(&file), "# Hotter\n").unwrap();
-    let shown = stdout(repo.arc(&repo.root).args(["journal", "show", &file]));
-    assert_eq!(shown, "# Hotter\n");
+    repo.arc(&repo.root)
+        .args(["journal", "show", &file])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("conflicting hot and cold bodies"));
 }
 
 #[test]
