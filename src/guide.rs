@@ -6,16 +6,18 @@
 //! handful of rules that change what a session should do. Anything that
 //! belongs to one command's contract stays in that command's `--help`.
 
-pub const GUIDE: &str = r#"arc — durable project context and change coordination over plain Git.
+pub const GUIDE: &str = r#"arc — persistent context and guarded workflow state over plain Git for agentic coding arcs.
 
-A project outlives any one session. arc keeps decisions, open questions,
-pending work, and verification evidence available to the next person or
-coding agent, across the repository's worktrees and AI harnesses.
+arc is a local context and workflow-state manager for agentic coding. It
+keeps a shared account of what is being worked on, what has been learned or
+decided, what remains to be done, and what is actually safe to integrate.
+A cold session reconstructs project and workflow context from the journal
+and change ledger shared across worktrees and harnesses.
 
-The journal holds reasoning and the backlog in Markdown artifacts and
-append-only events. The change ledger tracks implementation, patchsets,
-review findings, verdicts, gates, claims, holds, and guarded integration.
-Git owns files, branches, and history; arc records the context around them.
+Git owns content, branches, and history. arc owns changes, patchsets, briefs,
+handoffs, findings, verdicts, verification evidence, holds, and guarded
+integration. Review verdicts bind to exact patchsets; integration checks
+findings, holds, and required verification gates before merging.
 Run `arc catchup` for live project state and `arc journal open` for work
 waiting for a session.
 

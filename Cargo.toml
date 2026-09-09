@@ -2,7 +2,7 @@
 name = "arc-ledger"
 version = "2026.9.9"
 edition = "2021"
-description = "Durable project context and change coordination for humans and coding agents, built on plain Git"
+description = "Persistent context and guarded workflow state over plain Git for agentic coding arcs."
 license = "Unlicense"
 readme = "README.md"
 repository = "https://github.com/11xx/arc"

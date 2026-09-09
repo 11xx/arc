@@ -33,10 +33,12 @@ use model::{
 };
 use std::path::{Path, PathBuf};
 
-/// Durable project context and change coordination for humans and coding agents,
-/// built on plain Git. Keep decisions, pending work, review findings, and
-/// verification evidence across sessions and harnesses. Git owns files and
-/// history; arc owns the journal and change ledger.
+/// Persistent context and guarded workflow state over plain Git for agentic coding arcs.
+///
+/// Reconstruct project and workflow context across sessions and harnesses:
+/// work in progress, decisions, next steps, and what is safe to integrate.
+/// Git owns content and history; arc owns the journal, change ledger,
+/// review findings, verification evidence, and guarded integration.
 #[derive(Parser)]
 #[command(
     name = "arc",
