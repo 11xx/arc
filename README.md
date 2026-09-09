@@ -1,19 +1,22 @@
 # arc
 
-Durable project context and change coordination for humans and coding agents,
-built on plain Git.
+Persistent context and guarded workflow state over plain Git for agentic coding arcs.
 
-A project outlives any one chat or coding session. arc keeps its decisions,
-open questions, pending work, and verification evidence available to the next
-person or agent. Its journal holds the reasoning and backlog; its change
-ledger tracks implementation, review findings, and integration. Both are
-shared across a repository's worktrees and AI harnesses.
+`arc` is a local context and workflow-state manager for agentic coding, built
+over plain Git. It gives agents and sessions a persistent shared understanding
+of what is being worked on, what has been learned or decided, what remains to
+be done, and what is actually safe to integrate.
 
-Git owns files, branches, and history. arc records the context around that
-history as local Markdown artifacts and append-only events. Review verdicts
-bind to exact patchsets, and integration checks findings, holds, and required
-gates before merging. It runs as a single CLI, without a daemon or hosted
-service.
+Git owns content, branches, and history; `arc` owns the collaboration and
+execution state Git deliberately lacks — changes, patchsets, briefs,
+handoffs, findings, verdicts, verification evidence, holds, and guarded
+integration.
+
+This is durable project and workflow context: a cold session can reconstruct
+the state of work with `arc catchup`, using the journal and change ledger
+shared across worktrees and harnesses. Review verdicts bind to exact
+patchsets, and integration checks findings, holds, and required verification
+gates before merging. Arc runs as a single local CLI.
 
 ## Install
 

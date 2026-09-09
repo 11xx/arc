@@ -25,9 +25,11 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
-- Describe Arc as durable project context and change coordination across
-  its package metadata, README, and CLI introductions. Include a journal
-  example and registry installation instructions for arc-ledger.
+- Use the description "Persistent context and guarded workflow state over
+  plain Git for agentic coding arcs." across package and CLI metadata.
+  Explain persistent project context, cold-session reconstruction, and
+  guarded integration in the README opening. Include a journal example and
+  registry installation instructions for arc-ledger.
 
 ### Fixed
 
