@@ -6,8 +6,11 @@ identity, and run one change end to end.
 ## 1. Install
 
 ```sh
-cargo install --path .        # from a checkout of this repository
+cargo install arc-ledger --locked
 ```
+
+The package is named `arc-ledger`; its executable is `arc`. From a source
+checkout, use `cargo install --path . --locked`.
 
 This puts `arc` on your `$PATH` (typically `~/.cargo/bin` or
 `~/.local/share/cargo/bin`). Shell completions and a man page are optional:

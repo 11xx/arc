@@ -33,10 +33,10 @@ use model::{
 };
 use std::path::{Path, PathBuf};
 
-/// Change, review, and integration state over plain Git for agentic
-/// coding arcs. Git owns content and history; arc owns the collaboration
-/// objects Git lacks: changes, patchsets, findings, verdicts, gates,
-/// holds, and a guarded merge.
+/// Durable project context and change coordination for humans and coding agents,
+/// built on plain Git. Keep decisions, pending work, review findings, and
+/// verification evidence across sessions and harnesses. Git owns files and
+/// history; arc owns the journal and change ledger.
 #[derive(Parser)]
 #[command(
     name = "arc",

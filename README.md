@@ -1,15 +1,19 @@
 # arc
 
-Change, review, and integration state over plain Git for agentic coding arcs.
-Git owns content, branches, and history; `arc` owns the collaboration objects
-Git deliberately lacks — changes, patchsets, review findings, verdicts,
-verification evidence, holds, and a guarded merge — as an append-only local
-ledger that every worktree and every AI harness of one repository shares. No
-forge, no daemon, no database, no web UI. It exists so that the mechanical
-invariants of a multi-agent workflow (approval bound to an exact patchset,
-blocking findings replayed correctly, holds enforced across sessions, merges
-guarded against unreviewed commits) live in code instead of in prompt
-discipline.
+Durable project context and change coordination for humans and coding agents,
+built on plain Git.
+
+A project outlives any one chat or coding session. arc keeps its decisions,
+open questions, pending work, and verification evidence available to the next
+person or agent. Its journal holds the reasoning and backlog; its change
+ledger tracks implementation, review findings, and integration. Both are
+shared across a repository's worktrees and AI harnesses.
+
+Git owns files, branches, and history. arc records the context around that
+history as local Markdown artifacts and append-only events. Review verdicts
+bind to exact patchsets, and integration checks findings, holds, and required
+gates before merging. It runs as a single CLI, without a daemon or hosted
+service.
 
 ## Install
 
@@ -18,8 +22,11 @@ rest on POSIX semantics: `0700` private directories, atomic hard-link event
 publication, and process-group kill for gate timeouts.
 
 ```sh
-cargo install --path .          # from a checkout of this repository
+cargo install arc-ledger --locked
 ```
+
+The package is named `arc-ledger`; the installed command is `arc`. To build
+from a checkout, run `cargo install --path . --locked`.
 
 Released versions are the calendar date of publication in the `YYYY.M.D`
 shape, written without leading zeros. One release is cut per date, so a
@@ -31,6 +38,30 @@ Optional shell completions and man page:
 arc completions <bash|zsh|fish> > <completion-path>   # e.g. ~/.zfunc/_arc
 arc mangen <dir>                                      # writes <dir>/arc.1
 ```
+
+## Pick up where a session left off
+
+```sh
+arc catchup                  # project state and work waiting for attention
+arc journal open             # decisions to settle and work to pick up
+arc journal inventory --json # structured artifact facts and coverage
+```
+
+Keep a concrete next step in the project journal:
+
+```sh
+arc journal todo parser-diagnostics --body-file - <<'EOF'
+# Explain malformed configuration values
+
+Report the key and source location when a value cannot be parsed.
+Preserve the diagnostic in a CLI regression test.
+EOF
+```
+
+The item remains discoverable after the chat ends. Discussions, plans, and
+handoffs preserve the context behind the work; `arc begin --from-journal`
+links an actionable item to a tracked change. See the [journal guide](docs/journal.md)
+for the full workflow.
 
 ## One change, end to end
 
