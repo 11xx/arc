@@ -10,6 +10,97 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2026.9.9] - 2026-09-09
+
+### Added
+
+- Journal inventory exposes one read-only projection of storage, lifecycle,
+  questions, claims, and promotions.
+
+- Unresolved discussions can be shelved and restored with explicit cold-
+  storage and recovery facts.
+
+- Plans carry portable planner provenance and selected briefs retain
+  immutable source snapshots.
+
+### Changed
+
+- Describe Arc as durable project context and change coordination across
+  its package metadata, README, and CLI introductions. Include a journal
+  example and registry installation instructions for arc-ledger.
+
+### Fixed
+
+- Validate journal storage recovery evidence, serialize planner metadata
+  transport, and share inventory facts across journal and workspace views.
+  Preserve planner credit and distinguish unknown observations from empty
+  results.
+
+- The review JSON contract is versioned as arc-review/3 for both option-
+  bearing and option-free reports.
+
+### fix
+
+- Repair review guidance for refusing verdicts and shipped contributors;
+  preserve workspace fork visibility, read failures, question subtotals,
+  cutoff quoting/precision, and journal-only verification. Keep non-Git
+  journal anchors usable and expose the review subject and choices
+  consistently in read views.
+
+### provenance
+
+- A lead can now see the exact identities the independence check compares,
+  use the explicit contributor path before review, and get the concrete
+  blocker when attribution cannot be amended. arc status carries
+  review_subject — invoker, effective author, the effective contributor
+  set, and whether it was declared or synthesized — derived from the same
+  methods the gate calls. arc show and arc check name those identities
+  beside an approval rejection. The attribution-amendment refusal names the
+  verdict event and its author, or the terminal closure, and the documented
+  repair sequence (capture, inspect, amend the full set before any verdict,
+  independent review) is in docs/review.md. A run dispatch stays activity,
+  not authorship.
+
+### review guidance
+
+- Review guidance now matches the approval state it reports. A clean change
+  whose approval requirement is already satisfied by an in-force waiver
+  routes to integration: status says integrate beside the flagged waiver,
+  check drops the review-queue advisory, and the inbox keeps one lead row.
+  For ordinary work outside the independent-review scope, status offers the
+  lead an explicit choice — review_options carries declare_debt first,
+  request_review second — while required-review and unknown-danger scope
+  keeps the conservative review-only path. The list is guidance and writes
+  nothing; reading it moves no events. The refusal a waiver does not cover
+  keeps the policy's own reason, and a head moving past the covered
+  patchset restores request_review.
+
+### workspace backlog
+
+- Workspace backlog selection and provenance are now explicit. Journal
+  timestamps read through one parser over the canonical Z stamp and the
+  legacy form without it; artifact rows carry filed_at and
+  timestamp_status, so a malformed name stays visible with null time
+  instead of being dated or dropped. The workspace JSON states its
+  selection — normalized since, whether counts mean arrivals or outstanding
+  — and counts unknown-time rows separately. Debt rows distinguish a
+  recorded kind from the legacy default and the summary names the legacy
+  subset. Project rows name their journal_dir, carry every unanswered
+  question with its artifact disposition, count waiting decisions into
+  priority, and inventory active forks with no obligation weight. The
+  report states its observation interval and sequential consistency, and
+  writes nothing.
+
+### workspace discovery
+
+- The human workspace backlog report ends with a detail footer naming the
+  exact command that re-runs the same selection as itemized JSON — resolved
+  scope, normalized --since, and --unreachable, with paths quoted for the
+  shell. arc config reports journal_dir_for_cwd from the same resolver arc
+  journal dir answers, or null with the diagnostic when no journal anchors
+  the directory. The guide names journal dir as the authoritative journal
+  location and combines its workspace --items/--json examples into one.
+
 ## [2026.9.4] - 2026-09-04
 
 ### Added
