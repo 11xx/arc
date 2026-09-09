@@ -1087,8 +1087,19 @@ fn export_import_preserves_plan_links_on_every_brief_version() {
             .args(["brief", "brief-bundle", "--version", &version.to_string()])
             .assert()
             .success()
-            .stdout(format!(
-                "base-revision: {base_revision}\nplan-ref: {plan_ref}\nplan-slice: {plan_slice}\n\n{body}"
-            ));
+            .stdout(predicates::str::starts_with(format!("base-revision: {base_revision}\nplan-ref: {plan_ref}\nplan-slice: {plan_slice}\n"))
+                .and(predicates::str::contains("plan-sha256:"))
+                .and(predicates::str::ends_with(body)));
+        let args = [
+            "brief",
+            "brief-bundle",
+            "--version",
+            &version.to_string(),
+            "--json",
+        ];
+        assert_eq!(
+            json_stdout(source.arc(&source.root).args(args)),
+            json_stdout(destination.arc(&destination.root).args(args))
+        );
     }
 }

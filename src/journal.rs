@@ -1003,6 +1003,12 @@ pub enum JournalCmd {
         /// progress on it
         #[arg(long = "acknowledge-claim")]
         acknowledge_claim: Vec<String>,
+        /// Assert additional material planners on a plan successor.
+        #[arg(long = "planned-by", conflicts_with = "no_planner")]
+        planned_by: Vec<String>,
+        /// Preserve unknown authorship on a plan successor.
+        #[arg(long)]
+        no_planner: bool,
     },
     /// Move artifacts to the cold sibling archive without deleting history
     Archive {
@@ -1218,6 +1224,8 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             reason,
             dry_run,
             acknowledge_claim,
+            planned_by,
+            no_planner,
         } => transition(
             ctx,
             &filename,
@@ -1227,6 +1235,8 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             reason.as_deref(),
             dry_run,
             &acknowledge_claim,
+            &planned_by,
+            no_planner,
         ),
         JournalCmd::Archive {
             filename,
@@ -3153,6 +3163,9 @@ fn planner_headers(body: &str) -> (Vec<PlannerIdentity>, bool, bool) {
             title_seen = true;
             break;
         }
+        if !trimmed.is_empty() && !trimmed.starts_with("supersedes:") {
+            return (Vec::new(), false, false);
+        }
     }
     if !title_seen {
         return (Vec::new(), false, false);
@@ -3220,6 +3233,56 @@ fn planner_from_value(value: &serde_json::Value) -> Result<PlannerIdentity> {
     Ok(planner)
 }
 
+struct PlannerMetadata {
+    planners: Vec<PlannerIdentity>,
+    headers: Vec<PlannerIdentity>,
+    recorded: Option<Vec<PlannerIdentity>>,
+    status: &'static str,
+    basis: &'static str,
+}
+
+fn planner_metadata(body: &str, events: &[JournalEvent], filename: &str) -> PlannerMetadata {
+    let (headers, malformed, found) = planner_headers(body);
+    let recorded = events.iter().rev().find_map(|e| {
+        (e.file.as_deref() == Some(filename) && matches!(e.event.as_str(), "note" | "transition"))
+            .then(|| e.planners.clone())
+            .flatten()
+    });
+    let amendments = Amendments::collect(events, filename);
+    let corrected = amendments
+        .field("artifact", "planners", None)
+        .and_then(|s| serde_json::from_str::<Vec<serde_json::Value>>(s).ok())
+        .and_then(|values| {
+            values
+                .iter()
+                .map(planner_from_value)
+                .collect::<Result<Vec<_>>>()
+                .ok()
+        });
+    let (mut planners, status, basis) = if let Some(corrected) = corrected {
+        (corrected, "corrected", "correction")
+    } else if malformed {
+        (Vec::new(), "malformed", "body-header")
+    } else if recorded.as_ref().is_some_and(|r| found && r != &headers) {
+        (Vec::new(), "conflict", "header-and-event")
+    } else if let Some(recorded) = &recorded {
+        (recorded.clone(), "ok", "journal-event")
+    } else if found {
+        (headers.clone(), "ok", "body-header")
+    } else {
+        (Vec::new(), "unknown", "unattributed")
+    };
+    planners.sort_by(|a, b| a.key().cmp(&b.key()));
+    planners.dedup();
+    PlannerMetadata {
+        planners,
+        headers,
+        recorded,
+        status,
+        basis,
+    }
+}
+
 fn planner_header(planner: &PlannerIdentity) -> String {
     let mut object = serde_json::Map::new();
     for (name, value) in [
@@ -3236,6 +3299,16 @@ fn planner_header(planner: &PlannerIdentity) -> String {
 }
 
 fn planner_identity(ctx: &Ctx) -> Option<PlannerIdentity> {
+    if let Some(subject) = ctx.on_behalf_of.as_ref() {
+        if declared_actor(ctx).as_ref() != Some(subject) {
+            return Some(PlannerIdentity {
+                actor: Some(subject.clone()),
+                harness: None,
+                session: None,
+                model: None,
+            });
+        }
+    }
     let planner = PlannerIdentity {
         actor: declared_actor(ctx),
         harness: ctx.harness.clone().filter(|v| !v.trim().is_empty()),
@@ -3311,6 +3384,10 @@ fn planners_for_write(
                 )
             })
             .collect::<Result<Vec<_>>>()?;
+        let (headers, malformed, _) = planner_headers(body);
+        if !malformed {
+            planners.extend(headers);
+        }
         planners.sort_by(|a, b| a.key().cmp(&b.key()));
         planners.dedup();
         return Ok(Some(planners));
@@ -3423,11 +3500,9 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
     // machine-readable state is the cheap half, and an artifact carrying only
     // that says nothing a successor could not read from the repository.
     let mut contents = headed(topic, title, prelude, &body);
-    let planners = planners_for_write(ctx, kind, write, &contents)?;
+    let planners = planners_for_write(ctx, kind, write, &body)?;
     if let Some(planners) = planners.as_ref() {
-        if !write.planned_by.is_empty() || write.no_planner || planner_headers(&contents).2 {
-            contents = apply_planner_headers(&contents, planners);
-        }
+        contents = apply_planner_headers(&contents, planners);
     }
     let mut event = JournalEvent::base(ctx, now, topic, "note");
     event.file = Some(filename.clone());
@@ -3435,6 +3510,9 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
     event.source = source;
     event.item_key = item_key;
     event.planners = planners;
+    if kind == JournalKind::Discussion {
+        event.outcome = Some("unresolved".to_string());
+    }
 
     if write.spool {
         return spool_write(ctx, &stamp, kind.as_str(), topic, &event, Some(&contents));
@@ -3878,8 +3956,9 @@ fn position(
         None => String::new(),
     };
     let heading = format!(
-        "### Position {position_id} ({}, {ts}){under}",
-        attribution(ctx, &harness)
+        "### Position {position_id} ({}, {ts}){under}{}",
+        attribution(ctx, &harness),
+        if archived { " [archived]" } else { "" }
     );
     let position_body = match stance {
         Some(stance) => format!("Position: {}\n{body}", stance.as_str()),
@@ -3997,6 +4076,7 @@ fn open_discussion_for_answer(ctx: &Ctx, filename: &str) -> Result<(PathBuf, Pat
         bail!("{filename} is a {kind}, not a discussion");
     }
     let hot = resolve_dir(&ctx.cwd)?;
+    ensure_storage_settled(&hot, &read_events(&hot)?, filename)?;
     // The events stay in the hot journal, so the answer is recorded there
     // whichever directory holds the body it is appended to.
     let Some(path) = artifact_body_path(&hot, filename) else {
@@ -4661,6 +4741,12 @@ fn correct(
         bail!("--field stance takes for, against, or amend, not {value:?}");
     }
     if field == "planners" {
+        if check_artifact_name(filename)?.1 != "plan" {
+            bail!("planner corrections apply only to plans");
+        }
+        if note.is_none_or(|note| note.trim().is_empty()) {
+            bail!("planner corrections require --note <reason>");
+        }
         let values: Vec<serde_json::Value> = serde_json::from_str(value)
             .context("--field planners takes a JSON array of planner objects")?;
         for planner in &values {
@@ -5023,7 +5109,15 @@ fn scaffolds(ctx: &Ctx, show: Option<&str>, json: bool) -> Result<i32> {
 /// Every unanswered question in one journal, newest first.
 fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
     let events = read_events(dir)?;
-    let by_file = Amendments::collect_by_file(&events);
+    questions_from(dir, &events, false)
+}
+
+fn questions_from(
+    dir: &Path,
+    events: &[JournalEvent],
+    include_answered: bool,
+) -> Result<Vec<OpenQuestion>> {
+    let by_file = Amendments::collect_by_file(events);
     let unamended = Amendments::default();
     let amendments = |file: &str| by_file.get(file).unwrap_or(&unamended);
     let answered: HashSet<(&str, &str)> = events
@@ -5032,7 +5126,7 @@ fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
         .filter_map(|event| Some((event.file.as_deref()?, event.question_id.as_deref()?)))
         .filter(|(file, question)| amendments(file).answer_stands(question))
         .collect();
-    let marker = capability(&events, QUESTION_DELIVERY_CAPABILITY);
+    let marker = capability(events, QUESTION_DELIVERY_CAPABILITY);
     let mut open = Vec::new();
     for (posed_at, event) in events
         .iter()
@@ -5043,7 +5137,7 @@ fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
         else {
             continue;
         };
-        if answered.contains(&(file, question)) {
+        if !include_answered && answered.contains(&(file, question)) {
             continue;
         }
         // The same `known()` gate the answered set and the question scan use.
@@ -5065,9 +5159,14 @@ fn open_questions(dir: &Path) -> Result<Vec<OpenQuestion>> {
         // Every question here is unanswered by construction, so the answered
         // state cannot arise: this queue reports what is still waiting, and
         // delivery says whether it is waiting on a prompt or on a reply.
-        let deliveries = question_deliveries(&events, file, question);
+        let deliveries = question_deliveries(events, file, question);
         open.push(OpenQuestion {
-            delivery: delivery_state(marker.as_ref(), posed_at, deliveries.len(), false),
+            delivery: delivery_state(
+                marker.as_ref(),
+                posed_at,
+                deliveries.len(),
+                answered.contains(&(file, question)),
+            ),
             deliveries,
             heading: artifact_body_path(dir, file).and_then(|path| question_text(&path, question)),
             file: file.to_string(),
@@ -5123,14 +5222,16 @@ pub(crate) struct WorkspaceQuestion {
 /// reducer is the only reading: no Markdown reinterpretation, no recount.
 /// All unanswered questions are returned whatever became of their artifact;
 /// the disposition is what lets a caller count only the ones worth acting on.
-pub(crate) fn open_questions_with_disposition(dir: &Path) -> Result<Vec<WorkspaceQuestion>> {
-    let events = read_events(dir)?;
-    let questions = open_questions(dir)?;
+fn questions_with_disposition_from(
+    dir: &Path,
+    events: &[JournalEvent],
+) -> Result<Vec<WorkspaceQuestion>> {
+    let questions = questions_from(dir, events, false)?;
     Ok(questions
         .into_iter()
         .map(|question| {
             let file = &question.file;
-            let disposition = if is_consumed(&events, file) {
+            let disposition = if is_consumed(events, file) {
                 QuestionDisposition::Consumed
             } else if dir.join(file).is_file() {
                 QuestionDisposition::Open
@@ -7171,6 +7272,7 @@ fn claim_context(ctx: &Ctx, file: &str) -> Result<ClaimContext> {
         bail!("no such artifact {} in {}", file, dir.display());
     }
     let events = read_events(&dir)?;
+    ensure_storage_settled(&dir, &events, file)?;
     Ok(ClaimContext {
         dir,
         anchor: resolution.anchor,
@@ -7973,8 +8075,25 @@ pub(crate) struct ArtifactEntry {
     pub(crate) has_archived_positions: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) questions: Vec<WorkspaceQuestion>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) promotions: Vec<InventoryPromotion>,
+    pub(crate) promotions: Option<Vec<InventoryPromotion>>,
+    #[serde(flatten)]
+    facts: InventoryFacts,
+}
+
+#[derive(Clone, Default, Serialize)]
+struct InventoryFacts {
+    #[serde(skip)]
+    observed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tier: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ledger: Option<InventoryLedger>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    checkpoint_tips: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    blockers: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    question_history: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Serialize)]
@@ -7990,6 +8109,9 @@ pub(crate) struct InventoryPromotion {
     pub(crate) slice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) source_digest: Option<String>,
+    pub(crate) plan_source: Option<PlanSource>,
+    pub(crate) stage: String,
+    pub(crate) closure: Option<crate::state::ClosureState>,
 }
 
 #[derive(Clone, Serialize)]
@@ -8202,7 +8324,10 @@ fn artifact_resolution(
     }
     if let Some(_event) = events.iter().rev().find(|event| {
         event.known()
-            && matches!(event.event.as_str(), "archived" | "storage-completed")
+            && matches!(
+                event.event.as_str(),
+                "archived" | "storage-completed" | "note"
+            )
             && event.file.as_deref() == Some(filename)
             && event.outcome.as_deref() == Some("unresolved")
     }) {
@@ -8222,7 +8347,8 @@ fn position_metadata(events: &[JournalEvent], filename: &str) -> (Option<String>
     let archived = positions
         .iter()
         .any(|event| event.storage_at_write.as_deref() == Some("archived"));
-    (last, (!positions.is_empty()).then_some(archived))
+    let known = archived || positions.iter().all(|p| p.storage_at_write.is_some());
+    (last, (known && !positions.is_empty()).then_some(archived))
 }
 
 /// All artifact filenames in `dir`, newest first: filenames lead with a
@@ -8291,7 +8417,8 @@ fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
                 last_position_at,
                 has_archived_positions,
                 questions: Vec::new(),
-                promotions: Vec::new(),
+                promotions: None,
+                facts: InventoryFacts::default(),
             })
         })
         .collect())
@@ -8335,58 +8462,22 @@ fn memories(ctx: &Ctx, json: bool) -> Result<i32> {
 }
 
 fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
-    let hot_dir = resolve_dir(&ctx.cwd)?;
+    let resolution = resolve(&ctx.cwd)?;
+    let hot_dir = resolution.directory;
+    let project = resolution.anchor.as_deref().unwrap_or(&ctx.cwd);
     let dir = if archived {
         archive_dir(&hot_dir)
     } else {
         hot_dir.clone()
     };
     let journal = read_events(&hot_dir)?;
-    let mut files: Vec<ArtifactEntry> = Vec::new();
     let now = Utc::now();
-    let mut claims: Vec<ArtifactClaim> = Vec::new();
-    if dir.is_dir() {
-        for name in sorted_artifact_names(&dir)?.into_iter().take(limit) {
-            if let Some((ts, topic, kind)) = parse_artifact_name(&name) {
-                let (resolution, resolution_basis) = artifact_resolution(&journal, &name);
-                let (last_position_at, has_archived_positions) = position_metadata(&journal, &name);
-                let heading = amended_heading(&journal, &dir, &name);
-                let file_claims = artifact_claims(&journal, &name);
-                let (availability, claim_history) =
-                    artifact_availability(&journal, &name, &file_claims, now);
-                claims.extend(file_claims.iter().cloned());
-                files.push(ArtifactEntry {
-                    filed_at: filed_at_of(&ts),
-                    timestamp_status: TimestampStatus::classify(&ts).as_str(),
-                    file: name,
-                    timestamp: ts,
-                    topic,
-                    kind: Some(kind),
-                    heading,
-                    age_seconds: None,
-                    lane: None,
-                    change: None,
-                    verification: None,
-                    amendments: None,
-                    sources: None,
-                    claims: file_claims,
-                    availability: Some(availability),
-                    claim_history,
-                    storage: if archived {
-                        "archived".to_string()
-                    } else {
-                        "hot".to_string()
-                    },
-                    resolution,
-                    resolution_basis,
-                    last_position_at,
-                    has_archived_positions,
-                    questions: Vec::new(),
-                    promotions: Vec::new(),
-                });
-            }
-        }
-    }
+    let report = project_inventory(ctx, &hot_dir, project, None, archived, None, true)?;
+    let files: Vec<_> = report.items.into_iter().take(limit).collect();
+    let claims: Vec<_> = files
+        .iter()
+        .flat_map(|f| f.claims.iter().cloned())
+        .collect();
 
     let journal_tail = journal_tail(&hot_dir, limit)?;
     let lanes = lanes_from_journal(&journal, now);
@@ -8398,7 +8489,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
 
     if json {
         let out = Catchup {
-            schema: "arc-catchup/5",
+            schema: "arc-journal-catchup/6",
             dir: dir.display().to_string(),
             lanes,
             claims,
@@ -8554,6 +8645,8 @@ pub(crate) struct OpenItems {
     open: Vec<ArtifactEntry>,
     later: Vec<ArtifactEntry>,
     feature_requests: Vec<ArtifactEntry>,
+    #[serde(skip)]
+    pub(crate) questions: Vec<WorkspaceQuestion>,
 }
 
 impl OpenItems {
@@ -8678,140 +8771,22 @@ pub(crate) fn collect_open_in(
     project: &Path,
     kind: Option<&str>,
 ) -> Result<OpenItems> {
-    if let Some(kind) = kind {
-        if !is_actionable_kind(kind) {
-            bail!(
-                "--kind {} is not actionable; the open queue tracks {}",
-                kind,
-                PRIMARY_ACTIONABLE_KINDS
-                    .iter()
-                    .copied()
-                    .chain(std::iter::once(LATER_KIND))
-                    .chain(std::iter::once(FEATURE_REQUEST_KIND))
-                    .collect::<Vec<_>>()
-                    .join("|")
-            );
-        }
-    }
-    let dir = dir.to_path_buf();
-    let mut open: Vec<ArtifactEntry> = Vec::new();
-    let mut later: Vec<ArtifactEntry> = Vec::new();
-    let mut feature_requests: Vec<ArtifactEntry> = Vec::new();
-    let now = Utc::now();
-    let journal = read_events(&dir)?;
-    let lanes = lanes_from_journal(&journal, now);
-    // Queue rendering is advisory. If a configured journal has no reachable
-    // Git anchor, retain its stamp and leave the movement comparison unknown.
-    let current_revision = if journal.iter().any(|event| event.event == "verified") {
-        gitio::head_if_present(project).ok().flatten()
-    } else {
-        None
-    };
-    // Read-only ledger lookups for the annotations: a repository with no
-    // ledger has an empty rewrite map, while a ledger or rewrite map that
-    // cannot be read leaves comparisons unknown. Neither path creates data.
-    let (store, rewrites) = match Store::resolve_root(project) {
-        Ok(root) => match Store::open_at(&root) {
-            Ok(Some(store)) => {
-                let rewrites = store.rewrites().ok();
-                (Some(store), rewrites)
-            }
-            Ok(None) => (None, Some(crate::rewrite::RewriteMap::default())),
-            Err(_) => (None, None),
-        },
-        Err(_) => (None, None),
-    };
-    let changes = store
-        .map(|store| open_changes_in(&store))
-        .unwrap_or_default();
-    let (caller_harness, caller_session) = identity(ctx);
-    let caller = LaneOwner {
-        harness: caller_harness,
-        session: caller_session,
-    };
-    if dir.is_dir() {
-        let mut open_names: Vec<String> = Vec::new();
-        let mut later_names: Vec<String> = Vec::new();
-        let mut feature_request_names: Vec<String> = Vec::new();
-        for name in sorted_artifact_names(&dir)? {
-            let Some((_, _, file_kind)) = parse_artifact_name(&name) else {
-                continue;
-            };
-            let wanted = match kind {
-                Some(kind) => file_kind == kind,
-                None => is_actionable_kind(&file_kind),
-            };
-            if wanted && !is_consumed(&journal, &name) {
-                if file_kind == LATER_KIND {
-                    later_names.push(name);
-                } else if file_kind == FEATURE_REQUEST_KIND {
-                    feature_request_names.push(name);
-                } else {
-                    open_names.push(name);
-                }
-            }
-        }
-        // One row shape for all three tiers. A queue whose tiers derive a
-        // row differently reports the same artifact differently depending on
-        // which list it landed in.
-        let mut row = |name: String| -> Option<ArtifactEntry> {
-            let (ts, topic, file_kind) = parse_artifact_name(&name)?;
-            let heading = amended_heading(&journal, &dir, &name);
-            let change = change_annotation(&changes, &topic, &name);
-            let verification = verification_stamp(
-                &journal,
-                &name,
-                current_revision.as_deref(),
-                rewrites.as_ref(),
-            );
-            let amendments = standing_amendments(&journal, &name, &file_kind);
-            let sources = queue_sources(&journal, &name);
-            let claims = artifact_claims(&journal, &name);
-            let (availability, claim_history) =
-                artifact_availability(&journal, &name, &claims, now);
-            let (resolution, resolution_basis) = artifact_resolution(&journal, &name);
-            let (last_position_at, has_archived_positions) = position_metadata(&journal, &name);
-            Some(ArtifactEntry {
-                filed_at: filed_at_of(&ts),
-                timestamp_status: TimestampStatus::classify(&ts).as_str(),
-                lane: lane_for_topic(&lanes, &topic, &caller),
-                change,
-                age_seconds: if file_kind == JournalKind::Discussion.as_str() {
-                    discussion_age_seconds(now, &ts, &name, &journal)
-                } else {
-                    artifact_age_seconds(now, &ts)
-                },
-                file: name,
-                timestamp: ts,
-                topic,
-                kind: Some(file_kind),
-                heading,
-                verification,
-                amendments,
-                sources,
-                claims,
-                availability: Some(availability),
-                claim_history,
-                storage: "hot".to_string(),
-                resolution,
-                resolution_basis,
-                last_position_at,
-                has_archived_positions,
-                questions: Vec::new(),
-                promotions: Vec::new(),
-            })
-        };
-        open.extend(open_names.into_iter().filter_map(&mut row));
-        later.extend(later_names.into_iter().filter_map(&mut row));
-        feature_requests.extend(feature_request_names.into_iter().filter_map(&mut row));
-    }
-
-    Ok(OpenItems {
+    let report = project_inventory(ctx, dir, project, None, false, kind, false)?;
+    let mut result = OpenItems {
         dir: dir.display().to_string(),
-        open,
-        later,
-        feature_requests,
-    })
+        open: Vec::new(),
+        later: Vec::new(),
+        feature_requests: Vec::new(),
+        questions: report.questions,
+    };
+    for item in report.items {
+        match item.kind.as_deref() {
+            Some(LATER_KIND) => result.later.push(item),
+            Some(FEATURE_REQUEST_KIND) => result.feature_requests.push(item),
+            _ => result.open.push(item),
+        }
+    }
+    Ok(result)
 }
 
 fn open(ctx: &Ctx, kind: Option<String>, json: bool) -> Result<i32> {
@@ -8854,25 +8829,28 @@ struct JournalInventory {
     observed_at: String,
     ledger: InventoryLedger,
     items: Vec<ArtifactEntry>,
+    #[serde(skip)]
+    questions: Vec<WorkspaceQuestion>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct InventoryLedger {
     state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
 }
 
-fn all_changes_in(store: &Store) -> Vec<ChangeState> {
-    let Ok(ids) = store.list_change_ids() else {
-        return Vec::new();
-    };
-    let Ok(rewrites) = store.rewrites() else {
-        return Vec::new();
-    };
-    ids.into_iter()
-        .filter_map(|id| store.load_events(&id).ok())
-        .filter_map(|events| state::reduce_following(&events, &rewrites).ok())
+fn all_changes_in(
+    store: &Store,
+    rewrites: &crate::rewrite::RewriteMap,
+) -> Result<Vec<ChangeState>> {
+    store
+        .list_change_ids()?
+        .into_iter()
+        .map(|id| {
+            state::reduce_following(&store.load_events(&id)?, rewrites)
+                .with_context(|| format!("cannot read change {id}"))
+        })
         .collect()
 }
 
@@ -8888,6 +8866,9 @@ fn inventory_promotions(changes: &[ChangeState], filename: &str) -> Vec<Inventor
                 brief_version: None,
                 slice: None,
                 source_digest: None,
+                plan_source: None,
+                stage: stage_label(change),
+                closure: change.closure.clone(),
             });
         }
         for (version, brief) in change.briefs.iter().enumerate() {
@@ -8905,6 +8886,9 @@ fn inventory_promotions(changes: &[ChangeState], filename: &str) -> Vec<Inventor
                     .plan_source
                     .as_ref()
                     .map(|source| source.sha256.clone()),
+                plan_source: brief.plan_source.clone(),
+                stage: stage_label(change),
+                closure: change.closure.clone(),
             });
         }
     }
@@ -8913,13 +8897,15 @@ fn inventory_promotions(changes: &[ChangeState], filename: &str) -> Vec<Inventor
     promotions
 }
 
-fn inventory(
+fn project_inventory(
     ctx: &Ctx,
+    hot: &Path,
+    project: &Path,
     file: Option<&str>,
     archived: bool,
     kind: Option<&str>,
-    json: bool,
-) -> Result<i32> {
+    all_artifacts: bool,
+) -> Result<JournalInventory> {
     if let Some(kind) = kind {
         if !is_actionable_kind(kind) {
             bail!("--kind {kind} is not actionable; inventory accepts todo|handoff|plan|discussion|later|feature-request");
@@ -8930,8 +8916,7 @@ fn inventory(
             bail!("{file:?} is not a journal artifact filename");
         }
     }
-    let resolution = resolve(&ctx.cwd)?;
-    let hot = resolution.directory;
+    let hot = hot.to_path_buf();
     let selected_dir = if archived {
         archive_dir(&hot)
     } else {
@@ -8939,26 +8924,22 @@ fn inventory(
     };
     let events = read_events(&hot)?;
     let observed = Utc::now();
-    let project = resolution.anchor.clone().unwrap_or_else(|| ctx.cwd.clone());
-    let (ledger, changes, rewrites) = match Store::resolve_root(&project) {
+    let (ledger, changes, rewrites) = match Store::resolve_root(project) {
         Ok(root) => match Store::open_at(&root) {
             Ok(Some(store)) => {
                 let rewrites = store.rewrites().ok();
-                let changes = all_changes_in(&store);
-                let state = if rewrites.is_some() {
+                let loaded = rewrites
+                    .as_ref()
+                    .context("rewrite map unreadable")
+                    .and_then(|rewrites| all_changes_in(&store, rewrites));
+                let reason = loaded.as_ref().err().map(|e| format!("{e:#}"));
+                let changes = loaded.unwrap_or_default();
+                let state = if reason.is_none() {
                     "readable"
                 } else {
                     "unreadable"
                 };
-                (
-                    InventoryLedger {
-                        state,
-                        reason: (state == "unreadable")
-                            .then(|| "rewrite map unreadable".to_string()),
-                    },
-                    changes,
-                    rewrites,
-                )
+                (InventoryLedger { state, reason }, changes, rewrites)
             }
             Ok(None) => (
                 InventoryLedger {
@@ -8991,9 +8972,10 @@ fn inventory(
         let (harness, session) = identity(ctx);
         LaneOwner { harness, session }
     };
-    let question_rows = open_questions_with_disposition(&hot)?
-        .into_iter()
-        .collect::<Vec<_>>();
+    let question_rows = questions_with_disposition_from(&hot, &events)?;
+    let all_questions = questions_from(&hot, &events, true)?;
+    let current_revision = gitio::head_if_present(project).ok().flatten();
+    let open_changes: Vec<_> = changes.iter().filter(|c| !c.is_closed()).cloned().collect();
     let names = if let Some(file) = file {
         if !selected_dir.join(file).is_file() {
             bail!("no such artifact {file} in {}", selected_dir.display());
@@ -9005,8 +8987,8 @@ fn inventory(
             .filter(|name| {
                 parse_artifact_name(name).is_some_and(|(_, _, file_kind)| {
                     kind.is_none_or(|wanted| wanted == file_kind)
-                        && is_actionable_kind(&file_kind)
-                        && (archived || !is_consumed(&events, name))
+                        && (all_artifacts || is_actionable_kind(&file_kind))
+                        && (all_artifacts || archived || !is_consumed(&events, name))
                 })
             })
             .collect()
@@ -9027,21 +9009,50 @@ fn inventory(
             .filter(|question| question.question.file == name)
             .cloned()
             .collect();
+        // Reading the body is part of the observation: an unreadable file
+        // must not be presented as a successfully observed empty heading.
+        std::fs::read_to_string(selected_dir.join(&name))
+            .with_context(|| format!("cannot read artifact {name}"))?;
+        let mut checkpoint_tips = Vec::new();
+        let mut blockers = Vec::new();
+        for claim in &claims {
+            for tip in claim.tip_checkpoints() {
+                checkpoint_tips.push(serde_json::json!({"claim_id": claim.state.claim_id, "claim_open": claim.is_open(), "checkpoint": tip}));
+            }
+            if let Some(blocker) = &claim.blocker {
+                blockers.push(serde_json::json!({"claim_id": claim.state.claim_id, "claim_open": claim.is_open(), "reference": blocker, "typed": artifact_blocker_ref(blocker)}));
+            }
+            for checkpoint in &claim.checkpoints {
+                if let Some(blocker) = &checkpoint.blocker {
+                    blockers.push(serde_json::json!({"claim_id": claim.state.claim_id, "claim_open": claim.is_open(), "checkpoint_id": checkpoint.checkpoint_id, "reference": blocker, "typed": artifact_blocker_ref(blocker)}));
+                }
+            }
+        }
+        let amendments = Amendments::collect(&events, &name);
+        let question_history = all_questions.iter().filter(|q| q.file == name).map(|question| {
+            let answer = events.iter().rev().find(|e| e.file.as_deref() == Some(name.as_str()) && e.event == "answer" && e.question_id.as_deref() == Some(question.question.as_str()));
+            let state = if answer.is_none() { "unanswered" } else if amendments.answer_stands(&question.question) { "answered" } else { "retracted" };
+            serde_json::json!({"question": question, "state": state, "answer": answer.and_then(|e| amendments.answer_field(&question.question, "option", e.option.as_deref()))})
+        }).collect();
         items.push(ArtifactEntry {
             file: name.clone(),
             timestamp: ts.clone(),
             filed_at: filed_at_of(&ts),
             timestamp_status: TimestampStatus::classify(&ts).as_str(),
             topic: topic.clone(),
-            kind: Some(file_kind),
+            kind: Some(file_kind.clone()),
             heading: amended_heading(&events, &selected_dir, &name),
-            age_seconds: artifact_age_seconds(observed, &ts),
+            age_seconds: if file_kind == "discussion" {
+                discussion_age_seconds(observed, &ts, &name, &events)
+            } else {
+                artifact_age_seconds(observed, &ts)
+            },
             lane: lane_for_topic(&lanes, &topic, &caller),
-            change: change_annotation(&changes, &topic, &name),
+            change: change_annotation(&open_changes, &topic, &name),
             verification: verification_stamp(
                 &events,
                 &name,
-                gitio::head_if_present(&project).ok().flatten().as_deref(),
+                current_revision.as_deref(),
                 rewrites.as_ref(),
             ),
             amendments: standing_amendments(
@@ -9065,26 +9076,69 @@ fn inventory(
             last_position_at,
             has_archived_positions,
             questions,
-            promotions: inventory_promotions(&changes, &name),
+            promotions: (ledger.state != "unreadable")
+                .then(|| inventory_promotions(&changes, &name)),
+            facts: InventoryFacts {
+                observed_at: Some(observed),
+                tier: Some(match file_kind.as_str() {
+                    LATER_KIND => "later",
+                    FEATURE_REQUEST_KIND => "feature-request",
+                    _ => "primary",
+                }),
+                ledger: Some(ledger.clone()),
+                checkpoint_tips,
+                blockers,
+                question_history,
+            },
         });
     }
+    Ok(JournalInventory {
+        schema: "arc-journal-inventory/2",
+        journal_dir: hot.display().to_string(),
+        anchor: project.is_dir().then(|| project.display().to_string()),
+        observed_at: observed.to_rfc3339_opts(SecondsFormat::AutoSi, true),
+        ledger,
+        items,
+        questions: question_rows,
+    })
+}
+
+fn inventory(
+    ctx: &Ctx,
+    file: Option<&str>,
+    archived: bool,
+    kind: Option<&str>,
+    json: bool,
+) -> Result<i32> {
+    let resolution = resolve(&ctx.cwd)?;
+    let project = resolution.anchor.as_deref().unwrap_or(&ctx.cwd);
+    let mut report = project_inventory(
+        ctx,
+        &resolution.directory,
+        project,
+        file,
+        archived,
+        kind,
+        false,
+    )?;
+    report.anchor = resolution.anchor.map(|p| p.display().to_string());
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&JournalInventory {
-                schema: "arc-journal-inventory/1",
-                journal_dir: hot.display().to_string(),
-                anchor: resolution.anchor.map(|path| path.display().to_string()),
-                observed_at: observed.to_rfc3339_opts(SecondsFormat::AutoSi, true),
-                ledger,
-                items,
-            })?
-        );
+        println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        for item in &items {
+        println!(
+            "ledger: {}{}",
+            report.ledger.state,
+            report
+                .ledger
+                .reason
+                .as_ref()
+                .map(|s| format!(" ({s})"))
+                .unwrap_or_default()
+        );
+        for item in &report.items {
             render_open_entry(item);
         }
-        if items.is_empty() {
+        if report.items.is_empty() {
             println!("no inventory items");
         }
     }
@@ -9119,10 +9173,36 @@ pub(crate) fn render_open_entry(f: &ArtifactEntry) {
         f.heading.as_deref().unwrap_or(""),
         render_change(f.change.as_ref()),
         render_artifact_lane(f.lane.as_ref()),
-        render_artifact_claims(&f.claims, Utc::now()),
+        render_artifact_claims(&f.claims, f.facts.observed_at.unwrap_or_else(Utc::now)),
         render_verification(f.verification.as_ref()),
         render_amendments(f.amendments)
     );
+    if let Some(tier) = f.facts.tier {
+        println!(
+            "    {tier} · {} · {} · resolution: {}",
+            f.storage,
+            f.availability.map(|a| a.label()).unwrap_or("unknown"),
+            f.resolution.as_deref().unwrap_or("unknown")
+        );
+        match &f.promotions {
+            Some(promotions) => {
+                for promotion in promotions {
+                    println!(
+                        "    promotion: {} ({}, {})",
+                        promotion.change_id, promotion.basis, promotion.stage
+                    );
+                }
+            }
+            None => println!("    promotion coverage: unknown"),
+        }
+        if !f.facts.blockers.is_empty() || !f.facts.checkpoint_tips.is_empty() {
+            println!(
+                "    recorded blockers: {} · checkpoint tips: {}",
+                f.facts.blockers.len(),
+                f.facts.checkpoint_tips.len()
+            );
+        }
+    }
 }
 
 /// How many positions still stand on a filed claim.
@@ -9338,34 +9418,17 @@ fn show(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
     if json {
         let hot = resolve_dir(&ctx.cwd)?;
         let events = read_events(&hot)?;
-        let (planners, malformed, found) = planner_headers(&body);
-        let event_planners = events.iter().find_map(|event| {
-            (event.file.as_deref() == Some(filename) && event.event == "note")
-                .then_some(event.planners.clone())
-                .flatten()
-        });
-        let status = if malformed {
-            "malformed"
-        } else if event_planners
-            .as_ref()
-            .is_some_and(|p| found && p != &planners)
-        {
-            "conflict"
-        } else if event_planners.is_some() || found {
-            "ok"
-        } else {
-            "unknown"
-        };
-        let effective = event_planners.unwrap_or(planners);
+        let metadata = planner_metadata(&body, &events, filename);
         let recorded = recorded_identity(&events, filename);
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-journal-artifact/1",
+                "schema": "arc-journal-artifact/2",
                 "file": filename,
                 "body": body,
-                "planners": effective,
-                "planner_status": status,
+                "planners": metadata.planners,
+                "planner_status": metadata.status,
+                "planner_sources": {"headers": metadata.headers, "recorded": metadata.recorded},
                 "recorded_by": recorded.map(|identity| serde_json::json!({
                     "actor": identity.actor,
                     "harness": identity.harness,
@@ -9469,6 +9532,7 @@ pub fn read_artifact_body(ctx: &Ctx, filename: &str) -> Result<String> {
         bail!("artifact reference must be a filename inside the journal dir, not a path");
     }
     let hot = resolve_dir(&ctx.cwd)?;
+    ensure_storage_settled(&hot, &read_events(&hot)?, filename)?;
     for dir in [hot.clone(), archive_dir(&hot)] {
         let path = dir.join(filename);
         if path.is_file() {
@@ -9527,50 +9591,24 @@ pub fn plan_source(ctx: &Ctx, filename: &str, slice: &str) -> Result<PlanSource>
     };
     let bytes = std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
     let body = String::from_utf8(bytes.clone()).context("plan body is not valid UTF-8")?;
-    let (headers, malformed, found) = planner_headers(&body);
-    if malformed {
-        bail!("malformed planned-by metadata in {filename}");
-    }
     let events = read_events(&hot)?;
-    let amendments = Amendments::collect(&events, filename);
-    let corrected = amendments
-        .field("artifact", "planners", None)
-        .and_then(|value| serde_json::from_str::<Vec<serde_json::Value>>(value).ok())
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(|value| planner_from_value(value).ok())
-                .collect::<Vec<_>>()
-        });
-    let event_planners = events.iter().rev().find_map(|event| {
-        (event.file.as_deref() == Some(filename) && event.event == "note")
-            .then_some(event.planners.clone())
-            .flatten()
-    });
-    let (planners, planner_status, provenance_basis) = match (corrected, event_planners, found) {
-        (Some(corrected), _, _) => (corrected, "corrected".to_string(), "correction".to_string()),
-        (None, Some(recorded), true) if recorded != headers => (
-            Vec::new(),
-            "conflict".to_string(),
-            "header-and-event".to_string(),
-        ),
-        (None, Some(recorded), _) => (recorded, "ok".to_string(), "journal-event".to_string()),
-        (None, None, true) => (headers, "ok".to_string(), "body-header".to_string()),
-        (None, None, false) => (
-            Vec::new(),
-            "unknown".to_string(),
-            "unattributed".to_string(),
-        ),
-    };
+    ensure_storage_settled(&hot, &events, filename)?;
+    let metadata = planner_metadata(&body, &events, filename);
+    if matches!(metadata.status, "malformed" | "conflict") {
+        eprintln!(
+            "warning: {} planner metadata in {filename}; no planner credit",
+            metadata.status
+        );
+    }
     Ok(PlanSource {
         anchor: resolution.anchor.map(|path| path.display().to_string()),
         journal_dir: hot.display().to_string(),
         filename: filename.to_string(),
         slice: slice.to_string(),
         sha256: hex::encode(Sha256::digest(&bytes)),
-        planners,
-        planner_status,
-        provenance_basis: format!("{provenance_basis}:{storage}"),
+        planners: metadata.planners,
+        planner_status: metadata.status.to_string(),
+        provenance_basis: format!("{}:{storage}", metadata.basis),
     })
 }
 
@@ -9663,6 +9701,11 @@ struct DiscussionPosition {
 
 #[derive(Serialize)]
 struct DiscussionSummary {
+    storage: &'static str,
+    resolution_status: Option<String>,
+    resolution_basis: Option<String>,
+    last_position_at: Option<String>,
+    has_archived_positions: Option<bool>,
     schema: &'static str,
     file: String,
     topic: String,
@@ -10268,8 +10311,19 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
             }),
         });
 
+    let (resolution_status, resolution_basis) = artifact_resolution(&events, filename);
+    let (last_position_at, has_archived_positions) = position_metadata(&events, filename);
     let summary = DiscussionSummary {
-        schema: "journal-discussion/2",
+        storage: if dir.join(filename).try_exists()? {
+            "hot"
+        } else {
+            "archived"
+        },
+        resolution_status,
+        resolution_basis,
+        last_position_at,
+        has_archived_positions,
+        schema: "journal-discussion/3",
         age_seconds: discussion_age_seconds(Utc::now(), &ts, filename, &events),
         file: filename.to_string(),
         topic,
@@ -10965,6 +11019,7 @@ pub fn require_open_actionable(ctx: &Ctx, filename: &str) -> Result<String> {
         );
     }
     let dir = resolve_dir(&ctx.cwd)?;
+    ensure_storage_settled(&dir, &read_events(&dir)?, filename)?;
     if !dir.join(filename).is_file() {
         bail!("no such artifact {} in {}", filename, dir.display());
     }
@@ -11088,7 +11143,12 @@ fn transition(
     reason: Option<&str>,
     dry_run: bool,
     acknowledge_claim: &[String],
+    planned_by: &[String],
+    no_planner: bool,
 ) -> Result<i32> {
+    if (!planned_by.is_empty() || no_planner) && to != JournalKind::Plan {
+        bail!("--planned-by and --no-planner require a plan target");
+    }
     if !transition_allowed_target(to) {
         bail!(
             "--to {} is not a transition target; a decision is how a discussion ends, \
@@ -11163,7 +11223,30 @@ fn transition(
             format!("{inherited}{heading}\n")
         }
     };
-    let contents = headed(&topic, title, None, &body);
+    let mut contents = headed(&topic, title, None, &body);
+    let planners = if to == JournalKind::Plan {
+        let metadata = planner_metadata(
+            &body,
+            if body_file.is_some() { &[] } else { &events },
+            filename,
+        );
+        let mut planners = if no_planner {
+            Vec::new()
+        } else {
+            metadata.planners
+        };
+        for raw in planned_by {
+            planners.push(planner_from_value(&serde_json::from_str(raw)?)?);
+        }
+        planners.sort_by(|a, b| a.key().cmp(&b.key()));
+        planners.dedup();
+        if no_planner || !planned_by.is_empty() || !planners.is_empty() {
+            contents = apply_planner_headers(&contents, &planners);
+        }
+        Some(planners)
+    } else {
+        None
+    };
     let supersession = format!("supersedes: {filename}\n\n",);
     if dry_run {
         println!("successor: {}", successor_path.display());
@@ -11187,6 +11270,7 @@ fn transition(
     }
     let _transition = lock_journal_transition(&dir)?;
     let events = read_events(&dir)?;
+    ensure_storage_settled(&dir, &events, filename)?;
     if is_consumed(&events, filename) {
         bail!("{filename} is already consumed (see the journal)");
     }
@@ -11242,6 +11326,7 @@ fn transition(
     // the journal doctor can name it and a retry can finish it without
     // inventing another successor.
     let mut event = JournalEvent::base(ctx, now, &topic, "transition");
+    event.planners = planners;
     event.file = Some(successor_name.clone());
     event.supersedes = Some(filename.to_string());
     event.note = reason.map(str::to_string);
@@ -11316,25 +11401,6 @@ fn try_auto_log(ctx: &Ctx, topic: &str, message: &str) -> Result<()> {
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("cannot create journal dir {}", dir.display()))?;
     append_journal(&dir, ctx, Utc::now(), topic, message, None)
-}
-
-/// Open changes in this repo, for annotating journal items. Empty on any
-/// lookup failure (outside a repo, unreadable ledger): annotation is a
-/// convenience layer that must never make `journal open` fail.
-/// Open change states over a store that already exists. Listing never
-/// creates one.
-fn open_changes_in(store: &Store) -> Vec<ChangeState> {
-    let Ok(ids) = store.list_change_ids() else {
-        return Vec::new();
-    };
-    let Ok(rewrites) = store.rewrites() else {
-        return Vec::new();
-    };
-    ids.into_iter()
-        .filter_map(|id| store.load_events(&id).ok())
-        .filter_map(|events| state::reduce_following(&events, &rewrites).ok())
-        .filter(|state| !state.is_closed())
-        .collect()
 }
 
 /// `[change <id>: <stage|state>]` for an item covered by an open change,

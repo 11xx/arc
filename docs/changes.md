@@ -270,10 +270,15 @@ inject identity into other commands.
 
 `arc resume [CHANGE]` renders the latest brief, claim and stage, open findings,
 head gate state, next action, live journal lanes, and matching open journal
-items in one view. `--json` emits the versioned `arc-resume/2` schema with the
+items in one view. `--json` emits the versioned `arc-resume/3` schema with the
 existing status payload and a journal block. `arc prompt [CHANGE]` prints the
 stable one-line change summary used by statuslines, and exits successfully
 with no output outside a change worktree.
+
+A brief selecting a plan captures its full-body SHA-256 and declared planner
+coordinates. `arc brief CHANGE --json` returns that immutable snapshot; text
+output includes available planner-credit suggestions. Corrections to the source
+plan apply to subsequent briefs and leave recorded versions unchanged.
 
 Use `arc resume` to continue your own session's change. Use
 `arc rescue [CHANGE]` when another session stopped and left work behind:

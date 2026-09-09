@@ -69,6 +69,159 @@ fn storage_round_trip_keeps_typed_operation_identity() {
 }
 
 #[test]
+fn inventory_preserves_unreadable_ledger_and_open_parity() {
+    let repo = Repo::new();
+    let path =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "plan", "inventory-plan", "--title", "Plan"]),
+        );
+    let file = Path::new(path.trim())
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    begin_change(&repo, "first-slice", None);
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "first-slice",
+            "--plan-ref",
+            file,
+            "--plan-slice",
+            "one",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("# Slice\n")
+        .assert()
+        .success();
+    let inventory =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "inventory", file, "--json"]),
+        );
+    assert_eq!(
+        inventory["items"][0]["promotions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(inventory["items"][0]["promotions"][0]["plan_source"].is_object());
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    let mut a = inventory["items"][0].clone();
+    let mut b = open["open"][0].clone();
+    a.as_object_mut().unwrap().remove("age_seconds");
+    b.as_object_mut().unwrap().remove("age_seconds");
+    assert_eq!(a, b);
+    let change = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "first-slice", "--json"]),
+    );
+    let dir = event_dir(&repo, change["change_id"].as_str().unwrap());
+    let event = fs::read_dir(dir).unwrap().next().unwrap().unwrap().path();
+    fs::write(event, "invalid event").unwrap();
+    let broken = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "inventory", file, "--json"]),
+    );
+    assert_eq!(broken["ledger"]["state"], "unreadable");
+    assert!(broken["items"][0]["promotions"].is_null());
+}
+
+#[test]
+fn inventory_retains_answered_and_retracted_questions_without_active_counts() {
+    let repo = Repo::new();
+    let path = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "question-inventory",
+        "--kind",
+        "discussion",
+        "--title",
+        "Question",
+        "--no-scaffold",
+    ]));
+    let file = Path::new(path.trim())
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "question",
+            file,
+            "--placement",
+            "opening",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--settle-by",
+            "anyone",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Choose a branch\n")
+        .assert()
+        .success();
+    let id = question_id(&repo, file);
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            file,
+            "--question",
+            &id,
+            "--option",
+            "a",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Choose a\n")
+        .assert()
+        .success();
+    let inventory =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "inventory", file, "--json"]),
+        );
+    assert_eq!(
+        inventory["items"][0]["question_history"][0]["state"],
+        "answered"
+    );
+    assert!(inventory["items"][0].get("questions").is_none());
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "retract",
+            file,
+            "--target",
+            &format!("answer:{id}"),
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Reconsider choice\n")
+        .assert()
+        .success();
+    let inventory =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "inventory", file, "--json"]),
+        );
+    assert_eq!(
+        inventory["items"][0]["question_history"][0]["state"],
+        "retracted"
+    );
+    assert_eq!(
+        inventory["items"][0]["questions"].as_array().unwrap().len(),
+        1
+    );
+}
+
+#[test]
 fn cold_legacy_requires_classification_and_inventory_refuses_duplicates() {
     let repo = Repo::new();
     let hot = journal_dir(&repo);
@@ -692,7 +845,7 @@ fn journal_note_title_prepends_heading() {
     let file = PathBuf::from(out.trim());
     assert_eq!(
         fs::read_to_string(&file).unwrap(),
-        "# The Plan\n\nplan contents\n"
+        "# The Plan\n\nplanned-by: {\"actor\":\"tester\",\"harness\":\"test\",\"session\":\"session-a\"}\n\nplan contents\n"
     );
     assert_eq!(
         journal_events(file.parent().unwrap())[0]["title"],
@@ -1599,7 +1752,7 @@ fn journal_inventory_shares_storage_and_terminal_facts() {
         repo.arc(&repo.root)
             .args(["journal", "inventory", "--json"]),
     );
-    assert_eq!(hot["schema"], "arc-journal-inventory/1");
+    assert_eq!(hot["schema"], "arc-journal-inventory/2");
     assert_eq!(hot["items"][0]["storage"], "hot");
     repo.arc(&repo.root)
         .args(["journal", "consume", &file])
@@ -5290,7 +5443,7 @@ fn journal_discussion_summarizes_stances_participants_and_resolution() {
             repo.arc(&repo.root)
                 .args(["journal", "discussion", &file, "--json"]),
         );
-    assert_eq!(summary["schema"], "journal-discussion/2");
+    assert_eq!(summary["schema"], "journal-discussion/3");
     assert_eq!(summary["positions"], 3);
     assert_eq!(summary["stances"]["for"], 2);
     assert_eq!(summary["stances"]["against"], 1);

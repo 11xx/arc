@@ -928,7 +928,7 @@ fn workspace_backlog(
         // Question obligations are reported in full, like review and debt:
         // only the journal artifact tiers are filtered by --since, because a
         // decision that predates a delta can still be blocking work now.
-        let questions = crate::journal::open_questions_with_disposition(&project.journal_dir)?;
+        let questions = open_queue.questions.clone();
         let (opening_question_count, closing_question_count) = questions
             .iter()
             .filter(|entry| entry.disposition == crate::journal::QuestionDisposition::Open)
@@ -1002,7 +1002,7 @@ fn workspace_backlog(
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/12",
+                schema: "arc-workspace-backlog/13",
                 scope: scope.view(),
                 observation: Observation {
                     started_at: observed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),

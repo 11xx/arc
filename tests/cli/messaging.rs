@@ -558,7 +558,7 @@ fn catchup_reports_ledger_and_journal_together() {
     let change_id = begin_change(&repo, "catchup-change", None);
 
     let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-    assert_eq!(catchup["schema"], "arc-catchup/4");
+    assert_eq!(catchup["schema"], "arc-catchup/5");
     assert!(catchup["forks"].is_array(), "{catchup}");
     assert!(
         catchup["worktrees"]["changes"]
@@ -832,7 +832,7 @@ fn inbox_and_catchup_carry_open_deferrals() {
     );
 
     let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-    assert_eq!(catchup["schema"], "arc-catchup/4", "{catchup}");
+    assert_eq!(catchup["schema"], "arc-catchup/5", "{catchup}");
     assert_eq!(catchup["ledger"]["deferred"][0]["id"], "def-waiting");
     let catchup_text = stdout(repo.arc(&repo.root).args(["catchup"]));
     assert!(catchup_text.contains("## deferred (1)"), "{catchup_text}");
