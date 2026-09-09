@@ -1435,6 +1435,56 @@ fn journal_archive_refuses_unconsumed_later_then_accepts_consumed() {
 }
 
 #[test]
+fn journal_inventory_shares_storage_and_terminal_facts() {
+    let repo = Repo::new();
+    let body = repo.home.join("todo.md");
+    fs::write(&body, "# Inventory item\n\nwork\n").unwrap();
+    let file = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "todo",
+        "inventory-row",
+        "--body-file",
+        body.to_str().unwrap(),
+    ]));
+    let file = Path::new(file.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let hot = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "inventory", "--json"]),
+    );
+    assert_eq!(hot["schema"], "arc-journal-inventory/1");
+    assert_eq!(hot["items"][0]["storage"], "hot");
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file])
+        .assert()
+        .success();
+    let active = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "inventory", "--json"]),
+    );
+    assert!(active["items"].as_array().unwrap().is_empty());
+    let exact = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "inventory", &file, "--json"]),
+    );
+    assert_eq!(exact["items"][0]["availability"], "terminal");
+    repo.arc(&repo.root)
+        .args(["journal", "archive", &file])
+        .assert()
+        .success();
+    let cold =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "inventory", "--archived", "--json"]),
+        );
+    assert_eq!(cold["items"][0]["storage"], "archived");
+    assert_eq!(cold["items"][0]["resolution"], "done");
+}
+
+#[test]
 fn unresolved_discussion_can_be_shelved_and_explicitly_amended_in_cold_storage() {
     let repo = Repo::new();
     let hot = journal_dir(&repo);
