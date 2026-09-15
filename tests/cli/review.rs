@@ -443,11 +443,15 @@ fn a_verdict_from_the_assumed_author_names_the_patchset_it_wrote() {
     stdout(
         repo.arc(&worktree)
             .env_remove("ARC_ACTOR")
+            .env_remove("ARC_HARNESS")
+            .env_remove("ARC_SESSION")
             .args(["snapshot", "assumed-verdict"]),
     );
     let reviewed = repo
         .arc(&repo.root)
         .env_remove("ARC_ACTOR")
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION")
         .args(["review", "assumed-verdict", "--verdict", "approved"])
         .assert()
         .success();

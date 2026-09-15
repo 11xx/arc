@@ -537,6 +537,7 @@ mod tests {
             change_id: crate::store::Store::REPOSITORY_SCOPE.to_string(),
             actor: "tester".into(),
             actor_source: None,
+            operator: None,
             harness: None,
             session: None,
             on_behalf_of: None,

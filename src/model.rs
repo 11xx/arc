@@ -138,6 +138,11 @@ pub struct Event {
     /// rather than declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_source: Option<ActorSource>,
+    /// The checkout's `git config user.name` when `actor` was derived from the
+    /// harness session: whoever configured the checkout the agent ran in, not
+    /// a claim about who acted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
     /// The subject an action is performed for when a lead runs delegated
     /// ceremony. `actor` stays the invoker who ran the command; the effective
     /// author of the event is `on_behalf_of.unwrap_or(actor)`. Additive:
@@ -166,17 +171,31 @@ pub enum ActorSource {
     Flag,
     /// Declared through `ARC_ACTOR`.
     Env,
-    /// Nobody declared one, so arc used `git config user.name`. This is the
-    /// Git identity of whoever configured the checkout, not a claim about who
-    /// acted.
+    /// Nobody declared one and no harness session was known, so arc used
+    /// `git config user.name`. This is the Git identity of whoever configured
+    /// the checkout, not a claim about who acted.
     GitFallback,
+    /// Nobody declared one, so arc named the harness session the command ran
+    /// in, as `<harness>:<session>`. It names the acting agent session, but
+    /// it is arc's inference from the environment, not anybody's claim.
+    Derived,
 }
 
 impl ActorSource {
     /// Whether someone offered this identity, as opposed to arc inventing it. An assumed one names a person
     /// who never said they did anything.
     pub fn declared(self) -> bool {
-        !matches!(self, Self::GitFallback)
+        matches!(self, Self::Flag | Self::Env)
+    }
+
+    /// Where arc took an identity nobody declared, for the lines that announce
+    /// or refuse one.
+    pub fn assumed_from(self) -> Option<&'static str> {
+        match self {
+            Self::Flag | Self::Env => None,
+            Self::GitFallback => Some("git config user.name"),
+            Self::Derived => Some("the harness session"),
+        }
     }
 }
 

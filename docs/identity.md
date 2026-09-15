@@ -4,7 +4,9 @@
 
 Every event records an actor, and optionally a harness and native
 session ID: `--actor/--harness/--session` or `ARC_ACTOR`, `ARC_HARNESS`,
-`ARC_SESSION`. Actor defaults to `git config user.name`. `claim`,
+`ARC_SESSION`. With no actor declared, arc records `<harness>:<session>` when
+both are known, else `git config user.name`; either is an assumed identity
+(see [review](review.md)). `claim`,
 `release-claim`, and `stage` require nonempty harness and session values;
 identity is the actor + harness + session tuple.
 

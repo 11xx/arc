@@ -62,7 +62,7 @@ Every event records who acted. Export these per session (or pass
 `--actor/--harness/--session`):
 
 ```sh
-export ARC_ACTOR="Ada Lovelace"     # defaults to git config user.name
+export ARC_ACTOR="Ada Lovelace"     # defaults to <harness>:<session>, else git user.name
 export ARC_HARNESS=claude           # claude | codex | opencode | ...
 export ARC_SESSION="$(uuidgen)"     # your harness's native session id
 ```

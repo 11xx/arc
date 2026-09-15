@@ -3301,10 +3301,14 @@ fn assumed_identity_debt(repo: &Repo, slug: &str) -> String {
     stdout(
         repo.arc(&worktree)
             .env_remove("ARC_ACTOR")
+            .env_remove("ARC_HARNESS")
+            .env_remove("ARC_SESSION")
             .args(["snapshot", slug]),
     );
     repo.arc(&repo.root)
         .env_remove("ARC_ACTOR")
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION")
         .args(["review", slug, "--verdict", "approved"])
         .assert()
         .success();
@@ -3326,6 +3330,8 @@ fn an_audit_by_the_assumed_author_names_the_match_and_leaves_the_debt_owed() {
     let audited = repo
         .arc(&repo.root)
         .env_remove("ARC_ACTOR")
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION")
         .args(["audit", &change_id, "--verdict", "approved"])
         .assert()
         .success();
