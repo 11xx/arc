@@ -91,6 +91,9 @@ pub struct Ctx {
     /// time an event would carry it, because an operator cannot correct an
     /// append-only misattribution after the fact.
     pub actor_source: ActorSource,
+    /// The checkout's Git identity when `actor` was derived from the harness
+    /// session, recorded on each event as its operator.
+    pub operator: Option<String>,
     /// Set once the fallback warning has been printed, so one command says it
     /// once however many events it appends.
     pub fallback_announced: std::cell::Cell<bool>,
@@ -251,6 +254,7 @@ impl Ctx {
             cwd,
             actor: self.actor.clone(),
             actor_source: self.actor_source,
+            operator: self.operator.clone(),
             fallback_announced: self.fallback_announced.clone(),
             harness: self.harness.clone(),
             session: self.session.clone(),
@@ -303,9 +307,10 @@ impl Ctx {
             return Ok(());
         }
         bail!(
-            "policy requires a declared actor: {:?} came from git config user.name, which \
-             nobody claimed. Pass --actor or set ARC_ACTOR.",
-            self.actor
+            "policy requires a declared actor: {:?} came from {}, which nobody claimed. \
+             Pass --actor or set ARC_ACTOR.",
+            self.actor,
+            self.actor_source.assumed_from().unwrap_or_default()
         )
     }
 
@@ -319,14 +324,15 @@ impl Ctx {
             return;
         }
         eprintln!(
-            "warning: recording actor {:?} from git config user.name; nobody declared one. \
+            "warning: recording actor {:?} from {}; nobody declared one. \
              Pass --actor or set ARC_ACTOR.",
-            self.actor
+            self.actor,
+            self.actor_source.assumed_from().unwrap_or_default()
         );
     }
 
     /// Name the identity a verdict is recorded under when that identity also
-    /// wrote the work, or when arc invented it from git config.
+    /// wrote the work, or when arc assumed it rather than anyone declaring it.
     ///
     /// A repository that permits self-approval still gets an honest record.
     /// The verdict stands — it is a fact about what somebody concluded — and
@@ -344,9 +350,13 @@ impl Ctx {
             return false;
         }
         let author = self.on_behalf_of.as_deref().unwrap_or(&self.actor);
-        let assumed = self.on_behalf_of.is_none() && self.actor_source == ActorSource::GitFallback;
+        let assumed = self
+            .on_behalf_of
+            .is_none()
+            .then(|| self.actor_source.assumed_from())
+            .flatten();
         let matched = patchset.contributor_match(author).is_some();
-        if !matched && !assumed {
+        if !matched && assumed.is_none() {
             return false;
         }
         let mut line = format!("warning: recorded as {author:?}");
@@ -358,8 +368,8 @@ impl Ctx {
             };
             line.push_str(&format!(", who is {role} {}", patchset.id));
         }
-        if assumed {
-            line.push_str(" (identity assumed from git config)");
+        if let Some(source) = assumed {
+            line.push_str(&format!(" (identity assumed from {source})"));
         }
         line.push_str(
             "; this verdict shows that a review happened, not that it was independent of \
@@ -384,6 +394,7 @@ impl Ctx {
             change_id: change_id.to_string(),
             actor: self.actor.clone(),
             actor_source: Some(self.actor_source),
+            operator: self.operator.clone(),
             on_behalf_of: self.on_behalf_of.clone(),
             model: self.model.clone(),
             harness: self.harness.clone(),

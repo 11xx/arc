@@ -267,6 +267,8 @@ fn an_assumed_actor_is_announced_and_recorded_as_assumed() {
         let opened = repo
             .arc(&repo.root)
             .env_remove("ARC_ACTOR")
+            .env_remove("ARC_HARNESS")
+            .env_remove("ARC_SESSION")
             .args(["begin", "assumed", "--no-worktree"])
             .output()
             .unwrap();
@@ -308,6 +310,41 @@ fn an_assumed_actor_is_announced_and_recorded_as_assumed() {
     ]));
     let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
     assert_eq!(event["actor_source"], "env", "{event}");
+}
+
+/// A known harness session names the acting agent better than the checkout's
+/// Git identity, which is kept as the operator. The derived actor is still
+/// nobody's claim, so it is announced like any other assumed identity.
+#[test]
+fn an_undeclared_actor_with_a_known_session_is_derived_from_it() {
+    let repo = Repo::new();
+    let opened = with_uncommitted_worktree(&repo, || {
+        repo.arc(&repo.root)
+            .env_remove("ARC_ACTOR")
+            .args(["begin", "derived", "--no-worktree"])
+            .output()
+            .unwrap()
+    });
+    assert!(opened.status.success());
+    let stderr = String::from_utf8_lossy(&opened.stderr);
+    assert!(
+        stderr.contains(
+            "recording actor \"test:session-a\" from the harness session; nobody declared one"
+        ),
+        "{stderr}"
+    );
+
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "derived",
+        "--type",
+        "change-opened",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+    assert_eq!(event["actor"], "test:session-a", "{event}");
+    assert_eq!(event["actor_source"], "derived", "{event}");
+    assert_eq!(event["operator"], "Tester", "{event}");
 }
 
 /// A repository may require every writer to declare itself. Reading is
@@ -656,6 +693,8 @@ fn an_assumed_reviewer_is_neither_independent_nor_self_review() {
         .success();
     repo.arc(&wt)
         .env_remove("ARC_ACTOR")
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION")
         .args(["review", "assumed-reviewer", "--verdict", "approved"])
         .assert()
         .success();
@@ -682,6 +721,42 @@ fn an_assumed_reviewer_is_neither_independent_nor_self_review() {
             .iter()
             .any(|advisory| advisory["code"] == "reviewer-attribution-unknown"),
         "{advisories:?}"
+    );
+}
+
+/// A derived actor names a real harness session, but arc inferred it, so it is
+/// no more a declared second party than a name taken from git configuration.
+#[test]
+fn a_derived_reviewer_is_not_independent() {
+    let repo = repo_with_self_approval_policy();
+    stdout(repo.arc(&repo.root).args(["begin", "derived-reviewer"]));
+    let wt = repo.home.join(".worktrees/repo-derived-reviewer");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    repo.arc(&wt)
+        .args(["--actor", "author", "snapshot", "derived-reviewer"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .env_remove("ARC_ACTOR")
+        .args(["review", "derived-reviewer", "--verdict", "approved"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&wt).args(["status", "derived-reviewer", "--json"]));
+    assert_eq!(
+        status["verdict"]["valid_for_current_head"], false,
+        "{status}"
+    );
+    assert!(
+        status["approval_rejection_reason"]
+            .as_str()
+            .unwrap()
+            .contains("independence is unproven"),
+        "{status}"
+    );
+    assert_eq!(
+        status["review_map"][0]["reviewer"], "test:session-a",
+        "{status}"
     );
 }
 
@@ -1083,6 +1158,8 @@ fn a_findings_only_reviewer_with_an_assumed_identity_is_unplaceable() {
         .success();
     repo.arc(&wt)
         .env_remove("ARC_ACTOR")
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION")
         .args(["finding", "assumed-finder", "--summary", "a defect"])
         .assert()
         .success();

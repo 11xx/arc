@@ -52,9 +52,9 @@ Repository integration policy is declared in `.arc/policy.toml`. Policies are
 disabled when the file or setting is absent. Set
 `[policy] forbid_self_approval = true` to reject an approval when its effective
 author matches a contributor on the patchset it approves, or when arc assumed
-the *reviewing* identity from `git config user.name` rather than someone
-declaring it — an invented name is nobody's claim, so it cannot be the second
-party independence needs.
+the *reviewing* identity (from the harness session or `git config user.name`)
+rather than someone declaring it — an assumed name is nobody's claim, so it
+cannot be the second party independence needs.
 
 An assumed *authoring* identity is a different case, and it is read the same
 way before and after integration: a reviewer whose declared identity differs
@@ -80,14 +80,21 @@ compared.
 Where the policy is off the approval is recorded, and `arc review` and
 `arc audit` name what the record does not otherwise show: the identity the
 verdict was recorded as, the patchset that identity wrote, and whether arc
-assumed the identity from git config. Such a verdict is a review that happened
-rather than an independent one, and it leaves an independent-review debt owed.
+assumed the identity rather than anyone declaring it. Such a verdict is a review
+that happened rather than an independent one, and it leaves an
+independent-review debt owed.
 
-Every event records `actor_source`: `flag`, `env`, or `git-fallback`. The last
-means nobody declared an identity and arc took `git config user.name`, which
-names whoever configured the checkout rather than whoever acted. The
-substitution is announced on stderr the first time a command would record it,
-because the ledger is append-only and that is the last moment to correct it.
+Every event records `actor_source`: `flag`, `env`, `derived`, or
+`git-fallback`. The last two mean nobody declared an identity. `derived` names
+the harness session the command ran in as `<harness>:<session>`, from declared
+or detected harness and session values, and keeps the checkout's
+`git config user.name` as the event's `operator`. `git-fallback` applies when
+no session is known and takes `git config user.name` as the actor, which names
+whoever configured the checkout rather than whoever acted. Either substitution
+is announced on stderr the first time a command would record it, because the
+ledger is append-only and that is the last moment to correct it. A derived
+actor is still assumed: it does not satisfy `require_declared_actor`, and it
+cannot be the independent party to an approval.
 Events written before arc recorded provenance carry no source; that is
 *unknown* rather than assumed, and is compared by name as it always was.
 
@@ -195,8 +202,8 @@ blocking)`. The codes are `reviewer-behind-final-patchset`
 `debt-outstanding`. None of them changes readiness or the exit code:
 plenty of changes legitimately ship with a single reviewer, and an
 orchestrator's review is a valid review unless a project's policy says
-otherwise. A reviewer arc cannot place — an identity it assumed from
-`git config user.name`, or the patchset actor's own name with no
+otherwise. A reviewer arc cannot place — an identity it assumed from the
+harness session or `git config user.name`, or the patchset actor's own name with no
 `--on-behalf-of` recorded on either side — is reported as unknown attribution
 rather than counted as independent or as self-review. A finding carries the
 provenance of the identity that filed it, so a reviewer known only from its

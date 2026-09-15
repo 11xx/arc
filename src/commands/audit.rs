@@ -159,8 +159,11 @@ fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result
     // happen to differ do not show that two people acted. The same rule the
     // pre-integration guard applies, applied to the review that discharges the
     // obligation left behind.
-    let auditor_assumed =
-        ctx.on_behalf_of.is_none() && ctx.actor_source == crate::model::ActorSource::GitFallback;
+    let auditor_assumed = ctx
+        .on_behalf_of
+        .is_none()
+        .then(|| ctx.actor_source.assumed_from())
+        .flatten();
     // Only the auditor's identity is refused, because only it can be
     // corrected: declaring yourself is a flag away. The author's identity is
     // already on the ledger and the ledger is append-only, and an audit exists
@@ -168,9 +171,9 @@ fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result
     // change snapshotted under an assumed identity would leave its debt
     // permanently undischargeable. What the audit is worth in that case is a
     // question the recorded provenance answers for a reader.
-    if auditor_assumed {
+    if let Some(source) = auditor_assumed {
         bail!(
-            "arc assumed the auditing identity from git config, so this audit cannot show that \
+            "arc assumed the auditing identity from {source}, so this audit cannot show that \
 anyone independent looked at {}.\n\
   Declare who is auditing: arc audit {} --verdict approved --actor '<reviewer>'",
             state.change_id,

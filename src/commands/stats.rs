@@ -766,6 +766,7 @@ mod tests {
             change_id: "c".into(),
             actor: "tester".into(),
             actor_source: Some(ActorSource::Flag),
+            operator: None,
             on_behalf_of: None,
             model: None,
             harness: Some("test".into()),

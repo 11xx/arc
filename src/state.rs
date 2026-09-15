@@ -56,8 +56,8 @@ impl Patchset {
         }
     }
 
-    /// Whether the identity used by the compatibility fallback was invented
-    /// from Git configuration rather than declared by the caller.
+    /// Whether the identity used by the compatibility fallback was assumed by
+    /// arc rather than declared by the caller.
     pub fn author_assumed(&self) -> bool {
         self.contributors.is_empty()
             && author_assumed(self.on_behalf_of.as_deref(), self.actor_source)
@@ -337,7 +337,8 @@ impl VerdictEntry {
 
     /// Whether arc invented the identity this verdict is attributed to. A
     /// delegated subject is always somebody's claim; an invoker is assumed
-    /// only when arc took it from git config with nobody offering one.
+    /// only when arc took it from git config or the harness session with
+    /// nobody offering one.
     pub fn author_assumed(&self) -> bool {
         author_assumed(self.on_behalf_of.as_deref(), self.actor_source)
     }
@@ -392,13 +393,13 @@ impl TipEntry for VerdictEntry {
     }
 }
 
-/// An effective author is assumed when arc took it from git config and nobody
-/// supplied a subject. Provenance recorded before arc kept it is *unknown*
+/// An effective author is assumed when nobody declared the actor — arc took it
+/// from git config or the harness session — and nobody supplied a subject. Provenance recorded before arc kept it is *unknown*
 /// rather than assumed: an old event says nothing either way, and treating
 /// silence as an invention would retroactively invalidate approvals that were
 /// valid when they were made.
 fn author_assumed(on_behalf_of: Option<&str>, source: Option<ActorSource>) -> bool {
-    on_behalf_of.is_none() && source == Some(ActorSource::GitFallback)
+    on_behalf_of.is_none() && source.is_some_and(|source| !source.declared())
 }
 
 /// A declared, not-yet-discharged review obligation.
@@ -2721,6 +2722,7 @@ mod tests {
             change_id: change.into(),
             actor: "tester".into(),
             actor_source: Some(ActorSource::Flag),
+            operator: None,
             on_behalf_of: None,
             model: None,
             harness: None,

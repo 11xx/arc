@@ -20,13 +20,13 @@ pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approv
 pub const CONTESTED_VERDICT_REASON: &str =
     "verdicts replace the same earlier verdict, so none is authoritative; record a verdict \
      superseding all of them";
-/// An identity arc invented from `git config user.name` names nobody in
-/// particular, so a verdict recorded under one cannot be the second party
-/// independence needs. The reviewer is the identity this refuses, because it
-/// is the one the caller can still declare.
+/// An identity arc assumed, from `git config user.name` or the harness
+/// session, is nobody's claim, so a verdict recorded under one cannot be the
+/// second party independence needs. The reviewer is the identity this
+/// refuses, because it is the one the caller can still declare.
 pub const UNDECLARED_APPROVAL_REASON: &str =
-    "approval rejected by policy: arc assumed the reviewing identity from git config, so \
-     independence is unproven (pass --actor or set ARC_ACTOR)";
+    "approval rejected by policy: arc assumed the reviewing identity rather than anyone \
+     declaring it, so independence is unproven (pass --actor or set ARC_ACTOR)";
 
 /// Typed integration blockers, ordered by exit-code precedence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

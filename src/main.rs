@@ -48,7 +48,8 @@ use std::path::{Path, PathBuf};
 )]
 struct Cli {
     /// Acting identity, from ARC_ACTOR when the flag is absent. Falls back to
-    /// git user.name, which arc records as an identity nobody declared
+    /// <harness>:<session> when both are known, else git user.name; arc
+    /// records either as an identity nobody declared
     #[arg(long, global = true)]
     actor: Option<String>,
     /// Harness label, e.g. claude, codex, opencode
@@ -1871,17 +1872,20 @@ fn run(cli: Cli) -> Result<i32> {
     let from_env = std::env::var("ARC_ACTOR")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    let (actor, actor_source) = match (cli.actor.filter(|value| !value.trim().is_empty()), from_env)
-    {
-        (Some(declared), _) => (declared, ActorSource::Flag),
-        (None, Some(declared)) => (declared, ActorSource::Env),
-        (None, None) => (
-            gitio::git(&cwd, &["config", "user.name"])
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|_| "unknown".into()),
-            ActorSource::GitFallback,
-        ),
+    let git_user = || {
+        gitio::git(&cwd, &["config", "user.name"])
+            .ok()
+            .map(|name| name.trim().to_string())
     };
+    let (mut actor, mut actor_source) =
+        match (cli.actor.filter(|value| !value.trim().is_empty()), from_env) {
+            (Some(declared), _) => (declared, ActorSource::Flag),
+            (None, Some(declared)) => (declared, ActorSource::Env),
+            (None, None) => (
+                git_user().unwrap_or_else(|| "unknown".into()),
+                ActorSource::GitFallback,
+            ),
+        };
     let mut harness = cli.harness;
     let mut session = cli.session;
     // An empty --model is the same as absent.
@@ -1908,10 +1912,22 @@ fn run(cli: Cli) -> Result<i32> {
             }
         }
     }
+    // The session a command runs in names the acting agent better than the
+    // checkout's Git identity does, which is kept as the operator instead.
+    let mut operator = None;
+    if actor_source == ActorSource::GitFallback {
+        let known = |value: &Option<String>| value.clone().filter(|value| !value.trim().is_empty());
+        if let (Some(harness), Some(session)) = (known(&harness), known(&session)) {
+            actor = format!("{harness}:{session}");
+            actor_source = ActorSource::Derived;
+            operator = git_user();
+        }
+    }
     let ctx = Ctx {
         cwd,
         actor,
         actor_source,
+        operator,
         fallback_announced: std::cell::Cell::new(false),
         harness,
         session,

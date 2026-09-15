@@ -27,8 +27,10 @@ SAY WHO YOU ARE (before the first write)
          ARC_SESSION=<id> ARC_MODEL=<model[#effort]>
 
   Every event records who wrote it. Nothing refuses an undeclared identity by
-  default — the write succeeds and arc records an actor nobody claimed, which
-  is discovered later by a reader who cannot tell whose work it was.
+  default — the write succeeds and arc records an actor nobody claimed:
+  `<harness>:<session>` when both are known, else `git config user.name`.
+  Either is assumed rather than declared, so it cannot be the independent
+  party to an approval.
 
   `arc env` detects a harness by the session variable it exports; not every
   harness exports one. OpenCode v2 (`opencode2`) is recognized without one —
@@ -463,8 +465,8 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
 
   It is also a relation between declared identities. An approval is refused
   when its effective author matches a contributor on the patchset it approves,
-  or when arc assumed the reviewing identity from git config, which is nobody's
-  claim and so cannot be the second party. An assumed authoring identity
+  or when arc assumed the reviewing identity from git config or the harness
+  session, which is nobody's claim and so cannot be the second party. An assumed authoring identity
   refuses nothing on its own: a reviewer that declared a different name is
   independent of it, before the merge and in an audit after it alike. Two
   assumed identities are refused, since neither side claimed anything. A
@@ -571,7 +573,8 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   Where `forbid_self_approval` is off, an approving verdict from the identity
   that wrote the work is recorded rather than refused, and `arc review` and
   `arc audit` both name the match: who it was recorded as, which patchset that
-  identity wrote, and whether arc assumed the identity from git config. Such a
+  identity wrote, and whether arc assumed the identity rather than anyone
+  declaring it. Such a
   verdict is a review that happened, not an independent one, and it leaves an
   independent-review debt owed.
 
