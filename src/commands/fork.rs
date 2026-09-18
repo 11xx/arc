@@ -223,14 +223,15 @@ pub fn adopt(ctx: &Ctx, slug: &str, branch: Option<&str>, intent: Option<&str>) 
     if !crate::gitio::branch_exists(&ctx.cwd, &branch) {
         bail!("branch {branch:?} does not exist; nothing to adopt");
     }
-    // A worktree is where the fork's checkout is, when one is attached. A
-    // branch with no checkout is still a fork: a marker records interest in
-    // the branch, and inventing a path would name a checkout that is not
-    // there.
-    let worktree = identity::resolve_all(&ctx.cwd)?
-        .iter()
-        .find(|fork| fork.branch() == branch)
-        .and_then(|fork| fork.worktree().map(Path::to_path_buf));
+    // A worktree is where the fork's checkout is, when one is attached, and
+    // Git is the only thing that knows: a branch's name stopped predicting
+    // its path once any branch could be adopted. This is the same inventory
+    // walk `fork list` resolves a fork's worktree from, so the two agree by
+    // construction rather than by both happening to guess the same
+    // convention. A branch with no checkout is still a fork: a marker records
+    // interest in the branch, and inventing a path would name a checkout that
+    // is not there.
+    let worktree = crate::gitio::worktree_for_branch(&ctx.cwd, &branch)?;
     if let Some(existing) = identity::by_branch(&ctx.cwd, slug)? {
         if existing.marker().is_some() {
             match existing.worktree() {

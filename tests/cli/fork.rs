@@ -2066,3 +2066,52 @@ fn fork_list_reports_what_a_fork_holds() {
         "{listed}"
     );
 }
+
+/// Adoption asks Git which checkout holds the branch, the same question the
+/// listing asks, so the path it reports is the path `fork list` reports — not
+/// a conventional location derived from a branch name that no longer implies
+/// one.
+#[test]
+fn fork_adopt_reports_the_worktree_git_records() {
+    let repo = Repo::new();
+    let worktree = repo.home.join(".worktrees/hand-made-place");
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/handmade",
+            worktree.to_str().unwrap(),
+            "master",
+        ],
+    );
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "fork",
+        "adopt",
+        "handmade",
+        "--branch",
+        "work/handmade",
+    ]));
+    assert!(
+        out.contains(&format!("adopted: handmade at {}", worktree.display())),
+        "{out}"
+    );
+
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(
+        listed["forks"][0]["worktree"],
+        worktree.to_str().unwrap(),
+        "{listed}"
+    );
+
+    // A branch with genuinely no checkout still reports none.
+    git(&repo.root, &["branch", "work/bare"]);
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["fork", "adopt", "bare", "--branch", "work/bare"]),
+    );
+    assert!(out.contains("adopted: bare (no worktree)"), "{out}");
+}
