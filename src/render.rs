@@ -968,6 +968,19 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
             Blocker::BranchMissing => {
                 let _ = writeln!(out, "  - Branch `{}` is missing", state.branch);
             }
+            Blocker::ForkBranch => {
+                let derived = crate::commands::fork::fork_slug_of_branch(&state.branch);
+                let slug = report
+                    .fork
+                    .as_deref()
+                    .or(derived.as_deref())
+                    .unwrap_or(state.branch.as_str());
+                let _ = writeln!(
+                    out,
+                    "  - {}",
+                    crate::commands::fork::integrate_refusal(slug)
+                );
+            }
             Blocker::Iterating => {
                 let _ = writeln!(
                     out,
@@ -1139,6 +1152,7 @@ fn blocker_title(blocker: Blocker) -> &'static str {
     match blocker {
         Blocker::Closed => "change closed",
         Blocker::BranchMissing => "branch missing",
+        Blocker::ForkBranch => "change sits on fork work",
         Blocker::Iterating => "change is iterating",
         Blocker::BlockedByChanges => "prerequisite changes unresolved",
         Blocker::NeedsRebase => "target branch conflicts with change",

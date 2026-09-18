@@ -6,6 +6,17 @@ fn fork_worktree(repo: &Repo, slug: &str) -> PathBuf {
         .join(format!("repo-fork-{slug}"))
 }
 
+/// A change whose recorded branch is a fork's. The boundary refuses to make
+/// this state now, so the fixture is the record an arc without it wrote — the
+/// same ledger a session upgrading arc already holds.
+fn change_on_fork_branch(repo: &Repo, slug: &str, branch: &str) -> String {
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", slug])));
+    rewrite_event(repo, &change_id, "change-opened", |event| {
+        event["branch"] = serde_json::Value::String(branch.to_string());
+    });
+    change_id
+}
+
 /// A fork is a worktree on a fork/<slug> branch with a journaled marker,
 /// outside the change lifecycle: catchup lists it, integrate refuses inside
 /// it, and the contract is printed where the operator reads it.
@@ -45,13 +56,16 @@ fn fork_begin_creates_worktree_marker_and_refuses_integration() {
     assert!(catchup.contains("forks (1):"), "CATCHUP:\n{catchup}");
     assert!(catchup.contains("demo  fork/demo"), "CATCHUP:\n{catchup}");
 
-    // integrate refuses inside the fork worktree, naming the contract.
+    // Integration binds to the change, not to the checkout the caller
+    // stands in: from the fork worktree, an unnamed integration is the
+    // ordinary refusal to run without naming work.
     repo.arc(&worktree)
-        .args(["integrate", "anything"])
+        .args(["integrate"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("fork worktree demo"))
-        .stderr(predicates::str::contains("unintegrated by intent"));
+        .code(1)
+        .stderr(predicates::str::contains(
+            "provide a change or at least one --tag",
+        ));
 
     // A second begin on the same slug points at the existing branch.
     repo.arc(&repo.root)
@@ -207,11 +221,11 @@ fn fork_advice_names_commands_clap_actually_defines() {
 
     // The refusal text names the positional form.
     stdout(repo.arc(&repo.root).args(["fork", "begin", "named"]));
-    let worktree = fork_worktree(&repo, "named");
-    repo.arc(&worktree)
-        .args(["integrate", "anything"])
+    let promoted = change_on_fork_branch(&repo, "promoted", "fork/named");
+    repo.arc(&repo.root)
+        .args(["integrate", &promoted])
         .assert()
-        .failure()
+        .code(15)
         .stderr(predicates::str::contains("arc fork retire named <outcome>"));
 
     // The slug-collision advice names the adopt subcommand.
@@ -488,30 +502,28 @@ fn fork_list_from_inside_a_fork_uses_the_primary_worktree_branch() {
     assert_eq!(inside["forks"][0]["ahead"], primary["forks"][0]["ahead"]);
 }
 
-/// The integrate refusal holds on a detached HEAD. Detaching has no branch
-/// symbol and the porcelain list records only `detached`, so the fork
-/// identity comes from the marker's branch-to-worktree binding.
+/// A detached checkout has no branch symbol, and the porcelain list records
+/// only `detached`; the fork's identity comes from the marker's
+/// branch-to-worktree binding instead. Integration no longer asks where the
+/// caller stands, so the binding is read through `fork list`, which answers
+/// from every directory the same way.
 #[test]
-fn fork_refusal_holds_on_detached_head() {
+fn fork_views_bind_a_detached_checkout_through_the_marker() {
     let repo = Repo::new();
     stdout(repo.arc(&repo.root).args(["fork", "begin", "detachable"]));
     let worktree = fork_worktree(&repo, "detachable");
     git(&worktree, &["checkout", "--detach", "HEAD"]);
 
-    repo.arc(&worktree)
-        .args(["integrate"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("fork worktree detachable"))
-        .stderr(predicates::str::contains("unintegrated by intent"));
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(listed["forks"][0]["worktree"], worktree.to_str().unwrap());
 
-    // The refusal also holds in a subdirectory, where the operator works.
+    // From a subdirectory, where the operator works, the answer is the same.
     fs::create_dir_all(worktree.join("src")).unwrap();
-    repo.arc(&worktree.join("src"))
-        .args(["integrate"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("fork worktree detachable"));
+    let nested = json_stdout(
+        repo.arc(&worktree.join("src"))
+            .args(["fork", "list", "--json"]),
+    );
+    assert_eq!(nested["forks"][0]["worktree"], worktree.to_str().unwrap());
 }
 
 /// A detached worktree without a marker has no branch-to-path binding. Its
@@ -519,7 +531,7 @@ fn fork_refusal_holds_on_detached_head() {
 /// directory chosen for one fork must not lend that fork's name to another
 /// detached checkout.
 #[test]
-fn fork_refusal_detached_does_not_borrow_an_unrelated_forks_name() {
+fn a_detached_checkout_is_not_named_by_a_directory_or_an_unrelated_branch() {
     let repo = Repo::new();
     // An unrelated fork branch whose tip shares nothing with the worktree.
     git(&repo.root, &["branch", "fork/alpha"]);
@@ -541,28 +553,33 @@ fn fork_refusal_detached_does_not_borrow_an_unrelated_forks_name() {
     repo.commit(&worktree, "work.txt", "work\n", "test: beta work");
 
     // Attached, the branch symbol answers: this is beta, whatever the
-    // directory is called.
-    repo.arc(&worktree)
-        .args(["integrate"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("fork worktree beta"));
+    // directory is called, and alpha owns nothing.
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    let owned = |slug: &str| {
+        listed["forks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|fork| fork["slug"] == slug)
+            .and_then(|fork| fork["worktree"].as_str().map(str::to_string))
+    };
+    assert_eq!(owned("beta"), Some(worktree.display().to_string()));
+    assert_eq!(owned("alpha"), None);
 
-    // Detached, the name suggests alpha and fork/alpha exists — but there is
-    // no marker binding alpha to this path, so identity is unknowable and
-    // integrate falls through to its ordinary refusal.
+    // Detached, the name suggests alpha and fork/alpha exists — but no
+    // marker binds alpha to this path, so neither fork owns the checkout.
     git(&worktree, &["checkout", "--detach", "HEAD"]);
-    repo.arc(&worktree)
-        .args(["integrate"])
-        .assert()
-        .code(1)
-        .stderr(predicates::str::contains("provide a change"));
+    let detached = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert!(detached["forks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|fork| fork["worktree"].is_null()));
 }
 
 /// A detached checkout is no longer the fork once its branch is attached in
-/// another worktree. Every caller must use the same branch-first answer:
-/// integration in the stale checkout falls through, while list and retire
-/// resolve the branch to its attached worktree.
+/// another worktree. Every caller must use the same branch-first answer: list
+/// and retire resolve the branch to its attached worktree.
 #[test]
 fn fork_callers_agree_after_a_detached_branch_moves_worktrees() {
     let repo = Repo::new();
@@ -576,13 +593,6 @@ fn fork_callers_agree_after_a_detached_branch_moves_worktrees() {
         &repo.root,
         &["worktree", "add", attached.to_str().unwrap(), "fork/alpha"],
     );
-
-    repo.arc(&detached)
-        .args(["integrate"])
-        .assert()
-        .code(1)
-        .stderr(predicates::str::contains("provide a change"))
-        .stderr(predicates::str::contains("fork worktree alpha").not());
 
     let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
     assert_eq!(listed["forks"][0]["worktree"], attached.to_str().unwrap());
@@ -647,13 +657,13 @@ fn fork_adopt_refuses_after_its_branch_is_deleted() {
         ));
 }
 
-/// A hand-made fork (no `<repo>-fork-<slug>` gitdir name) keeps the
-/// integrate refusal while detached: the marker's `worktree:` record is
-/// arc's own data about which checkout the fork is, and it answers where
-/// the directory name cannot. An unmarked fork must be adopted while its
-/// branch is attached, before Git has discarded that branch-to-path link.
+/// A hand-made fork (no `<repo>-fork-<slug>` gitdir name) is bound to its
+/// checkout by the marker's `worktree:` record once it is adopted. An
+/// unmarked fork whose branch is detached has no such record and its gitdir
+/// name carries no slug, so no fork owns that checkout until the branch is
+/// attached again and adopted.
 #[test]
-fn fork_refusal_holds_detached_for_a_hand_made_fork() {
+fn a_hand_made_fork_is_bound_by_its_marker_when_detached() {
     let repo = Repo::new();
     let worktree = repo.home.join(".worktrees").join("my-own-place");
     fs::create_dir_all(worktree.parent().unwrap()).unwrap();
@@ -672,17 +682,12 @@ fn fork_refusal_holds_detached_for_a_hand_made_fork() {
     stdout(repo.arc(&repo.root).args(["fork", "adopt", "handmade"]));
     git(&worktree, &["checkout", "--detach", "HEAD"]);
 
-    repo.arc(&worktree)
-        .args(["integrate"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("fork worktree handmade"))
-        .stderr(predicates::str::contains("unintegrated by intent"));
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(listed["forks"][0]["worktree"], worktree.to_str().unwrap());
 
     // An unmarked fork whose gitdir name carries no slug cannot be
     // identified from the name — Git names gitdirs after the directory, not
     // the branch — and no other data arc holds maps this path to a fork.
-    // Falling through is the honest report of an unknowable identity.
     let repo = Repo::new();
     let worktree = repo.home.join(".worktrees").join("no-marker-here");
     fs::create_dir_all(worktree.parent().unwrap()).unwrap();
@@ -698,22 +703,16 @@ fn fork_refusal_holds_detached_for_a_hand_made_fork() {
         ],
     );
     git(&worktree, &["checkout", "--detach", "HEAD"]);
-    repo.arc(&worktree)
-        .args(["integrate"])
-        .assert()
-        .code(1)
-        .stderr(predicates::str::contains("provide a change"));
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert!(listed["forks"][0]["worktree"].is_null(), "{listed}");
 
     // Attach the branch so adopt can record the durable path binding.
     git(&worktree, &["checkout", "fork/unmarked"]);
     let out = stdout(repo.arc(&repo.root).args(["fork", "adopt", "unmarked"]));
     assert!(out.contains("adopted: unmarked"), "{out}");
     git(&worktree, &["checkout", "--detach", "HEAD"]);
-    repo.arc(&worktree)
-        .args(["integrate"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("fork worktree unmarked"));
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(listed["forks"][0]["worktree"], worktree.to_str().unwrap());
 }
 
 /// --force names what it destroys before destroying it: a summary of
@@ -824,28 +823,32 @@ fn fork_refusal_preserves_a_slug_containing_fork_separator_text() {
     let repo = Repo::new();
     let slug = "alpha-fork-beta";
     stdout(repo.arc(&repo.root).args(["fork", "begin", slug]));
-    let worktree = fork_worktree(&repo, slug);
-    git(&worktree, &["checkout", "--detach", "HEAD"]);
+    let change_id = change_on_fork_branch(&repo, "promoted", &format!("fork/{slug}"));
 
-    repo.arc(&worktree)
-        .args(["integrate"])
+    repo.arc(&repo.root)
+        .args(["integrate", &change_id])
         .assert()
-        .failure()
+        .code(15)
         .stderr(predicates::str::contains("fork worktree alpha-fork-beta"))
         .stderr(predicates::str::contains("fork worktree beta").not());
 }
 
 /// A primary checkout has a .git directory rather than a linked-worktree
-/// gitdir file. Its marker path still identifies the adopted fork after the
-/// primary is detached.
+/// gitdir file, and its marker path still identifies it as an adopted fork.
+/// Integration reads the change rather than the checkout the caller stands
+/// in, so an ordinary change integrates from inside that fork.
 #[test]
-fn fork_refusal_holds_for_a_detached_primary_checkout() {
+fn an_ordinary_change_integrates_from_inside_an_adopted_primary_checkout() {
     let repo = Repo::new();
+    // The change targets a branch of its own, so the primary checkout the
+    // fork will occupy is not the one holding the target.
+    git(&repo.root, &["switch", "-c", "integration-target"]);
     let (change_id, change_worktree, _) = change_with_patchset(&repo, "ready-change");
     repo.arc(&change_worktree)
         .args(["review", "ready-change", "--verdict", "approved"])
         .assert()
         .success();
+
     git(&repo.root, &["switch", "-c", "fork/primary"]);
     assert!(repo.root.join(".git").is_dir());
     stdout(repo.arc(&repo.root).args(["fork", "adopt", "primary"]));
@@ -856,20 +859,19 @@ fn fork_refusal_holds_for_a_detached_primary_checkout() {
         &[
             "worktree",
             "add",
-            "-b",
-            "integration-target",
             target.to_str().unwrap(),
-            "master",
+            "integration-target",
         ],
     );
     git(&repo.root, &["checkout", "--detach", "HEAD"]);
 
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(listed["forks"][0]["worktree"], repo.root.to_str().unwrap());
+
     repo.arc(&repo.root)
         .args(["integrate", &change_id])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("fork worktree primary"))
-        .stderr(predicates::str::contains("unintegrated by intent"));
+        .success();
 }
 
 /// A disposition is valid only for an existing fork branch. A typo must not
@@ -904,16 +906,15 @@ fn fork_retire_refuses_a_branch_that_never_existed() {
 /// A fork refusal is a precondition failure, not a merge failure. Declaring
 /// integration debt must therefore wait until that refusal has passed.
 #[test]
-fn integrate_debt_does_not_record_an_obligation_from_inside_a_fork() {
+fn integrate_debt_does_not_record_an_obligation_for_a_fork_branch() {
     let repo = Repo::new();
-    let (change_id, ..) = change_with_patchset(&repo, "debt-from-fork");
     stdout(repo.arc(&repo.root).args(["fork", "begin", "debt-context"]));
-    let fork = fork_worktree(&repo, "debt-context");
+    let change_id = change_on_fork_branch(&repo, "debt-from-fork", "fork/debt-context");
 
-    repo.arc(&fork)
+    repo.arc(&repo.root)
         .args(["integrate", &change_id, "--debt", "no reviewer reachable"])
         .assert()
-        .failure()
+        .code(15)
         .stderr(predicates::str::contains("fork worktree debt-context"));
 
     let status = json_stdout(repo.arc(&repo.root).args(["status", &change_id, "--json"]));
@@ -1008,12 +1009,6 @@ fn fork_marker_inventory_is_shared_across_worktrees_with_a_journal_prefix() {
         stdout(repo.arc(&worktree).args(["journal", "dir"])),
         "both worktrees must read the configured repository journal"
     );
-
-    repo.arc(&worktree)
-        .args(["integrate", "anything"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("fork worktree scoped"));
 }
 
 /// A relative worktrees_dir is resolved before a fork marker is written, so
@@ -1401,4 +1396,165 @@ fn fork_begin_refuses_when_no_base_is_discoverable() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("--from <branch>"));
+}
+
+/// The boundary binds to the change, not to the directory the caller stands
+/// in: a change recorded on a fork branch is refused from the project root,
+/// from the fork's own worktree, and from an unrelated worktree, and `check`
+/// names the same blocker its exit code reports.
+#[test]
+fn a_change_on_a_fork_branch_is_refused_from_every_directory() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "demo"]));
+    let fork_checkout = fork_worktree(&repo, "demo");
+    let unrelated = repo.home.join(".worktrees/unrelated");
+    fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "unrelated-branch",
+            unrelated.to_str().unwrap(),
+            "master",
+        ],
+    );
+    let change_id = change_on_fork_branch(&repo, "promoted", "fork/demo");
+
+    for cwd in [&repo.root, &fork_checkout, &unrelated] {
+        repo.arc(cwd)
+            .args(["integrate", &change_id])
+            .assert()
+            .code(15)
+            .stderr(predicates::str::contains("fork worktree demo"))
+            .stderr(predicates::str::contains("unintegrated by intent"));
+    }
+
+    // check reads the same boundary: the blocker is named, so the exit code
+    // is not green on something integrate will refuse.
+    let checked = repo
+        .arc(&repo.root)
+        .args(["check", &change_id, "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(checked.status.code(), Some(15));
+    let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert!(
+        report["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["blocker"] == "fork-branch" && blocker["exit_code"] == 15),
+        "{report}"
+    );
+    assert_eq!(report["ready"], false, "{report}");
+}
+
+/// A change on an ordinary branch reads the same wherever it is asked from,
+/// including from inside a fork's own worktree, where the directory used to
+/// be the whole question.
+#[test]
+fn a_change_on_an_ordinary_branch_is_unaffected_by_the_callers_directory() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "demo"]));
+    let fork_checkout = fork_worktree(&repo, "demo");
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "ordinary"])));
+
+    for cwd in [&repo.root, &fork_checkout] {
+        let checked = repo
+            .arc(cwd)
+            .args(["check", &change_id, "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(checked.status.code(), Some(3), "from {}", cwd.display());
+        let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+        assert!(
+            !report["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|blocker| blocker["blocker"] == "fork-branch"),
+            "{report}"
+        );
+        // The refusal is not the fork's either: no fork message is printed.
+        repo.arc(cwd)
+            .args(["integrate", &change_id, "--dry-run"])
+            .assert()
+            .code(3)
+            .stderr(predicates::str::contains("fork worktree").not());
+    }
+}
+
+/// `begin --adopt` on a fork branch opens a change that can be gated nowhere
+/// and merged nowhere, so the opening refuses and names where the work goes
+/// instead. An ordinary branch is untouched.
+#[test]
+fn begin_refuses_to_adopt_a_fork_branch() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "demo"]));
+
+    repo.arc(&repo.root)
+        .args(["begin", "promoted", "--adopt", "fork/demo", "--no-worktree"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("branch is fork demo"))
+        .stderr(predicates::str::contains(
+            "Move the work onto a change from the base branch",
+        ));
+
+    // Nothing was opened and the fork's own worktree is still its own.
+    let listed = json_stdout(repo.arc(&repo.root).args(["list", "--json"]));
+    assert!(listed.as_array().unwrap().is_empty(), "{listed}");
+    let forks = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(
+        forks["forks"][0]["worktree"],
+        fork_worktree(&repo, "demo").to_str().unwrap()
+    );
+
+    // An ordinary branch adopts as it always did.
+    git(&repo.root, &["branch", "work/plain"]);
+    let out = stdout(repo.arc(&repo.root).args([
+        "begin",
+        "plain",
+        "--adopt",
+        "work/plain",
+        "--no-worktree",
+    ]));
+    assert!(out.contains("branch: work/plain"), "{out}");
+}
+
+/// A change's own branch is never a fork's: naming a new one `fork/<slug>`
+/// would open the unintegrable state by another door.
+#[test]
+fn begin_refuses_to_name_a_new_branch_as_a_fork() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "laundered", "--branch", "fork/laundered"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("branch is fork laundered"));
+    let listed = json_stdout(repo.arc(&repo.root).args(["list", "--json"]));
+    assert!(listed.as_array().unwrap().is_empty(), "{listed}");
+    assert!(
+        !git_out(&repo.root, &["branch", "--list", "fork/laundered"]).contains("fork/laundered")
+    );
+}
+
+/// Opening a change from inside a fork worktree is ordinary work: the new
+/// branch comes from the integration target, and the change is not the
+/// fork's.
+#[test]
+fn begin_inside_a_fork_worktree_opens_an_ordinary_change() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "demo"]));
+    let fork_checkout = fork_worktree(&repo, "demo");
+
+    let out = stdout(repo.arc(&fork_checkout).args(["begin", "outside"]));
+    assert!(out.contains("branch: arc/outside"), "{out}");
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "outside", "--json"]));
+    assert_eq!(status["target_branch"], "master", "{status}");
+    assert_eq!(status["branch"], "arc/outside", "{status}");
+    assert!(status.get("fork").is_none(), "{status}");
 }

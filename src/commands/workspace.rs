@@ -348,6 +348,9 @@ fn workspace_inbox(stores: &[(String, Store)], json: bool) -> Result<()> {
                 // Workspace aggregation declares no per-repo policy, so no
                 // danger list is in play and there is nothing to resolve.
                 None,
+                // A fork's branch is a repository-level fact, and a workspace
+                // row carries no per-repo working tree to resolve one from.
+                None,
             )?;
             inbox.absorb(state, &report);
         }

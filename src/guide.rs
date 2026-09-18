@@ -57,8 +57,11 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   arc fork <slug>        Fork this repository: a worktree on fork/<slug>,
                          outside the change lifecycle — unintegrated by
                          intent; the operator decides what to merge, rebase,
-                         or discard. `arc integrate` refuses inside a fork;
-                         `arc fork retire <slug> <outcome>` records the
+                         or discard. A fork's work is unintegrable: a change
+                         whose branch is a fork's is refused by `integrate`
+                         and `check` from every directory, and `begin`
+                         refuses to open one. `arc fork retire <slug>
+                         <outcome>` records the
                          disposition and removes the worktree. `arc fork
                          thread <slug>` names the harness, session, and model
                          that opened it, and how to resume that session.
@@ -775,6 +778,9 @@ EXIT CODES
     `arc check` exits 13 while the change declares it is iterating.
     `arc check` exits 14 when the tree a merge would ship has no gate
       evidence.
+    `arc check` exits 15 when the change's branch is a fork's: fork work is
+      unintegrated by intent, and the boundary binds to the change rather
+      than to the directory the command runs in.
 
   Codes 1 and 2 are also reachable without a blocker at all: `arc` exits 1 on
   an internal error and 2 on a usage error, which argument parsing decides

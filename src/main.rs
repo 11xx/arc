@@ -2750,9 +2750,6 @@ fn run(cli: Cli) -> Result<i32> {
                 }
                 many => many.to_vec(),
             };
-            // A fork refusal means no integration happened, so it must not
-            // create an audit obligation for work that never shipped.
-            fork::ensure_not_fork(&ctx.cwd)?;
             commands::integrate(
                 &ctx,
                 &changes,

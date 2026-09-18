@@ -1845,16 +1845,21 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
         dry_run,
         debt,
     } = args;
-    // A fork is where work goes to stay unintegrated on purpose. The refusal
-    // comes before any store read, so it holds even in a fork whose base has
-    // no ledger, and it names the way out rather than only the wall.
-    super::fork::ensure_not_fork(&ctx.cwd)?;
     match (references, tags.is_empty()) {
         ([reference], true) => {
-            // Declared before the merge so the obligation is on the ledger
-            // even if integration then fails for an unrelated reason — but
-            // never under --dry-run, which promises to write nothing.
-            if let Some(debt) = debt.filter(|_| !dry_run) {
+            // A fork's branch cannot integrate from anywhere, so declaring an
+            // obligation for it would record review owed on work that can
+            // never ship. The refusal is a precondition failure rather than a
+            // merge that needs a reviewer later; every other failure still
+            // leaves the declaration on the ledger, which is why it happens
+            // before the merge at all — but never under `--dry-run`, which
+            // promises to write nothing.
+            let on_fork = {
+                let store = ctx.store()?;
+                let (_, state) = ctx.load_state(&store, reference)?;
+                super::fork::fork_slug_of_branch(&state.branch).is_some()
+            };
+            if let Some(debt) = debt.filter(|_| !dry_run && !on_fork) {
                 super::declare_debt(ctx, reference, debt.reason, debt.kind)?;
             }
             integrate_one(

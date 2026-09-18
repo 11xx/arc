@@ -121,6 +121,13 @@ pub fn begin(
         if !gitio::branch_exists(&ctx.cwd, &adopted) {
             bail!("--adopt branch {adopted:?} does not exist");
         }
+        // A change on a fork's branch can be gated nowhere and merged
+        // nowhere: the fork contract is unintegrated by intent, and
+        // integration refuses that branch from every directory. Refuse the
+        // opening rather than producing the state the refusal then explains.
+        if let Some(fork) = super::fork::fork_slug_of_branch(&adopted) {
+            bail!("{}", super::fork::promotion_refusal(&fork));
+        }
         let branch_head = gitio::branch_head(&ctx.cwd, &adopted)?;
         let base_rev = match base {
             Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
@@ -130,6 +137,9 @@ pub fn begin(
         (adopted, base_rev, wt)
     } else {
         let branch_name = branch.unwrap_or_else(|| format!("arc/{slug}"));
+        if let Some(fork) = super::fork::fork_slug_of_branch(&branch_name) {
+            bail!("{}", super::fork::promotion_refusal(&fork));
+        }
         if gitio::branch_exists(&ctx.cwd, &branch_name) {
             bail!("branch {branch_name:?} already exists; use --adopt {branch_name} to track it");
         }

@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/19";
+pub const STATUS_SCHEMA: &str = "arc-status/20";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// A verdict graph with several tips has no authority to report, so the
@@ -34,6 +34,7 @@ pub const UNDECLARED_APPROVAL_REASON: &str =
 pub enum Blocker {
     Closed,
     BranchMissing,
+    ForkBranch,
     Iterating,
     BlockedByChanges,
     NeedsRebase,
@@ -49,6 +50,7 @@ impl Blocker {
     pub fn exit_code(self) -> i32 {
         match self {
             Blocker::Closed | Blocker::BranchMissing => 6,
+            Blocker::ForkBranch => 15,
             Blocker::Iterating => 13,
             Blocker::BlockedByChanges => 7,
             Blocker::NeedsRebase => 11,
@@ -65,6 +67,7 @@ impl Blocker {
         match self {
             Blocker::Closed => "closed",
             Blocker::BranchMissing => "branch-missing",
+            Blocker::ForkBranch => "fork-branch",
             Blocker::Iterating => "iterating",
             Blocker::BlockedByChanges => "blocked-by-changes",
             Blocker::NeedsRebase => "needs-rebase",
@@ -488,6 +491,14 @@ pub struct StatusReport {
     pub target_branch: String,
     pub branch: String,
     pub base: String,
+    /// The fork that records this change's branch, when one does. A change on
+    /// fork work is unintegrable from every checkout: the boundary binds to
+    /// the change record rather than to the directory the caller stands in,
+    /// and this is the fork the refusal names. `None` for a branch no fork
+    /// records, including every branch arc opens itself. Additive in
+    /// `arc-status/20`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork: Option<String>,
     pub worktree: Option<String>,
     pub opened_by: String,
     pub opened_harness: Option<String>,
@@ -834,6 +845,7 @@ pub fn build(
     policy: &PolicyFile,
     dependency_status: BlockerStatus,
     blocks: Vec<String>,
+    fork: Option<String>,
 ) -> Result<StatusReport> {
     build_at(
         state,
@@ -843,9 +855,11 @@ pub fn build(
         dependency_status,
         blocks,
         Utc::now(),
+        fork,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_at(
     state: &ChangeState,
     cwd: &Path,
@@ -854,6 +868,7 @@ pub fn build_at(
     dependency_status: BlockerStatus,
     blocks: Vec<String>,
     now: DateTime<Utc>,
+    fork: Option<String>,
 ) -> Result<StatusReport> {
     let current_head = gitio::branch_head(cwd, &state.branch).ok();
     let target_head = gitio::branch_head(cwd, &state.target_branch).ok();
@@ -890,6 +905,7 @@ pub fn build_at(
         merged_tree,
         worktree_dirty,
         danger,
+        fork,
     )
 }
 
@@ -902,6 +918,7 @@ pub fn build_at(
 /// not read as one: resolving the danger scope needs the recorded base and
 /// patchset head plus the objects they name, which every clone already has.
 /// Passing `None` leaves the scope undetermined, which assumes dangerous.
+#[allow(clippy::too_many_arguments)]
 pub fn build_as_of(
     state: &ChangeState,
     gates: &GatesFile,
@@ -910,6 +927,7 @@ pub fn build_as_of(
     blocks: Vec<String>,
     now: DateTime<Utc>,
     repo: Option<&Path>,
+    fork: Option<String>,
 ) -> Result<StatusReport> {
     let current_head = state
         .latest_patchset()
@@ -930,6 +948,7 @@ pub fn build_as_of(
             Some(repo) => DangerScope::resolve(state, policy, repo, current_head.as_deref()),
             None => DangerScope::undetermined(state),
         },
+        fork,
     )
 }
 
@@ -947,6 +966,7 @@ fn build_report(
     merged_tree: Option<String>,
     worktree_dirty: Option<bool>,
     danger: DangerScope,
+    fork: Option<String>,
 ) -> Result<StatusReport> {
     let provenance_mode = policy.provenance.git_identity;
     let provenance_check_enabled = provenance_mode == crate::config::GitIdentityMode::PerActor;
@@ -1279,6 +1299,12 @@ fn build_report(
     if current_head.is_none() {
         blockers.push(Blocker::BranchMissing);
     }
+    // A fork's branch is where work stays unintegrated on purpose, whoever
+    // asks and from wherever they ask it. The refusal reads the change, so
+    // standing in the fork's worktree is neither required nor enough.
+    if fork.is_some() {
+        blockers.push(Blocker::ForkBranch);
+    }
     if state.iterating {
         blockers.push(Blocker::Iterating);
     }
@@ -1517,6 +1543,7 @@ fn build_report(
         target_branch: state.target_branch.clone(),
         branch: state.branch.clone(),
         base: state.base.clone(),
+        fork,
         worktree: state.worktree.clone(),
         opened_by: state.opened_by.clone(),
         opened_harness: state.opened_harness.clone(),
@@ -1638,6 +1665,7 @@ pub fn check_exit_code(report: &StatusReport) -> i32 {
     for blocker in [
         Blocker::Closed,
         Blocker::BranchMissing,
+        Blocker::ForkBranch,
         Blocker::Iterating,
         Blocker::BlockedByChanges,
         Blocker::NeedsRebase,

@@ -14,9 +14,9 @@ use identity::{canonical_path, ForkIdentity};
 use std::collections::HashSet;
 use std::path::Path;
 
-/// The branch prefix every fork carries. The prefix is the boundary: a
-/// branch outside it is not a fork, and `integrate` inside a fork worktree
-/// refuses before it reaches any gate.
+/// The branch prefix every fork arc creates carries. A branch under it names
+/// a fork, and a change on one is unintegrable: the work is unintegrated by
+/// intent, so `integrate` refuses it wherever the caller stands.
 pub const FORK_BRANCH_PREFIX: &str = "fork/";
 
 /// The journal topic prefix every fork marker is filed under, so `catchup`
@@ -25,9 +25,17 @@ const FORK_TOPIC_PREFIX: &str = "fork-";
 
 /// Whether a branch name names a fork. `fork/` itself is not a branch.
 pub fn is_fork_branch(branch: &str) -> bool {
+    fork_slug_of_branch(branch).is_some()
+}
+
+/// The fork slug a branch carries, for the branches arc names itself. A fork
+/// adopted under another name is recorded in a marker, and whether a branch
+/// is that fork is the identity resolver's question rather than a string's.
+pub fn fork_slug_of_branch(branch: &str) -> Option<String> {
     branch
         .strip_prefix(FORK_BRANCH_PREFIX)
-        .is_some_and(|slug| !slug.is_empty())
+        .filter(|slug| !slug.is_empty())
+        .map(str::to_string)
 }
 
 fn fork_branch(slug: &str) -> String {
@@ -584,21 +592,26 @@ fn uncommitted_summary(worktree: &Path) -> String {
     }
 }
 
-/// The refusal `integrate` prints inside a fork worktree. It names the way
-/// out rather than only the wall: a fork merges when its operator moves the
-/// work, and the disposition is recorded, not gated.
-pub fn ensure_not_fork(cwd: &Path) -> Result<()> {
-    if let Some(fork) = identity::by_current_path(cwd)? {
-        bail!("{}", integrate_refusal(fork.slug()));
-    }
-    Ok(())
-}
-
+/// The refusal `integrate` prints for a change on a fork's branch. It names
+/// the way out rather than only the wall: a fork merges when its operator
+/// moves the work, and the disposition is recorded, not gated.
 pub fn integrate_refusal(slug: &str) -> String {
     format!(
         "this is fork worktree {slug}: unintegrated by intent, so arc does not \
          gate or merge it. Move the work onto a change from the base branch \
          (or `git merge` from the target) when it is ready, and record the \
          disposition with `arc fork retire {slug} <outcome>`."
+    )
+}
+
+/// The refusal `begin` prints for a branch a fork owns. Opening a change on
+/// fork work produces a change that can be gated nowhere and merged nowhere,
+/// so the refusal names where the work goes instead.
+pub fn promotion_refusal(slug: &str) -> String {
+    format!(
+        "branch is fork {slug}: unintegrated by intent, so arc does not gate or \
+         merge it. Move the work onto a change from the base branch (or `git \
+         merge` from the target) when it is ready, and record the disposition \
+         with `arc fork retire {slug} <outcome>`."
     )
 }
