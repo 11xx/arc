@@ -242,6 +242,19 @@ pub fn adopt(ctx: &Ctx, slug: &str, branch: Option<&str>, intent: Option<&str>) 
             return Ok(0);
         }
     }
+    // A marker is what makes a branch a fork, so adopting an open change's
+    // branch would make that change unintegrable from every directory without
+    // touching the change. Nothing un-adopts it: the marker stands until the
+    // fork is retired, and the change's own operators would be reading a
+    // blocker about work they did not ask about. This is the only point where
+    // the state can be kept from existing.
+    if let Some((change_id, change_slug)) = open_change_on_branch(ctx, &branch)? {
+        bail!(
+            "branch {branch:?} is the branch of open change {change_id} ({change_slug}); \
+             a fork cannot adopt a change's branch — close the change, or adopt another \
+             branch"
+        );
+    }
     let worktree_line = worktree
         .as_ref()
         .map(|path| format!("worktree: {}\n", path.display()))
@@ -413,13 +426,8 @@ pub fn list_entries(ctx: &Ctx) -> Result<Vec<ForkEntry>> {
     forks.sort_by(|a, b| a.slug().cmp(b.slug()));
 
     // A promotion records the fork it came from, so what a fork has fed is a
-    // ledger fact rather than an inference. Read once for every fork here,
-    // and read only: a repository can hold forks before it holds any change,
-    // and a listing that initialized a ledger would make a read a write.
-    let promoted = match crate::store::Store::resolve_root(cwd)
-        .ok()
-        .and_then(|root| crate::store::Store::open_at(&root).ok().flatten())
-    {
+    // ledger fact rather than an inference. Read once for every fork here.
+    let promoted = match read_only_store(cwd)? {
         Some(store) => {
             let mut promoted: BTreeMap<String, Vec<String>> = BTreeMap::new();
             for state in ctx.load_all_states(&store)?.values() {
@@ -700,6 +708,29 @@ fn describe(
         untracked_files: counts.map(|(_, untracked)| untracked),
         promoted: promoted.get(fork.slug()).cloned().unwrap_or_default(),
     }
+}
+
+/// The repository's ledger, read-only, when it has one. Reading what a change
+/// records must not initialize a store: a repository can hold forks before it
+/// holds any change, and a read that created one would be a write.
+fn read_only_store(cwd: &Path) -> Result<Option<crate::store::Store>> {
+    let root = crate::store::Store::resolve_root(cwd)?;
+    crate::store::Store::open_at(&root)
+}
+
+/// The open change recording a branch, if one does: the state `adopt` must
+/// refuse to record over, because the marker it writes would make that change
+/// unintegrable. Read from the ledger alone; the question is what a change
+/// records, not where any checkout is.
+fn open_change_on_branch(ctx: &Ctx, branch: &str) -> Result<Option<(String, String)>> {
+    let Some(store) = read_only_store(&ctx.cwd)? else {
+        return Ok(None);
+    };
+    Ok(ctx
+        .load_all_states(&store)?
+        .values()
+        .find(|state| !state.is_closed() && state.branch == branch)
+        .map(|state| (state.change_id.clone(), state.slug.clone())))
 }
 
 /// Uncommitted and untracked file counts in a checkout, from Git's own

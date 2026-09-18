@@ -2443,6 +2443,7 @@ fn append_policy_has_a_single_authority() {
     let allowed = [
         "chain.rs::chain::state:ifstate.is_closed(){",
         "claims.rs::ready_candidate::!candidate.is_closed()",
+        "fork.rs::open_change_on_branch::.find(|state|!state.is_closed()&&state.branch==branch)",
         "gatekeeping.rs::check_tagged::ifstate.is_closed(){",
         "gatekeeping.rs::close::ifst.is_closed(){",
         "gatekeeping.rs::integrate_one::ifst.is_closed()&&matches!(closed_behavior,ClosedBehavior::SkipTagged){",

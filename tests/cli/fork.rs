@@ -1929,6 +1929,10 @@ fn fork_adopt_takes_a_branch_with_no_worktree() {
 
 /// The boundary reads the marker: a change on a branch adopted under another
 /// name is refused from every directory, exactly as one on `fork/<slug>` is.
+/// Adoption now refuses an open change's branch, so the state it can no longer
+/// create is the fixture here: a marker over a branch that already held a
+/// change, which is what an arc without the guard left behind and what an
+/// independent reader has to be sure the blocker still catches.
 #[test]
 fn a_change_on_an_adopted_branch_is_refused_by_integrate() {
     let repo = Repo::new();
@@ -1953,11 +1957,15 @@ fn a_change_on_an_adopted_branch_is_refused_by_integrate() {
         "--no-worktree",
     ])));
 
-    // Before adoption the change is ordinary; adopting its branch makes the
-    // fork, and the boundary follows the record rather than the name.
-    stdout(
-        repo.arc(&repo.root)
-            .args(["fork", "adopt", "demo", "--branch", "work/plain"]),
+    // The marker an older arc would have journaled over the branch.
+    journal_artifact(
+        &repo,
+        "fork-demo",
+        "plan",
+        &format!(
+            "branch: work/plain\nworktree: {}\nstatus: adopted\n",
+            worktree.display()
+        ),
     );
 
     let unrelated = repo.home.join(".worktrees/unrelated");
@@ -2114,4 +2122,55 @@ fn fork_adopt_reports_the_worktree_git_records() {
             .args(["fork", "adopt", "bare", "--branch", "work/bare"]),
     );
     assert!(out.contains("adopted: bare (no worktree)"), "{out}");
+}
+
+/// A marker is what makes a branch a fork, so adopting an open change's branch
+/// would make that change unintegrable from every directory without touching
+/// the change — and nothing un-adopts a marker. The refusal names the change
+/// it would have bricked.
+#[test]
+fn fork_adopt_refuses_an_open_changes_branch() {
+    let repo = Repo::new();
+    let output = stdout(repo.arc(&repo.root).args(["begin", "later-fork"]));
+    let change_id = opened_change_id(&output);
+
+    repo.arc(&repo.root)
+        .args(["fork", "adopt", "lateradopt", "--branch", "arc/later-fork"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(&change_id))
+        .stderr(predicates::str::contains("(later-fork)"))
+        .stderr(predicates::str::contains("cannot adopt a change's branch"));
+
+    // Nothing was recorded, and the change reads exactly as it did.
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert!(listed["forks"].as_array().unwrap().is_empty(), "{listed}");
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "later-fork", "--json"]),
+    );
+    assert!(status.get("fork").is_none(), "{status}");
+    assert!(
+        !status["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["blocker"] == "fork-branch"),
+        "{status}"
+    );
+
+    // Closing the change releases the branch: the guard is the open record,
+    // not the branch name.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["close", "later-fork", "--abandoned"]),
+    );
+    let out = stdout(repo.arc(&repo.root).args([
+        "fork",
+        "adopt",
+        "lateradopt",
+        "--branch",
+        "arc/later-fork",
+    ]));
+    assert!(out.contains("adopted: lateradopt"), "{out}");
 }
