@@ -165,6 +165,12 @@ pub struct Event {
     /// is the absence of a lookup rather than a claim about the store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_resolution: Option<SessionResolution>,
+    /// Whether the environment marked `session` as one a harness spawned
+    /// inside another session rather than one an operator started. The mark
+    /// names no parent, so the spawning thread stays unrecovered. Absent when
+    /// no mark was present, which is not evidence either way.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub child_session: bool,
     pub created_at: DateTime<Utc>,
     #[serde(flatten)]
     pub payload: Payload,

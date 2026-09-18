@@ -210,6 +210,18 @@ pub struct DetectedIdentity {
     /// record.
     pub session: Option<DetectedSession>,
     pub model: Option<String>,
+    /// Whether the environment marks this process as one a harness spawned
+    /// inside another session rather than one an operator started. The mark
+    /// names no parent: the spawning thread stays unrecovered.
+    pub child_session: bool,
+}
+
+/// Whether the environment marks this process as a child session. Claude Code
+/// exports `CLAUDE_CODE_CHILD_SESSION` for the shells its own tools run, so a
+/// derived actor from a subagent is distinguishable from one a lead session
+/// recorded.
+fn child_session_marker() -> bool {
+    std::env::var_os("CLAUDE_CODE_CHILD_SESSION").is_some_and(|value| !value.is_empty())
 }
 
 pub fn detect_identity() -> Option<DetectedIdentity> {
@@ -241,6 +253,7 @@ pub fn detect_identity() -> Option<DetectedIdentity> {
                     resolution,
                 }),
                 model,
+                child_session: child_session_marker(),
             });
         }
     }
@@ -249,6 +262,7 @@ pub fn detect_identity() -> Option<DetectedIdentity> {
             harness: "opencode".to_string(),
             session: None,
             model: None,
+            child_session: child_session_marker(),
         });
     }
     None
@@ -272,6 +286,7 @@ pub fn print_env() -> i32 {
              export a session variable; set it by hand",
             identity.harness
         );
+        print_child_session_line(identity.child_session);
         return 0;
     };
     match identity.model {
@@ -291,7 +306,18 @@ pub fn print_env() -> i32 {
         "# {}",
         session_resolution_line(&identity.harness, session.resolution)
     );
+    print_child_session_line(identity.child_session);
     0
+}
+
+/// Whether the shell arc is running in was started by a harness session
+/// rather than by an operator, as the environment marks it.
+fn print_child_session_line(child_session: bool) {
+    if child_session {
+        println!(
+            "# session is a child: the environment marks it as spawned inside another session"
+        );
+    }
 }
 
 /// What `arc env` says about a detected session's backing. The store is

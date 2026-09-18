@@ -665,6 +665,7 @@ fn verify_against(
             harness: ctx.harness.clone(),
             session: ctx.session.clone(),
             session_resolution: ctx.session_resolution,
+            child_session: ctx.child_session,
             model: ctx.model.clone(),
             on_behalf_of: ctx.on_behalf_of.clone(),
         };
@@ -1951,6 +1952,7 @@ fn integrate_queue(
         harness: ctx.harness.clone(),
         session: ctx.session.clone(),
         session_resolution: ctx.session_resolution,
+        child_session: ctx.child_session,
         model: ctx.model.clone(),
         on_behalf_of: ctx.on_behalf_of.clone(),
     };

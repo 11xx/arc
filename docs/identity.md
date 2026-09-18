@@ -31,6 +31,12 @@ environment down — is recorded as uncorroborated rather than left to be
 inferred from an absent model. A session declared with `ARC_SESSION` or
 `--session` was never looked up, so it carries no verdict either way.
 
+A session the environment marks as spawned inside another session is recorded
+as `child_session` on the events it writes. Claude Code sets
+`CLAUDE_CODE_CHILD_SESSION` in the shells its tools run, so a subagent's actor
+is distinguishable from the lead session's; the mark names no parent, so the
+spawning thread is not recovered from it.
+
 Journal events additionally record the acting model via `--model` or
 `ARC_MODEL`, a `model-slug[#effort]` string (e.g. `kimi-k3#high`,
 `gpt-5.6-sol#low`) matching the `Assisted-by: Harness:Model#Effort` grammar.
