@@ -18,14 +18,18 @@ fn change_on_fork_branch(repo: &Repo, slug: &str, branch: &str) -> String {
 }
 
 /// A fork is a worktree on a fork/<slug> branch with a journaled marker,
-/// outside the change lifecycle: catchup lists it, integrate refuses inside
-/// it, and the contract is printed where the operator reads it.
+/// outside the change lifecycle: catchup lists it, integrate refuses a change
+/// on its branch, and the contract is printed where the operator reads it.
 #[test]
 fn fork_begin_creates_worktree_marker_and_refuses_integration() {
     let repo = Repo::new();
     let out = stdout(repo.arc(&repo.root).args(["fork", "begin", "demo"]));
     assert!(out.contains("branch: fork/demo"), "{out}");
     assert!(out.contains("Fork contract:"), "{out}");
+    assert!(
+        out.contains("`arc integrate` refuses a change on a fork branch."),
+        "{out}"
+    );
 
     let worktree = fork_worktree(&repo, "demo");
     assert!(worktree.is_dir(), "worktree must exist");
@@ -828,8 +832,10 @@ fn fork_refusal_preserves_a_slug_containing_fork_separator_text() {
         .args(["integrate", &change_id])
         .assert()
         .code(15)
-        .stderr(predicates::str::contains("fork worktree alpha-fork-beta"))
-        .stderr(predicates::str::contains("fork worktree beta").not());
+        .stderr(predicates::str::contains(
+            "branch fork/alpha-fork-beta is fork alpha-fork-beta's work",
+        ))
+        .stderr(predicates::str::contains("is fork beta's work").not());
 }
 
 /// A primary checkout has a .git directory rather than a linked-worktree
@@ -916,7 +922,9 @@ fn integrate_debt_does_not_record_an_obligation_for_a_fork_branch() {
         .args(["integrate", &change_id, "--debt", "no reviewer reachable"])
         .assert()
         .code(15)
-        .stderr(predicates::str::contains("fork worktree debt-context"));
+        .stderr(predicates::str::contains(
+            "branch fork/debt-context is fork debt-context's work",
+        ));
 
     let status = json_stdout(repo.arc(&repo.root).args(["status", &change_id, "--json"]));
     assert_ne!(status["debt_outstanding"], true, "{status}");
@@ -1428,7 +1436,9 @@ fn a_change_on_a_fork_branch_is_refused_from_every_directory() {
             .args(["integrate", &change_id])
             .assert()
             .code(15)
-            .stderr(predicates::str::contains("fork worktree demo"))
+            .stderr(predicates::str::contains(
+                "branch fork/demo is fork demo's work",
+            ))
             .stderr(predicates::str::contains("unintegrated by intent"));
     }
 
@@ -2004,7 +2014,9 @@ fn a_change_on_an_adopted_branch_is_refused_by_integrate() {
             .args(["integrate", &change_id])
             .assert()
             .code(15)
-            .stderr(predicates::str::contains("fork worktree demo"));
+            .stderr(predicates::str::contains(
+                "branch work/plain is fork demo's work",
+            ));
     }
 }
 
@@ -2173,4 +2185,31 @@ fn fork_adopt_refuses_an_open_changes_branch() {
         "arc/later-fork",
     ]));
     assert!(out.contains("adopted: lateradopt"), "{out}");
+}
+
+/// The fork refusal binds to the change, so it states what the change records
+/// and never where the caller is standing: from the repository root, where no
+/// fork worktree is in play, the sentence is the same one the fork's own
+/// checkout prints.
+#[test]
+fn the_fork_refusal_is_about_the_change_not_the_callers_directory() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "demo"]));
+    let fork_checkout = fork_worktree(&repo, "demo");
+    let change_id = change_on_fork_branch(&repo, "promoted", "fork/demo");
+
+    for cwd in [&repo.root, &fork_checkout] {
+        let out = repo.arc(cwd).args(["check", &change_id]).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(15), "{text}");
+        assert!(
+            text.contains("branch fork/demo is fork demo's work"),
+            "from {}: {text}",
+            cwd.display()
+        );
+        assert!(
+            !text.contains("fork worktree"),
+            "the refusal must not claim the caller is in one: {text}"
+        );
+    }
 }

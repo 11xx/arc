@@ -196,7 +196,7 @@ pub fn begin(ctx: &Ctx, slug: &str, base_branch: Option<&str>) -> Result<i32> {
     println!("worktree: {}", worktree.display());
     println!("cd {}", worktree.display());
     println!();
-    println!("{FORK_CONTRACT} `arc integrate` refuses inside a fork worktree.");
+    println!("{FORK_CONTRACT} `arc integrate` refuses a change on a fork branch.");
     Ok(0)
 }
 
@@ -811,13 +811,16 @@ fn uncommitted_summary(worktree: &Path) -> String {
     }
 }
 
-/// The refusal `integrate` prints for a change on a fork's branch. It names
-/// the way out rather than only the wall: a fork merges when its operator
-/// promotes the work, and the disposition is recorded, not gated.
-pub fn integrate_refusal(slug: &str) -> String {
+/// The refusal `integrate` prints for a change on a fork's branch. It states
+/// what the change records — its branch belongs to fork work — because the
+/// boundary reads the change and the refusal renders wherever the caller
+/// stands, and it names the way out rather than only the wall: a fork merges
+/// when its operator promotes the work, and the disposition is recorded, not
+/// gated.
+pub fn integrate_refusal(branch: &str, slug: &str) -> String {
     format!(
-        "this is fork worktree {slug}: unintegrated by intent, so arc does not \
-         gate or merge it. Promote the work onto a change with \
+        "branch {branch} is fork {slug}'s work: unintegrated by intent, so arc \
+         does not gate or merge it. Promote the work onto a change with \
          `arc begin <change> --from-fork {slug}` when it is ready, and record \
          the disposition with `arc fork retire {slug} <outcome>`."
     )
