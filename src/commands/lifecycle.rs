@@ -136,7 +136,7 @@ pub fn begin(
         // nowhere: the fork contract is unintegrated by intent, and
         // integration refuses that branch from every directory. Refuse the
         // opening rather than producing the state the refusal then explains.
-        if let Some(fork) = super::fork::fork_slug_of_branch(&adopted) {
+        if let Some(fork) = super::fork::fork_slug_for_branch(&ctx.cwd, &adopted)? {
             bail!("{}", super::fork::promotion_refusal(&fork));
         }
         let branch_head = gitio::branch_head(&ctx.cwd, &adopted)?;

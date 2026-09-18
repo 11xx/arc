@@ -67,12 +67,13 @@ fn fork_begin_creates_worktree_marker_and_refuses_integration() {
             "provide a change or at least one --tag",
         ));
 
-    // A second begin on the same slug points at the existing branch.
+    // A second begin on the same slug points at the recorded fork.
     repo.arc(&repo.root)
         .args(["fork", "begin", "demo"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("already exists"));
+        .stderr(predicates::str::contains("already recorded"))
+        .stderr(predicates::str::contains("arc fork adopt demo"));
 }
 
 /// The lifecycle closes: retirement records the disposition, removes the
@@ -356,7 +357,7 @@ fn fork_views_agree_about_retirement_and_catchup_json_carries_forks() {
         "{catchup_text}"
     );
     let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-    assert_eq!(catchup["schema"], "arc-catchup/5");
+    assert_eq!(catchup["schema"], "arc-catchup/6");
     assert!(catchup["forks"].as_array().unwrap().is_empty(), "{catchup}");
 
     stdout(repo.arc(&repo.root).args(["fork", "begin", "open-now"]));
@@ -488,7 +489,7 @@ fn fork_list_from_inside_a_fork_uses_the_primary_worktree_branch() {
     let primary_text = stdout(repo.arc(&repo.root).args(["fork", "list"]));
     assert!(primary_text.contains("+1 over main"), "{primary_text}");
     let primary = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
-    assert_eq!(primary["schema"], "arc-forks/1", "{primary}");
+    assert_eq!(primary["schema"], "arc-forks/2", "{primary}");
     assert_eq!(primary["forks"][0]["base_branch"], "main", "{primary}");
     assert_eq!(primary["forks"][0]["ahead"], 1, "{primary}");
 
@@ -613,7 +614,8 @@ fn fork_callers_agree_after_a_detached_branch_moves_worktrees() {
 
 /// Git keeps a prunable worktree entry after its checkout is deleted outside
 /// Git. Fork views must not turn that administrative record into a live path,
-/// and adopt must not report a surviving marker as already journaled there.
+/// and adopting the branch afterwards records the branch alone rather than a
+/// path that is not there.
 #[test]
 fn fork_list_and_adopt_ignore_a_prunable_deleted_worktree() {
     let repo = Repo::new();
@@ -628,13 +630,10 @@ fn fork_list_and_adopt_ignore_a_prunable_deleted_worktree() {
 
     let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
     assert!(listed["forks"][0]["worktree"].is_null(), "{listed}");
-
-    repo.arc(&repo.root)
-        .args(["fork", "adopt", "vanished"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("no live worktree"))
-        .stderr(predicates::str::contains("already journaled").not());
+    assert!(
+        listed["forks"][0].get("dirty_files").is_none(),
+        "no checkout means no counts, not zero: {listed}"
+    );
 }
 
 /// A marker is not a fork without the branch it names. Adopt must apply the
@@ -653,7 +652,7 @@ fn fork_adopt_refuses_after_its_branch_is_deleted() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "fork branch fork/gone does not exist",
+            "branch \"fork/gone\" does not exist",
         ));
 }
 
@@ -883,8 +882,10 @@ fn fork_retire_refuses_a_branch_that_never_existed() {
         .args(["fork", "retire", "never-made", "dropped: typo"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("fork/never-made"))
-        .stderr(predicates::str::contains("does not exist"));
+        .stderr(predicates::str::contains(
+            "no fork \"never-made\" is recorded",
+        ))
+        .stderr(predicates::str::contains("arc fork list"));
 
     let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
     assert!(
@@ -1826,4 +1827,242 @@ fn begin_from_fork_refuses_to_combine_with_adopt() {
         .stderr(predicates::str::contains("cannot be combined with --adopt"));
     let listed = json_stdout(repo.arc(&repo.root).args(["list", "--json"]));
     assert!(listed.as_array().unwrap().is_empty(), "{listed}");
+}
+
+/// A hand-made branch is adoptable under its own name: the marker records it,
+/// the branch is not renamed, and the fork is the same fork as one arc made.
+#[test]
+fn fork_adopt_takes_a_branch_that_is_not_named_fork_slug() {
+    let repo = Repo::new();
+    let worktree = repo.home.join(".worktrees/browser-control");
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/cu-browser-control",
+            worktree.to_str().unwrap(),
+            "master",
+        ],
+    );
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "fork",
+        "adopt",
+        "browser",
+        "--branch",
+        "work/cu-browser-control",
+    ]));
+    assert!(out.contains("adopted: browser"), "{out}");
+
+    // The branch keeps the name everybody else knows it by.
+    assert_eq!(
+        git_out(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "work/cu-browser-control"
+    );
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(listed["forks"][0]["slug"], "browser", "{listed}");
+    assert_eq!(
+        listed["forks"][0]["branch"], "work/cu-browser-control",
+        "{listed}"
+    );
+    assert_eq!(
+        listed["forks"][0]["worktree"],
+        worktree.to_str().unwrap(),
+        "{listed}"
+    );
+
+    // thread, retire, and integration all read the marker's branch.
+    let thread = stdout(repo.arc(&repo.root).args(["fork", "thread", "browser"]));
+    assert!(
+        thread.contains("branch: work/cu-browser-control"),
+        "{thread}"
+    );
+
+    let checked = repo
+        .arc(&repo.root)
+        .args(["fork", "retire", "browser", "dropped: superseded"])
+        .output()
+        .unwrap();
+    assert!(checked.status.success(), "{checked:?}");
+    assert!(!worktree.exists());
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "work/cu-browser-control"]),
+        repo.head(&repo.root),
+        "retire keeps the branch"
+    );
+}
+
+/// A branch with no checkout is still a fork: the marker records the branch,
+/// no path is invented, and the listing reports the worktree as absent with no
+/// counts at all.
+#[test]
+fn fork_adopt_takes_a_branch_with_no_worktree() {
+    let repo = Repo::new();
+    git(&repo.root, &["branch", "work/no-checkout"]);
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "fork",
+        "adopt",
+        "orphan",
+        "--branch",
+        "work/no-checkout",
+    ]));
+    assert!(out.contains("adopted: orphan (no worktree)"), "{out}");
+
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    let fork = &listed["forks"][0];
+    assert_eq!(fork["branch"], "work/no-checkout", "{listed}");
+    assert!(fork["worktree"].is_null(), "{listed}");
+    assert!(fork["dirty_files"].is_null(), "{listed}");
+    assert!(fork["untracked_files"].is_null(), "{listed}");
+
+    // A marker that names no path still names the fork, and it can be retired.
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["fork", "retire", "orphan", "dropped: no work"]),
+    );
+    assert!(out.contains("retired: orphan"), "{out}");
+}
+
+/// The boundary reads the marker: a change on a branch adopted under another
+/// name is refused from every directory, exactly as one on `fork/<slug>` is.
+#[test]
+fn a_change_on_an_adopted_branch_is_refused_by_integrate() {
+    let repo = Repo::new();
+    let worktree = repo.home.join(".worktrees/adopted-work");
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/plain",
+            worktree.to_str().unwrap(),
+            "master",
+        ],
+    );
+    let change_id = opened_change_id(&stdout(repo.arc(&worktree).args([
+        "begin",
+        "promoted",
+        "--adopt",
+        "work/plain",
+        "--no-worktree",
+    ])));
+
+    // Before adoption the change is ordinary; adopting its branch makes the
+    // fork, and the boundary follows the record rather than the name.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["fork", "adopt", "demo", "--branch", "work/plain"]),
+    );
+
+    let unrelated = repo.home.join(".worktrees/unrelated");
+    fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "unrelated-branch",
+            unrelated.to_str().unwrap(),
+            "master",
+        ],
+    );
+
+    for cwd in [&repo.root, &worktree, &unrelated] {
+        let checked = repo
+            .arc(cwd)
+            .args(["check", &change_id, "--json"])
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+        assert!(
+            report["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|blocker| blocker["blocker"] == "fork-branch"),
+            "from {}: {report}",
+            cwd.display()
+        );
+        let status = json_stdout(repo.arc(cwd).args(["status", &change_id, "--json"]));
+        assert_eq!(status["fork"], "demo", "{status}");
+        repo.arc(cwd)
+            .args(["integrate", &change_id])
+            .assert()
+            .code(15)
+            .stderr(predicates::str::contains("fork worktree demo"));
+    }
+}
+
+/// `fork list` says what a fork holds: when it opened, how old it is, its
+/// head, whether its checkout has work arc cannot see, and what was promoted
+/// from it. A fresh empty fork and one carrying work read differently.
+#[test]
+fn fork_list_reports_what_a_fork_holds() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "fresh"]));
+    let fresh = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    let fresh = &fresh["forks"][0];
+    assert!(fresh["opened_at"].is_string(), "{fresh}");
+    assert!(fresh["age_seconds"].as_i64().unwrap() >= 0, "{fresh}");
+    assert!(fresh["head"].is_string(), "{fresh}");
+    assert_eq!(
+        fresh["dirty_files"], 0,
+        "a clean fork reports zero: {fresh}"
+    );
+    assert_eq!(fresh["untracked_files"], 0, "{fresh}");
+    assert_eq!(fresh["promoted"].as_array().unwrap().len(), 0, "{fresh}");
+
+    // Work inside the fork and uncommitted edits beside it.
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "working"]));
+    let worktree = fork_worktree(&repo, "working");
+    repo.commit(&worktree, "committed.txt", "committed\n", "test: fork work");
+    fs::write(worktree.join("untracked.txt"), "local\n").unwrap();
+    fs::write(worktree.join("README.md"), "edited\n").unwrap();
+
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    let working = listed["forks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fork| fork["slug"] == "working")
+        .unwrap();
+    assert_eq!(working["dirty_files"], 1, "{listed}");
+    assert_eq!(working["untracked_files"], 1, "{listed}");
+    assert_eq!(working["ahead"], 1, "{listed}");
+    assert_ne!(working["head"], fresh["head"], "{listed}");
+    assert!(
+        listed["forks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|fork| fork["promoted"].as_array().unwrap().is_empty()),
+        "nothing was promoted yet: {listed}"
+    );
+
+    // Promotion shows up against the fork that fed it.
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "promoted",
+        "--from-fork",
+        "working",
+    ])));
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    let working = listed["forks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fork| fork["slug"] == "working")
+        .unwrap();
+    assert_eq!(
+        working["promoted"].as_array().unwrap(),
+        &vec![serde_json::Value::String(change_id)],
+        "{listed}"
+    );
 }

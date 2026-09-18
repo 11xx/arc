@@ -1857,7 +1857,7 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
             let on_fork = {
                 let store = ctx.store()?;
                 let (_, state) = ctx.load_state(&store, reference)?;
-                super::fork::fork_slug_of_branch(&state.branch).is_some()
+                super::fork::fork_slug_for_branch(&ctx.cwd, &state.branch)?.is_some()
             };
             if let Some(debt) = debt.filter(|_| !dry_run && !on_fork) {
                 super::declare_debt(ctx, reference, debt.reason, debt.kind)?;

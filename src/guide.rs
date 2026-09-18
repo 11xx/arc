@@ -54,6 +54,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          left open, journal backlog, forks, and what the
                          change and fork worktrees occupy — apparent size,
                          with the mount's free space.
+  arc fork adopt <slug> [--branch B]
+                         Record a branch the operator made by hand as a fork;
+                         any local branch, keeping the name it carries.
   arc fork <slug>        Fork this repository: a worktree on fork/<slug>,
                          outside the change lifecycle — unintegrated by
                          intent; the operator decides what to merge, rebase,

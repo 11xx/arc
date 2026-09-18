@@ -969,12 +969,9 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                 let _ = writeln!(out, "  - Branch `{}` is missing", state.branch);
             }
             Blocker::ForkBranch => {
-                let derived = crate::commands::fork::fork_slug_of_branch(&state.branch);
-                let slug = report
-                    .fork
-                    .as_deref()
-                    .or(derived.as_deref())
-                    .unwrap_or(state.branch.as_str());
+                // The report carries the fork the refusal names; the branch
+                // stands in only if a report somehow reached here without it.
+                let slug = report.fork.as_deref().unwrap_or(state.branch.as_str());
                 let _ = writeln!(
                     out,
                     "  - {}",

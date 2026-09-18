@@ -2,18 +2,24 @@
 
 ## Forks and worktree cost
 
-A fork is a worktree on a `fork/<slug>` branch, deliberately outside the
-change lifecycle: no ledger change, no gates, nothing merged. `arc fork begin
-<slug>` creates it and journals a marker, `arc fork adopt <slug>` records a
-hand-made one, `arc fork list` reports every fork from markers and branches
-together, and `arc fork retire <slug> <outcome>` records the disposition and
-removes the worktree while keeping the branch; removal refuses while the
-checkout holds work arc cannot see, and `--force` is the operator's decision
-to discard it. A fork's work is unintegrable, and that boundary binds to the
-change: a change whose branch is a fork's is refused by `arc integrate` and
-`arc check` from every directory, and `arc begin` refuses to open one. Where
-the caller stands decides nothing — an ordinary change integrates from inside
-a fork's worktree.
+A fork is a branch deliberately outside the change lifecycle: no ledger
+change, no gates, nothing merged. `arc fork begin <slug>` creates one on a
+`fork/<slug>` branch with its own worktree, and `arc fork adopt <slug>` records
+a branch the operator made by hand — any local branch, named by `--branch` and
+defaulting to `fork/<slug>`, keeping whatever name it carries. The marker is
+what makes an adopted branch a fork, and it is also what makes the branch
+unintegrable: a change on it is refused from every directory, whoever named the
+branch. `arc fork list` reports every fork from markers and branches together,
+with when it opened, its head, the uncommitted and untracked counts in its
+checkout, and the changes promoted from it; counts come from Git's own status,
+never from reading the work. `arc fork retire <slug> <outcome>` records the
+disposition and removes the worktree while keeping the branch; removal refuses
+while the checkout holds work arc cannot see, and `--force` is the operator's
+decision to discard it. A fork's work is unintegrable, and that boundary binds
+to the change: a change whose branch is a fork's is refused by `arc integrate`
+and `arc check` from every directory, and `arc begin` refuses to open one.
+Where the caller stands decides nothing — an ordinary change integrates from
+inside a fork's worktree.
 
 `arc begin <slug> --from-fork <fork>` is how fork work becomes a change: the
 new branch starts at the integration target and the fork's own commits are

@@ -756,6 +756,10 @@ pub(crate) fn render_journal_backlog(backlog: Option<&crate::inbox::JournalBackl
 /// is waiting: a fork is work in progress by intent, and the operator's
 /// next session should know it exists without finding the worktree by hand.
 /// Arc does not gate forks, so this is orientation, not obligation.
+///
+/// What a fork holds is reported beside what it is: a fork open for weeks
+/// with uncommitted work and a fresh empty one otherwise read identically,
+/// and the difference is what tells a session whether to look.
 fn render_forks(forks: &[crate::commands::fork::ForkEntry]) {
     let open: Vec<_> = forks.iter().filter(|fork| fork.retired.is_none()).collect();
     if !open.is_empty() {
@@ -770,9 +774,30 @@ fn render_forks(forks: &[crate::commands::fork::ForkEntry]) {
                 .ahead
                 .map(|count| format!("+{count}"))
                 .unwrap_or_else(|| "+?".to_string());
+            let mut facts: Vec<String> = Vec::new();
+            if let Some(head) = &fork.head {
+                facts.push(format!("head {}", &head[..head.len().min(12)]));
+            }
+            if let Some(age) = fork.age_seconds {
+                facts.push(format!(
+                    "opened {}",
+                    crate::journal::format_age(age.max(0) as u64)
+                ));
+            }
+            if let (Some(dirty), Some(untracked)) = (fork.dirty_files, fork.untracked_files) {
+                facts.push(format!("{dirty} uncommitted, {untracked} untracked"));
+            }
+            if !fork.promoted.is_empty() {
+                facts.push(format!("promoted: {}", fork.promoted.join(", ")));
+            }
+            let facts = if facts.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", facts.join("  "))
+            };
             println!(
-                "  {}  {}  {} over {}{}",
-                fork.slug, fork.branch, ahead, fork.base_branch, place
+                "  {}  {}  {} over {}{}{}",
+                fork.slug, fork.branch, ahead, fork.base_branch, facts, place
             );
         }
     }
@@ -893,7 +918,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-catchup/5",
+                "schema": "arc-catchup/6",
                 "ledger": inbox,
                 "journal": journal.as_ref().ok(),
                 // Open forks only: retired ones are history, and the JSON

@@ -11,7 +11,7 @@ use super::*;
 mod identity;
 use anyhow::{bail, Context, Result};
 use identity::{canonical_path, ForkIdentity};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 /// The branch prefix every fork arc creates carries. A branch under it names
@@ -36,6 +36,17 @@ pub fn fork_slug_of_branch(branch: &str) -> Option<String> {
         .strip_prefix(FORK_BRANCH_PREFIX)
         .filter(|slug| !slug.is_empty())
         .map(str::to_string)
+}
+
+/// The fork that records a branch, by the name the branch carries or by the
+/// marker an adoption wrote. The marker is what makes an adopted branch a
+/// fork, so the boundary and the listing read the same two facts rather than
+/// agreeing on one of them.
+pub fn fork_slug_for_branch(cwd: &Path, branch: &str) -> Result<Option<String>> {
+    if let Some(slug) = fork_slug_of_branch(branch) {
+        return Ok(Some(slug));
+    }
+    identity::marker_slug_for_branch(cwd, branch)
 }
 
 fn fork_branch(slug: &str) -> String {
@@ -127,6 +138,12 @@ pub fn begin(ctx: &Ctx, slug: &str, base_branch: Option<&str>) -> Result<i32> {
         bail!("base branch {base:?} is itself a fork; fork from an integrated branch");
     }
     let branch = fork_branch(slug);
+    if identity::by_branch(cwd, slug)?.is_some() {
+        bail!(
+            "fork {slug} is already recorded; continue it with `arc fork adopt {slug}`, \
+             or pick another slug"
+        );
+    }
     if crate::gitio::branch_exists(cwd, &branch) {
         bail!(
             "branch {branch} already exists; continue it with \
@@ -183,36 +200,65 @@ pub fn begin(ctx: &Ctx, slug: &str, base_branch: Option<&str>) -> Result<i32> {
     Ok(0)
 }
 
-pub fn adopt(ctx: &Ctx, slug: &str, intent: Option<&str>) -> Result<i32> {
+pub fn adopt(ctx: &Ctx, slug: &str, branch: Option<&str>, intent: Option<&str>) -> Result<i32> {
     crate::ids::validate_slug(slug)?;
-    let branch = fork_branch(slug);
-    let Some(resolved) = identity::by_branch(&ctx.cwd, slug)? else {
-        bail!("fork branch {branch} does not exist; nothing to adopt");
-    };
-    let Some(worktree) = resolved.worktree().map(Path::to_path_buf) else {
+    // A fork is a recorded marker, and the branch it names is whatever the
+    // operator called it: `fork/<slug>` is the name arc gives the forks it
+    // creates, not a requirement on what may be adopted. `work/foo` is the
+    // common case, and renaming a branch to adopt it loses the name every
+    // other tool already knows it by.
+    let branch = branch
+        .map(str::to_string)
+        .unwrap_or_else(|| fork_branch(slug));
+    if let Some(existing) = identity::resolve_all(&ctx.cwd)?
+        .iter()
+        .find(|fork| fork.slug() == slug)
+        .filter(|fork| fork.branch() != branch)
+    {
         bail!(
-            "no live worktree has {branch} checked out with a reliable branch identity; \
-             adopt a hand-made fork while its branch is attached so arc can record \
-             the worktree path"
+            "fork {slug} is already recorded on branch {}; pick another slug or retire it",
+            existing.branch()
         );
-    };
-    if resolved.marker().is_none() {
-        journal_marker(
-            ctx,
-            slug,
-            &format!("fork {slug} (adopted)"),
-            &format!(
-                "branch: {branch}\nworktree: {}\nstatus: adopted\n{}\n\n\
-                 {FORK_CONTRACT}\n",
-                worktree.display(),
-                intent
-                    .map(|text| format!("intent: {text}\n"))
-                    .unwrap_or_default(),
-            ),
-        )?;
-        println!("adopted: {slug} at {}", worktree.display());
-    } else {
-        println!("already journaled: {slug} at {}", worktree.display());
+    }
+    if !crate::gitio::branch_exists(&ctx.cwd, &branch) {
+        bail!("branch {branch:?} does not exist; nothing to adopt");
+    }
+    // A worktree is where the fork's checkout is, when one is attached. A
+    // branch with no checkout is still a fork: a marker records interest in
+    // the branch, and inventing a path would name a checkout that is not
+    // there.
+    let worktree = identity::resolve_all(&ctx.cwd)?
+        .iter()
+        .find(|fork| fork.branch() == branch)
+        .and_then(|fork| fork.worktree().map(Path::to_path_buf));
+    if let Some(existing) = identity::by_branch(&ctx.cwd, slug)? {
+        if existing.marker().is_some() {
+            match existing.worktree() {
+                Some(path) => println!("already journaled: {slug} at {}", path.display()),
+                None => println!("already journaled: {slug} (no worktree)"),
+            }
+            println!("{FORK_CONTRACT}");
+            return Ok(0);
+        }
+    }
+    let worktree_line = worktree
+        .as_ref()
+        .map(|path| format!("worktree: {}\n", path.display()))
+        .unwrap_or_default();
+    journal_marker(
+        ctx,
+        slug,
+        &format!("fork {slug} (adopted)"),
+        &format!(
+            "branch: {branch}\n{worktree_line}status: adopted\n{}\n\n{FORK_CONTRACT}\n",
+            intent
+                .map(|text| format!("intent: {text}\n"))
+                .unwrap_or_default(),
+        ),
+    )?;
+    match &worktree {
+        Some(path) => println!("adopted: {slug} at {}", path.display()),
+        None => println!("adopted: {slug} (no worktree)"),
     }
     println!("{FORK_CONTRACT}");
     Ok(0)
@@ -245,10 +291,12 @@ pub fn retire(
     if outcome.trim().is_empty() {
         bail!("retire needs a disposition: merged, dropped, or kept, with a word of why");
     }
-    let branch = fork_branch(slug);
     let Some(resolved) = identity::by_branch(&ctx.cwd, slug)? else {
-        bail!("fork branch {branch} does not exist; nothing to retire");
+        bail!("no fork {slug:?} is recorded here; `arc fork list` names the forks there are");
     };
+    // The branch is the marker's own record: a fork adopted under a name of
+    // its own is retired through that name, not through `fork/<slug>`.
+    let branch = resolved.branch().to_string();
     let worktree = resolved.worktree().map(Path::to_path_buf);
     let marker = resolved.marker();
     let dir = crate::journal::resolve_dir(&ctx.cwd)?;
@@ -362,9 +410,33 @@ pub fn list_entries(ctx: &Ctx) -> Result<Vec<ForkEntry>> {
     // one resolution per fork plus one.
     let mut forks = identity::resolve_all(cwd)?;
     forks.sort_by(|a, b| a.slug().cmp(b.slug()));
+
+    // A promotion records the fork it came from, so what a fork has fed is a
+    // ledger fact rather than an inference. Read once for every fork here,
+    // and read only: a repository can hold forks before it holds any change,
+    // and a listing that initialized a ledger would make a read a write.
+    let promoted = match crate::store::Store::resolve_root(cwd)
+        .ok()
+        .and_then(|root| crate::store::Store::open_at(&root).ok().flatten())
+    {
+        Some(store) => {
+            let mut promoted: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for state in ctx.load_all_states(&store)?.values() {
+                if let Some(fork) = &state.from_fork {
+                    promoted
+                        .entry(fork.slug.clone())
+                        .or_default()
+                        .push(state.change_id.clone());
+                }
+            }
+            promoted
+        }
+        None => BTreeMap::new(),
+    };
+
     Ok(forks
         .iter()
-        .map(|fork| describe(cwd, fork, &consumed))
+        .map(|fork| describe(cwd, fork, &consumed, &promoted))
         .collect())
 }
 
@@ -375,7 +447,7 @@ pub fn list(ctx: &Ctx, json: bool) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-forks/1",
+                "schema": "arc-forks/2",
                 "forks": entries,
             }))?
         );
@@ -403,9 +475,30 @@ pub fn list(ctx: &Ctx, json: bool) -> Result<i32> {
             .ahead
             .map(|count| format!("+{count}"))
             .unwrap_or_else(|| "+?".to_string());
+        let mut facts: Vec<String> = Vec::new();
+        if let Some(head) = &entry.head {
+            facts.push(format!("head {}", &head[..head.len().min(12)]));
+        }
+        if let Some(age) = entry.age_seconds {
+            facts.push(format!(
+                "opened {}",
+                crate::journal::format_age(age.max(0) as u64)
+            ));
+        }
+        if let (Some(dirty), Some(untracked)) = (entry.dirty_files, entry.untracked_files) {
+            facts.push(format!("{dirty} uncommitted, {untracked} untracked"));
+        }
+        if !entry.promoted.is_empty() {
+            facts.push(format!("promoted: {}", entry.promoted.join(", ")));
+        }
+        let facts = if facts.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", facts.join("  "))
+        };
         println!(
-            "  {}  {}  {} over {}",
-            entry.slug, state, ahead, entry.base_branch
+            "  {}  {}  {} over {}{}",
+            entry.slug, state, ahead, entry.base_branch, facts
         );
         if let Some(intent) = &entry.intent {
             println!("    {intent}");
@@ -439,6 +532,29 @@ pub struct ForkEntry {
     /// The recorded or discovered integration branch. `"unknown"` means no
     /// marker or safe repository-level discovery supplied a branch.
     pub base_branch: String,
+    /// When the fork was opened, from the marker's own record. Absent for a
+    /// branch a marker never recorded, where the fork's age is unknowable
+    /// rather than zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opened_at: Option<String>,
+    /// The fork's age in seconds, derived from `opened_at`. Absent with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_seconds: Option<i64>,
+    /// The fork head, so two forks differing only in how much work they hold
+    /// are distinguishable. Absent when the branch cannot be resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    /// Files with uncommitted changes in the fork's worktree, and untracked
+    /// files beside them. Counts, never contents, and never a walk of the
+    /// tree. Absent when the fork has no checkout to read: an unreadable
+    /// count is not zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dirty_files: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub untracked_files: Option<usize>,
+    /// Changes `begin --from-fork` opened from this fork. Empty when none:
+    /// a fork with no promoted work is a fork doing its job, not a gap.
+    pub promoted: Vec<String>,
 }
 
 /// The fork checkouts on disk, for the accounting that measures them. It
@@ -487,12 +603,11 @@ pub fn current(cwd: &Path) -> Result<Option<CurrentFork>> {
 /// harness with no stable resume form gets no invented incantation.
 pub fn thread(ctx: &Ctx, slug: &str) -> Result<i32> {
     crate::ids::validate_slug(slug)?;
-    let branch = fork_branch(slug);
     let Some(resolved) = identity::by_branch(&ctx.cwd, slug)? else {
-        bail!("fork branch {branch} does not exist; `arc fork list` names the forks there are");
+        bail!("no fork {slug:?} is recorded here; `arc fork list` names the forks there are");
     };
     println!("fork: {slug}");
-    println!("branch: {branch}");
+    println!("branch: {}", resolved.branch());
     match resolved.worktree() {
         Some(worktree) => println!("worktree: {}", worktree.display()),
         None => println!("worktree: absent"),
@@ -537,7 +652,12 @@ fn resume_command(harness: &str, session: &str) -> Option<String> {
 
 /// Render one resolved fork. It takes an identity rather than a slug, so the
 /// listing resolves the repository once instead of once per fork.
-fn describe(cwd: &Path, fork: &ForkIdentity, consumed: &HashSet<&str>) -> ForkEntry {
+fn describe(
+    cwd: &Path,
+    fork: &ForkIdentity,
+    consumed: &HashSet<&str>,
+    promoted: &BTreeMap<String, Vec<String>>,
+) -> ForkEntry {
     let marker = fork.marker();
     // A marker's base is the fork's own claim. An unmarked fork uses the
     // primary worktree's branch or origin/HEAD; if neither is safe to use,
@@ -550,19 +670,58 @@ fn describe(cwd: &Path, fork: &ForkIdentity, consumed: &HashSet<&str>) -> ForkEn
         .filter(|marker| consumed.contains(marker.filename()))
         .map(|_| "retired".to_string());
     let worktree = fork.worktree().map(|path| path.display().to_string());
+    let counts = worktree.as_deref().map(Path::new).and_then(worktree_counts);
     let ahead = base_branch
         .as_deref()
         .and_then(|base| crate::gitio::ahead_count(cwd, base, fork.branch()).ok());
     let base_branch = base_branch.unwrap_or_else(|| "unknown".to_string());
+    // Age comes from the marker's own name, which is when the fork was
+    // journaled. A branch no marker recorded has no open time to report.
+    let opened = marker
+        .and_then(|marker| crate::journal::parse_artifact_name(marker.filename()))
+        .and_then(|(stamp, _, _)| {
+            chrono::NaiveDateTime::parse_from_str(&stamp, "%Y%m%dT%H%M%SZ")
+                .ok()
+                .map(|stamp| stamp.and_utc())
+        });
     ForkEntry {
         slug: fork.slug().to_string(),
         branch: fork.branch().to_string(),
-        worktree,
+        worktree: worktree.clone(),
         intent,
         retired,
         ahead,
         base_branch,
+        opened_at: opened.map(|opened| opened.to_rfc3339()),
+        age_seconds: opened.map(|opened| (chrono::Utc::now() - opened).num_seconds()),
+        head: crate::gitio::rev_parse(cwd, fork.branch()).ok(),
+        dirty_files: counts.map(|(dirty, _)| dirty),
+        untracked_files: counts.map(|(_, untracked)| untracked),
+        promoted: promoted.get(fork.slug()).cloned().unwrap_or_default(),
     }
+}
+
+/// Uncommitted and untracked file counts in a checkout, from Git's own
+/// status. Counts, never contents, and never a walk of the tree: `catchup`
+/// renders this on every run, so the cost has to stay one status read rather
+/// than a pass over the files.
+fn worktree_counts(worktree: &Path) -> Option<(usize, usize)> {
+    let status = crate::gitio::git(
+        worktree,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )
+    .ok()?;
+    let mut dirty = 0usize;
+    let mut untracked = 0usize;
+    for line in status.lines() {
+        let state = &line[..2.min(line.len())];
+        if state.starts_with('?') {
+            untracked += 1;
+        } else if !state.trim().is_empty() {
+            dirty += 1;
+        }
+    }
+    Some((dirty, untracked))
 }
 
 /// What `begin --from-fork` reads from a fork: the branch, and the base,
