@@ -540,6 +540,7 @@ mod tests {
             operator: None,
             harness: None,
             session: None,
+            session_resolution: None,
             on_behalf_of: None,
             model: None,
             created_at: chrono::Utc::now(),

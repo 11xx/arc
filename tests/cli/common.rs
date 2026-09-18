@@ -81,6 +81,18 @@ impl Repo {
     }
 }
 
+/// Turn on the opt-in ambient identity detection this suite's harness
+/// environment otherwise never reaches.
+pub(crate) fn enable_identity_detection(repo: &Repo) {
+    let config_dir = repo.home.join(".local/ai/arc");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "[identity]\ndetect = true\n",
+    )
+    .unwrap();
+}
+
 /// Git's editor, for every command this suite runs and every command the
 /// binary under test runs beneath it. A fixture that reaches the operator's
 /// editor stops the whole suite on a modal window it cannot answer, and

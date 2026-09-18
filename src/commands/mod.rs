@@ -99,6 +99,11 @@ pub struct Ctx {
     pub fallback_announced: std::cell::Cell<bool>,
     pub harness: Option<String>,
     pub session: Option<String>,
+    /// What the harness's own store said about `session` when detection
+    /// resolved it. `None` when the session was declared or detection did not
+    /// run, which is the absence of a lookup rather than a claim about the
+    /// store.
+    pub session_resolution: Option<SessionResolution>,
     /// Model identity (`--model`/`ARC_MODEL`): a model slug with optional
     /// `#effort`, e.g. `kimi-k3#high`. Optional everywhere it is recorded;
     /// absent means absent and is never rendered as "unknown".
@@ -258,6 +263,7 @@ impl Ctx {
             fallback_announced: self.fallback_announced.clone(),
             harness: self.harness.clone(),
             session: self.session.clone(),
+            session_resolution: self.session_resolution,
             model: self.model.clone(),
             on_behalf_of: self.on_behalf_of.clone(),
         }
@@ -399,6 +405,7 @@ impl Ctx {
             model: self.model.clone(),
             harness: self.harness.clone(),
             session: self.session.clone(),
+            session_resolution: self.session_resolution,
             created_at,
             payload,
         }

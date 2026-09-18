@@ -23,6 +23,14 @@ default under `$HOME` rather than adding to it. A session recorded under more
 than one Claude project directory resolves to the most recently modified
 recording, with equal timestamps falling to path order.
 
+A detected session id is resolved against that store, and the answer is
+reported: `arc env` says whether the store corroborates the session, and every
+event carries the same verdict as `session_resolution` beside `session`. An id
+the store does not hold — a stale export, a nested shell, a wrapper passing its
+environment down — is recorded as uncorroborated rather than left to be
+inferred from an absent model. A session declared with `ARC_SESSION` or
+`--session` was never looked up, so it carries no verdict either way.
+
 Journal events additionally record the acting model via `--model` or
 `ARC_MODEL`, a `model-slug[#effort]` string (e.g. `kimi-k3#high`,
 `gpt-5.6-sol#low`) matching the `Assisted-by: Harness:Model#Effort` grammar.

@@ -347,6 +347,80 @@ fn an_undeclared_actor_with_a_known_session_is_derived_from_it() {
     assert_eq!(event["operator"], "Tester", "{event}");
 }
 
+/// An identity nobody declared is derived from detection, so what detection
+/// claimed about the session is part of the record. A session id the harness's
+/// own store does not hold is marked as such rather than left to be inferred
+/// from an absent model; a session the caller declared is never looked up and
+/// makes no claim.
+#[test]
+fn an_event_records_whether_the_harness_store_backed_the_session() {
+    let repo = Repo::new();
+    enable_identity_detection(&repo);
+    let session = "55555555-6666-7777-8888-999999999999";
+
+    let opened = |slug: &str| {
+        assert!(repo
+            .arc(&repo.root)
+            .env_remove("ARC_ACTOR")
+            .env_remove("ARC_HARNESS")
+            .env_remove("ARC_SESSION")
+            .env_remove("CLAUDE_SESSION_ID")
+            .env_remove("OPENCODE_SESSION")
+            .env_remove("PI_SESSION_ID")
+            .env("CODEX_THREAD_ID", session)
+            .args(["begin", slug])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let events = stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            slug,
+            "--type",
+            "change-opened",
+        ]));
+        serde_json::from_str::<serde_json::Value>(events.trim()).unwrap()
+    };
+
+    let event = opened("store-less-session");
+    assert_eq!(event["session"], session, "{event}");
+    assert_eq!(event["session_resolution"], "uncorroborated", "{event}");
+
+    let day = repo.home.join(".codex/sessions/2026/09/18");
+    fs::create_dir_all(&day).unwrap();
+    fs::write(
+        day.join(format!("rollout-2026-09-18T00-00-00-{session}.jsonl")),
+        "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-sol\"}}\n",
+    )
+    .unwrap();
+    let event = opened("store-backed-session");
+    assert_eq!(event["session_resolution"], "corroborated", "{event}");
+
+    // The harness and session come from the declared environment here, so
+    // detection never ran and nothing was asked of any store.
+    assert!(repo
+        .arc(&repo.root)
+        .args(["begin", "declared-session"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let events = stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        "declared-session",
+        "--type",
+        "change-opened",
+    ]));
+    let event: serde_json::Value = serde_json::from_str(events.trim()).unwrap();
+    assert_eq!(event["session"], "session-a", "{event}");
+    assert!(
+        event.get("session_resolution").is_none(),
+        "a declared session's events carry no store report: {event}"
+    );
+}
+
 /// A repository may require every writer to declare itself. Reading is
 /// unaffected: it records nothing that could be mistaken for evidence.
 #[test]

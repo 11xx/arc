@@ -1015,7 +1015,10 @@ enum Cmd {
     /// session store for the model, and the effort where the store records
     /// one. The store root is the harness's own override —
     /// `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_SESSION_DIR`, or
-    /// `PI_CODING_AGENT_DIR` — before its default under `$HOME`. Not every
+    /// `PI_CODING_AGENT_DIR` — before its default under `$HOME`. The store's
+    /// answer for the session is reported with the exports: an id the store
+    /// does not hold is uncorroborated, and the events the identity writes
+    /// carry that verdict. Not every
     /// harness
     /// exports one, and a harness that does may not in every mode. OpenCode
     /// v2 exports none and is recognized by `OPENCODE_TERMINAL` or its
@@ -1901,6 +1904,7 @@ fn run(cli: Cli) -> Result<i32> {
         };
     let mut harness = cli.harness;
     let mut session = cli.session;
+    let mut session_resolution = None;
     // An empty --model is the same as absent.
     let mut model = cli.model.filter(|value| !value.trim().is_empty());
     if config::load()
@@ -1916,8 +1920,14 @@ fn run(cli: Cli) -> Result<i32> {
                 // A harness recognized without its cooperation carries no
                 // session id; recording the harness alone is the honest half
                 // of the detection, not a partial failure.
-                if let Some(detected_session) = detected.session {
-                    session.get_or_insert(detected_session);
+                if session.is_none() {
+                    if let Some(detected_session) = detected.session {
+                        // The store's answer is about the session detection
+                        // supplied; a session the caller declared was never
+                        // asked about, so it carries no report.
+                        session_resolution = Some(detected_session.resolution);
+                        session = Some(detected_session.id);
+                    }
                 }
                 if model.is_none() {
                     model = detected.model;
@@ -1944,6 +1954,7 @@ fn run(cli: Cli) -> Result<i32> {
         fallback_announced: std::cell::Cell::new(false),
         harness,
         session,
+        session_resolution,
         model,
         // An empty --on-behalf-of is the same as absent: today's behavior.
         on_behalf_of: cli.on_behalf_of.filter(|value| !value.trim().is_empty()),

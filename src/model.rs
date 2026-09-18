@@ -158,9 +158,30 @@ pub struct Event {
     pub harness: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// What the harness's own store said about `session` when the event was
+    /// written. A detected session id arrives from the environment and can
+    /// name no session the harness ever wrote; this is the record that the
+    /// store backed it, or did not. Absent when detection did not run, which
+    /// is the absence of a lookup rather than a claim about the store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_resolution: Option<SessionResolution>,
     pub created_at: DateTime<Utc>,
     #[serde(flatten)]
     pub payload: Payload,
+}
+
+/// What a harness's own session store said about a session id.
+///
+/// A session id reaches arc through the environment, so it can be a stale
+/// export, a nested harness, or a wrapper passing its environment down. The
+/// store is the only witness that the id names a session the harness wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionResolution {
+    /// The store resolved a recording for the id.
+    Corroborated,
+    /// No recording for the id resolved in the store.
+    Uncorroborated,
 }
 
 /// How the acting identity on an event was determined.

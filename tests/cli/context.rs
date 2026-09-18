@@ -18,14 +18,18 @@ fn opened_event(repo: &Repo, change_id: &str) -> serde_json::Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
-fn enable_identity_detection(repo: &Repo) {
-    let config_dir = repo.home.join(".local/ai/arc");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::write(
-        config_dir.join("config.toml"),
-        "[identity]\ndetect = true\n",
+/// `arc env`'s line for a session the harness's own store backs.
+fn corroborated(harness: &str) -> String {
+    format!(
+        "# session corroborated: the {harness} session store resolved a recording for this id\n"
     )
-    .unwrap();
+}
+
+/// `arc env`'s line for a session id the harness's own store does not hold.
+fn uncorroborated(harness: &str) -> String {
+    format!(
+        "# session uncorroborated: the {harness} session store resolved no recording for this id\n"
+    )
 }
 
 #[test]
@@ -94,7 +98,10 @@ fn env_detects_codex_thread_and_prints_exports() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout("export ARC_HARNESS='codex' ARC_SESSION='thread-123'\n");
+        .stdout(format!(
+            "export ARC_HARNESS='codex' ARC_SESSION='thread-123'\n{}",
+            uncorroborated("codex")
+        ));
 }
 
 #[test]
@@ -190,7 +197,8 @@ fn env_detects_claude_model_from_transcript() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n"
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n{}",
+            corroborated("claude")
         ));
 }
 
@@ -224,7 +232,8 @@ fn env_resolves_the_claude_store_under_its_config_dir_override() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n"
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n{}",
+            corroborated("claude")
         ));
 }
 
@@ -264,7 +273,8 @@ fn env_takes_the_newest_claude_recording_across_project_directories() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-live'\n"
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-live'\n{}",
+            corroborated("claude")
         ));
 }
 
@@ -299,7 +309,8 @@ fn env_detects_claude_code_session_variable() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n"
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n{}",
+            corroborated("claude")
         ));
 }
 
@@ -312,7 +323,10 @@ fn env_prefers_hand_set_claude_session_over_ambient() {
         .env("CLAUDE_CODE_SESSION_ID", "ambient")
         .assert()
         .success()
-        .stdout("export ARC_HARNESS='claude' ARC_SESSION='hand-set'\n");
+        .stdout(format!(
+            "export ARC_HARNESS='claude' ARC_SESSION='hand-set'\n{}",
+            uncorroborated("claude")
+        ));
 }
 
 #[test]
@@ -344,7 +358,8 @@ fn env_detects_codex_model_and_effort_from_rollout() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='codex' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-sol#high'\n"
+            "export ARC_HARNESS='codex' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-sol#high'\n{}",
+            corroborated("codex")
         ));
 }
 
@@ -385,7 +400,8 @@ fn env_detects_opencode_model_and_variant_from_session_store() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='opencode' ARC_SESSION='{session}' ARC_MODEL='kimi-k3#max'\n"
+            "export ARC_HARNESS='opencode' ARC_SESSION='{session}' ARC_MODEL='kimi-k3#max'\n{}",
+            corroborated("opencode")
         ));
 }
 
@@ -415,7 +431,8 @@ fn env_detects_pi_model_and_thinking_level_from_session_store() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-sol#medium'\n"
+            "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-sol#medium'\n{}",
+            corroborated("pi")
         ));
 }
 
@@ -514,7 +531,10 @@ fn env_omits_model_when_no_session_store_matches() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout("export ARC_HARNESS='codex' ARC_SESSION='no-such-thread'\n");
+        .stdout(format!(
+            "export ARC_HARNESS='codex' ARC_SESSION='no-such-thread'\n{}",
+            uncorroborated("codex")
+        ));
 
     // Nothing detected at all: the fallback comment names ARC_MODEL too.
     repo.arc(&repo.root)
