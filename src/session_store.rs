@@ -29,11 +29,7 @@ struct TapesTurn {
 pub fn transcript_path(harness: &str, session: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     match harness {
-        "claude" => std::fs::read_dir(home.join(".claude/projects"))
-            .ok()?
-            .flatten()
-            .map(|entry| entry.path().join(format!("{session}.jsonl")))
-            .find(|path| path.is_file()),
+        "claude" => claude_transcript_path(&home, session),
         "codex" => {
             let root = std::env::var_os("CODEX_HOME")
                 .map(PathBuf::from)
@@ -53,6 +49,41 @@ pub fn transcript_path(harness: &str, session: &str) -> Option<PathBuf> {
         }
         _ => None,
     }
+}
+
+/// The directory Claude Code keeps one subdirectory per project under,
+/// honouring the override its own tooling documents: `CLAUDE_CONFIG_DIR`
+/// relocates the whole configuration directory, session history included.
+fn claude_projects(home: &Path) -> PathBuf {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".claude"))
+        .join("projects")
+}
+
+/// A session id can be recorded under more than one project directory, so the
+/// answer follows a stated rule rather than directory enumeration order: the
+/// most recently modified recording wins, and equal timestamps fall back to
+/// path order. A recording whose timestamp cannot be read never wins.
+fn claude_transcript_path(home: &Path, session: &str) -> Option<PathBuf> {
+    let mut recordings: Vec<PathBuf> = std::fs::read_dir(claude_projects(home))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path().join(format!("{session}.jsonl")))
+        .filter(|path| path.is_file())
+        .collect();
+    recordings.sort_by(|left, right| {
+        modified(right)
+            .cmp(&modified(left))
+            .then_with(|| left.cmp(right))
+    });
+    recordings.into_iter().next()
+}
+
+fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
 }
 
 /// A session's turns as `tapes` reports them, or `None` when tapes cannot

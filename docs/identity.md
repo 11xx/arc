@@ -15,6 +15,14 @@ file to fill omitted harness, session, and model values from the running
 harness's own session store. Detection is off by default and does not mix a
 detected session into a different explicitly selected harness.
 
+The store is the one the harness itself would read. Claude Code relocates its
+configuration directory — session history included — under
+`CLAUDE_CONFIG_DIR`, Codex under `CODEX_HOME`, and Pi under
+`PI_CODING_AGENT_SESSION_DIR` or `PI_CODING_AGENT_DIR`; each replaces the
+default under `$HOME` rather than adding to it. A session recorded under more
+than one Claude project directory resolves to the most recently modified
+recording, with equal timestamps falling to path order.
+
 Journal events additionally record the acting model via `--model` or
 `ARC_MODEL`, a `model-slug[#effort]` string (e.g. `kimi-k3#high`,
 `gpt-5.6-sol#low`) matching the `Assisted-by: Harness:Model#Effort` grammar.

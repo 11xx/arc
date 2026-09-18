@@ -1013,7 +1013,10 @@ enum Cmd {
     /// `CLAUDE_SESSION_ID` or `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`,
     /// `OPENCODE_SESSION`, or `PI_SESSION_ID` — and then that harness's own
     /// session store for the model, and the effort where the store records
-    /// one. Not every harness
+    /// one. The store root is the harness's own override —
+    /// `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_SESSION_DIR`, or
+    /// `PI_CODING_AGENT_DIR` — before its default under `$HOME`. Not every
+    /// harness
     /// exports one, and a harness that does may not in every mode. OpenCode
     /// v2 exports none and is recognized by `OPENCODE_TERMINAL` or its
     /// process ancestry, printing the harness export with the session left

@@ -195,6 +195,90 @@ fn env_detects_claude_model_from_transcript() {
 }
 
 #[test]
+fn env_resolves_the_claude_store_under_its_config_dir_override() {
+    let repo = Repo::new();
+    let session = "22222222-3333-4444-5555-666666666666";
+    let relocated = repo.home.join("relocated-claude");
+    let project = relocated.join("projects/-home-lobo");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{session}.jsonl")),
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fable-5\"}}\n",
+    )
+    .unwrap();
+    // The default store holds the same session under a different model, so a
+    // store consulted in addition to the override would answer with it: the
+    // override replaces the configuration directory rather than extending it.
+    let default = repo.home.join(".claude/projects/-home-lobo");
+    fs::create_dir_all(&default).unwrap();
+    fs::write(
+        default.join(format!("{session}.jsonl")),
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-elsewhere\"}}\n",
+    )
+    .unwrap();
+
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("CLAUDE_SESSION_ID", session)
+        .env("CLAUDE_CONFIG_DIR", &relocated)
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n"
+        ));
+}
+
+#[test]
+fn env_takes_the_newest_claude_recording_across_project_directories() {
+    let repo = Repo::new();
+    let session = "33333333-4444-5555-6666-777777777777";
+    let projects = repo.home.join(".claude/projects");
+    // The stale recording's directory is created first, which is the order
+    // this fixture's directory enumeration offers them in. The rule is the
+    // newest recording, not the first one offered.
+    let stale = projects.join("a-project");
+    let live = projects.join("b-project");
+    fs::create_dir_all(&stale).unwrap();
+    let stale_file = stale.join(format!("{session}.jsonl"));
+    fs::write(
+        &stale_file,
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-stale\"}}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(&live).unwrap();
+    let live_file = live.join(format!("{session}.jsonl"));
+    fs::write(
+        &live_file,
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-live\"}}\n",
+    )
+    .unwrap();
+    set_modified(&stale_file, 1_700_000_000);
+    set_modified(&live_file, 1_800_000_000);
+
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("CLAUDE_SESSION_ID", session)
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-live'\n"
+        ));
+}
+
+fn set_modified(path: &Path, seconds: u64) {
+    let time = std::time::UNIX_EPOCH + Duration::from_secs(seconds);
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(time)
+        .unwrap();
+}
+
+#[test]
 fn env_detects_claude_code_session_variable() {
     let repo = Repo::new();
     let session = "66666666-7777-8888-9999-000000000000";
