@@ -1320,7 +1320,8 @@ enum ForkCmd {
         /// The fork slug: the name the fork is recorded and retired under
         slug: String,
         /// The branch this fork is; defaults to fork/<slug>, and an adopted
-        /// fork keeps whatever name it has
+        /// fork keeps whatever name it has. An open change's branch is
+        /// refused: a marker over it would make the change unintegrable
         #[arg(long)]
         branch: Option<String>,
         /// What the fork is for, recorded in the marker
