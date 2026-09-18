@@ -1500,7 +1500,7 @@ fn begin_refuses_to_adopt_a_fork_branch() {
         .code(1)
         .stderr(predicates::str::contains("branch is fork demo"))
         .stderr(predicates::str::contains(
-            "Move the work onto a change from the base branch",
+            "arc begin <change> --from-fork demo",
         ));
 
     // Nothing was opened and the fork's own worktree is still its own.
@@ -1557,4 +1557,273 @@ fn begin_inside_a_fork_worktree_opens_an_ordinary_change() {
     assert_eq!(status["target_branch"], "master", "{status}");
     assert_eq!(status["branch"], "arc/outside", "{status}");
     assert!(status.get("fork").is_none(), "{status}");
+}
+
+/// A fork carrying its own work: two commits on the fork branch, and the head
+/// they leave behind.
+fn fork_with_work(repo: &Repo, slug: &str) -> (PathBuf, String) {
+    stdout(repo.arc(&repo.root).args(["fork", "begin", slug]));
+    let worktree = fork_worktree(repo, slug);
+    repo.commit(&worktree, "one.txt", "one\n", "test: fork one");
+    repo.commit(&worktree, "two.txt", "two\n", "test: fork two");
+    let head = repo.head(&worktree);
+    (worktree, head)
+}
+
+/// `begin --from-fork` promotes a fork onto an ordinary change: its own branch
+/// from the target, its own worktree, the fork's commits replayed onto it, and
+/// the source recorded. The fork keeps everything it had.
+#[test]
+fn begin_from_fork_opens_a_change_carrying_the_fork_work() {
+    let repo = Repo::new();
+    let (fork_checkout, fork_head) = fork_with_work(&repo, "demo");
+
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "promoted", "--from-fork", "demo"]),
+    );
+    assert!(out.contains("from-fork: demo (fork/demo)"), "{out}");
+    assert!(out.contains(&format!("fork-head: {fork_head}")), "{out}");
+
+    // The work arrived, on the change's own branch and in its own worktree.
+    let change_worktree = repo.home.join(".worktrees/repo-promoted");
+    assert!(change_worktree.join("one.txt").is_file());
+    assert!(change_worktree.join("two.txt").is_file());
+    assert_ne!(change_worktree, fork_checkout);
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "promoted", "--json"]));
+    assert_eq!(status["branch"], "arc/promoted", "{status}");
+    // The link is recorded: fork slug, and the source base, head, and tree.
+    let provenance = &status["from_fork"];
+    assert_eq!(provenance["slug"], "demo", "{status}");
+    assert_eq!(provenance["branch"], "fork/demo", "{status}");
+    assert_eq!(provenance["head"], fork_head.as_str(), "{status}");
+    assert_eq!(
+        provenance["tree"],
+        git_out(&repo.root, &["rev-parse", &format!("{fork_head}^{{tree}}")]).as_str(),
+        "{status}"
+    );
+    assert_eq!(
+        provenance["base"],
+        git_out(&repo.root, &["merge-base", "master", &fork_head]).as_str(),
+        "the fork's own range starts at its merge base with the target: {status}"
+    );
+
+    // A fork's branch is a fork's branch: the change `--from-fork` created is
+    // not refused by the boundary, from any directory, and its ordinary
+    // blockers are what stand in the way.
+    for cwd in [&repo.root, &fork_checkout, &change_worktree] {
+        let checked = repo
+            .arc(cwd)
+            .args(["check", "promoted", "--json"])
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+        assert!(
+            !report["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|blocker| blocker["blocker"] == "fork-branch"),
+            "from {}: {report}",
+            cwd.display()
+        );
+        assert!(
+            report["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|blocker| blocker["blocker"] == "no-valid-approval"),
+            "fork review evidence is not this change's coverage: {report}"
+        );
+        repo.arc(cwd)
+            .args(["integrate", "promoted", "--dry-run"])
+            .assert()
+            .code(3)
+            .stderr(predicates::str::contains("fork worktree").not());
+    }
+
+    // The fork is untouched: same branch, same head, same worktree, live.
+    let forks = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(
+        forks["forks"][0]["worktree"],
+        fork_checkout.to_str().unwrap()
+    );
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "fork/demo"]),
+        fork_head,
+        "promotion must not move the fork"
+    );
+    assert!(forks["forks"][0].get("retired").is_none(), "{forks}");
+}
+
+/// Reading a promoted change surfaces the artifacts filed under the fork it
+/// came from: its review evidence, and the findings those artifacts left open.
+#[test]
+fn resume_surfaces_the_source_forks_journal_artifacts() {
+    let repo = Repo::new();
+    fork_with_work(&repo, "demo");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "promoted", "--from-fork", "demo"]),
+    );
+    let (_, review) = journal_artifact(
+        &repo,
+        "fork-demo",
+        "review",
+        "# Review of demo\n\nOne finding left open.\n",
+    );
+
+    let resumed = json_stdout(repo.arc(&repo.root).args(["resume", "promoted", "--json"]));
+    let artifacts = resumed["journal"]["from_fork_items"].as_array().unwrap();
+    assert!(
+        artifacts.iter().any(|item| item["file"] == review.as_str()),
+        "{resumed}"
+    );
+
+    let text = stdout(repo.arc(&repo.root).args(["resume", "promoted"]));
+    assert!(text.contains("## From Fork"), "{text}");
+    assert!(text.contains("Source head:"), "{text}");
+    assert!(text.contains("### From the fork"), "{text}");
+    assert!(text.contains(&review), "{text}");
+    assert!(
+        text.contains("not review coverage"),
+        "the link grants no credit and says so: {text}"
+    );
+}
+
+/// One fork can feed several changes: each owns its patchset and its link, and
+/// neither inherits coverage from the other.
+#[test]
+fn one_fork_can_feed_several_changes() {
+    let repo = Repo::new();
+    let (_, fork_head) = fork_with_work(&repo, "demo");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "first", "--from-fork", "demo"]),
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "second", "--from-fork", "demo"]),
+    );
+
+    for slug in ["first", "second"] {
+        let status = json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]));
+        assert_eq!(status["from_fork"]["slug"], "demo", "{status}");
+        assert_eq!(status["branch"], format!("arc/{slug}"), "{status}");
+        assert_eq!(status["from_fork"]["head"], fork_head.as_str(), "{status}");
+    }
+    assert_ne!(
+        git_out(&repo.root, &["rev-parse", "arc/first"]),
+        "",
+        "each change keeps its own branch ref"
+    );
+    assert_ne!(
+        git_out(&repo.root, &["rev-parse", "--abbrev-ref", "arc/second"]),
+        git_out(&repo.root, &["rev-parse", "--abbrev-ref", "fork/demo"]),
+    );
+
+    // Each change snapshots its own patchset, and an obligation declared for
+    // one lands on that change rather than on the fork.
+    let mut patchsets = Vec::new();
+    for slug in ["first", "second"] {
+        let worktree = repo.home.join(format!(".worktrees/repo-{slug}"));
+        repo.commit(
+            &worktree,
+            &format!("{slug}.txt"),
+            "work\n",
+            "test: change work",
+        );
+        stdout(repo.arc(&worktree).args(["snapshot", slug]));
+        let status = json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]));
+        patchsets.push((
+            status["change_id"].as_str().unwrap().to_string(),
+            status["latest_patchset"]["head"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        ));
+    }
+    assert_ne!(patchsets[0].0, patchsets[1].0, "two changes, two records");
+    assert_ne!(
+        patchsets[0].1, patchsets[1].1,
+        "each change snapshots its own patchset"
+    );
+
+    repo.arc(&repo.root)
+        .args([
+            "debt",
+            "first",
+            "--kind",
+            "independent-review",
+            "--reason",
+            "review owed",
+        ])
+        .assert()
+        .success();
+    let first = json_stdout(repo.arc(&repo.root).args(["status", "first", "--json"]));
+    assert_eq!(first["debt"]["reason"], "review owed", "{first}");
+    let second = json_stdout(repo.arc(&repo.root).args(["status", "second", "--json"]));
+    assert!(second["debt"].is_null(), "{second}");
+    let forks = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(forks["forks"].as_array().unwrap().len(), 1, "{forks}");
+    assert!(forks["forks"][0].get("debt").is_none(), "{forks}");
+}
+
+/// A fork with no commits of its own owes nothing to carry, and the promotion
+/// says so rather than inventing an empty range.
+#[test]
+fn begin_from_fork_with_no_commits_carries_nothing() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "empty"]));
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "promoted", "--from-fork", "empty"]),
+    );
+    assert!(
+        out.contains("from-fork: empty has no commits of its own to carry"),
+        "{out}"
+    );
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "promoted", "--json"]));
+    assert_eq!(
+        status["from_fork"]["base"], status["from_fork"]["head"],
+        "{status}"
+    );
+}
+
+/// `--from-fork` naming no fork refuses by name, and nothing is created.
+#[test]
+fn begin_from_fork_naming_no_fork_refuses() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "promoted", "--from-fork", "ghost"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains(
+            "no fork \"ghost\" is recorded here",
+        ))
+        .stderr(predicates::str::contains("arc fork list"));
+    let listed = json_stdout(repo.arc(&repo.root).args(["list", "--json"]));
+    assert!(listed.as_array().unwrap().is_empty(), "{listed}");
+}
+
+/// The flag opens its own branch, so combining it with the adopt path is a
+/// usage error rather than a half-promoted change.
+#[test]
+fn begin_from_fork_refuses_to_combine_with_adopt() {
+    let repo = Repo::new();
+    fork_with_work(&repo, "demo");
+    repo.arc(&repo.root)
+        .args([
+            "begin",
+            "promoted",
+            "--from-fork",
+            "demo",
+            "--adopt",
+            "fork/demo",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("cannot be combined with --adopt"));
+    let listed = json_stdout(repo.arc(&repo.root).args(["list", "--json"]));
+    assert!(listed.as_array().unwrap().is_empty(), "{listed}");
 }

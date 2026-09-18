@@ -815,6 +815,7 @@ mod tests {
             opened_model: None,
             opened_session: Some("session".into()),
             journal_ref: None,
+            from_fork: None,
             blocked_by: blocked_by.iter().map(|id| (*id).into()).collect(),
             tags: Vec::new(),
             assigned_to: None,

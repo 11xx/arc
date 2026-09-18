@@ -211,6 +211,11 @@ enum Cmd {
         /// Open from an actionable journal artifact, consuming it
         #[arg(long = "from-journal")]
         from_journal: Option<String>,
+        /// Open by promoting a fork's work onto a new branch, recording the
+        /// fork slug and the source base, head, and tree. The fork keeps its
+        /// branch, worktree, and marker; no review credit crosses the link
+        #[arg(long = "from-fork")]
+        from_fork: Option<String>,
         /// Require an independent verdict whatever this change turns out to
         /// touch. One-way: nothing lowers it afterwards
         #[arg(long)]
@@ -1984,6 +1989,7 @@ fn run(cli: Cli) -> Result<i32> {
             blocked_by,
             tag,
             from_journal,
+            from_fork,
             dangerous,
             iterating,
         } => {
@@ -2001,6 +2007,7 @@ fn run(cli: Cli) -> Result<i32> {
                 blocked_by,
                 tag,
                 from_journal,
+                from_fork,
                 dangerous,
                 iterating,
             )?;

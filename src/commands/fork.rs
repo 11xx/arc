@@ -565,6 +565,34 @@ fn describe(cwd: &Path, fork: &ForkIdentity, consumed: &HashSet<&str>) -> ForkEn
     }
 }
 
+/// What `begin --from-fork` reads from a fork: the branch, and the base,
+/// head, and tree its work stands at against a target. A promotion is a read
+/// of the fork, never a write: the fork keeps its branch, its worktree, and
+/// its marker, and one fork may feed several changes.
+pub fn promotion_source(
+    cwd: &Path,
+    slug: &str,
+    target_head: &str,
+) -> Result<crate::model::ForkProvenance> {
+    crate::ids::validate_slug(slug)?;
+    let Some(fork) = identity::by_branch(cwd, slug)? else {
+        bail!(
+            "no fork {slug:?} is recorded here; `arc fork list` names the forks \
+             there are"
+        );
+    };
+    let head = crate::gitio::rev_parse(cwd, fork.branch())?;
+    let tree = crate::gitio::git(cwd, &["rev-parse", &format!("{head}^{{tree}}")])?;
+    let base = crate::gitio::merge_base(cwd, target_head, &head)?;
+    Ok(crate::model::ForkProvenance {
+        slug: slug.to_string(),
+        branch: fork.branch().to_string(),
+        base,
+        head,
+        tree,
+    })
+}
+
 /// What a forced removal will destroy, as one line: untracked files, and
 /// tracked files carrying uncommitted modifications. A summary a reader can
 /// act on before the removal, never a refusal — `--force` already decided.
@@ -594,13 +622,13 @@ fn uncommitted_summary(worktree: &Path) -> String {
 
 /// The refusal `integrate` prints for a change on a fork's branch. It names
 /// the way out rather than only the wall: a fork merges when its operator
-/// moves the work, and the disposition is recorded, not gated.
+/// promotes the work, and the disposition is recorded, not gated.
 pub fn integrate_refusal(slug: &str) -> String {
     format!(
         "this is fork worktree {slug}: unintegrated by intent, so arc does not \
-         gate or merge it. Move the work onto a change from the base branch \
-         (or `git merge` from the target) when it is ready, and record the \
-         disposition with `arc fork retire {slug} <outcome>`."
+         gate or merge it. Promote the work onto a change with \
+         `arc begin <change> --from-fork {slug}` when it is ready, and record \
+         the disposition with `arc fork retire {slug} <outcome>`."
     )
 }
 
@@ -610,8 +638,8 @@ pub fn integrate_refusal(slug: &str) -> String {
 pub fn promotion_refusal(slug: &str) -> String {
     format!(
         "branch is fork {slug}: unintegrated by intent, so arc does not gate or \
-         merge it. Move the work onto a change from the base branch (or `git \
-         merge` from the target) when it is ready, and record the disposition \
-         with `arc fork retire {slug} <outcome>`."
+         merge it. Promote the work onto a change with \
+         `arc begin <change> --from-fork {slug}` when it is ready, and record \
+         the disposition with `arc fork retire {slug} <outcome>`."
     )
 }

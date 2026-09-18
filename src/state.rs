@@ -814,6 +814,11 @@ pub struct ChangeState {
     pub opened_session: Option<String>,
     /// Journal artifact this change was opened from, if any.
     pub journal_ref: Option<String>,
+    /// The fork `begin --from-fork` promoted work from, when one did. A
+    /// recorded link: no review credit, obligation, or lifecycle state
+    /// crosses it, and the fork survives the promotion untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_fork: Option<crate::model::ForkProvenance>,
     pub blocked_by: Vec<String>,
     pub tags: Vec<String>,
     pub assigned_to: Option<String>,
@@ -1233,6 +1238,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 blocked_by,
                 tags,
                 journal_ref,
+                from_fork,
                 dangerous,
             } => (
                 ChangeState {
@@ -1253,6 +1259,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     opened_model: ev.model.clone(),
                     opened_session: ev.session.clone(),
                     journal_ref: journal_ref.clone(),
+                    from_fork: from_fork.clone(),
                     blocked_by: blocked_by.clone(),
                     tags: tags.clone(),
                     assigned_to: None,
@@ -2747,6 +2754,7 @@ mod tests {
                 blocked_by: Vec::new(),
                 tags: Vec::new(),
                 journal_ref: None,
+                from_fork: None,
             },
         )
     }

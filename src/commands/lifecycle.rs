@@ -19,10 +19,14 @@ pub fn begin(
     blocked_by: Vec<String>,
     tags: Vec<String>,
     from_journal: Option<String>,
+    from_fork: Option<String>,
     dangerous: bool,
     iterating: bool,
 ) -> Result<()> {
     ids::validate_slug(slug)?;
+    if from_fork.is_some() && adopt.is_some() {
+        bail!("--from-fork opens the change's own branch; it cannot be combined with --adopt");
+    }
     // Promotion is one journal transition from the open preflight through the
     // superseding consume event. Holding the same guard across the Git and
     // ledger work prevents two callers from both passing the advisory source.
@@ -112,6 +116,13 @@ pub fn begin(
         );
     }
     let target_head = gitio::branch_head(&ctx.cwd, &target_branch)?;
+    // Read the promotion source before anything is created: a `--from-fork`
+    // naming no fork refuses by name, and the record is the fork as it stood
+    // at promotion rather than whatever it becomes while this runs.
+    let fork_provenance = match &from_fork {
+        Some(slug) => Some(super::fork::promotion_source(&ctx.cwd, slug, &target_head)?),
+        None => None,
+    };
 
     let change_id = ids::new_change_id(slug);
     let title = title.unwrap_or_else(|| slug.replace('-', " "));
@@ -283,6 +294,7 @@ pub fn begin(
             blocked_by,
             tags,
             journal_ref: from_journal.clone(),
+            from_fork: fork_provenance.clone(),
             dangerous,
         },
     );
@@ -356,6 +368,19 @@ pub fn begin(
         eprintln!("warning: could not register this project for cross-project views: {error:#}");
     }
 
+    if let Some(provenance) = &fork_provenance {
+        match worktree_path.as_deref() {
+            Some(path) => carry_fork_work(Path::new(path), provenance)?,
+            None => println!(
+                "from-fork: no checkout was created; replay {}'s commits with \
+                 `git cherry-pick {}..{}` in the change's checkout",
+                provenance.slug, provenance.base, provenance.head
+            ),
+        }
+        println!("from-fork: {} ({})", provenance.slug, provenance.branch);
+        println!("fork-head: {}", provenance.head);
+    }
+
     println!("change: {change_id}");
     println!("branch: {branch_name}");
     if let Some(wt) = worktree_path {
@@ -364,6 +389,35 @@ pub fn begin(
     if let Some((reason, command)) = no_worktree_advice {
         println!("{reason}");
         println!("next: `{command}`");
+    }
+    Ok(())
+}
+
+/// Replay a fork's own commits onto the change that promotes it, in the
+/// change's own checkout.
+///
+/// The change owns its patchset: no fork ref is merged, so every commit the
+/// target would receive is one the change's own branch holds. A conflict
+/// stops the promotion with the change open and the link recorded, and
+/// nothing carried — the operator replays the range by hand rather than arc
+/// choosing a resolution.
+fn carry_fork_work(worktree: &Path, provenance: &crate::model::ForkProvenance) -> Result<()> {
+    if provenance.base == provenance.head {
+        println!(
+            "from-fork: {} has no commits of its own to carry",
+            provenance.slug
+        );
+        return Ok(());
+    }
+    let range = format!("{}..{}", provenance.base, provenance.head);
+    if let Err(error) = gitio::git(worktree, &["cherry-pick", &range]) {
+        let _ = gitio::git(worktree, &["cherry-pick", "--abort"]);
+        bail!(
+            "the fork's commits ({range}) do not apply cleanly, so nothing was carried: \
+             {error}. The change is open with the promotion recorded; replay the range in \
+             {} with `git cherry-pick {range}`",
+            worktree.display()
+        );
     }
     Ok(())
 }

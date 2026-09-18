@@ -424,12 +424,16 @@ pub fn resume(
     let change_id = resolve_change_or_infer(&store, &ctx.cwd, reference)?;
     let (_, state) = ctx.load_state(&store, &change_id)?;
     let status = commands::status_output(ctx, &store, &state)?;
-    let journal = journal::context_for_change(ctx, &state.slug)?;
+    let journal = journal::context_for_change(
+        ctx,
+        &state.slug,
+        state.from_fork.as_ref().map(|fork| fork.slug.as_str()),
+    )?;
 
     if json || get.is_some() || fields.is_some() {
         commands::print_projected(
             serde_json::to_value(ResumeOutput {
-                schema: "arc-resume/4",
+                schema: "arc-resume/5",
                 status,
                 journal,
             })?,
@@ -500,6 +504,17 @@ pub fn resume(
             None => "unknown",
         }
     );
+    if let Some(fork) = &status.report.from_fork {
+        println!("\n## From Fork\n");
+        println!("- Fork: {} (`{}`)", fork.slug, fork.branch);
+        println!("- Source base: `{}`", fork.base);
+        println!("- Source head: `{}`", fork.head);
+        println!("- Source tree: `{}`", fork.tree);
+        println!(
+            "- The link records where the work came from. It is not review coverage: \
+             this change's own patchset, gates, and verdict are what integration reads."
+        );
+    }
     // Before findings: a rejected approach is worth more to a cold session
     // than an open defect, because nothing else will stop it being re-tried.
     println!("\n## Kept Context\n");

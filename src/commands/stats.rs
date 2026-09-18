@@ -971,6 +971,7 @@ mod tests {
                     blocked_by: Vec::new(),
                     tags: Vec::new(),
                     journal_ref: None,
+                    from_fork: None,
                 },
             ),
             event(
