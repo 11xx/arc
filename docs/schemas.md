@@ -20,7 +20,7 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-status/21` | `arc status` — the actionable state of one change, including dependencies, claim timing, blockers, `next_action`, the current review subject, the review map, advisories, the forge block, captured plan provenance, and the fork a promotion came from | commitment |
 | `arc-check/3` | `arc check --json` — every blocker with its exit code, plus never-blocking advisories | commitment |
 | `arc-inbox/9` | `arc inbox --json` — the lead-facing queue buckets across open changes | commitment |
-| `arc-catchup/5` | `arc catchup --json` — ledger buckets, journal lanes and shared inventory rows, memories, forks, and worktree cost | commitment |
+| `arc-catchup/6` | `arc catchup --json` — ledger buckets, journal lanes and shared inventory rows, memories, forks with what they hold, and worktree cost | commitment |
 | `arc-journal-catchup/6` | `arc journal catchup --json` — artifact storage/resolution facts and journal activity | commitment |
 | `arc-resume/5` | `arc resume --json` — one change's brief, live state, and journal context, including captured plan provenance and the source fork's artifacts | commitment |
 | `arc-brief/1` | `arc brief --json` — one selected brief and its immutable plan-source snapshot | commitment |
@@ -35,7 +35,7 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-stats/1` | `arc stats --json` — durations, counts, rework rounds, and suggested stage budgets | commitment |
 | `arc-stats-by-model/1` | `arc stats --by-model --json` — one row per delegated identity, a different shape rather than a wider one | commitment |
 | `arc-changelog/1` | `arc changelog --json` — the projected release copy for integrated changes | commitment |
-| `arc-forks/1` | `arc fork list --json` — every fork from markers and branches together | commitment |
+| `arc-forks/2` | `arc fork list --json` — every fork from markers and branches together, with its age, head, worktree dirty counts, and the changes promoted from it | commitment |
 | `arc-doctor/3` | `arc doctor --json` — the ledger health report, problems apart from advice | commitment |
 | `arc-workspace/1` | `arc workspace list --json` and `arc workspace inbox --json` — rows aggregated across registered projects | commitment |
 | `arc-workspace-backlog/13` | `arc workspace backlog --json` — what is blocked on a decision per project, with its scope stated | commitment |

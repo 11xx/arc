@@ -10,7 +10,7 @@
 //! every one of those inputs is repository-wide except in the state that
 //! exposed it.
 
-use super::{fork_branch, is_fork_branch, FORK_TOPIC_PREFIX};
+use super::{is_fork_branch, FORK_TOPIC_PREFIX};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -18,12 +18,16 @@ use std::path::{Path, PathBuf};
 #[derive(Clone)]
 pub(super) struct ForkMarker {
     filename: String,
+    slug: String,
     body: String,
 }
 
+/// The branch a marker records, whatever it is named. A fork arc created sits
+/// on `fork/<slug>`; an adopted fork keeps the name its operator gave it, and
+/// the marker is what makes that branch a fork.
 fn marker_branch(marker: &ForkMarker) -> Option<String> {
     let branch = marker_field(&marker.body, "branch")?;
-    is_fork_branch(&branch).then_some(branch)
+    (!branch.trim().is_empty()).then_some(branch)
 }
 
 /// Every fork marker in the journal, newest first: the path match wants the
@@ -37,8 +41,12 @@ fn fork_markers(dir: &Path) -> Vec<ForkMarker> {
             let name = entry.file_name().to_string_lossy().to_string();
             crate::journal::parse_artifact_name(&name)
                 .filter(|(_, topic, kind)| kind == "plan" && topic.starts_with(FORK_TOPIC_PREFIX))
-                .map(|_| ForkMarker {
+                .map(|(_, topic, _)| ForkMarker {
                     filename: name.clone(),
+                    slug: topic
+                        .strip_prefix(FORK_TOPIC_PREFIX)
+                        .unwrap_or(&topic)
+                        .to_string(),
                     body: std::fs::read_to_string(dir.join(&name)).unwrap_or_default(),
                 })
         })
@@ -115,20 +123,43 @@ pub(super) fn resolve_all(cwd: &Path) -> Result<Vec<ForkIdentity>> {
         cwd,
         &["branch", "--list", "--format=%(refname:short)", "fork/*"],
     )?;
-    let mut forks: Vec<ForkIdentity> = branches
+    // A fork arc created is named by its branch; a fork the operator adopted
+    // is named by its marker, and the branch may be called anything. Both are
+    // facts git holds, read here once.
+    let mut found: Vec<(String, String)> = branches
         .lines()
         .filter(|branch| is_fork_branch(branch))
-        .map(|branch| ForkIdentity {
-            slug: branch
+        .map(|branch| {
+            let slug = branch
                 .strip_prefix(crate::commands::fork::FORK_BRANCH_PREFIX)
                 .expect("filtered by is_fork_branch")
-                .to_string(),
-            branch: branch.to_string(),
+                .to_string();
+            (branch.to_string(), slug)
+        })
+        .collect();
+    for marker in &markers {
+        let Some(branch) = marker_branch(marker) else {
+            continue;
+        };
+        if found.iter().any(|(existing, _)| existing == &branch) {
+            continue;
+        }
+        // A marker for a branch that no longer exists names no fork: the
+        // branch is the fact, and a deleted one is not work arc can report.
+        if crate::gitio::branch_exists(cwd, &branch) {
+            found.push((branch, marker.slug().to_string()));
+        }
+    }
+    let mut forks: Vec<ForkIdentity> = found
+        .into_iter()
+        .map(|(branch, slug)| ForkIdentity {
+            slug,
             worktree: None,
             marker: markers
                 .iter()
-                .find(|marker| marker_branch(marker).as_deref() == Some(branch))
+                .find(|marker| marker_branch(marker).as_deref() == Some(branch.as_str()))
                 .cloned(),
+            branch,
         })
         .collect();
 
@@ -170,12 +201,24 @@ pub(super) fn by_current_path(cwd: &Path) -> Result<Option<ForkIdentity>> {
     }))
 }
 
-/// The fork a slug names, if the repository has one.
-pub(super) fn by_branch(cwd: &Path, slug: &str) -> Result<Option<ForkIdentity>> {
-    let branch = fork_branch(slug);
-    Ok(resolve_all(cwd)?
+/// The slug of the marker that records a branch, read from the journal
+/// alone. The refusal asks whether a branch is recorded as a fork, and that
+/// answer lives in the marker: no Git inventory is needed, so a report for a
+/// branch that is not a fork cannot fail because a worktree listing did.
+/// Newest marker first, so the most recent claim about a branch answers.
+pub(super) fn marker_slug_for_branch(cwd: &Path, branch: &str) -> Result<Option<String>> {
+    let dir = crate::journal::resolve_dir(cwd)?;
+    Ok(fork_markers(&dir)
         .into_iter()
-        .find(|fork| fork.branch == branch))
+        .find(|marker| marker_branch(marker).as_deref() == Some(branch))
+        .map(|marker| marker.slug().to_string()))
+}
+
+/// The fork a slug names, if the repository has one. The slug is the
+/// marker's identity, so an adopted fork resolves by the name it was
+/// recorded under rather than by the branch it happens to sit on.
+pub(super) fn by_branch(cwd: &Path, slug: &str) -> Result<Option<ForkIdentity>> {
+    Ok(resolve_all(cwd)?.into_iter().find(|fork| fork.slug == slug))
 }
 
 pub(super) fn marker_field(body: &str, key: &str) -> Option<String> {
@@ -185,6 +228,10 @@ pub(super) fn marker_field(body: &str, key: &str) -> Option<String> {
 }
 
 impl ForkMarker {
+    pub(super) fn slug(&self) -> &str {
+        &self.slug
+    }
+
     pub(super) fn filename(&self) -> &str {
         &self.filename
     }

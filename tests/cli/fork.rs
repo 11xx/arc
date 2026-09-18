@@ -18,14 +18,18 @@ fn change_on_fork_branch(repo: &Repo, slug: &str, branch: &str) -> String {
 }
 
 /// A fork is a worktree on a fork/<slug> branch with a journaled marker,
-/// outside the change lifecycle: catchup lists it, integrate refuses inside
-/// it, and the contract is printed where the operator reads it.
+/// outside the change lifecycle: catchup lists it, integrate refuses a change
+/// on its branch, and the contract is printed where the operator reads it.
 #[test]
 fn fork_begin_creates_worktree_marker_and_refuses_integration() {
     let repo = Repo::new();
     let out = stdout(repo.arc(&repo.root).args(["fork", "begin", "demo"]));
     assert!(out.contains("branch: fork/demo"), "{out}");
     assert!(out.contains("Fork contract:"), "{out}");
+    assert!(
+        out.contains("`arc integrate` refuses a change on a fork branch."),
+        "{out}"
+    );
 
     let worktree = fork_worktree(&repo, "demo");
     assert!(worktree.is_dir(), "worktree must exist");
@@ -67,12 +71,13 @@ fn fork_begin_creates_worktree_marker_and_refuses_integration() {
             "provide a change or at least one --tag",
         ));
 
-    // A second begin on the same slug points at the existing branch.
+    // A second begin on the same slug points at the recorded fork.
     repo.arc(&repo.root)
         .args(["fork", "begin", "demo"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("already exists"));
+        .stderr(predicates::str::contains("already recorded"))
+        .stderr(predicates::str::contains("arc fork adopt demo"));
 }
 
 /// The lifecycle closes: retirement records the disposition, removes the
@@ -356,7 +361,7 @@ fn fork_views_agree_about_retirement_and_catchup_json_carries_forks() {
         "{catchup_text}"
     );
     let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-    assert_eq!(catchup["schema"], "arc-catchup/5");
+    assert_eq!(catchup["schema"], "arc-catchup/6");
     assert!(catchup["forks"].as_array().unwrap().is_empty(), "{catchup}");
 
     stdout(repo.arc(&repo.root).args(["fork", "begin", "open-now"]));
@@ -488,7 +493,7 @@ fn fork_list_from_inside_a_fork_uses_the_primary_worktree_branch() {
     let primary_text = stdout(repo.arc(&repo.root).args(["fork", "list"]));
     assert!(primary_text.contains("+1 over main"), "{primary_text}");
     let primary = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
-    assert_eq!(primary["schema"], "arc-forks/1", "{primary}");
+    assert_eq!(primary["schema"], "arc-forks/2", "{primary}");
     assert_eq!(primary["forks"][0]["base_branch"], "main", "{primary}");
     assert_eq!(primary["forks"][0]["ahead"], 1, "{primary}");
 
@@ -613,7 +618,8 @@ fn fork_callers_agree_after_a_detached_branch_moves_worktrees() {
 
 /// Git keeps a prunable worktree entry after its checkout is deleted outside
 /// Git. Fork views must not turn that administrative record into a live path,
-/// and adopt must not report a surviving marker as already journaled there.
+/// and adopting the branch afterwards records the branch alone rather than a
+/// path that is not there.
 #[test]
 fn fork_list_and_adopt_ignore_a_prunable_deleted_worktree() {
     let repo = Repo::new();
@@ -628,13 +634,10 @@ fn fork_list_and_adopt_ignore_a_prunable_deleted_worktree() {
 
     let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
     assert!(listed["forks"][0]["worktree"].is_null(), "{listed}");
-
-    repo.arc(&repo.root)
-        .args(["fork", "adopt", "vanished"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("no live worktree"))
-        .stderr(predicates::str::contains("already journaled").not());
+    assert!(
+        listed["forks"][0].get("dirty_files").is_none(),
+        "no checkout means no counts, not zero: {listed}"
+    );
 }
 
 /// A marker is not a fork without the branch it names. Adopt must apply the
@@ -653,7 +656,7 @@ fn fork_adopt_refuses_after_its_branch_is_deleted() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "fork branch fork/gone does not exist",
+            "branch \"fork/gone\" does not exist",
         ));
 }
 
@@ -829,8 +832,10 @@ fn fork_refusal_preserves_a_slug_containing_fork_separator_text() {
         .args(["integrate", &change_id])
         .assert()
         .code(15)
-        .stderr(predicates::str::contains("fork worktree alpha-fork-beta"))
-        .stderr(predicates::str::contains("fork worktree beta").not());
+        .stderr(predicates::str::contains(
+            "branch fork/alpha-fork-beta is fork alpha-fork-beta's work",
+        ))
+        .stderr(predicates::str::contains("is fork beta's work").not());
 }
 
 /// A primary checkout has a .git directory rather than a linked-worktree
@@ -883,8 +888,10 @@ fn fork_retire_refuses_a_branch_that_never_existed() {
         .args(["fork", "retire", "never-made", "dropped: typo"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("fork/never-made"))
-        .stderr(predicates::str::contains("does not exist"));
+        .stderr(predicates::str::contains(
+            "no fork \"never-made\" is recorded",
+        ))
+        .stderr(predicates::str::contains("arc fork list"));
 
     let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
     assert!(
@@ -915,7 +922,9 @@ fn integrate_debt_does_not_record_an_obligation_for_a_fork_branch() {
         .args(["integrate", &change_id, "--debt", "no reviewer reachable"])
         .assert()
         .code(15)
-        .stderr(predicates::str::contains("fork worktree debt-context"));
+        .stderr(predicates::str::contains(
+            "branch fork/debt-context is fork debt-context's work",
+        ));
 
     let status = json_stdout(repo.arc(&repo.root).args(["status", &change_id, "--json"]));
     assert_ne!(status["debt_outstanding"], true, "{status}");
@@ -1427,7 +1436,9 @@ fn a_change_on_a_fork_branch_is_refused_from_every_directory() {
             .args(["integrate", &change_id])
             .assert()
             .code(15)
-            .stderr(predicates::str::contains("fork worktree demo"))
+            .stderr(predicates::str::contains(
+                "branch fork/demo is fork demo's work",
+            ))
             .stderr(predicates::str::contains("unintegrated by intent"));
     }
 
@@ -1826,4 +1837,379 @@ fn begin_from_fork_refuses_to_combine_with_adopt() {
         .stderr(predicates::str::contains("cannot be combined with --adopt"));
     let listed = json_stdout(repo.arc(&repo.root).args(["list", "--json"]));
     assert!(listed.as_array().unwrap().is_empty(), "{listed}");
+}
+
+/// A hand-made branch is adoptable under its own name: the marker records it,
+/// the branch is not renamed, and the fork is the same fork as one arc made.
+#[test]
+fn fork_adopt_takes_a_branch_that_is_not_named_fork_slug() {
+    let repo = Repo::new();
+    let worktree = repo.home.join(".worktrees/browser-control");
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/cu-browser-control",
+            worktree.to_str().unwrap(),
+            "master",
+        ],
+    );
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "fork",
+        "adopt",
+        "browser",
+        "--branch",
+        "work/cu-browser-control",
+    ]));
+    assert!(out.contains("adopted: browser"), "{out}");
+
+    // The branch keeps the name everybody else knows it by.
+    assert_eq!(
+        git_out(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "work/cu-browser-control"
+    );
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(listed["forks"][0]["slug"], "browser", "{listed}");
+    assert_eq!(
+        listed["forks"][0]["branch"], "work/cu-browser-control",
+        "{listed}"
+    );
+    assert_eq!(
+        listed["forks"][0]["worktree"],
+        worktree.to_str().unwrap(),
+        "{listed}"
+    );
+
+    // thread, retire, and integration all read the marker's branch.
+    let thread = stdout(repo.arc(&repo.root).args(["fork", "thread", "browser"]));
+    assert!(
+        thread.contains("branch: work/cu-browser-control"),
+        "{thread}"
+    );
+
+    let checked = repo
+        .arc(&repo.root)
+        .args(["fork", "retire", "browser", "dropped: superseded"])
+        .output()
+        .unwrap();
+    assert!(checked.status.success(), "{checked:?}");
+    assert!(!worktree.exists());
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "work/cu-browser-control"]),
+        repo.head(&repo.root),
+        "retire keeps the branch"
+    );
+}
+
+/// A branch with no checkout is still a fork: the marker records the branch,
+/// no path is invented, and the listing reports the worktree as absent with no
+/// counts at all.
+#[test]
+fn fork_adopt_takes_a_branch_with_no_worktree() {
+    let repo = Repo::new();
+    git(&repo.root, &["branch", "work/no-checkout"]);
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "fork",
+        "adopt",
+        "orphan",
+        "--branch",
+        "work/no-checkout",
+    ]));
+    assert!(out.contains("adopted: orphan (no worktree)"), "{out}");
+
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    let fork = &listed["forks"][0];
+    assert_eq!(fork["branch"], "work/no-checkout", "{listed}");
+    assert!(fork["worktree"].is_null(), "{listed}");
+    assert!(fork["dirty_files"].is_null(), "{listed}");
+    assert!(fork["untracked_files"].is_null(), "{listed}");
+
+    // A marker that names no path still names the fork, and it can be retired.
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["fork", "retire", "orphan", "dropped: no work"]),
+    );
+    assert!(out.contains("retired: orphan"), "{out}");
+}
+
+/// The boundary reads the marker: a change on a branch adopted under another
+/// name is refused from every directory, exactly as one on `fork/<slug>` is.
+/// Adoption now refuses an open change's branch, so the state it can no longer
+/// create is the fixture here: a marker over a branch that already held a
+/// change, which is what an arc without the guard left behind and what an
+/// independent reader has to be sure the blocker still catches.
+#[test]
+fn a_change_on_an_adopted_branch_is_refused_by_integrate() {
+    let repo = Repo::new();
+    let worktree = repo.home.join(".worktrees/adopted-work");
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/plain",
+            worktree.to_str().unwrap(),
+            "master",
+        ],
+    );
+    let change_id = opened_change_id(&stdout(repo.arc(&worktree).args([
+        "begin",
+        "promoted",
+        "--adopt",
+        "work/plain",
+        "--no-worktree",
+    ])));
+
+    // The marker an older arc would have journaled over the branch.
+    journal_artifact(
+        &repo,
+        "fork-demo",
+        "plan",
+        &format!(
+            "branch: work/plain\nworktree: {}\nstatus: adopted\n",
+            worktree.display()
+        ),
+    );
+
+    let unrelated = repo.home.join(".worktrees/unrelated");
+    fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "unrelated-branch",
+            unrelated.to_str().unwrap(),
+            "master",
+        ],
+    );
+
+    for cwd in [&repo.root, &worktree, &unrelated] {
+        let checked = repo
+            .arc(cwd)
+            .args(["check", &change_id, "--json"])
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+        assert!(
+            report["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|blocker| blocker["blocker"] == "fork-branch"),
+            "from {}: {report}",
+            cwd.display()
+        );
+        let status = json_stdout(repo.arc(cwd).args(["status", &change_id, "--json"]));
+        assert_eq!(status["fork"], "demo", "{status}");
+        repo.arc(cwd)
+            .args(["integrate", &change_id])
+            .assert()
+            .code(15)
+            .stderr(predicates::str::contains(
+                "branch work/plain is fork demo's work",
+            ));
+    }
+}
+
+/// `fork list` says what a fork holds: when it opened, how old it is, its
+/// head, whether its checkout has work arc cannot see, and what was promoted
+/// from it. A fresh empty fork and one carrying work read differently.
+#[test]
+fn fork_list_reports_what_a_fork_holds() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "fresh"]));
+    let fresh = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    let fresh = &fresh["forks"][0];
+    assert!(fresh["opened_at"].is_string(), "{fresh}");
+    assert!(fresh["age_seconds"].as_i64().unwrap() >= 0, "{fresh}");
+    assert!(fresh["head"].is_string(), "{fresh}");
+    assert_eq!(
+        fresh["dirty_files"], 0,
+        "a clean fork reports zero: {fresh}"
+    );
+    assert_eq!(fresh["untracked_files"], 0, "{fresh}");
+    assert_eq!(fresh["promoted"].as_array().unwrap().len(), 0, "{fresh}");
+
+    // Work inside the fork and uncommitted edits beside it.
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "working"]));
+    let worktree = fork_worktree(&repo, "working");
+    repo.commit(&worktree, "committed.txt", "committed\n", "test: fork work");
+    fs::write(worktree.join("untracked.txt"), "local\n").unwrap();
+    fs::write(worktree.join("README.md"), "edited\n").unwrap();
+
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    let working = listed["forks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fork| fork["slug"] == "working")
+        .unwrap();
+    assert_eq!(working["dirty_files"], 1, "{listed}");
+    assert_eq!(working["untracked_files"], 1, "{listed}");
+    assert_eq!(working["ahead"], 1, "{listed}");
+    assert_ne!(working["head"], fresh["head"], "{listed}");
+    assert!(
+        listed["forks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|fork| fork["promoted"].as_array().unwrap().is_empty()),
+        "nothing was promoted yet: {listed}"
+    );
+
+    // Promotion shows up against the fork that fed it.
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "promoted",
+        "--from-fork",
+        "working",
+    ])));
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    let working = listed["forks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fork| fork["slug"] == "working")
+        .unwrap();
+    assert_eq!(
+        working["promoted"].as_array().unwrap(),
+        &vec![serde_json::Value::String(change_id)],
+        "{listed}"
+    );
+}
+
+/// Adoption asks Git which checkout holds the branch, the same question the
+/// listing asks, so the path it reports is the path `fork list` reports — not
+/// a conventional location derived from a branch name that no longer implies
+/// one.
+#[test]
+fn fork_adopt_reports_the_worktree_git_records() {
+    let repo = Repo::new();
+    let worktree = repo.home.join(".worktrees/hand-made-place");
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    git(
+        &repo.root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/handmade",
+            worktree.to_str().unwrap(),
+            "master",
+        ],
+    );
+
+    let out = stdout(repo.arc(&repo.root).args([
+        "fork",
+        "adopt",
+        "handmade",
+        "--branch",
+        "work/handmade",
+    ]));
+    assert!(
+        out.contains(&format!("adopted: handmade at {}", worktree.display())),
+        "{out}"
+    );
+
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert_eq!(
+        listed["forks"][0]["worktree"],
+        worktree.to_str().unwrap(),
+        "{listed}"
+    );
+
+    // A branch with genuinely no checkout still reports none.
+    git(&repo.root, &["branch", "work/bare"]);
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["fork", "adopt", "bare", "--branch", "work/bare"]),
+    );
+    assert!(out.contains("adopted: bare (no worktree)"), "{out}");
+}
+
+/// A marker is what makes a branch a fork, so adopting an open change's branch
+/// would make that change unintegrable from every directory without touching
+/// the change — and nothing un-adopts a marker. The refusal names the change
+/// it would have bricked.
+#[test]
+fn fork_adopt_refuses_an_open_changes_branch() {
+    let repo = Repo::new();
+    let output = stdout(repo.arc(&repo.root).args(["begin", "later-fork"]));
+    let change_id = opened_change_id(&output);
+
+    repo.arc(&repo.root)
+        .args(["fork", "adopt", "lateradopt", "--branch", "arc/later-fork"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(&change_id))
+        .stderr(predicates::str::contains("(later-fork)"))
+        .stderr(predicates::str::contains("cannot adopt a change's branch"));
+
+    // Nothing was recorded, and the change reads exactly as it did.
+    let listed = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    assert!(listed["forks"].as_array().unwrap().is_empty(), "{listed}");
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "later-fork", "--json"]),
+    );
+    assert!(status.get("fork").is_none(), "{status}");
+    assert!(
+        !status["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["blocker"] == "fork-branch"),
+        "{status}"
+    );
+
+    // Closing the change releases the branch: the guard is the open record,
+    // not the branch name.
+    stdout(
+        repo.arc(&repo.root)
+            .args(["close", "later-fork", "--abandoned"]),
+    );
+    let out = stdout(repo.arc(&repo.root).args([
+        "fork",
+        "adopt",
+        "lateradopt",
+        "--branch",
+        "arc/later-fork",
+    ]));
+    assert!(out.contains("adopted: lateradopt"), "{out}");
+}
+
+/// The fork refusal binds to the change, so it states what the change records
+/// and never where the caller is standing: from the repository root, where no
+/// fork worktree is in play, the sentence is the same one the fork's own
+/// checkout prints.
+#[test]
+fn the_fork_refusal_is_about_the_change_not_the_callers_directory() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["fork", "begin", "demo"]));
+    let fork_checkout = fork_worktree(&repo, "demo");
+    let change_id = change_on_fork_branch(&repo, "promoted", "fork/demo");
+
+    for cwd in [&repo.root, &fork_checkout] {
+        let out = repo.arc(cwd).args(["check", &change_id]).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(15), "{text}");
+        assert!(
+            text.contains("branch fork/demo is fork demo's work"),
+            "from {}: {text}",
+            cwd.display()
+        );
+        assert!(
+            !text.contains("fork worktree"),
+            "the refusal must not claim the caller is in one: {text}"
+        );
+    }
 }

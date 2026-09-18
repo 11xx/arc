@@ -1315,10 +1315,15 @@ enum ForkCmd {
         #[arg(long)]
         from: Option<String>,
     },
-    /// Journal a marker for a hand-made fork/<slug> worktree
+    /// Journal a marker for a hand-made fork worktree
     Adopt {
-        /// The fork slug — the part of the branch name after fork/
+        /// The fork slug: the name the fork is recorded and retired under
         slug: String,
+        /// The branch this fork is; defaults to fork/<slug>, and an adopted
+        /// fork keeps whatever name it has. An open change's branch is
+        /// refused: a marker over it would make the change unintegrable
+        #[arg(long)]
+        branch: Option<String>,
         /// What the fork is for, recorded in the marker
         #[arg(long)]
         intent: Option<String>,
@@ -2705,7 +2710,11 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Cmd::Fork { command } => match command {
             ForkCmd::Begin { slug, from } => fork::begin(&ctx, &slug, from.as_deref()),
-            ForkCmd::Adopt { slug, intent } => fork::adopt(&ctx, &slug, intent.as_deref()),
+            ForkCmd::Adopt {
+                slug,
+                branch,
+                intent,
+            } => fork::adopt(&ctx, &slug, branch.as_deref(), intent.as_deref()),
             ForkCmd::Retire {
                 slug,
                 outcome,
