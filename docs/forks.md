@@ -9,8 +9,11 @@ hand-made one, `arc fork list` reports every fork from markers and branches
 together, and `arc fork retire <slug> <outcome>` records the disposition and
 removes the worktree while keeping the branch; removal refuses while the
 checkout holds work arc cannot see, and `--force` is the operator's decision
-to discard it. `arc integrate` refuses inside
-a fork worktree.
+to discard it. A fork's work is unintegrable, and that boundary binds to the
+change: a change whose branch is a fork's is refused by `arc integrate` and
+`arc check` from every directory, and `arc begin` refuses to open one. Where
+the caller stands decides nothing — an ordinary change integrates from inside
+a fork's worktree.
 
 `arc fork thread <slug>` prints the identity the marker recorded — harness,
 session, model, actor — and, for a harness with a stable resume form, the

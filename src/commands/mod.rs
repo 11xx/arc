@@ -437,6 +437,7 @@ impl Ctx {
             &policy,
             dependency_status(state, &states),
             changes_blocked_by(&state.change_id, &states),
+            fork::fork_slug_of_branch(&state.branch),
         )
     }
 
@@ -458,6 +459,7 @@ impl Ctx {
             changes_blocked_by(&state.change_id, &states),
             chrono::Utc::now(),
             Some(toplevel.as_path()),
+            fork::fork_slug_of_branch(&state.branch),
         )
     }
 }
