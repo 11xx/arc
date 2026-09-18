@@ -384,6 +384,26 @@ pub struct DebtProduction {
     pub following_brief: bool,
 }
 
+/// Where a promoted change's work came from: the fork it was taken from at
+/// the moment of promotion, recorded so a later reader can tell whether the
+/// fork moved afterwards. It is a link, not an obligation: no review credit
+/// crosses it, and the fork is neither consumed nor obligated by it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForkProvenance {
+    /// The fork's slug, as the repository recorded it.
+    pub slug: String,
+    /// The fork branch the work was read from.
+    pub branch: String,
+    /// The revision the fork's own commits start from: their merge base with
+    /// the change's target when the promotion ran.
+    pub base: String,
+    /// The fork head the work was taken from.
+    pub head: String,
+    /// The tree of that head, so a reader can tell the exact content the
+    /// promotion read even after the fork branch moves.
+    pub tree: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", rename_all = "kebab-case")]
 pub enum Payload {
@@ -404,6 +424,12 @@ pub enum Payload {
         /// Additive: absent for changes not begun via `--from-journal`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         journal_ref: Option<String>,
+        /// The fork `begin --from-fork` promoted work from. A recorded link
+        /// and nothing more: it grants no review credit, creates no
+        /// obligation on the fork or the change, and is not a lifecycle
+        /// state. Additive: absent for changes not begun via `--from-fork`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_fork: Option<ForkProvenance>,
         /// Raised at `begin` to demand an independent verdict whatever the
         /// change turns out to touch. One-way: nothing lowers it later.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]

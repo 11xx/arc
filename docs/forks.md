@@ -15,6 +15,17 @@ change: a change whose branch is a fork's is refused by `arc integrate` and
 the caller stands decides nothing — an ordinary change integrates from inside
 a fork's worktree.
 
+`arc begin <slug> --from-fork <fork>` is how fork work becomes a change: the
+new branch starts at the integration target and the fork's own commits are
+replayed onto it, and the recorded link names the fork slug and the source
+base, head, and tree. The fork keeps its branch, its worktree, and its
+marker, and one fork may feed several changes. The link is not review
+coverage: a fork's review evidence grants the change no credit, and the change
+still snapshots its own patchset, runs its own gates, and takes its own
+verdict. `arc resume` on a promoted change names the source and lists the
+artifacts filed under the fork's topic, where the fork's review evidence and
+the findings it left open live.
+
 `arc fork thread <slug>` prints the identity the marker recorded — harness,
 session, model, actor — and, for a harness with a stable resume form, the
 command that reopens that session. A field the marker does not carry prints

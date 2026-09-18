@@ -188,6 +188,19 @@ the target branch, and records it as the change worktree. A dirty checkout or
 one on another branch is left unchanged; the opening still succeeds and prints
 the next Git command.
 
+`arc begin <slug> --from-fork <fork>` opens the change from a fork's work:
+the new branch starts at the integration target and the fork's own commits are
+replayed onto it, while the recorded link names the fork slug and the source
+base, head, and tree. The fork keeps its branch, worktree, and marker, and it
+may feed several changes. A fork's review evidence is not this change's:
+promotion grants no credit, and the change still snapshots its own patchset,
+runs its own gates, and takes its own verdict. `arc resume` names the source
+and lists the artifacts filed under the fork's topic, where its review
+evidence and unresolved findings live. A change whose branch is a fork's is
+refused by `arc integrate` and `arc check` from every directory, and `arc
+begin` refuses to open one; both refusals name `--from-fork` as the supported
+promotion path.
+
 ## Landing a queue
 
 A queue repairs what needs no judgement and defers what does. Per member it
@@ -270,7 +283,7 @@ inject identity into other commands.
 
 `arc resume [CHANGE]` renders the latest brief, claim and stage, open findings,
 head gate state, next action, live journal lanes, and matching open journal
-items in one view. `--json` emits the versioned `arc-resume/4` schema with the
+items in one view. `--json` emits the versioned `arc-resume/5` schema with the
 existing status payload and a journal block. `arc prompt [CHANGE]` prints the
 stable one-line change summary used by statuslines, and exits successfully
 with no output outside a change worktree.
@@ -359,7 +372,7 @@ condition is reached, with a JSON diagnostic containing the winning
 watch conditions are checked in their supplied order and the first reached
 condition wins.
 
-`arc status <change>` prints the versioned `arc-status/20` JSON report —
+`arc status <change>` prints the versioned `arc-status/21` JSON report —
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, claim owner/activity/stage timing, snapshot
 provenance, a `review_subject` naming the exact identities the independence

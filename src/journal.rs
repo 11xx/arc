@@ -8161,6 +8161,12 @@ pub(crate) struct ContextJournalItem {
 pub(crate) struct ContextJournal {
     pub(crate) lanes: Vec<LaneEntry>,
     pub(crate) open_items: Vec<ContextJournalItem>,
+    /// Artifacts filed under the fork a change was promoted from, when one
+    /// was. A fork's review evidence and the findings it left open live in
+    /// artifacts rather than on a change that never existed, so a promoted
+    /// change reads its source's topic alongside its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) from_fork_items: Vec<ContextJournalItem>,
 }
 
 impl ContextJournal {
@@ -8199,19 +8205,40 @@ impl ContextJournal {
                 );
             }
         }
+        if !self.from_fork_items.is_empty() {
+            println!("\n### From the fork");
+            for item in &self.from_fork_items {
+                println!(
+                    "- {} [{}]{}",
+                    item.file,
+                    item.kind,
+                    item.heading
+                        .as_deref()
+                        .map(|heading| format!(" — {heading}"))
+                        .unwrap_or_default()
+                );
+            }
+        }
     }
 }
 
 /// Read the live lanes and unconsumed actionable journal items relevant to a
-/// change slug. This is advisory context for `arc resume`, never policy input.
-pub(crate) fn context_for_change(ctx: &Ctx, slug: &str) -> Result<ContextJournal> {
+/// change slug, plus the artifacts filed under the fork it was promoted from.
+/// This is advisory context for `arc resume`, never policy input.
+pub(crate) fn context_for_change(
+    ctx: &Ctx,
+    slug: &str,
+    fork_slug: Option<&str>,
+) -> Result<ContextJournal> {
     let dir = resolve_dir(&ctx.cwd)?;
     let events = read_events(&dir)?;
+    let fork_topic = fork_slug.map(|slug| format!("fork-{slug}"));
     let lanes = lanes_from_journal(&events, Utc::now())
         .into_iter()
         .filter(|lane| lane.state == "live")
         .collect();
     let mut open_items = Vec::new();
+    let mut from_fork_items = Vec::new();
     if dir.is_dir() {
         for entry in
             std::fs::read_dir(&dir).with_context(|| format!("cannot read {}", dir.display()))?
@@ -8220,18 +8247,29 @@ pub(crate) fn context_for_change(ctx: &Ctx, slug: &str) -> Result<ContextJournal
             let Some((_, topic, kind)) = parse_artifact_name(&name) else {
                 continue;
             };
-            if topic.contains(slug) && is_actionable_kind(&kind) && !is_consumed(&events, &name) {
-                open_items.push(ContextJournalItem {
-                    heading: first_heading(&dir.join(&name)),
-                    file: name,
-                    topic,
-                    kind,
-                });
+            if is_consumed(&events, &name) {
+                continue;
+            }
+            let item = ContextJournalItem {
+                heading: first_heading(&dir.join(&name)),
+                file: name,
+                topic: topic.clone(),
+                kind,
+            };
+            if fork_topic.as_deref() == Some(topic.as_str()) {
+                from_fork_items.push(item);
+            } else if topic.contains(slug) && is_actionable_kind(&item.kind) {
+                open_items.push(item);
             }
         }
     }
     open_items.sort_by(|left, right| right.file.cmp(&left.file));
-    Ok(ContextJournal { lanes, open_items })
+    from_fork_items.sort_by(|left, right| right.file.cmp(&left.file));
+    Ok(ContextJournal {
+        lanes,
+        open_items,
+        from_fork_items,
+    })
 }
 
 #[derive(Clone, Serialize)]

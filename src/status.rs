@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/20";
+pub const STATUS_SCHEMA: &str = "arc-status/21";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// A verdict graph with several tips has no authority to report, so the
@@ -503,6 +503,12 @@ pub struct StatusReport {
     pub opened_by: String,
     pub opened_harness: Option<String>,
     pub tags: Vec<String>,
+    /// The fork `begin --from-fork` promoted this change's work from, when
+    /// one did. The recorded link is the fork slug and the source base, head,
+    /// and tree the work was read from; it is not review coverage and not an
+    /// obligation. Additive in `arc-status/21`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_fork: Option<crate::model::ForkProvenance>,
     pub blocked_by: Vec<String>,
     pub assigned_to: Option<String>,
     pub priority: i32,
@@ -1547,6 +1553,7 @@ fn build_report(
         worktree: state.worktree.clone(),
         opened_by: state.opened_by.clone(),
         opened_harness: state.opened_harness.clone(),
+        from_fork: state.from_fork.clone(),
         tags: state.tags.clone(),
         blocked_by: state.blocked_by.clone(),
         assigned_to: state.assigned_to.clone(),
