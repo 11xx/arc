@@ -9487,7 +9487,7 @@ fn verification_stamp(
     })
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 pub(crate) struct OpenItems {
     dir: String,
     open: Vec<ArtifactEntry>,

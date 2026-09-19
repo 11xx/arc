@@ -165,7 +165,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/17");
+    assert_eq!(value["schema"], "arc-workspace-backlog/18");
     assert_eq!(value["scope"]["mode"], "global");
     assert_backlog_summary_matches_rows(&value);
     let project = value["projects"]
@@ -401,6 +401,145 @@ fn workspace_backlog_names_an_unreachable_project() {
         .unwrap_or_else(|| panic!("orphan not reported: {value}"));
     assert_eq!(stranded["anchor"], "/gone/away/project");
     assert_eq!(stranded["reason"], "anchor does not exist");
+
+    // The unreachable journal is a failed observation in the census, never an
+    // observed-empty project, and the command says the collection is partial.
+    assert_eq!(value["collection"]["failed"], 1, "{value}");
+    assert_eq!(value["collection"]["empty"], 0, "{value}");
+    let failure = value["collection"]["failures"]
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap();
+    assert_eq!(failure["component"], "anchor", "{value}");
+    assert!(
+        failure["reason"]
+            .as_str()
+            .unwrap()
+            .contains("anchor does not exist"),
+        "{value}"
+    );
+}
+
+/// The collection manifest counts discovered, selected, skipped, empty,
+/// non-empty, and failed projects, and a failed observation never reads as
+/// healthy emptiness.
+#[test]
+fn workspace_backlog_collection_manifest_counts_failures_and_empties() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let outer = TempDir::new().unwrap();
+    let shared_home = outer.path().join("home");
+    fs::create_dir_all(&shared_home).unwrap();
+    let shared = |repo: &Repo| {
+        let mut cmd = repo.arc(&repo.root);
+        cmd.env("HOME", &shared_home)
+            .env("ARC_SANDBOX", &shared_home);
+        cmd
+    };
+
+    let healthy = Repo::new();
+    shared(&healthy)
+        .args(["begin", "collection-healthy", "--no-worktree"])
+        .assert()
+        .success();
+
+    // Registered, no ledger and no artifacts: observed and empty.
+    let empty = Repo::new();
+    shared(&empty)
+        .args(["journal", "log", "registered", "exists"])
+        .assert()
+        .success();
+
+    // Registered journal whose event log cannot be read.
+    let broken = Repo::new();
+    shared(&broken)
+        .args(["journal", "log", "registered", "exists"])
+        .assert()
+        .success();
+    let broken_journal = PathBuf::from(stdout(shared(&broken).args(["journal", "dir"])).trim());
+    let events = broken_journal.join("events.jsonl");
+    assert!(events.is_file(), "{broken_journal:?}");
+    fs::set_permissions(&events, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let run = |args: &[&str]| -> (Option<i32>, serde_json::Value) {
+        let mut cmd = shared(&healthy);
+        cmd.args(["workspace", "backlog", "--json"]).args(args);
+        let output = cmd.output().unwrap();
+        let value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stdout)));
+        (output.status.code(), value)
+    };
+
+    let (code, value) = run(&[]);
+    assert_eq!(code, Some(16), "{value}");
+    let collection = &value["collection"];
+    assert_eq!(collection["discovered"], 3, "{value}");
+    assert_eq!(collection["selected"], 3, "{value}");
+    assert_eq!(collection["skipped"], 0, "{value}");
+    assert_eq!(collection["empty"], 1, "{value}");
+    assert_eq!(collection["non_empty"], 1, "{value}");
+    assert_eq!(collection["failed"], 1, "{value}");
+    assert_eq!(
+        collection["discovered"].as_u64().unwrap(),
+        collection["selected"].as_u64().unwrap() + collection["skipped"].as_u64().unwrap()
+    );
+    assert_eq!(
+        collection["selected"].as_u64().unwrap(),
+        collection["empty"].as_u64().unwrap()
+            + collection["non_empty"].as_u64().unwrap()
+            + collection["failed"].as_u64().unwrap()
+    );
+    let failure = collection["failures"].as_array().unwrap().first().unwrap();
+    assert_eq!(failure["component"], "journal", "{value}");
+    assert!(
+        failure["reason"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("permission"),
+        "{value}"
+    );
+
+    // The partial row survives beside the healthy one; the empty project is
+    // censused rather than listed.
+    let anchor_of = |repo: &Repo| fs::canonicalize(&repo.root).unwrap().display().to_string();
+    let anchors: Vec<&str> = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|project| project["anchor"].as_str().unwrap())
+        .collect();
+    assert!(anchors.contains(&anchor_of(&healthy).as_str()), "{value}");
+    assert!(anchors.contains(&anchor_of(&broken).as_str()), "{value}");
+    assert!(!anchors.contains(&anchor_of(&empty).as_str()), "{value}");
+    let broken_row = value["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["anchor"] == anchor_of(&broken).as_str())
+        .unwrap();
+    assert_eq!(broken_row["failures"][0]["component"], "journal", "{value}");
+
+    fs::set_permissions(&events, fs::Permissions::from_mode(0o644)).unwrap();
+
+    // A project outside the scope is skipped, not empty, and a partial report
+    // becomes a clean one when the failing project is out of scope.
+    let under = fs::canonicalize(&healthy.root)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .display()
+        .to_string();
+    let (code, value) = run(&["--under", &under]);
+    assert_eq!(code, Some(0), "{value}");
+    let collection = &value["collection"];
+    assert_eq!(collection["discovered"], 3, "{value}");
+    assert_eq!(collection["selected"], 1, "{value}");
+    assert_eq!(collection["skipped"], 2, "{value}");
+    assert_eq!(collection["empty"], 0, "{value}");
+    assert_eq!(collection["non_empty"], 1, "{value}");
+    assert_eq!(collection["failed"], 0, "{value}");
 }
 
 #[test]
@@ -517,7 +656,7 @@ fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
     let mut scoped = repo.arc(&workspace);
     scoped.args(["workspace", "backlog", "--here", "--json"]);
     let value = json_stdout(&mut scoped);
-    assert_eq!(value["schema"], "arc-workspace-backlog/17");
+    assert_eq!(value["schema"], "arc-workspace-backlog/18");
     assert_eq!(value["scope"]["mode"], "under");
     assert_eq!(
         value["scope"]["under"],
@@ -770,7 +909,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/17");
+    assert_eq!(value["schema"], "arc-workspace-backlog/18");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {
@@ -1452,7 +1591,7 @@ fn workspace_backlog_detail_hint_preserves_selection() {
         .env_remove("ARC_DATA_ROOT");
     let spaced_output = spaced_shell.output().unwrap();
     assert!(
-        spaced_output.status.success(),
+        matches!(spaced_output.status.code(), Some(0) | Some(16)),
         "{spaced_hint}: {spaced_output:?}"
     );
     serde_json::from_slice::<serde_json::Value>(&spaced_output.stdout)
@@ -1550,11 +1689,13 @@ fn workspace_backlog_detail_hint_preserves_selection() {
         "{text}"
     );
 
-    // JSON stays one parseable value: no footer may ride along.
+    // JSON stays one parseable value: no footer may ride along. The project
+    // anchor moved with the fixture, so the collection is partial and exits
+    // 16; the value must still parse.
     repo.arc(&repo_root)
         .args(["workspace", "backlog", "--items", "--json"])
         .assert()
-        .success();
+        .code(16);
     let text = stdout(
         repo.arc(&repo_root)
             .args(["workspace", "backlog", "--items", "--json"]),
@@ -1601,7 +1742,7 @@ fn workspace_backlog_timestamp_interpretation_is_explicit() {
         "20260601T000000Z",
     ]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/17");
+    assert_eq!(value["schema"], "arc-workspace-backlog/18");
     let selection = &value["selection"];
     assert_eq!(selection["since"], "2026-06-01T00:00:00Z", "{}", selection);
     assert_eq!(selection["journal_counts"], "arrivals");
@@ -2245,7 +2386,7 @@ fn workspace_backlog_ranks_by_a_declared_fact_and_keeps_them_separate() {
     };
 
     let value = report(&[]);
-    assert_eq!(value["schema"], "arc-workspace-backlog/17");
+    assert_eq!(value["schema"], "arc-workspace-backlog/18");
     assert_eq!(value["ordering"]["basis"], "blocking", "{value}");
     assert_eq!(value["ordering"]["direction"], "descending");
 
@@ -2305,7 +2446,7 @@ fn workspace_backlog_keeps_held_only_and_deferred_only_projects() {
         held.arc(&held.root)
             .args(["workspace", "backlog", "--json"]),
     );
-    assert_eq!(value["schema"], "arc-workspace-backlog/17");
+    assert_eq!(value["schema"], "arc-workspace-backlog/18");
     let projects = value["projects"].as_array().unwrap();
     assert_eq!(projects.len(), 1, "{value}");
     let held_rows = projects[0]["changes"]["held"].as_array().unwrap();
@@ -2653,7 +2794,7 @@ fn workspace_backlog_keeps_unjournaled_forks_visible() {
 /// A failed branch inventory is an unreadable observation, not an empty fork
 /// list. The workspace command carries the project context to its caller.
 #[test]
-fn workspace_backlog_propagates_fork_inventory_failure() {
+fn workspace_backlog_retains_a_fork_inventory_failure() {
     use std::os::unix::fs::PermissionsExt;
 
     let repo = Repo::new();
@@ -2698,24 +2839,60 @@ exec \"$ARC_REAL_GIT\" \"$@\"\n",
         .stderr(predicates::str::contains(
             "simulated-fork-inventory-failure",
         ));
-    repo.arc(&repo.root)
+    // A failed fork inventory no longer aborts the collection: the project
+    // keeps the facts that were read, the failure is named, and the exit code
+    // says the report is partial.
+    let assert = repo
+        .arc(&repo.root)
         .env("PATH", &path)
         .env("ARC_REAL_GIT", &real_git)
         .args(["workspace", "backlog", "--json"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("cannot inventory forks for"))
-        .stderr(predicates::str::contains(
-            "simulated-fork-inventory-failure",
-        ));
-    repo.arc(&repo.root)
+        .code(16);
+    let value: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(value["collection"]["failed"], 1, "{value}");
+    let failure = value["collection"]["failures"]
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap();
+    assert_eq!(failure["component"], "forks", "{value}");
+    assert!(
+        failure["reason"]
+            .as_str()
+            .unwrap()
+            .contains("cannot inventory forks for"),
+        "{value}"
+    );
+    assert!(
+        failure["reason"]
+            .as_str()
+            .unwrap()
+            .contains("simulated-fork-inventory-failure"),
+        "{value}"
+    );
+    let assert = repo
+        .arc(&repo.root)
         .env("PATH", &path)
         .env("ARC_REAL_GIT", &real_git)
         .env("ARC_FAIL_GIT_DISCOVERY", "1")
         .args(["workspace", "backlog", "--json"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("simulated-git-discovery-failure"));
+        .code(16);
+    let value: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let failure = value["collection"]["failures"]
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap();
+    assert_eq!(failure["component"], "forks", "{value}");
+    assert!(
+        failure["reason"]
+            .as_str()
+            .unwrap()
+            .contains("simulated-git-discovery-failure"),
+        "{value}"
+    );
 }
 
 /// Opening and closing question subtotals describe the active decision set;

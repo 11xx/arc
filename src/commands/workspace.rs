@@ -299,10 +299,10 @@ fn repo_states(store: &Store) -> Result<BTreeMap<String, ChangeState>> {
     Ok(states)
 }
 
-pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<()> {
+pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
     match view {
-        WorkspaceView::List => workspace_list(&workspace_stores()?, json),
-        WorkspaceView::Inbox { scope } => workspace_inbox(ctx, scope, json),
+        WorkspaceView::List => workspace_list(&workspace_stores()?, json).map(|()| 0),
+        WorkspaceView::Inbox { scope } => workspace_inbox(ctx, scope, json).map(|()| 0),
         WorkspaceView::Backlog {
             since,
             items,
@@ -462,6 +462,10 @@ struct Backlog {
     /// The fact the project order was taken from, so a consumer reads the
     /// basis rather than inferring one.
     ordering: Ordering,
+    /// What was discovered, selected, skipped, observed empty, observed with
+    /// facts, and failed. `discovered = selected + skipped`, and
+    /// `selected = empty + non_empty + failed`.
+    collection: CollectionManifest,
     /// How the journal tiers were selected: the cutoff, what the counts mean,
     /// and whether undated rows ride inside them. The scope object stands
     /// beside it unchanged.
@@ -477,6 +481,48 @@ struct Ordering {
     /// `blocking`, `availability`, or `coverage`.
     basis: &'static str,
     direction: &'static str,
+}
+
+/// What the collection observed and what it could not: the boundary every
+/// count in the report is relative to, and the failures that make this report
+/// partial. A failed project still contributes the components that were read,
+/// so a failure never reads as healthy emptiness.
+#[derive(Serialize)]
+struct CollectionManifest {
+    /// Registry projects in the observed universe.
+    discovered: usize,
+    /// Projects the scope selected for observation.
+    selected: usize,
+    /// Projects outside the scope.
+    skipped: usize,
+    /// Selected projects observed with no facts at all.
+    empty: usize,
+    /// Selected projects observed with at least one fact and no failure.
+    non_empty: usize,
+    /// Selected projects with at least one failed component, unreachable
+    /// anchors included.
+    failed: usize,
+    /// One entry per failed component; a project may name several.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failures: Vec<CollectionFailure>,
+}
+
+#[derive(Serialize)]
+struct CollectionFailure {
+    project: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor: Option<String>,
+    /// `anchor`, `ledger`, `changes`, `journal`, or `forks`.
+    component: &'static str,
+    reason: String,
+}
+
+/// One component of a project observation that could not be read. The rest of
+/// the row still reports what it could.
+#[derive(Serialize)]
+struct ComponentFailure {
+    component: &'static str,
+    reason: String,
 }
 
 #[derive(Serialize)]
@@ -832,6 +878,11 @@ struct ProjectBacklog {
     /// disagree. Absent unless asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
     items: Option<BacklogItems>,
+    /// Components of this observation that failed. The row still reports
+    /// what was read; an empty bucket beside a listed failure is not
+    /// evidence of emptiness.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    failures: Vec<ComponentFailure>,
 }
 
 /// `skip_serializing_if` needs a path; a one-arm impl names the predicate.
@@ -924,6 +975,185 @@ fn identity_text(
     parts.join(", ")
 }
 
+/// Observe one reachable project into its backlog row.
+///
+/// Components are read independently: a failed ledger read still leaves the
+/// journal facts readable, and each failure is named on the row so the empty
+/// half cannot pass for an empty project.
+fn project_row(
+    ctx: &Ctx,
+    project: &crate::registry::Project,
+    anchor: &Path,
+    cutoff: Option<chrono::DateTime<chrono::Utc>>,
+    show_items: bool,
+) -> ProjectBacklog {
+    let mut failures: Vec<ComponentFailure> = Vec::new();
+
+    let (queues, changes) = match &project.ledger {
+        Some(root) => {
+            let queues = match ledger_queues(root) {
+                Ok(queues) => queues,
+                Err(error) => {
+                    failures.push(ComponentFailure {
+                        component: "ledger",
+                        reason: format!("{error:#}"),
+                    });
+                    LedgerQueues::default()
+                }
+            };
+            let changes = match Store::open_at(root) {
+                Ok(Some(store)) => match observe_changes(ctx, &store, anchor) {
+                    Ok(inbox) => inbox,
+                    Err(error) => {
+                        failures.push(ComponentFailure {
+                            component: "changes",
+                            reason: format!("{error:#}"),
+                        });
+                        crate::inbox::Inbox::new(None)
+                    }
+                },
+                Ok(None) => crate::inbox::Inbox::new(None),
+                Err(error) => {
+                    failures.push(ComponentFailure {
+                        component: "ledger",
+                        reason: format!("{error:#}"),
+                    });
+                    crate::inbox::Inbox::new(None)
+                }
+            };
+            (queues, changes)
+        }
+        None => (LedgerQueues::default(), crate::inbox::Inbox::new(None)),
+    };
+
+    let open_queue = match crate::journal::collect_open_in(ctx, &project.journal_dir, anchor, None)
+    {
+        Ok(queue) => queue,
+        Err(error) => {
+            failures.push(ComponentFailure {
+                component: "journal",
+                reason: format!("{error:#}"),
+            });
+            crate::journal::OpenItems::default()
+        }
+    };
+
+    // Under --since the counts mean "filed since", not "outstanding": a
+    // delta that reported the whole queue beside a delta heading would read
+    // as a full report and be believed as one. Rows whose stamp does not
+    // parse ride inside the tiers either way and are mirrored into their
+    // own count, so the inclusion is a stated fact.
+    let tiers = crate::journal::TierSelection::of(&open_queue, cutoff);
+    let open_items = tiers.open.len();
+    let later_items = tiers.later.len();
+    let feature_requests = tiers.feature_requests.len();
+    let unknown_rows: Vec<crate::journal::ArtifactEntry> = tiers
+        .unknown_time
+        .iter()
+        .map(|entry| (*entry).clone())
+        .collect();
+    let backlog_items = if show_items {
+        Some(BacklogItems {
+            open: tiers.open.iter().map(|entry| (*entry).clone()).collect(),
+            later: tiers.later.iter().map(|entry| (*entry).clone()).collect(),
+            feature_requests: tiers
+                .feature_requests
+                .iter()
+                .map(|entry| (*entry).clone())
+                .collect(),
+        })
+    } else {
+        None
+    };
+    // Question obligations are reported in full, like review and debt:
+    // only the journal artifact tiers are filtered by --since, because a
+    // decision that predates a delta can still be blocking work now.
+    let questions = open_queue.questions.clone();
+    let (opening_question_count, closing_question_count) = questions
+        .iter()
+        .filter(|entry| entry.disposition == crate::journal::QuestionDisposition::Open)
+        .fold((0, 0), |(opening, closing), entry| {
+            if entry.question.placement == "opening" {
+                (opening + 1, closing)
+            } else {
+                (opening, closing + 1)
+            }
+        });
+    let decision_questions = opening_question_count + closing_question_count;
+    // Fork inventory uses the same read-only resolver as `fork list`,
+    // run from the project's anchor: no checkouts are created, no forks
+    // retired, and no readiness is inferred. A reachable non-Git anchor
+    // has journal facts but no repository fork namespace, so it has no
+    // inventory to query. A Git repository is probed independently of
+    // its ledger: a failed inventory is returned with project context,
+    // an unreadable ahead count stays null rather than becoming zero,
+    // and retired forks remain history.
+    let forks: Vec<crate::commands::fork::ForkEntry> = match has_git_repository(anchor) {
+        Ok(false) => Vec::new(),
+        Ok(true) => {
+            let fork_ctx = ctx.with_cwd(anchor.to_path_buf());
+            match crate::commands::fork::list_entries(&fork_ctx) {
+                Ok(entries) => entries
+                    .into_iter()
+                    .filter(|entry| entry.retired.is_none())
+                    .collect(),
+                Err(error) => {
+                    failures.push(ComponentFailure {
+                        component: "forks",
+                        reason: format!(
+                            "cannot inventory forks for {}: {error:#}",
+                            anchor.display()
+                        ),
+                    });
+                    Vec::new()
+                }
+            }
+        }
+        Err(error) => {
+            failures.push(ComponentFailure {
+                component: "forks",
+                reason: format!("cannot inventory forks for {}: {error:#}", anchor.display()),
+            });
+            Vec::new()
+        }
+    };
+    let fork_count = forks.len();
+    let blocking = queues.needs_review.len() + decision_questions;
+    let availability = open_items;
+    let coverage = queues.debt_owed.len();
+    ProjectBacklog {
+        project: project.label(),
+        anchor: anchor.display().to_string(),
+        journal_dir: project.journal_dir.display().to_string(),
+        blocking,
+        availability,
+        coverage,
+        needs_review: queues.needs_review,
+        no_patchset: queues.no_patchset,
+        shared_surfaces: queues.shared_surfaces,
+        debt_owed: queues.debt_owed,
+        open_items,
+        later_items,
+        feature_requests,
+        changes,
+        unknown_time_items: unknown_rows,
+        open_questions: questions,
+        decision_questions,
+        opening_question_count,
+        closing_question_count,
+        forks,
+        fork_count,
+        // Age is a property of the whole queue, so it would contradict
+        // counts that mean "filed since". A delta reports arrivals only.
+        oldest_open_days: cutoff
+            .is_none()
+            .then(|| open_queue.oldest_open_days())
+            .flatten(),
+        items: backlog_items,
+        failures,
+    }
+}
+
 /// One backlog across every project the registry knows, ledger and journal
 /// together.
 ///
@@ -938,7 +1168,7 @@ fn workspace_backlog(
     show_unreachable: bool,
     rank_by: RankBasis,
     json: bool,
-) -> Result<()> {
+) -> Result<i32> {
     let cfg = crate::config::load()?;
     let scope = ResolvedWorkspaceScope::resolve(scope)?;
     let cutoff = match since {
@@ -963,142 +1193,70 @@ fn workspace_backlog(
     };
     let mut projects = Vec::new();
     let mut unreachable = Vec::new();
+    let mut failures: Vec<CollectionFailure> = Vec::new();
+    let mut discovered = 0usize;
+    let mut selected = 0usize;
+    let mut skipped = 0usize;
+    let mut empty = 0usize;
+    let mut non_empty = 0usize;
+    let mut failed = 0usize;
     let observed_at = chrono::Utc::now();
 
     for project in crate::registry::projects(&cfg)? {
+        discovered += 1;
         if !scope.includes(project.anchor.as_deref()) {
+            skipped += 1;
             continue;
         }
+        selected += 1;
         if !project.reachable {
             // An orphan holds work nobody can reach; a merely empty journal at
-            // a vanished path is housekeeping, not a finding.
+            // a vanished path is housekeeping, not a finding. Either way the
+            // census counts it as a failed observation, because an anchor that
+            // is not there is not a project with no work.
+            let reason = match project.anchor {
+                Some(_) => "anchor does not exist",
+                None => "journal name resolves to no single path",
+            };
             if project.is_orphan() {
                 unreachable.push(UnreachableProject {
                     slug: project.slug.clone(),
                     journal_dir: project.journal_dir.display().to_string(),
                     anchor: project.anchor.as_ref().map(|p| p.display().to_string()),
-                    reason: match project.anchor {
-                        Some(_) => "anchor does not exist",
-                        None => "journal name resolves to no single path",
-                    },
+                    reason,
                 });
             }
+            failures.push(CollectionFailure {
+                project: project.label(),
+                anchor: project.anchor.as_ref().map(|p| p.display().to_string()),
+                component: "anchor",
+                reason: reason.to_string(),
+            });
+            failed += 1;
             continue;
         }
         let anchor = project
             .anchor
             .clone()
             .expect("a reachable project has an anchor");
-
-        let queues = match &project.ledger {
-            Some(root) => ledger_queues(root)?,
-            None => LedgerQueues::default(),
-        };
-        let changes = match &project.ledger {
-            Some(root) => match Store::open_at(root)? {
-                Some(store) => observe_changes(ctx, &store, &anchor)?,
-                None => crate::inbox::Inbox::new(None),
-            },
-            None => crate::inbox::Inbox::new(None),
-        };
-
-        let open_queue = crate::journal::collect_open_in(ctx, &project.journal_dir, &anchor, None)?;
-        // Under --since the counts mean "filed since", not "outstanding": a
-        // delta that reported the whole queue beside a delta heading would read
-        // as a full report and be believed as one. Rows whose stamp does not
-        // parse ride inside the tiers either way and are mirrored into their
-        // own count, so the inclusion is a stated fact.
-        let tiers = crate::journal::TierSelection::of(&open_queue, cutoff);
-        let open_items = tiers.open.len();
-        let later_items = tiers.later.len();
-        let feature_requests = tiers.feature_requests.len();
-        let unknown_rows: Vec<crate::journal::ArtifactEntry> = tiers
-            .unknown_time
-            .iter()
-            .map(|entry| (*entry).clone())
-            .collect();
-        let backlog_items = if show_items {
-            Some(BacklogItems {
-                open: tiers.open.iter().map(|entry| (*entry).clone()).collect(),
-                later: tiers.later.iter().map(|entry| (*entry).clone()).collect(),
-                feature_requests: tiers
-                    .feature_requests
-                    .iter()
-                    .map(|entry| (*entry).clone())
-                    .collect(),
-            })
-        } else {
-            None
-        };
-        // Question obligations are reported in full, like review and debt:
-        // only the journal artifact tiers are filtered by --since, because a
-        // decision that predates a delta can still be blocking work now.
-        let questions = open_queue.questions.clone();
-        let (opening_question_count, closing_question_count) = questions
-            .iter()
-            .filter(|entry| entry.disposition == crate::journal::QuestionDisposition::Open)
-            .fold((0, 0), |(opening, closing), entry| {
-                if entry.question.placement == "opening" {
-                    (opening + 1, closing)
-                } else {
-                    (opening, closing + 1)
-                }
+        let entry = project_row(ctx, &project, &anchor, cutoff, show_items);
+        for failure in &entry.failures {
+            failures.push(CollectionFailure {
+                project: project.label(),
+                anchor: Some(anchor.display().to_string()),
+                component: failure.component,
+                reason: failure.reason.clone(),
             });
-        let decision_questions = opening_question_count + closing_question_count;
-        // Fork inventory uses the same read-only resolver as `fork list`,
-        // run from the project's anchor: no checkouts are created, no forks
-        // retired, and no readiness is inferred. A reachable non-Git anchor
-        // has journal facts but no repository fork namespace, so it has no
-        // inventory to query. A Git repository is probed independently of
-        // its ledger: a failed inventory is returned with project context,
-        // an unreadable ahead count stays null rather than becoming zero,
-        // and retired forks remain history.
-        let forks: Vec<crate::commands::fork::ForkEntry> = match has_git_repository(&anchor)? {
-            false => Vec::new(),
-            true => {
-                let fork_ctx = ctx.with_cwd(anchor.clone());
-                crate::commands::fork::list_entries(&fork_ctx)
-                    .with_context(|| format!("cannot inventory forks for {}", anchor.display()))?
-                    .into_iter()
-                    .filter(|entry| entry.retired.is_none())
-                    .collect()
-            }
-        };
-        let fork_count = forks.len();
-        let blocking = queues.needs_review.len() + decision_questions;
-        let availability = open_items;
-        let coverage = queues.debt_owed.len();
-        let entry = ProjectBacklog {
-            project: project.label(),
-            anchor: anchor.display().to_string(),
-            journal_dir: project.journal_dir.display().to_string(),
-            blocking,
-            availability,
-            coverage,
-            needs_review: queues.needs_review,
-            no_patchset: queues.no_patchset,
-            shared_surfaces: queues.shared_surfaces,
-            debt_owed: queues.debt_owed,
-            open_items,
-            later_items,
-            feature_requests,
-            changes,
-            unknown_time_items: unknown_rows,
-            open_questions: questions,
-            decision_questions,
-            opening_question_count,
-            closing_question_count,
-            forks,
-            fork_count,
-            // Age is a property of the whole queue, so it would contradict
-            // counts that mean "filed since". A delta reports arrivals only.
-            oldest_open_days: cutoff
-                .is_none()
-                .then(|| open_queue.oldest_open_days())
-                .flatten(),
-            items: backlog_items,
-        };
-        if !entry.is_empty() {
+        }
+        if !entry.failures.is_empty() {
+            // A project whose read failed is neither empty nor healthy: its
+            // partial facts stay in the report beside the named failure.
+            failed += 1;
+            projects.push(entry);
+        } else if entry.is_empty() {
+            empty += 1;
+        } else {
+            non_empty += 1;
             projects.push(entry);
         }
     }
@@ -1112,12 +1270,22 @@ fn workspace_backlog(
             .then_with(|| a.project.cmp(&b.project))
     });
     let summary = BacklogSummary::derive(&projects, &unreachable);
+    let collection = CollectionManifest {
+        discovered,
+        selected,
+        skipped,
+        empty,
+        non_empty,
+        failed,
+        failures,
+    };
+    let partial = collection.failed > 0;
 
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/17",
+                schema: "arc-workspace-backlog/18",
                 scope: scope.view(),
                 observation: Observation {
                     started_at: observed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -1125,6 +1293,7 @@ fn workspace_backlog(
                         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                     consistency: "sequential",
                 },
+                collection,
                 ordering: Ordering {
                     basis: rank_by.as_str(),
                     direction: "descending",
@@ -1143,11 +1312,26 @@ fn workspace_backlog(
                 unreachable,
             })?
         );
-        return Ok(());
+        return Ok(if partial { 16 } else { 0 });
     }
 
     println!("scope: {}", scope.text());
     println!("ordering: {} (descending)", rank_by.as_str());
+    println!(
+        "collection: {} discovered, {} selected ({} skipped); {} non-empty, {} empty, {} failed",
+        collection.discovered,
+        collection.selected,
+        collection.skipped,
+        collection.non_empty,
+        collection.empty,
+        collection.failed
+    );
+    for failure in &collection.failures {
+        println!(
+            "  failed {} [{}]: {}",
+            failure.project, failure.component, failure.reason
+        );
+    }
     if let Some(raw) = since {
         println!("since {raw}: journal counts are what was filed since, not what is outstanding");
         if summary.unknown_time_items > 0 {
@@ -1163,7 +1347,7 @@ fn workspace_backlog(
         // Over an empty scope too: this is when a reader is likeliest to
         // wonder whether the query found nothing or the report was trimmed.
         println!("detail: {}", selection.detail_command());
-        return Ok(());
+        return Ok(if partial { 16 } else { 0 });
     }
     for project in &projects {
         println!("# {} ({})", project.project, project.anchor);
@@ -1362,7 +1546,7 @@ fn workspace_backlog(
     // human path carries it: JSON is one parseable value and must not grow a
     // trailing line.
     println!("detail: {}", selection.detail_command());
-    Ok(())
+    Ok(if partial { 16 } else { 0 })
 }
 
 /// The two ledger buckets a lead reads across projects: what awaits a verdict,

@@ -1396,7 +1396,8 @@ enum WorkspaceCmd {
         json: bool,
     },
     /// Ledger and journal backlog across every project, ranked by what is
-    /// blocked on a decision rather than on work
+    /// blocked on a decision rather than on work. A partial collection keeps
+    /// the projects it did read, names each failure, and exits 16
     Backlog {
         /// Count only journal items filed at or after this journal stamp
         /// (20260101T000000Z) or RFC 3339 timestamp, so the tiers read as
@@ -3150,8 +3151,8 @@ fn run(cli: Cli) -> Result<i32> {
                     json,
                 ),
             };
-            commands::workspace(&ctx, view, json)?;
-            Ok(0)
+            let code = commands::workspace(&ctx, view, json)?;
+            Ok(code)
         }
         Cmd::Restack { change, advise } => {
             let change = infer(change.as_deref())?;

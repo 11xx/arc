@@ -841,6 +841,8 @@ EXIT CODES
       does not match, appending no event.
     `arc history resolve` exits 2 when nothing moved the revision.
     `arc restack --advise` exits 0 when the change has no dependents.
+    `arc workspace backlog` exits 16 when any selected project's observation
+      failed; the rows that were read still print.
     `arc doctor` exits 1 when problems are present and 0 for a clean or
       advice-only ledger.
     A rejected self-approval follows the no-valid-approval path and exits 3.
