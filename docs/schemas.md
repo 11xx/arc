@@ -21,11 +21,11 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-check/3` | `arc check --json` — every blocker with its exit code, plus never-blocking advisories | commitment |
 | `arc-inbox/9` | `arc inbox --json` — the lead-facing queue buckets across open changes | commitment |
 | `arc-catchup/6` | `arc catchup --json` — ledger buckets, journal lanes and shared inventory rows, memories, forks with what they hold, and worktree cost | commitment |
-| `arc-journal-catchup/6` | `arc journal catchup --json` — artifact storage/resolution facts and journal activity | commitment |
+| `arc-journal-catchup/7` | `arc journal catchup --json` — artifact storage/resolution facts, converged checkpoint tips, and journal activity | commitment |
 | `arc-resume/5` | `arc resume --json` — one change's brief, live state, and journal context, including captured plan provenance and the source fork's artifacts | commitment |
 | `arc-brief/1` | `arc brief --json` — one selected brief and its immutable plan-source snapshot | commitment |
 | `arc-journal-artifact/2` | `arc journal show --json` — raw artifact bytes and planner metadata | commitment |
-| `arc-journal-inventory/2` | `arc journal inventory [FILE] [--archived] --json` — one read-only artifact projection with storage, claims, questions, promotions, and ledger observation | commitment |
+| `arc-journal-inventory/3` | `arc journal inventory [FILE] [--archived] --json` — one read-only artifact projection with storage, claims, converged checkpoint tips, questions, promotions, and ledger observation | commitment |
 | `arc-rescue/3` | `arc rescue --json` — ledger state joined with worktree divergence, a foreign claim's standing, and the transcript reader's answer with its bound and cause | commitment |
 | `arc-review/3` | `arc review --json` — verdict history, findings, causes, current review options, and the next action | commitment |
 | `arc-findings/2` | `arc findings --format json` — the open finding set, or the audit set with `--audit` | commitment |
@@ -38,7 +38,7 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-forks/2` | `arc fork list --json` — every fork from markers and branches together, with its age, head, worktree dirty counts, and the changes promoted from it | commitment |
 | `arc-doctor/3` | `arc doctor --json` — the ledger health report, problems apart from advice | commitment |
 | `arc-workspace/1` | `arc workspace list --json` and `arc workspace inbox --json` — rows aggregated across registered projects | commitment |
-| `arc-workspace-backlog/13` | `arc workspace backlog --json` — what is blocked on a decision per project, with its scope stated | commitment |
+| `arc-workspace-backlog/14` | `arc workspace backlog --json` — what is blocked on a decision per project, with its scope stated | commitment |
 | `arc-writability/1` | `arc config --check-writable --json` — the probe an executor runs before it starts | commitment |
 | `arc-sandbox-clone/1` | `arc sandbox clone --json` — the roots the copy was given | commitment |
 | `arc-sandbox-diff/1` | `arc sandbox diff --json` — what the copy's events and refs differ by, in both directions | commitment |

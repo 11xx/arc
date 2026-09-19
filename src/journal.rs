@@ -698,8 +698,10 @@ pub enum JournalCmd {
     },
     /// Append a work checkpoint to an artifact this session has claimed:
     /// where the work stands, what comes next, and what a successor should
-    /// read. Requires a live claim held by this identity; a correction is
-    /// another checkpoint naming the one it supersedes
+    /// read. Requires a live claim held by this identity. Later checkpoints
+    /// in one claim are ordinary progress and replace its earlier ones; a
+    /// correction names what it replaces with `--supersedes`, and the flag
+    /// repeats so a takeover converges several continuations at once
     Checkpoint {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -718,9 +720,10 @@ pub enum JournalCmd {
         /// outside arc
         #[arg(long)]
         blocker: Option<String>,
-        /// The checkpoint this one corrects; both stay readable
+        /// The checkpoint this one corrects; repeat to converge several in
+        /// one takeover. Every target stays readable
         #[arg(long)]
-        supersedes: Option<String>,
+        supersedes: Vec<String>,
     },
     /// List the scaffolds a write can prepend, and print one before using
     /// it. A journal artifact is append-only, so choosing between
@@ -1274,7 +1277,7 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             next.as_deref(),
             gate.as_deref(),
             blocker.as_deref(),
-            supersedes.as_deref(),
+            &supersedes,
         ),
         JournalCmd::Questions { json } => questions(ctx, json),
         JournalCmd::Events { limit } => events(ctx, limit),
@@ -2522,26 +2525,37 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
             });
         }
     }
-    // Two uncorrected checkpoints on one claim are two answers to "what
-    // should a successor read". Views follow the tip, so a claim with two of
-    // them silently shows one and hides the other.
+    // Two uncorrected tips on one artifact are two answers to "what should a
+    // successor read". A claim's own later checkpoints are ordinary progress
+    // and replace its earlier ones; tips that remain across claims are
+    // contested until a `--supersedes` edge converges them.
     for name in &hot_files {
-        for claim in artifact_claims(&events, name) {
-            let tips = claim.tip_checkpoints();
-            if tips.len() > 1 {
-                problems.push(DoctorFinding {
-                    code: "contested-checkpoint-tip",
-                    detail: format!(
-                        "{name}: claim {} has {} uncorrected checkpoints ({})",
-                        claim.state.claim_id,
-                        tips.len(),
-                        tips.iter()
-                            .map(|tip| tip.checkpoint_id.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                });
-            }
+        let claims = artifact_claims(&events, name);
+        let superseded = superseded_checkpoints(&claims);
+        let tips: Vec<(&ArtifactClaim, &ArtifactCheckpoint)> = claims
+            .iter()
+            .flat_map(|claim| {
+                claim
+                    .tip_checkpoints(&superseded)
+                    .into_iter()
+                    .map(move |checkpoint| (claim, checkpoint))
+            })
+            .collect();
+        if tips.len() > 1 {
+            problems.push(DoctorFinding {
+                code: "contested-checkpoint-tip",
+                detail: format!(
+                    "{name}: {} uncorrected checkpoints ({})",
+                    tips.len(),
+                    tips.iter()
+                        .map(|(claim, checkpoint)| format!(
+                            "{} in {}",
+                            checkpoint.checkpoint_id, claim.state.claim_id
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
         }
     }
     inspect_transition_integrity(&dir, &cold, &hot_files, &events, &mut problems)?;
@@ -5803,6 +5817,12 @@ pub(crate) struct JournalEvent {
     /// can see that the first was contested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     supersedes_checkpoint: Option<String>,
+    /// Every earlier checkpoint this one corrects when a takeover converges
+    /// more than one continuation at once. The first target is repeated in
+    /// `supersedes_checkpoint` so a reader that predates this field still
+    /// follows the correction it understands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    supersedes_checkpoints: Option<Vec<String>>,
     /// Digest of the block a checkpoint appended, so a later reader can tell
     /// a block that still says what it said from one rewritten underneath.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6021,6 +6041,7 @@ impl JournalEvent {
             gate: None,
             blocker: None,
             supersedes_checkpoint: None,
+            supersedes_checkpoints: None,
             digest: None,
         }
     }
@@ -6234,6 +6255,13 @@ impl JournalEvent {
                         .supersedes_checkpoint
                         .as_deref()
                         .is_none_or(valid_checkpoint_id)
+                    && self
+                        .supersedes_checkpoints
+                        .as_deref()
+                        .is_none_or(|targets| {
+                            !targets.is_empty()
+                                && targets.iter().all(|target| valid_checkpoint_id(target))
+                        })
             }
             "lane-opened" => self.ttl_seconds.is_some() && self.scope.is_some(),
             "lane-renewed" => true,
@@ -6955,6 +6983,12 @@ pub(crate) struct ArtifactCheckpoint {
     pub(crate) blocker: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) supersedes_checkpoint: Option<String>,
+    /// Every checkpoint this one corrects when a takeover names more than
+    /// one; the first target is repeated in `supersedes_checkpoint` for
+    /// readers that predate this field. Empty on a checkpoint that names one
+    /// or none, so its projection is unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) supersedes_checkpoints: Vec<String>,
     pub(crate) digest: String,
 }
 
@@ -7003,19 +7037,44 @@ impl ArtifactClaim {
         self.closure.is_none()
     }
 
-    /// The checkpoint a successor should read: the newest one no later
-    /// checkpoint corrects.
-    pub(crate) fn tip_checkpoints(&self) -> Vec<&ArtifactCheckpoint> {
-        let superseded: HashSet<&str> = self
-            .checkpoints
-            .iter()
-            .filter_map(|checkpoint| checkpoint.supersedes_checkpoint.as_deref())
-            .collect();
+    /// The checkpoints that remain this claim's answers to what a successor
+    /// should read, given the artifact-wide supersessions.
+    pub(crate) fn tip_checkpoints<'a>(
+        &'a self,
+        superseded: &HashSet<String>,
+    ) -> Vec<&'a ArtifactCheckpoint> {
         self.checkpoints
             .iter()
             .filter(|checkpoint| !superseded.contains(checkpoint.checkpoint_id.as_str()))
             .collect()
     }
+}
+
+/// Every checkpoint on one artifact that a later checkpoint replaces.
+///
+/// A checkpoint supersedes its claim's earlier checkpoints: ordinary progress
+/// moves the continuation forward without a `--supersedes` edge. A named
+/// target supersedes across claims, which is how a takeover converges the tip
+/// an earlier identity left. Only a named target crosses the claim boundary:
+/// two claims' tips stay contested until one of them is named.
+fn superseded_checkpoints(claims: &[ArtifactClaim]) -> HashSet<String> {
+    let mut superseded = HashSet::new();
+    for claim in claims {
+        if let Some((_, older)) = claim.checkpoints.split_last() {
+            for checkpoint in older {
+                superseded.insert(checkpoint.checkpoint_id.clone());
+            }
+        }
+        for checkpoint in &claim.checkpoints {
+            if let Some(target) = checkpoint.supersedes_checkpoint.as_deref() {
+                superseded.insert(target.to_string());
+            }
+            for target in &checkpoint.supersedes_checkpoints {
+                superseded.insert(target.clone());
+            }
+        }
+    }
+    superseded
 }
 
 /// Whether an artifact can be picked up, in one word.
@@ -7236,6 +7295,10 @@ fn artifact_claims(events: &[JournalEvent], file: &str) -> Vec<ArtifactClaim> {
                     gate: event.gate.clone(),
                     blocker: event.blocker.clone(),
                     supersedes_checkpoint: event.supersedes_checkpoint.clone(),
+                    supersedes_checkpoints: event
+                        .supersedes_checkpoints
+                        .clone()
+                        .unwrap_or_default(),
                     digest: event.digest.clone().unwrap_or_default(),
                 });
                 claim.state.last_activity_at = timestamp;
@@ -7426,6 +7489,7 @@ pub fn rescue_artifact(ctx: &Ctx, file: &str, json: bool, take: bool) -> Result<
     if report.claims.is_empty() {
         println!("  (none)");
     }
+    let superseded = superseded_checkpoints(&report.claims);
     for claim in &report.claims {
         let condition = match &claim.closure {
             Some(closure) => closure
@@ -7452,7 +7516,7 @@ pub fn rescue_artifact(ctx: &Ctx, file: &str, json: bool, take: bool) -> Result<
         if let Some(blocker) = &claim.blocker {
             println!("    blocker: {blocker}");
         }
-        for checkpoint in claim.tip_checkpoints() {
+        for checkpoint in claim.tip_checkpoints(&superseded) {
             println!("    checkpoint {}:", checkpoint.checkpoint_id);
             for (label, value) in [
                 ("next", &checkpoint.next),
@@ -7808,7 +7872,7 @@ pub fn checkpoint(
     next: Option<&str>,
     gate: Option<&str>,
     blocker: Option<&str>,
-    supersedes: Option<&str>,
+    supersedes: &[String],
 ) -> Result<i32> {
     let owner = require_claim_identity(ctx)?;
     let body = read_body_verbatim(body_file)?;
@@ -7832,11 +7896,17 @@ pub fn checkpoint(
         print_artifact_claim_conflict("claim is expired", mine, now);
         return Ok(8);
     }
-    if let Some(target) = supersedes {
+    let mut targets: Vec<String> = Vec::new();
+    for target in supersedes {
+        if !targets.contains(target) {
+            targets.push(target.clone());
+        }
+    }
+    for target in &targets {
         if !claims
             .iter()
             .flat_map(|claim| claim.checkpoints.iter())
-            .any(|checkpoint| checkpoint.checkpoint_id == target)
+            .any(|checkpoint| &checkpoint.checkpoint_id == target)
         {
             bail!("no checkpoint {target} on {file}");
         }
@@ -7858,7 +7928,8 @@ pub fn checkpoint(
     event.next = next.map(str::to_string);
     event.gate = gate.map(str::to_string);
     event.blocker = blocker.map(str::to_string);
-    event.supersedes_checkpoint = supersedes.map(str::to_string);
+    event.supersedes_checkpoint = targets.first().cloned();
+    event.supersedes_checkpoints = (targets.len() > 1).then_some(targets);
     event.digest = Some(format!("sha256:{}", hex::encode(Sha256::digest(&block))));
     append_event(ctx, &context.dir, &event)?;
     println!("checkpoint: {checkpoint_id} on {file}");
@@ -8117,6 +8188,7 @@ fn render_catchup_claims(claims: &[ArtifactClaim], now: DateTime<Utc>) {
     if open.is_empty() {
         println!("  (none)");
     }
+    let superseded = superseded_checkpoints(claims);
     for claim in open {
         let idle = now
             .signed_duration_since(claim.state.last_activity_at)
@@ -8135,7 +8207,7 @@ fn render_catchup_claims(claims: &[ArtifactClaim], now: DateTime<Utc>) {
         if let Some(reason) = claim.displaced.as_ref().and_then(|it| it.reason.as_deref()) {
             println!("    displaced before its budget: {reason}");
         }
-        for checkpoint in claim.tip_checkpoints() {
+        for checkpoint in claim.tip_checkpoints(&superseded) {
             if let Some(next) = &checkpoint.next {
                 println!("    next: {next}");
             }
@@ -8848,7 +8920,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
 
     if json {
         let out = Catchup {
-            schema: "arc-journal-catchup/6",
+            schema: "arc-journal-catchup/7",
             dir: dir.display().to_string(),
             lanes,
             claims,
@@ -9359,6 +9431,7 @@ fn project_inventory(
             continue;
         };
         let claims = artifact_claims(&events, &name);
+        let superseded = superseded_checkpoints(&claims);
         let (availability, claim_history) =
             artifact_availability(&events, &name, &claims, observed);
         let (resolution_value, resolution_basis) = artifact_resolution(&events, &name);
@@ -9375,7 +9448,7 @@ fn project_inventory(
         let mut checkpoint_tips = Vec::new();
         let mut blockers = Vec::new();
         for claim in &claims {
-            for tip in claim.tip_checkpoints() {
+            for tip in claim.tip_checkpoints(&superseded) {
                 checkpoint_tips.push(serde_json::json!({"claim_id": claim.state.claim_id, "claim_open": claim.is_open(), "checkpoint": tip}));
             }
             if let Some(blocker) = &claim.blocker {
@@ -9452,7 +9525,7 @@ fn project_inventory(
         });
     }
     Ok(JournalInventory {
-        schema: "arc-journal-inventory/2",
+        schema: "arc-journal-inventory/3",
         journal_dir: hot.display().to_string(),
         anchor: project.is_dir().then(|| project.display().to_string()),
         observed_at: observed.to_rfc3339_opts(SecondsFormat::AutoSi, true),
