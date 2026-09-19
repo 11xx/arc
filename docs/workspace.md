@@ -78,7 +78,7 @@ the same open, later, and feature-request tier order used by `journal open`.
 Each item can include its `verification` stamp, and the text rows use the same
 renderer as `journal open`. Item rows share the journal inventory projection,
 including exact promotions, question history, checkpoint tips, and explicit
-ledger read coverage. JSON is versioned `arc-workspace-backlog/14` and
+ledger read coverage. JSON is versioned `arc-workspace-backlog/15` and
 states whether its scope is global or beneath one canonical path. Missing
 anchors are filtered by their recorded path, so an unreachable project inside
 a requested workspace remains visible without unrelated orphans leaking in.

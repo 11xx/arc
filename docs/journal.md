@@ -77,12 +77,12 @@ retry validates the recorded paths and bytes and completes the same operation.
 Pending operations block competing writes and appear in `journal doctor`.
 Unclassified cold discussions require explicit `archive --unresolved --note`
 adoption before accepting positions. Duplicate bodies are reported as conflicts.
-`journal catchup --archived --json` uses `arc-journal-catchup/7` and marks each row's
+`journal catchup --archived --json` uses `arc-journal-catchup/8` and marks each row's
 storage, resolution, resolution basis, latest position, and whether archived
 positions exist; unknown legacy facts remain explicit rather than becoming
 empty values.
 `journal inventory [FILE] [--archived] [--kind KIND] --json` emits
-`arc-journal-inventory/3`. It selects one hot or cold store from one observed
+`arc-journal-inventory/4`. It selects one hot or cold store from one observed
 set of events, keeps availability separate from storage and resolution, and
 reports claims, questions, exact change/brief promotions, source references,
 and whether the ledger was absent, readable, or unreadable. An exact file is
@@ -90,7 +90,11 @@ inspected even when terminal; a missing exact file is an error.
 Inventory, `journal open`, journal catchup, and workspace item rows share the
 artifact projection. Rows include tier, checkpoint tips, current and historical
 blocker references, unanswered questions and complete question history, and
-exact promotions with the selected plan snapshot and change closure/stage.
+exact promotions with the selected plan snapshot and change closure/stage. A
+plan whose every promotion has closed carries `promotion_state: closed` and
+stays in the queue: the work it drove is over, while consuming the plan
+remains a decision. `integrate` and `close` name that command when they close
+a `journal_ref` plan's last open promotion.
 Unreadable ledger coverage produces `promotions: null` with an explanation;
 an absent ledger produces an empty array. Body read failures and conflicting
 stores are errors. These observations write no ledger or journal state.
