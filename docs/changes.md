@@ -299,13 +299,22 @@ it joins the ledger state with worktree divergence and assesses a stale or
 expired foreign claim as abandoned. Rescue is read-only unless `--take` is
 given; takeover follows the same stale-claim rules as `arc claim --takeover`,
 records the displaced owner, and narrates the handover to journal auto-log.
-`--json` emits the versioned `arc-rescue/2` object.
+`--json` emits the versioned `arc-rescue/3` object.
 `--transcript [--tail N]` includes the claimed session's latest operator turns;
 it tries `tapes` when that CLI is installed and falls back to arc's own readers
-otherwise. `tapes` is what covers OpenCode sessions, while arc continues to
-work without `tapes` for its native readers. Arc names the reader that supplied
-the turns, prints what the transcript contains, and performs no redaction, so
-the option is opt-in and its output should be treated as sensitive.
+otherwise. Each reader takes the newest 4 MiB of a recording file as its
+window, so `--tail N` counts the same turns whichever one answers. The
+rendering names the reader that
+supplied the turns and the readers that declined, and a read that stopped before
+the start of the recording states the window it rested on: the bytes it skipped
+when the native reader measured them, or the `tapes show --full` command that
+reaches the unread text. An empty answer carries a `cause` field naming an
+unknown identity, an absent recording, or text outside the read window, so a
+machine consumer reading `count: 0` separates them without parsing prose.
+`tapes` is what covers OpenCode sessions, while arc continues to work without
+`tapes` for its native readers. Arc prints what the transcript contains and
+performs no redaction, so the option is opt-in and its output should be treated
+as sensitive.
 
 Observe a change without scraping status views, or wait for one condition for
 shell orchestration:

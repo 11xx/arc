@@ -703,7 +703,11 @@ RULES THAT CHANGE WHAT YOU DO
     reason, so a live claim always means live work.
   - An executor that hangs never reaches its own release. Before leaving a
     delegated run unattended, arm `arc watch <change> --until stalled`; silence
-    is unknown, not healthy. `arc rescue <change> --take` recovers it.
+    is unknown, not healthy. `arc rescue <change> --take` recovers it, and
+    `arc rescue <change> --transcript` reads the claimed session's latest
+    operator turns through `tapes` or arc's own readers, both taking the
+    newest 4 MiB of a recording file, and names the reader that answered, the
+    readers that declined, and the bound a read stopped at.
   - `arc watch <file.md> --until stalled` arms the same wait over an artifact
     claim, and `arc rescue <file.md> [--take]` reports where the work stopped
     and takes it over. An artifact answers only `stalled`; the rest of the

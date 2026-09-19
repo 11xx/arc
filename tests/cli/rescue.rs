@@ -24,6 +24,41 @@ fn claim_from_session(repo: &Repo, slug: &str, harness: &str, session: &str) {
         .success();
 }
 
+/// A `PATH` with a stub `tapes` first that prints `document`, so one recording
+/// can be read through both readers without a real tapes installation.
+fn tapes_path(repo: &Repo, document: &str) -> String {
+    let document_path = repo.home.join("tapes-document.json");
+    fs::write(&document_path, document).unwrap();
+    let tapes_bin = repo.home.join("tapes-bin");
+    fs::create_dir_all(&tapes_bin).unwrap();
+    let tapes = tapes_bin.join("tapes");
+    fs::write(
+        &tapes,
+        format!("#!/bin/sh\ncat '{}'\n", document_path.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&tapes, fs::Permissions::from_mode(0o755)).unwrap();
+    format!(
+        "{}:{}",
+        tapes_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+/// A `PATH` with only `git` on it, so no `tapes` reader is reachable.
+fn native_only_path(repo: &Repo) -> PathBuf {
+    let without_tapes = repo.home.join("without-tapes-bin");
+    fs::create_dir_all(&without_tapes).unwrap();
+    let git = std::env::split_paths(&std::env::var_os("PATH").expect("PATH is set"))
+        .map(|dir| dir.join("git"))
+        .find_map(|path| path.is_file().then(|| fs::canonicalize(path).unwrap()))
+        .expect("git must be available on PATH");
+    let link = without_tapes.join("git");
+    let _ = fs::remove_file(&link);
+    std::os::unix::fs::symlink(git, link).unwrap();
+    without_tapes
+}
+
 #[test]
 fn stale_foreign_claim_is_abandoned_and_reports_owner() {
     let repo = Repo::new();
@@ -173,7 +208,7 @@ fn rescue_json_uses_versioned_schema() {
     let output = stdout(repo.arc(&worktree).args(["rescue", "--json"]));
     let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 
-    assert_eq!(value["schema"], "arc-rescue/2");
+    assert_eq!(value["schema"], "arc-rescue/3");
     assert!(value.get("transcript").is_none());
 }
 
@@ -184,27 +219,15 @@ fn rescue_transcript_prefers_tapes() {
     let (change_id, worktree) = begin(&repo, "tapes-transcript");
     claim_from_session(&repo, "tapes-transcript", "opencode", session);
 
-    let tapes_bin = repo.home.join("tapes-bin");
-    fs::create_dir_all(&tapes_bin).unwrap();
-    let tapes = tapes_bin.join("tapes");
-    fs::write(
-        &tapes,
+    let path_with_tapes = tapes_path(
+        &repo,
         concat!(
-            "#!/bin/sh\n",
-            "printf '%s\\n' '",
             "{\"schema\":\"tapes-session/1\",\"session\":{},\"turns\":[",
             "{\"role\":\"user\",\"text\":\"fake question\",\"ts\":\"1\"},",
             "{\"role\":\"system\",\"text\":\"ignored\",\"ts\":\"2\"},",
             "{\"role\":\"assistant\",\"text\":\"fake answer\",\"ts\":\"3\"}",
-            "],\"truncated\":false}'\n",
+            "],\"truncated\":false}",
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&tapes, fs::Permissions::from_mode(0o755)).unwrap();
-    let path_with_tapes = format!(
-        "{}:{}",
-        tapes_bin.display(),
-        std::env::var("PATH").unwrap_or_default()
     );
 
     let output = stdout(repo.arc(&worktree).env("PATH", path_with_tapes).args([
@@ -219,13 +242,7 @@ fn rescue_transcript_prefers_tapes() {
     assert_eq!(value["transcript"]["turns"][0]["text"], "fake question");
     assert_eq!(value["transcript"]["turns"][1]["text"], "fake answer");
 
-    let git = std::env::split_paths(&std::env::var_os("PATH").expect("PATH is set"))
-        .map(|dir| dir.join("git"))
-        .find_map(|path| path.is_file().then(|| fs::canonicalize(path).unwrap()))
-        .expect("git must be available on PATH");
-    let path_without_tapes = repo.home.join("without-tapes-bin");
-    fs::create_dir_all(&path_without_tapes).unwrap();
-    std::os::unix::fs::symlink(git, path_without_tapes.join("git")).unwrap();
+    let path_without_tapes = native_only_path(&repo);
 
     let output = repo
         .arc(&worktree)
@@ -318,12 +335,22 @@ fn missing_transcript_is_reported_without_failure() {
     claim_from_session(&repo, "missing-transcript", "claude", "missing-session");
 
     repo.arc(&worktree)
+        .env("PATH", native_only_path(&repo))
         .args(["rescue", "--transcript"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
             "Unavailable: no transcript for the claimed session in tapes or on disk",
         ));
+
+    let output = stdout(
+        repo.arc(&worktree)
+            .env("PATH", native_only_path(&repo))
+            .args(["rescue", "--transcript", "--json"]),
+    );
+    let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["transcript"]["count"], 0);
+    assert_eq!(value["transcript"]["cause"], "no-recording");
 }
 
 #[test]
@@ -344,6 +371,14 @@ fn unknown_claim_identity_is_reported_without_failure() {
         .stdout(predicate::str::contains(
             "Unavailable: claim harness/session is unknown",
         ));
+
+    let output = stdout(
+        repo.arc(&worktree)
+            .args(["rescue", "--transcript", "--json"]),
+    );
+    let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["transcript"]["count"], 0);
+    assert_eq!(value["transcript"]["cause"], "unknown-identity");
 }
 
 #[test]
@@ -371,6 +406,167 @@ fn malformed_transcript_lines_are_skipped() {
     let value: serde_json::Value = serde_json::from_str(&output).unwrap();
     assert_eq!(value["transcript"]["count"], 1);
     assert_eq!(value["transcript"]["turns"][0]["text"], "kept");
+}
+
+/// One recording answers the same through a stub `tapes` and through arc's
+/// own reader, and `--tail` counts the same projection on both paths.
+#[test]
+fn transcript_readers_agree_on_one_recording() {
+    let repo = Repo::new();
+    let session = "agree-dead-session";
+    let (_, worktree) = begin(&repo, "agreement-transcript");
+    claim_from_session(&repo, "agreement-transcript", "claude", session);
+    let project = repo.home.join(".claude/projects/-test-repo");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{session}.jsonl")),
+        concat!(
+            "{\"type\":\"user\",\"timestamp\":\"1\",\"message\":{\"role\":\"user\",\"content\":\"q1\"}}\n",
+            "{\"type\":\"assistant\",\"timestamp\":\"2\",\"message\":{\"role\":\"assistant\",\"content\":\"a1\"}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"3\",\"message\":{\"role\":\"user\",\"content\":\"q2\"}}\n",
+            "{\"type\":\"assistant\",\"timestamp\":\"4\",\"message\":{\"role\":\"assistant\",\"content\":\"a2\"}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"5\",\"message\":{\"role\":\"user\",\"content\":\"q3\"}}\n",
+            "{\"type\":\"assistant\",\"timestamp\":\"6\",\"message\":{\"role\":\"assistant\",\"content\":\"a3\"}}\n",
+        ),
+    )
+    .unwrap();
+    let with_tapes = tapes_path(
+        &repo,
+        concat!(
+            "{\"schema\":\"tapes-session/1\",\"session\":{},\"turns\":[",
+            "{\"role\":\"user\",\"text\":\"q1\",\"ts\":\"1\"},",
+            "{\"role\":\"assistant\",\"text\":\"a1\",\"ts\":\"2\"},",
+            "{\"role\":\"user\",\"text\":\"q2\",\"ts\":\"3\"},",
+            "{\"role\":\"assistant\",\"text\":\"a2\",\"ts\":\"4\"},",
+            "{\"role\":\"user\",\"text\":\"q3\",\"ts\":\"5\"},",
+            "{\"role\":\"assistant\",\"text\":\"a3\",\"ts\":\"6\"}",
+            "],\"truncated\":false}",
+        ),
+    );
+    let without_tapes = native_only_path(&repo);
+    let read = |path: &Path, tail: Option<&str>| -> serde_json::Value {
+        let mut args = vec!["rescue", "--transcript", "--json"];
+        if let Some(tail) = tail {
+            args.extend(["--tail", tail]);
+        }
+        let output = stdout(repo.arc(&worktree).env("PATH", path).args(&args));
+        serde_json::from_str(&output).unwrap()
+    };
+
+    let through_tapes = read(Path::new(&with_tapes), None);
+    let through_native = read(&without_tapes, None);
+    assert_eq!(through_tapes["transcript"]["source"], "tapes");
+    assert_eq!(through_native["transcript"]["source"], "native");
+    assert_eq!(through_tapes["transcript"]["count"], 4);
+    assert_eq!(
+        through_tapes["transcript"]["turns"],
+        through_native["transcript"]["turns"]
+    );
+    let texts: Vec<&str> = through_native["transcript"]["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|turn| turn["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts, ["q1", "q2", "q3", "a3"]);
+
+    let tapes_tail = read(Path::new(&with_tapes), Some("3"));
+    let native_tail = read(&without_tapes, Some("3"));
+    assert_eq!(tapes_tail["transcript"]["count"], 3);
+    assert_eq!(
+        tapes_tail["transcript"]["turns"],
+        native_tail["transcript"]["turns"]
+    );
+
+    repo.arc(&worktree)
+        .env("PATH", Path::new(&with_tapes))
+        .args(["rescue", "--transcript"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Source: tapes (native: not consulted)",
+        ));
+}
+
+/// A recording whose newest operator turn lies before the read window reports
+/// the turns the window holds, the bound the answer rests on, and a cause a
+/// machine consumer can read.
+#[test]
+fn transcript_reports_text_outside_the_read_window() {
+    let repo = Repo::new();
+    let session = "bound-dead-session";
+    let (_, worktree) = begin(&repo, "bound-transcript");
+    claim_from_session(&repo, "bound-transcript", "claude", session);
+    let project = repo.home.join(".claude/projects/-test-repo");
+    fs::create_dir_all(&project).unwrap();
+
+    let mut recording = String::from(
+        "{\"type\":\"user\",\"timestamp\":\"1\",\"message\":{\"role\":\"user\",\"content\":\"the newest operator turn\"}}\n",
+    );
+    let filler = format!(
+        "{{\"type\":\"assistant\",\"timestamp\":\"0\",\"message\":{{\"role\":\"tool\",\"content\":\"{}\"}}}}\n",
+        "x".repeat(512)
+    );
+    while recording.len() < 5 * 1024 * 1024 {
+        recording.push_str(&filler);
+    }
+    fs::write(project.join(format!("{session}.jsonl")), recording).unwrap();
+
+    let native_only = native_only_path(&repo);
+    let output = stdout(repo.arc(&worktree).env("PATH", &native_only).args([
+        "rescue",
+        "--transcript",
+        "--json",
+    ]));
+    let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["transcript"]["count"], 0);
+    assert_eq!(value["transcript"]["cause"], "outside-read-bound");
+    assert_eq!(value["transcript"]["bound"]["kind"], "file-tail");
+    assert_eq!(
+        value["transcript"]["bound"]["window_bytes"],
+        4 * 1024 * 1024
+    );
+    assert!(
+        value["transcript"]["bound"]["skipped_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(value["transcript"]["turns"].as_array().unwrap().is_empty());
+
+    repo.arc(&worktree)
+        .env("PATH", &native_only)
+        .args(["rescue", "--transcript"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Bound:"))
+        .stdout(predicate::str::contains("Outside read bound:"))
+        .stdout(predicate::str::contains("earlier bytes were not read"));
+}
+
+/// A recording that fits the read window produces no bound-related message.
+#[test]
+fn short_recording_reports_no_bound() {
+    let repo = Repo::new();
+    let session = "short-dead-session";
+    let (_, worktree) = begin(&repo, "short-transcript");
+    claim_from_session(&repo, "short-transcript", "claude", session);
+    let project = repo.home.join(".claude/projects/-test-repo");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{session}.jsonl")),
+        "{\"type\":\"user\",\"timestamp\":\"1\",\"message\":{\"role\":\"user\",\"content\":\"only turn\"}}\n",
+    )
+    .unwrap();
+
+    repo.arc(&worktree)
+        .env("PATH", native_only_path(&repo))
+        .args(["rescue", "--transcript"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Turns: 1"))
+        .stdout(predicate::str::contains("Bound:").not())
+        .stdout(predicate::str::contains("Outside read bound:").not());
 }
 
 /// An artifact keeps checkpoints rather than a claimed session, so
