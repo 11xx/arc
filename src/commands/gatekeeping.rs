@@ -2321,6 +2321,7 @@ fn integrate_one(
         &st.slug,
         &format!("integrated {change_id} at {merged}"),
     );
+    advise_plan_promotions(&store, &st);
 
     if cleanup {
         // Run cleanup git commands from the target worktree: ctx.cwd may be
@@ -2718,7 +2719,26 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
     crate::journal::auto_log(ctx, &st.slug, &format!("closed change {change_id}"));
     println!("closed: {change_id}");
     println!("event: {}", ev.event_id);
+    advise_plan_promotions(&store, &st);
     Ok(())
+}
+
+/// Name the `journal consume` command when closing this change left its
+/// `journal_ref` plan with no open promotion. Best-effort: the closure it
+/// describes is already recorded, so a join that cannot be read is a warning
+/// rather than a failed close.
+fn advise_plan_promotions(store: &Store, st: &crate::state::ChangeState) {
+    let Some(plan) = st.journal_ref.as_deref() else {
+        return;
+    };
+    match crate::journal::last_promotion_closed(store, plan) {
+        Ok(true) => eprintln!(
+            "advice: every promotion of {plan} has closed; consume it with \
+             `arc journal consume {plan}`"
+        ),
+        Ok(false) => {}
+        Err(error) => eprintln!("warning: could not check promotions of {plan}: {error:#}"),
+    }
 }
 
 fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {

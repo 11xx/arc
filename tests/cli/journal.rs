@@ -1870,7 +1870,7 @@ fn journal_inventory_shares_storage_and_terminal_facts() {
         repo.arc(&repo.root)
             .args(["journal", "inventory", "--json"]),
     );
-    assert_eq!(hot["schema"], "arc-journal-inventory/3");
+    assert_eq!(hot["schema"], "arc-journal-inventory/4");
     assert_eq!(hot["items"][0]["storage"], "hot");
     repo.arc(&repo.root)
         .args(["journal", "consume", &file])
@@ -12287,6 +12287,171 @@ fn journal_reattribute_survives_a_concurrent_writer() {
     assert!(events
         .iter()
         .any(|event| event["event"] == "checkpoint" && event["next"] == "concurrent"));
+}
+
+/// File a plan artifact and return its filename.
+fn plan_named(repo: &Repo, topic: &str) -> String {
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "note",
+                topic,
+                "--kind",
+                "plan",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin(format!("{topic} plan\n")),
+    );
+    PathBuf::from(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Open a change promoted from `plan`, give it a patchset, and approve it, so
+/// closing it is one command away.
+fn promoted_change(repo: &Repo, slug: &str, plan: &str) {
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{slug}"));
+    repo.arc(&repo.root)
+        .args(["begin", slug, "--from-journal", plan])
+        .assert()
+        .success();
+    repo.commit(
+        &worktree,
+        &format!("{slug}.txt"),
+        &format!("{slug}\n"),
+        &format!("feat: {slug}"),
+    );
+    repo.arc(&worktree)
+        .args(["snapshot", slug])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
+}
+
+/// The queue row for one artifact, from `journal open --json`.
+fn open_row(repo: &Repo, file: &str) -> serde_json::Value {
+    let open = json_stdout(repo.arc(&repo.root).args(["journal", "open", "--json"]));
+    open["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file"] == file)
+        .unwrap_or_else(|| panic!("{file} is missing from the open queue: {open}"))
+        .clone()
+}
+
+#[test]
+fn a_plan_with_every_promotion_closed_reads_closed_and_stays_live() {
+    let repo = Repo::new();
+    let plan = plan_named(&repo, "roadmap");
+    promoted_change(&repo, "roadmap-one", &plan);
+    assert!(
+        open_row(&repo, &plan).get("promotion_state").is_none(),
+        "an open promotion leaves the ordinary row"
+    );
+
+    repo.arc(&repo.root)
+        .args(["integrate", "roadmap-one"])
+        .assert()
+        .success();
+    assert_eq!(open_row(&repo, &plan)["promotion_state"], "closed");
+
+    // The work the plan drove is over; the artifact is not consumed.
+    assert!(!journal_events(&journal_dir(&repo))
+        .iter()
+        .any(|event| { event["event"] == "consumed" && event["file"] == plan.as_str() }));
+    let text = stdout(repo.arc(&repo.root).args(["journal", "open"]));
+    assert!(text.contains("roadmap"), "{text}");
+    assert!(text.contains("promotions: closed"), "{text}");
+}
+
+#[test]
+fn a_plan_with_one_open_promotion_keeps_its_ordinary_row() {
+    let repo = Repo::new();
+    let plan = plan_named(&repo, "umbrella");
+    promoted_change(&repo, "umbrella-one", &plan);
+    promoted_change(&repo, "umbrella-two", &plan);
+
+    repo.arc(&repo.root)
+        .args(["integrate", "umbrella-one"])
+        .assert()
+        .success();
+    assert!(
+        open_row(&repo, &plan).get("promotion_state").is_none(),
+        "one promotion still open is not settled"
+    );
+
+    repo.arc(&repo.root)
+        .args(["integrate", "umbrella-two"])
+        .assert()
+        .success();
+    assert_eq!(open_row(&repo, &plan)["promotion_state"], "closed");
+}
+
+#[test]
+fn an_abandoned_promotion_counts_as_closed() {
+    let repo = Repo::new();
+    let plan = plan_named(&repo, "shelved");
+    promoted_change(&repo, "shelved-one", &plan);
+    repo.arc(&repo.root)
+        .args(["close", "shelved-one", "--abandoned"])
+        .assert()
+        .success();
+    assert_eq!(open_row(&repo, &plan)["promotion_state"], "closed");
+}
+
+#[test]
+fn a_plan_nobody_promoted_has_no_promotion_state() {
+    let repo = Repo::new();
+    let plan = plan_named(&repo, "untouched");
+    let row = open_row(&repo, &plan);
+    assert!(row.get("promotion_state").is_none(), "{row}");
+    assert!(row["promotions"].as_array().unwrap().is_empty(), "{row}");
+}
+
+#[test]
+fn integrate_names_the_consume_command_for_the_last_promotion() {
+    let repo = Repo::new();
+    let plan = plan_named(&repo, "closing-wave");
+    promoted_change(&repo, "wave-one", &plan);
+    promoted_change(&repo, "wave-two", &plan);
+
+    repo.arc(&repo.root)
+        .args(["integrate", "wave-one"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("arc journal consume").not());
+
+    repo.arc(&repo.root)
+        .args(["integrate", "wave-two"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("every promotion"))
+        .stderr(predicates::str::contains(format!(
+            "arc journal consume {plan}"
+        )));
+}
+
+#[test]
+fn close_names_the_consume_command_for_the_last_promotion() {
+    let repo = Repo::new();
+    let plan = plan_named(&repo, "abandoned-wave");
+    promoted_change(&repo, "abandon-wave", &plan);
+    repo.arc(&repo.root)
+        .args(["close", "abandon-wave", "--abandoned"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("every promotion"))
+        .stderr(predicates::str::contains(format!(
+            "arc journal consume {plan}"
+        )));
 }
 
 #[test]

@@ -79,7 +79,11 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   arc journal inventory --json
                          Shared artifact facts, claims, questions, promotions,
                          and explicit ledger coverage. --archived selects cold
-                         storage; a filename inspects one exact artifact.
+                         storage; a filename inspects one exact artifact. A
+                         plan whose every promotion has closed reads
+                         `promotions: closed` while staying listed, and
+                         `integrate`/`close` name the `journal consume` that
+                         makes closing the loop a decision.
 
   Plans carry portable planned-by metadata. A brief selecting --plan-ref and
   --plan-slice captures the body digest and declared planners; reading the

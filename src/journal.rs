@@ -7162,6 +7162,24 @@ pub(crate) enum Availability {
     Terminal,
 }
 
+/// What the promotion join says about the work an artifact drove.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum PromotionState {
+    /// Every change this artifact was promoted into has closed. The artifact
+    /// itself stays live: an umbrella plan can outlive one promotion, so this
+    /// is a reading of the ledger join, not a lifecycle state.
+    Closed,
+}
+
+impl PromotionState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+        }
+    }
+}
+
 impl Availability {
     fn label(self) -> &'static str {
         match self {
@@ -8536,6 +8554,11 @@ pub(crate) struct ArtifactEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) questions: Vec<WorkspaceQuestion>,
     pub(crate) promotions: Option<Vec<InventoryPromotion>>,
+    /// A plan whose every promotion has closed, so the work it drove is over
+    /// while the artifact itself is still live. Absent on a plan nobody
+    /// promoted and on one with work still open, which stay ordinary rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) promotion_state: Option<PromotionState>,
     #[serde(flatten)]
     facts: InventoryFacts,
 }
@@ -8916,6 +8939,7 @@ fn live_memories(dir: &Path) -> Result<Vec<ArtifactEntry>> {
                 has_archived_positions,
                 questions: Vec::new(),
                 promotions: None,
+                promotion_state: None,
                 facts: InventoryFacts::default(),
             })
         })
@@ -8987,7 +9011,7 @@ fn catchup(ctx: &Ctx, limit: usize, json: bool, archived: bool) -> Result<i32> {
 
     if json {
         let out = Catchup {
-            schema: "arc-journal-catchup/7",
+            schema: "arc-journal-catchup/8",
             dir: dir.display().to_string(),
             lanes,
             claims,
@@ -9678,6 +9702,44 @@ fn all_changes_in(
         .collect()
 }
 
+/// The promotion state a plan's row carries: `Closed` once at least one
+/// change names the plan and every one of them has closed. A plan nobody
+/// promoted, or one with work still open, carries no state and stays an
+/// ordinary queue row.
+fn promotion_state_of(
+    kind: &str,
+    promotions: Option<&[InventoryPromotion]>,
+) -> Option<PromotionState> {
+    if kind != JournalKind::Plan.as_str() {
+        return None;
+    }
+    let promotions = promotions?;
+    (!promotions.is_empty()
+        && promotions
+            .iter()
+            .all(|promotion| promotion.status == "closed"))
+    .then_some(PromotionState::Closed)
+}
+
+/// Whether `filename` names a plan that at least one change promoted and
+/// every one of them has closed. The closure advice reads this; it consumes
+/// nothing and writes nothing.
+pub(crate) fn last_promotion_closed(store: &Store, filename: &str) -> Result<bool> {
+    if parse_artifact_name(filename).is_none_or(|(_, _, kind)| kind != JournalKind::Plan.as_str()) {
+        return Ok(false);
+    }
+    let rewrites = store.rewrites().ok();
+    let Some(rewrites) = rewrites.as_ref() else {
+        return Ok(false);
+    };
+    let changes = all_changes_in(store, rewrites)?;
+    let promotions = inventory_promotions(&changes, filename);
+    Ok(!promotions.is_empty()
+        && promotions
+            .iter()
+            .all(|promotion| promotion.status == "closed"))
+}
+
 fn inventory_promotions(changes: &[ChangeState], filename: &str) -> Vec<InventoryPromotion> {
     let mut promotions = Vec::new();
     for change in changes {
@@ -9854,6 +9916,9 @@ fn project_inventory(
             }
         }
         let amendments = Amendments::collect(&events, &name);
+        let promotions =
+            (ledger.state != "unreadable").then(|| inventory_promotions(&changes, &name));
+        let promotion_state = promotion_state_of(&file_kind, promotions.as_deref());
         let question_history = all_questions.iter().filter(|q| q.file == name).map(|question| {
             let answer = events.iter().rev().find(|e| e.file.as_deref() == Some(name.as_str()) && e.event == "answer" && e.question_id.as_deref() == Some(question.question.as_str()));
             let state = if answer.is_none() { "unanswered" } else if amendments.answer_stands(&question.question) { "answered" } else { "retracted" };
@@ -9901,8 +9966,8 @@ fn project_inventory(
             last_position_at,
             has_archived_positions,
             questions,
-            promotions: (ledger.state != "unreadable")
-                .then(|| inventory_promotions(&changes, &name)),
+            promotions,
+            promotion_state,
             facts: InventoryFacts {
                 observed_at: Some(observed),
                 tier: Some(match file_kind.as_str() {
@@ -9918,7 +9983,7 @@ fn project_inventory(
         });
     }
     Ok(JournalInventory {
-        schema: "arc-journal-inventory/3",
+        schema: "arc-journal-inventory/4",
         journal_dir: hot.display().to_string(),
         anchor: project.is_dir().then(|| project.display().to_string()),
         observed_at: observed.to_rfc3339_opts(SecondsFormat::AutoSi, true),
@@ -10019,6 +10084,9 @@ pub(crate) fn render_open_entry(f: &ArtifactEntry) {
                 }
             }
             None => println!("    promotion coverage: unknown"),
+        }
+        if let Some(state) = f.promotion_state {
+            println!("    promotions: {}", state.label());
         }
         if !f.facts.blockers.is_empty() || !f.facts.checkpoint_tips.is_empty() {
             println!(
