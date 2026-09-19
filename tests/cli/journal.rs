@@ -7465,6 +7465,139 @@ fn journal_latest_falls_back_to_cold_storage_and_reports_a_missing_topic() {
         ));
 }
 
+/// File one artifact with one filing event, in the order the tests call them,
+/// so a same-second fixture's recording order is the test's own. All events
+/// carry one timestamp, which is the tie being tested.
+fn record_artifact(dir: &Path, name: &str, body: &str, event: &str, supersedes: Option<&str>) {
+    fs::write(dir.join(name), body).unwrap();
+    let mut entry = serde_json::json!({
+        "schema": "journal-events/1",
+        "ts": "2026-01-01T00:00:00Z",
+        "harness": "test",
+        "session": "session-a",
+        "topic": "same-second",
+        "event": event,
+        "file": name,
+    });
+    if let Some(source) = supersedes {
+        entry["supersedes"] = serde_json::json!(source);
+    }
+    let path = dir.join("events.jsonl");
+    let mut log = fs::read_to_string(&path).unwrap_or_default();
+    log.push_str(&format!("{entry}\n"));
+    fs::write(path, log).unwrap();
+}
+
+#[test]
+fn journal_latest_prefers_a_same_second_successor() {
+    let repo = Repo::new();
+    let hot = journal_dir(&repo);
+    fs::create_dir_all(&hot).unwrap();
+    let plan = "20260101T000000Z-deploy-plan.md";
+    let later = "20260101T000000Z-deploy-later.md";
+    let successor = "20260101T000000Z-deploy-plan-2.md";
+    record_artifact(&hot, plan, "# Old plan\n", "note", None);
+    record_artifact(
+        &hot,
+        later,
+        &format!("supersedes: {plan}\n\n# Parked\n"),
+        "transition",
+        Some(plan),
+    );
+    record_artifact(
+        &hot,
+        successor,
+        &format!("supersedes: {later}\n\n# New plan\n"),
+        "transition",
+        Some(later),
+    );
+
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "latest", "deploy", "--kind", "plan", "--json"]),
+    );
+    assert_eq!(value["file"], successor);
+    assert_eq!(
+        value["body"],
+        "supersedes: 20260101T000000Z-deploy-later.md\n\n# New plan\n"
+    );
+
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "latest", "deploy", "--kind", "later", "--json"]),
+    );
+    assert_eq!(value["file"], later);
+    assert_eq!(
+        value["body"],
+        "supersedes: 20260101T000000Z-deploy-plan.md\n\n# Parked\n"
+    );
+
+    // Without a kind the terminal successor answers for the topic as well.
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "latest", "deploy", "--json"]),
+    );
+    assert_eq!(value["file"], successor);
+}
+
+#[test]
+fn journal_latest_same_second_without_a_relation_uses_recording_order() {
+    let repo = Repo::new();
+    let hot = journal_dir(&repo);
+    fs::create_dir_all(&hot).unwrap();
+    let first = "20260101T000000Z-notes-todo.md";
+    let second = "20260101T000000Z-notes-todo-2.md";
+    record_artifact(&hot, first, "# First\n", "note", None);
+    record_artifact(&hot, second, "# Second\n", "note", None);
+
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "latest", "notes", "--kind", "todo", "--json"]),
+    );
+    assert_eq!(value["file"], second);
+    assert_eq!(value["body"], "# Second\n");
+}
+
+#[test]
+fn journal_latest_does_not_order_by_filename_suffix() {
+    let repo = Repo::new();
+    let hot = journal_dir(&repo);
+    fs::create_dir_all(&hot).unwrap();
+    // The suffixed artifact is recorded first; recording order still answers
+    // with the bare name recorded after it.
+    let suffixed = "20260101T000000Z-notes-todo-2.md";
+    let bare = "20260101T000000Z-notes-todo.md";
+    record_artifact(&hot, suffixed, "# Suffixed\n", "note", None);
+    record_artifact(&hot, bare, "# Bare\n", "note", None);
+
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "latest", "notes", "--kind", "todo", "--json"]),
+    );
+    assert_eq!(value["file"], bare);
+    assert_eq!(value["body"], "# Bare\n");
+}
+
+#[test]
+fn journal_latest_hot_beats_cold_when_both_hold_a_match() {
+    let repo = Repo::new();
+    let hot = journal_dir(&repo);
+    let cold = PathBuf::from(format!("{}-archive", hot.display()));
+    fs::create_dir_all(&hot).unwrap();
+    fs::create_dir_all(&cold).unwrap();
+    let hot_file = "20260101T000000Z-both-note.md";
+    record_artifact(&hot, hot_file, "# Hot\n", "note", None);
+    fs::write(cold.join("20260101T000000Z-both-note-2.md"), "# Cold\n").unwrap();
+
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "latest", "both", "--json"]),
+    );
+    assert_eq!(value["file"], hot_file);
+    assert_eq!(value["storage"], "hot");
+    assert_eq!(value["body"], "# Hot\n");
+}
+
 #[test]
 fn consume_refuses_while_a_question_is_unanswered_and_relents_once_settled() {
     let repo = Repo::new();

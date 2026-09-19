@@ -907,7 +907,10 @@ pub enum JournalCmd {
     /// workflow that appends continuations under a stable topic can read its
     /// own tail back without reproducing arc's ordering rules. The topic must
     /// match exactly; a similarly prefixed topic never matches. The hot
-    /// journal wins over the cold archive whenever both hold a match
+    /// journal wins over the cold archive whenever both hold a match. Inside
+    /// one timestamp second a transition's terminal successor is preferred,
+    /// and otherwise the order the event log recorded the artifacts in
+    /// decides; a numeric filename suffix is never an ordering of its own.
     Latest {
         /// Kebab-case topic slug, matched exactly
         topic: String,
@@ -9599,6 +9602,74 @@ struct LatestArtifact {
     body: String,
 }
 
+/// One artifact a `latest` lookup could answer with.
+#[derive(Clone)]
+struct LatestCandidate {
+    name: String,
+    timestamp: String,
+    kind: String,
+}
+
+/// The candidate a `latest` lookup answers with.
+///
+/// The newest timestamp wins across seconds. Inside one second filename order
+/// cannot decide: the numeric suffix that keeps two artifacts apart sorts
+/// before the bare name, so descending order reaches the earlier artifact
+/// first. The event log decides instead. A transition records the artifact it
+/// superseded, so the one candidate no event supersedes is the end of its
+/// chain and answers the lookup; where the relation leaves more than one, or
+/// none, the order the events filed the artifacts in decides. Artifacts no
+/// event names keep the filename order, and a suffix is never an ordering of
+/// its own.
+fn latest_candidate(
+    candidates: &[LatestCandidate],
+    events: &[JournalEvent],
+) -> Option<LatestCandidate> {
+    let newest = candidates
+        .iter()
+        .map(|candidate| candidate.timestamp.as_str())
+        .max()?;
+    let same_second: Vec<&LatestCandidate> = candidates
+        .iter()
+        .filter(|candidate| candidate.timestamp == newest)
+        .collect();
+    if let [only] = same_second.as_slice() {
+        return Some((*only).clone());
+    }
+    // A candidate no recorded transition supersedes is the end of its chain.
+    // The check crosses kinds: the artifact that superseded an older plan is
+    // what makes the newer plan terminal.
+    let superseded = |name: &str| {
+        events
+            .iter()
+            .any(|event| event.supersedes.as_deref() == Some(name))
+    };
+    let terminals: Vec<&LatestCandidate> = same_second
+        .iter()
+        .copied()
+        .filter(|candidate| !superseded(&candidate.name))
+        .collect();
+    if let [terminal] = terminals.as_slice() {
+        return Some((*terminal).clone());
+    }
+    // Recording order decides. An artifact no event names keeps the filename
+    // order, which is the order the candidates arrive in.
+    let mut best: Option<&LatestCandidate> = None;
+    let mut best_rank = 0;
+    for candidate in same_second {
+        let rank = events
+            .iter()
+            .position(|event| event.file.as_deref() == Some(candidate.name.as_str()))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        if best.is_none() || rank > best_rank {
+            best = Some(candidate);
+            best_rank = rank;
+        }
+    }
+    best.cloned()
+}
+
 /// Resolve the newest artifact under one topic. Hot storage is searched
 /// before the cold archive and a hot match wins outright: an archived
 /// artifact is by definition older work, so a newer archived stamp would
@@ -9609,15 +9680,22 @@ fn latest(ctx: &Ctx, topic: &str, kind: Option<&str>, json: bool) -> Result<i32>
     let events = read_events(&hot)?;
 
     for (dir, storage) in [(&hot, "hot"), (&cold, "cold")] {
-        let found = sorted_artifact_names(dir)?.into_iter().find_map(|name| {
-            let (ts, file_topic, file_kind) = parse_artifact_name(&name)?;
-            (file_topic == topic && kind.is_none_or(|kind| file_kind == kind))
-                .then_some((name, ts, file_kind))
-        });
-        let Some((name, timestamp, file_kind)) = found else {
+        let candidates: Vec<LatestCandidate> = sorted_artifact_names(dir)?
+            .into_iter()
+            .filter_map(|name| {
+                let (timestamp, file_topic, file_kind) = parse_artifact_name(&name)?;
+                (file_topic == topic && kind.is_none_or(|selected| file_kind == selected))
+                    .then_some(LatestCandidate {
+                        name,
+                        timestamp,
+                        kind: file_kind,
+                    })
+            })
+            .collect();
+        let Some(found) = latest_candidate(&candidates, &events) else {
             continue;
         };
-        let path = dir.join(&name);
+        let path = dir.join(&found.name);
         let body = std::fs::read_to_string(&path)
             .with_context(|| format!("cannot read {}", path.display()))?;
         if !json {
@@ -9627,13 +9705,13 @@ fn latest(ctx: &Ctx, topic: &str, kind: Option<&str>, json: bool) -> Result<i32>
         let resolved = LatestArtifact {
             schema: "arc-journal-latest/1",
             heading: first_heading(&path),
-            consumed: consumption(&events, &name),
-            file: name,
+            consumed: consumption(&events, &found.name),
+            file: found.name,
             dir: dir.display().to_string(),
             storage,
-            timestamp,
+            timestamp: found.timestamp,
             topic: topic.to_string(),
-            kind: file_kind,
+            kind: found.kind,
             body,
         };
         println!("{}", serde_json::to_string_pretty(&resolved)?);
