@@ -1066,10 +1066,12 @@ enum Cmd {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
-        /// Include the claimed session's sensitive transcript
+        /// Include the claimed session's sensitive transcript; both readers
+        /// share one read window
         #[arg(long)]
         transcript: bool,
-        /// Maximum transcript turns to include
+        /// Maximum operator turns to include; both readers share one read
+        /// window
         #[arg(long, default_value_t = 5, requires = "transcript")]
         tail: usize,
         /// Take over another session's stale or expired claim

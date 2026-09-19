@@ -17,6 +17,8 @@ pub struct Turn {
 #[derive(Deserialize)]
 struct TapesResponse {
     turns: Vec<TapesTurn>,
+    #[serde(default)]
+    truncation: Option<TapesTruncation>,
 }
 
 #[derive(Deserialize)]
@@ -24,6 +26,51 @@ struct TapesTurn {
     role: String,
     text: String,
     ts: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TapesTruncation {
+    #[serde(default)]
+    source: Vec<TapesBound>,
+}
+
+/// One bound `tapes` reports its read rested on. `Unknown` keeps a bound kind
+/// a newer tapes adds from discarding an otherwise readable answer.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum TapesBound {
+    /// Only the final `bytes` of the recording file were read.
+    FileTail { bytes: u64 },
+    /// The store read stopped at the newest `records` records of one kind.
+    RecordPage { records: usize, of: String },
+    /// These `turns` carry text the source stored cut at `chars` characters.
+    TurnText { turns: usize, chars: usize },
+    /// A bound kind this reader does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+impl TapesBound {
+    /// Whether the bound withheld turns rather than shortening text inside a
+    /// returned turn. A withheld turn is text outside the read; a text cut is
+    /// text inside it.
+    pub fn withholds_turns(&self) -> bool {
+        !matches!(self, TapesBound::TurnText { .. })
+    }
+}
+
+/// How the `tapes` reader answered for one session.
+pub enum TapesTurns {
+    /// The reader returned what its window reached, with the bound its own
+    /// source reported, if any.
+    Answered {
+        turns: Vec<Turn>,
+        bound: Option<TapesBound>,
+    },
+    /// The `tapes` binary is not installed.
+    Absent,
+    /// `tapes` ran and refused, or wrote output this reader cannot parse.
+    Declined,
 }
 
 pub fn transcript_path(harness: &str, session: &str) -> Option<PathBuf> {
@@ -86,26 +133,37 @@ fn modified(path: &Path) -> Option<std::time::SystemTime> {
         .ok()
 }
 
-/// A session's turns as `tapes` reports them, or `None` when tapes cannot
-/// answer — absent binary, non-zero exit, unparseable output. Every one of
-/// those is a fall-back signal rather than an error: this is the preferred
-/// path, not the only one.
-pub fn tapes_turns(session: &str, limit: usize) -> Option<Vec<Turn>> {
-    if limit == 0 {
-        return Some(Vec::new());
-    }
-    let output = Command::new("tapes")
-        .args(["show", session, "--json"])
+/// A session's exchange turns as the `tapes` CLI reports them. Both transcript
+/// readers rest on the same bound — the newest `TRANSCRIPT_BYTES` of the
+/// recording — so an answer does not depend on which reader is installed.
+/// `--tail` is pinned to the widest window so tapes' own turn window cannot
+/// clip inside that byte window, and `--read-bytes` pins the byte window to
+/// the one the native reader uses. The role filter and `--tail` projection
+/// then apply once, locally, for both readers: tapes' own kind classification
+/// varies across its releases, while the roles it reports do not.
+pub fn tapes_turns(session: &str) -> TapesTurns {
+    let output = match Command::new("tapes")
+        .args([
+            "show",
+            session,
+            "--tail",
+            &usize::MAX.to_string(),
+            "--read-bytes",
+            &TRANSCRIPT_BYTES.to_string(),
+            "--json",
+        ])
         .output()
-        .ok()?;
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return TapesTurns::Absent,
+        Err(_) => return TapesTurns::Declined,
+    };
     if !output.status.success() {
-        return None;
+        return TapesTurns::Declined;
     }
-    let response = serde_json::from_slice::<TapesResponse>(&output.stdout).ok()?;
-    // No `--tail`: tapes' own default window is the analogue of the byte
-    // window the file reader takes, and the curation below is what decides how
-    // many turns come back. Bounding tapes first would make `--tail` mean the
-    // last N turns of any role here and the last N operator turns there.
+    let Ok(response) = serde_json::from_slice::<TapesResponse>(&output.stdout) else {
+        return TapesTurns::Declined;
+    };
     let turns = response
         .turns
         .into_iter()
@@ -116,13 +174,21 @@ pub fn tapes_turns(session: &str, limit: usize) -> Option<Vec<Turn>> {
             ts: turn.ts,
         })
         .collect();
-    Some(operator_view(turns, limit))
+    let bound = response
+        .truncation
+        .and_then(|truncation| truncation.source.into_iter().next());
+    TapesTurns::Answered { turns, bound }
+}
+
+/// Whether arc has its own reader for a harness's recording files.
+pub fn native_supported(harness: &str) -> bool {
+    matches!(harness, "claude" | "codex" | "pi")
 }
 
 /// The operator's view of a transcript: what they asked, plus where the
 /// assistant got to. Shared by both readers, so `--tail` counts the same thing
 /// whichever one answered.
-fn operator_view(turns: Vec<Turn>, limit: usize) -> Vec<Turn> {
+pub fn operator_view(turns: Vec<Turn>, limit: usize) -> Vec<Turn> {
     let mut users = Vec::new();
     let mut last_message = None;
     for turn in turns {
@@ -147,11 +213,17 @@ pub fn opencode_databases() -> Option<[PathBuf; 2]> {
     Some([root.join("opencode.db"), root.join("opencode-next.db")])
 }
 
-pub fn operator_turns(path: &Path, limit: usize) -> Result<Vec<Turn>> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
+/// The operator turns one recording file holds, with the window they were
+/// read from.
+pub struct OperatorTurns {
+    pub turns: Vec<Turn>,
+    /// Bytes the read inspected from the end of the recording.
+    pub window_bytes: u64,
+    /// Bytes of the recording before the window; zero when it fit whole.
+    pub skipped_bytes: u64,
+}
 
+pub fn operator_turns(path: &Path) -> Result<OperatorTurns> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
     let start = len.saturating_sub(TRANSCRIPT_BYTES);
@@ -172,7 +244,11 @@ pub fn operator_turns(path: &Path, limit: usize) -> Result<Vec<Turn>> {
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .filter_map(|value| parse_turn(&value))
         .collect();
-    Ok(operator_view(turns, limit))
+    Ok(OperatorTurns {
+        turns,
+        window_bytes: len - start,
+        skipped_bytes: start,
+    })
 }
 
 fn parse_turn(value: &serde_json::Value) -> Option<Turn> {
