@@ -19,7 +19,12 @@ config` reports the same resolution as `journal_dir_for_cwd`, so a caller
 collecting paths asks one command. `dir
 --explain` prints the selected source, stable anchor, and directory;
 resolution refuses to guess when no source matches, and refuses ambiguous
-recorded bindings. `note`
+recorded bindings. Read-only journal commands also run from inside the
+journal directory itself: a directory whose binding records a project
+resolves to that project's checkout and answers exactly as it would there,
+while a write refuses and names the checkout, because a write records that
+checkout's Git state. A journal directory that records no project says so
+instead of listing the resolution sources it tried. `note`
 writes a timestamped `<ts>-<topic>-<kind>.md` artifact and its journal event;
 `log` appends a log-only event; `journal position` adds a position to an
 existing artifact; `journal verified <filename> [--note <text>]` records that
