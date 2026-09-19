@@ -183,6 +183,9 @@ SETTLE A QUESTION (before it is work)
   arc journal answer <file> --question <id> --option <choice> --body-file -
     --other "<answer>"                 Settle it outside the options offered.
   arc journal discussion <file>        Read stances, branches, and open questions.
+  arc journal suggest <file> --question <id> --option <opt> --body-file -
+                         Suggest an option without settling the question;
+                         every question view shows it beside the options.
   arc journal latest <topic> [--kind <k>]
                          One topic's newest artifact, hot before cold; inside
                          one second the successor relation and recording order

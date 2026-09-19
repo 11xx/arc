@@ -47,8 +47,8 @@ Parsing an internal shape means tracking arc's implementation.
 
 | Schema | Surface | Stability |
 | --- | --- | --- |
-| `arc-journal-questions/2` | `arc journal questions --json` — every open question with its options, settle-by, delivery state, and the capability marker | commitment |
-| `journal-discussion/3` | `arc journal discussion --json` — the derived view of one debate: tally, participants, rounds, open questions | commitment |
+| `arc-journal-questions/3` | `arc journal questions --json` — every open question with its options, settle-by, delivery state, the capability marker, and the suggestions standing on it | commitment |
+| `journal-discussion/4` | `arc journal discussion --json` — the derived view of one debate: tally, participants, rounds, open questions, and their suggestions | commitment |
 | `journal-source/1` | `arc journal source --json` — what one recorded session produced here | commitment |
 | `arc-journal-latest/1` | `arc journal latest --json` — the newest artifact under one topic, with the resolved identity beside its body | commitment |
 | `arc-journal-scaffolds/1` | `arc journal scaffolds --json` — the scaffolds a write can prepend, and one scaffold's body | commitment |

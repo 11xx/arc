@@ -772,6 +772,25 @@ pub enum JournalCmd {
         #[arg(long)]
         body_file: String,
     },
+    /// Suggest one of a question's options without settling it. A suggestion
+    /// carries the suggesting identity and its reason, shows beside the
+    /// question in every question view, and is input to a decision: it never
+    /// closes the question and never counts toward the stance tally. Use
+    /// `arc journal suggest <file> --question <id> --option <opt> --body-file -`
+    Suggest {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// The open question the suggestion is input to
+        #[arg(long)]
+        question: String,
+        /// The option suggested; must be one the question offered
+        #[arg(long)]
+        option: String,
+        /// Body source: a file path, or '-' for stdin (the reason, recorded
+        /// verbatim on the suggestion event)
+        #[arg(long)]
+        body_file: String,
+    },
     /// Record that a caller delivered an open question to somebody. arc keeps
     /// the fact; it sends nothing, holds no messaging credentials, and infers
     /// no delivery from prose. Without it a question queue cannot separate
@@ -1216,6 +1235,12 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             other.as_deref(),
             &body_file,
         ),
+        JournalCmd::Suggest {
+            filename,
+            question,
+            option,
+            body_file,
+        } => suggest(ctx, &filename, &question, &option, &body_file),
         JournalCmd::Delivered {
             filename,
             question,
@@ -4437,6 +4462,18 @@ fn answer(
     let ts = now.to_rfc3339_opts(SecondsFormat::Secs, true);
     let (harness, _) = identity(ctx);
     let who = attribution(ctx, &harness);
+    // A standing suggestion is advice the answerer may follow or leave. The
+    // answer is still theirs to give; naming what it departed from keeps a
+    // reader from reconstructing the standing advice out of branch prose.
+    let suggestions = suggestions_from(&events, filename, question_id);
+    let chosen_option = match chosen {
+        Chosen::Offered(option) => Some(option),
+        Chosen::OffMenu(_) => None,
+    };
+    let departed: Vec<&Suggestion> = suggestions
+        .iter()
+        .filter(|suggestion| chosen_option != Some(suggestion.option.as_str()))
+        .collect();
     let heading = match chosen {
         Chosen::Offered(option) => format!("### Answer {question_id} = {option} ({who}, {ts})"),
         Chosen::OffMenu(answer) => {
@@ -4468,6 +4505,81 @@ fn answer(
             unargued.join(", ")
         );
     }
+    if !departed.is_empty() {
+        let named = departed
+            .iter()
+            .map(|suggestion| format!("{} by {}", suggestion.option, suggestion.by))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let answer = match chosen {
+            Chosen::Offered(option) => option,
+            Chosen::OffMenu(answer) => answer,
+        };
+        println!(
+            "warning: {question_id} was answered with {answer}, departing from standing \
+             suggestions ({named})"
+        );
+    }
+    Ok(0)
+}
+
+/// Record a suggestion without settling the question.
+///
+/// A suggestion is input to a decision, not the decision: it never closes a
+/// question and never counts toward the stance tally. The event carries the
+/// suggesting identity and the reason, and every question view shows it
+/// beside the options, so a decider does not have to read every branch to
+/// find the standing advice.
+fn suggest(
+    ctx: &Ctx,
+    filename: &str,
+    question_id: &str,
+    option: &str,
+    body_file: &str,
+) -> Result<i32> {
+    let body = read_body_verbatim(body_file)?;
+    let dir = resolve_dir(&ctx.cwd)?;
+    let _transition = lock_journal_transition(&dir)?;
+    let (dir, path, topic) = open_discussion_for_answer(ctx, filename)?;
+    let events = read_events(&dir)?;
+    let Some(posed) = events.iter().find(|event| {
+        event.known()
+            && event.event == "question"
+            && event.file.as_deref() == Some(filename)
+            && event.question_id.as_deref() == Some(question_id)
+    }) else {
+        bail!("no question {question_id} on {filename}");
+    };
+    let offered = posed.options.clone().unwrap_or_default();
+    if !offered.iter().any(|value| value == option) {
+        bail!(
+            "{option:?} is not one of the options {question_id} offered ({}); a \
+             suggestion must name one of them",
+            offered.join(", ")
+        );
+    }
+    let amendments = Amendments::collect(&events, filename);
+    let answered = amendments.answer_stands(question_id)
+        && events.iter().any(|event| {
+            event.known()
+                && event.event == "answer"
+                && event.file.as_deref() == Some(filename)
+                && event.question_id.as_deref() == Some(question_id)
+        });
+    if answered {
+        bail!(
+            "{question_id} is already answered; a suggestion is input to a decision, \
+             not a way to reopen one"
+        );
+    }
+    let now = Utc::now();
+    let mut event = JournalEvent::base(ctx, now, &topic, "suggestion");
+    event.file = Some(filename.to_string());
+    event.question_id = Some(question_id.to_string());
+    event.option = Some(option.to_string());
+    event.note = Some(body.trim().to_string()).filter(|reason| !reason.is_empty());
+    append_event(ctx, &dir, &event)?;
+    println!("{}", path.display());
     Ok(0)
 }
 
@@ -4989,6 +5101,67 @@ pub(crate) struct QuestionOption {
     positions: usize,
 }
 
+/// One standing suggestion on an open question.
+#[derive(Clone, Serialize)]
+pub(crate) struct Suggestion {
+    /// The option suggested.
+    pub(crate) option: String,
+    /// The suggesting identity: `model via harness` when a model was
+    /// declared, the actor when one was, and the harness otherwise.
+    pub(crate) by: String,
+    /// Who ran the command, when somebody declared an actor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) actor: Option<String>,
+    /// The subject the suggestion was recorded for, when the invocation
+    /// represented one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) on_behalf_of: Option<String>,
+    /// The model that suggested it, when one was declared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model: Option<String>,
+    pub(crate) at: String,
+    /// The reason, recorded verbatim. Absent when the caller supplied none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) note: Option<String>,
+}
+
+/// The suggestions standing on one question, oldest first. A suggestion is
+/// input to a decision: it settles nothing and counts toward no branch, so
+/// only the views built for the decider carry it.
+fn suggestions_from(events: &[JournalEvent], file: &str, question: &str) -> Vec<Suggestion> {
+    events
+        .iter()
+        .filter(|event| {
+            event.known()
+                && event.event == "suggestion"
+                && event.file.as_deref() == Some(file)
+                && event.question_id.as_deref() == Some(question)
+        })
+        .filter_map(|event| {
+            Some(Suggestion {
+                option: event.option.clone()?,
+                by: suggestion_identity(event),
+                actor: event.actor.clone(),
+                on_behalf_of: event.on_behalf_of.clone(),
+                model: event.model.clone().filter(|model| !model.is_empty()),
+                at: event.ts.clone(),
+                note: event.note.clone(),
+            })
+        })
+        .collect()
+}
+
+fn suggestion_identity(event: &JournalEvent) -> String {
+    match event.model.as_deref().filter(|value| !value.is_empty()) {
+        Some(model) => format!("{model} via {}", event.harness),
+        None => event
+            .actor
+            .clone()
+            .filter(|actor| !actor.trim().is_empty())
+            .unwrap_or_else(|| event.harness.clone()),
+    }
+}
+
 #[derive(Serialize)]
 struct OpenQuestions {
     schema: &'static str,
@@ -5000,7 +5173,19 @@ struct OpenQuestions {
     /// predates it.
     #[serde(skip_serializing_if = "Option::is_none")]
     question_delivery: Option<Capability>,
-    questions: Vec<OpenQuestion>,
+    questions: Vec<QuestionView>,
+}
+
+/// One question as the queue reports it: the question's own shape plus the
+/// suggestions standing on it. The shared question projections (inventory,
+/// catchup, and the workspace backlog) keep their shape; a suggestion belongs
+/// to the view a decider reads, not to the artifact record.
+#[derive(Serialize)]
+struct QuestionView {
+    #[serde(flatten)]
+    question: OpenQuestion,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    suggestions: Vec<Suggestion>,
 }
 
 /// Every unanswered question across the journal.
@@ -5010,14 +5195,21 @@ struct OpenQuestions {
 /// The signal that most needs a person was the only one with no queue.
 fn questions(ctx: &Ctx, json: bool) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
-    let open = open_questions(&dir)?;
+    let events = read_events(&dir)?;
+    let open: Vec<QuestionView> = questions_from(&dir, &events, false)?
+        .into_iter()
+        .map(|question| QuestionView {
+            suggestions: suggestions_from(&events, &question.file, &question.question),
+            question,
+        })
+        .collect();
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&OpenQuestions {
-                schema: "arc-journal-questions/2",
+                schema: "arc-journal-questions/3",
                 dir: dir.display().to_string(),
-                question_delivery: capability(&read_events(&dir)?, QUESTION_DELIVERY_CAPABILITY),
+                question_delivery: capability(&events, QUESTION_DELIVERY_CAPABILITY),
                 questions: open,
             })?
         );
@@ -5028,7 +5220,8 @@ fn questions(ctx: &Ctx, json: bool) -> Result<i32> {
         return Ok(0);
     }
     println!("questions awaiting settlement ({}):", open.len());
-    for question in &open {
+    for view in &open {
+        let question = &view.question;
         let settle_by = match &question.settle_by {
             None => "person".to_string(),
             Some(value) => value.clone(),
@@ -5045,6 +5238,9 @@ fn questions(ctx: &Ctx, json: bool) -> Result<i32> {
         println!("    {} in {}", question.question, question.file);
         for option in &question.options {
             println!("    - {} ({} argued)", option.option, option.positions);
+        }
+        for suggestion in &view.suggestions {
+            println!("    suggested: {} by {}", suggestion.option, suggestion.by);
         }
         println!(
             "    answer: arc journal answer {} --question {} --option <choice> --body-file -",
@@ -5937,6 +6133,19 @@ impl JournalEvent {
                     && self.placement.is_none()
                     && self.options.is_none()
             }
+            // A suggestion names one question and one of its options, plus the
+            // reason it was suggested. It settles nothing, so it carries none
+            // of the fields that describe a settlement.
+            "suggestion" => {
+                self.file_is_discussion()
+                    && self.question_id.as_deref().is_some_and(valid_question_id)
+                    && self
+                        .option
+                        .as_deref()
+                        .is_some_and(|option| !option.trim().is_empty())
+                    && self.placement.is_none()
+                    && self.options.is_none()
+            }
             // A delivery names one question on one discussion and one audience
             // that was asked. The handle is optional because most delivery
             // systems hand back nothing; an empty one is a caller that meant
@@ -6213,6 +6422,24 @@ impl QuestionMachine {
                 }
                 progress.argued.insert(option.to_string());
                 true
+            }
+            // A suggestion adds advice to a question that is still open and
+            // offered the option. It never moves the question's state, so one
+            // after settlement, or naming an option the question never
+            // offered, is ignored rather than promoted into a derived view.
+            "suggestion" => {
+                let (Some(question), Some(option)) =
+                    (event.question_id.as_deref(), event.option.as_deref())
+                else {
+                    return true;
+                };
+                let key = (
+                    event.file.clone().expect("known suggestion has a file"),
+                    question.to_string(),
+                );
+                self.questions.get(&key).is_some_and(|progress| {
+                    !progress.answered && progress.options.iter().any(|offered| offered == option)
+                })
             }
             "answer" => {
                 let key = (
@@ -9867,6 +10094,11 @@ struct DiscussionQuestion {
     /// Every recorded delivery, oldest first, including those made before an
     /// answer arrived.
     pub(crate) deliveries: Vec<QuestionDelivery>,
+    /// Suggestions standing on this question when the view was derived. A
+    /// suggestion never settles anything; it is here so the decider sees the
+    /// advice beside the branches.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    suggestions: Vec<Suggestion>,
     /// An opening question is meant to settle a premise before anyone argues.
     /// Set when it is still open and positions exist anyway — the argument
     /// started without the premise it was supposed to rest on.
@@ -10457,6 +10689,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
                 && answered.is_none()
                 && positions > 0;
             let deliveries = question_deliveries(&events, filename, &id);
+            let suggestions = suggestions_from(&events, filename, &id);
             Some(DiscussionQuestion {
                 delivery: delivery_state(
                     delivery_marker.as_ref(),
@@ -10465,6 +10698,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
                     answered.is_some(),
                 ),
                 deliveries,
+                suggestions,
                 id,
                 placement: posed.placement.clone().unwrap_or_default(),
                 options,
@@ -10530,7 +10764,7 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
         resolution_basis,
         last_position_at,
         has_archived_positions,
-        schema: "journal-discussion/3",
+        schema: "journal-discussion/4",
         age_seconds: discussion_age_seconds(Utc::now(), &ts, filename, &events),
         file: filename.to_string(),
         topic,
@@ -10615,6 +10849,9 @@ fn discussion_summary(ctx: &Ctx, filename: &str, json: bool) -> Result<i32> {
                 branch.positions,
                 if branch.positions == 1 { "" } else { "s" }
             );
+        }
+        for suggestion in &question.suggestions {
+            println!("  suggested: {} by {}", suggestion.option, suggestion.by);
         }
         if question.argued_before_answered {
             println!(
