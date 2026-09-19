@@ -11534,6 +11534,88 @@ fn a_checkpoint_correction_supersedes_the_earlier_one_and_doctor_reports_two_tip
         .stdout(predicates::str::contains("contested-checkpoint-tip"));
 }
 
+/// A takeover checkpoint that supersedes a tip written by another claim
+/// converges the artifact's current continuation: one tip, not two. This is
+/// the discriminator between supersession that follows the recorded edge
+/// wherever it points and supersession that only counts inside the writing
+/// claim.
+#[test]
+fn a_takeover_checkpoint_converges_a_tip_from_the_previous_claim() {
+    let repo = Repo::new();
+    let (_, file) = journal_artifact(&repo, "cross-claim-tip", "todo", "# Queued\n");
+    let first_owner = |cmd: &mut AssertCommand| {
+        cmd.env("ARC_ACTOR", "model-a")
+            .env("ARC_HARNESS", "ca")
+            .env("ARC_SESSION", "sa");
+    };
+    let second_owner = |cmd: &mut AssertCommand| {
+        cmd.env("ARC_ACTOR", "model-b")
+            .env("ARC_HARNESS", "cb")
+            .env("ARC_SESSION", "sb");
+    };
+
+    let mut claim = repo.arc(&repo.root);
+    first_owner(&mut claim);
+    claim.args(["claim", &file]).assert().success();
+    let mut checkpoint = repo.arc(&repo.root);
+    first_owner(&mut checkpoint);
+    checkpoint
+        .args(["journal", "checkpoint", &file, "--next", "first", "--body-file", "-"])
+        .write_stdin("first\n")
+        .assert()
+        .success();
+    let first = journal_event_log(&journal_dir(&repo))
+        .into_iter()
+        .rfind(|event| event["event"] == "checkpoint")
+        .unwrap()["checkpoint_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut release = repo.arc(&repo.root);
+    first_owner(&mut release);
+    release.args(["release-claim", &file]).assert().success();
+
+    let mut claim = repo.arc(&repo.root);
+    second_owner(&mut claim);
+    claim.args(["claim", &file]).assert().success();
+    let mut checkpoint = repo.arc(&repo.root);
+    second_owner(&mut checkpoint);
+    checkpoint
+        .args([
+            "journal",
+            "checkpoint",
+            &file,
+            "--next",
+            "second",
+            "--supersedes",
+            &first,
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("second\n")
+        .assert()
+        .success();
+
+    let inventory = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "inventory", &file, "--json"]),
+    );
+    let tips: Vec<&str> = inventory["items"][0]["checkpoint_tips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tip| tip["checkpoint"]["checkpoint_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(tips.len(), 1, "{inventory}");
+    assert_ne!(tips[0], first.as_str(), "{inventory}");
+
+    repo.arc(&repo.root)
+        .args(["journal", "doctor"])
+        .assert()
+        .success();
+}
+
 #[test]
 fn a_checkpoint_needs_a_claim_and_is_refused_once_the_artifact_is_consumed() {
     let repo = Repo::new();
