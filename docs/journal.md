@@ -77,12 +77,12 @@ retry validates the recorded paths and bytes and completes the same operation.
 Pending operations block competing writes and appear in `journal doctor`.
 Unclassified cold discussions require explicit `archive --unresolved --note`
 adoption before accepting positions. Duplicate bodies are reported as conflicts.
-`journal catchup --archived --json` uses `arc-journal-catchup/6` and marks each row's
+`journal catchup --archived --json` uses `arc-journal-catchup/7` and marks each row's
 storage, resolution, resolution basis, latest position, and whether archived
 positions exist; unknown legacy facts remain explicit rather than becoming
 empty values.
 `journal inventory [FILE] [--archived] [--kind KIND] --json` emits
-`arc-journal-inventory/2`. It selects one hot or cold store from one observed
+`arc-journal-inventory/3`. It selects one hot or cold store from one observed
 set of events, keeps availability separate from storage and resolution, and
 reports claims, questions, exact change/brief promotions, source references,
 and whether the ledger was absent, readable, or unreadable. An exact file is
@@ -402,9 +402,12 @@ checkpoint` block to the artifact and records a typed event carrying the
 structured fields and a digest of exactly the bytes appended, so a reader can
 tell a checkpoint that still says what it said from one rewritten underneath.
 It requires a live claim held by this identity and is refused once the artifact
-is consumed. A correction is another checkpoint naming the one it supersedes;
-views follow the uncorrected tip, and `journal doctor` reports a claim left
-with two of them.
+is consumed. Later checkpoints in one claim are ordinary progress and replace
+that claim's earlier ones; `--supersedes` names a checkpoint to replace across
+claims and repeats, so a takeover converges several continuations in one
+checkpoint. Views report the tips that remain: more than one across claims is
+a contest unless a `--supersedes` edge converges them, and `journal doctor`
+reports exactly that.
 
 `journal consume` and `journal transition` refuse while any claim on the
 artifact is open, naming each, and proceed only when `--acknowledge-claim <id>`

@@ -1005,7 +1005,7 @@ fn workspace_backlog(
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/13",
+                schema: "arc-workspace-backlog/14",
                 scope: scope.view(),
                 observation: Observation {
                     started_at: observed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
