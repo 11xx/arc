@@ -319,6 +319,26 @@ withdrawn by consuming it and a question by answering it. Both append a
 target and the change, never rewriting an existing one, and both are accepted
 on a consumed artifact, which is closed to new work but not to being wrong.
 
+Provenance recorded wrong at creation is not an amendment. `journal
+reattribute <filename> --set-actor <a> --set-harness <h> --set-session <s>
+--set-model <m>` rewrites the authorship fields of the artifact's one
+creation (`note`) event in place, each absent flag leaving the recorded field
+alone and nothing inferred for a field nobody named. The operation is
+deliberate maintenance rather than ordinary mutation: it validates the whole
+log before writing, holds the journal transition and event-write locks across
+the read and the replace, keeps the previous bytes as `events.jsonl.bak`, and
+publishes the replacement by fsync and rename, so an interruption leaves either the old log
+or the fully written new one. Every event append shares the event-write lock;
+a writer either appends to the published log or fails with a busy-lock error.
+Tools that ignore these locks cannot be serialized by Arc. `--dry-run` names
+the record and every other record carrying the replaced identity and writes
+nothing; those other records
+are deliberately left for a separate decision rather than blanket-rewritten.
+Every other event kind is refused by name, because position, answer, claim,
+and checkpoint events carry contributions and continuations that provenance
+repair must not rewrite, and so is a creation event recording an
+`on-behalf-of` subject.
+
 The effect lives in the derived views, and the latest correction of a given
 target and field wins in event order. `journal discussion` counts the
 corrected stance and branch, carries the corrected actor on each round

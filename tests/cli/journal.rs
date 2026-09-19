@@ -1189,7 +1189,11 @@ fn journal_log_appends_without_creating_artifact_file() {
     // The binding names the project this journal belongs to; no artifact.
     assert_eq!(
         entries,
-        vec!["bindings.jsonl".to_string(), "events.jsonl".to_string()]
+        vec![
+            ".locks".to_string(),
+            "bindings.jsonl".to_string(),
+            "events.jsonl".to_string()
+        ]
     );
     let event = &journal_events(&dir)[0];
     assert_eq!(event["event"], "log");
@@ -6100,6 +6104,9 @@ fn journal_doctor_split_advice_reads_as_one_sentence() {
         .assert()
         .failure();
     assert!(dir.join(".locks/transition.lock").is_file());
+    // A repair can leave coordination files without ever publishing history.
+    fs::write(dir.join(".locks/events.lock"), "").unwrap();
+
     let orphan = dir.parent().unwrap().join("-old-path-repo");
     fs::create_dir_all(&orphan).unwrap();
     fs::write(orphan.join("20260101T000000Z-alpha-todo.md"), "# Alpha\n").unwrap();
@@ -6243,6 +6250,7 @@ fn rebind_adopts_over_a_journal_holding_only_its_binding() {
         .assert()
         .failure();
     assert!(dir.join(".locks/transition.lock").is_file());
+    fs::write(dir.join(".locks/events.lock"), "").unwrap();
 
     let orphan = dir.parent().unwrap().join("-old-path-repo");
     fs::create_dir_all(&orphan).unwrap();
@@ -11838,6 +11846,457 @@ fn a_takeover_checkpoint_converges_a_tip_from_the_previous_claim() {
         .args(["journal", "doctor"])
         .assert()
         .success();
+}
+
+/// File one artifact whose creation event records the given identity.
+fn artifact_with_identity(
+    repo: &Repo,
+    topic: &str,
+    kind: &str,
+    harness: &str,
+    session: &str,
+    actor: &str,
+    model: &str,
+) -> String {
+    let body = repo.home.join(format!("{topic}-body.md"));
+    fs::write(&body, format!("# {topic}\n")).unwrap();
+    let out = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_HARNESS", harness)
+            .env("ARC_SESSION", session)
+            .env("ARC_ACTOR", actor)
+            .env("ARC_MODEL", model)
+            .args([
+                "journal",
+                "note",
+                topic,
+                "--kind",
+                kind,
+                "--body-file",
+                body.to_str().unwrap(),
+            ]),
+    );
+    PathBuf::from(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string()
+}
+
+/// The event log's lines, so a test can say exactly which one moved.
+fn events_bytes(repo: &Repo) -> Vec<u8> {
+    fs::read(journal_dir(repo).join("events.jsonl")).unwrap()
+}
+
+#[test]
+fn journal_reattribute_dry_run_names_the_record_and_writes_nothing() {
+    let repo = Repo::new();
+    let file = artifact_with_identity(
+        &repo,
+        "mistyped",
+        "todo",
+        "pi",
+        "unknown",
+        "pi:unknown",
+        "unknown",
+    );
+    let before = events_bytes(&repo);
+
+    let text = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "reattribute",
+        &file,
+        "--dry-run",
+        "--set-actor",
+        "model-x",
+        "--set-harness",
+        "claude",
+        "--set-session",
+        "sess-x",
+        "--set-model",
+        "claude-opus-5#high",
+    ]));
+    assert!(text.contains(&file), "{text}");
+    assert!(text.contains("actor: pi:unknown -> model-x"), "{text}");
+    assert!(text.contains("harness: pi -> claude"), "{text}");
+    assert!(text.contains("session: unknown -> sess-x"), "{text}");
+    assert!(text.contains("dry run: nothing written"), "{text}");
+    assert_eq!(events_bytes(&repo), before, "dry run must not write");
+}
+
+#[test]
+fn journal_reattribute_repairs_only_the_selected_creation_event() {
+    let repo = Repo::new();
+    let file = artifact_with_identity(
+        &repo,
+        "first-mistype",
+        "todo",
+        "pi",
+        "unknown",
+        "pi:unknown",
+        "unknown",
+    );
+    let sibling = artifact_with_identity(
+        &repo,
+        "second-mistype",
+        "todo",
+        "pi",
+        "unknown",
+        "pi:unknown",
+        "unknown",
+    );
+    let before = events_bytes(&repo);
+
+    let text = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "reattribute",
+        &file,
+        "--set-actor",
+        "model-x",
+        "--set-session",
+        "sess-x",
+    ]));
+    assert!(text.contains("repaired:"), "{text}");
+
+    // Only the creation line moved; every other line is byte-identical, and
+    // the fields nobody named keep their recorded values.
+    let after = events_bytes(&repo);
+    let before_lines: Vec<&str> = std::str::from_utf8(&before)
+        .unwrap()
+        .split_inclusive('\n')
+        .collect();
+    let after_lines: Vec<&str> = std::str::from_utf8(&after)
+        .unwrap()
+        .split_inclusive('\n')
+        .collect();
+    assert_eq!(before_lines.len(), after_lines.len());
+    let mut repaired = 0;
+    for (index, (before_line, after_line)) in before_lines.iter().zip(&after_lines).enumerate() {
+        let event: serde_json::Value = serde_json::from_str(before_line.trim()).unwrap();
+        if event["file"] == file.as_str() && event["event"] == "note" {
+            repaired += 1;
+            let event: serde_json::Value = serde_json::from_str(after_line.trim()).unwrap();
+            assert_eq!(event["actor"], "model-x");
+            assert_eq!(event["session"], "sess-x");
+            assert_eq!(event["harness"], "pi", "an unnamed field keeps its value");
+            assert_eq!(
+                event["model"], "unknown",
+                "an unnamed field keeps its value"
+            );
+        } else {
+            assert_eq!(before_line, after_line, "line {} changed bytes", index + 1);
+        }
+    }
+    assert_eq!(repaired, 1);
+
+    // A sibling filed with the same wrong identity is a separate decision.
+    let sibling_event = journal_event_log(&journal_dir(&repo))
+        .into_iter()
+        .find(|event| event["file"] == sibling.as_str())
+        .unwrap();
+    assert_eq!(sibling_event["session"], "unknown");
+
+    // Derived views read the corrected identity; the body still round-trips.
+    let show = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "show", &file, "--json"]),
+    );
+    assert_eq!(show["recorded_by"]["actor"], "model-x");
+    assert_eq!(show["recorded_by"]["session"], "sess-x");
+    assert_eq!(show["recorded_by"]["harness"], "pi");
+    repo.arc(&repo.root)
+        .args(["journal", "show", &file])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("# first-mistype"));
+    repo.arc(&repo.root)
+        .args(["journal", "inventory", &file, "--json"])
+        .assert()
+        .success();
+
+    let doctor = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    assert!(
+        doctor["problems"].as_array().unwrap().is_empty(),
+        "{doctor}"
+    );
+
+    // A temporary left by an interrupted replace sits in the staging directory
+    // and is not a record or a health problem.
+    let staging = journal_dir(&repo).join(".repair-staging");
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(staging.join(".events.jsonl.crash.tmp"), "partial").unwrap();
+    let doctor = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    assert!(
+        doctor["problems"].as_array().unwrap().is_empty(),
+        "{doctor}"
+    );
+
+    assert_eq!(
+        fs::read(journal_dir(&repo).join("events.jsonl.bak")).unwrap(),
+        before,
+        "the previous bytes stay recoverable"
+    );
+}
+
+#[test]
+fn journal_reattribute_refuses_a_repeat_or_an_empty_selection() {
+    let repo = Repo::new();
+    let file = artifact_with_identity(
+        &repo,
+        "repeatable",
+        "todo",
+        "pi",
+        "unknown",
+        "pi:unknown",
+        "unknown",
+    );
+    repo.arc(&repo.root)
+        .args(["journal", "reattribute", &file])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "pass at least one of --set-actor",
+        ));
+    repo.arc(&repo.root)
+        .args(["journal", "reattribute", &file, "--set-actor", " "])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--set-actor must not be empty"));
+
+    repo.arc(&repo.root)
+        .args(["journal", "reattribute", &file, "--set-actor", "model-x"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "reattribute", &file, "--set-actor", "model-x"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already records the requested"));
+}
+
+#[test]
+fn journal_reattribute_refuses_other_kinds_and_delegated_records() {
+    let repo = Repo::new();
+    let file = artifact_with_identity(
+        &repo,
+        "guarded",
+        "todo",
+        "pi",
+        "unknown",
+        "pi:unknown",
+        "unknown",
+    );
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "reattribute",
+            &file,
+            "--event",
+            "position",
+            "--set-actor",
+            "model-x",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "events record contribution or decisions",
+        ));
+
+    // A creation event recorded for a subject is refused, not reattributed.
+    let body = repo.home.join("delegated-body.md");
+    fs::write(&body, "# Delegated\n").unwrap();
+    let delegated = stdout(
+        repo.arc(&repo.root)
+            .env("ARC_ON_BEHALF_OF", "someone")
+            .args([
+                "journal",
+                "note",
+                "delegated",
+                "--kind",
+                "todo",
+                "--body-file",
+                body.to_str().unwrap(),
+            ]),
+    );
+    let delegated = PathBuf::from(delegated.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "reattribute",
+            &delegated,
+            "--set-actor",
+            "model-x",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("on-behalf-of subject"));
+}
+
+#[test]
+fn journal_reattribute_refuses_a_malformed_log_and_writes_nothing() {
+    let repo = Repo::new();
+    let file = artifact_with_identity(
+        &repo,
+        "malformed-log",
+        "todo",
+        "pi",
+        "unknown",
+        "pi:unknown",
+        "unknown",
+    );
+    let path = journal_dir(&repo).join("events.jsonl");
+    let mut text = String::from_utf8(events_bytes(&repo)).unwrap();
+    text.push_str("this is not a journal event\n");
+    fs::write(&path, &text).unwrap();
+    let malformed = fs::read(&path).unwrap();
+
+    repo.arc(&repo.root)
+        .args(["journal", "reattribute", &file, "--set-actor", "model-x"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("line 2 is not JSON"));
+    assert_eq!(fs::read(&path).unwrap(), malformed, "nothing was rewritten");
+}
+
+#[test]
+fn journal_reattribute_repairs_a_consumed_artifact_without_touching_lifecycle() {
+    let repo = Repo::new();
+    let file = artifact_with_identity(
+        &repo,
+        "consumed-mistype",
+        "todo",
+        "pi",
+        "unknown",
+        "pi:unknown",
+        "unknown",
+    );
+    repo.arc(&repo.root)
+        .args(["claim", &file])
+        .assert()
+        .success();
+    let claim = artifact_claim_ids(&journal_dir(&repo), &file).remove(0);
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &file, "--acknowledge-claim", &claim])
+        .assert()
+        .success();
+    let before = events_bytes(&repo);
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "reattribute",
+            &file,
+            "--set-session",
+            "corrected",
+        ])
+        .assert()
+        .success();
+    let show = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "show", &file, "--json"]),
+    );
+    assert_eq!(show["recorded_by"]["session"], "corrected");
+
+    // The lifecycle events are byte-identical.
+    let after = String::from_utf8(events_bytes(&repo)).unwrap();
+    let before = String::from_utf8(before).unwrap();
+    for (before_line, after_line) in before.lines().zip(after.lines()) {
+        let event: serde_json::Value = serde_json::from_str(before_line).unwrap();
+        if event["event"] == "note" {
+            continue;
+        }
+        assert_eq!(before_line, after_line);
+    }
+    let doctor = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    assert!(
+        doctor["problems"].as_array().unwrap().is_empty(),
+        "{doctor}"
+    );
+}
+
+/// Appending a log line and replacing its file share the event-write lock.
+#[test]
+fn journal_reattribute_survives_a_concurrent_writer() {
+    let repo = Repo::new();
+    let file = artifact_with_identity(
+        &repo,
+        "racing",
+        "todo",
+        "pi",
+        "unknown",
+        "pi:unknown",
+        "unknown",
+    );
+    repo.arc(&repo.root)
+        .args(["claim", &file])
+        .assert()
+        .success();
+    let binary = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo provides the binary");
+    let arc = || {
+        let mut command = Command::new(&binary);
+        command
+            .current_dir(&repo.root)
+            .env("HOME", &repo.home)
+            .env("ARC_SANDBOX", &repo.home)
+            .env("ARC_ACTOR", "tester")
+            .env("ARC_HARNESS", "test")
+            .env("ARC_SESSION", "session-a")
+            .env("GIT_EDITOR", "true");
+        command
+    };
+    let mut repair = arc();
+    repair.args([
+        "journal",
+        "reattribute",
+        &file,
+        "--set-session",
+        "corrected",
+    ]);
+    let mut writer = arc();
+    writer.args(["journal", "log", "concurrent", "must survive repair"]);
+    repair.stdout(Stdio::null()).stderr(Stdio::piped());
+    writer.stdout(Stdio::null()).stderr(Stdio::piped());
+
+    let lock_dir = journal_dir(&repo).join(".locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    let event_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_dir.join("events.lock"))
+        .unwrap();
+    event_lock.lock().unwrap();
+    let mut repair = repair.spawn().unwrap();
+    let mut writer = writer.spawn().unwrap();
+    assert_waiting_on_transition_lock(&mut [&mut repair, &mut writer]);
+    event_lock.unlock().unwrap();
+    let repair = repair.wait_with_output().unwrap();
+    let writer = writer.wait_with_output().unwrap();
+    assert!(
+        repair.status.success(),
+        "the repair failed: {}",
+        String::from_utf8_lossy(&repair.stderr)
+    );
+    assert!(
+        writer.status.success(),
+        "the writer failed: {}",
+        String::from_utf8_lossy(&writer.stderr)
+    );
+
+    let events = journal_event_log(&journal_dir(&repo));
+    let creation = events
+        .iter()
+        .find(|event| event["event"] == "note" && event["file"] == file.as_str())
+        .unwrap();
+    assert_eq!(creation["session"], "corrected");
+    assert!(events
+        .iter()
+        .any(|event| event["event"] == "log" && event["topic"] == "concurrent"));
 }
 
 #[test]
