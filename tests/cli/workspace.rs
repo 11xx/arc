@@ -3173,3 +3173,113 @@ fn workspace_backlog_writes_nothing() {
         "tracked tree changed"
     );
 }
+
+/// One project whose ledger cannot be read is skipped with a warning; the
+/// workspace inbox still reports every project it could read.
+#[test]
+fn workspace_inbox_skips_an_unreadable_project_with_a_warning() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let outer = TempDir::new().unwrap();
+    let shared_home = outer.path().join("home");
+    fs::create_dir_all(&shared_home).unwrap();
+    let shared = |repo: &Repo| {
+        let mut cmd = repo.arc(&repo.root);
+        cmd.env("HOME", &shared_home)
+            .env("ARC_SANDBOX", &shared_home);
+        cmd
+    };
+
+    let healthy = Repo::new();
+    shared(&healthy)
+        .args(["begin", "inbox-healthy", "--no-worktree"])
+        .assert()
+        .success();
+    let broken = Repo::new();
+    shared(&broken)
+        .args(["begin", "inbox-broken", "--no-worktree"])
+        .assert()
+        .success();
+    let catchup = stdout(shared(&broken).args(["catchup"]));
+    let ledger = catchup
+        .lines()
+        .find_map(|line| line.strip_prefix("ledger: "))
+        .map(|path| PathBuf::from(path.trim()))
+        .unwrap_or_else(|| panic!("no ledger line: {catchup}"));
+    let changes = ledger.join("changes");
+    assert!(changes.is_dir(), "{changes:?}");
+    fs::set_permissions(&changes, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let output = shared(&healthy)
+        .args(["workspace", "inbox", "--json"])
+        .output()
+        .unwrap();
+    // The backlog reads the same ledger and names the failure rather than
+    // reporting the project as holding no changes.
+    let backlog = shared(&healthy)
+        .args(["workspace", "backlog", "--json"])
+        .output()
+        .unwrap();
+    fs::set_permissions(&changes, fs::Permissions::from_mode(0o755)).unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&backlog.stdout).unwrap();
+    assert_eq!(backlog.status.code(), Some(16), "{report}");
+    assert_eq!(report["collection"]["failed"], 1, "{report}");
+    assert!(
+        report["collection"]["failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|failure| failure["component"] == "ledger"),
+        "{report}"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("warning: skipping"),
+        "{stderr}\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let repos = value["repos"].as_array().unwrap();
+    assert_eq!(repos.len(), 1, "{value}");
+    assert!(
+        repos[0]["needs-review"][0]["change_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("inbox-healthy"),
+        "{value}"
+    );
+}
+
+/// A journal directory at a vanished path that holds nothing and was never
+/// bound is housekeeping: the census counts it as observed empty, and it does
+/// not make the collection partial.
+#[test]
+fn workspace_backlog_counts_an_empty_vanished_journal_as_empty() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "census-present", "--no-worktree"])
+        .assert()
+        .success();
+    let journals = repo.home.join(".local/ai/journals");
+    fs::create_dir_all(journals.join("-gone-empty-project")).unwrap();
+
+    let output = repo
+        .arc(&repo.root)
+        .args(["workspace", "backlog", "--json"])
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    let collection = &value["collection"];
+    assert_eq!(collection["discovered"], 2, "{value}");
+    assert_eq!(collection["failed"], 0, "{value}");
+    assert_eq!(collection["empty"], 1, "{value}");
+    assert_eq!(collection["non_empty"], 1, "{value}");
+    assert!(collection.get("failures").is_none(), "{value}");
+    assert!(
+        value["unreachable"].as_array().unwrap().is_empty(),
+        "{value}"
+    );
+}

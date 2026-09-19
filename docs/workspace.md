@@ -48,10 +48,10 @@ is skipped only when journal `<x>` is also present, so a project genuinely
 called that is not lost.
 
 `list` prints per-repo open-change rows; `inbox` concatenates each project's
-inbox rollup, tagged with the project. Both accept the same `--under`,
-`--here`, and `--global` scope as `backlog`, so the projections select the same
-set. The scan opens each store read-only, never creates one, and skips
-unreadable entries with a warning. JSON is versioned `arc-workspace/1`. The
+inbox rollup, tagged with the project. `inbox` accepts the same `--under`,
+`--here`, and `--global` scope as `backlog`, so the two projections select the
+same set; `list` takes no scope. The scan opens each store read-only, never
+creates one, and skips unreadable entries with a warning. JSON is versioned `arc-workspace/1`. The
 workspace inbox observes each project through a context standing in its own
 anchor, so gate policy and live heads are the project's own and its buckets
 answer what a per-project tour would.
@@ -112,8 +112,10 @@ detail. Temporary and scratch anchors are collapsed in the default text view;
 `--unreachable` expands every maintenance row, while JSON always retains the
 complete structured list. The `collection` manifest states the collection's
 boundaries — discovered, selected, skipped, observed-empty, observed-with-facts,
-and failed — with one entry per failed component, so an unreachable anchor or an
+and failed — with one entry per failed component, so an orphaned anchor or an
 unreadable ledger or journal is a named failure rather than an empty project.
+A journal at a vanished path that holds nothing and was never bound is counted
+as empty.
 Discovered equals selected plus skipped, and selected equals empty plus non-empty
 plus failed. `arc workspace backlog` exits 16 when any selected project's
 observation failed; the rows that were read still print.

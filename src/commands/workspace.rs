@@ -446,17 +446,22 @@ fn workspace_inbox(ctx: &Ctx, scope: WorkspaceScope, json: bool) -> Result<()> {
         let Some(root) = project.ledger.clone() else {
             continue;
         };
-        let Some(store) = Store::open_at(&root)? else {
-            continue;
-        };
         let anchor = project
             .anchor
             .clone()
             .expect("a reachable project has an anchor");
-        repos.push(RepoInbox {
-            repo: project.label(),
-            inbox: observe_changes(ctx, &store, &anchor)?,
+        let observed = Store::open_at(&root).and_then(|store| match store {
+            Some(store) => observe_changes(ctx, &store, &anchor).map(Some),
+            None => Ok(None),
         });
+        match observed {
+            Ok(Some(inbox)) => repos.push(RepoInbox {
+                repo: project.label(),
+                inbox,
+            }),
+            Ok(None) => {}
+            Err(error) => eprintln!("warning: skipping {}: {error:#}", project.label()),
+        }
     }
     if json {
         println!(
@@ -537,7 +542,7 @@ struct CollectionManifest {
     empty: usize,
     /// Selected projects observed with at least one fact and no failure.
     non_empty: usize,
-    /// Selected projects with at least one failed component, unreachable
+    /// Selected projects with at least one failed component, orphaned
     /// anchors included.
     failed: usize,
     /// One entry per failed component; a project may name several.
@@ -1508,22 +1513,24 @@ fn workspace_backlog(
         }
         selected += 1;
         if !project.reachable {
-            // An orphan holds work nobody can reach; a merely empty journal at
-            // a vanished path is housekeeping, not a finding. Either way the
-            // census counts it as a failed observation, because an anchor that
-            // is not there is not a project with no work.
+            // An orphan holds work nobody can reach, so the census counts it
+            // as a failed observation: an anchor that is not there is not a
+            // project with no work. A journal at a vanished path that holds
+            // nothing and was never bound is housekeeping, observed empty.
+            if !project.is_orphan() {
+                empty += 1;
+                continue;
+            }
             let reason = match project.anchor {
                 Some(_) => "anchor does not exist",
                 None => "journal name resolves to no single path",
             };
-            if project.is_orphan() {
-                unreachable.push(UnreachableProject {
-                    slug: project.slug.clone(),
-                    journal_dir: project.journal_dir.display().to_string(),
-                    anchor: project.anchor.as_ref().map(|p| p.display().to_string()),
-                    reason,
-                });
-            }
+            unreachable.push(UnreachableProject {
+                slug: project.slug.clone(),
+                journal_dir: project.journal_dir.display().to_string(),
+                anchor: project.anchor.as_ref().map(|p| p.display().to_string()),
+                reason,
+            });
             failures.push(CollectionFailure {
                 project: project.label(),
                 anchor: project.anchor.as_ref().map(|p| p.display().to_string()),

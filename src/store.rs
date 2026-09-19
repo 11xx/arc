@@ -343,12 +343,17 @@ impl Store {
         }
     }
 
+    /// Every change in the ledger. A ledger with no changes directory has no
+    /// changes; one whose directory cannot be read is an error, never empty.
     pub fn list_change_ids(&self) -> Result<Vec<String>> {
         let dir = self.changes_dir();
         let mut ids_out = Vec::new();
         let entries = match fs::read_dir(&dir) {
             Ok(e) => e,
-            Err(_) => return Ok(ids_out),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(ids_out),
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", dir.display()))
+            }
         };
         for entry in entries {
             let entry = entry?;
