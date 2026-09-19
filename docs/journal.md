@@ -325,11 +325,14 @@ reattribute <filename> --set-actor <a> --set-harness <h> --set-session <s>
 creation (`note`) event in place, each absent flag leaving the recorded field
 alone and nothing inferred for a field nobody named. The operation is
 deliberate maintenance rather than ordinary mutation: it validates the whole
-log before writing, holds the journal transition lock across the read and the
-replace, keeps the previous bytes as `events.jsonl.bak`, and publishes the
-replacement by fsync and rename, so an interruption leaves either the old log
-or the fully written new one. `--dry-run` names the record and every other
-record carrying the replaced identity and writes nothing; those other records
+log before writing, holds the journal transition and event-write locks across
+the read and the replace, keeps the previous bytes as `events.jsonl.bak`, and
+publishes the replacement by fsync and rename, so an interruption leaves either the old log
+or the fully written new one. Every event append shares the event-write lock;
+a writer either appends to the published log or fails with a busy-lock error.
+Tools that ignore these locks cannot be serialized by Arc. `--dry-run` names
+the record and every other record carrying the replaced identity and writes
+nothing; those other records
 are deliberately left for a separate decision rather than blanket-rewritten.
 Every other event kind is refused by name, because position, answer, claim,
 and checkpoint events carry contributions and continuations that provenance

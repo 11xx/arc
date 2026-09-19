@@ -34,6 +34,7 @@ const JOURNAL_LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 const JOURNAL_LOCK_RETRY: Duration = Duration::from_millis(10);
 const JOURNAL_LOCK_DIR: &str = ".locks";
 const JOURNAL_TRANSITION_LOCK: &str = "transition.lock";
+const JOURNAL_EVENTS_LOCK: &str = "events.lock";
 
 /// Where a provenance repair keeps the bytes it replaced. The name is fixed
 /// so one repair always leaves the immediately previous log recoverable and
@@ -59,17 +60,27 @@ impl Drop for JournalTransitionLock {
 }
 
 fn lock_journal_transition(dir: &Path) -> Result<JournalTransitionLock> {
+    lock_journal_file(dir, JOURNAL_TRANSITION_LOCK, "transition")
+}
+
+// Transition callers acquire their state lock first, then this write lock.
+// Append-only callers take only the write lock; no writer acquires in reverse.
+fn lock_journal_events(dir: &Path) -> Result<JournalTransitionLock> {
+    lock_journal_file(dir, JOURNAL_EVENTS_LOCK, "events")
+}
+
+fn lock_journal_file(dir: &Path, name: &str, purpose: &str) -> Result<JournalTransitionLock> {
     let lock_dir = dir.join(JOURNAL_LOCK_DIR);
     std::fs::create_dir_all(&lock_dir)
         .with_context(|| format!("cannot create journal lock dir {}", lock_dir.display()))?;
-    let path = lock_dir.join(JOURNAL_TRANSITION_LOCK);
+    let path = lock_dir.join(name);
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(&path)
-        .with_context(|| format!("cannot open journal transition lock {}", path.display()))?;
+        .with_context(|| format!("cannot open journal {purpose} lock {}", path.display()))?;
     let deadline = Instant::now() + JOURNAL_LOCK_TIMEOUT;
     loop {
         match file.try_lock() {
@@ -77,7 +88,7 @@ fn lock_journal_transition(dir: &Path) -> Result<JournalTransitionLock> {
             Err(std::fs::TryLockError::WouldBlock) => {
                 if Instant::now() >= deadline {
                     bail!(
-                        "journal transition lock {} is busy; retry the command",
+                        "journal {purpose} lock {} is busy; retry the command",
                         path.display()
                     );
                 }
@@ -85,7 +96,7 @@ fn lock_journal_transition(dir: &Path) -> Result<JournalTransitionLock> {
             }
             Err(std::fs::TryLockError::Error(error)) => {
                 return Err(error)
-                    .with_context(|| format!("cannot lock journal transition {}", path.display()));
+                    .with_context(|| format!("cannot lock journal {purpose} {}", path.display()));
             }
         }
     }
@@ -877,7 +888,8 @@ pub enum JournalCmd {
     /// mutation stays append-only and no correction block is appended. Only
     /// the named fields of the one creation (`note`) event change; every
     /// other record keeps its bytes, and the previous log is kept as
-    /// `events.jsonl.bak`. Other event kinds are refused by name because
+    /// `events.jsonl.bak`. Repair and every event append share an event-write
+    /// lock across the read and replacement. Other event kinds are refused because
     /// their identity carries contribution, decision, or continuation that
     /// provenance repair must not rewrite, and so is a creation event
     /// recording an on-behalf-of subject. `--dry-run` names the exact record
@@ -1783,20 +1795,22 @@ fn looks_like_a_journal(dir: &Path) -> Result<bool> {
     Ok(false)
 }
 
-/// Remove a target journal that holds only its binding and transition-lock
+/// Remove a target journal that holds only its binding and journal-lock
 /// metadata, so the adopted journal can be renamed into its place.
 fn clear_bound_target(target: &Path) -> Result<()> {
     let lock_dir = target.join(JOURNAL_LOCK_DIR);
-    if lock_dir.exists() && !holds_only_transition_lock(&lock_dir)? {
+    if lock_dir.exists() && !holds_only_journal_locks(&lock_dir)? {
         bail!(
             "cannot replace internal lock dir {} because it holds unexpected content",
             lock_dir.display()
         );
     }
-    let transition_lock = lock_dir.join(JOURNAL_TRANSITION_LOCK);
-    if transition_lock.is_file() {
-        std::fs::remove_file(&transition_lock)
-            .with_context(|| format!("cannot remove {}", transition_lock.display()))?;
+    for name in [JOURNAL_TRANSITION_LOCK, JOURNAL_EVENTS_LOCK] {
+        let lock = lock_dir.join(name);
+        if lock.is_file() {
+            std::fs::remove_file(&lock)
+                .with_context(|| format!("cannot remove {}", lock.display()))?;
+        }
     }
     if lock_dir.is_dir() {
         std::fs::remove_dir(&lock_dir)
@@ -1811,13 +1825,16 @@ fn clear_bound_target(target: &Path) -> Result<()> {
         .with_context(|| format!("cannot replace empty {}", target.display()))
 }
 
-fn holds_only_transition_lock(lock_dir: &Path) -> Result<bool> {
+fn holds_only_journal_locks(lock_dir: &Path) -> Result<bool> {
     if !lock_dir.is_dir() {
         return Ok(false);
     }
     for entry in std::fs::read_dir(lock_dir)? {
         let entry = entry?;
-        if entry.file_name() != JOURNAL_TRANSITION_LOCK || !entry.file_type()?.is_file() {
+        if (entry.file_name() != JOURNAL_TRANSITION_LOCK
+            && entry.file_name() != JOURNAL_EVENTS_LOCK)
+            || !entry.file_type()?.is_file()
+        {
             return Ok(false);
         }
     }
@@ -1826,7 +1843,7 @@ fn holds_only_transition_lock(lock_dir: &Path) -> Result<bool> {
 
 /// Whether a journal holds anything a rebind could destroy by merging.
 ///
-/// Bindings and transition locks are not history. A binding says which project
+/// Bindings and journal locks are not history. A binding says which project
 /// the directory belongs to, which is exactly what a rebind is about to
 /// restate. The lock directory is arc-owned coordination metadata. Neither may
 /// close the recovery path for a journal freshly created at a moved project's
@@ -1836,7 +1853,7 @@ fn holds_history(dir: &Path) -> Result<bool> {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
         if name == "bindings.jsonl"
-            || (name == JOURNAL_LOCK_DIR && holds_only_transition_lock(&entry.path())?)
+            || (name == JOURNAL_LOCK_DIR && holds_only_journal_locks(&entry.path())?)
         {
             continue;
         }
@@ -1940,7 +1957,7 @@ fn rebind(ctx: &Ctx, from: &str) -> Result<i32> {
         archive_moved = true;
     }
     if target.is_dir() {
-        // Only arc-owned binding and transition-lock metadata can be here —
+        // Only arc-owned binding and journal-lock metadata can be here —
         // `holds_history` refused anything else. Clearing it last keeps the
         // window in which the target is unbound as short as the move allows:
         // everything that can fail on its own has already succeeded, and only
@@ -6728,6 +6745,7 @@ pub(crate) fn register_project(ctx: &Ctx) -> Result<()> {
 
 fn write_event(dir: &Path, event: &JournalEvent) -> Result<()> {
     use std::io::Write;
+    let _events = lock_journal_events(dir)?;
     let mut line = serde_json::to_string(event)?;
     line.push('\n');
     let journal_path = dir.join("events.jsonl");
@@ -9120,8 +9138,8 @@ impl Reattribution<'_> {
 /// This is a maintenance operation, not an ordinary journal write: ordinary
 /// mutation appends, while this rewrites exactly one line of `events.jsonl`
 /// and leaves every byte of every other record untouched. The whole log is
-/// validated before anything is written, the journal transition lock is held
-/// across the read and the replace, the previous bytes are kept as
+/// validated before anything is written, the journal transition and event-write
+/// locks are held across the read and the replace, the previous bytes are kept as
 /// `events.jsonl.bak`, and the replacement is published by fsync and rename,
 /// so an interruption leaves either the old file or the fully written one.
 ///
@@ -9162,6 +9180,7 @@ fn reattribute(
 
     let dir = resolve_dir(&ctx.cwd)?;
     let _lock = lock_journal_transition(&dir)?;
+    let _events = lock_journal_events(&dir)?;
     let path = dir.join("events.jsonl");
     let original =
         std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
@@ -9340,9 +9359,8 @@ fn reattribute(
         return Ok(0);
     }
 
-    // A writer that honors the transition lock is blocked here; one that does
-    // not is caught by this comparison, so its append is refused rather than
-    // overwritten.
+    // Product writers share the event lock. This comparison also detects
+    // external edits made before it; tools ignoring the lock cannot be serialized.
     let current =
         std::fs::read(&path).with_context(|| format!("cannot re-read {}", path.display()))?;
     if current != original {

@@ -1189,7 +1189,11 @@ fn journal_log_appends_without_creating_artifact_file() {
     // The binding names the project this journal belongs to; no artifact.
     assert_eq!(
         entries,
-        vec!["bindings.jsonl".to_string(), "events.jsonl".to_string()]
+        vec![
+            ".locks".to_string(),
+            "bindings.jsonl".to_string(),
+            "events.jsonl".to_string()
+        ]
     );
     let event = &journal_events(&dir)[0];
     assert_eq!(event["event"], "log");
@@ -6100,6 +6104,9 @@ fn journal_doctor_split_advice_reads_as_one_sentence() {
         .assert()
         .failure();
     assert!(dir.join(".locks/transition.lock").is_file());
+    // A repair can leave coordination files without ever publishing history.
+    fs::write(dir.join(".locks/events.lock"), "").unwrap();
+
     let orphan = dir.parent().unwrap().join("-old-path-repo");
     fs::create_dir_all(&orphan).unwrap();
     fs::write(orphan.join("20260101T000000Z-alpha-todo.md"), "# Alpha\n").unwrap();
@@ -6243,6 +6250,7 @@ fn rebind_adopts_over_a_journal_holding_only_its_binding() {
         .assert()
         .failure();
     assert!(dir.join(".locks/transition.lock").is_file());
+    fs::write(dir.join(".locks/events.lock"), "").unwrap();
 
     let orphan = dir.parent().unwrap().join("-old-path-repo");
     fs::create_dir_all(&orphan).unwrap();
@@ -12210,8 +12218,7 @@ fn journal_reattribute_repairs_a_consumed_artifact_without_touching_lifecycle() 
     );
 }
 
-/// A writer that honors the transition lock and the repair serialize: whichever
-/// runs first, both records survive.
+/// Appending a log line and replacing its file share the event-write lock.
 #[test]
 fn journal_reattribute_survives_a_concurrent_writer() {
     let repo = Repo::new();
@@ -12228,9 +12235,6 @@ fn journal_reattribute_survives_a_concurrent_writer() {
         .args(["claim", &file])
         .assert()
         .success();
-    let body = repo.home.join("racing-checkpoint.md");
-    fs::write(&body, "concurrent work\n").unwrap();
-
     let binary = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo provides the binary");
     let arc = || {
         let mut command = Command::new(&binary);
@@ -12253,20 +12257,26 @@ fn journal_reattribute_survives_a_concurrent_writer() {
         "corrected",
     ]);
     let mut writer = arc();
-    writer.args([
-        "journal",
-        "checkpoint",
-        &file,
-        "--next",
-        "concurrent",
-        "--body-file",
-        body.to_str().unwrap(),
-    ]);
+    writer.args(["journal", "log", "concurrent", "must survive repair"]);
     repair.stdout(Stdio::null()).stderr(Stdio::piped());
     writer.stdout(Stdio::null()).stderr(Stdio::piped());
 
-    let repair = repair.spawn().unwrap().wait_with_output().unwrap();
-    let writer = writer.spawn().unwrap().wait_with_output().unwrap();
+    let lock_dir = journal_dir(&repo).join(".locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    let event_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_dir.join("events.lock"))
+        .unwrap();
+    event_lock.lock().unwrap();
+    let mut repair = repair.spawn().unwrap();
+    let mut writer = writer.spawn().unwrap();
+    assert_waiting_on_transition_lock(&mut [&mut repair, &mut writer]);
+    event_lock.unlock().unwrap();
+    let repair = repair.wait_with_output().unwrap();
+    let writer = writer.wait_with_output().unwrap();
     assert!(
         repair.status.success(),
         "the repair failed: {}",
@@ -12286,7 +12296,7 @@ fn journal_reattribute_survives_a_concurrent_writer() {
     assert_eq!(creation["session"], "corrected");
     assert!(events
         .iter()
-        .any(|event| event["event"] == "checkpoint" && event["next"] == "concurrent"));
+        .any(|event| event["event"] == "log" && event["topic"] == "concurrent"));
 }
 
 #[test]
