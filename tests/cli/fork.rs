@@ -1002,8 +1002,10 @@ fn fork_marker_inventory_is_shared_across_worktrees_with_a_journal_prefix() {
     let worktree = fork_worktree(&repo, "scoped");
     git(&worktree, &["checkout", "--detach", "HEAD"]);
 
-    let from_primary = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
-    let from_fork = json_stdout(repo.arc(&worktree).args(["fork", "list", "--json"]));
+    let mut from_primary = json_stdout(repo.arc(&repo.root).args(["fork", "list", "--json"]));
+    let mut from_fork = json_stdout(repo.arc(&worktree).args(["fork", "list", "--json"]));
+    strip_clock_fields(&mut from_primary);
+    strip_clock_fields(&mut from_fork);
     assert_eq!(
         from_primary, from_fork,
         "one repository must have one fork view"

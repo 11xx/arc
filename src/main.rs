@@ -1380,8 +1380,17 @@ enum WorkspaceCmd {
         #[arg(long)]
         json: bool,
     },
-    /// The inbox rollup for every repo under the data_root
+    /// The inbox rollup for every registered project
     Inbox {
+        /// Report only projects whose canonical anchor is beneath this path
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
+        under: Option<PathBuf>,
+        /// Report only projects beneath the current directory
+        #[arg(long, conflicts_with_all = ["under", "global"])]
+        here: bool,
+        /// Report every registered project, the default when no scope is set
+        #[arg(long, conflicts_with_all = ["under", "here"])]
+        global: bool,
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
@@ -1869,6 +1878,18 @@ fn main() {
             eprintln!("error: {e:#}");
             std::process::exit(1);
         }
+    }
+}
+
+/// Resolve the shared workspace scope flags into the one selection every
+/// workspace projection reads, so `--under` and `--here` mean the same thing
+/// in `list`, `inbox`, and `backlog`.
+fn workspace_scope(under: Option<PathBuf>, here: bool) -> Result<commands::WorkspaceScope> {
+    match (under, here) {
+        (Some(path), false) => Ok(commands::WorkspaceScope::Under(path)),
+        (None, true) => Ok(commands::WorkspaceScope::Under(std::env::current_dir()?)),
+        (None, false) => Ok(commands::WorkspaceScope::Global),
+        (Some(_), true) => unreachable!("clap rejects conflicting scopes"),
     }
 }
 
@@ -3098,7 +3119,17 @@ fn run(cli: Cli) -> Result<i32> {
         Cmd::Workspace { cmd } => {
             let (view, json) = match cmd {
                 WorkspaceCmd::List { json } => (commands::WorkspaceView::List, json),
-                WorkspaceCmd::Inbox { json } => (commands::WorkspaceView::Inbox, json),
+                WorkspaceCmd::Inbox {
+                    under,
+                    here,
+                    global: _,
+                    json,
+                } => (
+                    commands::WorkspaceView::Inbox {
+                        scope: workspace_scope(under, here)?,
+                    },
+                    json,
+                ),
                 WorkspaceCmd::Backlog {
                     since,
                     items,
@@ -3108,24 +3139,16 @@ fn run(cli: Cli) -> Result<i32> {
                     unreachable,
                     rank_by,
                     json,
-                } => {
-                    let scope = match (under, here) {
-                        (Some(path), false) => commands::WorkspaceScope::Under(path),
-                        (None, true) => commands::WorkspaceScope::Under(std::env::current_dir()?),
-                        (None, false) => commands::WorkspaceScope::Global,
-                        (Some(_), true) => unreachable!("clap rejects conflicting scopes"),
-                    };
-                    (
-                        commands::WorkspaceView::Backlog {
-                            since,
-                            items,
-                            scope,
-                            show_unreachable: unreachable,
-                            rank_by,
-                        },
-                        json,
-                    )
-                }
+                } => (
+                    commands::WorkspaceView::Backlog {
+                        since,
+                        items,
+                        scope: workspace_scope(under, here)?,
+                        show_unreachable: unreachable,
+                        rank_by,
+                    },
+                    json,
+                ),
             };
             commands::workspace(&ctx, view, json)?;
             Ok(0)

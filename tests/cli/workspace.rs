@@ -18,6 +18,15 @@ fn assert_backlog_summary_matches_rows(value: &serde_json::Value) {
     assert_eq!(value["summary"]["needs_review"], count("needs_review"));
     assert_eq!(value["summary"]["no_patchset"], count("no_patchset"));
     assert_eq!(value["summary"]["debt_owed"], count("debt_owed"));
+    let deferred = projects
+        .iter()
+        .map(|project| {
+            project["changes"]["deferred"]
+                .as_array()
+                .map_or(0, Vec::len)
+        })
+        .sum::<usize>();
+    assert_eq!(value["summary"]["deferred"], deferred);
     assert_eq!(value["summary"]["open_items"], sum("open_items"));
     assert_eq!(value["summary"]["later_items"], sum("later_items"));
     assert_eq!(
@@ -156,7 +165,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/16");
+    assert_eq!(value["schema"], "arc-workspace-backlog/17");
     assert_eq!(value["scope"]["mode"], "global");
     assert_backlog_summary_matches_rows(&value);
     let project = value["projects"]
@@ -508,7 +517,7 @@ fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
     let mut scoped = repo.arc(&workspace);
     scoped.args(["workspace", "backlog", "--here", "--json"]);
     let value = json_stdout(&mut scoped);
-    assert_eq!(value["schema"], "arc-workspace-backlog/16");
+    assert_eq!(value["schema"], "arc-workspace-backlog/17");
     assert_eq!(value["scope"]["mode"], "under");
     assert_eq!(
         value["scope"]["under"],
@@ -761,7 +770,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/16");
+    assert_eq!(value["schema"], "arc-workspace-backlog/17");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {
@@ -1592,7 +1601,7 @@ fn workspace_backlog_timestamp_interpretation_is_explicit() {
         "20260601T000000Z",
     ]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/16");
+    assert_eq!(value["schema"], "arc-workspace-backlog/17");
     let selection = &value["selection"];
     assert_eq!(selection["since"], "2026-06-01T00:00:00Z", "{}", selection);
     assert_eq!(selection["journal_counts"], "arrivals");
@@ -2236,7 +2245,7 @@ fn workspace_backlog_ranks_by_a_declared_fact_and_keeps_them_separate() {
     };
 
     let value = report(&[]);
-    assert_eq!(value["schema"], "arc-workspace-backlog/16");
+    assert_eq!(value["schema"], "arc-workspace-backlog/17");
     assert_eq!(value["ordering"]["basis"], "blocking", "{value}");
     assert_eq!(value["ordering"]["direction"], "descending");
 
@@ -2272,6 +2281,278 @@ fn workspace_backlog_ranks_by_a_declared_fact_and_keeps_them_separate() {
         stdout(shared(&debt_project).args(["workspace", "backlog", "--rank-by", "coverage"]));
     assert!(text.contains("ordering: coverage (descending)"), "{text}");
     assert!(text.contains("--rank-by coverage"), "{text}");
+}
+
+/// The backlog keeps a project visible when its only fact is an approved but
+/// held change or an uncollected round deferral: the two states the compact
+/// ledger queues never enumerate.
+#[test]
+fn workspace_backlog_keeps_held_only_and_deferred_only_projects() {
+    // An approved change under a hold has no review owed and no debt, so the
+    // project's only fact is the hold.
+    let held = Repo::new();
+    let (held_id, ..) = change_with_patchset(&held, "only-held");
+    held.arc(&held.root)
+        .args(["review", "only-held", "--verdict", "approved"])
+        .assert()
+        .success();
+    held.arc(&held.root)
+        .args(["hold", "only-held", "--reason", "waiting on upstream"])
+        .assert()
+        .success();
+
+    let value = json_stdout(
+        held.arc(&held.root)
+            .args(["workspace", "backlog", "--json"]),
+    );
+    assert_eq!(value["schema"], "arc-workspace-backlog/17");
+    let projects = value["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 1, "{value}");
+    let held_rows = projects[0]["changes"]["held"].as_array().unwrap();
+    assert!(
+        held_rows
+            .iter()
+            .any(|row| row["change_id"] == held_id.as_str()),
+        "{value}"
+    );
+    assert_eq!(projects[0]["blocking"], 0, "{value}");
+
+    // A registered project with only a deferred round has no change bucket at
+    // all; the deferral alone keeps it on the report.
+    let deferred = Repo::new();
+    deferred
+        .arc(&deferred.root)
+        .args(["journal", "log", "registered", "exists"])
+        .assert()
+        .success();
+    let dispatch = stdout(deferred.arc(&deferred.root).args([
+        "run",
+        "dispatch",
+        "--route",
+        "r",
+        "--worktree",
+        "w",
+        "--fork",
+        "spike",
+    ]));
+    let dispatch = dispatch
+        .lines()
+        .find_map(|line| line.strip_prefix("event: "))
+        .unwrap()
+        .to_string();
+    let body = deferred.root.join("deferred.json");
+    fs::write(
+        &body,
+        r#"[{"summary": "the listing is O(n^2)", "why": "n is under ten in every real ledger"}]"#,
+    )
+    .unwrap();
+    deferred
+        .arc(&deferred.root)
+        .args([
+            "run",
+            "end",
+            &dispatch,
+            "--outcome",
+            "completed",
+            "--deferred-json",
+            body.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let value = json_stdout(
+        deferred
+            .arc(&deferred.root)
+            .args(["workspace", "backlog", "--json"]),
+    );
+    let projects = value["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 1, "{value}");
+    let deferrals = projects[0]["changes"]["deferred"].as_array().unwrap();
+    assert_eq!(deferrals.len(), 1, "{value}");
+    assert!(
+        deferrals[0]["why"]
+            .as_str()
+            .unwrap()
+            .contains("n is under ten"),
+        "{value}"
+    );
+    assert_eq!(value["summary"]["deferred"], 1, "{value}");
+}
+
+/// Every predicate the inbox can assign appears in the backlog's per-project
+/// change block, and a state no bucket claims lands in `unclassified` with its
+/// reason rather than nowhere.
+#[test]
+fn workspace_backlog_exposes_every_change_predicate() {
+    let repo = Repo::new();
+    let mut expected: Vec<(String, &str)> = Vec::new();
+
+    let (ready, ..) = change_with_patchset(&repo, "pred-ready");
+    repo.arc(&repo.root)
+        .args(["review", "pred-ready", "--verdict", "approved"])
+        .assert()
+        .success();
+    expected.push((ready, "ready-to-integrate"));
+
+    let (held, ..) = change_with_patchset(&repo, "pred-held");
+    repo.arc(&repo.root)
+        .args(["review", "pred-held", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["hold", "pred-held", "--reason", "pause"])
+        .assert()
+        .success();
+    expected.push((held, "held"));
+
+    let (requested, ..) = change_with_patchset(&repo, "pred-requested");
+    repo.arc(&repo.root)
+        .args([
+            "review",
+            "pred-requested",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+        ])
+        .assert()
+        .success();
+    expected.push((requested, "changes-requested"));
+
+    let (unclassified, ..) = change_with_patchset(&repo, "pred-unclassified");
+    repo.arc(&repo.root)
+        .args(["review", "pred-unclassified", "--verdict", "comment-only"])
+        .assert()
+        .success();
+    expected.push((unclassified.clone(), "unclassified"));
+
+    let blocker = begin_change(&repo, "pred-blocker", None);
+    let blocked = begin_change(&repo, "pred-blocked", Some(&blocker));
+    expected.push((blocked, "blocked"));
+
+    let iterating = begin_no_worktree(&repo, "pred-iterating", &["--iterating"]);
+    expected.push((iterating, "iterating"));
+
+    let stalled = begin_change(&repo, "pred-stalled", None);
+    repo.arc(&repo.root)
+        .args(["claim", "pred-stalled", "--stage-budget", "launch=1s"])
+        .assert()
+        .success();
+    age_event(&repo, &stalled, "claim-set", 120);
+    expected.push((stalled, "stalled"));
+
+    let value = json_stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "backlog", "--json"]),
+    );
+    let projects = value["projects"].as_array().unwrap();
+    assert_eq!(projects.len(), 1, "{value}");
+    let changes = &projects[0]["changes"];
+    for (change_id, bucket) in &expected {
+        let rows = changes[*bucket].as_array().unwrap();
+        assert!(
+            rows.iter()
+                .any(|row| row["change_id"] == change_id.as_str()),
+            "{change_id} is not in {bucket}: {value}"
+        );
+    }
+    let row = changes["unclassified"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["change_id"] == unclassified.as_str())
+        .unwrap();
+    assert_eq!(row["reason"], "no-valid-approval", "{value}");
+}
+
+/// `--under` and `--here` pick the same projects for the workspace inbox and
+/// the backlog.
+#[test]
+fn workspace_inbox_and_backlog_select_the_same_projects() {
+    let outer = TempDir::new().unwrap();
+    let shared_home = outer.path().join("home");
+    fs::create_dir_all(&shared_home).unwrap();
+    let shared = |repo: &Repo| {
+        let mut cmd = repo.arc(&repo.root);
+        cmd.env("HOME", &shared_home)
+            .env("ARC_SANDBOX", &shared_home);
+        cmd
+    };
+
+    let first = Repo::new();
+    shared(&first)
+        .args(["begin", "scope-first", "--no-worktree"])
+        .assert()
+        .success();
+    let second = Repo::new();
+    shared(&second)
+        .args(["begin", "scope-second", "--no-worktree"])
+        .assert()
+        .success();
+
+    let mut global = shared(&first);
+    global.args(["workspace", "inbox", "--global", "--json"]);
+    let inbox = json_stdout(&mut global);
+    let mut global = shared(&first);
+    global.args(["workspace", "backlog", "--global", "--json"]);
+    let backlog = json_stdout(&mut global);
+    assert_eq!(
+        backlog["projects"].as_array().unwrap().len(),
+        2,
+        "{backlog}"
+    );
+    assert_eq!(inbox["repos"].as_array().unwrap().len(), 2, "{inbox}");
+
+    let under = fs::canonicalize(&first.root)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .display()
+        .to_string();
+    let mut scoped = shared(&first);
+    scoped.args(["workspace", "inbox", "--under", &under, "--json"]);
+    let inbox = json_stdout(&mut scoped);
+    let mut scoped = shared(&first);
+    scoped.args(["workspace", "backlog", "--under", &under, "--json"]);
+    let backlog = json_stdout(&mut scoped);
+    assert_eq!(
+        backlog["projects"].as_array().unwrap().len(),
+        1,
+        "{backlog}"
+    );
+    assert_eq!(inbox["repos"].as_array().unwrap().len(), 1, "{inbox}");
+    assert_eq!(
+        inbox["repos"][0]["needs-review"].as_array().unwrap().len(),
+        1,
+        "{inbox}"
+    );
+    assert!(
+        inbox["repos"][0]["needs-review"][0]["change_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("scope-first"),
+        "the selected project is the first one: {inbox}"
+    );
+
+    let mut here = shared(&first);
+    here.args(["workspace", "inbox", "--here", "--json"]);
+    let inbox = json_stdout(&mut here);
+    let mut here = shared(&first);
+    here.args(["workspace", "backlog", "--here", "--json"]);
+    let backlog = json_stdout(&mut here);
+    assert_eq!(
+        backlog["projects"].as_array().unwrap().len(),
+        1,
+        "{backlog}"
+    );
+    assert_eq!(inbox["repos"].as_array().unwrap().len(), 1, "{inbox}");
+    assert!(
+        backlog["projects"][0]["anchor"]
+            .as_str()
+            .unwrap()
+            .starts_with(&under),
+        "{backlog}"
+    );
 }
 
 /// Fork inventory and observation boundaries: an active fork appears with its

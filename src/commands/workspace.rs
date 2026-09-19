@@ -3,8 +3,6 @@
 //! scanning, and `restack` only prints commands — arc never rewrites branches.
 
 use super::*;
-use crate::gates::GatesFile;
-use crate::policy::PolicyFile;
 use anyhow::ensure;
 use serde::Serialize;
 
@@ -46,7 +44,9 @@ fn has_git_repository(anchor: &Path) -> Result<bool> {
 
 pub enum WorkspaceView {
     List,
-    Inbox,
+    Inbox {
+        scope: WorkspaceScope,
+    },
     Backlog {
         since: Option<String>,
         items: bool,
@@ -126,6 +126,32 @@ struct RepoInbox {
     repo: String,
     #[serde(flatten)]
     inbox: crate::inbox::Inbox,
+}
+
+/// One project's complete change observation: every open change classified
+/// into its predicate buckets, with debt and outstanding deferrals, read from
+/// the project's own checkout. The workspace inbox and the backlog's
+/// per-project block both answer from this one derivation.
+fn observe_changes(ctx: &Ctx, store: &Store, anchor: &Path) -> Result<crate::inbox::Inbox> {
+    let project_ctx = ctx.with_cwd(anchor.to_path_buf());
+    super::messaging::collect_inbox(&project_ctx, store, None)
+}
+
+/// Whether a project's complete change observation holds anything at all. A
+/// held-only change or an uncollected deferred round is a reason for the
+/// project to appear, not a case for the empty filter.
+fn inbox_has_rows(inbox: &crate::inbox::Inbox) -> bool {
+    !inbox.needs_review.is_empty()
+        || !inbox.iterating.is_empty()
+        || !inbox.changes_requested.is_empty()
+        || !inbox.ready_to_integrate.is_empty()
+        || !inbox.blocked.is_empty()
+        || !inbox.held.is_empty()
+        || !inbox.in_progress.is_empty()
+        || !inbox.stalled.is_empty()
+        || !inbox.debt_owed.is_empty()
+        || !inbox.unclassified.is_empty()
+        || !inbox.deferred.is_empty()
 }
 
 /// Every ledger this workspace can reach, with its label.
@@ -274,15 +300,16 @@ fn repo_states(store: &Store) -> Result<BTreeMap<String, ChangeState>> {
 }
 
 pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<()> {
-    if let WorkspaceView::Backlog {
-        since,
-        items,
-        scope,
-        show_unreachable,
-        rank_by,
-    } = view
-    {
-        return workspace_backlog(
+    match view {
+        WorkspaceView::List => workspace_list(&workspace_stores()?, json),
+        WorkspaceView::Inbox { scope } => workspace_inbox(ctx, scope, json),
+        WorkspaceView::Backlog {
+            since,
+            items,
+            scope,
+            show_unreachable,
+            rank_by,
+        } => workspace_backlog(
             ctx,
             since.as_deref(),
             items,
@@ -290,13 +317,7 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<()> {
             show_unreachable,
             rank_by,
             json,
-        );
-    }
-    let stores = workspace_stores()?;
-    match view {
-        WorkspaceView::List => workspace_list(&stores, json),
-        WorkspaceView::Inbox => workspace_inbox(&stores, json),
-        WorkspaceView::Backlog { .. } => unreachable!("handled above"),
+        ),
     }
 }
 
@@ -373,40 +394,30 @@ fn workspace_list(stores: &[(String, Store)], json: bool) -> Result<()> {
     Ok(())
 }
 
-fn workspace_inbox(stores: &[(String, Store)], json: bool) -> Result<()> {
-    // Workspace inbox is ledger-derived: it consults no per-repo working tree,
-    // so the derived latest-patchset head stands in for the live branch head
-    // and repo-local gate policy is not applied (gate buckets stay empty).
-    let gates = GatesFile::default();
-    let policy = PolicyFile::default();
+/// The inbox rollup for every registered project in scope. Each project is
+/// observed from its own checkout, so gates, policy, and live heads are the
+/// project's own and the rollup answers what a per-project tour would.
+fn workspace_inbox(ctx: &Ctx, scope: WorkspaceScope, json: bool) -> Result<()> {
+    let cfg = crate::config::load()?;
+    let scope = ResolvedWorkspaceScope::resolve(scope)?;
     let mut repos = Vec::new();
-    for (repo, store) in stores {
-        let states = repo_states(store)?;
-        let mut inbox = crate::inbox::Inbox::new(None);
-        for state in states.values() {
-            if state.is_closed() {
-                continue;
-            }
-            let report = status::build_as_of(
-                state,
-                &gates,
-                &policy,
-                dependency_status(state, &states),
-                changes_blocked_by(&state.change_id, &states),
-                chrono::Utc::now(),
-                // Workspace aggregation declares no per-repo policy, so no
-                // danger list is in play and there is nothing to resolve.
-                None,
-                // A fork's branch is a repository-level fact, and a workspace
-                // row carries no per-repo working tree to resolve one from.
-                None,
-            )?;
-            inbox.absorb(state, &report);
+    for project in crate::registry::projects(&cfg)? {
+        if !scope.includes(project.anchor.as_deref()) || !project.reachable {
+            continue;
         }
-        inbox.sort_by_priority();
+        let Some(root) = project.ledger.clone() else {
+            continue;
+        };
+        let Some(store) = Store::open_at(&root)? else {
+            continue;
+        };
+        let anchor = project
+            .anchor
+            .clone()
+            .expect("a reachable project has an anchor");
         repos.push(RepoInbox {
-            repo: repo.clone(),
-            inbox,
+            repo: project.label(),
+            inbox: observe_changes(ctx, &store, &anchor)?,
         });
     }
     if json {
@@ -489,6 +500,9 @@ struct BacklogSummary {
     /// Unanswered questions on consumed, archived, or missing artifacts:
     /// unresolved records, reported but not ranked as waiting decisions.
     unresolved_question_records: usize,
+    /// Findings delegated rounds deferred and no later round collected,
+    /// across every project.
+    deferred: usize,
     /// Active forks across every project. Orientation only: a fork is work
     /// somebody chose to keep unintegrated, not a queue waiting to merge.
     fork_count: usize,
@@ -536,6 +550,10 @@ impl BacklogSummary {
                 .map(|project| project.open_questions.len() - project.decision_questions)
                 .sum(),
             fork_count: projects.iter().map(|project| project.fork_count).sum(),
+            deferred: projects
+                .iter()
+                .map(|project| project.changes.deferred.len())
+                .sum(),
             open_items: projects.iter().map(|project| project.open_items).sum(),
             later_items: projects.iter().map(|project| project.later_items).sum(),
             feature_requests: projects
@@ -572,7 +590,7 @@ impl BacklogSummary {
             String::new()
         };
         println!(
-            "summary: {} projects; {} needs-review; {} debt-owed{} ({}); {} no-patchset; journal {} open, {} later, {} feature-request{unknown}{questions}; {} unreachable",
+            "summary: {} projects; {} needs-review; {} debt-owed{} ({}); {} no-patchset; journal {} open, {} later, {} feature-request{unknown}{questions}; {} deferred; {} unreachable",
             self.projects,
             self.needs_review,
             self.debt_owed,
@@ -582,6 +600,7 @@ impl BacklogSummary {
             self.open_items,
             self.later_items,
             self.feature_requests,
+            self.deferred,
             self.unreachable,
         );
     }
@@ -770,6 +789,12 @@ struct ProjectBacklog {
     open_items: usize,
     later_items: usize,
     feature_requests: usize,
+    /// Every open change with the predicate buckets it satisfies, the debt
+    /// split by kind, and the outstanding round deferrals: the complete
+    /// per-project observation `arc inbox` performs, taken from this
+    /// project's checkout. The compact queues stay for the review and debt
+    /// facts they carry in detail.
+    changes: crate::inbox::Inbox,
     /// This project's selected rows whose stamp does not parse, included in
     /// the tier counts above. Empty without an active cutoff, which counts
     /// everything.
@@ -832,11 +857,13 @@ struct BacklogItems {
 impl ProjectBacklog {
     /// A fork is not an obligation, but its presence is still a project fact
     /// that the workspace report must retain when every obligation tier is
-    /// empty. Coverage counts: a completed project's routine debt is a real
-    /// row even though it is not blocking.
+    /// empty. Coverage counts, and so does any change bucket: a completed
+    /// project's routine debt, a held-only change, and an uncollected
+    /// deferred round are each a real row even when nothing is blocking.
     fn is_empty(&self) -> bool {
         self.blocking == 0
             && self.coverage == 0
+            && !inbox_has_rows(&self.changes)
             && self.no_patchset.is_empty()
             && self.open_items == 0
             && self.later_items == 0
@@ -967,6 +994,13 @@ fn workspace_backlog(
             Some(root) => ledger_queues(root)?,
             None => LedgerQueues::default(),
         };
+        let changes = match &project.ledger {
+            Some(root) => match Store::open_at(root)? {
+                Some(store) => observe_changes(ctx, &store, &anchor)?,
+                None => crate::inbox::Inbox::new(None),
+            },
+            None => crate::inbox::Inbox::new(None),
+        };
 
         let open_queue = crate::journal::collect_open_in(ctx, &project.journal_dir, &anchor, None)?;
         // Under --since the counts mean "filed since", not "outstanding": a
@@ -1048,6 +1082,7 @@ fn workspace_backlog(
             open_items,
             later_items,
             feature_requests,
+            changes,
             unknown_time_items: unknown_rows,
             open_questions: questions,
             decision_questions,
@@ -1082,7 +1117,7 @@ fn workspace_backlog(
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/16",
+                schema: "arc-workspace-backlog/17",
                 scope: scope.view(),
                 observation: Observation {
                     started_at: observed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -1132,6 +1167,27 @@ fn workspace_backlog(
     }
     for project in &projects {
         println!("# {} ({})", project.project, project.anchor);
+        let buckets: Vec<String> = project
+            .changes
+            .sections()
+            .iter()
+            .filter(|(name, rows)| {
+                !rows.is_empty() && !matches!(*name, "needs-review" | "debt-owed")
+            })
+            .map(|(name, rows)| format!("{name} {}", rows.len()))
+            .collect();
+        let deferred = project.changes.deferred.len();
+        if !buckets.is_empty() || deferred > 0 {
+            println!(
+                "  changes: {}{}",
+                buckets.join(" · "),
+                if deferred > 0 {
+                    format!(" · deferred {deferred}")
+                } else {
+                    String::new()
+                }
+            );
+        }
         for change in &project.needs_review {
             let seen = match &change.superseded_verdict {
                 Some(verdict) => format!(", {verdict} superseded"),

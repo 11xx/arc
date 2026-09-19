@@ -566,7 +566,7 @@ pub fn messages(
 
 /// Classify every open change into its queue buckets. Shared by `inbox` and
 /// `catchup` so the queue has one derivation.
-fn collect_inbox(
+pub(crate) fn collect_inbox(
     ctx: &Ctx,
     store: &crate::store::Store,
     assigned_to: Option<&str>,

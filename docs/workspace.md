@@ -47,17 +47,23 @@ A cold archive is identified structurally rather than by its name: `<x>-archive`
 is skipped only when journal `<x>` is also present, so a project genuinely
 called that is not lost.
 
-`list` prints per-repo open-change rows; `inbox` concatenates each repo's inbox
-rollup, tagged with the repo. The scan opens each store read-only, never
-creates one, and skips unreadable entries with a warning. JSON is versioned
-`arc-workspace/1`. The workspace inbox is ledger-derived — it consults no
-per-repo working tree, so rebase and gate buckets are not evaluated there.
+`list` prints per-repo open-change rows; `inbox` concatenates each project's
+inbox rollup, tagged with the project. Both accept the same `--under`,
+`--here`, and `--global` scope as `backlog`, so the projections select the same
+set. The scan opens each store read-only, never creates one, and skips
+unreadable entries with a warning. JSON is versioned `arc-workspace/1`. The
+workspace inbox observes each project through a context standing in its own
+anchor, so gate policy and live heads are the project's own and its buckets
+answer what a per-project tour would.
 
 `backlog` answers what no single repository can: where work is blocked on a
 decision rather than on effort. Per project it reports changes awaiting a
 verdict, changes carrying audit debt, the journal's three tiers, and the
 primary tier's oldest entry — a one-item queue never looks like a backlog from
-inside its own project. Projects are ranked by the fact `--rank-by` names —
+inside its own project. Each project row also carries every open change with
+the predicate buckets it satisfies, the per-kind debt split, and the
+outstanding round deferrals, observed from that project's own checkout, so a
+held-only change or an uncollected deferral keeps the project visible. Projects are ranked by the fact `--rank-by` names —
 `blocking` (verdicts owed plus decisions waiting on a person) by default, or
 `availability` (primary work ready to pick up) or `coverage` (review
 obligations owed on shipped work) — and the report's `ordering` object states
@@ -84,7 +90,7 @@ the same open, later, and feature-request tier order used by `journal open`.
 Each item can include its `verification` stamp, and the text rows use the same
 renderer as `journal open`. Item rows share the journal inventory projection,
 including exact promotions, question history, checkpoint tips, and explicit
-ledger read coverage. JSON is versioned `arc-workspace-backlog/16` and
+ledger read coverage. JSON is versioned `arc-workspace-backlog/17` and
 states whether its scope is global or beneath one canonical path. Missing
 anchors are filtered by their recorded path, so an unreachable project inside
 a requested workspace remains visible without unrelated orphans leaking in.

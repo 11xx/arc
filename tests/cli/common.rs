@@ -403,9 +403,45 @@ pub(crate) fn journal_event_log(dir: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Drop the values that move with the wall clock before comparing two
+/// invocations: `age_seconds` wherever it appears, `observed_at`, and the
+/// prose `age:` line. Output that differs only in those is a fact about when
+/// each command ran, not about the state it read.
+pub(crate) fn without_clock(text: &str) -> String {
+    let prose: String = text
+        .lines()
+        .filter(|line| !(line.starts_with("age: ") && line.ends_with(" old")))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&prose) else {
+        return prose;
+    };
+    strip_clock_fields(&mut value);
+    serde_json::to_string(&value).unwrap()
+}
+
+pub(crate) fn strip_clock_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, entry) in map.iter_mut() {
+                match key.as_str() {
+                    "age_seconds" => *entry = serde_json::Value::Number(0.into()),
+                    "observed_at" => *entry = serde_json::Value::String(String::new()),
+                    _ => strip_clock_fields(entry),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                strip_clock_fields(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Move every event in a journal directory `seconds` further into the past, so
-/// the leases and lanes recorded there read as that much older.
-///
+/// the leases and lanes recorded there read as that much older.///
 /// Shifting the whole log rather than one entry keeps the events in the order
 /// they were appended, which is the order a reader replays them in. It lets a
 /// test hold a lease long enough that no scheduling delay can end it, and then
