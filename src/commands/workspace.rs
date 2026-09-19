@@ -47,6 +47,10 @@ pub enum WorkspaceView {
     Inbox {
         scope: WorkspaceScope,
     },
+    Inventory {
+        scope: WorkspaceScope,
+        storage: StorageSelection,
+    },
     Backlog {
         since: Option<String>,
         items: bool,
@@ -85,6 +89,37 @@ impl RankBasis {
             Self::Blocking => project.blocking,
             Self::Availability => project.availability,
             Self::Coverage => project.coverage,
+        }
+    }
+}
+
+/// Which stores a workspace reconciliation reads. The choice is explicit so a
+/// consumer never has to infer from a missing row whether work finished or was
+/// shelved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum StorageSelection {
+    /// The hot journal directory only.
+    Hot,
+    /// The cold archive only.
+    Archived,
+    /// Both stores, each row naming the one it came from.
+    All,
+}
+
+impl StorageSelection {
+    fn stores(self) -> &'static [bool] {
+        match self {
+            Self::Hot => &[false],
+            Self::Archived => &[true],
+            Self::All => &[false, true],
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Hot => "hot",
+            Self::Archived => "archived",
+            Self::All => "all",
         }
     }
 }
@@ -303,6 +338,9 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
     match view {
         WorkspaceView::List => workspace_list(&workspace_stores()?, json).map(|()| 0),
         WorkspaceView::Inbox { scope } => workspace_inbox(ctx, scope, json).map(|()| 0),
+        WorkspaceView::Inventory { scope, storage } => {
+            workspace_inventory(ctx, scope, storage, json)
+        }
         WorkspaceView::Backlog {
             since,
             items,
@@ -505,6 +543,25 @@ struct CollectionManifest {
     /// One entry per failed component; a project may name several.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     failures: Vec<CollectionFailure>,
+}
+
+/// Render the collection boundaries every workspace projection shares.
+fn render_collection(collection: &CollectionManifest) {
+    println!(
+        "collection: {} discovered, {} selected ({} skipped); {} non-empty, {} empty, {} failed",
+        collection.discovered,
+        collection.selected,
+        collection.skipped,
+        collection.non_empty,
+        collection.empty,
+        collection.failed
+    );
+    for failure in &collection.failures {
+        println!(
+            "  failed {} [{}]: {}",
+            failure.project, failure.component, failure.reason
+        );
+    }
 }
 
 #[derive(Serialize)]
@@ -975,6 +1032,247 @@ fn identity_text(
     parts.join(", ")
 }
 
+/// Every artifact in the selected stores across the workspace, each with why
+/// it is where it is. A reconciliation says what finished, what was shelved,
+/// and what a transition superseded, so a hot row's absence is never read as
+/// completion.
+fn workspace_inventory(
+    ctx: &Ctx,
+    scope: WorkspaceScope,
+    storage: StorageSelection,
+    json: bool,
+) -> Result<i32> {
+    let cfg = crate::config::load()?;
+    let scope = ResolvedWorkspaceScope::resolve(scope)?;
+    let observed_at = chrono::Utc::now();
+    let mut projects = Vec::new();
+    let mut unreachable = Vec::new();
+    let mut failures: Vec<CollectionFailure> = Vec::new();
+    let mut discovered = 0usize;
+    let mut selected = 0usize;
+    let mut skipped = 0usize;
+    let mut empty = 0usize;
+    let mut non_empty = 0usize;
+    let mut failed = 0usize;
+
+    for project in crate::registry::projects(&cfg)? {
+        discovered += 1;
+        if !scope.includes(project.anchor.as_deref()) {
+            skipped += 1;
+            continue;
+        }
+        selected += 1;
+        if !project.reachable {
+            let reason = match project.anchor {
+                Some(_) => "anchor does not exist",
+                None => "journal name resolves to no single path",
+            };
+            if project.is_orphan() {
+                unreachable.push(UnreachableProject {
+                    slug: project.slug.clone(),
+                    journal_dir: project.journal_dir.display().to_string(),
+                    anchor: project.anchor.as_ref().map(|p| p.display().to_string()),
+                    reason,
+                });
+            }
+            failures.push(CollectionFailure {
+                project: project.label(),
+                anchor: project.anchor.as_ref().map(|p| p.display().to_string()),
+                component: "anchor",
+                reason: reason.to_string(),
+            });
+            failed += 1;
+            continue;
+        }
+        let anchor = project
+            .anchor
+            .clone()
+            .expect("a reachable project has an anchor");
+        let mut row_failed = false;
+        let mut entries = Vec::new();
+        for archived in storage.stores() {
+            match crate::journal::inventory_artifacts(ctx, &project.journal_dir, &anchor, *archived)
+            {
+                Ok(items) => entries.extend(items),
+                Err(error) => {
+                    row_failed = true;
+                    failures.push(CollectionFailure {
+                        project: project.label(),
+                        anchor: Some(anchor.display().to_string()),
+                        component: if *archived { "archive" } else { "journal" },
+                        reason: format!("{error:#}"),
+                    });
+                }
+            }
+        }
+        let facts = match crate::journal::reconciliation_facts(&project.journal_dir) {
+            Ok(facts) => facts,
+            Err(error) => {
+                row_failed = true;
+                failures.push(CollectionFailure {
+                    project: project.label(),
+                    anchor: Some(anchor.display().to_string()),
+                    component: "events",
+                    reason: format!("{error:#}"),
+                });
+                crate::journal::ReconciliationFacts::default()
+            }
+        };
+        let mut artifacts: Vec<ReconciledArtifact> = entries
+            .iter()
+            .map(|entry| reconcile_artifact(entry, &facts))
+            .collect();
+        artifacts.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then_with(|| a.file.cmp(&b.file))
+        });
+        let row = ReconciledProject {
+            project: project.label(),
+            anchor: anchor.display().to_string(),
+            journal_dir: project.journal_dir.display().to_string(),
+            artifacts,
+        };
+        if row_failed {
+            failed += 1;
+            projects.push(row);
+        } else if row.artifacts.is_empty() {
+            empty += 1;
+        } else {
+            non_empty += 1;
+            projects.push(row);
+        }
+    }
+
+    let collection = CollectionManifest {
+        discovered,
+        selected,
+        skipped,
+        empty,
+        non_empty,
+        failed,
+        failures,
+    };
+    let partial = collection.failed > 0;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&WorkspaceInventory {
+                schema: "arc-workspace-inventory/1",
+                scope: scope.view(),
+                storage: storage.as_str(),
+                observation: Observation {
+                    started_at: observed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    finished_at: chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    consistency: "sequential",
+                },
+                collection,
+                projects,
+                unreachable,
+            })?
+        );
+        return Ok(if partial { 16 } else { 0 });
+    }
+
+    println!("scope: {}", scope.text());
+    println!("storage: {}", storage.as_str());
+    render_collection(&collection);
+    for project in &projects {
+        println!("# {} ({})", project.project, project.anchor);
+        for artifact in &project.artifacts {
+            println!(
+                "  {}  {}  {}  {}  {}",
+                artifact.storage,
+                artifact.timestamp,
+                artifact.explanation,
+                artifact.resolution.as_deref().unwrap_or("unknown"),
+                artifact.file
+            );
+            if let Some(successor) = &artifact.superseded_by {
+                println!("    superseded by {successor}");
+            }
+        }
+    }
+    for project in &unreachable {
+        project.render();
+    }
+    Ok(if partial { 16 } else { 0 })
+}
+
+#[derive(Serialize)]
+struct WorkspaceInventory {
+    schema: &'static str,
+    scope: BacklogScope,
+    storage: &'static str,
+    observation: Observation,
+    collection: CollectionManifest,
+    projects: Vec<ReconciledProject>,
+    unreachable: Vec<UnreachableProject>,
+}
+
+#[derive(Serialize)]
+struct ReconciledProject {
+    project: String,
+    anchor: String,
+    journal_dir: String,
+    /// Artifacts from the selected stores, newest first, keyed by filename
+    /// rather than by topic: two files sharing a topic are two rows.
+    artifacts: Vec<ReconciledArtifact>,
+}
+
+#[derive(Serialize)]
+struct ReconciledArtifact {
+    file: String,
+    topic: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    timestamp: String,
+    storage: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution_basis: Option<String>,
+    /// The recorded successor this artifact was superseded by, when a
+    /// transition named one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded_by: Option<String>,
+    /// Why the artifact is where it is: `present`, `terminal`, `archived`, or
+    /// `superseded`. Nothing is classified from one store's absence alone.
+    explanation: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    promotions: Option<Vec<crate::journal::InventoryPromotion>>,
+}
+
+fn reconcile_artifact(
+    entry: &crate::journal::ArtifactEntry,
+    facts: &crate::journal::ReconciliationFacts,
+) -> ReconciledArtifact {
+    let consumed = facts.consumed.get(&entry.file);
+    let superseded_by = facts.successors.get(&entry.file).cloned();
+    let explanation = if superseded_by.is_some() {
+        "superseded"
+    } else if consumed.is_some() || entry.resolution.is_some() {
+        "terminal"
+    } else if entry.storage == "archived" {
+        "archived"
+    } else {
+        "present"
+    };
+    ReconciledArtifact {
+        file: entry.file.clone(),
+        topic: entry.topic.clone(),
+        kind: entry.kind.clone(),
+        timestamp: entry.timestamp.clone(),
+        storage: entry.storage.clone(),
+        resolution: entry.resolution.clone(),
+        resolution_basis: entry.resolution_basis.clone(),
+        superseded_by,
+        explanation,
+        promotions: entry.promotions.clone(),
+    }
+}
+
 /// Observe one reachable project into its backlog row.
 ///
 /// Components are read independently: a failed ledger read still leaves the
@@ -1317,21 +1615,7 @@ fn workspace_backlog(
 
     println!("scope: {}", scope.text());
     println!("ordering: {} (descending)", rank_by.as_str());
-    println!(
-        "collection: {} discovered, {} selected ({} skipped); {} non-empty, {} empty, {} failed",
-        collection.discovered,
-        collection.selected,
-        collection.skipped,
-        collection.non_empty,
-        collection.empty,
-        collection.failed
-    );
-    for failure in &collection.failures {
-        println!(
-            "  failed {} [{}]: {}",
-            failure.project, failure.component, failure.reason
-        );
-    }
+    render_collection(&collection);
     if let Some(raw) = since {
         println!("since {raw}: journal counts are what was filed since, not what is outstanding");
         if summary.unknown_time_items > 0 {

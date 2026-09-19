@@ -58,6 +58,13 @@ FROM A WORKSPACE ROOT (outside a project)
                        Each registered project's predicate buckets, observed
                        from that project's own checkout; the same --under and
                        --here scope selects the same set as the backlog.
+  arc workspace inventory [--storage hot|archived|all]
+                       Reconcile every registered project's stores: where each
+                       artifact sits, what resolved it, and its recorded
+                       successor. It accepts the same
+                       `--under`/`--here`/`--global` scope, reports the same
+                       collection manifest, exits 16 on a partial collection,
+                       and is versioned `arc-workspace-inventory/1`.
   cd <anchor>          Enter one project named by the report, then orient there.
 
 ORIENT INSIDE A PROJECT (start here, in this order)

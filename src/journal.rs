@@ -9993,6 +9993,67 @@ fn project_inventory(
     })
 }
 
+/// Every artifact the selected store holds, with the inventory projection's
+/// storage, resolution, claim, and promotion facts. Shared with the workspace
+/// reconciliation so one projection answers what a project tour would.
+pub(crate) fn inventory_artifacts(
+    ctx: &Ctx,
+    hot: &Path,
+    project: &Path,
+    archived: bool,
+) -> Result<Vec<ArtifactEntry>> {
+    Ok(project_inventory(ctx, hot, project, None, archived, None, true)?.items)
+}
+
+/// What the event log says about an artifact's place in the queues, for a
+/// reconciliation across two collections: which files a consumption terminal
+/// closed, and which file a transition superseded. The events live in the hot
+/// journal whichever store holds the artifact, so a cold artifact keeps its
+/// explanation.
+#[derive(Default)]
+pub(crate) struct ReconciliationFacts {
+    /// Consumption outcome per consumed artifact filename.
+    pub consumed: HashMap<String, String>,
+    /// Successor filename per superseded artifact filename.
+    pub successors: HashMap<String, String>,
+}
+
+pub(crate) fn reconciliation_facts(dir: &Path) -> Result<ReconciliationFacts> {
+    let mut facts = ReconciliationFacts::default();
+    for event in read_events(dir)? {
+        if !event.known() {
+            continue;
+        }
+        let Some(file) = event.file.as_deref() else {
+            continue;
+        };
+        match event.event.as_str() {
+            "consumed" => {
+                if let Some(outcome) = event
+                    .outcome
+                    .as_deref()
+                    .filter(|outcome| ["done", "superseded", "discarded"].contains(outcome))
+                {
+                    facts
+                        .consumed
+                        .entry(file.to_string())
+                        .or_insert_with(|| outcome.to_string());
+                }
+            }
+            "transition" => {
+                if let Some(source) = event.supersedes.as_deref() {
+                    facts
+                        .successors
+                        .entry(source.to_string())
+                        .or_insert_with(|| file.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(facts)
+}
+
 fn inventory(
     ctx: &Ctx,
     file: Option<&str>,
