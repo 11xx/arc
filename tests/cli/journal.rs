@@ -802,6 +802,43 @@ fn journal_dir_archive_prints_cold_sibling_and_respects_env() {
     assert!(!PathBuf::from(env_cold.trim()).exists());
 }
 
+/// Drop the values that move with the wall clock before comparing two
+/// invocations: `age_seconds` wherever it appears, `observed_at`, and the
+/// prose `age:` line. Output that differs only in those is a fact about when
+/// each command ran, not about the directory it ran from.
+fn without_clock(text: &str) -> String {
+    let prose: String = text
+        .lines()
+        .filter(|line| !(line.starts_with("age: ") && line.ends_with(" old")))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&prose) else {
+        return prose;
+    };
+    strip_clock_fields(&mut value);
+    serde_json::to_string(&value).unwrap()
+}
+
+fn strip_clock_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, entry) in map.iter_mut() {
+                match key.as_str() {
+                    "age_seconds" => *entry = serde_json::Value::Number(0.into()),
+                    "observed_at" => *entry = serde_json::Value::String(String::new()),
+                    _ => strip_clock_fields(entry),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                strip_clock_fields(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[test]
 fn journal_reads_answer_from_inside_the_journal_directory() {
     let repo = Repo::new();
@@ -820,22 +857,19 @@ fn journal_reads_answer_from_inside_the_journal_directory() {
         vec!["journal", "events"],
     ];
     for args in commands {
-        let from_checkout = stdout(repo.arc(&repo.root).args(&args));
-        let from_journal = stdout(repo.arc(&dir).args(&args));
+        let from_checkout = without_clock(&stdout(repo.arc(&repo.root).args(&args)));
+        let from_journal = without_clock(&stdout(repo.arc(&dir).args(&args)));
         assert_eq!(from_checkout, from_journal, "{args:?}");
     }
 
-    // The inventory's observation time is the command's, so compare the
-    // resolved facts without it.
     let mut from_checkout =
         json_stdout(
             repo.arc(&repo.root)
                 .args(["journal", "inventory", "--json"]),
         );
     let mut from_journal = json_stdout(repo.arc(&dir).args(["journal", "inventory", "--json"]));
-    for value in [&mut from_checkout, &mut from_journal] {
-        value["observed_at"] = serde_json::Value::String(String::new());
-    }
+    strip_clock_fields(&mut from_checkout);
+    strip_clock_fields(&mut from_journal);
     assert_eq!(from_checkout, from_journal);
 }
 
