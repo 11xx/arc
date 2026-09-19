@@ -90,7 +90,7 @@ the same open, later, and feature-request tier order used by `journal open`.
 Each item can include its `verification` stamp, and the text rows use the same
 renderer as `journal open`. Item rows share the journal inventory projection,
 including exact promotions, question history, checkpoint tips, and explicit
-ledger read coverage. JSON is versioned `arc-workspace-backlog/17` and
+ledger read coverage. JSON is versioned `arc-workspace-backlog/18` and
 states whether its scope is global or beneath one canonical path. Missing
 anchors are filtered by their recorded path, so an unreachable project inside
 a requested workspace remains visible without unrelated orphans leaking in.
@@ -98,7 +98,13 @@ Its top-level `summary` totals the project rows, ledger queues, journal tiers,
 and unreachable journals, and the text view prints those totals before project
 detail. Temporary and scratch anchors are collapsed in the default text view;
 `--unreachable` expands every maintenance row, while JSON always retains the
-complete structured list.
+complete structured list. The `collection` manifest states the collection's
+boundaries — discovered, selected, skipped, observed-empty, observed-with-facts,
+and failed — with one entry per failed component, so an unreachable anchor or an
+unreadable ledger or journal is a named failure rather than an empty project.
+Discovered equals selected plus skipped, and selected equals empty plus non-empty
+plus failed. `arc workspace backlog` exits 16 when any selected project's
+observation failed; the rows that were read still print.
 
 Review rows carry the actor, model, harness, and session that recorded the
 latest patchset, plus `on_behalf_of` when that actor represented another
