@@ -179,7 +179,7 @@ fn catchup_and_doctor_report_open_worktree_usage() {
     assert!(catchup.contains("repo-usage-two"), "{catchup}");
 
     let catchup_json = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-    assert_eq!(catchup_json["schema"], "arc-catchup/8", "{catchup_json}");
+    assert_eq!(catchup_json["schema"], "arc-catchup/9", "{catchup_json}");
     assert_eq!(
         catchup_json["worktrees"]["changes"]
             .as_array()
@@ -231,7 +231,7 @@ fn worktree_accounting_resolves_relative_paths_and_reports_mismatches() {
     let report = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
     let changes = report["worktrees"]["changes"].as_array().unwrap();
     assert_eq!(changes.len(), 1, "{report}");
-    assert_eq!(changes[0]["change_id"], relative_id);
+    assert_eq!(changes[0]["owners"][0]["change_id"], relative_id);
     assert_eq!(
         changes[0]["path"],
         relative_path.to_string_lossy().as_ref(),
@@ -250,6 +250,98 @@ fn worktree_accounting_resolves_relative_paths_and_reports_mismatches() {
         "{report}"
     );
     assert!(report["worktrees"]["total_bytes"].is_null(), "{report}");
+}
+
+/// A stack of changes through one checkout is a deliberate shape: it is how a
+/// series is built without one `target/` per slice. The accounting names
+/// every change the path holds, counts the size once, and shows the change
+/// whose branch is not checked out the command that would let it gate.
+#[test]
+fn worktree_accounting_names_every_change_a_shared_checkout_holds() {
+    let repo = Repo::new();
+    let mut ids = Vec::new();
+    for (slug, branch) in [
+        ("first", "arc/first"),
+        ("second", "arc/second"),
+        ("third", "arc/third"),
+    ] {
+        git(&repo.root, &["checkout", "-b", branch]);
+        let output =
+            stdout(
+                repo.arc(&repo.root)
+                    .args(["begin", slug, "--adopt", branch, "--no-worktree"]),
+            );
+        ids.push(opened_change_id(&output));
+    }
+
+    let report = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
+    let changes = report["worktrees"]["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1, "one path, one size: {report}");
+    let owners = changes[0]["owners"].as_array().unwrap();
+    let mut listed: Vec<&str> = owners
+        .iter()
+        .map(|owner| owner["change_id"].as_str().unwrap())
+        .collect();
+    listed.sort();
+    let mut expected: Vec<&str> = ids.iter().map(String::as_str).collect();
+    expected.sort();
+    assert_eq!(listed, expected, "{report}");
+    let root = fs::canonicalize(&repo.root).unwrap();
+    assert_eq!(changes[0]["path"], root.display().to_string(), "{report}");
+
+    // The checkout stands on the last branch; the other two carry the command
+    // that would let each gate where it stands.
+    for (index, (id, branch)) in ids
+        .iter()
+        .zip(["arc/first", "arc/second", "arc/third"])
+        .enumerate()
+    {
+        let owner = owners
+            .iter()
+            .find(|owner| owner["change_id"] == id.as_str())
+            .unwrap_or_else(|| panic!("{id} missing: {report}"));
+        assert_eq!(owner["branch"], branch, "{report}");
+        if index + 1 == ids.len() {
+            assert_eq!(owner["checked_out"], true, "{report}");
+            assert!(owner["checkout"].is_null(), "{report}");
+        } else {
+            assert_eq!(owner["checked_out"], false, "{report}");
+            assert!(
+                owner["checkout"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("checkout {branch}")),
+                "{report}"
+            );
+        }
+    }
+
+    // The human report names every owner and the checkout that lets the
+    // standing-still changes gate.
+    let text = stdout(repo.arc(&repo.root).args(["catchup"]));
+    for id in &ids {
+        assert!(text.contains(id), "{id} missing: {text}");
+    }
+    assert!(text.contains("checkout arc/first"), "{text}");
+
+    // Doctor's usage advice names the same owners and adds no problem.
+    let doctor = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
+    assert!(
+        doctor["problems"].as_array().unwrap().is_empty(),
+        "{doctor}"
+    );
+    let usage = doctor["advice"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["code"] == "open-worktree-usage")
+        .unwrap();
+    for id in &ids {
+        assert!(
+            usage["detail"].as_str().unwrap().contains(id),
+            "{id} missing from doctor advice: {doctor}"
+        );
+    }
 }
 
 /// A failed Git inventory is not an empty inventory. Catchup keeps the open

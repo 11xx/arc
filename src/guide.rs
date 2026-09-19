@@ -72,7 +72,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          left open, journal backlog, forks, unowned branches
                          and worktrees, and what the change and fork
                          worktrees occupy — apparent size, with the mount's
-                         free space.
+                         free space. A path several changes record names them
+                         all, and a change not checked out there carries the
+                         command that would let it gate.
   arc fork adopt <slug> [--branch B]
                          Record a branch the operator made by hand as a fork;
                          any local branch, keeping the name it carries.

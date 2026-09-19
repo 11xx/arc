@@ -772,7 +772,17 @@ fn inspect_worktree_accounting(
             .unwrap_or_else(|| "size unknown".to_string());
         advice.push(Finding {
             code: "open-worktree-usage",
-            detail: format!("{}: {} at {}", usage.change_id, size, usage.path),
+            detail: format!(
+                "{}: {} at {}",
+                usage
+                    .owners
+                    .iter()
+                    .map(|owner| owner.change_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                size,
+                usage.path
+            ),
         });
     }
     for usage in &accounting.unknown {

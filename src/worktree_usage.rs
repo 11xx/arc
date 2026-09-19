@@ -35,12 +35,32 @@ const PHYSICAL_UNKNOWN: &str = "unknown";
 /// less than this is one ordinary session from failing.
 const LOW_FREE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
+/// One change whose recorded checkout is a given worktree path, with the
+/// branch the change's gate evidence must be recorded on and whether the
+/// checkout currently holds it. One branch at a time is what a worktree is
+/// for, so this is a state to report rather than a problem to refuse.
+#[derive(Debug, Serialize)]
+pub struct WorktreeOwner {
+    pub change_id: String,
+    /// The branch the change is gated on.
+    pub branch: String,
+    /// Whether the checkout currently holds `branch`.
+    pub checked_out: bool,
+    /// The command that checks `branch` out here, when it is not current.
+    /// The same tip `arc verify` prints for this state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<String>,
+}
+
 /// One open change's worktree and what it occupies. `bytes` stays `None` when
 /// the size could not be measured — the worktree is pruned, or `du` is
-/// unavailable — rather than inventing a zero a reader would sum.
+/// unavailable — rather than inventing a zero a reader would sum. Several
+/// changes may record one path, so ownership is a list while the size is
+/// attributed to the path once.
 #[derive(Debug, Serialize)]
 pub struct WorktreeUsage {
-    pub change_id: String,
+    /// Every open change whose recorded checkout is this path, by change id.
+    pub owners: Vec<WorktreeOwner>,
     pub path: String,
     pub bytes: Option<u64>,
 }
@@ -194,33 +214,21 @@ fn resolve_path(cwd: &Path, path: &Path) -> PathBuf {
     fs::canonicalize(&path).unwrap_or(path)
 }
 
-fn git_worktree_inventory(cwd: &Path) -> Result<BTreeSet<PathBuf>, String> {
-    let output = crate::gitio::git_command()
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(cwd)
-        .output()
-        .map_err(|error| format!("cannot run git worktree list: {error}"))?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if detail.is_empty() {
-            format!("git worktree list exited with {}", output.status)
-        } else {
-            format!("git worktree list failed: {detail}")
-        });
+/// Git's live worktree inventory as resolved paths to the branch each holds.
+/// A detached checkout maps to `None`.
+fn git_worktree_inventory(cwd: &Path) -> Result<BTreeMap<PathBuf, Option<String>>, String> {
+    let entries = crate::gitio::worktree_inventory(cwd).map_err(|error| format!("{error:#}"))?;
+    let mut inventory = BTreeMap::new();
+    for entry in entries {
+        if entry.prunable {
+            continue;
+        }
+        inventory.insert(resolve_path(cwd, &entry.path), entry.branch);
     }
-    let paths = output
-        .stdout
-        .split(|byte| *byte == b'\n')
-        .filter_map(|line| {
-            let line = std::str::from_utf8(line).ok()?;
-            line.strip_prefix("worktree ")
-                .map(|path| resolve_path(cwd, Path::new(path)))
-        })
-        .collect::<BTreeSet<_>>();
-    if paths.is_empty() {
+    if inventory.is_empty() {
         return Err("git worktree list returned no worktree paths".to_string());
     }
-    Ok(paths)
+    Ok(inventory)
 }
 
 pub fn measure(
@@ -237,6 +245,16 @@ pub fn measure(
     }
 
     let inventory = git_worktree_inventory(cwd);
+    let mut grouped: BTreeMap<PathBuf, Vec<(&String, &str)>> = BTreeMap::new();
+    for (change_id, state) in candidates {
+        let worktree = state.worktree.as_deref().expect("candidate has a worktree");
+        let resolved = resolve_path(cwd, Path::new(worktree));
+        grouped
+            .entry(resolved)
+            .or_default()
+            .push((change_id, state.branch.as_str()));
+    }
+
     let mut changes = Vec::new();
     let mut unknown = Vec::new();
     // One set across both lists: a path is measured once, whichever list
@@ -244,47 +262,64 @@ pub fn measure(
     let mut seen = BTreeSet::new();
     let mut total = 0u64;
     let mut total_known = true;
-    for (change_id, state) in candidates {
-        let worktree = state.worktree.as_deref().expect("candidate has a worktree");
-        let resolved = resolve_path(cwd, Path::new(worktree));
-        if !seen.insert(resolved.clone()) {
-            continue;
-        }
+    let owner_rows = |owners: &[(&String, &str)], current: Option<&str>, path: &str| {
+        owners
+            .iter()
+            .map(|(change_id, branch)| {
+                let checked_out = current == Some(*branch);
+                WorktreeOwner {
+                    change_id: (*change_id).clone(),
+                    branch: (*branch).to_string(),
+                    checked_out,
+                    checkout: (!checked_out).then(|| format!("git -C {path} checkout {branch}")),
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    for (resolved, owners) in grouped {
+        seen.insert(resolved.clone());
         let path = resolved.display().to_string();
-        let Some(registered) = inventory.as_ref().ok() else {
+        let Some(inventory) = inventory.as_ref().ok() else {
             let reason = inventory
                 .as_ref()
                 .expect_err("the Ok arm was taken above")
                 .clone();
-            unknown.push(UnknownWorktree {
-                change_id: change_id.clone(),
-                path,
-                reason,
-            });
+            for (change_id, _) in &owners {
+                unknown.push(UnknownWorktree {
+                    change_id: (*change_id).clone(),
+                    path: path.clone(),
+                    reason: reason.clone(),
+                });
+            }
             total_known = false;
             continue;
         };
-        if !registered.contains(&resolved) {
-            unknown.push(UnknownWorktree {
-                change_id: change_id.clone(),
-                path,
-                reason: "recorded path does not match Git worktree inventory".to_string(),
-            });
+        let Some(current) = inventory.get(&resolved) else {
+            for (change_id, _) in &owners {
+                unknown.push(UnknownWorktree {
+                    change_id: (*change_id).clone(),
+                    path: path.clone(),
+                    reason: "recorded path does not match Git worktree inventory".to_string(),
+                });
+            }
             total_known = false;
             continue;
-        }
+        };
         let bytes = du_bytes(cwd, &resolved);
         if let Some(size) = bytes {
             total += size;
         } else {
             total_known = false;
         }
+        let mut owners = owner_rows(&owners, current.as_deref(), &path);
+        owners.sort_by(|a, b| a.change_id.cmp(&b.change_id));
         changes.push(WorktreeUsage {
-            change_id: change_id.clone(),
+            owners,
             path,
             bytes,
         });
     }
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
 
     // A fork checkout arrives already resolved against Git's inventory, so it
     // is measured rather than re-validated: the resolver reports a worktree

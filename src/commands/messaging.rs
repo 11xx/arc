@@ -895,7 +895,25 @@ fn render_worktree_accounting(accounting: &crate::worktree_usage::WorktreeAccoun
             .bytes
             .map(crate::worktree_usage::human)
             .unwrap_or_else(|| "size unknown".to_string());
-        println!("  {}  {}  {}", usage.change_id, size, usage.path);
+        println!(
+            "  {}  {}  {}",
+            usage
+                .owners
+                .iter()
+                .map(|owner| owner.change_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            size,
+            usage.path
+        );
+        for owner in &usage.owners {
+            if let Some(checkout) = &owner.checkout {
+                println!(
+                    "    {} expects {}: {checkout}",
+                    owner.change_id, owner.branch
+                );
+            }
+        }
     }
     for usage in &accounting.unknown {
         println!(
@@ -981,7 +999,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-catchup/8",
+                "schema": "arc-catchup/9",
                 "ledger": inbox,
                 "journal": journal.as_ref().ok(),
                 // Open forks only: retired ones are history, and the JSON

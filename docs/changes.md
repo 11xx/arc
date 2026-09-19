@@ -178,6 +178,15 @@ candidates, and registered worktrees no owner names, each with its dirty and
 untracked file counts. The scan reads refs and `git worktree list` only, so it
 stays cheap enough to run on every catchup.
 
+Several open changes may record one checkout: building a series without one
+`target/` per slice is a deliberate shape. Worktree accounting names every
+change a path holds, attributes the size to the path once, and, for a change
+whose branch is not the one checked out there, prints the
+`git -C <path> checkout <branch>` command that lets it gate. `arc doctor`'s
+usage advice names the same owners. The state is reported rather than refused:
+`arc verify` still declines to record gate evidence away from a change's
+branch head.
+
 ## Opening a change
 
 `--profile` selects the change's workflow (`direct`, `local`, `forge`, or
