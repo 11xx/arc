@@ -289,30 +289,6 @@ fn set_modified(path: &Path, seconds: u64) {
 }
 
 #[test]
-fn env_reports_a_session_the_environment_marks_as_a_child() {
-    let repo = Repo::new();
-    let session = "77777777-8888-9999-0000-111111111111";
-    let project = repo.home.join(".claude/projects/-home-lobo");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(
-        project.join(format!("{session}.jsonl")),
-        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fable-5\"}}\n",
-    )
-    .unwrap();
-
-    repo.arc(&repo.root)
-        .arg("env")
-        .env("CLAUDE_SESSION_ID", session)
-        .env("CLAUDE_CODE_CHILD_SESSION", "1")
-        .assert()
-        .success()
-        .stdout(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n{}# session is a child: the environment marks it as spawned inside another session\n",
-            corroborated("claude")
-        ));
-}
-
-#[test]
 fn env_detects_claude_code_session_variable() {
     let repo = Repo::new();
     let session = "66666666-7777-8888-9999-000000000000";
@@ -501,7 +477,6 @@ fn env_detects_opencode2_by_process_ancestry() {
         .env("HOME", &repo.home)
         .env_remove("CLAUDE_SESSION_ID")
         .env_remove("CLAUDE_CODE_SESSION_ID")
-        .env_remove("CLAUDE_CODE_CHILD_SESSION")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("OPENCODE_SESSION")
         .env_remove("PI_SESSION_ID")

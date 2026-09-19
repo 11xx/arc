@@ -38,8 +38,6 @@ SAY WHO YOU ARE (before the first write)
   `CODEX_HOME`, `PI_CODING_AGENT_SESSION_DIR`, `PI_CODING_AGENT_DIR` — before
   the default under `$HOME`, and reports whether the store corroborates the
   session. Events record that verdict beside the session they carry.
-  `CLAUDE_CODE_CHILD_SESSION` marks a shell a harness spawned inside another
-  session, and that mark is recorded on the events the identity writes.
   OpenCode v2 (`opencode2`) is recognized without one — by
   `OPENCODE_TERMINAL` or its process ancestry — and prints the harness
   export with the session left as a comment to set by hand. With nothing to
