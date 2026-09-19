@@ -1916,9 +1916,9 @@ fn main() {
     }
 }
 
-/// Resolve the shared workspace scope flags into the one selection every
-/// workspace projection reads, so `--under` and `--here` mean the same thing
-/// in `list`, `inbox`, and `backlog`.
+/// Resolve the shared workspace scope flags into the one selection the scoped
+/// workspace projections read, so `--under` and `--here` mean the same thing
+/// in `inbox` and `backlog`.
 fn workspace_scope(under: Option<PathBuf>, here: bool) -> Result<commands::WorkspaceScope> {
     match (under, here) {
         (Some(path), false) => Ok(commands::WorkspaceScope::Under(path)),

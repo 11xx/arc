@@ -48,10 +48,10 @@ is skipped only when journal `<x>` is also present, so a project genuinely
 called that is not lost.
 
 `list` prints per-repo open-change rows; `inbox` concatenates each project's
-inbox rollup, tagged with the project. Both accept the same `--under`,
-`--here`, and `--global` scope as `backlog`, so the projections select the same
-set. The scan opens each store read-only, never creates one, and skips
-unreadable entries with a warning. JSON is versioned `arc-workspace/1`. The
+inbox rollup, tagged with the project. `inbox` accepts the same `--under`,
+`--here`, and `--global` scope as `backlog`, so the two projections select the
+same set; `list` takes no scope. The scan opens each store read-only, never
+creates one, and skips unreadable entries with a warning. JSON is versioned `arc-workspace/1`. The
 workspace inbox observes each project through a context standing in its own
 anchor, so gate policy and live heads are the project's own and its buckets
 answer what a per-project tour would.
