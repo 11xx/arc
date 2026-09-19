@@ -35,6 +35,18 @@ const JOURNAL_LOCK_RETRY: Duration = Duration::from_millis(10);
 const JOURNAL_LOCK_DIR: &str = ".locks";
 const JOURNAL_TRANSITION_LOCK: &str = "transition.lock";
 
+/// Where a provenance repair keeps the bytes it replaced. The name is fixed
+/// so one repair always leaves the immediately previous log recoverable and
+/// the backup never accumulates; `journal doctor` ignores it because it is
+/// bookkeeping about the log rather than a record in it.
+const PROVENANCE_BACKUP: &str = "events.jsonl.bak";
+
+/// Where a provenance repair stages its replacement before publishing it.
+/// Keeping the temporary inside a directory means a crash leaves a file no
+/// reader or health check sees, and the replace itself is still one atomic
+/// rename on the journal's own filesystem.
+const REPAIR_STAGING_DIR: &str = ".repair-staging";
+
 /// Serialize journal transitions whose preflight depends on current state.
 /// The lock file persists, while the OS releases ownership with this handle,
 /// so a crashed writer cannot strand the journal behind a stale marker.
@@ -860,6 +872,41 @@ pub enum JournalCmd {
         #[arg(long)]
         body_file: String,
     },
+    /// Repair the recorded authorship of one artifact's creation event, in
+    /// place. A maintenance operation the operator selects: ordinary journal
+    /// mutation stays append-only and no correction block is appended. Only
+    /// the named fields of the one creation (`note`) event change; every
+    /// other record keeps its bytes, and the previous log is kept as
+    /// `events.jsonl.bak`. Other event kinds are refused by name because
+    /// their identity carries contribution, decision, or continuation that
+    /// provenance repair must not rewrite, and so is a creation event
+    /// recording an on-behalf-of subject. `--dry-run` names the exact record
+    /// and every other record carrying the replaced identity, and writes
+    /// nothing
+    Reattribute {
+        /// Artifact filename inside the journal dir (a name, not a path)
+        filename: String,
+        /// The event kind to repair; only the creation event (`note`) is
+        /// supported and anything else is refused by name
+        #[arg(long, default_value = "note")]
+        event: String,
+        /// Replacement actor; absent leaves the recorded actor alone
+        #[arg(long = "set-actor", value_name = "ACTOR")]
+        set_actor: Option<String>,
+        /// Replacement harness; absent leaves the recorded harness alone
+        #[arg(long = "set-harness", value_name = "HARNESS")]
+        set_harness: Option<String>,
+        /// Replacement session; absent leaves the recorded session alone
+        #[arg(long = "set-session", value_name = "SESSION")]
+        set_session: Option<String>,
+        /// Replacement model; absent leaves the recorded model alone
+        #[arg(long = "set-model", value_name = "MODEL")]
+        set_model: Option<String>,
+        /// Name the record and the other records carrying the replaced
+        /// identity, then write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Dump the journal event log as newline-delimited JSON
     Events {
         /// Cap the number of events (oldest first)
@@ -1262,6 +1309,26 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             target,
             body_file,
         } => retract(ctx, &filename, &target, &body_file),
+        JournalCmd::Reattribute {
+            filename,
+            event,
+            set_actor,
+            set_harness,
+            set_session,
+            set_model,
+            dry_run,
+        } => reattribute(
+            ctx,
+            &filename,
+            &event,
+            Reattribution {
+                actor: set_actor.as_deref(),
+                harness: set_harness.as_deref(),
+                session: set_session.as_deref(),
+                model: set_model.as_deref(),
+            },
+            dry_run,
+        ),
         JournalCmd::Scaffolds { show, json } => scaffolds(ctx, show.as_deref(), json),
         JournalCmd::Checkpoint {
             filename,
@@ -2448,7 +2515,7 @@ fn doctor(ctx: &Ctx, json: bool) -> Result<i32> {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if name == "events.jsonl" || name == "bindings.jsonl" {
+            if name == "events.jsonl" || name == "bindings.jsonl" || name == PROVENANCE_BACKUP {
                 continue;
             }
             names.push(name);
@@ -9017,6 +9084,332 @@ pub(crate) fn recorded_identity(
         actor: event.actor.clone(),
         model: event.model.clone(),
     })
+}
+
+/// The identity fields one provenance repair replaces. Absent means the
+/// recorded value stays; nothing is inferred for a field nobody named.
+#[derive(Clone, Copy)]
+struct Reattribution<'a> {
+    actor: Option<&'a str>,
+    harness: Option<&'a str>,
+    session: Option<&'a str>,
+    model: Option<&'a str>,
+}
+
+impl Reattribution<'_> {
+    fn named(&self) -> Vec<(&'static str, &str)> {
+        let mut named = Vec::new();
+        if let Some(value) = self.actor {
+            named.push(("actor", value));
+        }
+        if let Some(value) = self.harness {
+            named.push(("harness", value));
+        }
+        if let Some(value) = self.model {
+            named.push(("model", value));
+        }
+        if let Some(value) = self.session {
+            named.push(("session", value));
+        }
+        named
+    }
+}
+
+/// Repair the recorded authorship of one artifact's creation event, in place.
+///
+/// This is a maintenance operation, not an ordinary journal write: ordinary
+/// mutation appends, while this rewrites exactly one line of `events.jsonl`
+/// and leaves every byte of every other record untouched. The whole log is
+/// validated before anything is written, the journal transition lock is held
+/// across the read and the replace, the previous bytes are kept as
+/// `events.jsonl.bak`, and the replacement is published by fsync and rename,
+/// so an interruption leaves either the old file or the fully written one.
+///
+/// Only the artifact's creation event (`note`) is repairable. Every other
+/// event kind records a contribution, a decision, or a claim whose identity
+/// review, planner credit, or continuation rests on, so those kinds are
+/// refused by name rather than rewritten. An event recording an
+/// `on-behalf-of` subject is refused as well: reattributing the invoker of a
+/// delegated record without its subject would credit the wrong side.
+fn reattribute(
+    ctx: &Ctx,
+    filename: &str,
+    event_kind: &str,
+    replacement: Reattribution<'_>,
+    dry_run: bool,
+) -> Result<i32> {
+    if filename.contains(['/', '\\']) {
+        bail!("artifact reference must be a filename inside the journal dir, not a path");
+    }
+    if parse_artifact_name(filename).is_none() {
+        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+    }
+    if event_kind != "note" {
+        bail!(
+            "provenance repair covers the artifact creation event (`note`); {event_kind} \
+             events record contribution or decisions that provenance repair must not rewrite"
+        );
+    }
+    let named = replacement.named();
+    if named.is_empty() {
+        bail!("pass at least one of --set-actor, --set-harness, --set-session, --set-model");
+    }
+    for (field, value) in &named {
+        if value.trim().is_empty() {
+            bail!("--set-{field} must not be empty; provenance is never cleared by this operation");
+        }
+    }
+
+    let dir = resolve_dir(&ctx.cwd)?;
+    let _lock = lock_journal_transition(&dir)?;
+    let path = dir.join("events.jsonl");
+    let original =
+        std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
+    let text = String::from_utf8(original.clone())
+        .with_context(|| format!("{} is not UTF-8", path.display()))?;
+
+    let mut raw: Vec<String> = Vec::new();
+    let mut parsed: Vec<Option<JournalEvent>> = Vec::new();
+    let mut values: Vec<Option<serde_json::Value>> = Vec::new();
+    let mut matches: Vec<usize> = Vec::new();
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        if body.trim().is_empty() {
+            raw.push(line.to_string());
+            parsed.push(None);
+            values.push(None);
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(body).with_context(|| {
+            format!(
+                "{} line {} is not JSON; provenance repair writes nothing",
+                path.display(),
+                index + 1
+            )
+        })?;
+        let event: JournalEvent = serde_json::from_value(value.clone()).with_context(|| {
+            format!(
+                "{} line {} is not a journal event; provenance repair writes nothing",
+                path.display(),
+                index + 1
+            )
+        })?;
+        if !event.known() {
+            bail!(
+                "{} line {} is not an event this build understands (event {:?}); \
+                 provenance repair writes nothing",
+                path.display(),
+                index + 1,
+                event.event
+            );
+        }
+        if event.file.as_deref() == Some(filename) && event.event == event_kind {
+            matches.push(index);
+        }
+        raw.push(line.to_string());
+        parsed.push(Some(event));
+        values.push(Some(value));
+    }
+
+    let index = match matches.as_slice() {
+        [] => bail!(
+            "no {event_kind} creation event names {filename} in {}",
+            path.display()
+        ),
+        [index] => *index,
+        many => bail!(
+            "{} creation events name {filename} (lines {}); precise repair needs one",
+            many.len(),
+            many.iter()
+                .map(|index| (index + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    let target = parsed[index].as_ref().expect("the target line parsed");
+    if target.on_behalf_of.is_some() {
+        bail!(
+            "the creation event for {filename} records an on-behalf-of subject; \
+             provenance repair does not reattribute a delegated contribution"
+        );
+    }
+
+    let mut value = values[index].clone().expect("the target line parsed");
+    let object = value
+        .as_object_mut()
+        .expect("a journal event is a JSON object");
+    let mut changed: Vec<(&'static str, Option<String>)> = Vec::new();
+    for (field, rewritten) in &named {
+        let current = object
+            .get(*field)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        if current.as_deref() == Some(*rewritten) {
+            continue;
+        }
+        object.insert(
+            (*field).to_string(),
+            serde_json::Value::String((*rewritten).to_string()),
+        );
+        changed.push((field, current));
+    }
+    if changed.is_empty() {
+        bail!(
+            "the {event_kind} event for {filename} already records the requested \
+             identity; nothing to repair"
+        );
+    }
+    let repaired: JournalEvent = serde_json::from_value(value.clone())
+        .context("the repaired record would not be a journal event")?;
+    if !repaired.known() {
+        bail!("the repaired record would not be an event this build understands");
+    }
+
+    // A record elsewhere that carries the replaced identity is a reference
+    // this repair deliberately does not touch: another artifact's authorship,
+    // or a source coordinate naming the recording. Naming them is what makes
+    // the remaining work a decision rather than an omission.
+    let mut references: Vec<(usize, String)> = Vec::new();
+    for (position, candidate) in parsed.iter().enumerate() {
+        if position == index {
+            continue;
+        }
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        for (field, previous) in &changed {
+            let Some(previous) = previous.as_deref() else {
+                continue;
+            };
+            let records = match *field {
+                "actor" => candidate.actor.as_deref() == Some(previous),
+                "harness" => candidate.harness == previous,
+                "model" => candidate.model.as_deref() == Some(previous),
+                "session" => candidate.session == previous,
+                _ => false,
+            };
+            if records {
+                references.push((position, format!("records {field}={previous}")));
+                continue;
+            }
+            if let Some(source) = &candidate.source {
+                let sources = (*field == "harness" && source.harness == previous)
+                    || (*field == "session" && source.session == previous);
+                if sources {
+                    references.push((position, format!("sources {field}={previous}")));
+                }
+            }
+        }
+    }
+
+    println!("artifact: {filename}");
+    println!(
+        "event: {event_kind} in {} (line {})",
+        path.display(),
+        index + 1
+    );
+    for (field, previous) in &changed {
+        let rewritten = named
+            .iter()
+            .find(|(name, _)| name == field)
+            .map(|(_, value)| *value)
+            .unwrap_or_default();
+        println!(
+            "{field}: {} -> {rewritten}",
+            previous.as_deref().unwrap_or("(absent)")
+        );
+    }
+    if !references.is_empty() {
+        println!(
+            "other records naming the replaced identity ({}):",
+            references.len()
+        );
+        for (position, what) in references.iter().take(20) {
+            let kind = parsed[*position]
+                .as_ref()
+                .map(|event| event.event.as_str())
+                .unwrap_or_default();
+            println!("  line {}: {kind} {what}", position + 1);
+        }
+        if references.len() > 20 {
+            println!("  … and {} more", references.len() - 20);
+        }
+    }
+    if dry_run {
+        println!("dry run: nothing written");
+        return Ok(0);
+    }
+
+    // A writer that honors the transition lock is blocked here; one that does
+    // not is caught by this comparison, so its append is refused rather than
+    // overwritten.
+    let current =
+        std::fs::read(&path).with_context(|| format!("cannot re-read {}", path.display()))?;
+    if current != original {
+        bail!(
+            "{} changed while the repair was prepared; retry",
+            path.display()
+        );
+    }
+
+    let mut rewritten = String::with_capacity(text.len() + 64);
+    for (position, line) in raw.iter().enumerate() {
+        if position == index {
+            rewritten.push_str(&serde_json::to_string(&value)?);
+            if line.ends_with('\n') {
+                rewritten.push('\n');
+            }
+        } else {
+            rewritten.push_str(line);
+        }
+    }
+
+    let backup = dir.join(PROVENANCE_BACKUP);
+    let staging = dir.join(REPAIR_STAGING_DIR);
+    replace_file(&backup, &original, &staging)?;
+    replace_file(&path, rewritten.as_bytes(), &staging)?;
+    println!(
+        "repaired: {filename}; previous bytes at {}",
+        backup.display()
+    );
+    Ok(0)
+}
+
+/// Durably replace one file's bytes: write a temporary in `staging`, fsync
+/// it, rename it over the destination, and fsync the directory. A crash
+/// leaves either the previous file or the fully written new one; a temporary
+/// left behind sits in a directory no reader scans.
+fn replace_file(path: &Path, bytes: &[u8], staging: &Path) -> Result<()> {
+    use std::io::Write;
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    std::fs::create_dir_all(staging)
+        .with_context(|| format!("cannot create {}", staging.display()))?;
+    let temporary = staging.join(format!(".{name}.{}.tmp", crate::ids::new_event_id()));
+    let publish = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("cannot create {}", temporary.display()))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+            .with_context(|| format!("cannot replace {}", path.display()))?;
+        let dir = path
+            .parent()
+            .context("replacement path has no parent directory")?;
+        std::fs::File::open(dir)
+            .with_context(|| format!("cannot fsync {}", dir.display()))?
+            .sync_all()
+            .with_context(|| format!("cannot fsync {}", dir.display()))?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    publish
 }
 
 fn verification_stamp(

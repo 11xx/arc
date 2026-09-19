@@ -192,6 +192,11 @@ SETTLE A QUESTION (before it is work)
                          decide, never the filename suffix.
   arc journal correct <file> --target <t> --field <f> --value <v> [--note]
   arc journal retract <file> --target <t> --body-file -
+  arc journal reattribute <file> --set-actor <a> --set-harness <h>
+    --set-session <s> --set-model <m> [--dry-run]
+                         Repair one artifact's recorded creation authorship
+                         in place; other event kinds and delegated records
+                         refuse by name.
   arc journal consume <file> --outcome done --decision <decision>
   arc journal transition <file> --to discussion [--dry-run]
     Change a live artifact's kind as one guarded operation: a typed successor
