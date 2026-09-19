@@ -3175,9 +3175,9 @@ fn workspace_backlog_writes_nothing() {
 }
 
 /// One project whose ledger cannot be read is skipped with a warning; the
-/// workspace inbox still reports every project it could read.
+/// workspace list and inbox still report every project they could read.
 #[test]
-fn workspace_inbox_skips_an_unreadable_project_with_a_warning() {
+fn workspace_rollups_skip_an_unreadable_project_with_a_warning() {
     use std::os::unix::fs::PermissionsExt;
 
     let outer = TempDir::new().unwrap();
@@ -3220,7 +3220,24 @@ fn workspace_inbox_skips_an_unreadable_project_with_a_warning() {
         .args(["workspace", "backlog", "--json"])
         .output()
         .unwrap();
+    let listed = shared(&healthy)
+        .args(["workspace", "list", "--json"])
+        .output()
+        .unwrap();
     fs::set_permissions(&changes, fs::Permissions::from_mode(0o755)).unwrap();
+    let list_stderr = String::from_utf8_lossy(&listed.stderr);
+    assert!(listed.status.success(), "{list_stderr}");
+    assert!(list_stderr.contains("warning: skipping"), "{list_stderr}");
+    let list: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let listed_repos = list["repos"].as_array().unwrap();
+    assert_eq!(listed_repos.len(), 1, "{list}");
+    assert!(
+        listed_repos[0]["changes"][0]["change_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("inbox-healthy"),
+        "{list}"
+    );
     let report: serde_json::Value = serde_json::from_slice(&backlog.stdout).unwrap();
     assert_eq!(backlog.status.code(), Some(16), "{report}");
     assert_eq!(report["collection"]["failed"], 1, "{report}");

@@ -386,7 +386,13 @@ fn nothing_found() -> String {
 fn workspace_list(stores: &[(String, Store)], json: bool) -> Result<()> {
     let mut repos = Vec::new();
     for (repo, store) in stores {
-        let states = repo_states(store)?;
+        let states = match repo_states(store) {
+            Ok(states) => states,
+            Err(error) => {
+                eprintln!("warning: skipping {repo}: {error:#}");
+                continue;
+            }
+        };
         let changes = states
             .values()
             .filter(|state| !state.is_closed())
