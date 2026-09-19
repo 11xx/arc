@@ -103,6 +103,7 @@ properties =
   , ("proposition: a refusing verdict is not waivable", genAnyScenario, prop_refusal_stands)
   , ("proposition: a fulfilled read needs an independent reader", genAnyScenario, prop_read_requires_independence)
   , ("proposition: a debt beside an approval authorized nothing", genAnyScenario, prop_debt_unused)
+  , ("proposition: a negative audit that fulfils a read does not approve", genAnyScenario, prop_negative_audit_is_not_approval)
   ]
 
 prop_integratable_permitted :: Scenario -> Property
@@ -246,6 +247,22 @@ prop_read_requires_independence scenario =
           Nothing -> False
         [] -> False
       _ -> False
+
+-- | The coverage obligation, the verdict outcome, and the historical
+-- authorization are separate projections. A negative audit that fulfils the
+-- read leaves the read fulfilled, the findings open, and the approval flag
+-- false; the approval flag may only be true because some independent
+-- approving answer exists.
+prop_negative_audit_is_not_approval :: Scenario -> Property
+prop_negative_audit_is_not_approval scenario =
+  let final = builtFinalState (build scenario)
+      coverage = coverageAfterIntegration final
+   in counterexample (show scenario) $
+        case (coverageRead coverage, coverageVerdict coverage, coverageAuthorization coverage) of
+          (Just (ReadByAudit _), Just ChangesRequested, Just authorization)
+            | AuthorizedByVerdict _ <- authorization -> property True
+            | otherwise -> counterexample "a negative audit must not approve" (not (coverageApproved coverage))
+          _ -> property True
 
 prop_debt_unused :: Scenario -> Property
 prop_debt_unused scenario = case builtDecision built of

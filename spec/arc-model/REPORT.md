@@ -78,7 +78,7 @@ counterexample can be generated for them.
 
 ### Properties
 
-Nine properties run over generated scenarios; seeds and case counts are
+Ten properties run over generated scenarios; seeds and case counts are
 recorded in the README.
 
 | property | statement |
@@ -92,6 +92,7 @@ recorded in the README.
 | refusal stands | a changes-requested or comment-only verdict on the current patchset is never permitted |
 | read needs a reader | a fulfilled read implies a declared, non-contributor reader recorded on the shipped revision |
 | debt unused | a debt bound to an approved patchset is reported as recorded debt, not as an authorization input |
+| negative audit does not approve | a negative audit that fulfils the read leaves the approval flag false unless an independent approving answer exists |
 
 ### Mutants
 
