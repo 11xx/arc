@@ -1411,6 +1411,10 @@ enum WorkspaceCmd {
         /// Name every unreachable journal, including temporary and scratch anchors
         #[arg(long)]
         unreachable: bool,
+        /// Rank projects by this fact, highest first. Every row carries all
+        /// three facts unchanged, so the choice only sets the order
+        #[arg(long, value_enum, default_value_t = commands::RankBasis::Blocking)]
+        rank_by: commands::RankBasis,
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
@@ -3102,6 +3106,7 @@ fn run(cli: Cli) -> Result<i32> {
                     here,
                     global: _,
                     unreachable,
+                    rank_by,
                     json,
                 } => {
                     let scope = match (under, here) {
@@ -3116,6 +3121,7 @@ fn run(cli: Cli) -> Result<i32> {
                             items,
                             scope,
                             show_unreachable: unreachable,
+                            rank_by,
                         },
                         json,
                     )

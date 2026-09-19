@@ -124,6 +124,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   arc inbox              Lead-facing queue across open changes.
   arc workspace backlog  The same question asked of every registered project.
     --here | --under <path>  Restrict it to one workspace directory tree.
+    --rank-by blocking|availability|coverage
+                         Order rows by one recorded fact; the report states
+                         the basis it used.
 
   Work waiting for this project lives in two places. The ledger holds changes
   already open; the journal holds everything not yet opened as one. An empty

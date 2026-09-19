@@ -57,12 +57,18 @@ per-repo working tree, so rebase and gate buckets are not evaluated there.
 decision rather than on effort. Per project it reports changes awaiting a
 verdict, changes carrying audit debt, the journal's three tiers, and the
 primary tier's oldest entry — a one-item queue never looks like a backlog from
-inside its own project. Projects are ranked by what is blocked; items are never
+inside its own project. Projects are ranked by the fact `--rank-by` names —
+`blocking` (verdicts owed plus decisions waiting on a person) by default, or
+`availability` (primary work ready to pick up) or `coverage` (review
+obligations owed on shipped work) — and the report's `ordering` object states
+the basis it used. Coverage debt is its own field, so a completed project
+holding routine debt does not rank as waiting on a decision. Items are never
 ranked against each other across projects, because arc records no priority that
 spans repositories. The human report ends with a `detail:` footer naming the
 command that re-runs the same report as itemized JSON — the resolved scope, the
-normalized and shell-quoted `--since`, and `--unreachable` exactly as the
-report used them, with values quoted for the shell. The footer appears over an
+normalized and shell-quoted `--since`, `--rank-by` when it is not the default,
+and `--unreachable` exactly as the report used them, with values quoted for the
+shell. The footer appears over an
 empty scope too, and
 never on `--json`, whose whole stdout must stay one parseable value. A project whose journal holds work but whose anchor no
 longer resolves is reported under `unreachable` with the `journal rebind` that
@@ -78,7 +84,7 @@ the same open, later, and feature-request tier order used by `journal open`.
 Each item can include its `verification` stamp, and the text rows use the same
 renderer as `journal open`. Item rows share the journal inventory projection,
 including exact promotions, question history, checkpoint tips, and explicit
-ledger read coverage. JSON is versioned `arc-workspace-backlog/15` and
+ledger read coverage. JSON is versioned `arc-workspace-backlog/16` and
 states whether its scope is global or beneath one canonical path. Missing
 anchors are filtered by their recorded path, so an unreachable project inside
 a requested workspace remains visible without unrelated orphans leaking in.
