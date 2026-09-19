@@ -446,17 +446,22 @@ fn workspace_inbox(ctx: &Ctx, scope: WorkspaceScope, json: bool) -> Result<()> {
         let Some(root) = project.ledger.clone() else {
             continue;
         };
-        let Some(store) = Store::open_at(&root)? else {
-            continue;
-        };
         let anchor = project
             .anchor
             .clone()
             .expect("a reachable project has an anchor");
-        repos.push(RepoInbox {
-            repo: project.label(),
-            inbox: observe_changes(ctx, &store, &anchor)?,
+        let observed = Store::open_at(&root).and_then(|store| match store {
+            Some(store) => observe_changes(ctx, &store, &anchor).map(Some),
+            None => Ok(None),
         });
+        match observed {
+            Ok(Some(inbox)) => repos.push(RepoInbox {
+                repo: project.label(),
+                inbox,
+            }),
+            Ok(None) => {}
+            Err(error) => eprintln!("warning: skipping {}: {error:#}", project.label()),
+        }
     }
     if json {
         println!(
