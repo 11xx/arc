@@ -63,6 +63,7 @@ impl Repo {
             // test, or `env` detects the runner instead of the fixture.
             .env_remove("CLAUDE_SESSION_ID")
             .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CLAUDE_CODE_CHILD_SESSION")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("OPENCODE_SESSION")
             .env_remove("OPENCODE_TERMINAL")

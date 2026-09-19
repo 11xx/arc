@@ -501,6 +501,7 @@ fn env_detects_opencode2_by_process_ancestry() {
         .env("HOME", &repo.home)
         .env_remove("CLAUDE_SESSION_ID")
         .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CLAUDE_CODE_CHILD_SESSION")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("OPENCODE_SESSION")
         .env_remove("PI_SESSION_ID")
