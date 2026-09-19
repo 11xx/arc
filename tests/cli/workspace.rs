@@ -542,6 +542,141 @@ fn workspace_backlog_collection_manifest_counts_failures_and_empties() {
     assert_eq!(collection["failed"], 0, "{value}");
 }
 
+/// A reconciliation distinguishes a completed item from a shelved one and
+/// never classifies either from a missing row; storage selection is explicit.
+#[test]
+fn workspace_inventory_reconciles_completion_archive_and_unknown() {
+    let repo = Repo::new();
+    let (_, done) = journal_artifact(&repo, "finished", "todo", "# Finished\n");
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &done, "--outcome", "done"])
+        .assert()
+        .success();
+    let (_, shelved) = journal_artifact(&repo, "shelved", "note", "# Shelved\n");
+    repo.arc(&repo.root)
+        .args(["journal", "archive", &shelved])
+        .assert()
+        .success();
+    let (_, legacy) = journal_artifact(&repo, "legacy", "todo", "# Legacy\n");
+    // Two files sharing one topic, kept apart by filename.
+    let (_, shared_a) = journal_artifact(&repo, "shared", "todo", "# Shared A\n");
+    let (_, shared_b) = journal_artifact(&repo, "shared", "todo", "# Shared B\n");
+
+    let inventory = |storage: &str| {
+        let mut cmd = repo.arc(&repo.root);
+        cmd.args(["workspace", "inventory", "--storage", storage, "--json"]);
+        let output = cmd.output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+
+    let all = inventory("all");
+    assert_eq!(all["schema"], "arc-workspace-inventory/1");
+    assert_eq!(all["storage"], "all");
+    let project = &all["projects"][0];
+    let row = |file: &str| {
+        project["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["file"] == file)
+            .cloned()
+            .unwrap_or_else(|| panic!("{file} missing: {all}"))
+    };
+
+    let completed = row(&done);
+    assert_eq!(completed["explanation"], "terminal", "{completed}");
+    assert_eq!(completed["resolution"], "done", "{completed}");
+    assert_eq!(completed["storage"], "hot", "{completed}");
+    let archived = row(&shelved);
+    assert_eq!(archived["explanation"], "archived", "{archived}");
+    assert_eq!(archived["storage"], "archived", "{archived}");
+    assert_ne!(
+        completed["explanation"], archived["explanation"],
+        "completion and shelving must not read alike"
+    );
+
+    // A legacy artifact whose resolution was never recorded stays unknown.
+    let legacy = row(&legacy);
+    assert!(legacy.get("resolution").is_none(), "{legacy}");
+    assert_eq!(legacy["explanation"], "present", "{legacy}");
+
+    // Same topic, distinct rows.
+    assert_eq!(row(&shared_a)["topic"], "shared");
+    assert_eq!(row(&shared_b)["topic"], "shared");
+    assert_ne!(row(&shared_a)["file"], row(&shared_b)["file"]);
+
+    // Cold-only artifacts appear when storage asks for them and not otherwise.
+    let hot = inventory("hot");
+    let hot_files: Vec<&str> = hot["projects"][0]["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["file"].as_str().unwrap())
+        .collect();
+    assert!(hot_files.contains(&done.as_str()), "{hot}");
+    assert!(!hot_files.contains(&shelved.as_str()), "{hot}");
+
+    let archived_only = inventory("archived");
+    assert_eq!(archived_only["storage"], "archived");
+    let archived_files: Vec<&str> = archived_only["projects"][0]["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["file"].as_str().unwrap())
+        .collect();
+    assert!(
+        archived_files.contains(&shelved.as_str()),
+        "{archived_only}"
+    );
+    assert!(!archived_files.contains(&done.as_str()), "{archived_only}");
+}
+
+/// A project whose anchor is gone reports an unavailable observation rather
+/// than disappearing from the reconciliation without a word.
+#[test]
+fn workspace_inventory_reports_an_unreachable_project_as_unavailable() {
+    let repo = Repo::new();
+    let orphan = repo.home.join(".local/ai/journals/-gone-away-project");
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("20260101T000000Z-left-todo.md"), "# Left\n").unwrap();
+    fs::write(
+        orphan.join("bindings.jsonl"),
+        "{\"schema\":\"journal-binding/1\",\"ts\":\"2026-01-01T00:00:00Z\",\
+         \"event\":\"bound\",\"anchor\":\"/gone/away/project\"}\n",
+    )
+    .unwrap();
+
+    let assert = repo
+        .arc(&repo.root)
+        .args(["workspace", "inventory", "--storage", "all", "--json"])
+        .assert()
+        .code(16);
+    let value: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    assert_eq!(value["collection"]["failed"], 1, "{value}");
+    let failure = value["collection"]["failures"]
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap();
+    assert_eq!(failure["component"], "anchor", "{value}");
+    assert_eq!(failure["reason"], "anchor does not exist", "{value}");
+    assert!(
+        value["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|project| project["anchor"] != "/gone/away/project"),
+        "{value}"
+    );
+    assert_eq!(value["unreachable"][0]["slug"], "-gone-away-project");
+}
+
 #[test]
 fn workspace_backlog_compacts_temporary_unreachable_journals() {
     let repo = Repo::new();

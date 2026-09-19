@@ -1395,6 +1395,28 @@ enum WorkspaceCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Every artifact across the selected stores, each with why it is where
+    /// it is: present, terminal, archived, or superseded. It accepts the same
+    /// `--under`/`--here`/`--global` scope, reports the same collection
+    /// manifest, exits 16 on a partial collection, and is versioned
+    /// `arc-workspace-inventory/1`.
+    Inventory {
+        /// Read the hot journal directory, the cold archive, or both
+        #[arg(long, value_enum, default_value_t = commands::StorageSelection::Hot)]
+        storage: commands::StorageSelection,
+        /// Report only projects whose canonical anchor is beneath this path
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
+        under: Option<PathBuf>,
+        /// Report only projects beneath the current directory
+        #[arg(long, conflicts_with_all = ["under", "global"])]
+        here: bool,
+        /// Report every registered project, the default when no scope is set
+        #[arg(long, conflicts_with_all = ["under", "here"])]
+        global: bool,
+        /// Emit the machine-readable JSON view instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// Ledger and journal backlog across every project, ranked by what is
     /// blocked on a decision rather than on work. A partial collection keeps
     /// the projects it did read, names each failure, and exits 16
@@ -3128,6 +3150,19 @@ fn run(cli: Cli) -> Result<i32> {
                 } => (
                     commands::WorkspaceView::Inbox {
                         scope: workspace_scope(under, here)?,
+                    },
+                    json,
+                ),
+                WorkspaceCmd::Inventory {
+                    storage,
+                    under,
+                    here,
+                    global: _,
+                    json,
+                } => (
+                    commands::WorkspaceView::Inventory {
+                        scope: workspace_scope(under, here)?,
+                        storage,
                     },
                     json,
                 ),

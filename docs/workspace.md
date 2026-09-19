@@ -56,6 +56,18 @@ workspace inbox observes each project through a context standing in its own
 anchor, so gate policy and live heads are the project's own and its buckets
 answer what a per-project tour would.
 
+`inventory [--storage hot|archived|all]` reconciles the workspace's stores.
+Every artifact is a row keyed by project and filename — two files sharing a
+topic are two rows — carrying the store it sits in, the resolution the events
+record (absent when none does), the successor a transition named, its
+promotions, and an explanation: `present`, `terminal`, `archived`, or
+`superseded`. Nothing is classified from a missing row alone, so a completed
+item and a shelved one are distinguished without assuming either, and a legacy
+artifact whose resolution was never recorded stays unknown. It accepts the
+same `--under`/`--here`/`--global` scope, reports the same collection manifest,
+exits 16 on a partial collection, and is versioned
+`arc-workspace-inventory/1`.
+
 `backlog` answers what no single repository can: where work is blocked on a
 decision rather than on effort. Per project it reports changes awaiting a
 verdict, changes carrying audit debt, the journal's three tiers, and the
