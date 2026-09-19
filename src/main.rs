@@ -1265,6 +1265,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: HooksCmd,
     },
+    /// Print a portable convention specification, independent of arc state
+    Instructions {
+        #[command(subcommand)]
+        cmd: InstructionsCmd,
+    },
     /// Aggregate changes, inboxes, or backlog across every known project
     Workspace {
         #[command(subcommand)]
@@ -1369,6 +1374,17 @@ enum ForkCmd {
     Thread {
         /// The fork slug — the part of the branch name after fork/
         slug: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum InstructionsCmd {
+    /// Git contribution trailers and commit provenance, with no arc state
+    Git {
+        /// Report malformed role values and keys outside the convention in a
+        /// commit message file ('-' for stdin); never rewrites it
+        #[arg(long, value_name = "FILE")]
+        check: Option<String>,
     },
 }
 
@@ -3124,6 +3140,10 @@ fn run(cli: Cli) -> Result<i32> {
             SandboxCmd::Discard { prefix } => commands::sandbox::discard(&ctx, Path::new(&prefix)),
         },
         Cmd::Doctor { json, verbose } => commands::run_doctor(&ctx, json, verbose),
+        Cmd::Instructions { cmd } => {
+            let InstructionsCmd::Git { check } = cmd;
+            commands::instructions_git(check.as_deref())
+        }
         Cmd::Hooks { cmd } => match cmd {
             HooksCmd::Install { force } => {
                 commands::hooks_install(&ctx, force)?;

@@ -628,6 +628,18 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   verdict is a review that happened, not an independent one, and it leaves an
   independent-review debt owed.
 
+CONTRIBUTION TRAILERS
+    arc instructions git [--check <file>]
+                       Print the portable contribution-trailer convention
+                       `arc-contribution-trailers/1`: `Planned-by`,
+                       `Implemented-by`, `Reviewed-by`, and `Orchestrated-by`
+                       name material contributions in agent
+                       `harness:model[#effort]` or human `Name <email>` form.
+                       `--check <file>` reports malformed role values and
+                       keys outside the convention. It never rewrites a
+                       message, and exits 1 when a role key carries a
+                       malformed value.
+
 HISTORY REWRITES
     arc rewrite sign [--key <id>] [--from <rev>] [--dry-run] [--retag]
                        Recreate every commit from --from through the branch
