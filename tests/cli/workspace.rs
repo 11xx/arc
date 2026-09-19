@@ -156,7 +156,7 @@ fn workspace_backlog_reports_ledger_and_journal_together() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/15");
+    assert_eq!(value["schema"], "arc-workspace-backlog/16");
     assert_eq!(value["scope"]["mode"], "global");
     assert_backlog_summary_matches_rows(&value);
     let project = value["projects"]
@@ -508,7 +508,7 @@ fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
     let mut scoped = repo.arc(&workspace);
     scoped.args(["workspace", "backlog", "--here", "--json"]);
     let value = json_stdout(&mut scoped);
-    assert_eq!(value["schema"], "arc-workspace-backlog/15");
+    assert_eq!(value["schema"], "arc-workspace-backlog/16");
     assert_eq!(value["scope"]["mode"], "under");
     assert_eq!(
         value["scope"]["under"],
@@ -761,7 +761,7 @@ fn workspace_backlog_items() {
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--items", "--json"]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/15");
+    assert_eq!(value["schema"], "arc-workspace-backlog/16");
     let project = value["projects"].as_array().unwrap().first().unwrap();
     let items = &project["items"];
     let assert_tier = |actual: &serde_json::Value, expected: &[(&str, &str)]| {
@@ -1592,7 +1592,7 @@ fn workspace_backlog_timestamp_interpretation_is_explicit() {
         "20260601T000000Z",
     ]);
     let value = json_stdout(&mut report);
-    assert_eq!(value["schema"], "arc-workspace-backlog/15");
+    assert_eq!(value["schema"], "arc-workspace-backlog/16");
     let selection = &value["selection"];
     assert_eq!(selection["since"], "2026-06-01T00:00:00Z", "{}", selection);
     assert_eq!(selection["journal_counts"], "arrivals");
@@ -2109,6 +2109,169 @@ fn workspace_backlog_carries_questions_and_journal_paths() {
     assert_eq!(alpha_only["open_questions"].as_array().unwrap().len(), 1);
     assert_eq!(value["summary"]["unresolved_question_records"], 1);
     assert_eq!(value["summary"]["open_items"], 0);
+}
+
+/// Ranking reads the declared basis, and the three facts it can rank on stay
+/// separate fields: a completed project holding routine debt is not waiting on
+/// a decision, and choosing another basis reorders the rows.
+#[test]
+fn workspace_backlog_ranks_by_a_declared_fact_and_keeps_them_separate() {
+    let outer = TempDir::new().unwrap();
+    let shared_home = outer.path().join("home");
+    fs::create_dir_all(&shared_home).unwrap();
+    let shared = |repo: &Repo| {
+        let mut cmd = repo.arc(&repo.root);
+        cmd.env("HOME", &shared_home)
+            .env("ARC_SANDBOX", &shared_home);
+        cmd
+    };
+    let anchor_of = |repo: &Repo| fs::canonicalize(&repo.root).unwrap().display().to_string();
+
+    // Completed work carrying routine coverage debt: no primary work, no
+    // question, and nothing waiting on a person.
+    let debt_project = Repo::new();
+    shared(&debt_project)
+        .args(["begin", "feat-complete"])
+        .assert()
+        .success();
+    let worktree = shared_home.join(".worktrees/repo-feat-complete");
+    debt_project.commit(&worktree, "done.txt", "done\n", "feat: done");
+    shared(&debt_project)
+        .args(["snapshot", "feat-complete"])
+        .assert()
+        .success();
+    shared(&debt_project)
+        .args(["review", "feat-complete", "--verdict", "approved"])
+        .assert()
+        .success();
+    shared(&debt_project)
+        .args(["integrate", "feat-complete", "--debt", "review later"])
+        .assert()
+        .success();
+
+    // A project waiting on a decision.
+    let decision_project = Repo::new();
+    let discussion = stdout(
+        shared(&decision_project)
+            .args([
+                "journal",
+                "note",
+                "shape",
+                "--kind",
+                "discussion",
+                "--body-file",
+                "-",
+            ])
+            .write_stdin("# Shape\n"),
+    );
+    let discussion = PathBuf::from(discussion.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    shared(&decision_project)
+        .args([
+            "journal",
+            "question",
+            &discussion,
+            "--placement",
+            "opening",
+            "--option",
+            "yes",
+            "--option",
+            "no",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Which shape?\n")
+        .assert()
+        .success();
+
+    // A project with primary work and neither obligation.
+    let work_project = Repo::new();
+    shared(&work_project)
+        .args([
+            "journal",
+            "note",
+            "todo-work",
+            "--kind",
+            "todo",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("# Work\n")
+        .assert()
+        .success();
+
+    // A registered project with nothing outstanding is not a row.
+    let empty_project = Repo::new();
+    shared(&empty_project)
+        .args(["journal", "log", "registered", "exists"])
+        .assert()
+        .success();
+
+    let report = |args: &[&str]| {
+        let mut cmd = shared(&debt_project);
+        cmd.args(["workspace", "backlog", "--json"]).args(args);
+        json_stdout(&mut cmd)
+    };
+    let find = |value: &serde_json::Value, repo: &Repo| {
+        let anchor = anchor_of(repo);
+        value["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|project| project["anchor"] == anchor.as_str())
+            .cloned()
+            .unwrap_or_else(|| panic!("{anchor} missing from {value}"))
+    };
+    let rank = |value: &serde_json::Value, repo: &Repo| {
+        let anchor = anchor_of(repo);
+        value["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|project| project["anchor"] == anchor.as_str())
+            .unwrap_or_else(|| panic!("{anchor} missing from {value}"))
+    };
+
+    let value = report(&[]);
+    assert_eq!(value["schema"], "arc-workspace-backlog/16");
+    assert_eq!(value["ordering"]["basis"], "blocking", "{value}");
+    assert_eq!(value["ordering"]["direction"], "descending");
+
+    let debt = find(&value, &debt_project);
+    assert_eq!(debt["coverage"], 1, "{debt}");
+    assert_eq!(debt["blocking"], 0, "{debt}");
+    assert_eq!(debt["availability"], 0, "{debt}");
+    let decision = find(&value, &decision_project);
+    assert_eq!(decision["blocking"], 1, "{decision}");
+    assert_eq!(decision["coverage"], 0, "{decision}");
+    let work = find(&value, &work_project);
+    assert_eq!(work["availability"], 1, "{work}");
+    assert_eq!(work["blocking"], 0, "{work}");
+    assert_eq!(work["coverage"], 0, "{work}");
+    assert!(
+        !value["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|project| project["anchor"] == anchor_of(&empty_project).as_str()),
+        "{value}"
+    );
+
+    // Ranking by blocking puts the decision first; coverage reverses the two.
+    assert_eq!(rank(&value, &decision_project), 0, "{value}");
+    assert!(rank(&value, &work_project) < rank(&value, &debt_project));
+    let by_coverage = report(&["--rank-by", "coverage"]);
+    assert_eq!(by_coverage["ordering"]["basis"], "coverage");
+    assert_eq!(rank(&by_coverage, &debt_project), 0, "{by_coverage}");
+
+    // The text report states its basis, and the replay keeps a non-default.
+    let text =
+        stdout(shared(&debt_project).args(["workspace", "backlog", "--rank-by", "coverage"]));
+    assert!(text.contains("ordering: coverage (descending)"), "{text}");
+    assert!(text.contains("--rank-by coverage"), "{text}");
 }
 
 /// Fork inventory and observation boundaries: an active fork appears with its

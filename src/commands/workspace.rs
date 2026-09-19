@@ -52,7 +52,41 @@ pub enum WorkspaceView {
         items: bool,
         scope: WorkspaceScope,
         show_unreachable: bool,
+        rank_by: RankBasis,
     },
+}
+
+/// The fact `workspace backlog` ranks projects by, descending. Every row
+/// carries each of them as its own field, so choosing one never changes what
+/// the others say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum RankBasis {
+    /// Verdicts owed plus decisions waiting on a person: the project's
+    /// blocking facts. Coverage obligations are not blocking and are not
+    /// counted here.
+    Blocking,
+    /// Primary work waiting to be picked up.
+    Availability,
+    /// Coverage obligations owed on shipped work.
+    Coverage,
+}
+
+impl RankBasis {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocking => "blocking",
+            Self::Availability => "availability",
+            Self::Coverage => "coverage",
+        }
+    }
+
+    fn value(self, project: &ProjectBacklog) -> usize {
+        match self {
+            Self::Blocking => project.blocking,
+            Self::Availability => project.availability,
+            Self::Coverage => project.coverage,
+        }
+    }
 }
 
 pub enum WorkspaceScope {
@@ -184,6 +218,9 @@ struct BacklogSelection {
     /// The parsed cutoff in replayable RFC 3339 form, when one was supplied.
     since: Option<String>,
     show_unreachable: bool,
+    /// The ranking basis the report used. The replay names it when it is not
+    /// the default, so repeating the footer cannot silently reorder rows.
+    rank_by: &'static str,
 }
 
 /// How the journal tiers in this report were selected: the boundary, what the
@@ -218,6 +255,9 @@ impl BacklogSelection {
         if self.show_unreachable {
             parts.push("--unreachable".to_string());
         }
+        if self.rank_by != RankBasis::Blocking.as_str() {
+            parts.push(format!("--rank-by {}", self.rank_by));
+        }
         parts.push("--items --json".to_string());
         parts.join(" ")
     }
@@ -239,9 +279,18 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<()> {
         items,
         scope,
         show_unreachable,
+        rank_by,
     } = view
     {
-        return workspace_backlog(ctx, since.as_deref(), items, scope, show_unreachable, json);
+        return workspace_backlog(
+            ctx,
+            since.as_deref(),
+            items,
+            scope,
+            show_unreachable,
+            rank_by,
+            json,
+        );
     }
     let stores = workspace_stores()?;
     match view {
@@ -399,6 +448,9 @@ struct Backlog {
     /// these are the bounds of the reading, not a freshness guarantee, and
     /// no atomic-snapshot claim is made.
     observation: Observation,
+    /// The fact the project order was taken from, so a consumer reads the
+    /// basis rather than inferring one.
+    ordering: Ordering,
     /// How the journal tiers were selected: the cutoff, what the counts mean,
     /// and whether undated rows ride inside them. The scope object stands
     /// beside it unchanged.
@@ -406,6 +458,14 @@ struct Backlog {
     summary: BacklogSummary,
     projects: Vec<ProjectBacklog>,
     unreachable: Vec<UnreachableProject>,
+}
+
+#[derive(Serialize)]
+struct Ordering {
+    /// The row field projects are ranked by, highest first. One of
+    /// `blocking`, `availability`, or `coverage`.
+    basis: &'static str,
+    direction: &'static str,
 }
 
 #[derive(Serialize)]
@@ -688,6 +748,17 @@ struct ProjectBacklog {
     /// The journal directory this project's questions and items were read
     /// from: the same path `arc journal dir` resolves inside the project.
     journal_dir: String,
+    /// The project's blocking facts: verdicts owed plus decisions waiting
+    /// on a person. Coverage obligations are not blocking and are counted
+    /// apart, so a completed project holding routine debt does not rank as
+    /// blocked on a decision.
+    blocking: usize,
+    /// Primary work waiting to be picked up. The tier counts below it are
+    /// the same population, split by kind.
+    availability: usize,
+    /// Coverage obligations owed on shipped work: the review the work still
+    /// owes, not whether work is stuck.
+    coverage: usize,
     /// Changes whose next step is a verdict rather than more work: a
     /// patchset exists and no verdict answers it.
     needs_review: Vec<ReviewOwed>,
@@ -759,18 +830,13 @@ struct BacklogItems {
 }
 
 impl ProjectBacklog {
-    /// Whether anything here is waiting on a person rather than on work.
-    /// A question sitting on an open artifact is exactly that, so a project
-    /// holding only unanswered questions cannot disappear from the report.
-    fn blocked(&self) -> usize {
-        self.needs_review.len() + self.debt_owed.len() + self.decision_questions
-    }
-
     /// A fork is not an obligation, but its presence is still a project fact
     /// that the workspace report must retain when every obligation tier is
-    /// empty.
+    /// empty. Coverage counts: a completed project's routine debt is a real
+    /// row even though it is not blocking.
     fn is_empty(&self) -> bool {
-        self.blocked() == 0
+        self.blocking == 0
+            && self.coverage == 0
             && self.no_patchset.is_empty()
             && self.open_items == 0
             && self.later_items == 0
@@ -843,6 +909,7 @@ fn workspace_backlog(
     show_items: bool,
     scope: WorkspaceScope,
     show_unreachable: bool,
+    rank_by: RankBasis,
     json: bool,
 ) -> Result<()> {
     let cfg = crate::config::load()?;
@@ -865,6 +932,7 @@ fn workspace_backlog(
         },
         since: cutoff.map(normalized_cutoff),
         show_unreachable,
+        rank_by: rank_by.as_str(),
     };
     let mut projects = Vec::new();
     let mut unreachable = Vec::new();
@@ -963,10 +1031,16 @@ fn workspace_backlog(
             }
         };
         let fork_count = forks.len();
+        let blocking = queues.needs_review.len() + decision_questions;
+        let availability = open_items;
+        let coverage = queues.debt_owed.len();
         let entry = ProjectBacklog {
             project: project.label(),
             anchor: anchor.display().to_string(),
             journal_dir: project.journal_dir.display().to_string(),
+            blocking,
+            availability,
+            coverage,
             needs_review: queues.needs_review,
             no_patchset: queues.no_patchset,
             shared_surfaces: queues.shared_surfaces,
@@ -994,9 +1068,12 @@ fn workspace_backlog(
         }
     }
     projects.sort_by(|a, b| {
-        b.blocked()
-            .cmp(&a.blocked())
-            .then_with(|| b.open_items.cmp(&a.open_items))
+        rank_by
+            .value(b)
+            .cmp(&rank_by.value(a))
+            .then_with(|| b.blocking.cmp(&a.blocking))
+            .then_with(|| b.availability.cmp(&a.availability))
+            .then_with(|| b.coverage.cmp(&a.coverage))
             .then_with(|| a.project.cmp(&b.project))
     });
     let summary = BacklogSummary::derive(&projects, &unreachable);
@@ -1005,13 +1082,17 @@ fn workspace_backlog(
         println!(
             "{}",
             serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/15",
+                schema: "arc-workspace-backlog/16",
                 scope: scope.view(),
                 observation: Observation {
                     started_at: observed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                     finished_at: chrono::Utc::now()
                         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                     consistency: "sequential",
+                },
+                ordering: Ordering {
+                    basis: rank_by.as_str(),
+                    direction: "descending",
                 },
                 selection: JournalSelection {
                     since: cutoff.map(normalized_cutoff),
@@ -1031,6 +1112,7 @@ fn workspace_backlog(
     }
 
     println!("scope: {}", scope.text());
+    println!("ordering: {} (descending)", rank_by.as_str());
     if let Some(raw) = since {
         println!("since {raw}: journal counts are what was filed since, not what is outstanding");
         if summary.unknown_time_items > 0 {
