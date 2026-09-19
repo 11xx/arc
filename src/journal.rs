@@ -1038,7 +1038,77 @@ pub enum JournalCmd {
     },
 }
 
+impl JournalCmd {
+    /// Whether the command records an event or otherwise changes the journal.
+    /// A write stands on the checkout that owns the Git state it records; a
+    /// read only needs the journal.
+    fn writes(&self) -> bool {
+        match self {
+            JournalCmd::Dir { .. }
+            | JournalCmd::Doctor { .. }
+            | JournalCmd::Source { .. }
+            | JournalCmd::Scaffolds { .. }
+            | JournalCmd::Questions { .. }
+            | JournalCmd::Events { .. }
+            | JournalCmd::Catchup { .. }
+            | JournalCmd::Memories { .. }
+            | JournalCmd::Open { .. }
+            | JournalCmd::List { .. }
+            | JournalCmd::Inventory { .. }
+            | JournalCmd::Show { .. }
+            | JournalCmd::Latest { .. }
+            | JournalCmd::Discussion { .. }
+            | JournalCmd::Stamp => false,
+            JournalCmd::Spool { promote } => *promote,
+            JournalCmd::Lane { command } => matches!(
+                command,
+                LaneCmd::Open { .. } | LaneCmd::Renew { .. } | LaneCmd::Close { .. }
+            ),
+            JournalCmd::Transition { dry_run, .. } => !dry_run,
+            _ => true,
+        }
+    }
+}
+
+/// The checkout a read-only journal command standing in a journal directory
+/// runs from, and the refusal the others standing there get. `None` leaves
+/// the caller's directory alone.
+fn read_scope(ctx: &Ctx, cmd: &JournalCmd) -> Result<Option<PathBuf>> {
+    if std::env::var_os("ARC_JOURNAL_DIR").is_some() {
+        return Ok(None);
+    }
+    let Some(anchor) = recorded_anchor(&ctx.cwd)? else {
+        return Ok(None);
+    };
+    let anchor = PathBuf::from(anchor);
+    if cmd.writes() {
+        bail!(
+            "journal writes run from the project checkout, not from its journal directory: cd {} and run this there",
+            anchor.display()
+        );
+    }
+    if !anchor.is_dir() {
+        bail!(
+            "this journal records the project at {}, which is not there; run from where the project lives now, or set ARC_JOURNAL_DIR",
+            anchor.display()
+        );
+    }
+    Ok(Some(anchor))
+}
+
 pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
+    // A journal directory records the project it belongs to. Read-only
+    // commands answer for that project exactly as they would from its
+    // checkout; a write needs the checkout itself, where the Git state a
+    // write records lives.
+    let relocated;
+    let ctx = match read_scope(ctx, &cmd)? {
+        Some(anchor) => {
+            relocated = ctx.with_cwd(anchor);
+            &relocated
+        }
+        None => ctx,
+    };
     match cmd {
         JournalCmd::Dir { archive, explain } => {
             let resolution = resolve(&ctx.cwd)?;
@@ -2676,6 +2746,21 @@ fn resolve(cwd: &Path) -> Result<JournalResolution> {
             source,
             anchor: Some(canonical_cwd),
         });
+    }
+
+    if looks_like_a_journal(&canonical_cwd).unwrap_or(false) {
+        if let Some(anchor) = recorded_anchor(&canonical_cwd)? {
+            bail!(
+                "{} is a journal directory for the project at {anchor}; run this command \
+                 from that checkout, or set ARC_JOURNAL_DIR",
+                canonical_cwd.display()
+            );
+        }
+        bail!(
+            "{} holds journal artifacts but records no project checkout; run this command \
+             from the project checkout, or set ARC_JOURNAL_DIR",
+            canonical_cwd.display()
+        );
     }
 
     bail!(

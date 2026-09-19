@@ -803,6 +803,106 @@ fn journal_dir_archive_prints_cold_sibling_and_respects_env() {
 }
 
 #[test]
+fn journal_reads_answer_from_inside_the_journal_directory() {
+    let repo = Repo::new();
+    let (dir, discussion) = journal_artifact(&repo, "inside", "discussion", "# Debate\n");
+    let (_, todo) = journal_artifact(&repo, "inside-todo", "todo", "# Queued\n");
+
+    let commands: Vec<Vec<&str>> = vec![
+        vec!["journal", "dir", "--explain"],
+        vec!["journal", "discussion", &discussion],
+        vec!["journal", "show", &todo],
+        vec!["journal", "latest", "inside", "--json"],
+        vec!["journal", "list", "--json"],
+        vec!["journal", "open", "--json"],
+        vec!["journal", "questions", "--json"],
+        vec!["journal", "memories", "--json"],
+        vec!["journal", "events"],
+    ];
+    for args in commands {
+        let from_checkout = stdout(repo.arc(&repo.root).args(&args));
+        let from_journal = stdout(repo.arc(&dir).args(&args));
+        assert_eq!(from_checkout, from_journal, "{args:?}");
+    }
+
+    // The inventory's observation time is the command's, so compare the
+    // resolved facts without it.
+    let mut from_checkout =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["journal", "inventory", "--json"]),
+        );
+    let mut from_journal = json_stdout(repo.arc(&dir).args(["journal", "inventory", "--json"]));
+    for value in [&mut from_checkout, &mut from_journal] {
+        value["observed_at"] = serde_json::Value::String(String::new());
+    }
+    assert_eq!(from_checkout, from_journal);
+}
+
+#[test]
+fn journal_reads_from_an_unrecorded_journal_refuse_with_instructions() {
+    let repo = Repo::new();
+    let dir = repo.home.join(".local/ai/journals/unrecorded");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("20260101T000000Z-x-todo.md"), "# Queued\n").unwrap();
+
+    repo.arc(&dir)
+        .args(["journal", "list"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("records no project checkout"))
+        .stderr(predicates::str::contains(
+            "run this command from the project checkout",
+        ))
+        .stderr(predicates::str::contains("checked ARC_JOURNAL_DIR").not());
+}
+
+#[test]
+fn journal_writes_from_the_journal_directory_name_the_checkout() {
+    let repo = Repo::new();
+    let (dir, _) = journal_artifact(&repo, "write-scope", "todo", "# Queued\n");
+    let body = repo.home.join("body.md");
+    fs::write(&body, "# More\n").unwrap();
+    let checkout = fs::canonicalize(&repo.root).unwrap();
+
+    repo.arc(&dir)
+        .args([
+            "journal",
+            "note",
+            "second",
+            "--body-file",
+            body.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "journal writes run from the project checkout",
+        ))
+        .stderr(predicates::str::contains(checkout.display().to_string()));
+}
+
+#[test]
+fn sibling_journals_do_not_cross_resolve() {
+    let repo = Repo::new();
+    let (first_dir, _) = journal_artifact(&repo, "first", "todo", "# First\n");
+    let second_anchor = repo.home.join("second-project");
+    fs::create_dir_all(&second_anchor).unwrap();
+    let second_dir = recorded_journal(&repo, "second-project", &second_anchor);
+    let second_file = "20260101T000000Z-second-project-todo.md";
+
+    repo.arc(&first_dir)
+        .args(["journal", "show", second_file])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no such artifact"));
+    let listed = stdout(repo.arc(&first_dir).args(["journal", "list", "--json"]));
+    assert!(!listed.contains(second_file), "{listed}");
+
+    let shown = stdout(repo.arc(&second_dir).args(["journal", "show", second_file]));
+    assert_eq!(shown, "# Queued work\n");
+}
+
+#[test]
 fn journal_note_writes_file_and_journal_line() {
     let repo = Repo::new();
     let body_path = repo.home.join("body.md");

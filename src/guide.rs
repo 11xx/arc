@@ -97,8 +97,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   arc journal dir        The authoritative journal location for the project
                          you are standing in, honoring ARC_JOURNAL_DIR and
                          [journals.dirs]; the default path is only a default.
-                         Enter the owning project before resolving another
-                         project's journal.
+                         Read-only journal commands also resolve from the
+                         journal directory itself; a write refuses there and
+                         names the checkout it needs.
   arc claim <file.md>    Claim a journal artifact, the way a change is
                          claimed: a lease with a TTL, renewed by working it,
                          released with `arc release-claim <file.md> --outcome

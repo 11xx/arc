@@ -1307,7 +1307,9 @@ enum Cmd {
         #[command(flatten)]
         write: journal::KindWrite,
     },
-    /// Cross-harness project journal mechanics (plain Markdown stays the contract)
+    /// Cross-harness project journal mechanics (plain Markdown stays the
+    /// contract); read-only commands also resolve from the journal directory
+    /// itself, while a write names the checkout it needs
     Journal {
         #[command(subcommand)]
         cmd: journal::JournalCmd,
