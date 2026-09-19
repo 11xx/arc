@@ -58,6 +58,14 @@ never sees; `tests/cli/docs.rs` holds the two surfaces together by asserting
 that every exit code and every refusal or guarantee sentence in `docs/`
 appears in the guide or in a command's help.
 
+**The semantic model is independent of the implementation.** A pure Haskell
+model of arc's authorization lives in `spec/arc-model/`, characterizes the
+revision its `comparisonRevision` names rather than translating the Rust
+implementation, and stays outside the Rust build and its gate targets so no
+arc change needs a Haskell toolchain. Run it with `cd spec/arc-model &&
+cabal v2-test --test-show-details=direct`; its README records the fixture
+format, the dependencies, and the replay seed.
+
 ## Releasing
 
 **A version is the calendar date of its publication.** Releases are named
