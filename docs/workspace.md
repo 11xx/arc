@@ -112,8 +112,10 @@ detail. Temporary and scratch anchors are collapsed in the default text view;
 `--unreachable` expands every maintenance row, while JSON always retains the
 complete structured list. The `collection` manifest states the collection's
 boundaries — discovered, selected, skipped, observed-empty, observed-with-facts,
-and failed — with one entry per failed component, so an unreachable anchor or an
+and failed — with one entry per failed component, so an orphaned anchor or an
 unreadable ledger or journal is a named failure rather than an empty project.
+A journal at a vanished path that holds nothing and was never bound is counted
+as empty.
 Discovered equals selected plus skipped, and selected equals empty plus non-empty
 plus failed. `arc workspace backlog` exits 16 when any selected project's
 observation failed; the rows that were read still print.
