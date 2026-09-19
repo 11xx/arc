@@ -361,7 +361,7 @@ fn fork_views_agree_about_retirement_and_catchup_json_carries_forks() {
         "{catchup_text}"
     );
     let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-    assert_eq!(catchup["schema"], "arc-catchup/7");
+    assert_eq!(catchup["schema"], "arc-catchup/8");
     assert!(catchup["forks"].as_array().unwrap().is_empty(), "{catchup}");
 
     stdout(repo.arc(&repo.root).args(["fork", "begin", "open-now"]));
@@ -2214,4 +2214,142 @@ fn the_fork_refusal_is_about_the_change_not_the_callers_directory() {
             "the refusal must not claim the caller is in one: {text}"
         );
     }
+}
+
+/// Work no change and no fork owns is exactly what every queue reports empty.
+/// `catchup` and the inbox name the unowned branches, the merged cleanup
+/// candidates, and the unowned worktrees with their dirt.
+#[test]
+fn catchup_surfaces_branches_and_worktrees_no_owner_names() {
+    let repo = Repo::new();
+    let target = git_out(&repo.root, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    assert_eq!(target, "master");
+
+    // An unowned branch one commit past the target, held by a worktree with
+    // a large dirty file and two untracked ones.
+    git(&repo.root, &["branch", "work/loose"]);
+    git(&repo.root, &["checkout", "work/loose"]);
+    fs::write(repo.root.join("large.bin"), "x".repeat(4 * 1024 * 1024)).unwrap();
+    git(&repo.root, &["add", "large.bin"]);
+    git(&repo.root, &["commit", "-m", "feat: loose work"]);
+    git(&repo.root, &["checkout", &target]);
+    let worktree = repo.home.join("loose-worktree");
+    git(
+        &repo.root,
+        &["worktree", "add", worktree.to_str().unwrap(), "work/loose"],
+    );
+    fs::write(worktree.join("large.bin"), "y".repeat(4 * 1024 * 1024)).unwrap();
+    fs::write(worktree.join("scratch-a.txt"), "a\n").unwrap();
+    fs::write(worktree.join("scratch-b.txt"), "b\n").unwrap();
+
+    // A merged branch with no owner is a cleanup candidate, not unmerged work.
+    git(&repo.root, &["branch", "merged-cleanup"]);
+
+    // An open change's branch and an active fork's branch and checkout are
+    // owned and must not appear.
+    let owned_change = begin_change(&repo, "owned-branch", None);
+    assert!(owned_change.starts_with("owned-branch"));
+    repo.arc(&repo.root)
+        .args(["fork", "begin", "owned-fork"])
+        .assert()
+        .success();
+
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    assert_eq!(inbox["schema"], "arc-inbox/10");
+    let names = |bucket: &str| -> Vec<String> {
+        inbox[bucket]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let unowned = names("unowned_branches");
+    assert!(unowned.contains(&"work/loose".to_string()), "{inbox}");
+    assert!(
+        !unowned.contains(&"arc/owned-branch".to_string()),
+        "an open change's branch must not appear: {inbox}"
+    );
+    assert!(
+        !unowned.contains(&"fork/owned-fork".to_string()),
+        "an active fork's branch must not appear: {inbox}"
+    );
+    let merged = names("merged_branches");
+    assert!(merged.contains(&"merged-cleanup".to_string()), "{inbox}");
+    assert!(!merged.contains(&"work/loose".to_string()), "{inbox}");
+
+    let loose = inbox["unowned_branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "work/loose")
+        .unwrap();
+    assert_eq!(loose["ahead"], 1, "{inbox}");
+    assert_eq!(loose["behind"], 0, "{inbox}");
+    assert!(loose["age_days"].is_u64(), "{inbox}");
+    assert_eq!(loose["worktree"], worktree.display().to_string(), "{inbox}");
+    assert!(
+        loose["action"]
+            .as_str()
+            .unwrap()
+            .contains("--adopt work/loose"),
+        "{inbox}"
+    );
+    let cleanup = inbox["merged_branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "merged-cleanup")
+        .unwrap();
+    assert!(
+        cleanup["action"]
+            .as_str()
+            .unwrap()
+            .contains("git branch -d merged-cleanup"),
+        "{inbox}"
+    );
+
+    let worktrees = inbox["unowned_worktrees"].as_array().unwrap();
+    let loose_worktree = worktrees
+        .iter()
+        .find(|row| row["path"] == worktree.display().to_string())
+        .unwrap();
+    assert_eq!(loose_worktree["branch"], "work/loose", "{inbox}");
+    assert_eq!(loose_worktree["dirty_files"], 1, "{inbox}");
+    assert_eq!(loose_worktree["untracked_files"], 2, "{inbox}");
+    assert!(
+        !worktrees
+            .iter()
+            .any(|row| row["path"].as_str().unwrap().contains("owned-fork")),
+        "an active fork's checkout is owned: {inbox}"
+    );
+
+    // The human catchup rendering names the same surface.
+    let text = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(text.contains("unowned branches"), "{text}");
+    assert!(text.contains("work/loose"), "{text}");
+    assert!(text.contains("merged branches with no owner"), "{text}");
+    assert!(text.contains("unowned worktrees"), "{text}");
+
+    git(
+        &repo.root,
+        &["worktree", "remove", "--force", worktree.to_str().unwrap()],
+    );
+}
+
+/// A repository whose refs and worktrees are all owned reports an empty
+/// unowned surface, so the ordinary catchup carries no new noise.
+#[test]
+fn an_owned_repository_reports_no_unowned_surface() {
+    let repo = Repo::new();
+    let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
+    for bucket in ["unowned_branches", "merged_branches", "unowned_worktrees"] {
+        assert!(
+            inbox[bucket].as_array().unwrap().is_empty(),
+            "{bucket} is not empty: {inbox}"
+        );
+    }
+    let text = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(!text.contains("unowned"), "{text}");
+    assert!(!text.contains("merged branches with no owner"), "{text}");
 }

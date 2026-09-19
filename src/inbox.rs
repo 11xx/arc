@@ -4,7 +4,61 @@ use crate::status::{ClaimStatus, StatusReport};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-pub const INBOX_SCHEMA: &str = "arc-inbox/9";
+pub const INBOX_SCHEMA: &str = "arc-inbox/10";
+
+/// A local branch no open change and no active fork own. The branch is where
+/// work gets lost: nothing in the ledger or the journal names it, so every
+/// queue reports empty while it holds commits.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UnownedBranch {
+    pub name: String,
+    /// Days since the branch tip was committed. Absent when Git records no
+    /// date for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_days: Option<u64>,
+    /// Commits the branch carries alone, relative to the integration target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<usize>,
+    /// Commits the target carries alone, relative to the branch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behind: Option<usize>,
+    /// The worktree that holds the branch, when one does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    /// The command that gives the branch an owner: `begin --adopt`, or `git
+    /// branch -d` for a merged cleanup candidate.
+    pub action: String,
+}
+
+/// A registered worktree no open change and no active fork own. Its dirt is
+/// reported by count so a long-lived checkout cannot hide behind a size
+/// figure alone.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct UnownedWorktree {
+    pub path: String,
+    /// The branch checked out there, when it is not detached.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Modified tracked files. Absent when the check could not run, which is
+    /// not the same as a clean worktree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dirty_files: Option<usize>,
+    /// Untracked files. Absent when the check could not run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub untracked_files: Option<usize>,
+    /// The command that gives the worktree an owner, when one fits.
+    pub action: String,
+}
+
+/// Branches and worktrees no open change and no active fork own, in the three
+/// states a session acts on differently: unmerged work worth keeping, merged
+/// refs worth deleting, and checkouts worth either.
+#[derive(Debug, Default)]
+pub struct Unowned {
+    pub branches: Vec<UnownedBranch>,
+    pub merged_branches: Vec<UnownedBranch>,
+    pub worktrees: Vec<UnownedWorktree>,
+}
 
 /// One finding a delegated round deferred and no later round has collected.
 ///
@@ -145,6 +199,19 @@ pub struct Inbox {
     /// Findings delegated rounds deferred and no later round collected,
     /// newest first. Always serialized, like every bucket above.
     pub deferred: Vec<DeferredRow>,
+    /// Local branches no open change and no active fork own and the target
+    /// does not contain, newest first. Read from refs and `git worktree
+    /// list`; no file content is read, because this runs on every catchup.
+    #[serde(default)]
+    pub unowned_branches: Vec<UnownedBranch>,
+    /// Unowned branches the target already contains: cleanup candidates,
+    /// listed apart from the unmerged work.
+    #[serde(default)]
+    pub merged_branches: Vec<UnownedBranch>,
+    /// Registered worktrees no open change and no active fork own, with their
+    /// dirty and untracked file counts.
+    #[serde(default)]
+    pub unowned_worktrees: Vec<UnownedWorktree>,
     /// Absent when the journal directory could not be resolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub journal: Option<JournalBacklog>,
@@ -168,7 +235,18 @@ impl Inbox {
             debt_owed_by_kind: Vec::new(),
             unclassified: Vec::new(),
             deferred: Vec::new(),
+            unowned_branches: Vec::new(),
+            merged_branches: Vec::new(),
+            unowned_worktrees: Vec::new(),
         }
+    }
+
+    /// Record the branches and worktrees no owner names. Best-effort at the
+    /// caller: an empty surface is a report, not an inference.
+    pub fn absorb_unowned(&mut self, unowned: Unowned) {
+        self.unowned_branches = unowned.branches;
+        self.merged_branches = unowned.merged_branches;
+        self.unowned_worktrees = unowned.worktrees;
     }
 
     /// Bucket names paired with their rows, in rendering order.

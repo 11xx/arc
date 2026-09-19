@@ -69,9 +69,10 @@ FROM A WORKSPACE ROOT (outside a project)
 
 ORIENT INSIDE A PROJECT (start here, in this order)
   arc catchup            Live state: ledger queue, deferrals delegated rounds
-                         left open, journal backlog, forks, and what the
-                         change and fork worktrees occupy — apparent size,
-                         with the mount's free space.
+                         left open, journal backlog, forks, unowned branches
+                         and worktrees, and what the change and fork
+                         worktrees occupy — apparent size, with the mount's
+                         free space.
   arc fork adopt <slug> [--branch B]
                          Record a branch the operator made by hand as a fork;
                          any local branch, keeping the name it carries.
@@ -132,7 +133,8 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          was made in: the project anchor, or a fork's own
                          head recorded with the fork as its scope.
   arc resume <change>    One change's brief, live state, and journal context.
-  arc inbox              Lead-facing queue across open changes.
+  arc inbox              Lead-facing queue across open changes, unowned
+                         branches and worktrees, and the journal backlog.
   arc workspace backlog  The same question asked of every registered project.
     --here | --under <path>  Restrict it to one workspace directory tree.
     --rank-by blocking|availability|coverage

@@ -320,7 +320,7 @@ fn inbox_buckets_classify_open_changes() {
     age_event(&repo, &stalled_id, "claim-set", 120);
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/9");
+    assert_eq!(inbox["schema"], "arc-inbox/10");
     assert!(bucket_has(&inbox, "needs-review", &review_id));
     assert!(bucket_has(&inbox, "changes-requested", &cr_id));
     assert!(bucket_has(&inbox, "ready-to-integrate", &ready_id));
@@ -558,7 +558,7 @@ fn catchup_reports_ledger_and_journal_together() {
     let change_id = begin_change(&repo, "catchup-change", None);
 
     let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-    assert_eq!(catchup["schema"], "arc-catchup/7");
+    assert_eq!(catchup["schema"], "arc-catchup/8");
     assert!(catchup["forks"].is_array(), "{catchup}");
     assert!(
         catchup["worktrees"]["changes"]
@@ -814,7 +814,7 @@ fn inbox_and_catchup_carry_open_deferrals() {
     ]));
 
     let inbox = json_stdout(repo.arc(&repo.root).args(["inbox", "--json"]));
-    assert_eq!(inbox["schema"], "arc-inbox/9");
+    assert_eq!(inbox["schema"], "arc-inbox/10");
     let row = &inbox["deferred"][0];
     assert_eq!(row["id"], "def-waiting", "{inbox}");
     assert_eq!(row["subject"], "fork spike", "{inbox}");
@@ -832,7 +832,7 @@ fn inbox_and_catchup_carry_open_deferrals() {
     );
 
     let catchup = json_stdout(repo.arc(&repo.root).args(["catchup", "--json"]));
-    assert_eq!(catchup["schema"], "arc-catchup/7", "{catchup}");
+    assert_eq!(catchup["schema"], "arc-catchup/8", "{catchup}");
     assert_eq!(catchup["ledger"]["deferred"][0]["id"], "def-waiting");
     let catchup_text = stdout(repo.arc(&repo.root).args(["catchup"]));
     assert!(catchup_text.contains("## deferred (1)"), "{catchup_text}");

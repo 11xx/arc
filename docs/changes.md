@@ -166,13 +166,17 @@ consuming it.
 Queue rows include review-subject guidance for open changes, and integrated
 debt names the shipped subject so a reviewer can select the exact patchset and
 contributors rather than following the latest history.
-`arc inbox --json` uses `arc-inbox/9`; a change opened with `--iterating` is
+`arc inbox --json` uses `arc-inbox/10`; a change opened with `--iterating` is
 classified in the separate `iterating` bucket rather than in review or ready
 queues. Both `arc inbox` and `arc catchup` also carry a `deferred` section:
 the findings delegated rounds left open, each with the subject and round that
 deferred it, the reason, and its age. A deferral binds to a run's subject
 rather than to a change, so it is the one queue entry that can name a fork or
-a commit range.
+a commit range. They also carry the unowned surface: local branches no open
+change and no active fork names, split into unmerged work and merged cleanup
+candidates, and registered worktrees no owner names, each with its dirty and
+untracked file counts. The scan reads refs and `git worktree list` only, so it
+stays cheap enough to run on every catchup.
 
 ## Opening a change
 
