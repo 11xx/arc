@@ -429,7 +429,7 @@ impl Ctx {
         Ok((change_id, state))
     }
 
-    fn load_all_states(&self, store: &Store) -> Result<BTreeMap<String, ChangeState>> {
+    pub(crate) fn load_all_states(&self, store: &Store) -> Result<BTreeMap<String, ChangeState>> {
         let mut states = BTreeMap::new();
         let rewrites = store.rewrites()?;
         for change_id in store.list_change_ids()? {

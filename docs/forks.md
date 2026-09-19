@@ -40,6 +40,15 @@ session, model, actor — and, for a harness with a stable resume form, the
 command that reopens that session. A field the marker does not carry prints
 as absent: arc never infers an identity from a branch or a directory name.
 
+`arc catchup` and `arc inbox` also report the branches and worktrees no owner
+names: local branches no open change and no active fork holds, split into the
+unmerged and the already-merged cleanup candidates, and registered worktrees
+no owner names with their uncommitted and untracked file counts. Each row
+names the action that gives it an owner — `arc begin <slug> --adopt <branch>`,
+`arc fork adopt <slug> --branch <branch>`, or `git branch -d <merged ref>`.
+Reading refs and `git worktree list` is the whole scan: no tree is walked and
+no file content is read.
+
 `arc catchup` and `arc doctor` report what the open changes' worktrees occupy
 and, separately, what the fork checkouts occupy. The two are never summed:
 nothing in the change lifecycle retires a fork, so a fork is routinely the

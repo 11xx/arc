@@ -1186,6 +1186,72 @@ pub fn ahead_count(cwd: &Path, base: &str, branch: &str) -> Result<usize> {
         .with_context(|| format!("cannot parse rev-list count {out:?}"))
 }
 
+/// One local branch with what an ownership report needs: its tip and when
+/// that tip was committed. Reading refs only.
+#[derive(Debug, Clone)]
+pub struct BranchTip {
+    pub name: String,
+    /// The tip's committer timestamp, when Git records one.
+    pub committed_at: Option<i64>,
+}
+
+/// Every local branch with its tip. One `for-each-ref` over `refs/heads/`;
+/// no tree or file content is read.
+pub fn branch_tips(cwd: &Path) -> Result<Vec<BranchTip>> {
+    let out = git(
+        cwd,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)%00%(committerdate:unix)",
+            "refs/heads/",
+        ],
+    )?;
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\0');
+            let name = fields.next()?.to_string();
+            let committed_at = fields.next().and_then(|value| value.trim().parse().ok());
+            Some(BranchTip { name, committed_at })
+        })
+        .collect())
+}
+
+/// Commits each side of `target...branch` carries alone, as `(behind,
+/// ahead)`: how far the target has moved past the branch, and how much work
+/// the branch holds that the target does not.
+pub fn divergence(cwd: &Path, target: &str, branch: &str) -> Result<(usize, usize)> {
+    let out = git(
+        cwd,
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{target}...{branch}"),
+        ],
+    )?;
+    let mut parts = out.split_whitespace();
+    let behind = parts
+        .next()
+        .and_then(|value| value.parse().ok())
+        .context("git rev-list --left-right returned no left count")?;
+    let ahead = parts
+        .next()
+        .and_then(|value| value.parse().ok())
+        .context("git rev-list --left-right returned no right count")?;
+    Ok((behind, ahead))
+}
+
+/// Modified tracked files and untracked files in a worktree, by count.
+/// `ls-files` reads the index's stat data and lists untracked paths; it does
+/// not hash file contents, so a worktree holding a large dirty file costs
+/// nothing to describe.
+pub fn worktree_dirt(cwd: &Path) -> Result<(usize, usize)> {
+    let modified = git(cwd, &["ls-files", "--modified", "--exclude-standard"])?;
+    let untracked = git(cwd, &["ls-files", "--others", "--exclude-standard"])?;
+    Ok((modified.lines().count(), untracked.lines().count()))
+}
+
 /// One entry from `git worktree list --porcelain`. A detached worktree has no
 /// branch association; its path is still useful when another durable record
 /// names that exact checkout. Git marks an entry `prunable` after its path

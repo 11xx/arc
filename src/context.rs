@@ -15,6 +15,7 @@ use crate::status::BriefBaseDrift;
 use crate::store::Store;
 use anyhow::{bail, Result};
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -719,4 +720,106 @@ fn cwd_is_in_recorded_worktree(state: &ChangeState, cwd: &Path) -> bool {
         .map(PathBuf::from)
         .map(|path| canonical_or_owned(&path))
         .is_some_and(|worktree| cwd.starts_with(worktree))
+}
+
+/// Branches and worktrees no open change and no active fork own. This is
+/// where work disappears: nothing in the ledger or the journal names such a
+/// ref, so every queue reports empty while it holds commits or edits.
+///
+/// The scan reads refs, `git worktree list`, and each candidate's index stat
+/// data only. No tree is walked and no file content is read, because this
+/// runs on every catchup and a check that reads trees is a check somebody
+/// turns off.
+pub(crate) fn unowned_surface(ctx: &Ctx) -> Result<crate::inbox::Unowned> {
+    let store = ctx.store()?;
+    let states = ctx.load_all_states(&store)?;
+    let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
+    let Ok(Some(target)) = gitio::primary_worktree_branch(&ctx.cwd) else {
+        return Ok(crate::inbox::Unowned::default());
+    };
+
+    let mut owned_branches: BTreeSet<String> = BTreeSet::new();
+    let mut owned_worktrees: BTreeSet<PathBuf> = BTreeSet::new();
+    for state in states.values().filter(|state| !state.is_closed()) {
+        owned_branches.insert(state.branch.clone());
+        if let Some(worktree) = state.worktree.as_deref() {
+            owned_worktrees.insert(canonical_or_owned(Path::new(worktree)));
+        }
+    }
+    for fork in forks.iter().filter(|fork| fork.retired.is_none()) {
+        owned_branches.insert(fork.branch.clone());
+        if let Some(worktree) = fork.worktree.as_deref() {
+            owned_worktrees.insert(canonical_or_owned(Path::new(worktree)));
+        }
+    }
+    owned_branches.insert(target.clone());
+
+    let now = chrono::Utc::now();
+    let mut unowned = crate::inbox::Unowned::default();
+    for tip in gitio::branch_tips(&ctx.cwd).unwrap_or_default() {
+        if owned_branches.contains(&tip.name) {
+            continue;
+        }
+        let worktree = gitio::worktree_for_branch(&ctx.cwd, &tip.name)
+            .ok()
+            .flatten()
+            .map(|path| path.display().to_string());
+        let merged = gitio::is_ancestor(&ctx.cwd, &tip.name, &target).unwrap_or(false);
+        let (behind, ahead) = gitio::divergence(&ctx.cwd, &target, &tip.name)
+            .map(|(behind, ahead)| (Some(behind), Some(ahead)))
+            .unwrap_or((None, None));
+        let age_days = tip
+            .committed_at
+            .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+            .map(|committed| (now - committed).num_days().max(0) as u64);
+        let action = if merged {
+            format!("git branch -d {}", tip.name)
+        } else if worktree.is_some() {
+            format!("arc begin <slug> --adopt {}", tip.name)
+        } else {
+            format!("arc fork adopt <slug> --branch {}", tip.name)
+        };
+        let row = crate::inbox::UnownedBranch {
+            name: tip.name,
+            age_days,
+            ahead,
+            behind,
+            worktree,
+            action,
+        };
+        if merged {
+            unowned.merged_branches.push(row);
+        } else {
+            unowned.branches.push(row);
+        }
+    }
+
+    let primary = gitio::primary_worktree(&ctx.cwd).ok();
+    for entry in gitio::worktree_inventory(&ctx.cwd).unwrap_or_default() {
+        if entry.prunable || primary.as_deref() == Some(entry.path.as_path()) {
+            continue;
+        }
+        if owned_worktrees.contains(&canonical_or_owned(&entry.path)) {
+            continue;
+        }
+        let (dirty_files, untracked_files) = match gitio::worktree_dirt(&entry.path) {
+            Ok((dirty, untracked)) => (Some(dirty), Some(untracked)),
+            Err(_) => (None, None),
+        };
+        let action = match &entry.branch {
+            Some(branch) => format!("arc begin <slug> --adopt {branch}"),
+            None => format!("git worktree remove {}", entry.path.display()),
+        };
+        unowned.worktrees.push(crate::inbox::UnownedWorktree {
+            path: entry.path.display().to_string(),
+            branch: entry.branch,
+            dirty_files,
+            untracked_files,
+            action,
+        });
+    }
+    unowned.branches.sort_by(|a, b| a.name.cmp(&b.name));
+    unowned.merged_branches.sort_by(|a, b| a.name.cmp(&b.name));
+    unowned.worktrees.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(unowned)
 }

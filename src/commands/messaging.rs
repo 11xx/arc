@@ -638,6 +638,9 @@ pub(crate) fn render_deferred(deferred: &[crate::inbox::DeferredRow]) {
 
 pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
     let mut inbox = collect_inbox(ctx, &ctx.store()?, assigned_to.as_deref())?;
+    if let Ok(unowned) = crate::context::unowned_surface(ctx) {
+        inbox.absorb_unowned(unowned);
+    }
     inbox.journal = journal_backlog(ctx);
 
     if json {
@@ -699,9 +702,66 @@ pub fn inbox(ctx: &Ctx, assigned_to: Option<String>, json: bool) -> Result<()> {
             }
         }
         render_deferred(&inbox.deferred);
+        render_unowned(&inbox);
         render_journal_backlog(inbox.journal.as_ref());
     }
     Ok(())
+}
+
+/// Branches and worktrees no owner names, so a session sees the work no queue
+/// could have reported.
+fn render_unowned(inbox: &crate::inbox::Inbox) {
+    if !inbox.unowned_branches.is_empty() {
+        println!("unowned branches ({}):", inbox.unowned_branches.len());
+        for branch in &inbox.unowned_branches {
+            let distance = match (branch.ahead, branch.behind) {
+                (Some(ahead), Some(behind)) => format!("+{ahead}/-{behind}"),
+                _ => "distance unknown".to_string(),
+            };
+            let age = branch
+                .age_days
+                .map(|days| format!("{days}d"))
+                .unwrap_or_else(|| "age unknown".to_string());
+            let place = branch
+                .worktree
+                .as_deref()
+                .map(|path| format!("  {path}"))
+                .unwrap_or_default();
+            println!(
+                "  {}  {}  {}{}  {}",
+                branch.name, distance, age, place, branch.action
+            );
+        }
+    }
+    if !inbox.merged_branches.is_empty() {
+        println!(
+            "merged branches with no owner ({} cleanup candidate(s)):",
+            inbox.merged_branches.len()
+        );
+        for branch in &inbox.merged_branches {
+            let age = branch
+                .age_days
+                .map(|days| format!("{days}d"))
+                .unwrap_or_else(|| "age unknown".to_string());
+            println!("  {}  {}  {}", branch.name, age, branch.action);
+        }
+    }
+    if !inbox.unowned_worktrees.is_empty() {
+        println!("unowned worktrees ({}):", inbox.unowned_worktrees.len());
+        for worktree in &inbox.unowned_worktrees {
+            let dirt = match (worktree.dirty_files, worktree.untracked_files) {
+                (Some(dirty), Some(untracked)) => {
+                    format!("{dirty} uncommitted, {untracked} untracked")
+                }
+                _ => "dirt unknown".to_string(),
+            };
+            let branch = worktree.branch.as_deref().unwrap_or("(detached)");
+            println!(
+                "  {}  {}  {}  {}",
+                worktree.path, branch, dirt, worktree.action
+            );
+        }
+    }
 }
 
 /// Outstanding review obligations as one actionable summary row.
@@ -904,7 +964,10 @@ fn render_waiting_spools(ctx: &Ctx, states: &BTreeMap<String, crate::state::Chan
 /// one a session starting cold actually has.
 pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     let store = ctx.store()?;
-    let inbox = collect_inbox(ctx, &store, None)?;
+    let mut inbox = collect_inbox(ctx, &store, None)?;
+    if let Ok(unowned) = crate::context::unowned_surface(ctx) {
+        inbox.absorb_unowned(unowned);
+    }
     let journal = crate::journal::orientation(ctx);
     let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
     let states = ctx.load_all_states(&store)?;
@@ -918,7 +981,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-catchup/7",
+                "schema": "arc-catchup/8",
                 "ledger": inbox,
                 "journal": journal.as_ref().ok(),
                 // Open forks only: retired ones are history, and the JSON
@@ -976,6 +1039,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     render_worktree_accounting(&worktrees);
     render_debts(&debts);
     render_deferred(&inbox.deferred);
+    render_unowned(&inbox);
     match journal {
         Ok(journal) => journal.render(),
         Err(error) => println!("journal: unavailable ({error:#})"),

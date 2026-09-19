@@ -19,8 +19,8 @@ Parsing an internal shape means tracking arc's implementation.
 | --- | --- | --- |
 | `arc-status/21` | `arc status` — the actionable state of one change, including dependencies, claim timing, blockers, `next_action`, the current review subject, the review map, advisories, the forge block, captured plan provenance, and the fork a promotion came from | commitment |
 | `arc-check/3` | `arc check --json` — every blocker with its exit code, plus never-blocking advisories | commitment |
-| `arc-inbox/9` | `arc inbox --json` — the lead-facing queue buckets across open changes | commitment |
-| `arc-catchup/7` | `arc catchup --json` — ledger buckets, journal lanes and shared inventory rows, memories, forks with what they hold, worktree cost, and a plan's settled promotion state | commitment |
+| `arc-inbox/10` | `arc inbox --json` — the lead-facing queue buckets across open changes, unowned branches and worktrees, and the journal backlog | commitment |
+| `arc-catchup/8` | `arc catchup --json` — ledger buckets, journal lanes and shared inventory rows, memories, forks with what they hold, unowned refs and checkouts, worktree cost, and a plan's settled promotion state | commitment |
 | `arc-journal-catchup/8` | `arc journal catchup --json` — artifact storage/resolution facts, converged checkpoint tips, promotion state, and journal activity | commitment |
 | `arc-resume/5` | `arc resume --json` — one change's brief, live state, and journal context, including captured plan provenance and the source fork's artifacts | commitment |
 | `arc-brief/1` | `arc brief --json` — one selected brief and its immutable plan-source snapshot | commitment |
