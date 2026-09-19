@@ -38,7 +38,11 @@ marking each consumed item with its outcome. Read-side `--kind` filters on
 discoverable, while `journal note --kind` accepts only active kinds.
 `show <filename>` prints one
 artifact's raw Markdown body, resolving the hot directory first and then the
-cold archive. Dated inline headings (positions, conclusions, review stamps)
+cold archive. `latest <topic> [--kind <k>]` resolves one topic's newest
+artifact, hot before cold, breaking a tie inside one timestamp second by the
+transition relation and then by the order the event log recorded the
+artifacts; a numeric filename suffix is never an ordering of its own. Dated
+inline headings (positions, conclusions, review stamps)
 take the house timestamp from `journal stamp` — RFC 3339 seconds in UTC, the
 same spelling as the event log's `ts`, so prose and log cross-grep — never
 an agent-authored date. Artifact filenames carry a `YYYYMMDDTHHMMSSZ` UTC

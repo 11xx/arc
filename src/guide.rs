@@ -183,6 +183,10 @@ SETTLE A QUESTION (before it is work)
   arc journal answer <file> --question <id> --option <choice> --body-file -
     --other "<answer>"                 Settle it outside the options offered.
   arc journal discussion <file>        Read stances, branches, and open questions.
+  arc journal latest <topic> [--kind <k>]
+                         One topic's newest artifact, hot before cold; inside
+                         one second the successor relation and recording order
+                         decide, never the filename suffix.
   arc journal correct <file> --target <t> --field <f> --value <v> [--note]
   arc journal retract <file> --target <t> --body-file -
   arc journal consume <file> --outcome done --decision <decision>
