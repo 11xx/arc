@@ -33,8 +33,15 @@ SAY WHO YOU ARE (before the first write)
   party to an approval.
 
   `arc env` detects a harness by the session variable it exports; not every
-  harness exports one. OpenCode v2 (`opencode2`) is recognized without one —
-  by `OPENCODE_TERMINAL` or its process ancestry — and prints the harness
+  harness exports one. It reads that harness's own session store for the
+  model, honouring the store's own override — `CLAUDE_CONFIG_DIR`,
+  `CODEX_HOME`, `PI_CODING_AGENT_SESSION_DIR`, `PI_CODING_AGENT_DIR` — before
+  the default under `$HOME`, and reports whether the store corroborates the
+  session. Events record that verdict beside the session they carry.
+  `CLAUDE_CODE_CHILD_SESSION` marks a shell a harness spawned inside another
+  session, and that mark is recorded on the events the identity writes.
+  OpenCode v2 (`opencode2`) is recognized without one — by
+  `OPENCODE_TERMINAL` or its process ancestry — and prints the harness
   export with the session left as a comment to set by hand. With nothing to
   detect at all it exits non-zero and prints the export template, which is
   the normal path for setting identity manually, not a failure.

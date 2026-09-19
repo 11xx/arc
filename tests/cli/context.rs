@@ -18,14 +18,18 @@ fn opened_event(repo: &Repo, change_id: &str) -> serde_json::Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
-fn enable_identity_detection(repo: &Repo) {
-    let config_dir = repo.home.join(".local/ai/arc");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::write(
-        config_dir.join("config.toml"),
-        "[identity]\ndetect = true\n",
+/// `arc env`'s line for a session the harness's own store backs.
+fn corroborated(harness: &str) -> String {
+    format!(
+        "# session corroborated: the {harness} session store resolved a recording for this id\n"
     )
-    .unwrap();
+}
+
+/// `arc env`'s line for a session id the harness's own store does not hold.
+fn uncorroborated(harness: &str) -> String {
+    format!(
+        "# session uncorroborated: the {harness} session store resolved no recording for this id\n"
+    )
 }
 
 #[test]
@@ -94,7 +98,10 @@ fn env_detects_codex_thread_and_prints_exports() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout("export ARC_HARNESS='codex' ARC_SESSION='thread-123'\n");
+        .stdout(format!(
+            "export ARC_HARNESS='codex' ARC_SESSION='thread-123'\n{}",
+            uncorroborated("codex")
+        ));
 }
 
 #[test]
@@ -190,7 +197,118 @@ fn env_detects_claude_model_from_transcript() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n"
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n{}",
+            corroborated("claude")
+        ));
+}
+
+#[test]
+fn env_resolves_the_claude_store_under_its_config_dir_override() {
+    let repo = Repo::new();
+    let session = "22222222-3333-4444-5555-666666666666";
+    let relocated = repo.home.join("relocated-claude");
+    let project = relocated.join("projects/-home-lobo");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{session}.jsonl")),
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fable-5\"}}\n",
+    )
+    .unwrap();
+    // The default store holds the same session under a different model, so a
+    // store consulted in addition to the override would answer with it: the
+    // override replaces the configuration directory rather than extending it.
+    let default = repo.home.join(".claude/projects/-home-lobo");
+    fs::create_dir_all(&default).unwrap();
+    fs::write(
+        default.join(format!("{session}.jsonl")),
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-elsewhere\"}}\n",
+    )
+    .unwrap();
+
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("CLAUDE_SESSION_ID", session)
+        .env("CLAUDE_CONFIG_DIR", &relocated)
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n{}",
+            corroborated("claude")
+        ));
+}
+
+#[test]
+fn env_takes_the_newest_claude_recording_across_project_directories() {
+    let repo = Repo::new();
+    let session = "33333333-4444-5555-6666-777777777777";
+    let projects = repo.home.join(".claude/projects");
+    // The stale recording's directory is created first, which is the order
+    // this fixture's directory enumeration offers them in. The rule is the
+    // newest recording, not the first one offered.
+    let stale = projects.join("a-project");
+    let live = projects.join("b-project");
+    fs::create_dir_all(&stale).unwrap();
+    let stale_file = stale.join(format!("{session}.jsonl"));
+    fs::write(
+        &stale_file,
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-stale\"}}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(&live).unwrap();
+    let live_file = live.join(format!("{session}.jsonl"));
+    fs::write(
+        &live_file,
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-live\"}}\n",
+    )
+    .unwrap();
+    set_modified(&stale_file, 1_700_000_000);
+    set_modified(&live_file, 1_800_000_000);
+
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("CLAUDE_SESSION_ID", session)
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-live'\n{}",
+            corroborated("claude")
+        ));
+}
+
+fn set_modified(path: &Path, seconds: u64) {
+    let time = std::time::UNIX_EPOCH + Duration::from_secs(seconds);
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(time)
+        .unwrap();
+}
+
+#[test]
+fn env_reports_a_session_the_environment_marks_as_a_child() {
+    let repo = Repo::new();
+    let session = "77777777-8888-9999-0000-111111111111";
+    let project = repo.home.join(".claude/projects/-home-lobo");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{session}.jsonl")),
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fable-5\"}}\n",
+    )
+    .unwrap();
+
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("CLAUDE_SESSION_ID", session)
+        .env("CLAUDE_CODE_CHILD_SESSION", "1")
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n{}# session is a child: the environment marks it as spawned inside another session\n",
+            corroborated("claude")
         ));
 }
 
@@ -215,7 +333,8 @@ fn env_detects_claude_code_session_variable() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n"
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n{}",
+            corroborated("claude")
         ));
 }
 
@@ -228,7 +347,10 @@ fn env_prefers_hand_set_claude_session_over_ambient() {
         .env("CLAUDE_CODE_SESSION_ID", "ambient")
         .assert()
         .success()
-        .stdout("export ARC_HARNESS='claude' ARC_SESSION='hand-set'\n");
+        .stdout(format!(
+            "export ARC_HARNESS='claude' ARC_SESSION='hand-set'\n{}",
+            uncorroborated("claude")
+        ));
 }
 
 #[test]
@@ -260,7 +382,8 @@ fn env_detects_codex_model_and_effort_from_rollout() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='codex' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-sol#high'\n"
+            "export ARC_HARNESS='codex' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-sol#high'\n{}",
+            corroborated("codex")
         ));
 }
 
@@ -301,7 +424,8 @@ fn env_detects_opencode_model_and_variant_from_session_store() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='opencode' ARC_SESSION='{session}' ARC_MODEL='kimi-k3#max'\n"
+            "export ARC_HARNESS='opencode' ARC_SESSION='{session}' ARC_MODEL='kimi-k3#max'\n{}",
+            corroborated("opencode")
         ));
 }
 
@@ -331,7 +455,8 @@ fn env_detects_pi_model_and_thinking_level_from_session_store() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-sol#medium'\n"
+            "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-sol#medium'\n{}",
+            corroborated("pi")
         ));
 }
 
@@ -376,6 +501,7 @@ fn env_detects_opencode2_by_process_ancestry() {
         .env("HOME", &repo.home)
         .env_remove("CLAUDE_SESSION_ID")
         .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CLAUDE_CODE_CHILD_SESSION")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("OPENCODE_SESSION")
         .env_remove("PI_SESSION_ID")
@@ -430,7 +556,10 @@ fn env_omits_model_when_no_session_store_matches() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout("export ARC_HARNESS='codex' ARC_SESSION='no-such-thread'\n");
+        .stdout(format!(
+            "export ARC_HARNESS='codex' ARC_SESSION='no-such-thread'\n{}",
+            uncorroborated("codex")
+        ));
 
     // Nothing detected at all: the fallback comment names ARC_MODEL too.
     repo.arc(&repo.root)

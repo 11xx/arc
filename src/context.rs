@@ -8,6 +8,7 @@
 use crate::commands::{self, Ctx, StatusOutput};
 use crate::gitio;
 use crate::journal;
+use crate::model::SessionResolution;
 use crate::session_store;
 use crate::state::ChangeState;
 use crate::status::BriefBaseDrift;
@@ -192,27 +193,67 @@ fn ambiguous<T>(cwd: &Path, matches: &[&ChangeState]) -> Result<T> {
     )
 }
 
+/// A session id detected from the environment, with what the harness's own
+/// store said about it.
+pub struct DetectedSession {
+    pub id: String,
+    /// The store's answer for `id`. Most events carry nothing else about who
+    /// wrote them, so whether the store knows the id is part of the identity
+    /// report rather than a fact inferred later from a missing model.
+    pub resolution: SessionResolution,
+}
+
 pub struct DetectedIdentity {
     pub harness: String,
     /// A harness recognized without its cooperation carries no session id;
     /// `None` reports that honestly where an empty string would fabricate a
     /// record.
-    pub session: Option<String>,
+    pub session: Option<DetectedSession>,
     pub model: Option<String>,
+    /// Whether the environment marks this process as one a harness spawned
+    /// inside another session rather than one an operator started. The mark
+    /// names no parent: the spawning thread stays unrecovered.
+    pub child_session: bool,
+}
+
+/// Whether the environment marks this process as a child session. Claude Code
+/// exports `CLAUDE_CODE_CHILD_SESSION` for the shells its own tools run, so a
+/// derived actor from a subagent is distinguishable from one a lead session
+/// recorded.
+fn child_session_marker() -> bool {
+    std::env::var_os("CLAUDE_CODE_CHILD_SESSION").is_some_and(|value| !value.is_empty())
 }
 
 pub fn detect_identity() -> Option<DetectedIdentity> {
     for (variable, harness) in HARNESS_ENV {
         if let Some(session) = std::env::var_os(variable) {
-            let session = session.to_string_lossy();
+            let session = session.to_string_lossy().into_owned();
             if session.is_empty() {
                 continue;
             }
-            let model = detect_model(harness, &session);
+            let (resolution, model) = match harness {
+                "claude" | "codex" | "pi" => {
+                    let transcript = session_store::transcript_path(harness, &session);
+                    let resolution = match transcript {
+                        Some(_) => SessionResolution::Corroborated,
+                        None => SessionResolution::Uncorroborated,
+                    };
+                    let model = transcript
+                        .as_deref()
+                        .and_then(|path| detect_model(harness, path));
+                    (resolution, model)
+                }
+                "opencode" => detect_opencode_record(&session),
+                _ => (SessionResolution::Uncorroborated, None),
+            };
             return Some(DetectedIdentity {
                 harness: harness.to_string(),
-                session: Some(session.into_owned()),
+                session: Some(DetectedSession {
+                    id: session,
+                    resolution,
+                }),
                 model,
+                child_session: child_session_marker(),
             });
         }
     }
@@ -221,6 +262,7 @@ pub fn detect_identity() -> Option<DetectedIdentity> {
             harness: "opencode".to_string(),
             session: None,
             model: None,
+            child_session: child_session_marker(),
         });
     }
     None
@@ -244,42 +286,71 @@ pub fn print_env() -> i32 {
              export a session variable; set it by hand",
             identity.harness
         );
+        print_child_session_line(identity.child_session);
         return 0;
     };
     match identity.model {
         Some(model) => println!(
             "export ARC_HARNESS={} ARC_SESSION={} ARC_MODEL={}",
             shell_quote(&identity.harness),
-            shell_quote(&session),
+            shell_quote(&session.id),
             shell_quote(&model)
         ),
         None => println!(
             "export ARC_HARNESS={} ARC_SESSION={}",
             shell_quote(&identity.harness),
-            shell_quote(&session)
+            shell_quote(&session.id)
         ),
     }
+    println!(
+        "# {}",
+        session_resolution_line(&identity.harness, session.resolution)
+    );
+    print_child_session_line(identity.child_session);
     0
 }
 
-/// Best-effort model detection for `arc env`: read the harness's own session
-/// store and extract the model (plus effort, where the store records one).
+/// Whether the shell arc is running in was started by a harness session
+/// rather than by an operator, as the environment marks it.
+fn print_child_session_line(child_session: bool) {
+    if child_session {
+        println!(
+            "# session is a child: the environment marks it as spawned inside another session"
+        );
+    }
+}
+
+/// What `arc env` says about a detected session's backing. The store is
+/// asked once, at detection time, so this is a fact the report carries rather
+/// than something a caller infers from an absent model.
+fn session_resolution_line(harness: &str, resolution: SessionResolution) -> String {
+    match resolution {
+        SessionResolution::Corroborated => format!(
+            "session corroborated: the {harness} session store resolved a recording for this id"
+        ),
+        SessionResolution::Uncorroborated => format!(
+            "session uncorroborated: the {harness} session store resolved no recording for this id"
+        ),
+    }
+}
+
+/// Best-effort model detection for `arc env`: read the resolved transcript
+/// and extract the model (plus effort, where the store records one).
 /// Detection is a convenience layered on the explicit `ARC_MODEL` contract —
-/// every failure mode is a silent omission, never an error.
-fn detect_model(harness: &str, session: &str) -> Option<String> {
+/// every failure mode here is a silent omission, never an error; whether the
+/// store backs the session is reported separately.
+fn detect_model(harness: &str, transcript: &Path) -> Option<String> {
     match harness {
-        "claude" => detect_claude_model(session),
-        "codex" => detect_codex_model(session),
-        "opencode" => detect_opencode_model(session),
-        "pi" => detect_pi_model(session),
+        "claude" => detect_claude_model(transcript),
+        "codex" => detect_codex_model(transcript),
+        "pi" => detect_pi_model(transcript),
         _ => None,
     }
 }
 
-/// `~/.claude/projects/<cwd-slug>/<session>.jsonl`: assistant messages carry
+/// `<claude store>/<cwd-slug>/<session>.jsonl`: assistant messages carry
 /// `message.model`; the newest one wins.
-fn detect_claude_model(session: &str) -> Option<String> {
-    let path = session_store::transcript_path("claude", session)?;
+fn detect_claude_model(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     for line in text.lines().rev() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -296,8 +367,7 @@ fn detect_claude_model(session: &str) -> Option<String> {
 /// to `~/.codex`): the newest `turn_context` payload carries `model` and
 /// `effort`; combined as `model#effort` when both exist. Older effort fields
 /// remain readable for compatibility.
-fn detect_codex_model(session: &str) -> Option<String> {
-    let file = session_store::transcript_path("codex", session)?;
+fn detect_codex_model(file: &Path) -> Option<String> {
     let text = std::fs::read_to_string(file).ok()?;
     let mut model: Option<String> = None;
     let mut effort: Option<String> = None;
@@ -327,32 +397,41 @@ fn detect_codex_model(session: &str) -> Option<String> {
     })
 }
 
-/// OpenCode stores the selected model as JSON in its SQLite session row. Both
-/// stable and preview store names are checked. `sqlite3` is an optional
-/// best-effort reader: its absence leaves ARC_MODEL unset without making
-/// `arc env` fail.
-fn detect_opencode_model(session: &str) -> Option<String> {
+/// The OpenCode store's answer for one session: whether it holds a row for
+/// the id, and the model that row records when it parses. Both stable and
+/// preview store names are checked. `sqlite3` is an optional best-effort
+/// reader: its absence resolves no row without making `arc env` fail.
+fn detect_opencode_record(session: &str) -> (SessionResolution, Option<String>) {
     let session = session.replace('\'', "''");
     let query = format!("SELECT model FROM session WHERE id = '{session}' LIMIT 1;");
-    for path in session_store::opencode_databases()? {
+    for path in session_store::opencode_databases().into_iter().flatten() {
         if !path.is_file() {
             continue;
         }
-        let output = Command::new("sqlite3")
+        let output = match Command::new("sqlite3")
             .arg("-noheader")
             .arg(&path)
             .arg(&query)
             .output()
-            .ok()?;
+        {
+            Ok(output) => output,
+            Err(_) => continue,
+        };
         if !output.status.success() {
             continue;
         }
-        let raw = String::from_utf8(output.stdout).ok()?;
-        if let Some(model) = parse_opencode_model(raw.trim()) {
-            return Some(model);
+        let Ok(raw) = String::from_utf8(output.stdout) else {
+            continue;
+        };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            // A successful query returning nothing is this database holding
+            // no row for the id, not an answer about the session.
+            continue;
         }
+        return (SessionResolution::Corroborated, parse_opencode_model(raw));
     }
-    None
+    (SessionResolution::Uncorroborated, None)
 }
 
 fn parse_opencode_model(raw: &str) -> Option<String> {
@@ -372,8 +451,7 @@ fn parse_opencode_model(raw: &str) -> Option<String> {
 /// Pi session JSONL carries model and thinking-level changes. The current Pi
 /// runtime bridge exposes its native ID as `PI_SESSION_ID`; custom agent and
 /// session roots are honored before the default store.
-fn detect_pi_model(session: &str) -> Option<String> {
-    let file = session_store::transcript_path("pi", session)?;
+fn detect_pi_model(file: &Path) -> Option<String> {
     let text = std::fs::read_to_string(file).ok()?;
     let mut model: Option<String> = None;
     let mut effort: Option<String> = None;

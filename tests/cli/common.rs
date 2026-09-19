@@ -63,6 +63,7 @@ impl Repo {
             // test, or `env` detects the runner instead of the fixture.
             .env_remove("CLAUDE_SESSION_ID")
             .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CLAUDE_CODE_CHILD_SESSION")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("OPENCODE_SESSION")
             .env_remove("OPENCODE_TERMINAL")
@@ -79,6 +80,18 @@ impl Repo {
     pub(crate) fn head(&self, cwd: &Path) -> String {
         git_out(cwd, &["rev-parse", "HEAD"])
     }
+}
+
+/// Turn on the opt-in ambient identity detection this suite's harness
+/// environment otherwise never reaches.
+pub(crate) fn enable_identity_detection(repo: &Repo) {
+    let config_dir = repo.home.join(".local/ai/arc");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        "[identity]\ndetect = true\n",
+    )
+    .unwrap();
 }
 
 /// Git's editor, for every command this suite runs and every command the

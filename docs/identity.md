@@ -15,6 +15,28 @@ file to fill omitted harness, session, and model values from the running
 harness's own session store. Detection is off by default and does not mix a
 detected session into a different explicitly selected harness.
 
+The store is the one the harness itself would read. Claude Code relocates its
+configuration directory — session history included — under
+`CLAUDE_CONFIG_DIR`, Codex under `CODEX_HOME`, and Pi under
+`PI_CODING_AGENT_SESSION_DIR` or `PI_CODING_AGENT_DIR`; each replaces the
+default under `$HOME` rather than adding to it. A session recorded under more
+than one Claude project directory resolves to the most recently modified
+recording, with equal timestamps falling to path order.
+
+A detected session id is resolved against that store, and the answer is
+reported: `arc env` says whether the store corroborates the session, and every
+event carries the same verdict as `session_resolution` beside `session`. An id
+the store does not hold — a stale export, a nested shell, a wrapper passing its
+environment down — is recorded as uncorroborated rather than left to be
+inferred from an absent model. A session declared with `ARC_SESSION` or
+`--session` was never looked up, so it carries no verdict either way.
+
+A session the environment marks as spawned inside another session is recorded
+as `child_session` on the events it writes. Claude Code sets
+`CLAUDE_CODE_CHILD_SESSION` in the shells its tools run, so a subagent's actor
+is distinguishable from the lead session's; the mark names no parent, so the
+spawning thread is not recovered from it.
+
 Journal events additionally record the acting model via `--model` or
 `ARC_MODEL`, a `model-slug[#effort]` string (e.g. `kimi-k3#high`,
 `gpt-5.6-sol#low`) matching the `Assisted-by: Harness:Model#Effort` grammar.

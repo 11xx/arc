@@ -2734,6 +2734,8 @@ mod tests {
             model: None,
             harness: None,
             session: None,
+            session_resolution: None,
+            child_session: false,
             created_at: Utc::now(),
             payload,
         }

@@ -771,6 +771,8 @@ mod tests {
             model: None,
             harness: Some("test".into()),
             session: Some("s".into()),
+            session_resolution: None,
+            child_session: false,
             created_at: DateTime::<Utc>::from_timestamp(1_000_000 + seconds, 0).unwrap(),
             payload,
         }
