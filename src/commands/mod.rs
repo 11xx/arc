@@ -108,9 +108,6 @@ pub struct Ctx {
     /// run, which is the absence of a lookup rather than a claim about the
     /// store.
     pub session_resolution: Option<SessionResolution>,
-    /// Whether the environment marks this session as one a harness spawned
-    /// inside another session rather than one an operator started.
-    pub child_session: bool,
     /// Model identity (`--model`/`ARC_MODEL`): a model slug with optional
     /// `#effort`, e.g. `kimi-k3#high`. Optional everywhere it is recorded;
     /// absent means absent and is never rendered as "unknown".
@@ -271,7 +268,6 @@ impl Ctx {
             harness: self.harness.clone(),
             session: self.session.clone(),
             session_resolution: self.session_resolution,
-            child_session: self.child_session,
             model: self.model.clone(),
             on_behalf_of: self.on_behalf_of.clone(),
         }
@@ -414,7 +410,6 @@ impl Ctx {
             harness: self.harness.clone(),
             session: self.session.clone(),
             session_resolution: self.session_resolution,
-            child_session: self.child_session,
             created_at,
             payload,
         }

@@ -421,63 +421,6 @@ fn an_event_records_whether_the_harness_store_backed_the_session() {
     );
 }
 
-/// A subagent's shells carry the child's own session id, and the spawning
-/// harness also marks the relationship in the environment. Recording the mark
-/// is what keeps an actor derived from a subagent distinguishable from one a
-/// lead session recorded.
-#[test]
-fn an_event_from_a_child_session_records_the_mark() {
-    let repo = Repo::new();
-    enable_identity_detection(&repo);
-    let session = "66666666-7777-8888-9999-000000000000";
-    let day = repo.home.join(".codex/sessions/2026/09/18");
-    fs::create_dir_all(&day).unwrap();
-    fs::write(
-        day.join(format!("rollout-2026-09-18T00-00-00-{session}.jsonl")),
-        "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-sol\"}}\n",
-    )
-    .unwrap();
-
-    let opened = |slug: &str, child: bool| {
-        let mut command = repo.arc(&repo.root);
-        command
-            .env_remove("ARC_ACTOR")
-            .env_remove("ARC_HARNESS")
-            .env_remove("ARC_SESSION")
-            .env_remove("CLAUDE_SESSION_ID")
-            .env_remove("OPENCODE_SESSION")
-            .env_remove("PI_SESSION_ID")
-            .env("CODEX_THREAD_ID", session)
-            .args(["begin", slug]);
-        if child {
-            command.env("CLAUDE_CODE_CHILD_SESSION", "1");
-        } else {
-            command.env_remove("CLAUDE_CODE_CHILD_SESSION");
-        }
-        assert!(command.output().unwrap().status.success());
-        let events = stdout(repo.arc(&repo.root).args([
-            "events",
-            "--change",
-            slug,
-            "--type",
-            "change-opened",
-        ]));
-        serde_json::from_str::<serde_json::Value>(events.trim()).unwrap()
-    };
-
-    let child = opened("child-session", true);
-    assert_eq!(child["session"], session, "{child}");
-    assert_eq!(child["child_session"], true, "{child}");
-
-    // Without the mark the event carries no field at all: an unmarked session
-    // is not evidence either way, and `false` would read as a finding.
-    let lead = opened("lead-session", false);
-    assert!(
-        lead.get("child_session").is_none(),
-        "an unmarked session records no child field: {lead}"
-    );
-}
-
 /// A repository may require every writer to declare itself. Reading is
 /// unaffected: it records nothing that could be mistaken for evidence.
 #[test]

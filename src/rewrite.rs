@@ -541,7 +541,6 @@ mod tests {
             harness: None,
             session: None,
             session_resolution: None,
-            child_session: false,
             on_behalf_of: None,
             model: None,
             created_at: chrono::Utc::now(),

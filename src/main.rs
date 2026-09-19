@@ -1018,14 +1018,10 @@ enum Cmd {
     /// `PI_CODING_AGENT_DIR` — before its default under `$HOME`. The store's
     /// answer for the session is reported with the exports: an id the store
     /// does not hold is uncorroborated, and the events the identity writes
-    /// carry that verdict. `CLAUDE_CODE_CHILD_SESSION` marks a shell a harness
-    /// spawned inside another session, and the events record that mark too.
-    /// Not every
-    /// harness
-    /// exports one, and a harness that does may not in every mode. OpenCode
-    /// v2 exports none and is recognized by `OPENCODE_TERMINAL` or its
-    /// process ancestry, printing the harness export with the session left
-    /// as a comment to set by hand.
+    /// carry that verdict. Not every harness exports one, and a harness that
+    /// does may not in every mode. OpenCode v2 exports none and is recognized
+    /// by `OPENCODE_TERMINAL` or its process ancestry, printing the harness
+    /// export with the session left as a comment to set by hand.
     ///
     /// With nothing to detect at all it prints the export template as a
     /// comment and exits non-zero, which is a report that identity must be
@@ -1976,7 +1972,6 @@ fn run(cli: Cli) -> Result<i32> {
     let mut harness = cli.harness;
     let mut session = cli.session;
     let mut session_resolution = None;
-    let mut child_session = false;
     // An empty --model is the same as absent.
     let mut model = cli.model.filter(|value| !value.trim().is_empty());
     if config::load()
@@ -1999,7 +1994,6 @@ fn run(cli: Cli) -> Result<i32> {
                         // asked about, so it carries no report.
                         session_resolution = Some(detected_session.resolution);
                         session = Some(detected_session.id);
-                        child_session = detected.child_session;
                     }
                 }
                 if model.is_none() {
@@ -2028,7 +2022,6 @@ fn run(cli: Cli) -> Result<i32> {
         harness,
         session,
         session_resolution,
-        child_session,
         model,
         // An empty --on-behalf-of is the same as absent: today's behavior.
         on_behalf_of: cli.on_behalf_of.filter(|value| !value.trim().is_empty()),
