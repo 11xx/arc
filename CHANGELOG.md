@@ -10,6 +10,13 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- Use the description "Persistent context and guarded workflow state over
+  plain Git for agentic coding arcs." in package and CLI metadata for the
+  next crate release. Keep claimed-row help beside journal open, and retain
+  healthy workspace list rows when another project cannot be read.
+
 ## [2026.9.9] - 2026-09-09
 
 ### Added
@@ -25,11 +32,9 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
-- Use the description "Persistent context and guarded workflow state over
-  plain Git for agentic coding arcs." across package and CLI metadata.
-  Explain persistent project context, cold-session reconstruction, and
-  guarded integration in the README opening. Include a journal example and
-  registry installation instructions for arc-ledger.
+- Describe Arc as durable project context and change coordination across
+  its package metadata, README, and CLI introductions. Include a journal
+  example and registry installation instructions for arc-ledger.
 
 ### Fixed
 

@@ -88,6 +88,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          thread <slug>` names the harness, session, and model
                          that opened it, and how to resume that session.
   arc journal open       The actionable backlog — work waiting for a session.
+                         A row occupied by somebody reads `[claimed by <actor>
+                         via <harness>: active|expired]`; `--json` carries the
+                         same as `availability` and the claims themselves.
   arc journal inventory --json
                          Shared artifact facts, claims, questions, promotions,
                          and explicit ledger coverage. --archived selects cold
@@ -107,9 +110,6 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   FILE to restore storage. Terminal resolution remains terminal. Pending
   storage moves appear in journal doctor and must be retried before other
   writes; the retry validates the operation's paths and body digest.
-                         A row occupied by somebody reads `[claimed by <actor>
-                         via <harness>: active|expired]`; `--json` carries the
-                         same as `availability` and the claims themselves.
   arc journal dir        The authoritative journal location for the project
                          you are standing in, honoring ARC_JOURNAL_DIR and
                          [journals.dirs]; the default path is only a default.
