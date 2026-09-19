@@ -13,6 +13,7 @@ mod findings;
 mod forge;
 mod fork;
 mod hooks;
+mod instructions;
 mod journal;
 mod lifecycle;
 mod messaging;

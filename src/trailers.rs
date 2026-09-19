@@ -10,6 +10,122 @@
 //! subject: a one-line message whose subject happens to be spelled
 //! `feat: something` has no trailers, and treating it as a block would append
 //! to the subject.
+//!
+//! [`check_contribution`] reads the same block against the portable
+//! contribution-trailer convention without editing anything.
+
+/// The role keys the convention defines: `Planned-by`, `Implemented-by`,
+/// `Reviewed-by`, `Orchestrated-by`, in canonical order.
+const CONTRIBUTION_ROLES: [&str; 4] = [
+    "Planned-by",
+    "Implemented-by",
+    "Reviewed-by",
+    "Orchestrated-by",
+];
+
+/// A disclosure key the convention retains as written rather than promoting
+/// to a role, because older commits carry it and its role is not recorded.
+const LEGACY_DISCLOSURE: &str = "Assisted-by";
+
+/// One thing a contribution check found in a message. `kind` separates a
+/// value a role key cannot read from a key outside the convention; neither
+/// changes the message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContributionIssue {
+    pub kind: &'static str,
+    pub key: String,
+    pub value: String,
+    pub detail: &'static str,
+}
+
+impl ContributionIssue {
+    /// The report line a caller prints.
+    pub fn line(&self) -> String {
+        format!(
+            "{}: {}: {} ({})",
+            self.kind, self.key, self.value, self.detail
+        )
+    }
+}
+
+/// Whether a role key's value is one of the convention's forms: an agent
+/// `harness:model[#effort]` coordinate, or a human `Name <email>` value. A
+/// value is one line, and no coordinate is empty.
+fn value_is_readable(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() || value.contains(['\n', '\r']) {
+        return false;
+    }
+    if let Some((name, address)) = value.rsplit_once('<') {
+        return !name.trim().is_empty()
+            && address.ends_with('>')
+            && !address.trim_end_matches('>').trim().is_empty();
+    }
+    let Some((harness, rest)) = value.split_once(':') else {
+        return false;
+    };
+    let (model, effort) = match rest.split_once('#') {
+        Some((model, effort)) => (model, Some(effort)),
+        None => (rest, None),
+    };
+    !harness.trim().is_empty()
+        && !model.trim().is_empty()
+        && effort.is_none_or(|effort| !effort.trim().is_empty())
+}
+
+/// Every contribution-trailer issue in a message's trailer block, in the
+/// order the lines appear. The message is read, never written: the answer is
+/// a report, not an edit.
+///
+/// A role key with a value the convention cannot read is `malformed`. A key
+/// outside the convention is `unsupported` and travels through untouched;
+/// [`LEGACY_DISCLOSURE`] is defined, so an older `Assisted-by` is not
+/// reported as either.
+pub fn check_contribution(message: &[u8]) -> Vec<ContributionIssue> {
+    let ends_with_newline = message.ends_with(b"\n");
+    let body = match ends_with_newline {
+        true => &message[..message.len() - 1],
+        false => message,
+    };
+    let lines: Vec<&[u8]> = match body.is_empty() {
+        true => Vec::new(),
+        false => body.split(|byte| *byte == b'\n').collect(),
+    };
+    let Some(block) = block_of(&lines) else {
+        return Vec::new();
+    };
+    let mut issues = Vec::new();
+    for line in &lines[block] {
+        let Some(key) = trailer_key(line) else {
+            continue;
+        };
+        let key = String::from_utf8_lossy(&key).into_owned();
+        let value = String::from_utf8_lossy(&line[key.len() + 1..])
+            .trim()
+            .to_string();
+        if CONTRIBUTION_ROLES
+            .iter()
+            .any(|role| role.eq_ignore_ascii_case(&key))
+        {
+            if !value_is_readable(&value) {
+                issues.push(ContributionIssue {
+                    kind: "malformed",
+                    key,
+                    value,
+                    detail: "expected harness:model[#effort] or Name <email> on one line",
+                });
+            }
+        } else if !key.eq_ignore_ascii_case(LEGACY_DISCLOSURE) {
+            issues.push(ContributionIssue {
+                kind: "unsupported",
+                key,
+                value,
+                detail: "outside arc-contribution-trailers/1; retained untouched",
+            });
+        }
+    }
+    issues
+}
 
 /// Edit a message's trailers: drop every trailer whose key is one of `drop`,
 /// then add each line of `append` the block does not already carry verbatim.

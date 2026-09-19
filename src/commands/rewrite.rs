@@ -98,6 +98,37 @@ pub struct TrailerArgs {
 /// is left exactly as it is: no new object, and no entry in the map. That is
 /// what separates this from re-signing, where every commit in range is
 /// recreated because the one below it was.
+/// The portable contribution-trailer specification, embedded at build time
+/// from its canonical page so the printed guide and the repository document
+/// cannot drift apart.
+const CONTRIBUTION_SPEC: &str = include_str!("../../docs/contribution-trailers.md");
+
+/// Print the contribution-trailer specification, or check one message against
+/// it. Reads no ledger, journal, configuration, identity, or network, and
+/// works outside a repository; `-` reads the message from stdin. A message
+/// with a malformed role value exits 1; unsupported keys are reported and
+/// nothing is rewritten.
+pub fn instructions_git(check: Option<&str>) -> Result<i32> {
+    let Some(source) = check else {
+        print!("{CONTRIBUTION_SPEC}");
+        return Ok(0);
+    };
+    let message = if source == "-" {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::io::stdin().read_to_end(&mut bytes)?;
+        bytes
+    } else {
+        std::fs::read(source).with_context(|| format!("cannot read {source}"))?
+    };
+    let issues = crate::trailers::check_contribution(&message);
+    let malformed = issues.iter().any(|issue| issue.kind == "malformed");
+    for issue in &issues {
+        println!("{}", issue.line());
+    }
+    Ok(if malformed { 1 } else { 0 })
+}
+
 pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
     let cwd = ctx.cwd.clone();
     let store = ctx.store()?;
