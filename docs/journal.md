@@ -269,8 +269,20 @@ Who may answer is changed by correcting or superseding the question.
 Deliveries accumulate rather than replace, because a question asked twice and
 still unanswered is more urgent than one asked once.
 
+`journal suggest <filename> --question <id> --option <opt> --body-file <src>`
+records advice for a decider without deciding: a typed `suggestion` event
+carrying the suggesting identity and the reason. Suggestions show beside
+their question in `journal questions` and `journal discussion` as
+`suggested: <option> by <identity>`, and an `answer` that names a different
+option warns that it departed from them. A suggestion never settles a
+question and never counts toward the stance tally, and one naming an option
+the question did not offer, or a question already answered, is refused. The
+event kind is additive input under `journal-events/1`: a reader that does not
+know it drops the advice and still reads the question, its answers, and its
+tally unchanged.
+
 Every question view reports the resulting state. `journal questions --json`
-(schema `arc-journal-questions/2`) and the questions in `journal discussion
+(schema `arc-journal-questions/3`) and the questions in `journal discussion
 --json` carry `delivery` — `unasked` while prompting work remains, `delivered`
 once somebody was asked and the reply is merely pending, `answered` once it is
 settled, and `unknown` for a question older than the record itself — plus

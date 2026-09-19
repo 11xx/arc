@@ -5564,7 +5564,7 @@ fn journal_discussion_summarizes_stances_participants_and_resolution() {
             repo.arc(&repo.root)
                 .args(["journal", "discussion", &file, "--json"]),
         );
-    assert_eq!(summary["schema"], "journal-discussion/3");
+    assert_eq!(summary["schema"], "journal-discussion/4");
     assert_eq!(summary["positions"], 3);
     assert_eq!(summary["stances"]["for"], 2);
     assert_eq!(summary["stances"]["against"], 1);
@@ -7827,7 +7827,7 @@ fn journal_questions_lists_what_is_waiting_on_a_person_with_its_branches() {
         repo.arc(&repo.root)
             .args(["journal", "questions", "--json"]),
     );
-    assert_eq!(value["schema"], "arc-journal-questions/2");
+    assert_eq!(value["schema"], "arc-journal-questions/3");
     assert_eq!(value["questions"][0]["question"], question.as_str());
     assert_eq!(value["questions"][0]["placement"], "opening");
     assert_eq!(value["questions"][0]["heading"], "Paths or properties?");
@@ -7839,6 +7839,290 @@ fn journal_questions_lists_what_is_waiting_on_a_person_with_its_branches() {
     let catchup = stdout(repo.arc(&repo.root).args(["catchup"]));
     assert!(catchup.contains("awaiting settlement (1)"), "{catchup}");
     assert!(catchup.contains(&question), "{catchup}");
+}
+
+/// Pose a closing question offering `options` on `file` and return its id.
+fn pose_choice(repo: &Repo, file: &str, options: &[&str]) -> String {
+    let mut cmd = repo.arc(&repo.root);
+    cmd.args(["journal", "question", file, "--placement", "closing"]);
+    for option in options {
+        cmd.args(["--option", option]);
+    }
+    cmd.args(["--body-file", "-"])
+        .write_stdin(format!("{}?\n", options.join(" or ")))
+        .assert()
+        .success();
+    question_ids(repo, file).pop().unwrap()
+}
+
+/// File a suggestion with a declared model, so the identity it records is
+/// predictable.
+fn suggest_option(
+    repo: &Repo,
+    file: &str,
+    question: &str,
+    option: &str,
+    reason: &str,
+    model: &str,
+) {
+    let body = repo.home.join(format!("suggestion-{option}.md"));
+    fs::write(&body, format!("{reason}\n")).unwrap();
+    repo.arc(&repo.root)
+        .env("ARC_MODEL", model)
+        .args([
+            "journal",
+            "suggest",
+            file,
+            "--question",
+            question,
+            "--option",
+            option,
+            "--body-file",
+            body.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+}
+
+/// A suggestion is input to a decision: it shows beside the question without
+/// settling it or moving the tally.
+#[test]
+fn journal_suggest_leaves_the_question_open_and_moves_no_tally() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "advice", "# Advice?\n");
+    let question = pose_choice(&repo, &file, &["paths", "properties"]);
+    let before = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "discussion", &file, "--json"]),
+    );
+
+    suggest_option(
+        &repo,
+        &file,
+        &question,
+        "paths",
+        "Paths are declarable.",
+        "kimi-k3#high",
+    );
+
+    let queue = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    assert_eq!(queue["schema"], "arc-journal-questions/3");
+    let rows = queue["questions"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{queue}");
+    let suggestions = rows[0]["suggestions"].as_array().unwrap();
+    assert_eq!(suggestions.len(), 1, "{queue}");
+    assert_eq!(suggestions[0]["option"], "paths");
+    assert_eq!(suggestions[0]["model"], "kimi-k3#high");
+    assert_eq!(suggestions[0]["by"], "kimi-k3#high via test");
+    assert_eq!(suggestions[0]["note"], "Paths are declarable.");
+    assert!(suggestions[0]["at"].is_string(), "{queue}");
+
+    let after = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "discussion", &file, "--json"]),
+    );
+    assert_eq!(after["schema"], "journal-discussion/4");
+    assert_eq!(before["positions"], after["positions"]);
+    assert_eq!(before["stances"], after["stances"]);
+    assert_eq!(after["questions"][0]["suggestions"][0]["option"], "paths");
+
+    let text = stdout(repo.arc(&repo.root).args(["journal", "questions"]));
+    assert!(
+        text.contains("suggested: paths by kimi-k3#high via test"),
+        "{text}"
+    );
+    let text = stdout(repo.arc(&repo.root).args(["journal", "discussion", &file]));
+    assert!(
+        text.contains("suggested: paths by kimi-k3#high via test"),
+        "{text}"
+    );
+
+    let doctor = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    assert!(
+        doctor["problems"].as_array().unwrap().is_empty(),
+        "{doctor}"
+    );
+}
+
+/// Two suggestions from different identities both show, oldest first.
+#[test]
+fn two_suggestions_from_different_identities_both_show() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "two-voices", "# Whose advice?\n");
+    let question = pose_choice(&repo, &file, &["paths", "properties"]);
+    suggest_option(
+        &repo,
+        &file,
+        &question,
+        "paths",
+        "Paths are declarable.",
+        "kimi-k3#high",
+    );
+    suggest_option(
+        &repo,
+        &file,
+        &question,
+        "properties",
+        "Properties carry better.",
+        "gpt-6#medium",
+    );
+
+    let queue = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "questions", "--json"]),
+    );
+    let suggestions = queue["questions"][0]["suggestions"].as_array().unwrap();
+    assert_eq!(suggestions.len(), 2, "{queue}");
+    assert_eq!(suggestions[0]["option"], "paths");
+    assert_eq!(suggestions[0]["model"], "kimi-k3#high");
+    assert_eq!(suggestions[1]["option"], "properties");
+    assert_eq!(suggestions[1]["model"], "gpt-6#medium");
+}
+
+/// A suggestion must name one of the question's options.
+#[test]
+fn journal_suggest_refuses_an_option_the_question_never_offered() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "off-menu-advice", "# Off menu?\n");
+    let question = pose_choice(&repo, &file, &["paths", "properties"]);
+    let body = repo.home.join("reason.md");
+    fs::write(&body, "Neither.\n").unwrap();
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "suggest",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "something-else",
+            "--body-file",
+            body.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is not one of the options"));
+}
+
+/// A suggestion on an answered question is refused: it cannot be live input to
+/// a decision already made.
+#[test]
+fn journal_suggest_after_an_answer_is_refused() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "late-advice", "# Too late?\n");
+    let question = pose_choice(&repo, &file, &["paths", "properties"]);
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "paths",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Paths win.\n")
+        .assert()
+        .success();
+
+    let body = repo.home.join("reason.md");
+    fs::write(&body, "Properties would too.\n").unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "suggest",
+            &file,
+            "--question",
+            &question,
+            "--option",
+            "properties",
+            "--body-file",
+            body.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already answered"));
+}
+
+/// An answer that leaves a standing suggestion behind says so; one that
+/// follows it says nothing.
+#[test]
+fn journal_answer_names_a_departure_from_a_standing_suggestion() {
+    let repo = Repo::new();
+    let file = discussion_named(&repo, "departure", "# Advice or not?\n");
+    let first = pose_choice(&repo, &file, &["paths", "properties"]);
+    suggest_option(
+        &repo,
+        &file,
+        &first,
+        "properties",
+        "Properties carry better.",
+        "kimi-k3#high",
+    );
+    let output = repo
+        .arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &first,
+            "--option",
+            "paths",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Paths anyway.\n")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("departing from standing suggestions"),
+        "{text}"
+    );
+    assert!(
+        text.contains("properties by kimi-k3#high via test"),
+        "{text}"
+    );
+
+    let second = pose_choice(&repo, &file, &["paths", "properties"]);
+    suggest_option(
+        &repo,
+        &file,
+        &second,
+        "paths",
+        "Paths are declarable.",
+        "gpt-6#medium",
+    );
+    let output = repo
+        .arc(&repo.root)
+        .args([
+            "journal",
+            "answer",
+            &file,
+            "--question",
+            &second,
+            "--option",
+            "paths",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("Paths win.\n")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !text.contains("departing from standing suggestions"),
+        "{text}"
+    );
 }
 
 /// Answered questions leave the queue, so it reports what is outstanding
@@ -10695,7 +10979,7 @@ fn a_question_records_whether_anyone_was_asked() {
         repo.arc(&repo.root)
             .args(["journal", "questions", "--json"]),
     );
-    assert_eq!(queue["schema"], "arc-journal-questions/2", "{queue}");
+    assert_eq!(queue["schema"], "arc-journal-questions/3", "{queue}");
     // The boundary is published, because `unknown` cannot be read without it.
     assert!(queue["question_delivery"]["since"].is_string(), "{queue}");
     assert!(
