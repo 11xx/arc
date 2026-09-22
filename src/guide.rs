@@ -626,6 +626,40 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   verdict is a review that happened, not an independent one, and it leaves an
   independent-review debt owed.
 
+REVIEW AND REPAIR
+  Before a repair path is chosen, a finding carries the trigger and the wrong
+  observable behavior, the violated contract and its source, the constraints
+  a correction must preserve, and discriminating acceptance evidence in the
+  existing finding or brief shape. Its probe must fail against the affected
+  revision for the predicted reason; a structural finding carries the
+  counterexample and the check that separates compliance.
+
+  A stable, nontrivial finding goes to an executor, who owns the edit and may
+  dispute the diagnosis, refuse ambiguous correctness, or show the probe
+  passing before any fix. Where plausible fixes imply different contracts,
+  name them and the observation that separates them.
+
+  A bounded local repair needs governing instructions that allow it and a
+  recorded reason its handoff would cost more; name the local scope and the
+  handoff avoided, and let stricter instructions control.
+
+  Record who authored a correction and who examined the behavior it produced:
+  an author cannot independently assess their own correction, while a lead
+  that did not author it can. Delegating the edit discharges no review; a
+  further independent pass answers to policy, a request, or the cost of a
+  wrong approval — an escalation, not the default.
+
+  A round is bounded on purpose: its brief carries the findings that matter
+  now, because the implementation's shape decides what the next review can
+  see and a repair raises findings no earlier pass could name. What it leaves
+  is recorded before it closes — as debt or a journal deferral.
+
+  An executor arguing back is the point: a brief says a disputed finding is
+  worth arguing, not complying with. The executor holds the code, and the
+  best returns are a finding shown worse than stated, or a fix shown the
+  weaker of two options — neither reachable by a reader who has not written
+  the diff.
+
 CONTRIBUTION TRAILERS
     arc instructions git [--check <file>]
                        Print the portable contribution-trailer convention
