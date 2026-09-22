@@ -2822,6 +2822,25 @@ fn the_guide_teaches_identity_and_how_a_session_ends() {
     assert!(ending < profiles, "session end must precede profiles");
 }
 
+/// A finding that travels without a probe is a finding nobody can falsify, and
+/// `arc check` refuses acceptance evidence that is not discriminating — so the
+/// guide has to name the section that carries what a repair needs, and the
+/// probe that must fail against the revision the finding was raised on.
+#[test]
+fn the_guide_teaches_what_a_finding_carries_before_a_repair() {
+    let repo = Repo::new();
+    let guide = stdout(&mut repo.arc(&repo.root));
+
+    assert!(guide.contains("REVIEW AND REPAIR"), "{guide}");
+    // The guide is hard-wrapped, so the requirement is asserted over its text
+    // with runs of whitespace collapsed rather than at one particular column.
+    let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("must fail against the affected revision for the predicted reason"),
+        "{guide}"
+    );
+}
+
 /// `arc env` exits non-zero whenever the harness exports no session variable,
 /// which is ordinary rather than broken — so its help has to say which
 /// variables it reads and what the non-zero exit means.
