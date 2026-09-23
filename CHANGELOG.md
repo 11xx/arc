@@ -17,6 +17,11 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   next crate release. Keep claimed-row help beside journal open, and retain
   healthy workspace list rows when another project cannot be read.
 
+### Fixed
+
+- `arc env` appends the Claude turn's effort to `ARC_MODEL`, and no longer
+  reports `<synthetic>` as the model when an API error ends the transcript.
+
 ## [2026.9.9] - 2026-09-09
 
 ### Added

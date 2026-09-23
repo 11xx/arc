@@ -203,6 +203,40 @@ fn env_detects_claude_model_from_transcript() {
 }
 
 #[test]
+fn env_detects_claude_effort_and_skips_synthetic_entries() {
+    let repo = Repo::new();
+    let session = "11111111-2222-3333-4444-555555555555";
+    let project = repo.home.join(".claude/projects/-home-lobo");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{session}.jsonl")),
+        concat!(
+            "{\"type\":\"assistant\",\"effort\":\"medium\",\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+            "{\"type\":\"assistant\",\"effort\":\"medium\",\"perTurnEffort\":\"high\",",
+            "\"message\":{\"model\":\"claude-fable-5\"}}\n",
+            "{\"type\":\"assistant\",\"isApiErrorMessage\":true,",
+            "\"message\":{\"model\":\"<synthetic>\"}}\n",
+        ),
+    )
+    .unwrap();
+
+    // The turn's own effort beats the session-wide one, and an API-error
+    // entry at the tail names no model.
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("CLAUDE_SESSION_ID", session)
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5#high'\n{}",
+            corroborated("claude")
+        ));
+}
+
+#[test]
 fn env_resolves_the_claude_store_under_its_config_dir_override() {
     let repo = Repo::new();
     let session = "22222222-3333-4444-5555-666666666666";
