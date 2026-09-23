@@ -324,16 +324,31 @@ fn detect_model(harness: &str, transcript: &Path) -> Option<String> {
 }
 
 /// `<claude store>/<cwd-slug>/<session>.jsonl`: assistant messages carry
-/// `message.model`; the newest one wins.
+/// `message.model` beside the turn's `perTurnEffort` (or the session-wide
+/// `effort`); the newest one wins, combined as `model#effort` when both
+/// exist. Entries Claude Code writes itself for API errors carry the model
+/// `<synthetic>` and no effort, so they are skipped.
 fn detect_claude_model(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     for line in text.lines().rev() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        if let Some(model) = value["message"]["model"].as_str() {
-            return Some(model.to_string());
+        let Some(model) = value["message"]["model"].as_str() else {
+            continue;
+        };
+        if model == "<synthetic>" {
+            continue;
         }
+        return Some(
+            match value["perTurnEffort"]
+                .as_str()
+                .or_else(|| value["effort"].as_str())
+            {
+                Some(effort) => format!("{model}#{effort}"),
+                None => model.to_string(),
+            },
+        );
     }
     None
 }

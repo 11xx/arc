@@ -283,8 +283,9 @@ this order: `CLAUDE_SESSION_ID`, `CLAUDE_CODE_SESSION_ID` (the name Claude
 Code itself exports), `CODEX_THREAD_ID`, `OPENCODE_SESSION`, `PI_SESSION_ID`.
 When the harness's own session store yields the model, it appends an
 `ARC_MODEL` export (`model-slug[#effort]`): Claude reads the newest
-assistant model from its project transcript; Codex honors `CODEX_HOME` and
-reads the latest turn's model and effort; OpenCode reads the selected model and
+assistant model and that turn's effort from its project transcript, skipping
+the `<synthetic>` entries it writes for API errors; Codex honors `CODEX_HOME`
+and reads the latest turn's model and effort; OpenCode reads the selected model and
 variant from its SQLite session row when `sqlite3` is available; and Pi reads
 model and thinking-level changes from its JSONL session. Failure while reading
 a session store is a silent omission, never an error. OpenCode v2 is recognized
