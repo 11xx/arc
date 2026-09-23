@@ -237,6 +237,39 @@ fn env_detects_claude_effort_and_skips_synthetic_entries() {
 }
 
 #[test]
+fn env_falls_back_to_the_claude_session_effort() {
+    let repo = Repo::new();
+    let session = "11111111-2222-3333-4444-555555555555";
+    let project = repo.home.join(".claude/projects/-home-lobo");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{session}.jsonl")),
+        concat!(
+            "{\"type\":\"assistant\",\"perTurnEffort\":\"high\",",
+            "\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+            "{\"type\":\"assistant\",\"effort\":\"low\",\"perTurnEffort\":null,",
+            "\"message\":{\"model\":\"claude-fable-5\"}}\n",
+        ),
+    )
+    .unwrap();
+
+    // Without a turn effort, the newest entry's session effort stands; an
+    // older entry's turn effort does not leak into it.
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("CLAUDE_SESSION_ID", session)
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5#low'\n{}",
+            corroborated("claude")
+        ));
+}
+
+#[test]
 fn env_resolves_the_claude_store_under_its_config_dir_override() {
     let repo = Repo::new();
     let session = "22222222-3333-4444-5555-666666666666";
