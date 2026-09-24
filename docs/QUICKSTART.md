@@ -68,6 +68,8 @@ export ARC_SESSION="$(uuidgen)"     # your harness's native session id
 ```
 
 `claim`, `stage`, and `release-claim` require non-empty harness and session.
+For journal artifacts, they also require a declared actor (`--actor` or
+`ARC_ACTOR`); the automatic actor fallback is not a declaration.
 
 ## 5. Map the project journal (optional)
 
