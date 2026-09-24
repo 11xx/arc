@@ -26,8 +26,8 @@ SAY WHO YOU ARE (before the first write)
   export ARC_ACTOR=<name> ARC_HARNESS=<claude|codex|opencode|pi> \
          ARC_SESSION=<id> ARC_MODEL=<model[#effort]>
 
-  Every event records who wrote it. Nothing refuses an undeclared identity by
-  default — the write succeeds and arc records an actor nobody claimed:
+  Every event records who wrote it. Most writes accept an undeclared
+  identity. In that case arc records an actor nobody claimed:
   `<harness>:<session>` when both are known, else `git config user.name`.
   Either is assumed rather than declared, so it cannot be the independent
   party to an approval.
@@ -121,6 +121,8 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          released with `arc release-claim <file.md> --outcome
                          paused|abandoned|expired`. `arc stage <file.md>
                          <stage>` records typed progress against it.
+                         Artifact claims require a declared actor, harness,
+                         and session.
   arc journal checkpoint <file.md> --body-file -
                          Where the work stands and what a successor should
                          read, appended to the artifact and recorded with a

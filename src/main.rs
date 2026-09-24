@@ -665,7 +665,9 @@ enum Cmd {
         json: bool,
     },
     /// Acquire or renew an advisory executor claim on a change or a journal
-    /// artifact
+    /// artifact. Journal artifact claims require a declared actor
+    /// (--actor/ARC_ACTOR), harness (--harness/ARC_HARNESS), and session
+    /// (--session/ARC_SESSION).
     Claim {
         /// Change to act on, or a journal artifact filename ending in `.md`.
         /// Omitted, the change is inferred from the current branch, then from
