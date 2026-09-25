@@ -267,6 +267,13 @@ that checkout is recorded and the new branch supplies the first inference path
 immediately. If the checkout is dirty or stands on another branch, no worktree
 is recorded and the checkout remains unchanged.
 
+A merge into a target no checkout holds runs in the change's own checkout when
+that checkout still holds the change branch: `arc integrate` checks the target
+out there, merges, and leaves the checkout on the target, which is where it
+stood before `begin --no-worktree`. The dry run reports the checkout it would
+take over. Any other shape of a target no checkout holds keeps the refusal
+naming the missing target checkout.
+
 `arc changelog <change>` reads the latest entry for one change; adding
 `--category <category> --body-file <file>` records replacement release copy as
 a new append-only event that names the entry it replaces, and says so when it
