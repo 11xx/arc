@@ -94,3 +94,8 @@ fn operator_policy_unions_with_project_policy_without_tracked_changes() {
 fn conflicting_gate_commands_are_reported_and_refused() {
     policy::conflicting_gate_commands_are_reported_and_refused();
 }
+
+#[test]
+fn layered_gates_take_the_stricter_timeout_and_refuse_a_different_environment() {
+    policy::layered_gates_take_the_stricter_timeout_and_refuse_a_different_environment();
+}

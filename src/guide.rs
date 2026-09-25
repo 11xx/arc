@@ -600,8 +600,9 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   declarations combine with danger taking priority, debt thresholds use the
   stricter value, and `per-actor` provenance applies when either file selects
   it. Project and operator gates combine by name: profiles combine and the
-  longer timeout applies when the commands agree. The same name with different
-  commands is a conflict: `arc doctor` names both declarations, while `arc
+  shorter timeout applies when the command and environment probe agree. The
+  same name with a different command or probe is a conflict: `arc doctor`
+  names both declarations, while `arc
   check` and gate execution refuse it. `arc status`, `arc show`, and `arc policy
   show` name the file that declared each rule. The operator file is outside
   the work tree, so local policy does not add tracked files to a contribution.

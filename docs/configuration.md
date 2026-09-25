@@ -91,10 +91,10 @@ snapshot can declare its subject with `--on-behalf-of`. If neither repository
 policy file declares provenance, the user configuration supplies its existing
 value; `arc policy show` names `<arc-config>/config.toml` when that file sets it.
 
-Gates are combined by name. Declarations with the same command share one
-gate: profile lists combine, an empty list applies to every profile, and the
-longer timeout applies. A gate name declared with different commands is a
-conflict. `arc doctor` reports both source files, while `arc check` and gate
+Gates are combined by name. Declarations with the same command and the same
+environment probe share one gate: profile lists combine, an empty list applies
+to every profile, and the shorter timeout applies. A gate name declared with a
+different command or a different environment probe is a conflict. `arc doctor` reports both source files, while `arc check` and gate
 execution refuse the conflict. Gate and policy views name the file that
 declares each rule. With no operator policy, an in-tree-only repository keeps
 its declared behavior.

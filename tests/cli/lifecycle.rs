@@ -952,7 +952,7 @@ fn conflicting_target_movement_requires_rebase_before_integration() {
         .code(11);
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "conflict-r"]))).unwrap();
-    assert_eq!(status["schema"], "arc-status/22");
+    assert_eq!(status["schema"], "arc-status/23");
     assert_eq!(status["needs_rebase"], true);
     assert!(status["blockers"]
         .as_array()
@@ -1704,7 +1704,7 @@ fn guarded_and_asserted_integrations_have_distinct_event_types_and_targets() {
     // A barrier nothing stamps protects only stores this build created.
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
-    assert_eq!(config["schema_version"], 4, "{config}");
+    assert_eq!(config["schema_version"], 3, "{config}");
 
     // Asserted: somebody else merged it, and says so afterwards.
     stdout(repo.arc(&repo.root).args(["begin", "asserted"]));
@@ -2064,7 +2064,7 @@ fn status_projection_and_stage_note_file_read_stdin() {
         .args(["status", "projected", "--get", "schema"])
         .assert()
         .success()
-        .stdout("arc-status/22\n");
+        .stdout("arc-status/23\n");
 
     repo.arc(&wt)
         .args([

@@ -85,7 +85,7 @@ pub(super) fn operator_policy_unions_with_project_policy_without_tracked_changes
     let policy_view = arc_output(&repo, &clone, &["policy", "show"]);
     assert!(policy_view.contains(".arc/policy.toml"));
     assert!(policy_view.contains("<git-common-dir>/arc/operator-policy.toml"));
-    assert!(policy_view.contains("profiles = local, release; timeout = 120"));
+    assert!(policy_view.contains("profiles = local, release; timeout = 30"));
     assert_eq!(git_out(&clone, &["status", "--porcelain"]), "");
 
     let begin = arc_output(&repo, &clone, &["begin", "policy-union"]);
@@ -118,7 +118,7 @@ pub(super) fn operator_policy_unions_with_project_policy_without_tracked_changes
 
     let status = arc_output(&repo, &worktree, &["status", "policy-union"]);
     let status: Value = serde_json::from_str(&status).unwrap();
-    assert_eq!(status["schema"], "arc-status/22");
+    assert_eq!(status["schema"], "arc-status/23");
     assert_eq!(status["danger"]["dangerous"], true);
     let gates = status["gates"].as_array().unwrap();
     for name in ["project", "operator", "shared"] {
@@ -190,4 +190,41 @@ pub(super) fn conflicting_gate_commands_are_reported_and_refused() {
             "<git-common-dir>/arc/operator-policy.toml",
         ));
     assert_eq!(git_out(&clone, &["status", "--porcelain"]), "");
+}
+
+pub(super) fn layered_gates_take_the_stricter_timeout_and_refuse_a_different_environment() {
+    let repo = Repo::new();
+    let clone = upstream_clone(
+        &repo,
+        "",
+        "[gates.build]\ncommand = \"true\"\ntimeout = \"5m\"\n\n[gates.probed]\ncommand = \"true\"\nenvironment = \"echo project\"\n",
+    );
+    let begin = arc_output(&repo, &clone, &["begin", "policy-layers"]);
+    let change = begin
+        .lines()
+        .find_map(|line| line.strip_prefix("change: "))
+        .unwrap()
+        .to_string();
+    write_operator_policy(
+        &repo,
+        &clone,
+        "[gates.build]\ncommand = \"true\"\ntimeout = \"1m\"\n\n[gates.probed]\ncommand = \"true\"\nenvironment = \"echo operator\"\n",
+    );
+
+    let view = arc_output(&repo, &clone, &["policy", "show"]);
+    assert!(
+        view.contains("gate build: command = \"true\"; profiles = all; timeout = 60;"),
+        "{view}"
+    );
+    assert!(
+        view.contains("environment probe \"echo operator\""),
+        "{view}"
+    );
+    repo.arc(&clone)
+        .args(["check", &change])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "environment probe \"echo project\"",
+        ));
 }

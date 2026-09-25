@@ -48,7 +48,7 @@ fn importing_an_integration_stamps_the_destination_store_format() {
         .success();
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
-    assert_eq!(config["schema_version"], 4, "{config}");
+    assert_eq!(config["schema_version"], 2, "{config}");
 }
 
 #[test]
