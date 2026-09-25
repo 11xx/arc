@@ -231,20 +231,30 @@ pub fn begin(
     /// which reads as nothing-to-do. The floor is advice, never a refusal; a
     /// project that declares none gets no warning and no opinion.
     fn warn_below_worktree_floor(cwd: &Path, worktree: &Path) {
-        let floor = match gitio::toplevel(cwd)
+        let policy = match gitio::toplevel(cwd)
             .ok()
             .and_then(|t| policy::load(&t).ok())
         {
-            Some(policy) => policy.policy.worktree_free_floor_bytes,
-            None => None,
+            Some(policy) => policy,
+            None => return,
         };
-        let Some(floor) = floor else { return };
+        let Some(floor) = policy.policy.worktree_free_floor_bytes else {
+            return;
+        };
         let Some(free) = free_bytes(worktree) else {
             return;
         };
         if free >= floor {
             return;
         }
+        let sources = policy
+            .sources
+            .sources_for(&format!("policy.worktree_free_floor_bytes={floor}"));
+        let source = if sources.is_empty() {
+            "source unavailable".to_string()
+        } else {
+            sources.join(", ")
+        };
         println!(
             "warning: {} free below the declared worktree floor of {}; \
          adding a worktree adds a full build to it — \
@@ -252,6 +262,7 @@ pub fn begin(
             crate::worktree_usage::human(free),
             crate::worktree_usage::human(floor)
         );
+        println!("  policy source: {source}");
     }
 
     /// Bytes available on the filesystem holding `path`, via `df -kP`
@@ -1222,7 +1233,17 @@ fn show(
             if !policy.review.checklist.is_empty() {
                 println!("\n## Review checklist\n");
                 for item in policy.review.checklist {
-                    println!("- [ ] {item}");
+                    let source = policy
+                        .sources
+                        .sources_for(&format!("review.checklist[{item:?}]"));
+                    println!(
+                        "- [ ] {item} (declared by {})",
+                        if source.is_empty() {
+                            "source unavailable".to_string()
+                        } else {
+                            source.join(", ")
+                        }
+                    );
                 }
             }
         }

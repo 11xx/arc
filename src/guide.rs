@@ -374,6 +374,10 @@ RUN A CHANGE
   arc done                           Snapshot, run every gate, print check state.
   arc rebase [--verify]              Replay the branch onto its target, snapshot
                                      the new head, name the gates it owes.
+  arc policy show                    Show effective project and operator rules,
+                                     with the file that declared each rule.
+  arc policy path                    Print the operator policy path for this repo.
+  arc policy write --body-file FILE  Replace that local policy from TOML.
   arc review --verdict <v>           Record a verdict (+ --findings-json -).
     --provisional <why>              It gates, and owes a second judgment.
     --relation corroborates          Support the standing verdict, not replace it.
@@ -579,16 +583,29 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   than counted as independent or as self-review, whether it cast a verdict or
   only filed findings.
 
-  Which changes need one is the project's call, declared in
-  `.arc/policy.toml` under `[danger] paths`. A change touching a declared
+  Which changes need one is declared in `[danger] paths` in
+  `.arc/policy.toml` or the operator policy at
+  `<git-common-dir>/arc/operator-policy.toml`. Both path lists apply, so a
+  path declared dangerous by either file is dangerous. A change touching a declared
   path needs a verdict from somebody other than its author; elsewhere a
-  self-recorded verdict satisfies the gate. Declare nothing and the gate stays
-  uniform, exactly as before. `arc begin --dangerous` raises a single change
+  self-recorded verdict satisfies the gate. Declare no danger paths and the
+  gate stays uniform. `arc begin --dangerous` raises a single change
   whatever it turns out to touch, and nothing lowers it afterwards — a project
   decides its own gate in advance, rather than a change deciding it under
   pressure to ship. `arc check` names the rule that fired, and `arc doctor`
   reports a declared literal that can never match — one that names nothing, or
   a directory, since declared paths are matched against changed files.
+
+  Required booleans apply when either policy enables them, danger and safe
+  declarations combine with danger taking priority, debt thresholds use the
+  stricter value, and `per-actor` provenance applies when either file selects
+  it. Project and operator gates combine by name: profiles combine and the
+  shorter timeout applies when the command and environment probe agree. The
+  same name with a different command or probe is a conflict: `arc doctor`
+  names both declarations, while `arc
+  check` and gate execution refuse it. `arc status`, `arc show`, and `arc policy
+  show` name the file that declared each rule. The operator file is outside
+  the work tree, so local policy does not add tracked files to a contribution.
 
   If no independent verdict is available, integrate with
   `arc integrate <change> --debt "<why>"`. A debt already in force routes to

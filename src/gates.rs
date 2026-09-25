@@ -1,13 +1,15 @@
-//! Repository-declared verification gates and their optional execution policy.
+//! Verification gates from project and operator declarations.
 //!
-//! Gate timeouts use the same positive `s`/`m`/`h` duration syntax as claim
-//! leases. Omitting a timeout preserves unbounded execution.
+//! Gates committed in `.arc/gates.toml` apply alongside gates in the
+//! repository's operator policy. A conflicting command for one gate name is
+//! retained for diagnostics and refused by gate-dependent operations.
 
 use crate::commands::parse_duration;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{de::Error as _, Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -30,13 +32,14 @@ extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;
 }
 
-/// Declared verification gates, committed at `.arc/gates.toml` in the
-/// repository. A gate with no `profiles` list is required for every
-/// profile. This file is the local analogue of required CI checks.
+/// Declared verification gates. A gate with no `profiles` list is required
+/// for every profile. This is the local analogue of required CI checks.
 #[derive(Debug, Default, Deserialize)]
 pub struct GatesFile {
     #[serde(default)]
     pub gates: BTreeMap<String, Gate>,
+    #[serde(skip)]
+    pub conflicts: Vec<GateConflict>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +57,34 @@ pub struct Gate {
     pub profiles: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_timeout")]
     pub timeout: Option<u64>,
+    #[serde(skip, default)]
+    pub declared_by: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GateConflict {
+    pub name: String,
+    pub declarations: Vec<GateDeclaration>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GateDeclaration {
+    pub command: String,
+    pub environment: Option<String>,
+    pub source: String,
+}
+
+impl GateDeclaration {
+    /// One declaration as a conflict report names it.
+    pub fn describe(&self) -> String {
+        match &self.environment {
+            Some(probe) => format!(
+                "{} declares {:?} with environment probe {:?}",
+                self.source, self.command, probe
+            ),
+            None => format!("{} declares {:?}", self.source, self.command),
+        }
+    }
 }
 
 fn deserialize_timeout<'de, D>(deserializer: D) -> std::result::Result<Option<u64>, D::Error>
@@ -266,21 +297,130 @@ fn kill_process_group(pid: u32) -> Result<()> {
     Ok(())
 }
 
-pub fn load(repo_toplevel: &Path) -> Result<GatesFile> {
-    let path = repo_toplevel.join(".arc").join("gates.toml");
-    if !path.is_file() {
-        return Ok(GatesFile::default());
+fn source_name(path: &Path, repo_toplevel: &Path) -> String {
+    if path == repo_toplevel.join(".arc/gates.toml") {
+        ".arc/gates.toml".to_string()
+    } else {
+        "<git-common-dir>/arc/operator-policy.toml".to_string()
     }
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("cannot read {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("malformed {}", path.display()))
+}
+
+/// Validate the gate portion of an operator-policy document.
+pub fn validate_operator_text(text: &str) -> Result<()> {
+    toml::from_str::<GatesFile>(text).context("malformed operator policy TOML")?;
+    Ok(())
+}
+
+/// Load both declarations while retaining conflicts for `arc doctor`.
+pub fn inspect(repo_toplevel: &Path) -> Result<GatesFile> {
+    let in_tree = repo_toplevel.join(".arc/gates.toml");
+    let operator = crate::policy::operator_path(repo_toplevel)?;
+    let mut merged = GatesFile::default();
+
+    for path in [in_tree, operator] {
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", path.display()))
+            }
+        };
+        let layer = toml::from_str::<GatesFile>(&text)
+            .with_context(|| format!("malformed {}", path.display()))?;
+        let source = source_name(&path, repo_toplevel);
+
+        for (name, mut gate) in layer.gates {
+            gate.declared_by.push(source.clone());
+            match merged.gates.get_mut(&name) {
+                None => {
+                    merged.gates.insert(name, gate);
+                }
+                // A gate is its command and the environment its evidence
+                // applies to; two layers disagreeing on either declare two
+                // different checks under one name.
+                Some(current)
+                    if current.command != gate.command
+                        || current.environment != gate.environment =>
+                {
+                    merged.conflicts.push(GateConflict {
+                        name,
+                        declarations: vec![
+                            GateDeclaration {
+                                command: current.command.clone(),
+                                environment: current.environment.clone(),
+                                source: current.declared_by[0].clone(),
+                            },
+                            GateDeclaration {
+                                command: gate.command,
+                                environment: gate.environment,
+                                source: source.clone(),
+                            },
+                        ],
+                    });
+                    current.declared_by.extend(gate.declared_by);
+                    current.declared_by.sort();
+                    current.declared_by.dedup();
+                }
+                Some(current) => {
+                    if current.profiles.is_empty() || gate.profiles.is_empty() {
+                        current.profiles.clear();
+                    } else {
+                        current.profiles.extend(gate.profiles);
+                        let profiles: BTreeSet<_> = current.profiles.drain(..).collect();
+                        current.profiles.extend(profiles);
+                    }
+                    // The stricter bound wins, as every other layered rule
+                    // does: one layer cannot loosen a gate the other bounds.
+                    current.timeout = match (current.timeout, gate.timeout) {
+                        (Some(left), Some(right)) => Some(left.min(right)),
+                        (left, right) => left.or(right),
+                    };
+                    current.declared_by.extend(gate.declared_by);
+                    current.declared_by.sort();
+                    current.declared_by.dedup();
+                }
+            }
+        }
+    }
+
+    Ok(merged)
+}
+
+/// Load declarations for operations that must reject ambiguous gate commands.
+pub fn load(repo_toplevel: &Path) -> Result<GatesFile> {
+    let gates = inspect(repo_toplevel)?;
+    gates.ensure_unconflicted()?;
+    Ok(gates)
 }
 
 impl GatesFile {
+    pub fn ensure_unconflicted(&self) -> Result<()> {
+        if self.conflicts.is_empty() {
+            return Ok(());
+        }
+        let details = self
+            .conflicts
+            .iter()
+            .map(|conflict| {
+                let declarations = conflict
+                    .declarations
+                    .iter()
+                    .map(GateDeclaration::describe)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                format!("gate {:?} conflicts: {declarations}", conflict.name)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        bail!("conflicting gate declarations: {details}")
+    }
+
     pub fn required_for<'a>(&'a self, profile: &str) -> Vec<(&'a String, &'a Gate)> {
         self.gates
             .iter()
-            .filter(|(_, g)| g.profiles.is_empty() || g.profiles.iter().any(|p| p == profile))
+            .filter(|(_, gate)| {
+                gate.profiles.is_empty() || gate.profiles.iter().any(|item| item == profile)
+            })
             .collect()
     }
 }

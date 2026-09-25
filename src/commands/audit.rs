@@ -151,6 +151,14 @@ fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result
     if !policy.policy.forbid_self_approval {
         return Ok(());
     }
+    let policy_sources = policy
+        .sources
+        .sources_for("policy.forbid_self_approval=true");
+    let policy_source = if policy_sources.is_empty() {
+        "policy source unavailable".to_string()
+    } else {
+        format!("policy declared by {}", policy_sources.join(", "))
+    };
     let Some(patchset) = state.latest_patchset() else {
         return Ok(());
     };
@@ -173,7 +181,7 @@ fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result
     // question the recorded provenance answers for a reader.
     if let Some(source) = auditor_assumed {
         bail!(
-            "arc assumed the auditing identity from {source}, so this audit cannot show that \
+            "arc assumed the auditing identity from {source}; {policy_source}, so this audit cannot show that \
 anyone independent looked at {}.\n\
   Declare who is auditing: arc audit {} --verdict approved --actor '<reviewer>'",
             state.change_id,
@@ -182,7 +190,7 @@ anyone independent looked at {}.\n\
     }
     if let Some(contributor) = patchset.contributor_match(auditor) {
         bail!(
-            "{auditor} matches contributor {contributor} on the audited work, so this audit \
+            "{auditor} matches contributor {contributor} on the audited work; {policy_source}, so this audit \
              would discharge its own obligation.\n\
   If another reviewer did the pass, record it as theirs:\n\
     arc audit {} --verdict approved --actor '<reviewer>' --harness '<harness>' --model '<model>'\n\

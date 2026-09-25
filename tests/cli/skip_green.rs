@@ -32,10 +32,13 @@ fn skip_green_skips_only_at_matching_head_and_reruns_after_a_commit() {
             .args(["verify", "feat-x", "--all", "--skip-green"]),
     );
     assert!(
-        second.contains("build: skipped (green at head)"),
+        second.contains("build: skipped (green at head; declared by .arc/gates.toml)"),
         "{second}"
     );
-    assert!(second.contains("test: skipped (green at head)"), "{second}");
+    assert!(
+        second.contains("test: skipped (green at head; declared by .arc/gates.toml)"),
+        "{second}"
+    );
     assert!(second.contains("gates: 2/2 pass"), "{second}");
 
     // A new commit moves the head, so the gates run again.
@@ -65,8 +68,12 @@ fn verification_run_records_manifest_results_and_reused_evidence() {
         .args(["verify", "run-identity", "--all", "--skip-green"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("build: skipped (green at head)"))
-        .stdout(predicates::str::contains("test: skipped (green at head)"));
+        .stdout(predicates::str::contains(
+            "build: skipped (green at head; declared by .arc/gates.toml)",
+        ))
+        .stdout(predicates::str::contains(
+            "test: skipped (green at head; declared by .arc/gates.toml)",
+        ));
 
     let events = stdout(
         repo.arc(&worktree)
@@ -182,7 +189,7 @@ fn skip_green_requires_known_clean_local_provenance_but_allows_attested() {
         "--skip-green",
     ]));
     assert!(
-        attested_rerun.contains("build: skipped (green at head)"),
+        attested_rerun.contains("build: skipped (green at head; declared by .arc/gates.toml)"),
         "{attested_rerun}"
     );
 }

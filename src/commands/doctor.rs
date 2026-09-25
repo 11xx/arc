@@ -125,6 +125,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     inspect_repository_events(&store, &mut problems);
     inspect_dangling_revisions(&ctx.cwd, &store, &states, &mut problems, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
+    inspect_gate_conflicts(&ctx.cwd, &mut problems);
     inspect_danger_paths(&ctx.cwd, &mut problems);
     inspect_danger_classification(&ctx.cwd, &mut problems);
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
@@ -500,11 +501,15 @@ fn inspect_danger_paths(cwd: &Path, problems: &mut Vec<Finding>) {
             continue;
         }
         let target = toplevel.join(pattern);
+        let declared_by = policy
+            .sources
+            .sources_for(&format!("danger.paths[{pattern:?}]"))
+            .join(", ");
         if !target.exists() {
             problems.push(Finding {
                 code: "danger-path-matches-nothing",
                 detail: format!(
-                    "{pattern} is declared dangerous but does not exist; \
+                    "{pattern} is declared dangerous by {declared_by} but does not exist; \
                      the surface it names is on a self-verdict"
                 ),
             });
@@ -516,8 +521,8 @@ fn inspect_danger_paths(cwd: &Path, problems: &mut Vec<Finding>) {
             problems.push(Finding {
                 code: "danger-path-matches-nothing",
                 detail: format!(
-                    "{pattern} is a directory, and declared paths are matched \
-                     against changed files; write {pattern}/ to cover its subtree"
+                    "{pattern} is declared dangerous by {declared_by} but is a directory; \
+                     declared paths match changed files, so write {pattern}/ to cover its subtree"
                 ),
             });
         }
@@ -559,23 +564,95 @@ fn inspect_danger_classification(cwd: &Path, problems: &mut Vec<Finding>) {
         let dangerous = policy.danger.is_dangerous(path);
         let safe = policy.danger.acknowledged_safe(path);
         if dangerous && safe {
+            let dangerous_sources = policy
+                .danger
+                .paths
+                .iter()
+                .filter(|pattern| crate::policy::glob_match(pattern, path))
+                .flat_map(|pattern| {
+                    policy
+                        .sources
+                        .sources_for(&format!("danger.paths[{pattern:?}]"))
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let safe_sources = policy
+                .danger
+                .acknowledged_safe
+                .iter()
+                .filter(|pattern| crate::policy::glob_match(pattern, path))
+                .flat_map(|pattern| {
+                    policy
+                        .sources
+                        .sources_for(&format!("danger.acknowledged_safe[{pattern:?}]"))
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
             problems.push(Finding {
                 code: "danger-classification-conflict",
                 detail: format!(
-                    "{path} is declared both dangerous and acknowledged-safe; \
-                     one of the two claims is wrong"
+                    "{path} is declared dangerous by {} and acknowledged-safe by {}; \
+                     one of the two claims is wrong",
+                    dangerous_sources.join(", "),
+                    safe_sources.join(", ")
                 ),
             });
         } else if !dangerous && !safe {
+            let root_sources = policy
+                .danger
+                .source_roots
+                .iter()
+                .filter(|root| path.starts_with(root.as_str()))
+                .flat_map(|root| {
+                    policy
+                        .sources
+                        .sources_for(&format!("danger.source_roots[{root:?}]"))
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
             problems.push(Finding {
                 code: "danger-unclassified",
                 detail: format!(
-                    "{path} is inside a declared source root and classified \
-                     neither dangerous nor acknowledged-safe, so it is gated \
-                     by a self-verdict nobody chose"
+                    "{path} is inside source root declared by {} and classified neither \
+                     dangerous nor acknowledged-safe, so it is gated by a self-verdict nobody chose",
+                    root_sources.join(", ")
                 ),
             });
         }
+    }
+}
+
+fn inspect_gate_conflicts(cwd: &Path, problems: &mut Vec<Finding>) {
+    let Ok(toplevel) = crate::gitio::toplevel(cwd) else {
+        return;
+    };
+    let gates = match crate::gates::inspect(&toplevel) {
+        Ok(gates) => gates,
+        Err(error) => {
+            problems.push(Finding {
+                code: "gate-policy-unreadable",
+                detail: format!("{error:#}"),
+            });
+            return;
+        }
+    };
+    for conflict in gates.conflicts {
+        let declarations = conflict
+            .declarations
+            .iter()
+            .map(crate::gates::GateDeclaration::describe)
+            .collect::<Vec<_>>()
+            .join("; ");
+        problems.push(Finding {
+            code: "gate-declaration-conflict",
+            detail: format!(
+                "gate {:?} has conflicting declarations: {declarations}",
+                conflict.name
+            ),
+        });
     }
 }
 

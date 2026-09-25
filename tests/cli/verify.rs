@@ -970,7 +970,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
         .code(12);
 
     let status = json_stdout(repo.arc(&worktree).args(["status", "probe-readiness"]));
-    assert_eq!(status["schema"], "arc-status/22");
+    assert_eq!(status["schema"], "arc-status/23");
     assert_eq!(status["probes"][0]["name"], "marker-exists");
     assert_eq!(status["probes"][0]["brief_version"], 2);
     assert_eq!(status["probes"][0]["discriminating_at_head"], false);
@@ -1720,7 +1720,7 @@ fn dirty_gate_evidence_is_named_by_resume_check_and_the_next_action() {
         .success();
     let resume = stdout(repo.arc(&wt).args(["resume", "named"]));
     assert!(
-        resume.contains("unit: pass (undiscriminated)\n"),
+        resume.contains("unit: pass (undiscriminated) (declared by .arc/gates.toml)\n"),
         "{resume}"
     );
 
