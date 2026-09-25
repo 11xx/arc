@@ -199,18 +199,19 @@ pub struct GateStatus {
 /// Whether a gate's evidence describes the environment being evaluated.
 ///
 /// Present only for a gate that declares an environment probe. Readiness
-/// counts the evidence only when `inapplicable` is false and `evidence`
-/// carries an identity; the identities are opaque, and only equality between
+/// counts the evidence only when the recorded identity equals the one the
+/// probe yields here; the identities are opaque, and only equality between
 /// them is read.
 #[derive(Debug, Clone, Serialize)]
 pub struct GateEnvironmentStatus {
     /// The identity recorded on the evidence being counted. Absent when that
     /// evidence carries none, which is evidence written before environments
-    /// were recorded or evidence for a gate that declared no probe then.
+    /// were recorded or evidence whose probe could not answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
     /// The identity the declared probe yields where this report was built.
-    /// Absent on a ledger replay, which observes no environment.
+    /// Absent on a ledger replay, which observes no environment, and where
+    /// the probe could not answer here.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current: Option<String>,
     /// The evidence was produced in a different environment, so it does not
@@ -218,6 +219,16 @@ pub struct GateEnvironmentStatus {
     /// than missing: the run happened, it just describes somewhere else.
     #[serde(skip_serializing_if = "is_false")]
     pub inapplicable: bool,
+    /// The evidence carries no environment identity, so nothing says which
+    /// environment produced it. Unknown, not inapplicable: there is no second
+    /// identity to compare against.
+    #[serde(skip_serializing_if = "is_false")]
+    pub unknown: bool,
+    /// The declared probe could not be read where this report was built;
+    /// the run's exit, overrun, or empty output is named. Every receipt for
+    /// the gate is not-green while this holds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_failed: Option<String>,
 }
 
 impl GateStatus {
@@ -239,6 +250,13 @@ impl GateStatus {
         // An environment mismatch is a fact about where the run happened, not
         // about its provenance on this checkout, so it is reported first.
         if let Some(environment) = &self.environment {
+            if environment.unknown {
+                return Some(
+                    "the evidence records no environment identity, so no environment can be \
+                     said to have produced it"
+                        .into(),
+                );
+            }
             if environment.inapplicable {
                 return Some(format!(
                     "the evidence was produced in environment {} but this checkout's declared \
@@ -247,12 +265,10 @@ impl GateStatus {
                     environment.current.as_deref().unwrap_or("unknown")
                 ));
             }
-            if environment.evidence.is_none() && self.evidence_event_id.is_some() {
-                return Some(
-                    "the evidence records no environment identity, and this gate's declaration \
-                     requires one"
-                        .into(),
-                );
+            if let Some(failure) = &environment.probe_failed {
+                return Some(format!(
+                    "the declared environment probe could not be read here: {failure}"
+                ));
             }
         }
         Some(
@@ -1216,8 +1232,8 @@ fn build_report(
 
     let mut gate_statuses: Vec<GateStatus> = Vec::new();
     // A probe is one property of the checkout, so gates declaring the same
-    // probe command share one run.
-    let mut probe_identities: BTreeMap<String, String> = BTreeMap::new();
+    // probe under the same bound share one run.
+    let mut probe_runs: BTreeMap<(String, Option<u64>), crate::gates::ProbeRun> = BTreeMap::new();
     for (name, gate) in gates.required_for(&state.profile) {
         let evidence = match (&lookup_tree, current_head.as_deref()) {
             (Some(tree), _) => state.gate_evidence_at_tree(name, tree, &resolve_tree),
@@ -1225,42 +1241,56 @@ fn build_report(
             (None, None) => None,
         };
         // Applicability is asked where the checkout being evaluated exists. A
-        // ledger replay observes no environment and reports the recorded
-        // identity without judging it.
+        // ledger replay observes no environment and takes a recorded identity
+        // at its word; only a live report can say whether the probe answers
+        // here.
         let environment = match gate.environment.as_deref() {
             None => None,
             Some(probe) => {
                 let recorded = evidence
                     .and_then(|e| e.environment.as_ref())
                     .map(|environment| environment.identity.clone());
-                let current = match probe_cwd {
-                    Some(cwd) if recorded.is_some() => Some(match probe_identities.get(probe) {
-                        Some(identity) => identity.clone(),
-                        None => {
-                            let identity = crate::gates::environment_identity(cwd, probe)?;
-                            probe_identities.insert(probe.to_owned(), identity.clone());
-                            identity
+                let (current, probe_failed) = match probe_cwd {
+                    Some(cwd) if recorded.is_some() => {
+                        let key = (probe.to_owned(), gate.timeout);
+                        if !probe_runs.contains_key(&key) {
+                            let run = crate::gates::environment_probe(cwd, probe, gate.timeout)?;
+                            probe_runs.insert(key.clone(), run);
                         }
-                    }),
-                    _ => None,
+                        let run = probe_runs.get(&key).expect("probe run just cached");
+                        (
+                            run.identity.clone(),
+                            run.failure.as_ref().map(|failure| failure.describe()),
+                        )
+                    }
+                    _ => (None, None),
                 };
                 let inapplicable = current
                     .as_deref()
                     .zip(recorded.as_deref())
                     .is_some_and(|(current, recorded)| current != recorded);
+                let unknown = evidence.is_some() && recorded.is_none();
                 Some(GateEnvironmentStatus {
                     evidence: recorded,
                     current,
                     inapplicable,
+                    unknown,
+                    probe_failed,
                 })
             }
         };
         // A gate that declares an environment probe is answered only by
-        // evidence that carries an identity, and only where that identity is
-        // this environment's. A gate with no probe accepts any environment.
-        let environment_applies = match &environment {
-            None => true,
-            Some(environment) => !environment.inapplicable && environment.evidence.is_some(),
+        // evidence whose recorded identity is the one the probe yields here.
+        // A probe that yields none here leaves every receipt not-green; a
+        // ledger replay counts a recorded identity by its presence.
+        let environment_applies = match (&environment, probe_cwd) {
+            (None, _) => true,
+            (Some(environment), None) => environment.evidence.is_some(),
+            (Some(environment), Some(_)) => {
+                environment.current.is_some()
+                    && environment.evidence.is_some()
+                    && !environment.inapplicable
+            }
         };
         let result = evidence.map(|e| e.result);
         // Discrimination is asked of the gate at this revision, not of the

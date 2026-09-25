@@ -428,7 +428,10 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         // Applicability is a property of this checkout, so every declared
         // probe is read before reuse is decided. A probe is run once per
         // distinct command, however many gates declare it.
-        let environments = gate_environments(&run_ctx.cwd, required.iter().map(|(_, gate)| *gate))?;
+        let environments = gate_environments(
+            &run_ctx.cwd,
+            required.iter().map(|(name, gate)| (name.as_str(), *gate)),
+        )?;
         let mut reused = Vec::new();
         let mut to_run = Vec::new();
         for (name, gate) in required {
@@ -546,7 +549,17 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             }
             None
         }
-        (false, Some(probe)) => Some(gates::environment_identity(&run_ctx.cwd, probe)?),
+        (false, Some(probe)) => {
+            let run = gates::environment_probe(&run_ctx.cwd, probe, timeout)?;
+            if let Some(failure) = &run.failure {
+                eprintln!(
+                    "warning: environment probe {probe:?} for gate {:?} yielded no identity: {}",
+                    gate.as_deref().unwrap_or_default(),
+                    failure.describe()
+                );
+            }
+            run.identity
+        }
         (false, None) => None,
     };
     let falsification = resolve_falsification(&st, gate.as_deref(), &cmd, falsified_by)?;
@@ -725,7 +738,10 @@ fn verify_against(
         });
     }
     let probe_ctx = scratch_ctx.as_ref().unwrap_or(ctx);
-    let environments = gate_environments(&probe_ctx.cwd, required.iter().map(|(_, gate)| *gate))?;
+    let environments = gate_environments(
+        &probe_ctx.cwd,
+        required.iter().map(|(name, gate)| (name.as_str(), *gate)),
+    )?;
     let mut reused = Vec::new();
     let mut to_run = Vec::new();
     for (name, gate) in required {
@@ -1082,7 +1098,10 @@ pub fn snapshot_with_verify(
             false,
             &selected,
         )?;
-        let environments = gate_environments(&run_ctx.cwd, selected.iter().map(|(_, gate)| *gate))?;
+        let environments = gate_environments(
+            &run_ctx.cwd,
+            selected.iter().map(|(name, gate)| (name.as_str(), *gate)),
+        )?;
         let total = selected.len();
         let mut passed = 0;
         for (name, gate) in selected {
@@ -1362,7 +1381,7 @@ fn verify_all_parallel(
     skipped_green: usize,
     run_id: &str,
     revision: &str,
-    environments: &BTreeMap<String, String>,
+    environments: &DeclaredEnvironments,
     note: Option<String>,
 ) -> Result<i32> {
     let hostname = hostname::get()
@@ -1491,33 +1510,49 @@ fn resolve_falsification(
     }
 }
 
-/// The environment identity a gate's declared probe yields at `cwd`, when it
-/// declares one.
+/// The environment identity a gate's declared probe yields, when it declares
+/// one and the probe answered. A cached `None` is a probe that could not
+/// answer; it is not rerun for every gate that shares it.
+type DeclaredEnvironments = BTreeMap<(String, Option<u64>), Option<String>>;
+
 fn declared_environment<'a>(
-    identities: &'a BTreeMap<String, String>,
+    identities: &'a DeclaredEnvironments,
     gate: &gates::Gate,
 ) -> Option<&'a str> {
     gate.environment
         .as_deref()
-        .and_then(|probe| identities.get(probe))
-        .map(String::as_str)
+        .and_then(|probe| identities.get(&(probe.to_owned(), gate.timeout)))
+        .and_then(|identity| identity.as_deref())
 }
 
-/// Read every distinct declared probe once, keyed by the probe command.
+/// Read every distinct declared probe once, keyed by its command and the
+/// bound it runs under.
 ///
 /// Gates sharing one probe describe one environment, so the command runs once;
-/// the identities are read before any gate runs, so a probe that cannot run
-/// stops the batch instead of leaving half of it recorded.
+/// the identities are read before any gate runs, so a probe that cannot answer
+/// is reported before the batch records anything, and its gates then record
+/// evidence that names no environment.
 fn gate_environments<'a>(
     cwd: &Path,
-    gates: impl Iterator<Item = &'a gates::Gate>,
-) -> Result<BTreeMap<String, String>> {
-    let mut identities = BTreeMap::new();
-    for probe in gates.filter_map(|gate| gate.environment.as_deref()) {
-        if !identities.contains_key(probe) {
-            let identity = gates::environment_identity(cwd, probe)?;
-            identities.insert(probe.to_owned(), identity);
+    gates: impl Iterator<Item = (&'a str, &'a gates::Gate)>,
+) -> Result<DeclaredEnvironments> {
+    let mut identities = DeclaredEnvironments::new();
+    for (name, gate) in gates {
+        let Some(probe) = gate.environment.as_deref() else {
+            continue;
+        };
+        let key = (probe.to_owned(), gate.timeout);
+        if identities.contains_key(&key) {
+            continue;
         }
+        let run = gates::environment_probe(cwd, probe, gate.timeout)?;
+        if let Some(failure) = &run.failure {
+            eprintln!(
+                "warning: environment probe {probe:?} for gate {name:?} yielded no identity: {}",
+                failure.describe()
+            );
+        }
+        identities.insert(key, run.identity);
     }
     Ok(identities)
 }
