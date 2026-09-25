@@ -112,7 +112,6 @@ impl Store {
             require_declared_actor_sources,
         };
         store.repair_missing_format_three_stamp()?;
-        store.repair_missing_format_four_stamp()?;
         Ok(store)
     }
 
@@ -555,9 +554,9 @@ impl Store {
     fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
         let introduced_in = match payload {
             Payload::ChangeIntegrated {
-                authorization: Some(_),
+                authorization: Some(authorization),
                 ..
-            } => Some(4),
+            } if authorization.verdict_event_id.is_none() => Some(3),
             Payload::ChangeIntegrated { .. } | Payload::IntegrationAsserted { .. } => Some(2),
             _ => None,
         };
@@ -571,14 +570,6 @@ impl Store {
             .and_then(|value| value.get("event_type"))
             .and_then(serde_json::Value::as_str)
         {
-            Some("change-integrated")
-                if value
-                    .and_then(|value| value.get("authorization"))
-                    .and_then(serde_json::Value::as_object)
-                    .is_some_and(authorization_has_policy_sources) =>
-            {
-                Some(4)
-            }
             Some("change-integrated")
                 if value
                     .and_then(|value| value.get("authorization"))
@@ -627,59 +618,6 @@ impl Store {
             return Ok(());
         }
         self.stamp_format(Some(3))
-    }
-
-    /// Repair stores whose integration events carry policy declaration
-    /// sources but whose format stamp was not advanced with the event.
-    fn repair_missing_format_four_stamp(&self) -> Result<()> {
-        let config_path = self.root.join("config.json");
-        let cfg: StoreConfig = serde_json::from_slice(&fs::read(&config_path)?)
-            .context("malformed arc config.json")?;
-        if cfg.schema_version >= 4 || !self.contains_policy_source_integration()? {
-            return Ok(());
-        }
-        self.stamp_format(Some(4))
-    }
-
-    fn contains_policy_source_integration(&self) -> Result<bool> {
-        let changes = self.changes_dir();
-        let entries = match fs::read_dir(&changes) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => {
-                return Err(error).with_context(|| format!("cannot read {}", changes.display()))
-            }
-        };
-        for change in entries {
-            let events = change?.path().join("events");
-            let event_entries = match fs::read_dir(&events) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(error).with_context(|| format!("cannot read {}", events.display()))
-                }
-            };
-            for event in event_entries {
-                let path = event?.path();
-                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                    continue;
-                }
-                let Ok(value) = serde_json::from_slice::<serde_json::Value>(&fs::read(&path)?)
-                else {
-                    continue;
-                };
-                if value.get("event_type").and_then(serde_json::Value::as_str)
-                    == Some("change-integrated")
-                    && value
-                        .get("authorization")
-                        .and_then(serde_json::Value::as_object)
-                        .is_some_and(authorization_has_policy_sources)
-                {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
     }
 
     fn contains_waiver_only_integration(&self) -> Result<bool> {
@@ -1037,15 +975,6 @@ fn authorization_has_no_verdict(
         .is_none_or(serde_json::Value::is_null)
 }
 
-fn authorization_has_policy_sources(
-    authorization: &serde_json::Map<String, serde_json::Value>,
-) -> bool {
-    authorization
-        .get("policy")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|policy| policy.contains_key("declared_by"))
-}
-
 /// Whether this build may read a store at all.
 ///
 /// A store written by a newer arc may hold event types this build would skip
@@ -1150,7 +1079,7 @@ mod tests {
         let root = dir.path().to_path_buf();
         let (sent, received) = mpsc::channel();
         let writer = std::thread::spawn(move || {
-            test_store(&root).stamp_format(Some(4)).unwrap();
+            test_store(&root).stamp_format(Some(3)).unwrap();
             sent.send(()).unwrap();
         });
 
@@ -1158,39 +1087,10 @@ mod tests {
         drop(held);
         received.recv_timeout(Duration::from_secs(1)).unwrap();
         writer.join().unwrap();
-        test_store(dir.path()).stamp_format(Some(3)).unwrap();
+        test_store(dir.path()).stamp_format(Some(2)).unwrap();
 
         let stored: StoreConfig =
             serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap()).unwrap();
-        assert_eq!(stored.schema_version, 4);
-    }
-
-    #[test]
-    fn format_four_authorization_source_repairs_a_missing_store_stamp() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = StoreConfig {
-            schema_version: 3,
-            repository_id: "repo".into(),
-            created_at: chrono::Utc::now(),
-        };
-        fs::write(
-            dir.path().join("config.json"),
-            serde_json::to_vec_pretty(&config).unwrap(),
-        )
-        .unwrap();
-        let events = dir.path().join("changes/change/events");
-        fs::create_dir_all(&events).unwrap();
-        fs::write(
-            events.join("event.json"),
-            br#"{"event_type":"change-integrated","authorization":{"policy":{"declared_by":{}}}}"#,
-        )
-        .unwrap();
-
-        test_store(dir.path())
-            .repair_missing_format_four_stamp()
-            .unwrap();
-        let stored: StoreConfig =
-            serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap()).unwrap();
-        assert_eq!(stored.schema_version, 4);
+        assert_eq!(stored.schema_version, 3);
     }
 }
