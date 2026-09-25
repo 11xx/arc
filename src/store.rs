@@ -554,6 +554,7 @@ impl Store {
     fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
         let introduced_in = match payload {
             Payload::ExternalVerdictRecorded { .. }
+            | Payload::ReadyToSend { .. }
             | Payload::IntegrationAsserted {
                 external_reference: Some(_),
                 ..
@@ -583,7 +584,7 @@ impl Store {
             .and_then(|value| value.get("event_type"))
             .and_then(serde_json::Value::as_str)
         {
-            Some("external-verdict-recorded") => Some(4),
+            Some("external-verdict-recorded") | Some("ready-to-send") => Some(4),
             Some("integration-asserted")
                 if value
                     .and_then(|value| value.get("external_reference"))

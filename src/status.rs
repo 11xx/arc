@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/24";
+pub const STATUS_SCHEMA: &str = "arc-status/25";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// A verdict graph with several tips has no authority to report, so the
@@ -670,6 +670,10 @@ pub struct StatusReport {
     pub integrate_ready: bool,
     pub blockers: Vec<Blocker>,
     pub closure: Option<crate::state::ClosureState>,
+    /// The head a contribution was last found ready to send at. Additive in
+    /// `arc-status/25`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_to_send: Option<crate::state::ReadyToSendEntry>,
     /// A declared review obligation with no audit answering it. Additive in
     /// arc-status/6.
     pub debt_outstanding: bool,
@@ -1664,85 +1668,92 @@ fn build_report(
         })
     });
 
-    let next_action = if state.is_closed() {
-        "none:closed".into()
-    } else if current_head.is_none() {
-        "restore_branch".into()
-    } else if dependency_status
-        .blockers_ready
-        .iter()
-        .any(|dependency| dependency.status == "wedged")
-    {
-        "repair_blockers:metadata".into()
-    } else if dependency_status.blocked {
-        "wait_for:blockers".into()
-    } else if needs_rebase {
-        "rebase".into()
-    } else if !head_matches {
-        "snapshot".into()
-    } else if !open_blocking.is_empty() {
-        "resolve_findings".into()
-    } else if let Some(hold) = state.holds.values().next() {
-        format!("release_hold:{}", hold.hold_event_id)
-    } else if let Some(gate) = gate_statuses.iter().find(|gate| !gate.green_at_head) {
-        // A gate read at a merged tree is not repaired by running it at the
-        // head: that records evidence for content the merge discards. The
-        // merge is what has to be evaluated, and re-evaluated once the work
-        // that makes it pass lands.
-        if evaluated_tree.is_some() {
-            format!("verify_against:{}", state.target_branch)
-        } else {
-            gate.clearing_action(worktree_dirty)
-        }
-    } else if let Some(probe) = probe_statuses
-        .iter()
-        .find(|probe| !probe.discriminating_at_head)
-    {
-        format!("run_probe:{}", probe.name)
-    } else if state.iterating {
-        // An iterating change owes declared debt rather than a verdict,
-        // so it never reaches `request_review`. It reaches this arm only once
-        // findings, holds, gates and probes are clear, because those are real
-        // work whether or not integration is the goal.
-        if state.debt.is_none() && state.latest_patchset().is_some() {
-            "declare_debt".into()
-        } else {
-            "iterating:clear".into()
-        }
-    } else if external_refuses_this_head {
-        match current_external_verdict.map(|external| external.verdict) {
-            Some(crate::model::ExternalVerdict::ChangesRequested) => {
-                "external_changes_requested".into()
+    let next_action =
+        if state.is_closed() {
+            "none:closed".into()
+        } else if current_head.is_none() {
+            "restore_branch".into()
+        } else if dependency_status
+            .blockers_ready
+            .iter()
+            .any(|dependency| dependency.status == "wedged")
+        {
+            "repair_blockers:metadata".into()
+        } else if dependency_status.blocked {
+            "wait_for:blockers".into()
+        } else if needs_rebase {
+            "rebase".into()
+        } else if !head_matches {
+            "snapshot".into()
+        } else if !open_blocking.is_empty() {
+            "resolve_findings".into()
+        } else if let Some(hold) = state.holds.values().next() {
+            format!("release_hold:{}", hold.hold_event_id)
+        } else if let Some(gate) = gate_statuses.iter().find(|gate| !gate.green_at_head) {
+            // A gate read at a merged tree is not repaired by running it at the
+            // head: that records evidence for content the merge discards. The
+            // merge is what has to be evaluated, and re-evaluated once the work
+            // that makes it pass lands.
+            if evaluated_tree.is_some() {
+                format!("verify_against:{}", state.target_branch)
+            } else {
+                gate.clearing_action(worktree_dirty)
             }
-            Some(crate::model::ExternalVerdict::Rejected) => "external_rejected".into(),
-            _ => unreachable!("only non-approving external verdicts refuse this head"),
-        }
-    } else if let Some(action) = refusing_verdict_action {
-        // A current refusal is an action in its own right. Debt defers a
-        // missing review; it cannot route around a reviewer who read this
-        // patchset and declined it.
-        action.into()
-    } else if let Some(reason) = approval_rejection_reason.as_ref() {
-        // A rejection the waiver does not cover is a real refusal, not a
-        // routing question; it keeps the policy's own reason as the action.
-        reason.clone()
-    } else if approval_satisfied {
-        // The waiver is already in force and everything above is clear, so
-        // steering the caller back into a review queue would contradict the
-        // readiness this same report computes. The debt record and the
-        // approval_waived_by_debt flag still say what authorized this.
-        "integrate".into()
-    } else if danger.requires_independent_review(policy) {
-        // Policy requires an independent verdict; debt is not an option the
-        // lead may take from guidance alone, and unknown danger stays
-        // dangerous.
-        "request_review".into()
-    } else {
-        // Ordinary scope with no valid approval: the lead may declare debt
-        // with the specific coverage and deferral, or request review. The
-        // choice is the caller's; reading this list writes nothing.
-        "declare_debt".into()
-    };
+        } else if let Some(probe) = probe_statuses
+            .iter()
+            .find(|probe| !probe.discriminating_at_head)
+        {
+            format!("run_probe:{}", probe.name)
+        } else if state.iterating {
+            // An iterating change owes declared debt rather than a verdict,
+            // so it never reaches `request_review`. It reaches this arm only once
+            // findings, holds, gates and probes are clear, because those are real
+            // work whether or not integration is the goal.
+            if state.debt.is_none() && state.latest_patchset().is_some() {
+                "declare_debt".into()
+            } else {
+                "iterating:clear".into()
+            }
+        } else if external_refuses_this_head {
+            match current_external_verdict.map(|external| external.verdict) {
+                Some(crate::model::ExternalVerdict::ChangesRequested) => {
+                    "external_changes_requested".into()
+                }
+                Some(crate::model::ExternalVerdict::Rejected) => "external_rejected".into(),
+                _ => unreachable!("only non-approving external verdicts refuse this head"),
+            }
+        } else if let Some(action) = refusing_verdict_action {
+            // A current refusal is an action in its own right. Debt defers a
+            // missing review; it cannot route around a reviewer who read this
+            // patchset and declined it.
+            action.into()
+        } else if let Some(reason) = approval_rejection_reason.as_ref() {
+            // A rejection the waiver does not cover is a real refusal, not a
+            // routing question; it keeps the policy's own reason as the action.
+            reason.clone()
+        } else if state.ready_to_send.as_ref().is_some_and(|ready| {
+            head_matches && current_head.as_deref() == Some(ready.head.as_str())
+        }) {
+            // Everything a merge would need held at this head, and the merge is
+            // the receiver's. What is left is sending it and recording the answer.
+            "await_receiver".into()
+        } else if approval_satisfied {
+            // The waiver is already in force and everything above is clear, so
+            // steering the caller back into a review queue would contradict the
+            // readiness this same report computes. The debt record and the
+            // approval_waived_by_debt flag still say what authorized this.
+            "integrate".into()
+        } else if danger.requires_independent_review(policy) {
+            // Policy requires an independent verdict; debt is not an option the
+            // lead may take from guidance alone, and unknown danger stays
+            // dangerous.
+            "request_review".into()
+        } else {
+            // Ordinary scope with no valid approval: the lead may declare debt
+            // with the specific coverage and deferral, or request review. The
+            // choice is the caller's; reading this list writes nothing.
+            "declare_debt".into()
+        };
     // The options list beside the action: an empty list says the action is
     // the only correct one, which is most states. A required-review case
     // names review alone; a satisfied approval, an iterating change, a
@@ -1868,6 +1879,7 @@ fn build_report(
         integrate_ready: ready,
         blockers,
         closure: state.closure.clone(),
+        ready_to_send: state.ready_to_send.clone(),
         debt_outstanding: state.debt_outstanding(),
         provisional_approval_outstanding: state.provisional_approval_outstanding(),
         debt: state.debt.clone(),

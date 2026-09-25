@@ -26,6 +26,7 @@ mod rewrite;
 pub mod run;
 pub(crate) mod sandbox;
 pub(crate) mod scaffold;
+mod squash;
 pub(crate) use scaffold::{
     available as scaffolds_available, default_for_kind as scaffold_default_for_kind,
     resolve as scaffold_resolve, BUILT_IN as SCAFFOLD_BUILT_IN,
@@ -87,6 +88,7 @@ pub use rewrite::{
 };
 pub use run::{dispatch_run, end_run, list_runs, DispatchInput, EndingInput};
 use serde::Serialize;
+pub use squash::squash;
 pub use stats::{stats, StatsSelection};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -861,6 +863,7 @@ mod tests {
             findings: BTreeMap::new(),
             verdicts: Vec::new(),
             external_verdicts: Vec::new(),
+            ready_to_send: None,
             audit_verdicts: Vec::new(),
             audit_findings: Default::default(),
             debt: None,

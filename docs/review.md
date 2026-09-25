@@ -119,6 +119,31 @@ the contribution, `arc close --assert-integrated <revision>
 --external-reference <reference>` records the asserted integration and its
 external provenance. Arc does not fetch the reference.
 
+### Contributing to a repository you do not own
+
+A repository whose changes are merged by a receiver declares so in policy,
+normally the operator policy, since that file stays out of the contributed
+tree:
+
+```toml
+[contribution]
+history = "squash"   # or "preserve"
+```
+
+Under that declaration the receiver owns the history shape and the merge.
+`arc integrate` runs every check it runs for a merge (gates, verdicts,
+findings, holds, and dependencies) against the approved head and then records
+the change as ready to send at that head instead of merging it. The head must
+carry no merge commit since the target, and under `squash` exactly one commit.
+`arc squash <change> -m <message>` produces that commit on the change's base
+with the identical tree and records it as a new patchset, which needs its own
+gates and verdict: evidence and verdicts stay with the heads they were
+recorded against. `arc status` then names `await_receiver` as the next action.
+The receiver's answer closes the change: `arc external verdict` records a
+rejection or a change request, and `arc close --assert-integrated` records the
+merge the receiver made. Declaring `squash` in either policy file wins over
+`preserve`.
+
 Set `[policy] require_declared_actor = true` to refuse an event whose effective
 author nobody claimed. `begin`, `verify`, and `integrate` check before they
 create a branch, run a command, or merge, so a refusal never lands after the
