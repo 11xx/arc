@@ -14,6 +14,7 @@ mod forge;
 mod fork;
 mod hooks;
 mod instructions;
+mod integrate;
 mod journal;
 mod lifecycle;
 mod messaging;
