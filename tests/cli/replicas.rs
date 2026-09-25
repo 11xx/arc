@@ -348,6 +348,27 @@ fn authority_moves_only_through_an_imported_offer() {
         after_reclaim["authority"]["last_reclaim"]["reason"],
         "The handoff file was reported missing."
     );
+    // The peer had already acquired that offer, so both replicas held
+    // authority for a while. The reclaim decides the holder; the overlap is
+    // reported on both sides rather than disappearing.
+    let contest = &after_reclaim["authority"]["contested"][0];
+    assert_eq!(contest["acquired_by"]["name"], "peer");
+    assert_eq!(contest["reclaimed_by"]["name"], "origin");
+    let acknowledgement = recipient.home.join("contest-ack.json");
+    export_replica(&recipient, &acknowledgement);
+    import_replica(&source, &acknowledgement);
+    let source_view = replica_status(&source);
+    assert_eq!(source_view["authority"]["holder"]["name"], "origin");
+    assert_eq!(
+        source_view["authority"]["contested"][0]["acquired_by"]["name"],
+        "peer"
+    );
+    recipient
+        .arc(&recipient.root)
+        .args(["replica", "status"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("contested: peer acquired offer"));
 }
 
 /// An imported live claim cannot displace a different live local claim. The

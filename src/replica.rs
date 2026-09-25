@@ -114,6 +114,18 @@ pub struct AuthorityStatus {
     pub holder: Option<ReplicaIdentity>,
     pub offer_in_flight: Option<AuthorityOffer>,
     pub last_reclaim: Option<AuthorityReclaim>,
+    /// Offers both acquired by their recipient and reclaimed by their offerer.
+    /// The reclaim decides the holder, so every replica converges on one; the
+    /// acquirer believed it held authority until it imported the reclaim, and
+    /// may have integrated in that interval.
+    pub contested: Vec<AuthorityContest>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthorityContest {
+    pub offer_id: String,
+    pub acquired_by: ReplicaIdentity,
+    pub reclaimed_by: ReplicaIdentity,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -277,6 +289,15 @@ pub fn render_status(status: &ReplicaStatus) {
         );
     } else {
         println!("  integration authority: none");
+    }
+    for contest in &authority.contested {
+        println!(
+            "  contested: {} acquired offer {} before {} reclaimed it; {} may have integrated while it believed it held authority",
+            contest.acquired_by.name,
+            contest.offer_id,
+            contest.reclaimed_by.name,
+            contest.acquired_by.name
+        );
     }
     if let Some(reclaim) = &authority.last_reclaim {
         println!(
@@ -1076,6 +1097,7 @@ fn authority_state(
     let mut holder_id = initial.actor.repository_id.clone();
     let mut grant_id = initial.event_id.clone();
     let mut last_reclaim = None;
+    let mut contested = Vec::new();
     let mut visited = BTreeSet::new();
     loop {
         if !visited.insert(grant_id.clone()) {
@@ -1087,6 +1109,7 @@ fn authority_state(
                     holder: members.get(&holder_id).cloned(),
                     offer_in_flight: None,
                     last_reclaim,
+                    contested,
                 },
                 grant_id,
             ));
@@ -1105,6 +1128,13 @@ fn authority_state(
                 from: offer.actor.clone(),
                 reason,
             });
+            if let Some(acquired) = acquires.get(offer_id.as_str()) {
+                contested.push(AuthorityContest {
+                    offer_id: offer_id.clone(),
+                    acquired_by: acquired.actor.clone(),
+                    reclaimed_by: reclaimed.actor.clone(),
+                });
+            }
             holder_id = offer.actor.repository_id.clone();
             grant_id = reclaimed.event_id.clone();
             continue;
@@ -1127,6 +1157,7 @@ fn authority_state(
                     to,
                 }),
                 last_reclaim,
+                contested,
             },
             grant_id,
         ));

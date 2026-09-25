@@ -79,6 +79,13 @@ the offering replica the authority holder and records the reason. The file
 must be exchanged for a recipient that already imported the offer to learn the
 reclaim.
 
+When the recipient had already acquired the offer before the reclaim, both
+replicas held authority until the recipient imported the reclaim. The reclaim
+still decides the holder, so every replica converges on one, and every replica
+that holds both events reports the overlap as `contested` in `arc replica
+status`, naming the acquirer, the reclaimer, and the offer. Check what the
+acquirer integrated in that interval.
+
 ## Claims and local liveness
 
 Claims remain local liveness facts. When an imported change bundle brings a
