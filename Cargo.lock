@@ -92,6 +92,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tapes-core",
  "tempfile",
  "toml",
  "ulid",
@@ -765,6 +766,27 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "tapes-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tapes-discovery",
+]
+
+[[package]]
+name = "tapes-discovery"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
 ]
 
 [[package]]
