@@ -414,6 +414,11 @@ RUN A CHANGE
   merge would write that already exists there without being tracked, ignored
   paths included, is refused by name.
 
+  A head the target already contains, at its tip or behind it, has no merge
+  to make: the guard still runs every check, closes the change at the target
+  revision that already holds the head, and records that no merge was
+  created. A successor behind such a change proceeds normally.
+
   `--no-worktree` means in place, not nowhere: a clean checkout already on the
   target is checked out onto the new branch and recorded as the change's
   worktree, so the next command infers the change without being told. A dirty
