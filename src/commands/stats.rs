@@ -870,6 +870,8 @@ mod tests {
                     contributors: Vec::new(),
                     claim_id: None,
                     claim_actor: None,
+                    journal_refs: Vec::new(),
+                    thread: None,
                 },
             ),
             event(

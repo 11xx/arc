@@ -1030,6 +1030,8 @@ pub fn snapshot_with_verify(
     all: bool,
     contributors: Option<Vec<String>>,
     solo: bool,
+    journal_refs: Vec<String>,
+    thread: Option<String>,
 ) -> Result<i32> {
     if !verify_requested && (!gates.is_empty() || all) {
         bail!("--gate and --all require --verify");
@@ -1037,7 +1039,16 @@ pub fn snapshot_with_verify(
     if all && !gates.is_empty() {
         bail!("--all cannot be combined with --gate");
     }
-    super::review::snapshot(ctx, reference, base, brief_version, contributors, solo)?;
+    super::review::snapshot(
+        ctx,
+        reference,
+        base,
+        brief_version,
+        contributors,
+        solo,
+        journal_refs,
+        thread,
+    )?;
     if !verify_requested {
         return Ok(0);
     }
@@ -1169,14 +1180,28 @@ pub fn snapshot_with_verify(
     Ok(if passed == total { 0 } else { 1 })
 }
 
-pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
+pub fn done(
+    ctx: &Ctx,
+    reference: &str,
+    journal_refs: Vec<String>,
+    thread: Option<String>,
+) -> Result<i32> {
     if super::claims::owns_live_claim(ctx, reference)? {
         let code = super::claims::stage(ctx, reference, StageArg::Verifying, None, None, false)?;
         if code != 0 {
             return Ok(code);
         }
     }
-    super::review::snapshot(ctx, reference, None, None, None, false)?;
+    super::review::snapshot(
+        ctx,
+        reference,
+        None,
+        None,
+        None,
+        false,
+        journal_refs,
+        thread,
+    )?;
     // A profile with no declared gate has nothing to run. Reporting the check
     // state is still the whole point of `done`, and the state says plainly
     // that nothing was evaluated, so a green never stands in for a gate
@@ -1313,6 +1338,8 @@ pub fn rebase(ctx: &Ctx, reference: &str, verify_requested: bool) -> Result<i32>
                 false,
                 None,
                 false,
+                Vec::new(),
+                None,
             )?;
             let (_, replayed_state) = ctx.load_state(&store, reference)?;
             let report = ctx.report(&store, &replayed_state)?;

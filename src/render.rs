@@ -419,6 +419,12 @@ pub fn markdown(
                         .unwrap_or_default()
                 );
             }
+            for link in &p.journal_refs {
+                let _ = writeln!(w, "  - framed by: `{}` ({})", link.file, link.digest);
+            }
+            if let Some(thread) = &p.thread {
+                let _ = writeln!(w, "  - thread: {}:{}", thread.scheme, thread.id);
+            }
             if let Some(actor) = &p.claim_actor {
                 let _ = writeln!(
                     w,
@@ -1418,11 +1424,21 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             },
         ),
         Payload::PatchsetAdded {
-            patchset_id, head, ..
-        } => (
-            "patchset-added",
-            format!("{patchset_id} {}", short_sha(head)),
-        ),
+            patchset_id,
+            head,
+            journal_refs,
+            thread,
+            ..
+        } => {
+            let mut summary = format!("{patchset_id} {}", short_sha(head));
+            if !journal_refs.is_empty() {
+                summary.push_str(&format!("; {} journal link(s)", journal_refs.len()));
+            }
+            if let Some(thread) = thread {
+                summary.push_str(&format!("; thread {}:{}", thread.scheme, thread.id));
+            }
+            ("patchset-added", summary)
+        }
         Payload::PatchsetAttributionAmended {
             patchset_id,
             contributors,

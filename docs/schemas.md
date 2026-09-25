@@ -25,7 +25,7 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-resume/5` | `arc resume --json` — one change's brief, live state, and journal context, including captured plan provenance and the source fork's artifacts | commitment |
 | `arc-brief/1` | `arc brief --json` — one selected brief and its immutable plan-source snapshot | commitment |
 | `arc-journal-artifact/2` | `arc journal show --json` — raw artifact bytes and planner metadata | commitment |
-| `arc-journal-inventory/4` | `arc journal inventory [FILE] [--archived] --json` — one read-only artifact projection with storage, claims, converged checkpoint tips, questions, promotions, promotion state, and ledger observation | commitment |
+| `arc-journal-inventory/5` | `arc journal inventory [FILE] [--archived] --json` — one read-only artifact projection with storage, claims, converged checkpoint tips, questions, promotions, promotion state, patchsets citing each artifact, and ledger observation | commitment |
 | `arc-rescue/3` | `arc rescue --json` — ledger state joined with worktree divergence, a foreign claim's standing, and the transcript reader's answer with its bound and cause | commitment |
 | `arc-review/3` | `arc review --json` — verdict history, findings, causes, current review options, and the next action | commitment |
 | `arc-findings/2` | `arc findings --format json` — the open finding set, or the audit set with `--audit` | commitment |
