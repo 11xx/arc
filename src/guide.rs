@@ -388,6 +388,11 @@ RUN A CHANGE
   whose worktree is gone has nowhere to gate: give it one with `git worktree
   add`, or record evidence arc did not run with `verify --attest`.
 
+  A profile with no declared gate runs none: `done` still snapshots and
+  prints the check state, saying plainly that no gate is declared rather
+  than reporting a pass, and `verify --all` and `verify --against` still
+  refuse because there is nothing to run.
+
   `arc rebase` is what `check` names when the target moved with conflicting
   changes. A conflict stops it and leaves the rebase in progress — the partial
   resolution is yours, and aborting would throw it away — with the conflicting
