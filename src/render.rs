@@ -594,6 +594,9 @@ pub fn markdown(
                 }
             }
         }
+    } else {
+        let _ = writeln!(w, "\n## Gates\n");
+        let _ = writeln!(w, "- none declared for profile {}", report.profile);
     }
 
     if !report.probes.is_empty() {
@@ -1125,6 +1128,14 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
 /// evidence.
 pub fn gates_owed(report: &StatusReport) -> String {
     let mut out = String::new();
+    if report.gates.is_empty() {
+        let _ = writeln!(
+            out,
+            "gates: no gates declared for profile {}; nothing was evaluated",
+            report.profile
+        );
+        return out;
+    }
     let owed: Vec<&GateStatus> = report
         .gates
         .iter()
@@ -1854,10 +1865,17 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .clone()
             .unwrap_or_else(|| "current head has no valid approval".into()),
     );
+    // No declared gate is a satisfied condition nothing was checked
+    // against, and a reader must not take the tick for a pass.
+    let gates_label = if report.gates.is_empty() {
+        format!("no gates declared for profile {}", state.profile)
+    } else {
+        "required gates green".to_string()
+    };
     condition(
         &mut out,
         Blocker::GatesNotGreen,
-        "required gates green",
+        &gates_label,
         report
             .gates
             .iter()

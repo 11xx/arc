@@ -43,6 +43,16 @@ tree, and a worktree standing off the branch head is refused with the checkout
 that puts it back, because evidence recorded there is evidence status will
 never count.
 
+A profile with no declared gate has nothing to run. `arc done` snapshots and
+prints the check state as it always does, saying that no gate is declared for
+the profile rather than refusing to report, and every human view keeps "gates
+passed" distinct from "no gate exists": `check` says no gates are declared,
+`show` lists none, and a rebase names the same. `arc verify --all` and `arc
+verify --against` still refuse, because they are explicit requests to run
+declared gates and there is nothing to run. Readiness and integration are
+unchanged: a change whose profile declares no gate owes no gate evidence and
+integrates on its approval alone.
+
 By default `arc verify` runs the gate and observes the result itself. When
 the gate ran elsewhere — inside a sandbox, or on another host — record that
 external evidence with `--attest --result pass|fail` (optionally `--note`):
