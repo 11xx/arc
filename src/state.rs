@@ -543,6 +543,11 @@ pub struct VerificationEntry {
     /// never seen to fail before it passed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub falsification: Option<Falsification>,
+    /// The environment this evidence was produced in, when the gate declared
+    /// an environment probe. `None` on evidence written before arc recorded
+    /// environments, which satisfies only probe-less gates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<crate::model::EnvironmentEvidence>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -1976,6 +1981,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 run_id,
                 probe,
                 runner,
+                environment,
                 output_tail,
                 timed_out,
                 tested_tree,
@@ -2077,6 +2083,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     timed_out: *timed_out,
                     hostname: hostname.clone(),
                     runner: runner.clone(),
+                    environment: environment.clone(),
                     falsification: falsification.clone(),
                     created_at: ev.created_at,
                 });
@@ -3113,6 +3120,7 @@ mod tests {
                 run_id: Some(run_id),
                 probe: None,
                 runner: None,
+                environment: None,
                 note: None,
                 falsification: None,
                 tested_tree: Some("dirty-tree".into()),

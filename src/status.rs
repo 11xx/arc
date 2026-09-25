@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/21";
+pub const STATUS_SCHEMA: &str = "arc-status/22";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// A verdict graph with several tips has no authority to report, so the
@@ -170,6 +170,11 @@ pub struct GateStatus {
     pub hostname: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner: Option<String>,
+    /// Whether this gate's evidence describes the environment being
+    /// evaluated, named only for a gate that declares an environment probe.
+    /// Additive in `arc-status/22`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<GateEnvironmentStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tail: Option<String>,
     #[serde(skip_serializing_if = "is_false")]
@@ -191,13 +196,48 @@ pub struct GateStatus {
     pub discrimination_event_id: Option<String>,
 }
 
+/// Whether a gate's evidence describes the environment being evaluated.
+///
+/// Present only for a gate that declares an environment probe. Readiness
+/// counts the evidence only when the recorded identity equals the one the
+/// probe yields here; the identities are opaque, and only equality between
+/// them is read.
+#[derive(Debug, Clone, Serialize)]
+pub struct GateEnvironmentStatus {
+    /// The identity recorded on the evidence being counted. Absent when that
+    /// evidence carries none, which is evidence written before environments
+    /// were recorded or evidence whose probe could not answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// The identity the declared probe yields where this report was built.
+    /// Absent on a ledger replay, which observes no environment, and where
+    /// the probe could not answer here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    /// The evidence was produced in a different environment, so it does not
+    /// answer for this one. A mismatch is reported as inapplicable rather
+    /// than missing: the run happened, it just describes somewhere else.
+    #[serde(skip_serializing_if = "is_false")]
+    pub inapplicable: bool,
+    /// The evidence carries no environment identity, so nothing says which
+    /// environment produced it. Unknown, not inapplicable: there is no second
+    /// identity to compare against.
+    #[serde(skip_serializing_if = "is_false")]
+    pub unknown: bool,
+    /// The declared probe could not be read where this report was built;
+    /// the run's exit, overrun, or empty output is named. Every receipt for
+    /// the gate is not-green while this holds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_failed: Option<String>,
+}
+
 impl GateStatus {
     /// Why this gate is not green at head, in the caller's terms.
     ///
     /// A gate whose evidence passed but cannot be reused says so here; the
     /// bare result would read `pass` and contradict every readiness check.
     /// `None` means the gate is green.
-    pub fn not_green_reason(&self) -> Option<&'static str> {
+    pub fn not_green_reason(&self) -> Option<String> {
         if self.green_at_head {
             return None;
         }
@@ -205,26 +245,53 @@ impl GateStatus {
         // provenance for a command the gate no longer declares, and saying
         // its tree was unrecorded would send the reader to the wrong repair.
         if self.declaration_changed {
-            return Some("the gate declaration changed since this evidence was recorded");
+            return Some("the gate declaration changed since this evidence was recorded".into());
         }
-        Some(match self.result.as_str() {
-            "pending" if self.evaluated_tree.is_some() => "no evidence at the merged tree",
-            "pending" => "no evidence at head",
-            "fail" => "the gate failed",
-            _ if self.tree_moved => "the worktree changed while the gate ran",
-            _ if self.worktree_dirty == Some(true) => {
-                "evidence recorded on a dirty worktree, so no checkout of this revision \
-                 reproduces it"
+        // An environment mismatch is a fact about where the run happened, not
+        // about its provenance on this checkout, so it is reported first.
+        if let Some(environment) = &self.environment {
+            if environment.unknown {
+                return Some(
+                    "the evidence records no environment identity, so no environment can be \
+                     said to have produced it"
+                        .into(),
+                );
             }
-            // Parallel gates share one worktree, so no boundary comparison can
-            // prove that a gate did not change a tracked file and restore it.
-            // The tree was recorded; what is missing is whether it was clean.
-            _ if self.tested_tree.is_some() => {
-                "the worktree's cleanliness was not recorded, which is what a shared-worktree \
-                 parallel run can never establish"
+            if environment.inapplicable {
+                return Some(format!(
+                    "the evidence was produced in environment {} but this checkout's declared \
+                     probe yields {}",
+                    environment.evidence.as_deref().unwrap_or("unknown"),
+                    environment.current.as_deref().unwrap_or("unknown")
+                ));
             }
-            _ => "the tested tree was not recorded, so the evidence has no provenance",
-        })
+            if let Some(failure) = &environment.probe_failed {
+                return Some(format!(
+                    "the declared environment probe could not be read here: {failure}"
+                ));
+            }
+        }
+        Some(
+            match self.result.as_str() {
+                "pending" if self.evaluated_tree.is_some() => "no evidence at the merged tree",
+                "pending" => "no evidence at head",
+                "fail" => "the gate failed",
+                _ if self.tree_moved => "the worktree changed while the gate ran",
+                _ if self.worktree_dirty == Some(true) => {
+                    "evidence recorded on a dirty worktree, so no checkout of this revision \
+                     reproduces it"
+                }
+                // Parallel gates share one worktree, so no boundary comparison can
+                // prove that a gate did not change a tracked file and restore it.
+                // The tree was recorded; what is missing is whether it was clean.
+                _ if self.tested_tree.is_some() => {
+                    "the worktree's cleanliness was not recorded, which is what a shared-worktree \
+                     parallel run can never establish"
+                }
+                _ => "the tested tree was not recorded, so the evidence has no provenance",
+            }
+            .into(),
+        )
     }
 
     /// What actually clears this gate, given the state of the worktree now.
@@ -906,6 +973,7 @@ pub fn build_at(
         blocks,
         now,
         Some(cwd),
+        Some(cwd),
         current_head,
         needs_rebase,
         merged_tree,
@@ -946,6 +1014,7 @@ pub fn build_as_of(
         blocks,
         now,
         repo,
+        None,
         current_head.clone(),
         false,
         None,
@@ -958,6 +1027,9 @@ pub fn build_as_of(
     )
 }
 
+/// `probe_cwd` is the checkout a declared environment probe runs in, when the
+/// report is built where the environment can be observed. A ledger replay
+/// passes `None` and reports recorded identities without probing.
 #[allow(clippy::too_many_arguments)]
 fn build_report(
     state: &ChangeState,
@@ -967,6 +1039,7 @@ fn build_report(
     blocks: Vec<String>,
     now: DateTime<Utc>,
     cwd: Option<&Path>,
+    probe_cwd: Option<&Path>,
     current_head: Option<String>,
     needs_rebase: bool,
     merged_tree: Option<String>,
@@ -1157,85 +1230,138 @@ fn build_report(
     };
     let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
 
-    let gate_statuses: Vec<GateStatus> = gates
-        .required_for(&state.profile)
-        .into_iter()
-        .map(|(name, gate)| {
-            let evidence = match (&lookup_tree, current_head.as_deref()) {
-                (Some(tree), _) => state.gate_evidence_at_tree(name, tree, &resolve_tree),
-                (None, Some(head)) => state.gate_evidence_at(name, head),
-                (None, None) => None,
-            };
-            let result = evidence.map(|e| e.result);
-            // Discrimination is asked of the gate at this revision, not of the
-            // newest run, so a rerun that appends a plain pass cannot retract
-            // what an earlier run established against the same tree.
-            let counted_pass = evidence.filter(|e| e.result == crate::model::VerifyResult::Pass);
-            let discriminating = counted_pass.and_then(|e| match &lookup_tree {
-                Some(tree) => state.gate_falsification_at_tree(name, tree, &resolve_tree),
-                None => state.gate_falsification_at(name, &e.revision),
-            });
-            GateStatus {
-                name: name.clone(),
-                command: gate.command.clone(),
-                evaluated_tree: evaluated_tree.clone(),
-                inherited_from: evidence
-                    .map(|e| e.revision.clone())
-                    .filter(|revision| Some(revision.as_str()) != current_head.as_deref()),
-                result: match result {
-                    Some(crate::model::VerifyResult::Pass) => "pass",
-                    Some(crate::model::VerifyResult::Fail) => "fail",
-                    None => "pending",
-                }
-                .into(),
-                // Evidence produced on a dirty tree describes something no
-                // checkout of this revision reproduces, and evidence whose
-                // tree moved mid-run describes no single tree at all. Both
-                // are displayed and neither counts as green — throwing them
-                // away would push loops toward not recording at all, which is
-                // worse than recording them honestly.
-                // Evidence is green for the command it ran, not for the
-                // gate's name. A declaration edited after the run describes a
-                // different check, and counting the old pass would let a gate
-                // nobody has run authorize a merge.
-                // The whole declaration, not just the command: a run under a
-                // laxer timeout is not evidence for a stricter one, and a run
-                // whose declared timeout is unknown cannot be shown to satisfy
-                // a declaration that has one.
-                green_at_head: evidence.is_some_and(|e| {
-                    e.green_at_head(state.dirty_tree_waiver.as_ref())
-                        && matches_declaration(e, gate)
-                }),
-                declaration_changed: evidence.is_some_and(|e| {
-                    e.green_at_head(state.dirty_tree_waiver.as_ref())
-                        && !matches_declaration(e, gate)
-                }),
-                attested: evidence.is_some_and(|e| e.attested),
-                tested_tree: evidence.and_then(|e| e.tested_tree.clone()),
-                worktree_dirty: evidence.and_then(|e| e.worktree_dirty),
-                worktree_dirty_tracked: evidence.and_then(|e| e.worktree_dirty_tracked),
-                worktree_dirty_untracked: evidence.and_then(|e| e.worktree_dirty_untracked),
-                tree_moved: evidence.is_some_and(|e| e.tree_moved),
-                evidence_event_id: evidence.map(|e| e.event_id.clone()),
-                revision: evidence.map(|e| e.revision.clone()),
-                hostname: evidence.map(|e| e.hostname.clone()),
-                runner: evidence.and_then(|e| e.runner.clone()),
-                output_tail: evidence
-                    .filter(|e| e.result == crate::model::VerifyResult::Fail)
-                    .and_then(|e| e.output_tail.clone()),
-                timed_out: evidence
-                    .is_some_and(|e| e.result == crate::model::VerifyResult::Fail && e.timed_out),
-                discrimination: counted_pass.map(|_| match discriminating {
-                    Some(_) => Discrimination::Discriminating,
-                    None => Discrimination::Undiscriminated,
-                }),
-                falsification: discriminating.and_then(|e| e.falsification.clone()),
-                discrimination_event_id: discriminating
-                    .map(|e| e.event_id.clone())
-                    .filter(|id| Some(id.as_str()) != counted_pass.map(|e| e.event_id.as_str())),
+    let mut gate_statuses: Vec<GateStatus> = Vec::new();
+    // A probe is one property of the checkout, so gates declaring the same
+    // probe under the same bound share one run.
+    let mut probe_runs: BTreeMap<(String, Option<u64>), crate::gates::ProbeRun> = BTreeMap::new();
+    for (name, gate) in gates.required_for(&state.profile) {
+        let evidence = match (&lookup_tree, current_head.as_deref()) {
+            (Some(tree), _) => state.gate_evidence_at_tree(name, tree, &resolve_tree),
+            (None, Some(head)) => state.gate_evidence_at(name, head),
+            (None, None) => None,
+        };
+        // Applicability is asked where the checkout being evaluated exists. A
+        // ledger replay observes no environment and takes a recorded identity
+        // at its word; only a live report can say whether the probe answers
+        // here.
+        let environment = match gate.environment.as_deref() {
+            None => None,
+            Some(probe) => {
+                let recorded = evidence
+                    .and_then(|e| e.environment.as_ref())
+                    .map(|environment| environment.identity.clone());
+                let (current, probe_failed) = match probe_cwd {
+                    Some(cwd) if recorded.is_some() => {
+                        let key = (probe.to_owned(), gate.timeout);
+                        if !probe_runs.contains_key(&key) {
+                            let run = crate::gates::environment_probe(cwd, probe, gate.timeout)?;
+                            probe_runs.insert(key.clone(), run);
+                        }
+                        let run = probe_runs.get(&key).expect("probe run just cached");
+                        (
+                            run.identity.clone(),
+                            run.failure.as_ref().map(|failure| failure.describe()),
+                        )
+                    }
+                    _ => (None, None),
+                };
+                let inapplicable = current
+                    .as_deref()
+                    .zip(recorded.as_deref())
+                    .is_some_and(|(current, recorded)| current != recorded);
+                let unknown = evidence.is_some() && recorded.is_none();
+                Some(GateEnvironmentStatus {
+                    evidence: recorded,
+                    current,
+                    inapplicable,
+                    unknown,
+                    probe_failed,
+                })
             }
-        })
-        .collect();
+        };
+        // A gate that declares an environment probe is answered only by
+        // evidence whose recorded identity is the one the probe yields here.
+        // A probe that yields none here leaves every receipt not-green; a
+        // ledger replay counts a recorded identity by its presence.
+        let environment_applies = match (&environment, probe_cwd) {
+            (None, _) => true,
+            (Some(environment), None) => environment.evidence.is_some(),
+            (Some(environment), Some(_)) => {
+                environment.current.is_some()
+                    && environment.evidence.is_some()
+                    && !environment.inapplicable
+            }
+        };
+        let result = evidence.map(|e| e.result);
+        // Discrimination is asked of the gate at this revision, not of the
+        // newest run, so a rerun that appends a plain pass cannot retract
+        // what an earlier run established against the same tree.
+        let counted_pass = evidence.filter(|e| e.result == crate::model::VerifyResult::Pass);
+        let discriminating = counted_pass.and_then(|e| match &lookup_tree {
+            Some(tree) => state.gate_falsification_at_tree(name, tree, &resolve_tree),
+            None => state.gate_falsification_at(name, &e.revision),
+        });
+        gate_statuses.push(GateStatus {
+            name: name.clone(),
+            command: gate.command.clone(),
+            evaluated_tree: evaluated_tree.clone(),
+            inherited_from: evidence
+                .map(|e| e.revision.clone())
+                .filter(|revision| Some(revision.as_str()) != current_head.as_deref()),
+            result: match result {
+                Some(crate::model::VerifyResult::Pass) => "pass",
+                Some(crate::model::VerifyResult::Fail) => "fail",
+                None => "pending",
+            }
+            .into(),
+            // Evidence produced on a dirty tree describes something no
+            // checkout of this revision reproduces, and evidence whose
+            // tree moved mid-run describes no single tree at all. Both
+            // are displayed and neither counts as green — throwing them
+            // away would push loops toward not recording at all, which is
+            // worse than recording them honestly.
+            // Evidence is green for the command it ran, not for the
+            // gate's name. A declaration edited after the run describes a
+            // different check, and counting the old pass would let a gate
+            // nobody has run authorize a merge.
+            // The whole declaration, not just the command: a run under a
+            // laxer timeout is not evidence for a stricter one, and a run
+            // whose declared timeout is unknown cannot be shown to satisfy
+            // a declaration that has one.
+            green_at_head: evidence.is_some_and(|e| {
+                e.green_at_head(state.dirty_tree_waiver.as_ref())
+                    && matches_declaration(e, gate)
+                    && environment_applies
+            }),
+            declaration_changed: evidence.is_some_and(|e| {
+                e.green_at_head(state.dirty_tree_waiver.as_ref()) && !matches_declaration(e, gate)
+            }),
+            attested: evidence.is_some_and(|e| e.attested),
+            tested_tree: evidence.and_then(|e| e.tested_tree.clone()),
+            worktree_dirty: evidence.and_then(|e| e.worktree_dirty),
+            worktree_dirty_tracked: evidence.and_then(|e| e.worktree_dirty_tracked),
+            worktree_dirty_untracked: evidence.and_then(|e| e.worktree_dirty_untracked),
+            tree_moved: evidence.is_some_and(|e| e.tree_moved),
+            evidence_event_id: evidence.map(|e| e.event_id.clone()),
+            revision: evidence.map(|e| e.revision.clone()),
+            hostname: evidence.map(|e| e.hostname.clone()),
+            runner: evidence.and_then(|e| e.runner.clone()),
+            environment,
+            output_tail: evidence
+                .filter(|e| e.result == crate::model::VerifyResult::Fail)
+                .and_then(|e| e.output_tail.clone()),
+            timed_out: evidence
+                .is_some_and(|e| e.result == crate::model::VerifyResult::Fail && e.timed_out),
+            discrimination: counted_pass.map(|_| match discriminating {
+                Some(_) => Discrimination::Discriminating,
+                None => Discrimination::Undiscriminated,
+            }),
+            falsification: discriminating.and_then(|e| e.falsification.clone()),
+            discrimination_event_id: discriminating
+                .map(|e| e.event_id.clone())
+                .filter(|id| Some(id.as_str()) != counted_pass.map(|e| e.event_id.as_str())),
+        });
+    }
     let probe_statuses = latest_patchset
         .as_ref()
         .and_then(|patchset| {
@@ -1832,6 +1958,26 @@ pub fn matches_declaration(
     gate: &crate::gates::Gate,
 ) -> bool {
     evidence.command == gate.command && evidence.timeout_seconds == gate.timeout
+}
+
+/// Whether evidence was produced in the environment a gate declares.
+///
+/// A gate with no probe accepts evidence from any environment. A gate that
+/// declares one accepts only evidence carrying an identity equal to what the
+/// probe yields where the caller is deciding; `current` is that identity,
+/// `None` where no probe was run.
+pub fn matches_environment(
+    evidence: &crate::state::VerificationEntry,
+    gate: &crate::gates::Gate,
+    current: Option<&str>,
+) -> bool {
+    match gate.environment.as_deref() {
+        None => true,
+        Some(_) => evidence
+            .environment
+            .as_ref()
+            .is_some_and(|recorded| Some(recorded.identity.as_str()) == current),
+    }
 }
 
 /// One advisory: something a lead should know before integrating, which is

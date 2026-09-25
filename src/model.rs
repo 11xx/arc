@@ -793,6 +793,12 @@ pub enum Payload {
         /// Stable external runner identity for attested evidence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         runner: Option<String>,
+        /// The environment this evidence was produced in, when the gate
+        /// declared an environment probe. Absent on a gate that declares
+        /// none, and on evidence written before arc recorded environments,
+        /// which satisfies only probe-less gates.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment: Option<EnvironmentEvidence>,
         /// Optional free-form note recorded alongside the evidence.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
@@ -1625,6 +1631,24 @@ pub struct ProbeEvidenceRef {
     pub brief_event_id: String,
     pub name: String,
     pub phase: ProbePhase,
+}
+
+/// The environment a verification ran in, as its gate's declared probe
+/// identifies it.
+///
+/// A receipt from one environment says nothing about another unless the two
+/// are known to be the same. The probe's output is the identity evidence
+/// carries, and the store that recorded it is provenance that travels with
+/// the record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EnvironmentEvidence {
+    /// The digest the declared probe yielded: `sha256:` over its combined
+    /// output. Opaque to arc; only equality between digests is ever read.
+    pub identity: String,
+    /// The `repository_id` of the store that recorded the evidence. On
+    /// attested evidence this names the recording store, not a runner arc
+    /// has not been told about.
+    pub producing_store: String,
 }
 
 /// The observed failure that a passing verification answers.
