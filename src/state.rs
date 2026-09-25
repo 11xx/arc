@@ -2173,6 +2173,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 target_branch,
                 target_before,
                 authorization,
+                already_contained: _,
             } => {
                 let mut closure = integrated_closure(
                     ev,

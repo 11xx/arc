@@ -2315,27 +2315,39 @@ fn integrate_one(
     checkout_writes(&wt, &old_target, evaluated_tree.as_deref())?;
     let msg = message.unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
 
-    if let Err(e) = gitio::git(
-        &wt,
-        &["merge", "--no-ff", "--no-edit", "-m", &msg, &approved_head],
-    ) {
-        let _ = gitio::git(&wt, &["merge", "--abort"]);
-        bail!("merge failed (aborted): {e}");
-    }
+    // Git reports the merge up to date and creates no merge commit when the
+    // target already contains the approved head. That is not an unexpected
+    // merge result: the target revision that holds the head is the
+    // integration, and no fresh merge exists for the parent check to
+    // describe.
+    let already_contained = gitio::is_ancestor(&ctx.cwd, &approved_head, &old_target)?;
+    let merged = if already_contained {
+        old_target.clone()
+    } else {
+        if let Err(e) = gitio::git(
+            &wt,
+            &["merge", "--no-ff", "--no-edit", "-m", &msg, &approved_head],
+        ) {
+            let _ = gitio::git(&wt, &["merge", "--abort"]);
+            bail!("merge failed (aborted): {e}");
+        }
 
-    let merged = gitio::head(&wt)?;
-    let parents = gitio::commit_parents(&wt, &merged)?;
-    if parents != vec![old_target.clone(), approved_head.clone()] {
-        bail!(
-            "merge commit {merged} has unexpected parents {parents:?}; \
-             expected [{old_target}, {approved_head}] — target moved during \
-             integration, inspect before trusting this merge"
-        );
-    }
+        let merged = gitio::head(&wt)?;
+        let parents = gitio::commit_parents(&wt, &merged)?;
+        if parents != vec![old_target.clone(), approved_head.clone()] {
+            bail!(
+                "merge commit {merged} has unexpected parents {parents:?}; \
+                 expected [{old_target}, {approved_head}] — target moved during \
+                 integration, inspect before trusting this merge"
+            );
+        }
+        merged
+    };
     // Parents say which commits were merged; the tree says what the merge
     // carries, and only the tree is what any gate ever ran against. A merge
     // resolving to something else ships content nothing evaluated, so it is
-    // undone rather than recorded.
+    // undone rather than recorded. An already-contained head ships the target
+    // tree the guard evaluated.
     if let Some(expected) = &evaluated_tree {
         let shipped = gitio::commit_tree(&wt, &merged)?;
         if &shipped != expected {
@@ -2357,6 +2369,7 @@ fn integrate_one(
             target_branch: target.clone(),
             target_before: old_target.clone(),
             authorization: Some(authorization),
+            already_contained,
         },
     );
     store.append_event(&ev)?;
@@ -2367,7 +2380,11 @@ fn integrate_one(
     drop(target_lock);
     release_retention_refs(ctx, &change_id, Some(&merged))?;
 
-    println!("integrated: {merged}");
+    if already_contained {
+        println!("integrated: {merged} (already contained {approved_head}; no merge created)");
+    } else {
+        println!("integrated: {merged}");
+    }
     println!("event: {}", ev.event_id);
     // Advice, not policy: arc holds no opinion about which changes deserve a
     // release line. It says only that this one closes with nothing for the
@@ -2572,21 +2589,32 @@ fn integrate_dry_run(
     let outcome = gitio::merge_outcome(&ctx.cwd, &target_head, &approved_head)?;
     checkout_writes(&target_worktree, &target_head, outcome.tree.as_deref())?;
     let conflicts = outcome.conflicts;
+    // Git would report the merge up to date and create no merge commit. A
+    // plan that named parents for a merge that cannot exist would describe a
+    // different integration than the one the guard would perform.
+    let already_contained = gitio::is_ancestor(&ctx.cwd, &approved_head, &target_head)?;
     let msg = message
         .map(str::to_string)
         .unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
 
     println!("dry-run: would integrate {} into {target}", st.change_id);
-    println!("  merge message: {msg}");
-    println!("  merge parents: [{target_head}, {approved_head}]");
-    println!(
-        "  merge result: {}",
-        if conflicts {
-            "conflict — rebase required"
-        } else {
-            "clean"
-        }
-    );
+    if already_contained {
+        println!(
+            "  merge: none — {target_head} already contains {approved_head}; the change closes \
+             there"
+        );
+    } else {
+        println!("  merge message: {msg}");
+        println!("  merge parents: [{target_head}, {approved_head}]");
+        println!(
+            "  merge result: {}",
+            if conflicts {
+                "conflict — rebase required"
+            } else {
+                "clean"
+            }
+        );
+    }
     if let Some(tree) = &outcome.tree {
         println!("  merge tree: {tree}");
     }
