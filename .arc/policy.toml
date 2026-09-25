@@ -33,6 +33,8 @@ paths = [
   "src/commands/review.rs",
   "src/commands/audit.rs",
   "src/commands/external.rs",
+  # `squash` moves a change's branch to a new commit and records the patchset.
+  "src/commands/squash.rs",
   "src/commands/policy_cmd.rs",
   # `begin` records the --dangerous escalation here, so this file decides a
   # change's own gate and must not sit outside it.

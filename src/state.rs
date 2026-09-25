@@ -5,7 +5,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CHANGE_STATE_SCHEMA: &str = "arc-state/1";
+pub const CHANGE_STATE_SCHEMA: &str = "arc-state/2";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Patchset {
@@ -353,6 +353,15 @@ impl VerdictEntry {
     pub fn author_assumed(&self) -> bool {
         author_assumed(self.on_behalf_of.as_deref(), self.actor_source)
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadyToSendEntry {
+    pub event_id: String,
+    pub patchset_id: String,
+    pub head: String,
+    pub history: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -867,6 +876,10 @@ pub struct ChangeState {
     pub verdicts: Vec<VerdictEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_verdicts: Vec<ExternalVerdictEntry>,
+    /// The latest head a contribution was checked against and found ready
+    /// to send. Absent until `integrate` runs under a contribution policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_to_send: Option<ReadyToSendEntry>,
     /// Post-integration audits, deliberately separate from `verdicts` so that
     /// "what shipped with what review" cannot be rewritten after the fact.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1324,6 +1337,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     findings: BTreeMap::new(),
                     verdicts: Vec::new(),
                     external_verdicts: Vec::new(),
+                    ready_to_send: None,
                     audit_verdicts: Vec::new(),
                     audit_findings: BTreeMap::new(),
                     debt: None,
@@ -1847,6 +1861,20 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     on_behalf_of: ev.on_behalf_of.clone(),
                     actor_source: ev.actor_source,
                     relation: relation.clone(),
+                    created_at: ev.created_at,
+                });
+            }
+            Payload::ReadyToSend {
+                patchset_id,
+                head,
+                history,
+                ..
+            } => {
+                state.ready_to_send = Some(ReadyToSendEntry {
+                    event_id: ev.event_id.clone(),
+                    patchset_id: patchset_id.clone(),
+                    head: head.clone(),
+                    history: history.clone(),
                     created_at: ev.created_at,
                 });
             }

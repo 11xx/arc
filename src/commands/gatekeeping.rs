@@ -2630,6 +2630,19 @@ fn integrate_one(
         );
     }
 
+    if let Some(contribution) = contribution_policy(ctx)? {
+        return record_ready_to_send(
+            ctx,
+            &store,
+            &st,
+            &target,
+            contribution,
+            &approved_patchset_id,
+            &approved_head,
+            authorization,
+        );
+    }
+
     let checkout = target_checkout(ctx, &st, &target)?;
     checkout_tracked_dirt(&checkout.path)?;
     let old_target = gitio::branch_head(&ctx.cwd, &target)?;
@@ -2917,6 +2930,92 @@ fn authorization_basis(
     })
 }
 
+/// The contribution declaration in force where the command runs, if any.
+fn contribution_policy(ctx: &Ctx) -> Result<Option<crate::policy::Contribution>> {
+    match gitio::toplevel(&ctx.cwd) {
+        Ok(top) => Ok(crate::policy::load(&top)?.contribution),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Refuse a head whose history is not the shape the receiver declared: a merge
+/// commit anywhere since the base, or more than one commit when the history
+/// is squashed.
+fn contribution_shape(
+    ctx: &Ctx,
+    target: &str,
+    head: &str,
+    history: crate::policy::History,
+) -> Result<()> {
+    let target_head = gitio::branch_head(&ctx.cwd, target)?;
+    let base = gitio::merge_base(&ctx.cwd, &target_head, head)?;
+    let range = format!("{base}..{head}");
+    let commits = gitio::git(&ctx.cwd, &["rev-list", &range])?;
+    let count = commits.lines().filter(|line| !line.is_empty()).count();
+    if count == 0 {
+        bail!("{head} adds no commit to {target}; there is nothing to send");
+    }
+    let merges = gitio::git(&ctx.cwd, &["rev-list", "--merges", &range])?;
+    if let Some(merge) = merges.lines().find(|line| !line.is_empty()) {
+        bail!(
+            "contributed history carries merge commit {merge}; a receiver's branch takes \
+             no merge commits — rebase the change onto {target}"
+        );
+    }
+    if history == crate::policy::History::Squash && count > 1 {
+        bail!(
+            "contribution history is squash and the change has {count} commits since \
+             {target}; run `arc squash` to send one"
+        );
+    }
+    Ok(())
+}
+
+/// Record that a contributed change passed every integration check at its
+/// approved head, instead of merging it. The receiver merges, and its
+/// decision closes the change.
+#[allow(clippy::too_many_arguments)]
+fn record_ready_to_send(
+    ctx: &Ctx,
+    store: &Store,
+    st: &ChangeState,
+    target: &str,
+    contribution: crate::policy::Contribution,
+    patchset_id: &str,
+    head: &str,
+    authorization: AuthorizationBasis,
+) -> Result<i32> {
+    contribution_shape(ctx, target, head, contribution.history)?;
+    if st
+        .ready_to_send
+        .as_ref()
+        .is_some_and(|ready| ready.head == head)
+    {
+        println!("{}: already ready to send at {head}", st.change_id);
+        return Ok(0);
+    }
+    let payload = Payload::ReadyToSend {
+        patchset_id: patchset_id.to_string(),
+        head: head.to_string(),
+        history: contribution.history.as_str().to_string(),
+        authorization,
+    };
+    let event = ctx.event(store, &st.change_id, payload);
+    store.append_event(&event)?;
+    println!(
+        "ready to send: {} at {head} ({} history); nothing was merged",
+        st.change_id,
+        contribution.history.as_str()
+    );
+    println!(
+        "Next: send {} to the receiver, then record its decision with \
+         `arc external verdict` or `arc close --assert-integrated`",
+        st.branch
+    );
+    println!("event: {}", event.event_id);
+    Ok(0)
+}
+
 fn integrate_dry_run(
     ctx: &Ctx,
     store: &Store,
@@ -2928,6 +3027,30 @@ fn integrate_dry_run(
     // undeclared actor, and a target worktree that is missing or dirty. A dry
     // run that skipped them would report a merge the real path refuses.
     ctx.ensure_declared_actor(store)?;
+    if let Some(contribution) = contribution_policy(ctx)? {
+        let report = ctx.report(store, st)?;
+        if !report.integrate_ready {
+            eprint!("{}", render::blocker_explanation(st, &report));
+            println!(
+                "dry-run: would not record {} ready to send ({})",
+                st.change_id, report.ready_reason
+            );
+            return Ok(status::check_exit_code(&report));
+        }
+        let head = st
+            .latest_patchset()
+            .context("no patchset recorded")?
+            .head
+            .clone();
+        contribution_shape(ctx, target, &head, contribution.history)?;
+        println!(
+            "dry-run: would record {} ready to send at {} ({} history); nothing would be merged",
+            st.change_id,
+            &head[..head.len().min(12)],
+            contribution.history.as_str()
+        );
+        return Ok(0);
+    }
     let checkout = target_checkout(ctx, st, target)?;
     checkout_tracked_dirt(&checkout.path)?;
     let report = ctx.report(store, st)?;
