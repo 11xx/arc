@@ -397,6 +397,11 @@ RUN A CHANGE
                                      Relinquish authority to a paired recipient.
   arc replica authority reclaim --because <reason>
                                      Reclaim an unresolved offer with a reason.
+  arc journal export <file>... --output <file>
+                                     Export selected journal artifacts with
+                                     the events recorded about them.
+  arc journal import <file> [--dry-run]
+                                     File a journal bundle into this journal.
   arc audit <change> --verdict <v>   Review an already-integrated revision.
   arc close                          Terminal outcome arc did not merge itself.
 
@@ -471,6 +476,19 @@ PAIR REPLICA STORES
   Imports have a dry-run preview, are idempotent, and record a receipt with the
   source replica and bundle digest. A paired replica without authority is
   refused by `integrate`.
+
+  Journal artifacts travel between paired replicas as a versioned bundle:
+  each body, the events recorded about it, its digest, the exporting replica,
+  and every artifact the selection references by filename. An import is
+  all-or-nothing: the whole bundle is validated before anything is written.
+  An artifact the receiving journal holds in a different storage tier, or at a
+  different digest, refuses the whole import; an artifact that is not there
+  lands in the hot journal or the cold archive the bundle records, and its
+  events keep the identity they were recorded under. A live claim arriving on
+  an artifact a live local claim holds is reported as a contest naming both
+  replicas, and nothing on either claim's behalf is recorded. Importing the
+  same bundle twice changes nothing; the receipt names the source replica and
+  bundle digest.
 
 KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)
   arc keep --kind rejected   --body "<why it failed>" --evidence "<what showed it>"
