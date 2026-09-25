@@ -194,3 +194,33 @@ fn exported_changes_carry_their_cross_links() {
     assert_eq!(event["thread"]["scheme"], "t3", "{event}");
     assert_eq!(event["thread"]["id"], "exported-1", "{event}");
 }
+
+#[test]
+fn done_without_declared_gates_still_records_the_links() {
+    let repo = Repo::new();
+    let file = journal_file(&repo, "gateless-framing", "# Framing a gateless run\n");
+    let change_id = begin(&repo, "gateless-links");
+    repo.commit(&repo.root, "work.txt", "work\n", "test: work");
+
+    // With no declared gate there is nothing to run, and `done` says so. The
+    // links are still part of the patchset it snapshots.
+    repo.arc(&repo.root)
+        .args([
+            "done",
+            "gateless-links",
+            "--journal-ref",
+            &file,
+            "--thread",
+            "t3:gateless-1",
+        ])
+        .assert()
+        .code(3)
+        .stdout(predicates::str::contains(
+            "no gates declared for profile local; nothing was run",
+        ));
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", &change_id]));
+    assert_eq!(status["latest_patchset"]["journal_refs"][0]["file"], file);
+    assert_eq!(status["latest_patchset"]["thread"]["scheme"], "t3");
+    assert_eq!(status["latest_patchset"]["thread"]["id"], "gateless-1");
+}
