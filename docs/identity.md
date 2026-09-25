@@ -15,13 +15,14 @@ file to fill omitted harness, session, and model values from the running
 harness's own session store. Detection is off by default and does not mix a
 detected session into a different explicitly selected harness.
 
-The store is the one the harness itself would read. Claude Code relocates its
-configuration directory — session history included — under
-`CLAUDE_CONFIG_DIR`, Codex under `CODEX_HOME`, and Pi under
-`PI_CODING_AGENT_SESSION_DIR` or `PI_CODING_AGENT_DIR`; each replaces the
-default under `$HOME` rather than adding to it. A session recorded under more
-than one Claude project directory resolves to the most recently modified
-recording, with equal timestamps falling to path order.
+The store is the one the harness itself would read, and the tapes library arc
+links carries that knowledge: Claude Code relocates its configuration
+directory — session history included — under `CLAUDE_CONFIG_DIR`, Codex under
+`CODEX_HOME`, and Pi under `PI_CODING_AGENT_SESSION_DIR` or
+`PI_CODING_AGENT_DIR`; each replaces the default under `$HOME` rather than
+adding to it. A session id resolves against those stores by exact match. A
+session recorded under more than one Claude project directory resolves to the
+most recently modified recording, with equal timestamps falling to path order.
 
 A detected session id is resolved against that store, and the answer is
 reported: `arc env` says whether the store corroborates the session, and every

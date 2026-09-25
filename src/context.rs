@@ -17,7 +17,6 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Environment variables recognized for opt-in identity detection, in
 /// precedence order. Explicit identity always wins over detected values.
@@ -220,20 +219,11 @@ pub fn detect_identity() -> Option<DetectedIdentity> {
             if session.is_empty() {
                 continue;
             }
-            let (resolution, model) = match harness {
-                "claude" | "codex" | "pi" => {
-                    let transcript = session_store::transcript_path(harness, &session);
-                    let resolution = match transcript {
-                        Some(_) => SessionResolution::Corroborated,
-                        None => SessionResolution::Uncorroborated,
-                    };
-                    let model = transcript
-                        .as_deref()
-                        .and_then(|path| detect_model(harness, path));
-                    (resolution, model)
-                }
-                "opencode" => detect_opencode_record(&session),
-                _ => (SessionResolution::Uncorroborated, None),
+            let (found, model) = session_store::session_model(harness, &session);
+            let resolution = if found {
+                SessionResolution::Corroborated
+            } else {
+                SessionResolution::Uncorroborated
             };
             return Some(DetectedIdentity {
                 harness: harness.to_string(),
@@ -307,167 +297,6 @@ fn session_resolution_line(harness: &str, resolution: SessionResolution) -> Stri
             "session uncorroborated: the {harness} session store resolved no recording for this id"
         ),
     }
-}
-
-/// Best-effort model detection for `arc env`: read the resolved transcript
-/// and extract the model (plus effort, where the store records one).
-/// Detection is a convenience layered on the explicit `ARC_MODEL` contract —
-/// every failure mode here is a silent omission, never an error; whether the
-/// store backs the session is reported separately.
-fn detect_model(harness: &str, transcript: &Path) -> Option<String> {
-    match harness {
-        "claude" => detect_claude_model(transcript),
-        "codex" => detect_codex_model(transcript),
-        "pi" => detect_pi_model(transcript),
-        _ => None,
-    }
-}
-
-/// `<claude store>/<cwd-slug>/<session>.jsonl`: assistant messages carry
-/// `message.model` beside the turn's `perTurnEffort` (or the session-wide
-/// `effort`); the newest one wins, combined as `model#effort` when both
-/// exist. Entries Claude Code writes itself for API errors carry the model
-/// `<synthetic>` and no effort, so they are skipped.
-fn detect_claude_model(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    for line in text.lines().rev() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let Some(model) = value["message"]["model"].as_str() else {
-            continue;
-        };
-        if model == "<synthetic>" {
-            continue;
-        }
-        return Some(
-            match value["perTurnEffort"]
-                .as_str()
-                .or_else(|| value["effort"].as_str())
-            {
-                Some(effort) => format!("{model}#{effort}"),
-                None => model.to_string(),
-            },
-        );
-    }
-    None
-}
-
-/// `$CODEX_HOME/sessions/<y>/<m>/<d>/rollout-*<session>.jsonl` (falling back
-/// to `~/.codex`): the newest `turn_context` payload carries `model` and
-/// `effort`; combined as `model#effort` when both exist. Older effort fields
-/// remain readable for compatibility.
-fn detect_codex_model(file: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(file).ok()?;
-    let mut model: Option<String> = None;
-    let mut effort: Option<String> = None;
-    for line in text.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if value["type"] != "turn_context" {
-            continue;
-        }
-        let payload = &value["payload"];
-        if let Some(m) = payload["model"].as_str() {
-            model = Some(m.to_string());
-        }
-        if let Some(e) = payload["effort"]
-            .as_str()
-            .or_else(|| payload["reasoning_effort"].as_str())
-            .or_else(|| payload["collaboration_mode"]["settings"]["reasoning_effort"].as_str())
-        {
-            effort = Some(e.to_string());
-        }
-    }
-    let model = model?;
-    Some(match effort {
-        Some(effort) => format!("{model}#{effort}"),
-        None => model,
-    })
-}
-
-/// The OpenCode store's answer for one session: whether it holds a row for
-/// the id, and the model that row records when it parses. Both stable and
-/// preview store names are checked. `sqlite3` is an optional best-effort
-/// reader: its absence resolves no row without making `arc env` fail.
-fn detect_opencode_record(session: &str) -> (SessionResolution, Option<String>) {
-    let session = session.replace('\'', "''");
-    let query = format!("SELECT model FROM session WHERE id = '{session}' LIMIT 1;");
-    for path in session_store::opencode_databases().into_iter().flatten() {
-        if !path.is_file() {
-            continue;
-        }
-        let output = match Command::new("sqlite3")
-            .arg("-noheader")
-            .arg(&path)
-            .arg(&query)
-            .output()
-        {
-            Ok(output) => output,
-            Err(_) => continue,
-        };
-        if !output.status.success() {
-            continue;
-        }
-        let Ok(raw) = String::from_utf8(output.stdout) else {
-            continue;
-        };
-        let raw = raw.trim();
-        if raw.is_empty() {
-            // A successful query returning nothing is this database holding
-            // no row for the id, not an answer about the session.
-            continue;
-        }
-        return (SessionResolution::Corroborated, parse_opencode_model(raw));
-    }
-    (SessionResolution::Uncorroborated, None)
-}
-
-fn parse_opencode_model(raw: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let model = value["id"].as_str()?.trim();
-    if model.is_empty() {
-        return None;
-    }
-    Some(
-        match value["variant"].as_str().filter(|value| !value.is_empty()) {
-            Some(effort) => format!("{model}#{effort}"),
-            None => model.to_string(),
-        },
-    )
-}
-
-/// Pi session JSONL carries model and thinking-level changes. The current Pi
-/// runtime bridge exposes its native ID as `PI_SESSION_ID`; custom agent and
-/// session roots are honored before the default store.
-fn detect_pi_model(file: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(file).ok()?;
-    let mut model: Option<String> = None;
-    let mut effort: Option<String> = None;
-    for line in text.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        match value["type"].as_str() {
-            Some("model_change") => {
-                if let Some(value) = value["modelId"].as_str() {
-                    model = Some(value.to_string());
-                }
-            }
-            Some("thinking_level_change") => {
-                if let Some(value) = value["thinkingLevel"].as_str() {
-                    effort = Some(value.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    let model = model?;
-    Some(match effort {
-        Some(effort) => format!("{model}#{effort}"),
-        None => model,
-    })
 }
 
 pub(crate) fn shell_quote(value: &str) -> String {

@@ -1,6 +1,5 @@
 use super::common::*;
 use predicates::prelude::*;
-use std::os::unix::fs::PermissionsExt;
 
 fn begin(repo: &Repo, slug: &str) -> (String, PathBuf) {
     let output = stdout(repo.arc(&repo.root).args(["begin", slug]));
@@ -24,29 +23,8 @@ fn claim_from_session(repo: &Repo, slug: &str, harness: &str, session: &str) {
         .success();
 }
 
-/// A `PATH` with a stub `tapes` first that prints `document`, so one recording
-/// can be read through both readers without a real tapes installation.
-fn tapes_path(repo: &Repo, document: &str) -> String {
-    let document_path = repo.home.join("tapes-document.json");
-    fs::write(&document_path, document).unwrap();
-    let tapes_bin = repo.home.join("tapes-bin");
-    fs::create_dir_all(&tapes_bin).unwrap();
-    let tapes = tapes_bin.join("tapes");
-    fs::write(
-        &tapes,
-        format!("#!/bin/sh\ncat '{}'\n", document_path.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&tapes, fs::Permissions::from_mode(0o755)).unwrap();
-    format!(
-        "{}:{}",
-        tapes_bin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    )
-}
-
-/// A `PATH` with only `git` on it, so no `tapes` reader is reachable.
-fn native_only_path(repo: &Repo) -> PathBuf {
+/// A `PATH` with only `git` on it, so nothing named `tapes` is reachable.
+fn path_without_tapes(repo: &Repo) -> PathBuf {
     let without_tapes = repo.home.join("without-tapes-bin");
     fs::create_dir_all(&without_tapes).unwrap();
     let git = std::env::split_paths(&std::env::var_os("PATH").expect("PATH is set"))
@@ -212,59 +190,52 @@ fn rescue_json_uses_versioned_schema() {
     assert!(value.get("transcript").is_none());
 }
 
+/// One recording, read through the linked tapes library. Nothing named
+/// `tapes` is on `PATH`, and the answer does not depend on whether it is:
+/// location and shape knowledge travel in the binary's own dependencies.
 #[test]
-fn rescue_transcript_prefers_tapes() {
+fn transcript_reads_a_recording_through_the_linked_library() {
     let repo = Repo::new();
-    let session = "opencode-dead-session";
-    let (change_id, worktree) = begin(&repo, "tapes-transcript");
-    claim_from_session(&repo, "tapes-transcript", "opencode", session);
-
-    let path_with_tapes = tapes_path(
-        &repo,
+    let session = "library-dead-session";
+    let (change_id, worktree) = begin(&repo, "library-transcript");
+    claim_from_session(&repo, "library-transcript", "claude", session);
+    let project = repo.home.join(".claude/projects/-test-repo");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{session}.jsonl")),
         concat!(
-            "{\"schema\":\"tapes-session/1\",\"session\":{},\"turns\":[",
-            "{\"role\":\"user\",\"text\":\"fake question\",\"ts\":\"1\"},",
-            "{\"role\":\"system\",\"text\":\"ignored\",\"ts\":\"2\"},",
-            "{\"role\":\"assistant\",\"text\":\"fake answer\",\"ts\":\"3\"}",
-            "],\"truncated\":false}",
+            "{\"type\":\"user\",\"timestamp\":\"1\",\"message\":{\"role\":\"user\",\"content\":\"the question\"}}\n",
+            "{\"type\":\"system\",\"timestamp\":\"2\",\"message\":{\"role\":\"system\",\"content\":\"kept out of the operator view\"}}\n",
+            "{\"type\":\"assistant\",\"timestamp\":\"3\",\"message\":{\"role\":\"assistant\",\"content\":\"the answer\"}}\n",
         ),
-    );
+    )
+    .unwrap();
 
-    let output = stdout(repo.arc(&worktree).env("PATH", path_with_tapes).args([
-        "rescue",
-        change_id.as_str(),
-        "--transcript",
-        "--json",
-    ]));
-    let value: serde_json::Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(value["transcript"]["source"], "tapes");
-    assert_eq!(value["transcript"]["count"], 2);
-    assert_eq!(value["transcript"]["turns"][0]["text"], "fake question");
-    assert_eq!(value["transcript"]["turns"][1]["text"], "fake answer");
+    let without_tapes = path_without_tapes(&repo);
+    let read = |path: Option<&Path>| -> serde_json::Value {
+        let mut command = repo.arc(&worktree);
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let output = stdout(command.args(["rescue", change_id.as_str(), "--transcript", "--json"]));
+        serde_json::from_str(&output).unwrap()
+    };
 
-    let path_without_tapes = native_only_path(&repo);
-
-    let output = repo
-        .arc(&worktree)
-        .env("PATH", &path_without_tapes)
-        .args(["rescue", change_id.as_str(), "--transcript", "--json"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["transcript"]["count"], 0);
-    assert!(value["transcript"]["turns"]
-        .as_array()
-        .is_some_and(Vec::is_empty));
+    let inherited = read(None);
+    let restricted = read(Some(&without_tapes));
+    assert_eq!(inherited["transcript"]["source"], "tapes");
+    assert_eq!(inherited["transcript"]["count"], 2);
+    assert_eq!(inherited["transcript"]["turns"][0]["text"], "the question");
+    assert_eq!(inherited["transcript"]["turns"][1]["text"], "the answer");
+    assert_eq!(inherited, restricted);
 
     repo.arc(&worktree)
-        .env("PATH", &path_without_tapes)
+        .env("PATH", &without_tapes)
         .args(["rescue", change_id.as_str(), "--transcript"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Unavailable: no transcript for the claimed session in tapes or on disk",
-        ));
+        .stdout(predicate::str::contains("Source: tapes"))
+        .stdout(predicate::str::contains("Turns: 2"));
 }
 
 #[test]
@@ -303,17 +274,23 @@ fn claude_transcript_returns_newest_window_oldest_first() {
 #[test]
 fn codex_rollout_yields_operator_turns() {
     let repo = Repo::new();
-    let session = "codex-dead-session";
+    let session = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
     let (_, worktree) = begin(&repo, "codex-transcript");
     claim_from_session(&repo, "codex-transcript", "codex", session);
     let codex_home = repo.home.join("codex-state");
     let day = codex_home.join("sessions/2026/07/24");
     fs::create_dir_all(&day).unwrap();
     fs::write(
-        day.join(format!("rollout-{session}.jsonl")),
+        day.join(format!("rollout-2026-07-24T00-00-00-{session}.jsonl")),
         concat!(
-            "{\"type\":\"response_item\",\"timestamp\":\"1\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"do the work\"}]}}\n",
-            "{\"type\":\"response_item\",\"timestamp\":\"2\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"work done\"}]}}\n",
+            "{\"type\":\"session_meta\",\"timestamp\":\"2026-07-24T00:00:00Z\",",
+            "\"payload\":{\"id\":\"019f7890-5c01-7ec1-9240-2eba1613e5d2\"}}\n",
+            "{\"type\":\"response_item\",\"timestamp\":\"2026-07-24T00:00:01Z\",",
+            "\"payload\":{\"type\":\"message\",\"role\":\"user\",",
+            "\"content\":[{\"type\":\"input_text\",\"text\":\"do the work\"}]}}\n",
+            "{\"type\":\"response_item\",\"timestamp\":\"2026-07-24T00:00:02Z\",",
+            "\"payload\":{\"type\":\"message\",\"role\":\"assistant\",",
+            "\"content\":[{\"type\":\"output_text\",\"text\":\"work done\"}]}}\n",
         ),
     )
     .unwrap();
@@ -324,6 +301,7 @@ fn codex_rollout_yields_operator_turns() {
         "--json",
     ]));
     let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["transcript"]["source"], "tapes");
     assert_eq!(value["transcript"]["turns"][0]["text"], "do the work");
     assert_eq!(value["transcript"]["turns"][1]["text"], "work done");
 }
@@ -335,17 +313,17 @@ fn missing_transcript_is_reported_without_failure() {
     claim_from_session(&repo, "missing-transcript", "claude", "missing-session");
 
     repo.arc(&worktree)
-        .env("PATH", native_only_path(&repo))
+        .env("PATH", path_without_tapes(&repo))
         .args(["rescue", "--transcript"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Unavailable: no transcript for the claimed session in tapes or on disk",
+            "Unavailable: no recording of the claimed session in its harness's store",
         ));
 
     let output = stdout(
         repo.arc(&worktree)
-            .env("PATH", native_only_path(&repo))
+            .env("PATH", path_without_tapes(&repo))
             .args(["rescue", "--transcript", "--json"]),
     );
     let value: serde_json::Value = serde_json::from_str(&output).unwrap();
@@ -408,13 +386,14 @@ fn malformed_transcript_lines_are_skipped() {
     assert_eq!(value["transcript"]["turns"][0]["text"], "kept");
 }
 
-/// One recording answers the same through a stub `tapes` and through arc's
-/// own reader, and `--tail` counts the same projection on both paths.
+/// The operator projection keeps every operator turn and the assistant's last
+/// word, and `--tail` counts turns of that projection rather than records of
+/// the recording.
 #[test]
-fn transcript_readers_agree_on_one_recording() {
+fn transcript_projects_operator_turns_before_tail() {
     let repo = Repo::new();
     let session = "agree-dead-session";
-    let (_, worktree) = begin(&repo, "agreement-transcript");
+    let (change_id, worktree) = begin(&repo, "agreement-transcript");
     claim_from_session(&repo, "agreement-transcript", "claude", session);
     let project = repo.home.join(".claude/projects/-test-repo");
     fs::create_dir_all(&project).unwrap();
@@ -430,39 +409,24 @@ fn transcript_readers_agree_on_one_recording() {
         ),
     )
     .unwrap();
-    let with_tapes = tapes_path(
-        &repo,
-        concat!(
-            "{\"schema\":\"tapes-session/1\",\"session\":{},\"turns\":[",
-            "{\"role\":\"user\",\"text\":\"q1\",\"ts\":\"1\"},",
-            "{\"role\":\"assistant\",\"text\":\"a1\",\"ts\":\"2\"},",
-            "{\"role\":\"user\",\"text\":\"q2\",\"ts\":\"3\"},",
-            "{\"role\":\"assistant\",\"text\":\"a2\",\"ts\":\"4\"},",
-            "{\"role\":\"user\",\"text\":\"q3\",\"ts\":\"5\"},",
-            "{\"role\":\"assistant\",\"text\":\"a3\",\"ts\":\"6\"}",
-            "],\"truncated\":false}",
-        ),
-    );
-    let without_tapes = native_only_path(&repo);
-    let read = |path: &Path, tail: Option<&str>| -> serde_json::Value {
-        let mut args = vec!["rescue", "--transcript", "--json"];
+    let without_tapes = path_without_tapes(&repo);
+    let read = |path: Option<&Path>, tail: Option<&str>| -> serde_json::Value {
+        let mut args = vec!["rescue", change_id.as_str(), "--transcript", "--json"];
         if let Some(tail) = tail {
             args.extend(["--tail", tail]);
         }
-        let output = stdout(repo.arc(&worktree).env("PATH", path).args(&args));
+        let mut command = repo.arc(&worktree);
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let output = stdout(command.args(&args));
         serde_json::from_str(&output).unwrap()
     };
 
-    let through_tapes = read(Path::new(&with_tapes), None);
-    let through_native = read(&without_tapes, None);
-    assert_eq!(through_tapes["transcript"]["source"], "tapes");
-    assert_eq!(through_native["transcript"]["source"], "native");
-    assert_eq!(through_tapes["transcript"]["count"], 4);
-    assert_eq!(
-        through_tapes["transcript"]["turns"],
-        through_native["transcript"]["turns"]
-    );
-    let texts: Vec<&str> = through_native["transcript"]["turns"]
+    let whole = read(None, None);
+    assert_eq!(whole["transcript"]["source"], "tapes");
+    assert_eq!(whole["transcript"]["count"], 4);
+    let texts: Vec<&str> = whole["transcript"]["turns"]
         .as_array()
         .unwrap()
         .iter()
@@ -470,22 +434,17 @@ fn transcript_readers_agree_on_one_recording() {
         .collect();
     assert_eq!(texts, ["q1", "q2", "q3", "a3"]);
 
-    let tapes_tail = read(Path::new(&with_tapes), Some("3"));
-    let native_tail = read(&without_tapes, Some("3"));
-    assert_eq!(tapes_tail["transcript"]["count"], 3);
-    assert_eq!(
-        tapes_tail["transcript"]["turns"],
-        native_tail["transcript"]["turns"]
-    );
-
-    repo.arc(&worktree)
-        .env("PATH", Path::new(&with_tapes))
-        .args(["rescue", "--transcript"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Source: tapes (native: not consulted)",
-        ));
+    let tail = read(None, Some("3"));
+    assert_eq!(tail["transcript"]["count"], 3);
+    let tail_texts: Vec<&str> = tail["transcript"]["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|turn| turn["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(tail_texts, ["q2", "q3", "a3"]);
+    assert_eq!(read(Some(&without_tapes), None), whole);
+    assert_eq!(read(Some(&without_tapes), Some("3")), tail);
 }
 
 /// A recording whose newest operator turn lies before the read window reports
@@ -512,8 +471,8 @@ fn transcript_reports_text_outside_the_read_window() {
     }
     fs::write(project.join(format!("{session}.jsonl")), recording).unwrap();
 
-    let native_only = native_only_path(&repo);
-    let output = stdout(repo.arc(&worktree).env("PATH", &native_only).args([
+    let without_tapes = path_without_tapes(&repo);
+    let output = stdout(repo.arc(&worktree).env("PATH", &without_tapes).args([
         "rescue",
         "--transcript",
         "--json",
@@ -535,7 +494,7 @@ fn transcript_reports_text_outside_the_read_window() {
     assert!(value["transcript"]["turns"].as_array().unwrap().is_empty());
 
     repo.arc(&worktree)
-        .env("PATH", &native_only)
+        .env("PATH", &without_tapes)
         .args(["rescue", "--transcript"])
         .assert()
         .success()
@@ -560,7 +519,7 @@ fn short_recording_reports_no_bound() {
     .unwrap();
 
     repo.arc(&worktree)
-        .env("PATH", native_only_path(&repo))
+        .env("PATH", path_without_tapes(&repo))
         .args(["rescue", "--transcript"])
         .assert()
         .success()
