@@ -101,6 +101,24 @@ cannot be the independent party to an approval.
 Events written before arc recorded provenance carry no source; that is
 *unknown* rather than assumed, and is compared by name as it always was.
 
+### External verdicts
+
+`arc external verdict` records an upstream decision with its own `source`,
+decision-maker, opaque reference, and exact revision. The `arc status`, `arc
+show`, `arc review`, and `arc findings` views keep it labelled as external;
+Arc does not report it as a verdict it observed. It gates only when its
+revision equals the current patchset head. A changes-requested external verdict
+can include findings. A rejected verdict at the current patchset closes the
+change as abandoned and keeps the external reference on the closure.
+
+An external approval can satisfy the approval gate where independent review is
+not required. On a dangerous path, it never satisfies
+`forbid_self_approval`: Arc cannot check the external identity, so a separate
+local independent verdict is required. When the upstream accepts and integrates
+the contribution, `arc close --assert-integrated <revision>
+--external-reference <reference>` records the asserted integration and its
+external provenance. Arc does not fetch the reference.
+
 Set `[policy] require_declared_actor = true` to refuse an event whose effective
 author nobody claimed. `begin`, `verify`, and `integrate` check before they
 create a branch, run a command, or merge, so a refusal never lands after the

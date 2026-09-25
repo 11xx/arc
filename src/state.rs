@@ -5,6 +5,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub const CHANGE_STATE_SCHEMA: &str = "arc-state/1";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Patchset {
     pub id: String,
@@ -351,6 +353,19 @@ impl VerdictEntry {
     pub fn author_assumed(&self) -> bool {
         author_assumed(self.on_behalf_of.as_deref(), self.actor_source)
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExternalVerdictEntry {
+    pub source: &'static str,
+    pub event_id: String,
+    pub revision: String,
+    pub verdict: crate::model::ExternalVerdict,
+    pub decided_by: String,
+    pub reference: String,
+    pub findings: Vec<crate::model::ExternalFinding>,
+    pub recorded_by: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 trait TipEntry {
@@ -762,6 +777,9 @@ pub struct ClosureState {
     /// events written before arc recorded it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization: Option<crate::model::AuthorizationBasis>,
+    /// External reference associated with a recorded receiver outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_reference: Option<String>,
     pub event_id: String,
     #[serde(skip)]
     pub created_at: DateTime<Utc>,
@@ -789,6 +807,7 @@ fn integrated_closure(
         target_branch: Some(target_branch.to_string()),
         target_before,
         authorization: None,
+        external_reference: None,
         event_id: ev.event_id.clone(),
         created_at: ev.created_at,
     }
@@ -811,6 +830,7 @@ pub enum IntegrationKind {
 /// ULID order. The event ledger is authoritative; this is a view.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChangeState {
+    pub schema: &'static str,
     pub change_id: String,
     pub slug: String,
     pub title: String,
@@ -845,6 +865,8 @@ pub struct ChangeState {
     pub comments: Vec<CommentEntry>,
     pub findings: BTreeMap<String, FindingState>,
     pub verdicts: Vec<VerdictEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_verdicts: Vec<ExternalVerdictEntry>,
     /// Post-integration audits, deliberately separate from `verdicts` so that
     /// "what shipped with what review" cannot be rewritten after the fact.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -931,6 +953,9 @@ impl ChangeState {
         }
         for audit in &self.audit_verdicts {
             note(&audit.revision, "audit".to_string());
+        }
+        for external in &self.external_verdicts {
+            note(&external.revision, "external verdict".to_string());
         }
         if let Some(waiver) = &self.dirty_tree_waiver {
             note(&waiver.revision, "dirty-tree waiver".to_string());
@@ -1116,6 +1141,17 @@ impl ChangeState {
         }
     }
 
+    /// Most recent external decision that names this exact revision.
+    pub fn latest_external_verdict_for_revision(
+        &self,
+        revision: &str,
+    ) -> Option<&ExternalVerdictEntry> {
+        self.external_verdicts
+            .iter()
+            .rev()
+            .find(|verdict| verdict.revision == revision)
+    }
+
     pub fn open_blocking_findings(&self) -> Vec<&FindingState> {
         self.findings
             .values()
@@ -1256,6 +1292,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 dangerous,
             } => (
                 ChangeState {
+                    schema: CHANGE_STATE_SCHEMA,
                     dangerous: *dangerous,
                     dirty_tree_waiver: None,
                     iterating: false,
@@ -1286,6 +1323,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     comments: Vec::new(),
                     findings: BTreeMap::new(),
                     verdicts: Vec::new(),
+                    external_verdicts: Vec::new(),
                     audit_verdicts: Vec::new(),
                     audit_findings: BTreeMap::new(),
                     debt: None,
@@ -1812,6 +1850,48 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     created_at: ev.created_at,
                 });
             }
+            Payload::ExternalVerdictRecorded {
+                revision,
+                verdict,
+                decided_by,
+                reference,
+                findings,
+            } => {
+                let closes_rejected_patchset = *verdict == crate::model::ExternalVerdict::Rejected
+                    && state
+                        .latest_patchset()
+                        .is_some_and(|patchset| patchset.head == *revision);
+                let closed_patchset = closes_rejected_patchset
+                    .then(|| state.latest_patchset().cloned())
+                    .flatten();
+                state.external_verdicts.push(ExternalVerdictEntry {
+                    source: "external",
+                    event_id: ev.event_id.clone(),
+                    revision: revision.clone(),
+                    verdict: *verdict,
+                    decided_by: decided_by.clone(),
+                    reference: reference.clone(),
+                    findings: findings.clone(),
+                    recorded_by: ev.actor.clone(),
+                    created_at: ev.created_at,
+                });
+                if let Some(patchset) = closed_patchset {
+                    state.closure = Some(ClosureState {
+                        outcome: Closure::Abandoned,
+                        integrated_commit: None,
+                        superseded_by: None,
+                        integration: None,
+                        source_patchset_id: Some(patchset.id),
+                        source_head: Some(revision.clone()),
+                        target_branch: None,
+                        target_before: None,
+                        authorization: None,
+                        external_reference: Some(reference.clone()),
+                        event_id: ev.event_id.clone(),
+                        created_at: ev.created_at,
+                    });
+                }
+            }
             Payload::DirtyTreeWaived { reason, revision } => {
                 state.dirty_tree_waiver = Some(DirtyTreeWaiver {
                     event_id: ev.event_id.clone(),
@@ -2182,6 +2262,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     target_branch: None,
                     target_before: None,
                     authorization: None,
+                    external_reference: None,
                     event_id: ev.event_id.clone(),
                     created_at: ev.created_at,
                 });
@@ -2205,6 +2286,10 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     Some(target_before.clone()),
                 );
                 closure.authorization = authorization.clone();
+                closure.external_reference = authorization
+                    .as_ref()
+                    .and_then(|basis| basis.external_verdict.as_ref())
+                    .map(|verdict| verdict.reference.clone());
                 state.closure = Some(closure);
             }
             Payload::IntegrationAsserted {
@@ -2213,8 +2298,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 source_head,
                 target_branch,
                 target_before,
+                external_reference,
             } => {
-                state.closure = Some(integrated_closure(
+                let mut closure = integrated_closure(
                     ev,
                     IntegrationKind::Asserted,
                     integrated_commit,
@@ -2222,7 +2308,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     source_head,
                     target_branch,
                     target_before.clone(),
-                ));
+                );
+                closure.external_reference = external_reference.clone();
+                state.closure = Some(closure);
             }
             Payload::ForgeProjection {
                 host,

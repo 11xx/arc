@@ -36,6 +36,12 @@ environment probe is a conflict reported by
 `arc doctor`; `arc check` and gate execution refuse it and identify both files.
 Gate listings name the file or files that declared each command.
 
+An external approval recorded with `arc external verdict` applies only to the
+patchset whose head equals the decision's revision. It can satisfy the approval
+gate where independent review is not required. On a dangerous path it cannot
+satisfy `forbid_self_approval`, because Arc cannot verify the external
+reviewer's identity.
+
 A gate runs in the checkout that holds the change. `verify`, `snapshot
 --verify`, `done`, and `rebase --verify` execute the command in the change's
 recorded worktree and record the evidence at that worktree's head, whichever
