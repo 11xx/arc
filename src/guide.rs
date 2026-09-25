@@ -842,15 +842,20 @@ RULES THAT CHANGE WHAT YOU DO
     the one it just landed is now evaluating a different merge.
   - A gate may declare an environment probe: a command whose output
     identifies the environment the gate's evidence applies to. `verify` runs
-    the probe beside the gate and records a digest of its output on the
-    evidence. `status` runs the probe where it is evaluating and counts the
-    evidence only when the two digests agree; a receipt from another
-    environment is reported inapplicable, naming both identities, rather than
-    missing. Evidence that records no environment identity satisfies only
-    gates that declare no probe, and a gate that declares none takes evidence
-    from any environment. An attested run happened where arc observes
-    nothing, so `--attest` takes the identity with `--environment
-    <IDENTITY>`.
+    the probe beside the gate and records its identity on the evidence. The
+    identity is a digest of the probe's stdout, and only a successful run
+    that prints something yields one; a failed, empty, or overrunning probe
+    yields none, so two environments in which it fails do not share one.
+    `status` runs the probe where it is evaluating and counts the evidence
+    only when the two identities agree; a receipt from another environment is
+    reported inapplicable, naming both identities, and a receipt with no
+    identity is reported unknown. A probe that yields no identity there
+    leaves every receipt for the gate not-green. Evidence that records no
+    environment identity satisfies only gates that declare no probe, and a
+    gate that declares none takes evidence from any environment. A probe is
+    bounded by the gate's declared timeout, or thirty seconds when the gate
+    declares none. An attested run happened where arc observes nothing, so
+    `--attest` takes the identity with `--environment <IDENTITY>`.
   - A gate that passed is not evidence that it could have failed. Watch it
     fail first, then record the pass with `--falsified-by <failing-event>
     --predicted "<why it should fail>"`; the gate line then reads

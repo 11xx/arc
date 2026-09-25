@@ -52,13 +52,21 @@
   `environment` value on a gate names a command whose output identifies the
   environment — a toolchain or image digest, or an opaque configuration
   version. `arc verify` runs that probe beside the gate at the same checkout
-  and records a digest of its output on the evidence, so a pass carries where
-  it was produced. Readiness runs the probe where it is evaluating and counts
-  the evidence only when the two digests agree; a receipt from another
-  environment is reported inapplicable rather than missing, naming both
-  identities. Evidence with no recorded environment identity satisfies only
+  and records the identity it yields on the evidence, so a pass carries where
+  it was produced. The identity is a digest of the probe's stdout, and only a
+  run that exits successfully and prints something yields one: a probe that
+  fails, cannot start, prints nothing, or overruns its bound is not an
+  identity, because two environments in which the probe fails the same way
+  are not thereby the same environment. Readiness runs the probe where it is
+  evaluating and counts the evidence only when the two identities agree; a
+  receipt from another environment is reported inapplicable rather than
+  missing, naming both identities, and a receipt carrying no identity is
+  reported unknown rather than counted. A probe that yields no identity there
+  leaves every receipt for the gate not-green, naming its exit, overrun, or
+  empty output. Evidence with no recorded environment identity satisfies only
   gates that declare no probe. A gate with no probe takes evidence from any
-  environment. An
+  environment. A probe runs under the gate's declared timeout, or thirty
+  seconds when the gate declares none. An
   attested run happened where arc observes nothing, so `arc verify --attest`
   takes the identity with `--environment`, and the evidence stays marked
   attested.
