@@ -74,6 +74,19 @@ pub struct GateDeclaration {
     pub source: String,
 }
 
+impl GateDeclaration {
+    /// One declaration as a conflict report names it.
+    pub fn describe(&self) -> String {
+        match &self.environment {
+            Some(probe) => format!(
+                "{} declares {:?} with environment probe {:?}",
+                self.source, self.command, probe
+            ),
+            None => format!("{} declares {:?}", self.source, self.command),
+        }
+    }
+}
+
 fn deserialize_timeout<'de, D>(deserializer: D) -> std::result::Result<Option<u64>, D::Error>
 where
     D: Deserializer<'de>,
@@ -392,13 +405,7 @@ impl GatesFile {
                 let declarations = conflict
                     .declarations
                     .iter()
-                    .map(|decl| match &decl.environment {
-                        Some(probe) => format!(
-                            "{} declares {:?} with environment probe {:?}",
-                            decl.source, decl.command, probe
-                        ),
-                        None => format!("{} declares {:?}", decl.source, decl.command),
-                    })
+                    .map(GateDeclaration::describe)
                     .collect::<Vec<_>>()
                     .join("; ");
                 format!("gate {:?} conflicts: {declarations}", conflict.name)

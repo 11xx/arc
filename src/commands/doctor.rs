@@ -643,13 +643,13 @@ fn inspect_gate_conflicts(cwd: &Path, problems: &mut Vec<Finding>) {
         let declarations = conflict
             .declarations
             .iter()
-            .map(|entry| format!("{} declares {:?}", entry.source, entry.command))
+            .map(crate::gates::GateDeclaration::describe)
             .collect::<Vec<_>>()
             .join("; ");
         problems.push(Finding {
             code: "gate-declaration-conflict",
             detail: format!(
-                "gate {:?} has conflicting commands: {declarations}",
+                "gate {:?} has conflicting declarations: {declarations}",
                 conflict.name
             ),
         });

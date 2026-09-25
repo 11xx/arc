@@ -17,8 +17,8 @@ mod lifecycle;
 pub(crate) mod messaging;
 mod observe;
 mod pass;
-mod replica;
 mod policy_cmd;
+mod replica;
 mod rescue;
 pub(crate) mod review;
 mod rewrite;
@@ -72,12 +72,12 @@ pub(crate) use lifecycle::{print_projected, status_output};
 pub use messaging::{catchup, inbox, message, messages};
 pub use observe::{events, watch, EventsArgs, WatchArgs, WatchQuorum};
 pub use pass::{abandon_pass, complete_pass, list_passes, open_pass};
+pub use policy_cmd::{path as policy_path, show as policy_show, write as policy_write};
 pub use replica::{
     export as replica_export, id as replica_id, import as replica_import, init as replica_init,
     offer as replica_offer, pair as replica_pair, reclaim as replica_reclaim,
     status as replica_status,
 };
-pub use policy_cmd::{path as policy_path, show as policy_show, write as policy_write};
 pub use rescue::rescue;
 pub use review::{comment, finding, keep, read_review, reply, resolve, review, ReviewArgs};
 pub use rewrite::{

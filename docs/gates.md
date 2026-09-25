@@ -29,9 +29,10 @@ timeout = "10m"                              # optional; s, m, or h
 
 An operator may declare local gates in
 `<git-common-dir>/arc/operator-policy.toml` with the same `[gates.*]` tables.
-Both files apply. Gates combine by name when their commands agree: profiles
-combine, an empty profile list means every profile, and the longer timeout
-applies. A repeated name with different commands is a conflict reported by
+Both files apply. Gates combine by name when their commands and environment
+probes agree: profiles combine, an empty profile list means every profile, and
+the shorter timeout applies. A repeated name with a different command or
+environment probe is a conflict reported by
 `arc doctor`; `arc check` and gate execution refuse it and identify both files.
 Gate listings name the file or files that declared each command.
 

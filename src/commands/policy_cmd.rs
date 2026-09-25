@@ -137,7 +137,7 @@ pub fn show(ctx: &Ctx) -> Result<i32> {
         let declarations = conflict
             .declarations
             .iter()
-            .map(|item| format!("{} declares {:?}", item.source, item.command))
+            .map(crate::gates::GateDeclaration::describe)
             .collect::<Vec<_>>()
             .join("; ");
         println!("gate conflict {}: {declarations}", conflict.name);

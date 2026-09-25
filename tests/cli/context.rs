@@ -114,7 +114,7 @@ fn resume_json_uses_arc_resume_schema() {
     let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(value["schema"], "arc-resume/6");
-    assert_eq!(value["status"]["schema"], "arc-status/22");
+    assert_eq!(value["status"]["schema"], "arc-status/23");
     assert!(value["status"]["policy_sources"].is_object());
     assert_eq!(value["status"]["change_id"], change_id);
 }
