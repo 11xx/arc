@@ -538,7 +538,7 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/17 schema)
+    /// Machine-readable status report (the versioned arc-status/22 schema)
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -948,6 +948,16 @@ enum Cmd {
         /// Stable identity of the external runner or job
         #[arg(long)]
         runner: Option<String>,
+        /// Environment identity the attested evidence applies to, as the
+        /// gate's declared environment probe yields it.
+        ///
+        /// Required with --attest for a gate whose declaration has an
+        /// environment probe, and rejected for a declaration that has none:
+        /// an identity is only meaningful against the probe that produces it.
+        /// Omit it for a run arc observes itself; arc reads the environment
+        /// from the declared probe
+        #[arg(long, value_name = "IDENTITY")]
+        environment: Option<String>,
         /// Optional note recorded alongside the evidence
         #[arg(long)]
         note: Option<String>,
@@ -2705,6 +2715,7 @@ fn run(cli: Cli) -> Result<i32> {
             tested_revision,
             execution_host,
             runner,
+            environment,
             note,
             waive_dirty,
             falsified_by,
@@ -2729,6 +2740,7 @@ fn run(cli: Cli) -> Result<i32> {
                     tested_revision,
                     execution_host,
                     runner,
+                    environment,
                     note,
                     waive_dirty,
                     falsified_by,

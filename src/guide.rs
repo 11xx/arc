@@ -363,6 +363,8 @@ RUN A CHANGE
   arc verify --command <cmd>         Same, for an ad hoc probe.
   arc verify --against <branch>      Run every required gate on the merge with
                                      that branch, not on this head.
+    --attest --environment <id>      Record a run arc did not perform, naming
+                                     the environment it applies to.
     --falsified-by <id> --predicted <why>
                                      Name the failure this pass answers.
   arc done                           Snapshot, run every gate, print check state.
@@ -838,6 +840,17 @@ RULES THAT CHANGE WHAT YOU DO
     evaluated, and undoes it otherwise. A queue runs the ones with no answer
     at that tree, because it moves the target itself and every member behind
     the one it just landed is now evaluating a different merge.
+  - A gate may declare an environment probe: a command whose output
+    identifies the environment the gate's evidence applies to. `verify` runs
+    the probe beside the gate and records a digest of its output on the
+    evidence. `status` runs the probe where it is evaluating and counts the
+    evidence only when the two digests agree; a receipt from another
+    environment is reported inapplicable, naming both identities, rather than
+    missing. Evidence that records no environment identity satisfies only
+    gates that declare no probe, and a gate that declares none takes evidence
+    from any environment. An attested run happened where arc observes
+    nothing, so `--attest` takes the identity with `--environment
+    <IDENTITY>`.
   - A gate that passed is not evidence that it could have failed. Watch it
     fail first, then record the pass with `--falsified-by <failing-event>
     --predicted "<why it should fail>"`; the gate line then reads

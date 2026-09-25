@@ -48,6 +48,20 @@
   not to the commit that happened to carry it: two commits with one tree are
   one evaluation, and a merge produces a tree neither side committed. Evidence
   written before arc recorded the tree resolves it from the revision it names.
+- **A gate may declare the environment its evidence applies to.** An
+  `environment` value on a gate names a command whose output identifies the
+  environment — a toolchain or image digest, or an opaque configuration
+  version. `arc verify` runs that probe beside the gate at the same checkout
+  and records a digest of its output on the evidence, so a pass carries where
+  it was produced. Readiness runs the probe where it is evaluating and counts
+  the evidence only when the two digests agree; a receipt from another
+  environment is reported inapplicable rather than missing, naming both
+  identities. Evidence with no recorded environment identity satisfies only
+  gates that declare no probe. A gate with no probe takes evidence from any
+  environment. An
+  attested run happened where arc observes nothing, so `arc verify --attest`
+  takes the identity with `--environment`, and the evidence stays marked
+  attested.
 - **A change behind its target must evaluate the merge, not its own head.**
   A change that is textually clean against a target that has moved still ships
   content nothing has run against — the two sides are each correct and their
@@ -158,7 +172,10 @@
   run under a laxer timeout is not evidence for a stricter one. Editing a
   declaration after its evidence was recorded means the declared check has not
   run, so the gate reports `declaration_changed` rather than counting, and `verify --skip-green` reruns
-  it instead of reusing a run of something else. Before merging, readiness is
+  it instead of reusing a run of something else. A gate that declares an
+  environment probe is green only for the environment the probe yields at the
+  tree under evaluation, so the same evidence that answers a gate on one
+  machine is reported inapplicable on another. Before merging, readiness is
   recomputed and the basis rebuilt; if the two differ, nothing is written.
   `arc integrate --dry-run` prints the basis it would record, when the merge
   would happen at all. `arc integrate <a> <b> <c>` and `arc integrate --tag '#series'` apply that same
@@ -423,7 +440,7 @@ condition is reached, with a JSON diagnostic containing the winning
 watch conditions are checked in their supplied order and the first reached
 condition wins.
 
-`arc status <change>` prints the versioned `arc-status/21` JSON report —
+`arc status <change>` prints the versioned `arc-status/22` JSON report —
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, claim owner/activity/stage timing, snapshot
 provenance, a `review_subject` naming the exact identities the independence
