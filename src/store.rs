@@ -553,6 +553,19 @@ impl Store {
     /// only read a ledger never locks its owner out of it.
     fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
         let introduced_in = match payload {
+            Payload::ExternalVerdictRecorded { .. }
+            | Payload::IntegrationAsserted {
+                external_reference: Some(_),
+                ..
+            }
+            | Payload::ChangeIntegrated {
+                authorization:
+                    Some(crate::model::AuthorizationBasis {
+                        external_verdict: Some(_),
+                        ..
+                    }),
+                ..
+            } => Some(4),
             Payload::ChangeIntegrated {
                 authorization: Some(authorization),
                 ..
@@ -570,6 +583,23 @@ impl Store {
             .and_then(|value| value.get("event_type"))
             .and_then(serde_json::Value::as_str)
         {
+            Some("external-verdict-recorded") => Some(4),
+            Some("integration-asserted")
+                if value
+                    .and_then(|value| value.get("external_reference"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some() =>
+            {
+                Some(4)
+            }
+            Some("change-integrated")
+                if value
+                    .and_then(|value| value.get("authorization"))
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(authorization_has_external_verdict) =>
+            {
+                Some(4)
+            }
             Some("change-integrated")
                 if value
                     .and_then(|value| value.get("authorization"))
@@ -965,6 +995,14 @@ impl Store {
         write_exclusive(&path, bytes)
             .with_context(|| format!("event {event_id} already exists during import"))
     }
+}
+
+fn authorization_has_external_verdict(
+    authorization: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    authorization
+        .get("external_verdict")
+        .is_some_and(|external| !external.is_null())
 }
 
 fn authorization_has_no_verdict(

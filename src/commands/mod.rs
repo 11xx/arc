@@ -7,6 +7,7 @@ mod claims;
 mod config_cmd;
 mod diff;
 mod doctor;
+mod external;
 mod findings;
 mod forge_cmd;
 pub(crate) mod fork;
@@ -52,6 +53,7 @@ use clap::ValueEnum;
 pub use config_cmd::check_writable;
 pub use diff::{diff, DiffArgs};
 pub use doctor::run as run_doctor;
+pub use external::{record_verdict as record_external_verdict, ExternalVerdictArgs};
 pub use findings::{findings, FindingsFormat};
 pub use forge_cmd::{forge_checks, forge_declare, forge_link, forge_pr_state};
 pub(crate) use gatekeeping::dependency_order;
@@ -826,6 +828,7 @@ mod tests {
 
     fn change(id: &str, blocked_by: &[&str], closure: Option<Closure>) -> ChangeState {
         ChangeState {
+            schema: crate::state::CHANGE_STATE_SCHEMA,
             dirty_tree_waiver: None,
             dangerous: false,
             kept: Vec::new(),
@@ -857,6 +860,7 @@ mod tests {
             comments: Vec::new(),
             findings: BTreeMap::new(),
             verdicts: Vec::new(),
+            external_verdicts: Vec::new(),
             audit_verdicts: Vec::new(),
             audit_findings: Default::default(),
             debt: None,
@@ -875,6 +879,7 @@ mod tests {
                 target_branch: None,
                 target_before: None,
                 authorization: None,
+                external_reference: None,
                 integrated_commit: None,
                 superseded_by: None,
                 event_id: "event".into(),

@@ -1175,6 +1175,16 @@ fn status_matches(state: &ChangeState, wanted: &str) -> bool {
 }
 
 fn verdict_label(state: &ChangeState) -> &'static str {
+    if let Some(external) = state
+        .latest_patchset()
+        .and_then(|patchset| state.latest_external_verdict_for_revision(&patchset.head))
+    {
+        return match external.verdict {
+            crate::model::ExternalVerdict::Approved => "external-approved",
+            crate::model::ExternalVerdict::ChangesRequested => "external-changes-requested",
+            crate::model::ExternalVerdict::Rejected => "external-rejected",
+        };
+    }
     match state.latest_verdict().map(|verdict| verdict.verdict) {
         Some(Verdict::Approved) => "approved",
         Some(Verdict::ChangesRequested) => "changes-requested",

@@ -17,17 +17,18 @@ Parsing an internal shape means tracking arc's implementation.
 
 | Schema | Surface | Stability |
 | --- | --- | --- |
-| `arc-status/23` | `arc status` — the actionable state of one change, including dependencies, claim timing, blockers, `next_action`, the current review subject, the review map, advisories, the forge block, captured plan provenance, the fork a promotion came from, the environment each gate's evidence applies to, and the source files for effective policy rules and gates | commitment |
+| `arc-state/1` | `arc show --json` — the reduced change ledger state, including external verdicts marked with their source | commitment |
+| `arc-status/24` | `arc status` — the actionable state of one change, including dependencies, claim timing, blockers, `next_action`, local and external verdicts, the current review subject, the review map, advisories, the forge block, captured plan provenance, the fork a promotion came from, the environment each gate's evidence applies to, and the source files for effective policy rules and gates | commitment |
 | `arc-check/3` | `arc check --json` — every blocker with its exit code, plus never-blocking advisories | commitment |
 | `arc-inbox/10` | `arc inbox --json` — the lead-facing queue buckets across open changes, unowned branches and worktrees, and the journal backlog | commitment |
 | `arc-catchup/10` | `arc catchup --json` — ledger buckets, journal lanes and shared inventory rows, memories, forks with what they hold, unowned refs and checkouts, worktree cost, replica peers and integration authority, and a plan's settled promotion state | commitment |
 | `arc-journal-catchup/8` | `arc journal catchup --json` — artifact storage/resolution facts, converged checkpoint tips, promotion state, and journal activity | commitment |
-| `arc-resume/6` | `arc resume --json` — one change's brief, live state, and journal context, including captured plan provenance, the source fork's artifacts, and policy declaration sources | commitment |
+| `arc-resume/7` | `arc resume --json` — one change's brief, live state, and journal context, including captured plan provenance, the source fork's artifacts, external verdicts, and policy declaration sources | commitment |
 | `arc-brief/1` | `arc brief --json` — one selected brief and its immutable plan-source snapshot | commitment |
 | `arc-journal-artifact/2` | `arc journal show --json` — raw artifact bytes and planner metadata | commitment |
 | `arc-journal-inventory/5` | `arc journal inventory [FILE] [--archived] --json` — one read-only artifact projection with storage, claims, converged checkpoint tips, questions, promotions, promotion state, patchsets citing each artifact, and ledger observation | commitment |
 | `arc-rescue/3` | `arc rescue --json` — ledger state joined with worktree divergence, a foreign claim's standing, and the transcript reader's answer with its bound and cause | commitment |
-| `arc-review/3` | `arc review --json` — verdict history, findings, causes, current review options, and the next action | commitment |
+| `arc-review/4` | `arc review --json` — local and external verdict history, findings, causes, current review options, and the next action | commitment |
 | `arc-findings/2` | `arc findings --format json` — the open finding set, or the audit set with `--audit` | commitment |
 | `arc-blocker-status/1` | `arc blocker-status --json` — dependency detail for one change | commitment |
 | `arc-metadata/1` | `arc metadata --json` — the derived tags, dependencies, and priority | commitment |
@@ -56,8 +57,10 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-journal-latest/1` | `arc journal latest --json` — the newest artifact under one topic, with the resolved identity beside its body | commitment |
 | `arc-journal-scaffolds/1` | `arc journal scaffolds --json` — the scaffolds a write can prepend, and one scaffold's body | commitment |
 
-`arc-review/3` includes the optional `review_options` field. The schema is
-`arc-review/3` even when no options apply and the field is omitted.
+`arc-review/4` includes the optional `review_options` field. External verdicts
+keep a separate `source: external` marker and retain their decision-maker,
+reference, and revision. The schema is `arc-review/4` even when no options
+apply and the field is omitted.
 
 ## Files
 
@@ -67,6 +70,7 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-replica-event/1` | One identity or authority event carried by an `arc-replica-bundle/1` file | commitment |
 | `arc-replica-bundle/1` | `arc replica export` / `arc replica import` — a logical project's explicit replica identities and authority events | commitment |
 | `arc-replica-import/1` | Local receipt batch naming the source replica and imported bundle digest | internal |
+| `store-format/4` | `.git/arc/config.json` and the change ledger, including external verdicts and their source references | internal |
 | `journal-events/1` | `events.jsonl`, streamed by `arc journal events` — the canonical agent-written event log | commitment |
 | `arc-journal-spool/1` | `.arc/outbox/<ts>-<kind>-<topic>.json` — a journal write parked for later promotion | commitment |
 | `arc-sandbox/2` | `.arc-sandbox.json` — the marker naming a prefix as arc's to remove | internal |
@@ -84,3 +88,7 @@ next one.
 `arc-bundle/N` sits in between and is checked in both directions: a bundle
 carries the store format it was written with, and arc refuses a bundle written
 by a newer arc rather than skipping lifecycle events it does not know.
+
+Store format 4 adds external verdicts and their source references to the
+change ledger. A build that reads format 3 would skip them, so a store holding
+one is stamped format 4.
