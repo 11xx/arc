@@ -1,6 +1,7 @@
 use crate::commands::fork::is_fork_branch;
 use anyhow::{bail, Context, Result};
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -255,6 +256,134 @@ pub fn merge_outcome(cwd: &Path, target_rev: &str, head_rev: &str) -> Result<Mer
             String::from_utf8_lossy(&out.stderr).trim()
         ),
     }
+}
+
+/// The paths an operation writes between two trees: every file it adds or
+/// changes, and every parent directory those files need.
+///
+/// A deletion is not a write. Without rename detection a rename reads as an
+/// add beside a delete, and the add is the half that lands on disk.
+pub struct WriteSet {
+    pub files: Vec<String>,
+    pub parents: Vec<String>,
+}
+
+pub fn write_set(cwd: &Path, from_rev: &str, to_rev: &str) -> Result<WriteSet> {
+    let out = git(
+        cwd,
+        &[
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "--diff-filter=d",
+            "-z",
+            from_rev,
+            to_rev,
+        ],
+    )?;
+    let mut files = Vec::new();
+    let mut parents = BTreeSet::new();
+    for path in out.split('\0').filter(|path| !path.is_empty()) {
+        files.push(path.to_string());
+        let mut parent = Path::new(path).parent();
+        while let Some(dir) = parent.filter(|dir| !dir.as_os_str().is_empty()) {
+            parents.insert(dir.to_string_lossy().into_owned());
+            parent = dir.parent();
+        }
+    }
+    for file in &files {
+        parents.remove(file);
+    }
+    Ok(WriteSet {
+        files,
+        parents: parents.into_iter().collect(),
+    })
+}
+
+/// Untracked and ignored paths in a checkout that an operation would write.
+///
+/// A path Git has in its index is the checkout's own content: rewriting it is
+/// what the operation is for. A path it does not is bytes Git does not carry,
+/// and writing there either fails the operation or, when the path is ignored,
+/// destroys it silently. That silent case is why this exists.
+pub fn write_overlap(checkout: &Path, writes: &WriteSet) -> Result<Vec<String>> {
+    let candidates = writes
+        .files
+        .iter()
+        .chain(writes.parents.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    let tracked = tracked_paths(checkout, &candidates)?;
+    let mut collisions = Vec::new();
+    for path in &writes.files {
+        let full = checkout.join(path);
+        let Ok(metadata) = std::fs::symlink_metadata(&full) else {
+            continue;
+        };
+        if !metadata.is_dir() {
+            if !tracked.contains(path) {
+                collisions.push(path.clone());
+            }
+            continue;
+        }
+        // A file where the checkout holds a directory replaces it. That is an
+        // ordinary merge when everything beneath is tracked, and a silent
+        // loss of ignored bytes otherwise.
+        if !git(
+            checkout,
+            &["status", "--porcelain", "-z", "--ignored", "--", path],
+        )?
+        .is_empty()
+        {
+            collisions.push(path.clone());
+        }
+    }
+    for path in &writes.parents {
+        let full = checkout.join(path);
+        let Ok(metadata) = std::fs::symlink_metadata(&full) else {
+            continue;
+        };
+        if !metadata.is_dir() && !tracked.contains(path) {
+            collisions.push(path.clone());
+        }
+    }
+    collisions.sort();
+    collisions.dedup();
+    Ok(collisions)
+}
+
+/// Untracked and ignored paths a checkout holds, as Git reports them. Ignored
+/// directories are collapsed to their top entry, which is what a report can
+/// name without walking a tree Git already walked.
+pub fn untracked_and_ignored(checkout: &Path) -> Result<Vec<String>> {
+    let out = git(checkout, &["status", "--porcelain", "-z", "--ignored"])?;
+    let mut paths = Vec::new();
+    for entry in out.split('\0') {
+        let (tag, path) = entry.split_at_checked(2).unwrap_or((entry, ""));
+        if tag == "??" || tag == "!!" {
+            paths.push(path.trim_start().to_string());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// The subset of `paths` Git has in the index of `checkout`.
+fn tracked_paths(checkout: &Path, paths: &[String]) -> Result<BTreeSet<String>> {
+    let mut tracked = BTreeSet::new();
+    // Batched so a large change cannot overrun a command line.
+    for chunk in paths.chunks(512) {
+        let mut args = vec!["ls-files", "-z", "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        let out = git(checkout, &args)?;
+        tracked.extend(
+            out.split('\0')
+                .filter(|path| !path.is_empty())
+                .map(str::to_string),
+        );
+    }
+    Ok(tracked)
 }
 
 /// Write a commit holding `tree` under the given parents, touching no ref.

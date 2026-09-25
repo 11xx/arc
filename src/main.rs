@@ -1111,7 +1111,13 @@ enum Cmd {
         reason: Option<String>,
     },
     /// Guarded merge of one change, or of a dependency-ordered queue named
-    /// by several changes or by --tag
+    /// by several changes or by --tag.
+    ///
+    /// The merge runs where the target is checked out. That checkout's tracked
+    /// modifications refuse, staged or unstaged. Untracked or ignored paths
+    /// the merge does not write are left in place and named in the report; a
+    /// path the merge would write that is already there without being tracked
+    /// is refused by name.
     Integrate {
         /// Changes to integrate. Several run as a queue, in dependency order,
         /// stopping at the first that needs a person. Omit only when
