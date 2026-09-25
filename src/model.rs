@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 /// store stamped newer than this, because the alternative is what silently
 /// went wrong before: an older binary skipping event types it does not know,
 /// concluding the change is still open, and closing it a second way.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {
@@ -683,6 +683,16 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         route_version: Option<String>,
     },
+    /// A verdict copied from a decision made outside Arc, with its source and
+    /// exact revision kept apart from witnessed review.
+    ExternalVerdictRecorded {
+        revision: String,
+        verdict: ExternalVerdict,
+        decided_by: String,
+        reference: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        findings: Vec<ExternalFinding>,
+    },
     /// A review obligation this change carries but has not discharged.
     ///
     /// Declaring it is what lets a change integrate without an independent
@@ -950,6 +960,8 @@ pub enum Payload {
         /// where there was no prior target state to name.
         #[serde(skip_serializing_if = "Option::is_none")]
         target_before: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        external_reference: Option<String>,
     },
     /// The author declares whether this change is being iterated on rather
     /// than driven to a merge. An iterating change records progress with
@@ -1103,6 +1115,15 @@ pub enum Payload {
 /// beside its normalized values. This does not make the ledger a config store:
 /// arc records no configuration history, only the inputs to one decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalVerdictBasis {
+    pub event_id: String,
+    pub revision: String,
+    pub verdict: ExternalVerdict,
+    pub decided_by: String,
+    pub reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorizationBasis {
     /// The verdict that approved the merged patchset, when one did. Absent
     /// when a declared debt stood in for a review nobody performed: the
@@ -1110,6 +1131,10 @@ pub struct AuthorizationBasis {
     /// honest than naming a verdict that does not exist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict_event_id: Option<String>,
+    /// External approval consumed for this merge, kept apart from verdicts
+    /// Arc witnessed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_verdict: Option<ExternalVerdictBasis>,
     /// One passing verification per resolved required gate, by gate name.
     pub gate_evidence: std::collections::BTreeMap<String, String>,
     /// Each prerequisite change and the closure that satisfied it.
@@ -1228,6 +1253,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::FindingAdded { .. }
         | Payload::DispositionRecorded { .. }
         | Payload::VerdictRecorded { .. }
+        | Payload::ExternalVerdictRecorded { .. }
         | Payload::VerificationRunStarted { .. }
         | Payload::VerificationRecorded { .. }
         | Payload::VerificationReused { .. }
@@ -1404,6 +1430,19 @@ pub struct InlineFinding {
     pub anchor: Option<Anchor>,
 }
 
+/// A finding copied from an external review record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalFinding {
+    pub finding_id: String,
+    pub blocking: bool,
+    pub severity: Severity,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<AnchorInput>,
+}
+
 /// Shape accepted by `arc review --findings-json`: finding IDs are
 /// assigned by the CLI at write time.
 #[derive(Debug, Clone, Deserialize)]
@@ -1418,7 +1457,7 @@ pub struct FindingInput {
     pub anchor: Option<AnchorInput>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnchorInput {
     pub path: String,
     #[serde(default = "default_side")]
@@ -1457,6 +1496,15 @@ pub enum Verdict {
     Approved,
     ChangesRequested,
     CommentOnly,
+}
+
+/// A decision supplied by a receiver outside the local review ledger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExternalVerdict {
+    Approved,
+    ChangesRequested,
+    Rejected,
 }
 
 /// The relationship between a verdict and the verdicts it observed.

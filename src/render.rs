@@ -143,6 +143,16 @@ pub fn authorization_basis(basis: &crate::model::AuthorizationBasis) -> String {
         Some(verdict) => writeln!(out, "    verdict: {verdict}"),
         None => writeln!(out, "    verdict: none — authorized by declared debt"),
     };
+    if let Some(external) = &basis.external_verdict {
+        let _ = writeln!(
+            out,
+            "    external verdict: {:?} by {} at {} (reference {})",
+            external.verdict,
+            external.decided_by,
+            short_sha(&external.revision),
+            external.reference
+        );
+    }
     let _ = match &basis.danger {
         Some(danger) => writeln!(
             out,
@@ -315,6 +325,9 @@ pub fn markdown(
                 "  - into `{branch}`, which stood at `{}`",
                 &before[..before.len().min(8)]
             );
+        }
+        if let Some(reference) = &c.external_reference {
+            let _ = writeln!(w, "  - external outcome reference: `{reference}`");
         }
     }
     if !state.tags.is_empty() {
@@ -564,6 +577,40 @@ pub fn markdown(
         }
         if let Some(body) = &v.body {
             let _ = writeln!(w, "\n{body}");
+        }
+    }
+
+    if !report.external_verdicts.is_empty() {
+        let _ = writeln!(w, "\n## External verdicts\n");
+        for external in &report.external_verdicts {
+            let _ = writeln!(
+                w,
+                "- [external] {:?} at `{}` by {} — {} (reference `{}`)",
+                external.verdict,
+                external.revision,
+                external.decided_by,
+                if external.gates_current_head {
+                    "valid for current head"
+                } else if external.matches_current_patchset {
+                    "applies to current patchset but does not satisfy local review policy"
+                } else {
+                    "stale for current head"
+                },
+                external.reference
+            );
+            for finding in &external.findings {
+                let _ = writeln!(
+                    w,
+                    "  - external finding `{}` [{}{:?}] {}",
+                    finding.finding_id,
+                    if finding.blocking { "blocking/" } else { "" },
+                    finding.severity,
+                    finding.summary
+                );
+                if let Some(body) = &finding.body {
+                    let _ = writeln!(w, "    {body}");
+                }
+            }
         }
     }
 
@@ -1399,6 +1446,21 @@ pub fn nested_finding_lines(event: &Event) -> Vec<String> {
     let (findings, kind) = match &event.payload {
         Payload::VerdictRecorded { findings, .. } => (findings, "finding-added"),
         Payload::AuditVerdictRecorded { findings, .. } => (findings, "audit-finding-added"),
+        Payload::ExternalVerdictRecorded { findings, .. } => {
+            return findings
+                .iter()
+                .map(|finding| {
+                    format!(
+                        "{}  external-finding-added  {} [{}{:?}] {}",
+                        event_prefix(event),
+                        finding.finding_id,
+                        if finding.blocking { "blocking/" } else { "" },
+                        finding.severity,
+                        finding.summary
+                    )
+                })
+                .collect();
+        }
         _ => return Vec::new(),
     };
     // Each line carries the same prefix an event line does, because these are
@@ -1666,6 +1728,22 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             }
             ("verdict-recorded", summary)
         }
+        Payload::ExternalVerdictRecorded {
+            revision,
+            verdict,
+            decided_by,
+            reference,
+            ..
+        } => (
+            "external-verdict-recorded",
+            format!(
+                "[external] {} at {} by {} ({})",
+                format!("{verdict:?}").to_lowercase(),
+                short_sha(revision),
+                decided_by,
+                reference
+            ),
+        ),
         Payload::VerificationRunStarted {
             mode,
             gates,
@@ -1716,26 +1794,47 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             integrated_commit,
             target_branch,
             already_contained,
+            authorization,
             ..
-        } => (
-            "change-integrated",
-            if *already_contained {
-                format!(
-                    "{} into {target_branch} (already contained; no merge created)",
-                    short_sha(integrated_commit)
-                )
-            } else {
-                format!("{} into {target_branch}", short_sha(integrated_commit))
-            },
-        ),
+        } => {
+            let external = authorization
+                .as_ref()
+                .and_then(|authorization| authorization.external_verdict.as_ref())
+                .map(|external| format!(" [external: {}]", external.reference))
+                .unwrap_or_default();
+            (
+                "change-integrated",
+                if *already_contained {
+                    format!(
+                        "{} into {target_branch} (already contained; no merge created){external}",
+                        short_sha(integrated_commit)
+                    )
+                } else {
+                    format!(
+                        "{} into {target_branch}{external}",
+                        short_sha(integrated_commit)
+                    )
+                },
+            )
+        }
         Payload::IntegrationAsserted {
             integrated_commit,
             target_branch,
+            external_reference,
             ..
-        } => (
-            "integration-asserted",
-            format!("{} into {target_branch}", short_sha(integrated_commit)),
-        ),
+        } => {
+            let external = external_reference
+                .as_deref()
+                .map(|reference| format!(" [external: {reference}]"))
+                .unwrap_or_default();
+            (
+                "integration-asserted",
+                format!(
+                    "{} into {target_branch}{external}",
+                    short_sha(integrated_commit)
+                ),
+            )
+        }
         Payload::IterationScopeSet { iterating } => {
             ("iteration-scope-set", format!("iterating: {iterating}"))
         }

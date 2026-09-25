@@ -10,6 +10,7 @@ mod cross_links;
 mod diff;
 mod docs;
 mod doctor;
+mod external;
 mod findings;
 mod forge;
 mod fork;

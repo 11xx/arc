@@ -118,7 +118,7 @@ pub(super) fn operator_policy_unions_with_project_policy_without_tracked_changes
 
     let status = arc_output(&repo, &worktree, &["status", "policy-union"]);
     let status: Value = serde_json::from_str(&status).unwrap();
-    assert_eq!(status["schema"], "arc-status/23");
+    assert_eq!(status["schema"], "arc-status/24");
     assert_eq!(status["danger"]["dangerous"], true);
     let gates = status["gates"].as_array().unwrap();
     for name in ["project", "operator", "shared"] {

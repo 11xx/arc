@@ -29,8 +29,9 @@ use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use commands::{fork, AnchorArgs, Ctx, ListFormat, QueryArgs};
 use model::{
-    ActorSource, DebtMissing, DispositionStatus, MessageSeverity, MessageType, ProbePhase,
-    ReviewCause, RunOutcome, Severity, Side, Verdict, VerdictRelationKind, VerifyResult,
+    ActorSource, DebtMissing, DispositionStatus, ExternalVerdict, MessageSeverity, MessageType,
+    ProbePhase, ReviewCause, RunOutcome, Severity, Side, Verdict, VerdictRelationKind,
+    VerifyResult,
 };
 use std::path::{Path, PathBuf};
 
@@ -553,7 +554,7 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/23 schema)
+    /// Machine-readable status report (the versioned arc-status/24 schema)
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -928,6 +929,11 @@ enum Cmd {
         #[arg(long = "route-version", value_name = "VERSION")]
         route_version: Option<String>,
     },
+    /// Record a review decision made outside the local ledger
+    External {
+        #[command(subcommand)]
+        cmd: ExternalCmd,
+    },
     /// Run a declared gate (or ad hoc command) and record the evidence. Gate
     /// evidence only counts at the change's own head, so the command runs in
     /// the change's recorded worktree whichever checkout it was typed in;
@@ -1263,6 +1269,9 @@ enum Cmd {
         /// Superseded by another change
         #[arg(long)]
         superseded: Option<String>,
+        /// Opaque upstream reference for an external approval at this patchset
+        #[arg(long = "external-reference")]
+        external_reference: Option<String>,
     },
     /// Record a Git history rewrite that happened to this repository
     History {
@@ -1522,6 +1531,31 @@ enum PolicyCmd {
         /// Read TOML from a file ('-' for stdin)
         #[arg(long, required = true, value_name = "FILE")]
         body_file: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExternalCmd {
+    /// Record an external verdict at the revision its decision covered. A
+    /// rejection of the latest patchset closes the change as abandoned
+    Verdict {
+        /// Change that received the external decision
+        change: String,
+        /// Decision made by the external reviewer or receiver
+        #[arg(long, value_enum)]
+        verdict: ExternalVerdict,
+        /// Name supplied for who made the external decision
+        #[arg(long = "decided-by", required = true)]
+        decided_by: String,
+        /// Opaque source reference such as a review URL
+        #[arg(long, required = true)]
+        reference: String,
+        /// Commit revision the external decision covered
+        #[arg(long, required = true)]
+        revision: String,
+        /// Findings JSON for a changes-requested verdict
+        #[arg(long = "findings-json")]
+        findings_json: Option<String>,
     },
 }
 
@@ -1925,6 +1959,7 @@ fn role_refusal(role: ExecutionRole, command: &Cmd) -> Option<(&'static str, &'s
             Cmd::Review {
                 verdict: Some(_), ..
             } => Some(("review", "reviewer or lead")),
+            Cmd::External { .. } => Some(("external verdict", "reviewer or lead")),
             Cmd::Resolve { .. } => Some(("resolve", "reviewer or lead")),
             Cmd::Hold { .. } => Some(("hold", "reviewer or lead")),
             Cmd::ReleaseHold { .. } => Some(("release-hold", "reviewer or lead")),
@@ -2859,6 +2894,29 @@ fn run(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Cmd::External { cmd } => match cmd {
+            ExternalCmd::Verdict {
+                change,
+                verdict,
+                decided_by,
+                reference,
+                revision,
+                findings_json,
+            } => {
+                commands::record_external_verdict(
+                    &ctx,
+                    &change,
+                    commands::ExternalVerdictArgs {
+                        verdict,
+                        decided_by,
+                        reference,
+                        revision,
+                        findings_json,
+                    },
+                )?;
+                Ok(0)
+            }
+        },
         Cmd::Verify {
             change,
             all,
@@ -3088,6 +3146,7 @@ fn run(cli: Cli) -> Result<i32> {
             target_before,
             abandoned,
             superseded,
+            external_reference,
         } => {
             commands::close(
                 &ctx,
@@ -3099,6 +3158,7 @@ fn run(cli: Cli) -> Result<i32> {
                     target_before,
                     abandoned,
                     superseded_by: superseded,
+                    external_reference,
                 },
             )?;
             Ok(0)

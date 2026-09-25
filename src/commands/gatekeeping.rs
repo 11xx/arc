@@ -2782,11 +2782,33 @@ fn authorization_basis(
     // the review nobody performed. One of the two must hold: a merge with
     // neither has nothing authorizing it, and this record exists to say what
     // did.
-    let verdict = st.verdicts.iter().rev().find(|verdict| {
-        verdict.patchset_id == approved_patchset_id
-            && verdict.verdict == crate::model::Verdict::Approved
-    });
-    if verdict.is_none() && !st.debt_waives_latest_patchset() {
+    let verdict_authorized_locally = report
+        .verdict
+        .as_ref()
+        .is_some_and(|verdict| verdict.valid_for_current_head || report.approval_waived_by_debt);
+    let verdict = verdict_authorized_locally
+        .then(|| {
+            st.verdicts.iter().rev().find(|verdict| {
+                verdict.patchset_id == approved_patchset_id
+                    && verdict.verdict == crate::model::Verdict::Approved
+            })
+        })
+        .flatten();
+    let external_verdict = report
+        .external_verdicts
+        .iter()
+        .find(|external| {
+            external.gates_current_head
+                && external.verdict == crate::model::ExternalVerdict::Approved
+        })
+        .map(|external| crate::model::ExternalVerdictBasis {
+            event_id: external.event_id.clone(),
+            revision: external.revision.clone(),
+            verdict: external.verdict,
+            decided_by: external.decided_by.clone(),
+            reference: external.reference.clone(),
+        });
+    if verdict.is_none() && external_verdict.is_none() && !st.debt_waives_latest_patchset() {
         anyhow::bail!("integration is ready but nothing authorizes the merged patchset: no approving verdict and no declared debt");
     }
 
@@ -2863,6 +2885,7 @@ fn authorization_basis(
 
     Ok(crate::model::AuthorizationBasis {
         verdict_event_id: verdict.map(|verdict| verdict.event_id.clone()),
+        external_verdict,
         verdict_provisional: verdict.and_then(|verdict| verdict.provisional.clone()),
         gate_evidence,
         prerequisites,
@@ -3027,6 +3050,7 @@ pub struct CloseArgs {
     pub target_before: Option<String>,
     pub abandoned: bool,
     pub superseded_by: Option<String>,
+    pub external_reference: Option<String>,
 }
 
 pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
@@ -3037,6 +3061,7 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
         target_before,
         abandoned,
         superseded_by,
+        external_reference,
     } = args;
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
@@ -3054,6 +3079,14 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
     if target_before.is_some() && assert_integrated.is_none() {
         bail!("--target-before describes an asserted integration; pass --assert-integrated <REV>");
     }
+    if let Some(reference) = external_reference.as_deref() {
+        if reference.trim().is_empty() || reference.contains('\n') || reference.contains('\r') {
+            bail!("--external-reference must be one nonempty line");
+        }
+        if assert_integrated.is_none() {
+            bail!("--external-reference requires --assert-integrated");
+        }
+    }
     let (payload, integrated_rev) = match (assert_integrated, abandoned, superseded_by) {
         (Some(rev), false, None) => {
             let rev = gitio::rev_parse(&ctx.cwd, &rev)?;
@@ -3070,6 +3103,21 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
                     )
                 })?,
             };
+            if let Some(reference) = external_reference.as_deref() {
+                let external = st
+                    .latest_external_verdict_for_revision(&patchset.head)
+                    .filter(|external| {
+                        external.verdict == crate::model::ExternalVerdict::Approved
+                            && external.reference == reference
+                    })
+                    .with_context(|| {
+                        format!(
+                            "no external approval at {} has reference {reference:?}",
+                            patchset.head
+                        )
+                    })?;
+                let _ = external;
+            }
             let target = into.unwrap_or_else(|| st.target_branch.clone());
             if !gitio::branch_exists(&ctx.cwd, &target) {
                 bail!(
@@ -3082,7 +3130,8 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
             // all, and the ledger would record an integration that never
             // happened — worse than recording nothing, because it reads as
             // authoritative.
-            if !gitio::is_ancestor(&ctx.cwd, &patchset.head, &rev)? {
+            if external_reference.is_none() && !gitio::is_ancestor(&ctx.cwd, &patchset.head, &rev)?
+            {
                 bail!(
                     "{rev} does not contain {} ({}), so it is not an integration of this change",
                     patchset.id,
@@ -3119,6 +3168,7 @@ pub fn close(ctx: &Ctx, reference: &str, args: CloseArgs) -> Result<()> {
                     source_head: patchset.head.clone(),
                     target_branch: target,
                     target_before,
+                    external_reference: external_reference.clone(),
                 },
                 Some(rev),
             )

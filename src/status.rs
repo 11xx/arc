@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/23";
+pub const STATUS_SCHEMA: &str = "arc-status/24";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// A verdict graph with several tips has no authority to report, so the
@@ -27,6 +27,10 @@ pub const CONTESTED_VERDICT_REASON: &str =
 pub const UNDECLARED_APPROVAL_REASON: &str =
     "approval rejected by policy: arc assumed the reviewing identity rather than anyone \
      declaring it, so independence is unproven (pass --actor or set ARC_ACTOR)";
+
+fn short_revision(revision: &str) -> &str {
+    &revision[..revision.len().min(8)]
+}
 
 /// Typed integration blockers, ordered by exit-code precedence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -610,6 +614,13 @@ pub struct StatusReport {
     pub head_matches_latest_patchset: bool,
     pub worktree_dirty: Option<bool>,
     pub verdict: Option<VerdictStatus>,
+    /// External decisions remain distinct from observed local verdicts.
+    /// Additive in `arc-status/24`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub external_verdicts: Vec<ExternalVerdictStatus>,
+    /// Whether a local or eligible external approval covers the current head.
+    /// Additive in `arc-status/24`.
+    pub has_valid_approval: bool,
     /// Who reviewed what, newest coverage first. Additive in arc-status/6.
     pub review_map: Vec<ReviewerCoverage>,
     /// What a lead should know before integrating and arc will not refuse for:
@@ -775,6 +786,25 @@ pub struct VerdictStatus {
     /// than someone declaring it. Additive in `arc-status/6`.
     pub author_assumed: bool,
     pub valid_for_current_head: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExternalVerdictStatus {
+    /// External source marker is part of the public status projection.
+    /// Additive in `arc-status/24`.
+    pub source: &'static str,
+    pub event_id: String,
+    pub revision: String,
+    pub verdict: crate::model::ExternalVerdict,
+    pub decided_by: String,
+    pub reference: String,
+    pub recorded_by: String,
+    pub created_at: DateTime<Utc>,
+    /// The named revision equals the current patchset head.
+    pub matches_current_patchset: bool,
+    /// The external approval satisfies review policy for this head.
+    pub gates_current_head: bool,
+    pub findings: Vec<crate::model::ExternalFinding>,
 }
 
 /// Why an approval fails the self-approval guard, or `None` when it stands.
@@ -1127,6 +1157,66 @@ fn build_report(
             valid_for_current_head: valid,
         }
     });
+    let external_verdicts: Vec<ExternalVerdictStatus> = state
+        .external_verdicts
+        .iter()
+        .rev()
+        .map(|external| {
+            let latest_for_revision = state
+                .latest_external_verdict_for_revision(&external.revision)
+                .is_some_and(|latest| latest.event_id == external.event_id);
+            let matches_current_patchset = latest_for_revision
+                && head_matches
+                && current_head.as_deref() == Some(external.revision.as_str());
+            ExternalVerdictStatus {
+                source: "external",
+                event_id: external.event_id.clone(),
+                revision: external.revision.clone(),
+                verdict: external.verdict,
+                decided_by: external.decided_by.clone(),
+                reference: external.reference.clone(),
+                recorded_by: external.recorded_by.clone(),
+                created_at: external.created_at,
+                matches_current_patchset,
+                gates_current_head: matches_current_patchset
+                    && external.verdict == crate::model::ExternalVerdict::Approved
+                    && !danger.requires_independent_review(policy),
+                findings: external.findings.clone(),
+            }
+        })
+        .collect();
+    let current_external_verdict = if head_matches {
+        latest_patchset
+            .as_ref()
+            .and_then(|patchset| state.latest_external_verdict_for_revision(&patchset.head))
+    } else {
+        None
+    };
+    let external_refuses_this_head = current_external_verdict
+        .is_some_and(|external| external.verdict != crate::model::ExternalVerdict::Approved);
+    let external_approval_valid = current_external_verdict.is_some_and(|external| {
+        external.verdict == crate::model::ExternalVerdict::Approved
+            && !danger.requires_independent_review(policy)
+    });
+    let local_approval_valid = verdict
+        .as_ref()
+        .is_some_and(|verdict| verdict.valid_for_current_head);
+    let external_overrides_local = external_approval_valid;
+    let local_verdict_refuses_this_head = verdict.as_ref().is_some_and(|verdict| {
+        verdict.verdict != Verdict::Approved
+            && latest_patchset
+                .as_ref()
+                .is_some_and(|patchset| patchset.id == verdict.patchset_id)
+    });
+    let verdict_refuses_this_head = local_verdict_refuses_this_head && !external_overrides_local;
+    let approval_valid = if external_refuses_this_head {
+        false
+    } else if current_external_verdict.is_some() {
+        external_approval_valid
+            || (danger.requires_independent_review(policy) && local_approval_valid)
+    } else {
+        local_approval_valid
+    };
     // True whenever the waiver is load-bearing: it rescued a self-approval, or
     // it stood in for a verdict that was never recorded. Reporting it only in
     // the first case would let the second merge look independently approved.
@@ -1143,16 +1233,12 @@ fn build_report(
                 .as_ref()
                 .map(|v| v.valid_for_current_head)
                 .unwrap_or(false)
-            && !verdict.as_ref().is_some_and(|v| {
-                v.verdict != Verdict::Approved
-                    && latest_patchset
-                        .as_ref()
-                        .is_some_and(|patchset| patchset.id == v.patchset_id)
-            }));
+            && !local_verdict_refuses_this_head
+            && !external_refuses_this_head);
     // The same predicate the validity above reads, so the reason a reader is
     // given is the reason the gate acted on rather than a second reading of
     // the same ledger.
-    let approval_rejection_reason = verdict.as_ref().and_then(|verdict| {
+    let local_approval_rejection_reason = verdict.as_ref().and_then(|verdict| {
         if verdict.valid_for_current_head
             || verdict.verdict != Verdict::Approved
             || debt_waives_current_head
@@ -1169,13 +1255,53 @@ fn build_report(
             .unwrap_or(verdict.actor.as_str());
         self_approval_rejection(patchset, verdict_author, verdict.author_assumed)
     });
+    let external_approval_rejection_reason = current_external_verdict.and_then(|external| {
+        match external.verdict {
+            crate::model::ExternalVerdict::ChangesRequested => Some(format!(
+                "external verdict requests changes: {} at {} (reference {})",
+                external.decided_by,
+                short_revision(&external.revision),
+                external.reference
+            )),
+            crate::model::ExternalVerdict::Rejected => Some(format!(
+                "external verdict rejected by {} at {} (reference {})",
+                external.decided_by,
+                short_revision(&external.revision),
+                external.reference
+            )),
+            crate::model::ExternalVerdict::Approved
+                if danger.requires_independent_review(policy)
+                    && !local_approval_valid
+                    && !debt_waives_current_head =>
+            {
+                let sources = policy
+                    .sources
+                    .sources_for("policy.forbid_self_approval=true")
+                    .join(", ");
+                Some(format!(
+                    "external approval by {} at {} (reference {}) cannot satisfy the independent-review rule on this dangerous patchset; Arc cannot verify the external identity (declared by {})",
+                    external.decided_by,
+                    short_revision(&external.revision),
+                    external.reference,
+                    if sources.is_empty() {
+                        "source unavailable".to_string()
+                    } else {
+                        sources
+                    }
+                ))
+            }
+            crate::model::ExternalVerdict::Approved => None,
+        }
+    });
+    let approval_rejection_reason =
+        external_approval_rejection_reason.or(local_approval_rejection_reason);
     // A contested verdict graph has no single authority, so `latest_verdict`
     // reports none and the change reads as unreviewed. Without this the
     // blocker would say nobody reviewed it, which is the opposite of what
     // happened: two reviewers did, and each replaced the same verdict.
     let verdict_contested = state.verdict_contested();
     let approval_rejection_reason = approval_rejection_reason.or_else(|| {
-        verdict_contested
+        (verdict_contested && !approval_valid)
             .then(|| format!("{} {CONTESTED_VERDICT_REASON}", state.verdict_tips().len()))
     });
 
@@ -1478,17 +1604,8 @@ fn build_report(
     // of a verdict — none recorded, or one that only policy's self-approval rule
     // rejects. The obligation itself is untouched and stays where
     // `arc query --debt` finds it.
-    let verdict_refuses_this_head = verdict.as_ref().is_some_and(|v| {
-        v.verdict != Verdict::Approved
-            && latest_patchset
-                .as_ref()
-                .is_some_and(|patchset| patchset.id == v.patchset_id)
-    });
-    let approval_valid = verdict
-        .as_ref()
-        .map(|v| v.valid_for_current_head)
-        .unwrap_or(false);
-    let waiver_satisfies_approval = debt_waives_current_head && !verdict_refuses_this_head;
+    let waiver_satisfies_approval =
+        debt_waives_current_head && !local_verdict_refuses_this_head && !external_refuses_this_head;
     if !state.iterating && !approval_valid && !waiver_satisfies_approval {
         blockers.push(Blocker::NoValidApproval);
     }
@@ -1592,6 +1709,14 @@ fn build_report(
         } else {
             "iterating:clear".into()
         }
+    } else if external_refuses_this_head {
+        match current_external_verdict.map(|external| external.verdict) {
+            Some(crate::model::ExternalVerdict::ChangesRequested) => {
+                "external_changes_requested".into()
+            }
+            Some(crate::model::ExternalVerdict::Rejected) => "external_rejected".into(),
+            _ => unreachable!("only non-approving external verdicts refuse this head"),
+        }
     } else if let Some(action) = refusing_verdict_action {
         // A current refusal is an action in its own right. Debt defers a
         // missing review; it cannot route around a reviewer who read this
@@ -1638,6 +1763,7 @@ fn build_report(
         || state.iterating
         || approval_satisfied
         || verdict_refuses_this_head
+        || external_refuses_this_head
         || approval_rejection_reason.is_some()
     {
         Vec::new()
@@ -1719,6 +1845,8 @@ fn build_report(
         head_matches_latest_patchset: head_matches,
         worktree_dirty,
         verdict,
+        external_verdicts,
+        has_valid_approval: approval_valid,
         review_map,
         advisories,
         findings,
