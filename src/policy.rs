@@ -18,7 +18,37 @@ pub struct PolicyFile {
     pub review: Review,
     pub provenance: ProvenanceBehavior,
     pub danger: Danger,
+    /// Declared when the repository receives contributions rather than
+    /// merges: its history shape is the receiver's, and `integrate` records a
+    /// change as ready to send instead of merging it.
+    pub contribution: Option<Contribution>,
     pub sources: PolicySources,
+}
+
+/// How a contributed change's history must look when it is sent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum History {
+    /// Every commit of the change is sent as it stands.
+    #[default]
+    Preserve,
+    /// The change is sent as one commit on its base.
+    Squash,
+}
+
+impl History {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            History::Preserve => "preserve",
+            History::Squash => "squash",
+        }
+    }
+}
+
+/// A repository whose integration happens at a receiver arc cannot see.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Contribution {
+    pub history: History,
 }
 
 /// Stable origin labels for every policy declaration.
@@ -159,6 +189,12 @@ struct PolicyLayer {
     review: Option<ReviewLayer>,
     provenance: Option<ProvenanceLayer>,
     danger: Option<DangerLayer>,
+    contribution: Option<ContributionLayer>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ContributionLayer {
+    history: Option<History>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -241,6 +277,7 @@ pub fn load(repo_toplevel: &Path) -> Result<PolicyFile> {
     let mut acknowledged_safe_seen = BTreeSet::new();
     let mut source_roots = Vec::new();
     let mut source_roots_seen = BTreeSet::new();
+    let mut contribution: Option<Contribution> = None;
 
     for (source, layer) in layers {
         if let Some(raw) = layer.policy {
@@ -285,6 +322,19 @@ pub fn load(repo_toplevel: &Path) -> Result<PolicyFile> {
                 &source,
             );
             provenance_modes.push(mode);
+        }
+        if let Some(raw) = layer.contribution {
+            // Declaring contribution in either file makes the repository one;
+            // squash is the stricter shape and wins over preserve.
+            let history = raw.history.unwrap_or_default();
+            sources.record(
+                format!("contribution.history={}", history.as_str()),
+                &source,
+            );
+            let current = contribution.get_or_insert_with(Contribution::default);
+            if history == History::Squash {
+                current.history = History::Squash;
+            }
         }
         if let Some(raw) = layer.danger {
             if let Some(entries) = raw.paths {
@@ -348,6 +398,7 @@ pub fn load(repo_toplevel: &Path) -> Result<PolicyFile> {
         review,
         provenance: ProvenanceBehavior { git_identity },
         danger,
+        contribution,
         sources,
     })
 }

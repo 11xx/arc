@@ -1728,6 +1728,18 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             }
             ("verdict-recorded", summary)
         }
+        Payload::ReadyToSend {
+            patchset_id,
+            head,
+            history,
+            ..
+        } => (
+            "ready-to-send",
+            format!(
+                "{patchset_id} at {} ({history} history); nothing merged",
+                short_sha(head)
+            ),
+        ),
         Payload::ExternalVerdictRecorded {
             revision,
             verdict,

@@ -950,6 +950,16 @@ pub enum Payload {
     /// An integration somebody performed elsewhere and asserted afterwards.
     /// Deliberately carries no authorization: arc did not guard this merge and
     /// cannot claim it was authorized, only that it was asserted.
+    /// A contributed change passed every integration check at this head and
+    /// is ready to go to its receiver. Nothing was merged: the receiver's
+    /// decision closes the change later.
+    ReadyToSend {
+        patchset_id: String,
+        head: String,
+        /// The history shape the head was checked against.
+        history: String,
+        authorization: AuthorizationBasis,
+    },
     IntegrationAsserted {
         integrated_commit: String,
         source_patchset_id: String,
@@ -1261,6 +1271,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         // to excuse.
         | Payload::DirtyTreeWaived { .. }
         | Payload::HoldSet { .. }
+        | Payload::ReadyToSend { .. }
         | Payload::ForgeProjection { .. } => AppendPermission::OpenOnly,
         Payload::Message { .. }
         | Payload::ClaimReleased { .. }
