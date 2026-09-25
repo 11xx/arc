@@ -59,9 +59,10 @@
   `--skip-green` reuses a gate already green at that merged tree instead of
   running it again, keyed exactly as readiness keys it. That evidence is
   spent as soon as the target moves again, exactly as a verdict is spent by a
-  new commit. A head already on the target tip merges to the tree it already
-  has and needs nothing new: a rebase that moves the base without changing the
-  diff lands on the evaluated tree, and the gate reads `inherited from
+  new commit. A head the target already contains merges to the tree it
+  already has and needs nothing new: a rebase that moves the base without
+  changing the diff lands on the evaluated tree, and the gate reads
+  `inherited from
   <revision>` rather than running again. `needs-rebase` keeps its narrower
   meaning: the
   text conflicts, so there is no single merged tree to evaluate at all.
@@ -113,7 +114,12 @@
 
   It records a `change-integrated` event
   carrying the patchset and head that were merged, the branch merged into, and
-  where that branch stood first. A merge arc did not perform is `arc close
+  where that branch stood first. A head the target already contains, at its
+  tip or behind it, has no merge to make: Git reports the merge up to date,
+  and the guard closes the change at the target revision that already held
+  the head, recording `already_contained` rather than inventing merge
+  parents. The change closes at the revision that shipped it and a successor
+  behind it proceeds normally. A merge arc did not perform is `arc close
   --assert-integrated <rev> [--patchset <ps>] [--into <branch>]`, which writes
   `integration-asserted` — the same facts, deliberately without authorization,
   because arc did not guard that merge and cannot claim it was authorized. The
