@@ -407,6 +407,13 @@ RUN A CHANGE
   thing to name — a debt reason least of all, since it is a judgment about one
   patchset. A queue is for changes already green or already carrying a verdict.
 
+  A merge runs where the target is checked out, and that checkout blocks it
+  only where the merge could change or lose bytes there. Its tracked
+  modifications refuse, staged or unstaged. Untracked or ignored paths the
+  merge does not write are left in place and named in the report. A path the
+  merge would write that already exists there without being tracked, ignored
+  paths included, is refused by name.
+
   `--no-worktree` means in place, not nowhere: a clean checkout already on the
   target is checked out onto the new branch and recorded as the change's
   worktree, so the next command infers the change without being told. A dirty

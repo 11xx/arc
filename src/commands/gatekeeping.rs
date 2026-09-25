@@ -2143,6 +2143,72 @@ enum ClosedBehavior {
     SkipTagged,
 }
 
+/// Refuse when the target checkout carries tracked modifications. A merge
+/// beside uncommitted work writes into a tree nobody can name afterwards.
+fn checkout_tracked_dirt(checkout: &Path) -> Result<()> {
+    if gitio::dirt(checkout)?.tracked {
+        bail!(
+            "target worktree {} carries tracked modifications, staged or unstaged; commit or stash \
+             them before integrating",
+            checkout.display()
+        );
+    }
+    Ok(())
+}
+
+/// Refuse when the merge would write over a path the target checkout holds
+/// untracked or ignored, and report the paths it leaves untouched.
+///
+/// A merge computes its result from the tree it produces, so the paths it
+/// writes are exactly those added or changed between the target head and that
+/// tree, together with the parent directories they need. Each is checked
+/// against the checkout itself, which covers ignored paths Git would overwrite
+/// without saying so and bounds the work by the size of the change rather than
+/// the size of the checkout.
+fn checkout_writes(checkout: &Path, target_head: &str, merged_tree: Option<&str>) -> Result<()> {
+    let writes = match merged_tree {
+        Some(tree) => gitio::write_set(checkout, target_head, tree)?,
+        None => gitio::WriteSet {
+            files: Vec::new(),
+            parents: Vec::new(),
+        },
+    };
+    let collisions = gitio::write_overlap(checkout, &writes)?;
+    if !collisions.is_empty() {
+        bail!(
+            "merge would write over paths the target worktree {} holds untracked or ignored: {}",
+            checkout.display(),
+            collisions.join(", ")
+        );
+    }
+    let left = gitio::untracked_and_ignored(checkout)?;
+    if !left.is_empty() {
+        println!(
+            "target worktree {}: leaving {} untracked or ignored {} the merge does not write: {}",
+            checkout.display(),
+            left.len(),
+            if left.len() == 1 { "path" } else { "paths" },
+            name_first_few(&left, 3)
+        );
+    }
+    Ok(())
+}
+
+/// Name up to `limit` paths and count the rest, so a report stays one line
+/// however much a checkout holds.
+fn name_first_few(paths: &[String], limit: usize) -> String {
+    let mut named = paths
+        .iter()
+        .take(limit)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if paths.len() > limit {
+        named.push_str(&format!(", and {} more", paths.len() - limit));
+    }
+    named
+}
+
 /// Integrate one already-selected change. Tagged integration reuses this
 /// guarded path for every open member so each merge gets the normal target,
 /// approval, gate, and dependency checks.
@@ -2241,13 +2307,12 @@ fn integrate_one(
 
     let wt = gitio::worktree_for_branch(&ctx.cwd, &target)?
         .with_context(|| format!("no worktree has {target:?} checked out; check it out first"))?;
-    if !gitio::is_clean(&wt)? {
-        bail!("target worktree {} is not clean", wt.display());
-    }
+    checkout_tracked_dirt(&wt)?;
     let old_target = gitio::branch_head(&ctx.cwd, &target)?;
     // The content readiness was decided against, read under the target lock so
     // the merge is checked against the same tree the authorization covers.
     let evaluated_tree = gitio::merge_outcome(&ctx.cwd, &old_target, &approved_head)?.tree;
+    checkout_writes(&wt, &old_target, evaluated_tree.as_deref())?;
     let msg = message.unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
 
     if let Err(e) = gitio::git(
@@ -2487,9 +2552,7 @@ fn integrate_dry_run(
     ctx.ensure_declared_actor(store)?;
     let target_worktree = gitio::worktree_for_branch(&ctx.cwd, target)?
         .with_context(|| format!("no worktree has {target:?} checked out; check it out first"))?;
-    if !gitio::is_clean(&target_worktree)? {
-        bail!("target worktree {} is not clean", target_worktree.display());
-    }
+    checkout_tracked_dirt(&target_worktree)?;
     let report = ctx.report(store, st)?;
     if !report.integrate_ready {
         eprint!("{}", render::blocker_explanation(st, &report));
@@ -2507,6 +2570,7 @@ fn integrate_dry_run(
         .clone();
     let target_head = gitio::branch_head(&ctx.cwd, target)?;
     let outcome = gitio::merge_outcome(&ctx.cwd, &target_head, &approved_head)?;
+    checkout_writes(&target_worktree, &target_head, outcome.tree.as_deref())?;
     let conflicts = outcome.conflicts;
     let msg = message
         .map(str::to_string)

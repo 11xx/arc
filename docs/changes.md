@@ -96,7 +96,22 @@
   verifies the merge commit's parents and that its tree is the one the gates
   were evaluated against, undoing the merge otherwise: parents say which
   commits were merged, and only the tree says what ships. It never runs a
-  gate. It records a `change-integrated` event
+  gate.
+
+  A target checkout blocks the merge only where the merge could change or
+  lose bytes in it. Uncommitted tracked modifications refuse, staged or
+  unstaged, because a merge beside them writes into a tree nobody can name
+  afterwards. Untracked and ignored paths the merge does not write are left
+  in place, and the integration report names the paths it leaves. The paths a
+  merge writes are the ones added or changed between the target head and the
+  tree the merge produces, together with the parent directories those paths
+  need; any of them that already exists in the checkout without being tracked
+  there is refused by name, including ignored paths Git itself would
+  overwrite without saying so. The check reads each candidate from the
+  checkout, so its cost follows the size of the change rather than the size
+  of the checkout.
+
+  It records a `change-integrated` event
   carrying the patchset and head that were merged, the branch merged into, and
   where that branch stood first. A merge arc did not perform is `arc close
   --assert-integrated <rev> [--patchset <ps>] [--into <branch>]`, which writes
