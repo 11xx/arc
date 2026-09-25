@@ -17,8 +17,8 @@ Parsing an internal shape means tracking arc's implementation.
 
 | Schema | Surface | Stability |
 | --- | --- | --- |
-| `arc-state/1` | `arc show --json` — the reduced change ledger state, including external verdicts marked with their source | commitment |
-| `arc-status/24` | `arc status` — the actionable state of one change, including dependencies, claim timing, blockers, `next_action`, local and external verdicts, the current review subject, the review map, advisories, the forge block, captured plan provenance, the fork a promotion came from, the environment each gate's evidence applies to, and the source files for effective policy rules and gates | commitment |
+| `arc-state/2` | `arc show --json` — the reduced change ledger state, including external verdicts marked with their source and the head a contribution was found ready to send at | commitment |
+| `arc-status/25` | `arc status` — the actionable state of one change, including dependencies, claim timing, blockers, `next_action`, local and external verdicts, the current review subject, the review map, advisories, the forge block, captured plan provenance, the fork a promotion came from, the environment each gate's evidence applies to, the source files for effective policy rules and gates, and the head a contribution was found ready to send at | commitment |
 | `arc-check/3` | `arc check --json` — every blocker with its exit code, plus never-blocking advisories | commitment |
 | `arc-inbox/10` | `arc inbox --json` — the lead-facing queue buckets across open changes, unowned branches and worktrees, and the journal backlog | commitment |
 | `arc-catchup/10` | `arc catchup --json` — ledger buckets, journal lanes and shared inventory rows, memories, forks with what they hold, unowned refs and checkouts, worktree cost, replica peers and integration authority, and a plan's settled promotion state | commitment |
@@ -70,7 +70,7 @@ apply and the field is omitted.
 | `arc-replica-event/1` | One identity or authority event carried by an `arc-replica-bundle/1` file | commitment |
 | `arc-replica-bundle/1` | `arc replica export` / `arc replica import` — a logical project's explicit replica identities and authority events | commitment |
 | `arc-replica-import/1` | Local receipt batch naming the source replica and imported bundle digest | internal |
-| `store-format/4` | `.git/arc/config.json` and the change ledger, including external verdicts and their source references | internal |
+| `store-format/4` | `.git/arc/config.json` and the change ledger, including external verdicts, their source references, and ready-to-send records | internal |
 | `journal-events/1` | `events.jsonl`, streamed by `arc journal events` — the canonical agent-written event log | commitment |
 | `arc-journal-spool/1` | `.arc/outbox/<ts>-<kind>-<topic>.json` — a journal write parked for later promotion | commitment |
 | `arc-sandbox/2` | `.arc-sandbox.json` — the marker naming a prefix as arc's to remove | internal |
@@ -89,6 +89,7 @@ next one.
 carries the store format it was written with, and arc refuses a bundle written
 by a newer arc rather than skipping lifecycle events it does not know.
 
-Store format 4 adds external verdicts and their source references to the
-change ledger. A build that reads format 3 would skip them, so a store holding
-one is stamped format 4.
+Store format 4 adds external verdicts with their source references, and the
+record that a contributed change is ready to send, to the change ledger. A
+build that reads format 3 would skip them, so a store holding either is
+stamped format 4.

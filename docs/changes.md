@@ -458,7 +458,7 @@ condition is reached, with a JSON diagnostic containing the winning
 watch conditions are checked in their supplied order and the first reached
 condition wins.
 
-`arc status <change>` prints the versioned `arc-status/24` JSON report —
+`arc status <change>` prints the versioned `arc-status/25` JSON report —
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, claim owner/activity/stage timing, snapshot
 provenance, a `review_subject` naming the exact identities the independence

@@ -952,7 +952,7 @@ fn conflicting_target_movement_requires_rebase_before_integration() {
         .code(11);
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "conflict-r"]))).unwrap();
-    assert_eq!(status["schema"], "arc-status/24");
+    assert_eq!(status["schema"], "arc-status/25");
     assert_eq!(status["needs_rebase"], true);
     assert!(status["blockers"]
         .as_array()
@@ -2064,7 +2064,7 @@ fn status_projection_and_stage_note_file_read_stdin() {
         .args(["status", "projected", "--get", "schema"])
         .assert()
         .success()
-        .stdout("arc-status/24\n");
+        .stdout("arc-status/25\n");
 
     repo.arc(&wt)
         .args([

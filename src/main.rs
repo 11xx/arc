@@ -554,7 +554,7 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/24 schema)
+    /// Machine-readable status report (the versioned arc-status/25 schema)
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -747,6 +747,18 @@ enum Cmd {
         blocker: Option<String>,
     },
     /// Record the current branch head as a new patchset
+    /// Rewrite a change as one commit on its base, with the same tree, and
+    /// record it as a new patchset. Evidence and verdicts on the earlier
+    /// heads stay with those heads; the single commit is gated and reviewed
+    /// like any other patchset
+    Squash {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
+        change: Option<String>,
+        /// Message for the single commit
+        #[arg(long, short = 'm')]
+        message: String,
+    },
     Snapshot {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -2735,6 +2747,11 @@ fn run(cli: Cli) -> Result<i32> {
                     commands::stage(&ctx, &change, stage, note, blocker, claim)
                 }
             }
+        }
+        Cmd::Squash { change, message } => {
+            let change = infer(change.as_deref())?;
+            commands::squash(&ctx, &change, &message)?;
+            Ok(0)
         }
         Cmd::Snapshot {
             change,
