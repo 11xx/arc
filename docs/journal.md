@@ -514,7 +514,7 @@ change ledger. Malformed events, store configuration, IDs, and missing open
 events are problems; orphaned temporary files and retention refs, missing open
 branches, long-expired claims, dependency cycles, and future event types are
 non-failing advice. Human output names each affected path or ref; JSON uses the
-versioned `arc-doctor/3` report. Both open with the roots the invocation reads
+versioned `arc-doctor/4` report. Both open with the roots the invocation reads
 and writes and whether a sandbox is in force, because every finding is a
 statement about state at those paths. `arc doctor` exits 1 when problems are
 present and 0 for a clean or advice-only ledger.

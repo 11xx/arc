@@ -57,3 +57,6 @@ in `journal questions --json`, and the verification stamps on `journal open`
 and `catchup`. Prose headings name the identity that argued and never the
 subject, so who a lead recorded work for is a question for the structured view.
 
+Replica identities sit above store-local repository IDs and preserve event
+provenance across file exchange. See the [replica guide](replicas.md) for
+pairing and integration authority.

@@ -28,8 +28,14 @@ struct Finding {
 struct Report {
     schema: &'static str,
     roots: Roots,
+    replica: Option<crate::replica::ReplicaStatus>,
     problems: Vec<Finding>,
     advice: Vec<Finding>,
+}
+
+struct ChangeInspection<'a> {
+    cwd: &'a Path,
+    local_repository_id: &'a str,
 }
 
 /// Where this invocation reads and writes. Every other diagnostic here is a
@@ -85,6 +91,10 @@ impl Roots {
 
 pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     let root = Store::resolve_root(&ctx.cwd)?;
+    let local_repository_id = Store::repository_id_at(&root)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     let mut problems = Vec::new();
     let mut advice = Vec::new();
     if Store::repository_id_at(&root).is_err() {
@@ -97,7 +107,10 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     let mut states = BTreeMap::new();
     let mut known_patchsets = BTreeMap::<String, Vec<String>>::new();
     inspect_changes(
-        &ctx.cwd,
+        ChangeInspection {
+            cwd: &ctx.cwd,
+            local_repository_id: &local_repository_id,
+        },
         &root,
         &mut problems,
         &mut advice,
@@ -108,20 +121,25 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     // reported as the problem it is, not surface as a fatal error inside
     // whatever happened to read it first — which is what doctor exists to
     // prevent for every other kind of event.
-    inspect_repository_events(&Store::discover(&ctx.cwd)?, &mut problems);
-    inspect_dangling_revisions(
-        &ctx.cwd,
-        &Store::discover(&ctx.cwd)?,
-        &states,
-        &mut problems,
-        &mut advice,
-    )?;
+    let store = Store::discover(&ctx.cwd)?;
+    inspect_repository_events(&store, &mut problems);
+    inspect_dangling_revisions(&ctx.cwd, &store, &states, &mut problems, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
     inspect_danger_paths(&ctx.cwd, &mut problems);
     inspect_danger_classification(&ctx.cwd, &mut problems);
     inspect_closed_worktrees(&ctx.cwd, &states, &mut advice)?;
     inspect_debt(ctx, &states, &mut advice)?;
-    inspect_hold_releases(&Store::discover(&ctx.cwd)?, &states, &mut advice);
+    inspect_hold_releases(&store, &states, &mut advice);
+    let replica = match crate::replica::status(&store) {
+        Ok(status) => Some(status),
+        Err(error) => {
+            problems.push(Finding {
+                code: "invalid-replica-state",
+                detail: format!("{error:#}"),
+            });
+            None
+        }
+    };
     let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
     inspect_worktree_accounting(
         &ctx.cwd,
@@ -144,8 +162,9 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
 
     let exit = i32::from(!problems.is_empty());
     let report = Report {
-        schema: "arc-doctor/3",
+        schema: "arc-doctor/4",
         roots: Roots::resolve(&ctx.cwd, &root)?,
+        replica,
         problems,
         advice,
     };
@@ -153,6 +172,10 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
         println!("{}", serde_json::to_string(&report)?);
     } else {
         report.roots.render();
+        match &report.replica {
+            Some(replica) => crate::replica::render_status(replica),
+            None => println!("replica: unavailable (see invalid-replica-state problem)"),
+        }
         render("problems", &report.problems);
         render_advice(&report.advice, verbose);
     }
@@ -265,7 +288,7 @@ fn inspect_dangling_revisions(
 }
 
 fn inspect_changes(
-    cwd: &Path,
+    inspection: ChangeInspection<'_>,
     root: &Path,
     problems: &mut Vec<Finding>,
     advice: &mut Vec<Finding>,
@@ -294,7 +317,7 @@ fn inspect_changes(
             continue;
         }
         inspect_change(
-            cwd,
+            &inspection,
             &change_id,
             &entry.path(),
             problems,
@@ -307,7 +330,7 @@ fn inspect_changes(
 }
 
 fn inspect_change(
-    cwd: &Path,
+    inspection: &ChangeInspection<'_>,
     change_id: &str,
     change_dir: &Path,
     problems: &mut Vec<Finding>,
@@ -394,10 +417,11 @@ fn inspect_change(
     // Deliberately the unresolved reduction. Doctor's job includes reporting
     // which recorded revisions no longer resolve, and a view that had already
     // followed them forward would have nothing left to report.
-    let Ok(state) = state::reduce(&events) else {
+    let Ok(mut state) = state::reduce(&events) else {
         return Ok(());
     };
-    if state.closure.is_none() && !gitio::branch_exists(cwd, &state.branch) {
+    crate::replica::localize_change(inspection.local_repository_id, &events, &mut state);
+    if state.closure.is_none() && !gitio::branch_exists(inspection.cwd, &state.branch) {
         advice.push(Finding {
             code: "missing-open-branch",
             detail: format!("{}: refs/heads/{}", change_dir.display(), state.branch),

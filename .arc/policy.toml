@@ -19,6 +19,7 @@ git_identity = "shared"
 paths = [
   # Replay and store format: a defect corrupts an append-only history silently.
   "src/store.rs",
+  "src/replica.rs",
   "src/state.rs",
   "src/model.rs",
   "src/session_store.rs",
@@ -55,6 +56,7 @@ paths = [
   ".arc/policy.toml",
   # Bundle import writes foreign events into the append-only store.
   "src/commands/bundle_io.rs",
+  "src/commands/replica.rs",
   # Change and event identity: a collision merges two histories silently.
   "src/ids.rs",
   # The health report itself, including the classification check below. A

@@ -329,7 +329,9 @@ fn repo_states(store: &Store) -> Result<BTreeMap<String, ChangeState>> {
     let rewrites = store.rewrites()?;
     for change_id in store.list_change_ids()? {
         let events = store.load_events(&change_id)?;
-        states.insert(change_id, state::reduce_following(&events, &rewrites)?);
+        let mut state = state::reduce_following(&events, &rewrites)?;
+        crate::replica::localize_change(&store.repository_id, &events, &mut state);
+        states.insert(change_id, state);
     }
     Ok(states)
 }
