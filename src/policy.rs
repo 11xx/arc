@@ -1,41 +1,68 @@
-//! Repository-declared integration policy.
+//! Repository integration policy from project and operator declarations.
 //!
-//! Policy is loaded from `.arc/policy.toml`. An absent file preserves the
-//! default behavior, with every policy disabled.
+//! `.arc/policy.toml` travels with a repository. The operator policy is kept
+//! beside the repository ledger under Git's common directory, so a clone can
+//! carry local review policy without adding it to the contributed tree.
 
-use crate::config::ProvenanceBehavior;
+use crate::config::{GitIdentityMode, ProvenanceBehavior};
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
-/// Integration policy committed at `.arc/policy.toml` in the repository.
-#[derive(Debug, Default, Deserialize)]
+/// Effective policy declarations and the source files that supplied them.
+#[derive(Debug, Default)]
 pub struct PolicyFile {
-    #[serde(default)]
     pub policy: Policy,
-    #[serde(default)]
     pub review: Review,
-    #[serde(default)]
     pub provenance: ProvenanceBehavior,
-    #[serde(default)]
     pub danger: Danger,
+    pub sources: PolicySources,
 }
 
-/// Surfaces the project has declared dangerous. A change touching one needs a
-/// verdict from somebody other than its author; everywhere else a
+/// Stable origin labels for every policy declaration.
+#[derive(Debug, Default)]
+pub struct PolicySources {
+    entries: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl PolicySources {
+    fn record(&mut self, rule: String, source: &str) {
+        self.entries
+            .entry(rule)
+            .or_default()
+            .insert(source.to_string());
+    }
+
+    pub fn as_map(&self) -> BTreeMap<String, Vec<String>> {
+        self.entries
+            .iter()
+            .map(|(rule, sources)| (rule.clone(), sources.iter().cloned().collect()))
+            .collect()
+    }
+
+    pub fn sources_for(&self, rule: &str) -> Vec<String> {
+        self.entries
+            .get(rule)
+            .map(|sources| sources.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// Surfaces the project or operator has declared dangerous. A change touching
+/// one needs a verdict from somebody other than its author; everywhere else a
 /// self-recorded verdict satisfies the gate.
 ///
-/// The declaration is a judgement made once, in a reviewable commit, by an
-/// identifiable author — rather than one made per change by the party under
-/// pressure to ship, which is the party with the incentive to skip it.
-#[derive(Debug, Default, Deserialize)]
+/// The declaration is a judgement made once, in a reviewable commit or local
+/// operator policy, by an identifiable author — rather than one made per
+/// change by the party under pressure to ship.
+#[derive(Debug, Default)]
 pub struct Danger {
     /// Path globs. `*` matches within a path segment, `**` across segments.
-    #[serde(default)]
     pub paths: Vec<String>,
     /// Files deliberately classified as not dangerous. An entry is a claim
     /// somebody made and a reviewer accepted, not an absence of one.
-    #[serde(default)]
     pub acknowledged_safe: Vec<String>,
     /// Directory prefixes inside which classification is closed: every tracked
     /// file must match `paths` or `acknowledged_safe`, and `arc doctor` fails
@@ -45,7 +72,6 @@ pub struct Danger {
     /// permissive direction: a file nobody classified matches nothing, looks
     /// safe, and lands on a self-verdict. Declaring the root turns adding or
     /// renaming a file from a silent escalation into a loud one.
-    #[serde(default)]
     pub source_roots: Vec<String>,
 }
 
@@ -128,6 +154,220 @@ fn matches_from(pattern: &[u8], path: &[u8]) -> bool {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct PolicyLayer {
+    policy: Option<PolicyLayerPolicy>,
+    review: Option<ReviewLayer>,
+    provenance: Option<ProvenanceLayer>,
+    danger: Option<DangerLayer>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PolicyLayerPolicy {
+    forbid_self_approval: Option<bool>,
+    require_declared_actor: Option<bool>,
+    debt_count_threshold: Option<usize>,
+    debt_age_threshold_seconds: Option<u64>,
+    worktree_free_floor_bytes: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ReviewLayer {
+    checklist: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ProvenanceLayer {
+    git_identity: Option<GitIdentityMode>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DangerLayer {
+    paths: Option<Vec<String>>,
+    acknowledged_safe: Option<Vec<String>>,
+    source_roots: Option<Vec<String>>,
+}
+
+/// Operator policy is stored in the repository's shared Git directory, next
+/// to the ledger, so linked worktrees and clones resolve one local file.
+pub fn operator_path(repo_toplevel: &Path) -> Result<PathBuf> {
+    Ok(crate::gitio::common_dir(repo_toplevel)?.join("arc/operator-policy.toml"))
+}
+
+/// A stable source name safe to retain in reports and ledger events.
+pub fn source_name(path: &Path, repo_toplevel: &Path) -> String {
+    if path == repo_toplevel.join(".arc/policy.toml") {
+        ".arc/policy.toml".to_string()
+    } else {
+        "<git-common-dir>/arc/operator-policy.toml".to_string()
+    }
+}
+
+/// Validate the policy portion of an operator-policy document.
+pub fn validate_operator_text(text: &str) -> Result<()> {
+    toml::from_str::<PolicyLayer>(text).context("malformed operator policy TOML")?;
+    Ok(())
+}
+
+pub fn load(repo_toplevel: &Path) -> Result<PolicyFile> {
+    let in_tree = repo_toplevel.join(".arc/policy.toml");
+    let operator = operator_path(repo_toplevel)?;
+    let mut layers = Vec::new();
+    for path in [in_tree, operator] {
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", path.display()))
+            }
+        };
+        let layer = toml::from_str::<PolicyLayer>(&text)
+            .with_context(|| format!("malformed {}", path.display()))?;
+        layers.push((source_name(&path, repo_toplevel), layer));
+    }
+
+    let mut policy = Policy::default();
+    let mut review = Review::default();
+    let mut danger = Danger::default();
+    let mut sources = PolicySources::default();
+    let mut provenance_modes = Vec::new();
+    let mut debt_count_threshold = Vec::new();
+    let mut debt_age_threshold_seconds = Vec::new();
+    let mut worktree_free_floor_bytes = Vec::new();
+    let mut checklist = Vec::new();
+    let mut checklist_seen = BTreeSet::new();
+    let mut paths = Vec::new();
+    let mut paths_seen = BTreeSet::new();
+    let mut acknowledged_safe = Vec::new();
+    let mut acknowledged_safe_seen = BTreeSet::new();
+    let mut source_roots = Vec::new();
+    let mut source_roots_seen = BTreeSet::new();
+
+    for (source, layer) in layers {
+        if let Some(raw) = layer.policy {
+            if let Some(value) = raw.forbid_self_approval {
+                policy.forbid_self_approval |= value;
+                sources.record(format!("policy.forbid_self_approval={value}"), &source);
+            }
+            if let Some(value) = raw.require_declared_actor {
+                policy.require_declared_actor |= value;
+                sources.record(format!("policy.require_declared_actor={value}"), &source);
+            }
+            if let Some(value) = raw.debt_count_threshold {
+                debt_count_threshold.push(value);
+                sources.record(format!("policy.debt_count_threshold={value}"), &source);
+            }
+            if let Some(value) = raw.debt_age_threshold_seconds {
+                debt_age_threshold_seconds.push(value);
+                sources.record(
+                    format!("policy.debt_age_threshold_seconds={value}"),
+                    &source,
+                );
+            }
+            if let Some(value) = raw.worktree_free_floor_bytes {
+                worktree_free_floor_bytes.push(value);
+                sources.record(format!("policy.worktree_free_floor_bytes={value}"), &source);
+            }
+        }
+        if let Some(raw) = layer.review {
+            if let Some(entries) = raw.checklist {
+                for entry in entries {
+                    sources.record(format!("review.checklist[{entry:?}]"), &source);
+                    if checklist_seen.insert(entry.clone()) {
+                        checklist.push(entry);
+                    }
+                }
+            }
+        }
+        if let Some(raw) = layer.provenance {
+            let mode = raw.git_identity.unwrap_or_default();
+            sources.record(
+                format!("provenance.git_identity={}", mode.as_str()),
+                &source,
+            );
+            provenance_modes.push(mode);
+        }
+        if let Some(raw) = layer.danger {
+            if let Some(entries) = raw.paths {
+                for pattern in entries {
+                    sources.record(format!("danger.paths[{pattern:?}]"), &source);
+                    if paths_seen.insert(pattern.clone()) {
+                        paths.push(pattern);
+                    }
+                }
+            }
+            if let Some(entries) = raw.acknowledged_safe {
+                for pattern in entries {
+                    sources.record(format!("danger.acknowledged_safe[{pattern:?}]"), &source);
+                    if acknowledged_safe_seen.insert(pattern.clone()) {
+                        acknowledged_safe.push(pattern);
+                    }
+                }
+            }
+            if let Some(entries) = raw.source_roots {
+                for root in entries {
+                    sources.record(format!("danger.source_roots[{root:?}]"), &source);
+                    if source_roots_seen.insert(root.clone()) {
+                        source_roots.push(root);
+                    }
+                }
+            }
+        }
+    }
+
+    policy.debt_count_threshold = debt_count_threshold.into_iter().min();
+    policy.debt_age_threshold_seconds = debt_age_threshold_seconds.into_iter().min();
+    policy.worktree_free_floor_bytes = worktree_free_floor_bytes.into_iter().max();
+    review.checklist = checklist;
+    danger.paths = paths;
+    danger.acknowledged_safe = acknowledged_safe;
+    danger.source_roots = source_roots;
+
+    let git_identity = if provenance_modes
+        .iter()
+        .any(|mode| matches!(mode, GitIdentityMode::PerActor))
+    {
+        GitIdentityMode::PerActor
+    } else if !provenance_modes.is_empty() {
+        GitIdentityMode::Shared
+    } else {
+        let config = crate::config::load()?;
+        if config_declares_git_identity(&config.config_path)? {
+            sources.record(
+                format!(
+                    "provenance.git_identity={}",
+                    config.provenance_git_identity.as_str()
+                ),
+                "<arc-config>/config.toml",
+            );
+        }
+        config.provenance_git_identity
+    };
+
+    Ok(PolicyFile {
+        policy,
+        review,
+        provenance: ProvenanceBehavior { git_identity },
+        danger,
+        sources,
+    })
+}
+
+fn config_declares_git_identity(path: &Path) -> Result<bool> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let config: toml::Value =
+        toml::from_str(&text).with_context(|| format!("malformed {}", path.display()))?;
+    Ok(config
+        .get("provenance")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|table| table.contains_key("git_identity")))
+}
+
+/// Policy that applies to every change in the repository.
+#[derive(Debug, Default, Deserialize)]
 pub struct Policy {
     #[serde(default)]
     pub forbid_self_approval: bool,
@@ -155,32 +395,9 @@ pub struct Policy {
     pub worktree_free_floor_bytes: Option<u64>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default)]
 pub struct Review {
-    #[serde(default)]
     pub checklist: Vec<String>,
-}
-
-pub fn load(repo_toplevel: &Path) -> Result<PolicyFile> {
-    let path = repo_toplevel.join(".arc").join("policy.toml");
-    if !path.is_file() {
-        return Ok(PolicyFile {
-            provenance: ProvenanceBehavior {
-                git_identity: crate::config::load()?.provenance_git_identity,
-            },
-            ..PolicyFile::default()
-        });
-    }
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("cannot read {}", path.display()))?;
-    let mut policy: PolicyFile =
-        toml::from_str(&text).with_context(|| format!("malformed {}", path.display()))?;
-    let tables: toml::Table =
-        toml::from_str(&text).with_context(|| format!("malformed {}", path.display()))?;
-    if !tables.contains_key("provenance") {
-        policy.provenance.git_identity = crate::config::load()?.provenance_git_identity;
-    }
-    Ok(policy)
 }
 
 #[cfg(test)]
@@ -209,7 +426,7 @@ mod tests {
         assert!(!glob_match("src/*.rs", "src/commands/mod.rs"));
         assert!(glob_match("src/**/*.rs", "src/commands/mod.rs"));
         assert!(glob_match("src/**", "src/commands/mod.rs"));
-        // A trailing slash names a directory and everything beneath it.
+        // A trailing `/` names a directory and everything beneath it.
         assert!(glob_match("src/commands/", "src/commands/mod.rs"));
         assert!(!glob_match("src/commands/", "src/commands.rs"));
     }

@@ -17,12 +17,12 @@ Parsing an internal shape means tracking arc's implementation.
 
 | Schema | Surface | Stability |
 | --- | --- | --- |
-| `arc-status/22` | `arc status` — the actionable state of one change, including dependencies, claim timing, blockers, `next_action`, the current review subject, the review map, advisories, the forge block, captured plan provenance, and the fork a promotion came from | commitment |
+| `arc-status/23` | `arc status` — the actionable state of one change, including dependencies, claim timing, blockers, `next_action`, the current review subject, the review map, advisories, the forge block, captured plan provenance, the fork a promotion came from, the environment each gate's evidence applies to, and the source files for effective policy rules and gates | commitment |
 | `arc-check/3` | `arc check --json` — every blocker with its exit code, plus never-blocking advisories | commitment |
 | `arc-inbox/10` | `arc inbox --json` — the lead-facing queue buckets across open changes, unowned branches and worktrees, and the journal backlog | commitment |
 | `arc-catchup/10` | `arc catchup --json` — ledger buckets, journal lanes and shared inventory rows, memories, forks with what they hold, unowned refs and checkouts, worktree cost, replica peers and integration authority, and a plan's settled promotion state | commitment |
 | `arc-journal-catchup/8` | `arc journal catchup --json` — artifact storage/resolution facts, converged checkpoint tips, promotion state, and journal activity | commitment |
-| `arc-resume/5` | `arc resume --json` — one change's brief, live state, and journal context, including captured plan provenance and the source fork's artifacts | commitment |
+| `arc-resume/6` | `arc resume --json` — one change's brief, live state, and journal context, including captured plan provenance, the source fork's artifacts, and policy declaration sources | commitment |
 | `arc-brief/1` | `arc brief --json` — one selected brief and its immutable plan-source snapshot | commitment |
 | `arc-journal-artifact/2` | `arc journal show --json` — raw artifact bytes and planner metadata | commitment |
 | `arc-journal-inventory/5` | `arc journal inventory [FILE] [--archived] --json` — one read-only artifact projection with storage, claims, converged checkpoint tips, questions, promotions, promotion state, patchsets citing each artifact, and ledger observation | commitment |
@@ -84,3 +84,6 @@ next one.
 `arc-bundle/N` sits in between and is checked in both directions: a bundle
 carries the store format it was written with, and arc refuses a bundle written
 by a newer arc rather than skipping lifecycle events it does not know.
+
+Store format 4 records the policy source labels used by guarded integration
+authorizations, alongside their normalized policy and gate declarations.

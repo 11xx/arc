@@ -26,6 +26,7 @@ mod orchestrate;
 mod pass;
 mod paths;
 mod planners;
+mod policy;
 mod provenance;
 mod queue;
 mod rebase;
@@ -82,4 +83,14 @@ fn top_level_typo_retains_clap_suggestion() {
         .stderr(predicates::str::contains(
             "a similar subcommand exists: 'journal'",
         ));
+}
+
+#[test]
+fn operator_policy_unions_with_project_policy_without_tracked_changes() {
+    policy::operator_policy_unions_with_project_policy_without_tracked_changes();
+}
+
+#[test]
+fn conflicting_gate_commands_are_reported_and_refused() {
+    policy::conflicting_gate_commands_are_reported_and_refused();
 }

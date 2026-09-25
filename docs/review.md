@@ -48,8 +48,11 @@ finding in `arc show`; comment replies render beneath their parent comment.
 
 ## Policy
 
-Repository integration policy is declared in `.arc/policy.toml`. Policies are
-disabled when the file or setting is absent. Set
+Project integration policy is declared in `.arc/policy.toml`; operator policy
+for a repository is stored at
+`<git-common-dir>/arc/operator-policy.toml`. Both files apply, and
+`arc policy show` names the file that declared each effective rule. Policies
+are disabled when both files omit the setting. Set
 `[policy] forbid_self_approval = true` to reject an approval when its effective
 author matches a contributor on the patchset it approves, or when arc assumed
 the *reviewing* identity (from the harness session or `git config user.name`)

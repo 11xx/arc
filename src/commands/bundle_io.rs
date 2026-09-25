@@ -58,6 +58,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
                 root: root.clone(),
                 repository_id: repository_id.clone(),
                 require_declared_actor: false,
+                require_declared_actor_sources: Vec::new(),
             });
             if let Some(store) = store.as_ref() {
                 claim_contest = claim_contest_for_import(store, &validated, &plan.new_events)?;

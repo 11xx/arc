@@ -263,11 +263,14 @@ fn verify_against_skip_green_reuses_the_evidence_at_the_merged_tree() {
         "--skip-green",
     ]));
     assert!(
-        second.contains("gate build: skipped (green at the merged tree)"),
+        second.contains(
+            "gate build: skipped (green at the merged tree; declared by .arc/gates.toml)"
+        ),
         "{second}"
     );
     assert!(
-        second.contains("gate test: skipped (green at the merged tree)"),
+        second
+            .contains("gate test: skipped (green at the merged tree; declared by .arc/gates.toml)"),
         "{second}"
     );
     assert!(
