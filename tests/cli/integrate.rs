@@ -618,3 +618,236 @@ fn the_switch_onto_the_target_does_not_overwrite_an_ignored_file() {
         .iter()
         .any(|event| event["event_type"] == "change-integrated"));
 }
+
+/// A change in a repository that declares no gate: approval is the only
+/// evidence its profile can carry, because nothing was ever evaluated.
+fn ungated_change(repo: &Repo, slug: &str) -> String {
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        slug,
+        "--no-worktree",
+    ])));
+    repo.commit(&repo.root, &format!("{slug}.txt"), "content\n", "feat");
+    stdout(repo.arc(&repo.root).args(["snapshot", slug]));
+    change_id
+}
+
+fn approve(repo: &Repo, change_id: &str) {
+    repo.arc(&repo.root)
+        .args(["review", change_id, "--verdict", "approved"])
+        .assert()
+        .success();
+}
+
+fn output_of(assertion: &assert_cmd::assert::Assert) -> String {
+    String::from_utf8_lossy(&assertion.get_output().stdout).into_owned()
+}
+
+#[test]
+fn done_without_declared_gates_reports_the_check_state() {
+    let repo = Repo::new();
+    let change_id = ungated_change(&repo, "ungated-done");
+
+    // The first `done` snapshots and prints where the change actually
+    // stands, rather than dying on the missing declaration.
+    let assertion = repo
+        .arc(&repo.root)
+        .args(["done", "ungated-done"])
+        .assert()
+        .code(3);
+    let out = output_of(&assertion);
+    assert!(
+        out.contains("no gates declared for profile local; nothing was run"),
+        "{out}"
+    );
+    assert!(out.contains("missing or stale approval"), "{out}");
+
+    approve(&repo, &change_id);
+    let assertion = repo
+        .arc(&repo.root)
+        .args(["done", "ungated-done"])
+        .assert()
+        .success();
+    let out = output_of(&assertion);
+    assert!(
+        out.contains("no gates declared for profile local"),
+        "done says no gate exists:\n{out}"
+    );
+    assert!(
+        !out.contains("all integration gates pass"),
+        "done must not report gates passing where none exist:\n{out}"
+    );
+}
+
+#[test]
+fn check_and_show_name_the_missing_gate_rather_than_gates_passing() {
+    let repo = Repo::new();
+    let change_id = ungated_change(&repo, "ungated-check");
+    approve(&repo, &change_id);
+
+    let assertion = repo
+        .arc(&repo.root)
+        .args(["check", "ungated-check"])
+        .assert()
+        .success();
+    let out = output_of(&assertion);
+    assert!(
+        out.contains("ready: no gates declared for profile local"),
+        "{out}"
+    );
+    assert!(!out.contains("all integration gates pass"), "{out}");
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "ungated-check"]),
+    ))
+    .unwrap();
+    assert_eq!(
+        status["ready_reason"],
+        "no gates declared for profile local"
+    );
+
+    let assertion = repo
+        .arc(&repo.root)
+        .args(["check", "ungated-check", "--explain"])
+        .assert()
+        .success();
+    let out = output_of(&assertion);
+    assert!(out.contains("no gates declared for profile local"), "{out}");
+    assert!(!out.contains("required gates green"), "{out}");
+
+    let assertion = repo
+        .arc(&repo.root)
+        .args(["show", &change_id])
+        .assert()
+        .success();
+    let out = output_of(&assertion);
+    assert!(out.contains("none declared for profile local"), "{out}");
+}
+
+#[test]
+fn verify_against_without_declared_gates_still_refuses_and_integrate_lands() {
+    let repo = Repo::new();
+    let change_id = ungated_change(&repo, "ungated-keep");
+    approve(&repo, &change_id);
+    let old_master = git_out(&repo.root, &["rev-parse", "master"]);
+
+    repo.arc(&repo.root)
+        .args(["verify", "ungated-keep", "--against", "master"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "no gates declared for profile local",
+        ));
+
+    repo.arc(&repo.root)
+        .args(["integrate", "ungated-keep"])
+        .assert()
+        .success();
+    let merged = repo.head(&repo.root);
+    let parents = git_out(&repo.root, &["rev-list", "--parents", "-n", "1", &merged])
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(parents.len(), 3);
+    assert_eq!(parents[1], old_master);
+}
+
+#[test]
+fn rebase_without_declared_gates_names_the_missing_gate() {
+    let repo = Repo::new();
+    ungated_change(&repo, "ungated-rebase");
+
+    // A second change moves the target under the first.
+    let mover = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "ungated-mover",
+        "--target",
+        "master",
+    ])));
+    let mover_wt = repo.home.join(".worktrees").join("repo-ungated-mover");
+    repo.commit(&mover_wt, "mover.txt", "mover\n", "feat: mover");
+    stdout(repo.arc(&mover_wt).args(["snapshot", "ungated-mover"]));
+    repo.arc(&mover_wt)
+        .args(["review", "ungated-mover", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", &mover])
+        .assert()
+        .success();
+
+    let assertion = repo
+        .arc(&repo.root)
+        .args(["rebase", "ungated-rebase"])
+        .assert()
+        .success();
+    let out = output_of(&assertion);
+    assert!(out.contains("no gates declared for profile local"), "{out}");
+    assert!(
+        !out.contains("every required gate is green at head"),
+        "a rebase must not report gates passing where none exist:\n{out}"
+    );
+}
+
+#[test]
+fn a_merged_file_over_an_ignored_directory_is_refused_by_name() {
+    let repo = repo_with_gates();
+    fs::write(repo.root.join(".gitignore"), "packed/\n").unwrap();
+    git(&repo.root, &["add", ".gitignore"]);
+    git(&repo.root, &["commit", "-m", "test: ignore packed/"]);
+    let (_change, _wt) = approved_change(&repo, "file-over-dir", "packed", "now a file\n");
+    fs::create_dir_all(repo.root.join("packed")).unwrap();
+    fs::write(repo.root.join("packed/local.bin"), b"local ignored bytes\n").unwrap();
+
+    repo.arc(&repo.root)
+        .args(["integrate", "file-over-dir"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("untracked or ignored: packed"));
+    assert_eq!(
+        fs::read(repo.root.join("packed/local.bin")).unwrap(),
+        b"local ignored bytes\n"
+    );
+}
+
+#[test]
+fn cleanup_after_an_already_contained_closure_removes_the_change_checkout() {
+    let repo = repo_with_gates();
+    let (first_id, _) = approved_change(&repo, "cleanup-first", "first.txt", "first\n");
+    repo.arc(&repo.root)
+        .args(["integrate", "cleanup-first"])
+        .assert()
+        .success();
+    let target = repo.head(&repo.root);
+    let (verify_id, verify_wt) = verification_only(&repo, "cleanup-verify", &target, &[&first_id]);
+
+    repo.arc(&repo.root)
+        .args(["integrate", &verify_id, "--cleanup"])
+        .assert()
+        .success();
+    assert!(
+        !verify_wt.exists(),
+        "the contained change's checkout is removed"
+    );
+    assert!(git_out(&repo.root, &["branch", "--list", "arc/cleanup-verify"]).is_empty());
+}
+
+#[test]
+fn cleanup_after_a_take_over_keeps_the_checkout_and_drops_the_branch() {
+    let repo = repo_with_gates();
+    let _change = in_place_change(&repo, "stranded-cleanup");
+
+    repo.arc(&repo.root)
+        .args(["integrate", "stranded-cleanup", "--cleanup"])
+        .assert()
+        .success();
+    assert!(
+        repo.root.exists(),
+        "the repository checkout is never removed"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "master"
+    );
+    assert!(git_out(&repo.root, &["branch", "--list", "arc/stranded-cleanup"]).is_empty());
+    assert!(repo.root.join("stranded-cleanup.txt").exists());
+}

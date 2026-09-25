@@ -1068,30 +1068,45 @@ pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
         }
     }
     super::review::snapshot(ctx, reference, None, None, None, false)?;
-    let _ = verify(
-        ctx,
-        reference,
-        VerifyArgs {
-            all: true,
-            parallel: false,
-            skip_green: false,
-            gate: None,
-            command: None,
-            probe: None,
-            brief_version: None,
-            probe_phase: None,
-            attest: false,
-            result: None,
-            tested_revision: None,
-            execution_host: None,
-            runner: None,
-            note: None,
-            waive_dirty: None,
-            falsified_by: None,
-            predicted: None,
-            against: None,
-        },
-    )?;
+    // A profile with no declared gate has nothing to run. Reporting the check
+    // state is still the whole point of `done`, and the state says plainly
+    // that nothing was evaluated, so a green never stands in for a gate
+    // nobody declared.
+    let store = ctx.store()?;
+    let (_, st) = ctx.load_state(&store, reference)?;
+    let declarations = gates::load(&gitio::toplevel(&ctx.cwd)?)?;
+    let required = declarations.required_for(&st.profile);
+    if required.is_empty() {
+        println!(
+            "no gates declared for profile {}; nothing was run",
+            st.profile
+        );
+    } else {
+        let _ = verify(
+            ctx,
+            reference,
+            VerifyArgs {
+                all: true,
+                parallel: false,
+                skip_green: false,
+                gate: None,
+                command: None,
+                probe: None,
+                brief_version: None,
+                probe_phase: None,
+                attest: false,
+                result: None,
+                tested_revision: None,
+                execution_host: None,
+                runner: None,
+                note: None,
+                waive_dirty: None,
+                falsified_by: None,
+                predicted: None,
+                against: None,
+            },
+        )?;
+    }
     check(ctx, reference, false, false)
 }
 
@@ -2964,7 +2979,16 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
     if explain {
         print!("{}", render::check_explanation(&st, &report));
     } else if report.integrate_ready {
-        println!("ready: all integration gates pass");
+        // A profile with no declared gate is ready, but "all integration
+        // gates pass" would claim an evaluation nobody performed.
+        if report.gates.is_empty() {
+            println!(
+                "ready: no gates declared for profile {}; nothing was evaluated",
+                report.profile
+            );
+        } else {
+            println!("ready: all integration gates pass");
+        }
     } else {
         print!("{}", render::blocker_explanation(&st, &report));
     }
