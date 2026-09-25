@@ -2143,6 +2143,56 @@ enum ClosedBehavior {
     SkipTagged,
 }
 
+/// The checkout a merge into a target runs in.
+struct TargetCheckout {
+    path: PathBuf,
+    /// The branch the checkout holds when it does not hold the target and
+    /// must be moved onto it before the merge.
+    switch_from: Option<String>,
+}
+
+/// Resolve the checkout the merge into `target` runs in.
+///
+/// A worktree holding the target is authoritative. When none does, the one
+/// shape arc still merges in is the checkout `begin --no-worktree` moved onto
+/// the change's branch in place: the change's recorded worktree is the
+/// worktree holding the change branch, so checking the target out there puts
+/// the checkout back on the branch it stood on before `begin`. Any other
+/// shape refuses, naming the missing target checkout.
+fn target_checkout(ctx: &Ctx, st: &ChangeState, target: &str) -> Result<TargetCheckout> {
+    if let Some(path) = gitio::worktree_for_branch(&ctx.cwd, target)? {
+        return Ok(TargetCheckout {
+            path,
+            switch_from: None,
+        });
+    }
+    let recorded = st.worktree.as_deref().map(PathBuf::from);
+    let holds_change = match recorded.as_deref() {
+        Some(path) => gitio::worktree_for_branch(&ctx.cwd, &st.branch)?
+            .is_some_and(|holding| same_path(&holding, path)),
+        None => false,
+    };
+    match (recorded, holds_change) {
+        (Some(path), true) => Ok(TargetCheckout {
+            path,
+            switch_from: Some(st.branch.clone()),
+        }),
+        _ => bail!("no worktree has {target:?} checked out; check it out first"),
+    }
+}
+
+/// Whether two paths name the same directory, comparing what the filesystem
+/// resolves them to when both exist.
+fn same_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 /// Refuse when the target checkout carries tracked modifications. A merge
 /// beside uncommitted work writes into a tree nobody can name afterwards.
 fn checkout_tracked_dirt(checkout: &Path) -> Result<()> {
@@ -2161,31 +2211,51 @@ fn checkout_tracked_dirt(checkout: &Path) -> Result<()> {
 ///
 /// A merge computes its result from the tree it produces, so the paths it
 /// writes are exactly those added or changed between the target head and that
-/// tree, together with the parent directories they need. Each is checked
+/// tree, together with the parent directories they need. A checkout that must
+/// first be moved onto the target writes the paths that differ between the
+/// branch it holds and the target, so those are checked too: an ignored path
+/// there loses its bytes to the switch, and a switch that fails after the
+/// merge has begun leaves a state nobody asked for. Each candidate is checked
 /// against the checkout itself, which covers ignored paths Git would overwrite
 /// without saying so and bounds the work by the size of the change rather than
 /// the size of the checkout.
-fn checkout_writes(checkout: &Path, target_head: &str, merged_tree: Option<&str>) -> Result<()> {
-    let writes = match merged_tree {
-        Some(tree) => gitio::write_set(checkout, target_head, tree)?,
-        None => gitio::WriteSet {
-            files: Vec::new(),
-            parents: Vec::new(),
-        },
+fn checkout_writes(
+    checkout: &TargetCheckout,
+    target_head: &str,
+    merged_tree: Option<&str>,
+) -> Result<()> {
+    let mut files = Vec::new();
+    let mut parents = Vec::new();
+    let mut collect = |writes: gitio::WriteSet| {
+        files.extend(writes.files);
+        parents.extend(writes.parents);
     };
-    let collisions = gitio::write_overlap(checkout, &writes)?;
+    if let Some(branch) = &checkout.switch_from {
+        let from = gitio::branch_head(&checkout.path, branch)?;
+        collect(gitio::write_set(&checkout.path, &from, target_head)?);
+    }
+    if let Some(tree) = merged_tree {
+        collect(gitio::write_set(&checkout.path, target_head, tree)?);
+    }
+    files.sort();
+    files.dedup();
+    parents.sort();
+    parents.dedup();
+    let writes = gitio::WriteSet { files, parents };
+    let collisions = gitio::write_overlap(&checkout.path, &writes)?;
     if !collisions.is_empty() {
         bail!(
-            "merge would write over paths the target worktree {} holds untracked or ignored: {}",
-            checkout.display(),
+            "the merge would write over paths the target worktree {} holds untracked or ignored: \
+             {}",
+            checkout.path.display(),
             collisions.join(", ")
         );
     }
-    let left = gitio::untracked_and_ignored(checkout)?;
+    let left = gitio::untracked_and_ignored(&checkout.path)?;
     if !left.is_empty() {
         println!(
             "target worktree {}: leaving {} untracked or ignored {} the merge does not write: {}",
-            checkout.display(),
+            checkout.path.display(),
             left.len(),
             if left.len() == 1 { "path" } else { "paths" },
             name_first_few(&left, 3)
@@ -2305,14 +2375,23 @@ fn integrate_one(
         );
     }
 
-    let wt = gitio::worktree_for_branch(&ctx.cwd, &target)?
-        .with_context(|| format!("no worktree has {target:?} checked out; check it out first"))?;
-    checkout_tracked_dirt(&wt)?;
+    let checkout = target_checkout(ctx, &st, &target)?;
+    checkout_tracked_dirt(&checkout.path)?;
     let old_target = gitio::branch_head(&ctx.cwd, &target)?;
     // The content readiness was decided against, read under the target lock so
     // the merge is checked against the same tree the authorization covers.
     let evaluated_tree = gitio::merge_outcome(&ctx.cwd, &old_target, &approved_head)?.tree;
-    checkout_writes(&wt, &old_target, evaluated_tree.as_deref())?;
+    checkout_writes(&checkout, &old_target, evaluated_tree.as_deref())?;
+    if checkout.switch_from.is_some() {
+        gitio::checkout(&checkout.path, &target).with_context(|| {
+            format!(
+                "cannot check {target} out in {} for the merge",
+                checkout.path.display()
+            )
+        })?;
+        println!("checked out {target} in {}", checkout.path.display());
+    }
+    let wt = checkout.path;
     let msg = message.unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
 
     // Git reports the merge up to date and creates no merge commit when the
@@ -2567,9 +2646,8 @@ fn integrate_dry_run(
     // undeclared actor, and a target worktree that is missing or dirty. A dry
     // run that skipped them would report a merge the real path refuses.
     ctx.ensure_declared_actor(store)?;
-    let target_worktree = gitio::worktree_for_branch(&ctx.cwd, target)?
-        .with_context(|| format!("no worktree has {target:?} checked out; check it out first"))?;
-    checkout_tracked_dirt(&target_worktree)?;
+    let checkout = target_checkout(ctx, st, target)?;
+    checkout_tracked_dirt(&checkout.path)?;
     let report = ctx.report(store, st)?;
     if !report.integrate_ready {
         eprint!("{}", render::blocker_explanation(st, &report));
@@ -2587,7 +2665,7 @@ fn integrate_dry_run(
         .clone();
     let target_head = gitio::branch_head(&ctx.cwd, target)?;
     let outcome = gitio::merge_outcome(&ctx.cwd, &target_head, &approved_head)?;
-    checkout_writes(&target_worktree, &target_head, outcome.tree.as_deref())?;
+    checkout_writes(&checkout, &target_head, outcome.tree.as_deref())?;
     let conflicts = outcome.conflicts;
     // Git would report the merge up to date and create no merge commit. A
     // plan that named parents for a merge that cannot exist would describe a
@@ -2598,6 +2676,12 @@ fn integrate_dry_run(
         .unwrap_or_else(|| format!("merge({}): {}", st.slug, st.title));
 
     println!("dry-run: would integrate {} into {target}", st.change_id);
+    if checkout.switch_from.is_some() {
+        println!(
+            "dry-run: would check out {target} in {} and merge there",
+            checkout.path.display()
+        );
+    }
     if already_contained {
         println!(
             "  merge: none — {target_head} already contains {approved_head}; the change closes \

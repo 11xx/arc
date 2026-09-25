@@ -444,3 +444,177 @@ fn tracked_modifications_refuse_by_their_own_reason() {
 
     assert_eq!(repo.head(&repo.root), old_master, "nothing merged");
 }
+
+/// A change opened with `begin --no-worktree` from a clean checkout on its
+/// target: the checkout itself is the change's worktree.
+fn in_place_change(repo: &Repo, slug: &str) -> String {
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        slug,
+        "--no-worktree",
+    ])));
+    repo.commit(&repo.root, &format!("{slug}.txt"), "in place\n", "feat");
+    stdout(repo.arc(&repo.root).args(["snapshot", slug]));
+    repo.arc(&repo.root)
+        .args(["verify", slug, "--gate", "smoke"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
+    change_id
+}
+
+#[test]
+fn a_no_worktree_change_merges_in_its_own_checkout() {
+    let repo = repo_with_gates();
+    let change_id = in_place_change(&repo, "stranded-in-place");
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "arc/stranded-in-place"
+    );
+    let old_master = git_out(&repo.root, &["rev-parse", "master"]);
+
+    let plan = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", "stranded-in-place", "--dry-run"]),
+    );
+    assert!(
+        plan.contains("would check out master in")
+            && plan.contains(&repo.root.display().to_string()),
+        "the plan reports the checkout it would take over:\n{plan}"
+    );
+
+    repo.arc(&repo.root)
+        .args(["integrate", "stranded-in-place"])
+        .assert()
+        .success();
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "master",
+        "the checkout is left on the target, as it stood before begin"
+    );
+    let merged = repo.head(&repo.root);
+    let parents = git_out(&repo.root, &["rev-list", "--parents", "-n", "1", &merged])
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(parents.len(), 3);
+    assert_eq!(parents[1], old_master);
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", &change_id, "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(status["state"], "closed");
+}
+
+#[test]
+fn a_dirty_no_worktree_checkout_keeps_the_refusal() {
+    let repo = repo_with_gates();
+    let _change_id = in_place_change(&repo, "stranded-dirty");
+    let old_master = git_out(&repo.root, &["rev-parse", "master"]);
+    fs::write(repo.root.join("README.md"), "edited in place\n").unwrap();
+
+    repo.arc(&repo.root)
+        .args(["integrate", "stranded-dirty"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("tracked modifications"));
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "arc/stranded-dirty",
+        "the refused checkout is left alone"
+    );
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), old_master);
+}
+
+#[test]
+fn a_change_with_no_checkout_keeps_the_missing_worktree_refusal() {
+    let repo = Repo::new();
+    git(
+        &repo.root,
+        &["checkout", "-q", "-b", "arc/stranded-nowhere"],
+    );
+    repo.commit(&repo.root, "nowhere.txt", "nowhere\n", "feat: nowhere");
+    git(&repo.root, &["checkout", "-q", "master"]);
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "stranded-nowhere",
+        "--adopt",
+        "arc/stranded-nowhere",
+    ])));
+    stdout(repo.arc(&repo.root).args(["snapshot", &change_id]));
+    repo.arc(&repo.root)
+        .args(["review", &change_id, "--verdict", "approved"])
+        .assert()
+        .success();
+    // With nobody on master and no recorded checkout, there is nowhere to
+    // merge, and the refusal is the one that says so.
+    git(&repo.root, &["checkout", "-q", "--detach", "master"]);
+
+    repo.arc(&repo.root)
+        .args(["integrate", &change_id])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no worktree has"));
+}
+
+#[test]
+fn the_switch_onto_the_target_does_not_overwrite_an_ignored_file() {
+    let repo = repo_with_gates();
+    repo.commit(
+        &repo.root,
+        "kept.txt",
+        "tracked on the target\n",
+        "test: add kept.txt",
+    );
+    let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args([
+        "begin",
+        "stranded-guard",
+        "--no-worktree",
+    ])));
+    git(&repo.root, &["rm", "-q", "kept.txt"]);
+    git(&repo.root, &["commit", "-qm", "feat: drop kept"]);
+    stdout(repo.arc(&repo.root).args(["snapshot", "stranded-guard"]));
+    repo.arc(&repo.root)
+        .args(["verify", "stranded-guard", "--gate", "smoke"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["review", "stranded-guard", "--verdict", "approved"])
+        .assert()
+        .success();
+    // The checkout ignores a local file exactly where the switch onto the
+    // target would write the target's copy. Git checkout would overwrite it
+    // without a word.
+    let exclude = repo.root.join(".git/info/exclude");
+    let mut text = fs::read_to_string(&exclude).unwrap_or_default();
+    text.push_str("kept.txt\n");
+    fs::write(&exclude, text).unwrap();
+    fs::write(repo.root.join("kept.txt"), b"local ignored bytes\n").unwrap();
+    let before = git_out(&repo.root, &["rev-parse", "master"]);
+
+    repo.arc(&repo.root)
+        .args(["integrate", "stranded-guard", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("kept.txt"));
+    repo.arc(&repo.root)
+        .args(["integrate", "stranded-guard"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("kept.txt"));
+    assert_eq!(
+        fs::read(repo.root.join("kept.txt")).unwrap(),
+        b"local ignored bytes\n"
+    );
+    assert_eq!(git_out(&repo.root, &["rev-parse", "master"]), before);
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "arc/stranded-guard"
+    );
+    assert!(!events(&repo, &change_id)
+        .iter()
+        .any(|event| event["event_type"] == "change-integrated"));
+}

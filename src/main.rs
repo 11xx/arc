@@ -1118,7 +1118,9 @@ enum Cmd {
     /// the merge does not write are left in place and named in the report; a
     /// path the merge would write that is already there without being tracked
     /// is refused by name. A head the target already contains closes at the
-    /// target revision that holds it, without a merge commit.
+    /// target revision that holds it, without a merge commit. When no checkout
+    /// holds the target, the merge takes over the change's own checkout if it
+    /// still holds the change branch and leaves it on the target.
     Integrate {
         /// Changes to integrate. Several run as a queue, in dependency order,
         /// stopping at the first that needs a person. Omit only when
