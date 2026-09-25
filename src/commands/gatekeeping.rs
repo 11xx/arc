@@ -5,6 +5,7 @@
 //! evidence is appended afterward in deterministic gate-name order.
 
 use super::*;
+use std::collections::BTreeMap;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{ExitStatus, Stdio};
@@ -67,6 +68,7 @@ pub struct VerifyArgs {
     pub tested_revision: Option<String>,
     pub execution_host: Option<String>,
     pub runner: Option<String>,
+    pub environment: Option<String>,
     pub note: Option<String>,
     pub waive_dirty: Option<String>,
     pub falsified_by: Option<String>,
@@ -84,6 +86,11 @@ struct VerificationInput {
     tested_revision: Option<String>,
     execution_host: Option<String>,
     runner: Option<String>,
+    /// The environment identity the evidence carries: the digest an attested
+    /// caller supplied, or the digest the gate's declared probe produced at
+    /// the checkout the command ran in. `None` for a check that declares no
+    /// environment probe.
+    environment_identity: Option<String>,
     note: Option<String>,
     falsification: Option<Falsification>,
     /// The target head a synthesized merge was computed against, on a run
@@ -106,6 +113,7 @@ struct CompletedVerification {
     hostname: String,
     attested: bool,
     runner: Option<String>,
+    environment_identity: Option<String>,
     note: Option<String>,
     falsification: Option<Falsification>,
     tested_tree: Option<String>,
@@ -131,6 +139,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         tested_revision,
         execution_host,
         runner,
+        environment,
         note,
         waive_dirty,
         falsified_by,
@@ -228,6 +237,11 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         (false, Some(_)) => bail!("--result is only valid with --attest"),
         (false, None) => None,
     };
+    // A locally observed run learns its environment from the gate's declared
+    // probe; only an attested run has an environment arc cannot observe.
+    if environment.is_some() && !attest {
+        bail!("--environment is only valid with --attest");
+    }
     let (tested_revision, execution_host, runner) = if attest {
         let tested_revision =
             tested_revision.context("--attest requires --tested-revision <REV>")?;
@@ -296,6 +310,9 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         st
     };
     if let Some(probe_name) = probe {
+        if environment.is_some() {
+            bail!("--environment applies only to a declared gate with an environment probe");
+        }
         let (version, brief) = match brief_version {
             Some(0) => bail!("brief version 0 not found"),
             Some(version) => (
@@ -368,6 +385,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 tested_revision,
                 execution_host,
                 runner,
+                environment_identity: None,
                 note,
                 falsification,
                 against_target: None,
@@ -407,18 +425,31 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         let run_id = start_verification_run(
             run_ctx, &store, &change_id, &head, mode, skip_green, &required,
         )?;
+        // Applicability is a property of this checkout, so every declared
+        // probe is read before reuse is decided. A probe is run once per
+        // distinct command, however many gates declare it.
+        let environments = gate_environments(
+            &run_ctx.cwd,
+            required.iter().map(|(name, gate)| (name.as_str(), *gate)),
+        )?;
         let mut reused = Vec::new();
         let mut to_run = Vec::new();
         for (name, gate) in required {
             // Reuse is reuse of a *run*, so the recorded command must be the
             // one declared now. Skipping on a name match would report a gate
-            // as satisfied by a run of something else.
+            // as satisfied by a run of something else. Evidence from another
+            // environment is not reuse either: it ran, but not here.
             let reusable = skip_green
                 .then(|| st.gate_evidence_at(name, &head))
                 .flatten()
                 .filter(|evidence| {
                     evidence.green_at_head(st.dirty_tree_waiver.as_ref())
                         && status::matches_declaration(evidence, gate)
+                        && status::matches_environment(
+                            evidence,
+                            gate,
+                            declared_environment(&environments, gate),
+                        )
                 });
             if let Some(evidence) = reusable {
                 println!("gate {name}: skipped (green at head)");
@@ -438,6 +469,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 reused.len(),
                 &run_id,
                 &head,
+                &environments,
                 note,
             );
         }
@@ -457,6 +489,8 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                     tested_revision: None,
                     execution_host: None,
                     runner: None,
+                    environment_identity: declared_environment(&environments, gate)
+                        .map(str::to_owned),
                     note: note.clone(),
                     falsification: None,
                     against_target: None,
@@ -469,7 +503,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         println!("gates: {passed}/{total} pass");
         return Ok(if passed == total { 0 } else { 1 });
     }
-    let (cmd, timeout) = match (&gate, command) {
+    let (cmd, timeout, declared_environment) = match (&gate, command) {
         (Some(name), None) => {
             let gates = gates::load(&toplevel)?;
             let declared = match gates.gates.get(name) {
@@ -483,11 +517,50 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 ),
                 None => bail!("gate {name:?} not declared in .arc/gates.toml"),
             };
-            (declared.command.clone(), declared.timeout)
+            (
+                declared.command.clone(),
+                declared.timeout,
+                declared.environment.clone(),
+            )
         }
-        (None, Some(c)) => (c, None),
+        (None, Some(c)) => (c, None, None),
         (Some(_), Some(_)) => bail!("--gate and --command are mutually exclusive"),
         (None, None) => bail!("provide --gate <name> or --command <cmd>"),
+    };
+    // An attested run happened where arc cannot observe an environment, so
+    // the caller states the identity. A run arc performs reads it from the
+    // gate's declared probe; a declaration with no probe has nothing for an
+    // identity to be compared against, so one is refused rather than kept as
+    // unreferenced metadata.
+    let environment_identity = match (attest, &declared_environment) {
+        (true, Some(_)) => Some(environment.with_context(|| {
+            format!(
+                "--attest for gate {:?} requires --environment <IDENTITY>: the gate declares an \
+                 environment probe",
+                gate.as_deref().unwrap_or_default()
+            )
+        })?),
+        (true, None) => {
+            if environment.is_some() {
+                bail!(
+                    "--environment applies only to a gate whose declaration has an environment \
+                     probe"
+                );
+            }
+            None
+        }
+        (false, Some(probe)) => {
+            let run = gates::environment_probe(&run_ctx.cwd, probe, timeout)?;
+            if let Some(failure) = &run.failure {
+                eprintln!(
+                    "warning: environment probe {probe:?} for gate {:?} yielded no identity: {}",
+                    gate.as_deref().unwrap_or_default(),
+                    failure.describe()
+                );
+            }
+            run.identity
+        }
+        (false, None) => None,
     };
     let falsification = resolve_falsification(&st, gate.as_deref(), &cmd, falsified_by)?;
     record_verification(
@@ -504,6 +577,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             tested_revision,
             execution_host,
             runner,
+            environment_identity,
             note,
             falsification,
             against_target: None,
@@ -627,36 +701,30 @@ fn verify_against(
     )?;
     let legacy_trees = status::legacy_evidence_trees(st, &ctx.cwd);
     let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
-    let mut reused = Vec::new();
-    let mut to_run = Vec::new();
-    for (name, gate) in required {
-        // Reuse is reuse of a *run*, so the recorded command must be the one
-        // declared now. Skipping on a name match would report a gate as
-        // satisfied by a run of something else.
-        let reusable = skip_green
+    // A checkout exists only to run a command or a declared probe in, and a
+    // probe reads the merged content: applicability is a property of the tree
+    // that would ship. A declared probe therefore needs the checkout before
+    // reuse can be decided; without one, a gate answered at this tree already
+    // leaves nothing to run.
+    let cheap_reusable = |name: &String, gate: &gates::Gate| {
+        skip_green
             .then(|| st.gate_evidence_at_tree(name, &merged_tree, &resolve_tree))
             .flatten()
             .filter(|evidence| {
                 evidence.green_at_head(st.dirty_tree_waiver.as_ref())
                     && status::matches_declaration(evidence, gate)
-            });
-        if let Some(evidence) = reusable {
-            println!("gate {name}: skipped (green at the merged tree)");
-            reused.push((name.clone(), evidence.event_id.clone()));
-        } else {
-            to_run.push((name, gate));
-        }
-    }
-    append_reuses(ctx, store, change_id, &run_id, &synthesized, &reused)?;
-
-    let mut passed = reused.len();
-    // A checkout exists only to run a command in. Where every gate was
-    // answered at this tree already, there is no command left to run and the
-    // scratch worktree would be created and removed having held nothing.
-    if !to_run.is_empty() {
+            })
+    };
+    let any_probe = required.iter().any(|(_, gate)| gate.environment.is_some());
+    let answered_already = required
+        .iter()
+        .all(|(name, gate)| cheap_reusable(name, gate).is_some());
+    let mut _scratch = None;
+    let mut scratch_ctx = None;
+    if any_probe || !answered_already {
         let path = super::lifecycle::worktree_path_for(&ctx.cwd, &format!("{}-against", st.slug))?;
-        let scratch = ScratchWorktree::create(&ctx.cwd, path, &synthesized)?;
-        let scratch_ctx = Ctx {
+        _scratch = Some(ScratchWorktree::create(&ctx.cwd, path, &synthesized)?);
+        scratch_ctx = _scratch.as_ref().map(|scratch| Ctx {
             cwd: scratch.path.clone(),
             actor: ctx.actor.clone(),
             actor_source: ctx.actor_source,
@@ -667,10 +735,41 @@ fn verify_against(
             session_resolution: ctx.session_resolution,
             model: ctx.model.clone(),
             on_behalf_of: ctx.on_behalf_of.clone(),
-        };
+        });
+    }
+    let probe_ctx = scratch_ctx.as_ref().unwrap_or(ctx);
+    let environments = gate_environments(
+        &probe_ctx.cwd,
+        required.iter().map(|(name, gate)| (name.as_str(), *gate)),
+    )?;
+    let mut reused = Vec::new();
+    let mut to_run = Vec::new();
+    for (name, gate) in required {
+        // Reuse is reuse of a *run*, so the recorded command must be the one
+        // declared now. Skipping on a name match would report a gate as
+        // satisfied by a run of something else. Evidence from another
+        // environment is not reuse either: it ran, but not against this
+        // content.
+        let reusable = cheap_reusable(name, gate).filter(|evidence| {
+            status::matches_environment(evidence, gate, declared_environment(&environments, gate))
+        });
+        if let Some(evidence) = reusable {
+            println!("gate {name}: skipped (green at the merged tree)");
+            reused.push((name.clone(), evidence.event_id.clone()));
+        } else {
+            to_run.push((name, gate));
+        }
+    }
+    append_reuses(ctx, store, change_id, &run_id, &synthesized, &reused)?;
+
+    let mut passed = reused.len();
+    if !to_run.is_empty() {
+        let scratch_ctx = scratch_ctx
+            .as_ref()
+            .context("a gate is left to run but its checkout was not created")?;
         for (name, gate) in to_run {
             let code = record_verification(
-                &scratch_ctx,
+                scratch_ctx,
                 store,
                 change_id,
                 VerificationInput {
@@ -683,6 +782,8 @@ fn verify_against(
                     tested_revision: Some(synthesized.clone()),
                     execution_host: None,
                     runner: None,
+                    environment_identity: declared_environment(&environments, gate)
+                        .map(str::to_owned),
                     note: note.clone(),
                     falsification: None,
                     against_target: Some(target_head.clone()),
@@ -958,6 +1059,7 @@ pub fn snapshot_with_verify(
                 tested_revision: None,
                 execution_host: None,
                 runner: None,
+                environment: None,
                 note: None,
                 waive_dirty: None,
                 falsified_by: None,
@@ -996,6 +1098,10 @@ pub fn snapshot_with_verify(
             false,
             &selected,
         )?;
+        let environments = gate_environments(
+            &run_ctx.cwd,
+            selected.iter().map(|(name, gate)| (name.as_str(), *gate)),
+        )?;
         let total = selected.len();
         let mut passed = 0;
         for (name, gate) in selected {
@@ -1013,6 +1119,8 @@ pub fn snapshot_with_verify(
                     tested_revision: None,
                     execution_host: None,
                     runner: None,
+                    environment_identity: declared_environment(&environments, gate)
+                        .map(str::to_owned),
                     note: None,
                     falsification: None,
                     against_target: None,
@@ -1045,6 +1153,7 @@ pub fn snapshot_with_verify(
                 tested_revision: None,
                 execution_host: None,
                 runner: None,
+                environment: None,
                 note: None,
                 waive_dirty: None,
                 falsified_by: None,
@@ -1099,6 +1208,7 @@ pub fn done(ctx: &Ctx, reference: &str) -> Result<i32> {
                 tested_revision: None,
                 execution_host: None,
                 runner: None,
+                environment: None,
                 note: None,
                 waive_dirty: None,
                 falsified_by: None,
@@ -1271,6 +1381,7 @@ fn verify_all_parallel(
     skipped_green: usize,
     run_id: &str,
     revision: &str,
+    environments: &DeclaredEnvironments,
     note: Option<String>,
 ) -> Result<i32> {
     let hostname = hostname::get()
@@ -1294,6 +1405,7 @@ fn verify_all_parallel(
             tested_revision: None,
             execution_host: None,
             runner: None,
+            environment_identity: declared_environment(environments, gate).map(str::to_owned),
             note: note.clone(),
             falsification: None,
             against_target: None,
@@ -1398,6 +1510,53 @@ fn resolve_falsification(
     }
 }
 
+/// The environment identity a gate's declared probe yields, when it declares
+/// one and the probe answered. A cached `None` is a probe that could not
+/// answer; it is not rerun for every gate that shares it.
+type DeclaredEnvironments = BTreeMap<(String, Option<u64>), Option<String>>;
+
+fn declared_environment<'a>(
+    identities: &'a DeclaredEnvironments,
+    gate: &gates::Gate,
+) -> Option<&'a str> {
+    gate.environment
+        .as_deref()
+        .and_then(|probe| identities.get(&(probe.to_owned(), gate.timeout)))
+        .and_then(|identity| identity.as_deref())
+}
+
+/// Read every distinct declared probe once, keyed by its command and the
+/// bound it runs under.
+///
+/// Gates sharing one probe describe one environment, so the command runs once;
+/// the identities are read before any gate runs, so a probe that cannot answer
+/// is reported before the batch records anything, and its gates then record
+/// evidence that names no environment.
+fn gate_environments<'a>(
+    cwd: &Path,
+    gates: impl Iterator<Item = (&'a str, &'a gates::Gate)>,
+) -> Result<DeclaredEnvironments> {
+    let mut identities = DeclaredEnvironments::new();
+    for (name, gate) in gates {
+        let Some(probe) = gate.environment.as_deref() else {
+            continue;
+        };
+        let key = (probe.to_owned(), gate.timeout);
+        if identities.contains_key(&key) {
+            continue;
+        }
+        let run = gates::environment_probe(cwd, probe, gate.timeout)?;
+        if let Some(failure) = &run.failure {
+            eprintln!(
+                "warning: environment probe {probe:?} for gate {name:?} yielded no identity: {}",
+                failure.describe()
+            );
+        }
+        identities.insert(key, run.identity);
+    }
+    Ok(identities)
+}
+
 fn record_verification(
     ctx: &Ctx,
     store: &Store,
@@ -1475,6 +1634,7 @@ fn execute_verification(
         tested_revision: _,
         execution_host: _,
         runner,
+        environment_identity,
         note,
         falsification,
         against_target,
@@ -1518,6 +1678,7 @@ fn execute_verification(
         hostname,
         attested,
         runner,
+        environment_identity,
         note,
         falsification,
         against_target,
@@ -1570,6 +1731,12 @@ fn append_verifications(
             hostname: item.hostname,
             attested: item.attested,
             runner: item.runner,
+            environment: item
+                .environment_identity
+                .map(|identity| EnvironmentEvidence {
+                    identity,
+                    producing_store: store.repository_id.clone(),
+                }),
             note: item.note,
             falsification: item.falsification,
             // The content the gate holds for, written beside the revision
