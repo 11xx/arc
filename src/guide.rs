@@ -419,6 +419,11 @@ RUN A CHANGE
   revision that already holds the head, and records that no merge was
   created. A successor behind such a change proceeds normally.
 
+  When no checkout holds the target, `integrate` takes over the change's own
+  checkout if it still holds the change branch, checks the target out there,
+  merges, and leaves the checkout on the target. The dry run says it would.
+  Any other shape keeps the refusal naming the missing target checkout.
+
   `--no-worktree` means in place, not nowhere: a clean checkout already on the
   target is checked out onto the new branch and recorded as the change's
   worktree, so the next command infers the change without being told. A dirty
