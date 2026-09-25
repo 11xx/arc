@@ -67,6 +67,27 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool)
                     state.audit_findings.len()
                 );
             }
+            for external in &state.external_verdicts {
+                if external.findings.is_empty() {
+                    continue;
+                }
+                println!(
+                    "[external] {:?} by {} at {} (reference {})",
+                    external.verdict, external.decided_by, external.revision, external.reference
+                );
+                for finding in &external.findings {
+                    println!(
+                        "  {} [{}{:?}] {}",
+                        finding.finding_id,
+                        if finding.blocking { "blocking/" } else { "" },
+                        finding.severity,
+                        finding.summary
+                    );
+                    if let Some(body) = &finding.body {
+                        println!("    {body}");
+                    }
+                }
+            }
         }
         FindingsFormat::Json => {
             println!(
@@ -76,11 +97,12 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool)
                     change_id: &state.change_id,
                     audit,
                     findings: selected.values().collect(),
+                    external_verdicts: state.external_verdicts.iter().collect(),
                 })?
             );
         }
         FindingsFormat::Sarif => {
-            let results = selected
+            let mut results = selected
                 .values()
                 .filter(|finding| finding.effective_status().is_none())
                 .map(|finding| {
@@ -116,6 +138,53 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool)
                     result
                 })
                 .collect::<Vec<_>>();
+            for external in &state.external_verdicts {
+                for finding in &external.findings {
+                    let body = finding.body.as_deref().map(str::trim).unwrap_or_default();
+                    let message = if body.is_empty() {
+                        format!(
+                            "[external review by {} at {} ({})] {}",
+                            external.decided_by,
+                            external.revision,
+                            external.reference,
+                            finding.summary
+                        )
+                    } else {
+                        format!(
+                            "[external review by {} at {} ({})] {}\n\n{body}",
+                            external.decided_by,
+                            external.revision,
+                            external.reference,
+                            finding.summary
+                        )
+                    };
+                    let mut result = serde_json::json!({
+                        "ruleId": finding.finding_id,
+                        "level": sarif_level_severity(finding.severity),
+                        "message": { "text": message },
+                        "properties": {
+                            "source": "external",
+                            "verdict": format!("{:?}", external.verdict).to_lowercase(),
+                            "decidedBy": external.decided_by,
+                            "reference": external.reference,
+                            "revision": external.revision,
+                            "blocking": finding.blocking,
+                            "summary": finding.summary,
+                        },
+                    });
+                    if let Some(anchor) = &finding.anchor {
+                        let start = anchor.line_start.unwrap_or(1);
+                        let end = anchor.line_end.filter(|end| *end >= start).unwrap_or(start);
+                        result["locations"] = serde_json::json!([{
+                            "physicalLocation": {
+                                "artifactLocation": { "uri": anchor.path },
+                                "region": { "startLine": start, "endLine": end }
+                            }
+                        }]);
+                    }
+                    results.push(result);
+                }
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -136,6 +205,8 @@ struct FindingsJson<'a> {
     /// These are post-integration audit findings, not what shipped.
     audit: bool,
     findings: Vec<&'a FindingState>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    external_verdicts: Vec<&'a crate::state::ExternalVerdictEntry>,
 }
 
 /// `path:line` when the anchor has one, `path` otherwise, with the side that
@@ -156,7 +227,11 @@ fn anchor_location(anchor: &crate::model::Anchor) -> String {
 }
 
 fn sarif_level(finding: &FindingState) -> &'static str {
-    match finding.severity {
+    sarif_level_severity(finding.severity)
+}
+
+fn sarif_level_severity(severity: crate::model::Severity) -> &'static str {
+    match severity {
         Severity::Critical | Severity::Major => "error",
         Severity::Minor => "warning",
         Severity::Note => "note",

@@ -13,6 +13,8 @@ struct ReviewView<'a> {
     schema: &'static str,
     change_id: &'a str,
     verdicts: Vec<ReviewVerdict<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    external_verdicts: Vec<&'a crate::status::ExternalVerdictStatus>,
     open_findings: Vec<&'a FindingSummary>,
     has_valid_approval: bool,
     /// The current status guidance, carried here so a review reader sees the
@@ -66,7 +68,7 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
     let (_, state) = ctx.load_state(&store, reference)?;
     let report = ctx.report(&store, &state)?;
     let view = ReviewView {
-        schema: "arc-review/3",
+        schema: "arc-review/4",
         change_id: &state.change_id,
         verdicts: state
             .verdicts
@@ -74,15 +76,13 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
             .rev()
             .map(|verdict| review_verdict(verdict, &state, &report))
             .collect(),
+        external_verdicts: report.external_verdicts.iter().collect(),
         open_findings: report
             .findings
             .iter()
             .filter(|finding| finding.status == "open")
             .collect(),
-        has_valid_approval: report
-            .verdict
-            .as_ref()
-            .is_some_and(|verdict| verdict.valid_for_current_head),
+        has_valid_approval: report.has_valid_approval,
         review_options: report.review_options.clone(),
         verdict_contested: state.verdict_contested(),
         next_action: &report.next_action,
@@ -148,6 +148,39 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
                 finding.severity,
                 finding.summary
             );
+        }
+    }
+
+    println!("\n## External verdicts\n");
+    if view.external_verdicts.is_empty() {
+        println!("No external verdicts recorded.");
+    }
+    for external in &view.external_verdicts {
+        println!(
+            "- [external] {:?} at `{}` by {} — {} (reference {})",
+            external.verdict,
+            external.revision,
+            external.decided_by,
+            if external.gates_current_head {
+                "valid for current head"
+            } else if external.matches_current_patchset {
+                "applies to current patchset but does not satisfy local review policy"
+            } else {
+                "stale for current head"
+            },
+            external.reference
+        );
+        for finding in &external.findings {
+            println!(
+                "  - external finding `{}` [{}{:?}] {}",
+                finding.finding_id,
+                if finding.blocking { "blocking/" } else { "" },
+                finding.severity,
+                finding.summary
+            );
+            if let Some(body) = &finding.body {
+                println!("    {body}");
+            }
         }
     }
 
@@ -1025,7 +1058,7 @@ fn resolve_patchset_id(st: &ChangeState, patchset: Option<String>) -> Result<Opt
 }
 
 /// Read a findings batch from a file or stdin.
-fn read_finding_inputs(src: &str) -> Result<Vec<FindingInput>> {
+pub(crate) fn read_finding_inputs(src: &str) -> Result<Vec<FindingInput>> {
     let text = if src == "-" {
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf)?;
