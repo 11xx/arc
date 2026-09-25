@@ -2045,7 +2045,10 @@ fn doctor_reports_a_declared_directory_that_can_never_match() {
         .map(|p| p["detail"].as_str().unwrap())
         .collect();
     assert_eq!(hits.len(), 1, "the trailing-slash form is fine: {hits:?}");
-    assert!(hits[0].starts_with("sub is a directory"), "{hits:?}");
+    assert!(
+        hits[0].starts_with("sub is declared dangerous by .arc/policy.toml but is a directory"),
+        "{hits:?}"
+    );
 }
 
 /// A report derived from the ledger alone still resolves the danger scope.

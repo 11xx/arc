@@ -360,7 +360,7 @@ inject identity into other commands.
 
 `arc resume [CHANGE]` renders the latest brief, claim and stage, open findings,
 head gate state, next action, live journal lanes, and matching open journal
-items in one view. `--json` emits the versioned `arc-resume/5` schema with the
+items in one view. `--json` emits the versioned `arc-resume/6` schema with the
 existing status payload and a journal block. `arc prompt [CHANGE]` prints the
 stable one-line change summary used by statuslines, and exits successfully
 with no output outside a change worktree.

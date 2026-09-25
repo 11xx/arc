@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub const STATUS_SCHEMA: &str = "arc-status/22";
+pub const STATUS_SCHEMA: &str = "arc-status/23";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// A verdict graph with several tips has no authority to report, so the
@@ -120,6 +120,9 @@ pub enum Discrimination {
 pub struct GateStatus {
     pub name: String,
     pub command: String,
+    /// Policy files that declared this effective gate. Additive in
+    /// `arc-status/23`.
+    pub declared_by: Vec<String>,
     pub result: String,
     pub green_at_head: bool,
     /// Passing evidence exists at this head, but for a different command than
@@ -618,6 +621,9 @@ pub struct StatusReport {
     pub open_blocking_findings: Vec<String>,
     pub holds: Vec<HoldEntry>,
     pub gates: Vec<GateStatus>,
+    /// Source files for the policy rules that apply to this change.
+    /// Additive in `arc-status/23`.
+    pub policy_sources: BTreeMap<String, Vec<String>>,
     pub probes: Vec<ProbeStatus>,
     pub blocker_summary: BlockerSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1304,6 +1310,7 @@ fn build_report(
         gate_statuses.push(GateStatus {
             name: name.clone(),
             command: gate.command.clone(),
+            declared_by: gate.declared_by.clone(),
             evaluated_tree: evaluated_tree.clone(),
             inherited_from: evidence
                 .map(|e| e.revision.clone())
@@ -1718,6 +1725,7 @@ fn build_report(
         open_blocking_findings: open_blocking,
         holds: hold_entries(state),
         gates: gate_statuses,
+        policy_sources: policy.sources.as_map(),
         probes: probe_statuses,
         blocker_summary,
         approval_rejection_reason,

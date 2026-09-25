@@ -1720,7 +1720,7 @@ fn dirty_gate_evidence_is_named_by_resume_check_and_the_next_action() {
         .success();
     let resume = stdout(repo.arc(&wt).args(["resume", "named"]));
     assert!(
-        resume.contains("unit: pass (undiscriminated)\n"),
+        resume.contains("unit: pass (undiscriminated) (declared by .arc/gates.toml)\n"),
         "{resume}"
     );
 

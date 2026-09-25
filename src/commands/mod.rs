@@ -18,6 +18,7 @@ pub(crate) mod messaging;
 mod observe;
 mod pass;
 mod replica;
+mod policy_cmd;
 mod rescue;
 pub(crate) mod review;
 mod rewrite;
@@ -76,6 +77,7 @@ pub use replica::{
     offer as replica_offer, pair as replica_pair, reclaim as replica_reclaim,
     status as replica_status,
 };
+pub use policy_cmd::{path as policy_path, show as policy_show, write as policy_write};
 pub use rescue::rescue;
 pub use review::{comment, finding, keep, read_review, reply, resolve, review, ReviewArgs};
 pub use rewrite::{
@@ -322,9 +324,13 @@ impl Ctx {
         if !store.require_declared_actor {
             return Ok(());
         }
+        let source = if store.require_declared_actor_sources.is_empty() {
+            "source unavailable".to_string()
+        } else {
+            store.require_declared_actor_sources.join(", ")
+        };
         bail!(
-            "policy requires a declared actor: {:?} came from {}, which nobody claimed. \
-             Pass --actor or set ARC_ACTOR.",
+            "policy requires a declared actor (declared by {source}): {:?} came from {}, which nobody claimed. Pass --actor or set ARC_ACTOR.",
             self.actor,
             self.actor_source.assumed_from().unwrap_or_default()
         )

@@ -1285,6 +1285,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RunCmd,
     },
+    /// Read or write policy kept with this repository's local Arc ledger
+    Policy {
+        #[command(subcommand)]
+        cmd: PolicyCmd,
+    },
     /// Record and validate observed forge (hosted-PR) facts
     Forge {
         #[command(subcommand)]
@@ -1503,6 +1508,20 @@ enum InstructionsCmd {
         /// commit message file ('-' for stdin); never rewrites it
         #[arg(long, value_name = "FILE")]
         check: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PolicyCmd {
+    /// Show effective policy and the file that declared each rule
+    Show,
+    /// Print the operator policy file path for this repository
+    Path,
+    /// Replace the operator policy file with TOML from a file or stdin
+    Write {
+        /// Read TOML from a file ('-' for stdin)
+        #[arg(long, required = true, value_name = "FILE")]
+        body_file: String,
     },
 }
 
@@ -3250,6 +3269,14 @@ fn run(cli: Cli) -> Result<i32> {
             RunCmd::List { json } => {
                 commands::list_runs(&ctx, json)?;
                 Ok(0)
+            }
+        },
+        Cmd::Policy { cmd } => match cmd {
+            PolicyCmd::Show => commands::policy_show(&ctx),
+            PolicyCmd::Path => commands::policy_path(&ctx),
+            PolicyCmd::Write { body_file } => {
+                let text = commands::read_body(None, Some(body_file))?;
+                commands::policy_write(&ctx, &text)
             }
         },
         Cmd::Config {

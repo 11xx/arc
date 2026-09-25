@@ -2,6 +2,7 @@ use crate::commands::ArcAlternative;
 use crate::model::{DebtCoverage, DebtIdentity, DebtMissing, DebtProduction, Event, Payload};
 use crate::state::ChangeState;
 use crate::status::{Blocker, BriefBaseDrift, GateStatus, StatusReport};
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 /// Why a passing *gate* verification cannot be reused as evidence at its
@@ -108,7 +109,7 @@ fn merged_tree_line(report: &StatusReport) -> Option<String> {
 /// is not one at this head, and whether a counted pass was ever shown capable
 /// of failing.
 pub fn gate_line(gate: &GateStatus) -> String {
-    match gate.not_green_reason() {
+    let status = match gate.not_green_reason() {
         None => format!(
             "{}{}{}",
             gate.result,
@@ -121,6 +122,15 @@ pub fn gate_line(gate: &GateStatus) -> String {
             gate_scope(gate),
             inheritance_suffix(gate)
         ),
+    };
+    format!("{status}{}", gate_declaration_suffix(gate))
+}
+
+fn gate_declaration_suffix(gate: &GateStatus) -> String {
+    if gate.declared_by.is_empty() {
+        " (declaration source unavailable)".to_string()
+    } else {
+        format!(" (declared by {})", gate.declared_by.join(", "))
     }
 }
 
@@ -147,7 +157,16 @@ pub fn authorization_basis(basis: &crate::model::AuthorizationBasis) -> String {
         None => writeln!(out, "    danger: not recorded"),
     };
     for (gate, evidence) in &basis.gate_evidence {
-        let _ = writeln!(out, "    gate {gate}: {evidence}");
+        let sources = basis
+            .gates
+            .get(gate)
+            .map(|declaration| declaration.declared_by.as_slice())
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "    gate {gate}: {evidence} (declared by {})",
+            source_list(sources)
+        );
     }
     for prerequisite in &basis.prerequisites {
         let _ = writeln!(
@@ -171,7 +190,7 @@ pub fn authorization_basis(basis: &crate::model::AuthorizationBasis) -> String {
     for (name, gate) in &basis.gates {
         let _ = writeln!(
             out,
-            "    gate declaration {name}: {}{}{}",
+            "    gate declaration {name}: {}{}{} (declared by {})",
             gate.command,
             gate.timeout
                 .map(|timeout| format!(" (timeout {timeout}s)"))
@@ -180,20 +199,57 @@ pub fn authorization_basis(basis: &crate::model::AuthorizationBasis) -> String {
                 String::new()
             } else {
                 format!(" (profiles: {})", gate.profiles.join(", "))
-            }
+            },
+            source_list(&gate.declared_by)
         );
     }
     if let Some(debt) = &basis.audit_debt_event_id {
         let _ = writeln!(out, "    debt waiving review: {debt}");
     }
-    let _ = write!(
+    let _ = writeln!(
         out,
-        "    policy: forbid_self_approval={}, require_declared_actor={}, git_identity={}",
+        "    policy: forbid_self_approval={} (declared by {}), require_declared_actor={} (declared by {}), git_identity={} (declared by {})",
         basis.policy.forbid_self_approval,
+        source_list_for_rule(
+            &basis.policy.declared_by,
+            &format!("policy.forbid_self_approval={}", basis.policy.forbid_self_approval)
+        ),
         basis.policy.require_declared_actor,
-        basis.policy.provenance_git_identity
+        source_list_for_rule(
+            &basis.policy.declared_by,
+            &format!("policy.require_declared_actor={}", basis.policy.require_declared_actor)
+        ),
+        basis.policy.provenance_git_identity,
+        source_list_for_rule(
+            &basis.policy.declared_by,
+            &format!("provenance.git_identity={}", basis.policy.provenance_git_identity)
+        )
     );
+    for (rule, sources) in &basis.policy.declared_by {
+        if rule.starts_with("danger.paths[") {
+            let _ = writeln!(
+                out,
+                "    danger rule {rule}: declared by {}",
+                sources.join(", ")
+            );
+        }
+    }
     out
+}
+
+fn source_list(sources: &[String]) -> String {
+    if sources.is_empty() {
+        "source unavailable".to_string()
+    } else {
+        sources.join(", ")
+    }
+}
+
+fn source_list_for_rule(sources: &BTreeMap<String, Vec<String>>, rule: &str) -> String {
+    sources
+        .get(rule)
+        .map(|entries| source_list(entries))
+        .unwrap_or_else(|| "Arc default".to_string())
 }
 
 /// Human-readable Markdown view of one change. Suitable for terminals
@@ -426,15 +482,23 @@ pub fn markdown(
                 let _ = writeln!(w, "  - thread: {}:{}", thread.scheme, thread.id);
             }
             if let Some(actor) = &p.claim_actor {
+                let provenance_warning = if report.provenance_check_enabled
+                    && p.provenance_mismatch == Some(true)
+                {
+                    format!(
+                        " — **PROVENANCE MISMATCH**; use `--on-behalf-of` for a delegated snapshot or set `[provenance] git_identity = \"shared\"` when the project uses one committing identity (declared by {})",
+                        source_list_for_rule(
+                            &report.policy_sources,
+                            "provenance.git_identity=per-actor"
+                        )
+                    )
+                } else {
+                    String::new()
+                };
                 let _ = writeln!(
                     w,
                     "  - claim actor at snapshot: {}{}",
-                    actor,
-                    if report.provenance_check_enabled && p.provenance_mismatch == Some(true) {
-                        " — **PROVENANCE MISMATCH**; use `--on-behalf-of` for a delegated snapshot or set `[provenance] git_identity = \"shared\"` when the project uses one committing identity"
-                    } else {
-                        ""
-                    }
+                    actor, provenance_warning
                 );
             }
         }
@@ -563,7 +627,7 @@ pub fn markdown(
         for g in &report.gates {
             let _ = writeln!(
                 w,
-                "- {}: `{}` — {}{}{}",
+                "- {}: `{}` — {}{}{}{}",
                 g.name,
                 g.command,
                 if g.green_at_head {
@@ -578,7 +642,8 @@ pub fn markdown(
                 } else {
                     ""
                 },
-                discrimination_suffix(g)
+                discrimination_suffix(g),
+                gate_declaration_suffix(g)
             );
             if g.attested {
                 let _ = writeln!(
@@ -603,6 +668,13 @@ pub fn markdown(
     } else {
         let _ = writeln!(w, "\n## Gates\n");
         let _ = writeln!(w, "- none declared for profile {}", report.profile);
+    }
+
+    if !report.policy_sources.is_empty() {
+        let _ = writeln!(w, "\n## Policy declarations\n");
+        for (rule, sources) in &report.policy_sources {
+            let _ = writeln!(w, "- {rule}: declared by {}", sources.join(", "));
+        }
     }
 
     if !report.probes.is_empty() {
@@ -1065,9 +1137,14 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                 }
             }
             Blocker::NoValidApproval => {
+                let source = report
+                    .policy_sources
+                    .get("policy.forbid_self_approval=true")
+                    .map(|items| format!(" (declared by {})", items.join(", ")))
+                    .unwrap_or_default();
                 let _ = writeln!(
                     out,
-                    "  - {}",
+                    "  - {}{source}",
                     report
                         .approval_rejection_reason
                         .as_deref()
@@ -1081,10 +1158,11 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                 for gate in report.gates.iter().filter(|gate| !gate.green_at_head) {
                     let _ = writeln!(
                         out,
-                        "  - Gate `{}` is not green at {}: {}",
+                        "  - Gate `{}` is not green at {}: {}{}",
                         gate.name,
                         gate_scope(gate),
-                        gate.not_green_reason().unwrap_or_default()
+                        gate.not_green_reason().unwrap_or_default(),
+                        gate_declaration_suffix(gate)
                     );
                 }
             }
@@ -1155,10 +1233,11 @@ pub fn gates_owed(report: &StatusReport) -> String {
     for gate in owed {
         let _ = writeln!(
             out,
-            "  - `{}` at {}: {}",
+            "  - `{}` at {}: {}{}",
             gate.name,
             gate_scope(gate),
-            gate.not_green_reason().unwrap_or_default()
+            gate.not_green_reason().unwrap_or_default(),
+            gate_declaration_suffix(gate)
         );
     }
     out
@@ -1898,10 +1977,11 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .filter(|gate| !gate.green_at_head)
             .map(|gate| {
                 format!(
-                    "gate `{}` is not green at {}: {}",
+                    "gate `{}` is not green at {}: {}{}",
                     gate.name,
                     gate_scope(gate),
-                    gate.not_green_reason().unwrap_or_default()
+                    gate.not_green_reason().unwrap_or_default(),
+                    gate_declaration_suffix(gate)
                 )
             })
             .collect::<Vec<_>>()

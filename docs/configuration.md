@@ -71,11 +71,33 @@ it names must be there with a Git directory. The home directory, the filesystem
 root, and any ancestor of the working directory are refused whatever a marker
 says.
 
-The committed `.arc/policy.toml` may set the same `[provenance]` table for a
-repository. `per-actor` compares the claim actor with the snapshot author and
-committer; `shared` omits `provenance_mismatch` because that comparison does
-not apply. A delegated snapshot can instead declare its subject with
-`--on-behalf-of`.
+### Repository policy
+
+Project policy lives in `.arc/policy.toml` and project gates live in
+`.arc/gates.toml`. Operator policy for one repository lives at
+`<git-common-dir>/arc/operator-policy.toml`, outside the work tree and shared
+by linked worktrees. `arc policy path` prints its full path,
+`arc policy write --body-file FILE` replaces it from TOML, and `arc policy
+show` prints effective rules with their declaring file. Reading or writing
+operator policy does not change tracked files.
+
+Both policy files apply. Boolean requirements apply when either file enables
+them. Danger paths, acknowledged-safe paths, closed source roots, and review
+checklists are combined; a dangerous path stays dangerous if another file
+acknowledges it as safe. The lower debt-count and debt-age thresholds apply,
+and the higher free-space floor applies. `per-actor` provenance applies if
+either file selects it; otherwise `shared` applies when declared. A delegated
+snapshot can declare its subject with `--on-behalf-of`. If neither repository
+policy file declares provenance, the user configuration supplies its existing
+value; `arc policy show` names `<arc-config>/config.toml` when that file sets it.
+
+Gates are combined by name. Declarations with the same command share one
+gate: profile lists combine, an empty list applies to every profile, and the
+longer timeout applies. A gate name declared with different commands is a
+conflict. `arc doctor` reports both source files, while `arc check` and gate
+execution refuse the conflict. Gate and policy views name the file that
+declares each rule. With no operator policy, an in-tree-only repository keeps
+its declared behavior.
 
 Before starting an executor in a restricted environment, run
 `arc config --check-writable`.
@@ -136,8 +158,8 @@ pipe-friendly IDs, a scannable orchestration table, or structured rows.
   produced, and merges only through `arc integrate` when every required gate
   is green. Both are explicit invocations: nothing arc does on the way to
   either moves a branch by itself.
-- Gates execute repo-committed commands (`.arc/gates.toml`): the trust
-  level is the same as running `make` in that repository.
+- Gates execute commands declared in `.arc/gates.toml` or the operator policy:
+  the trust level is the same as running `make` in that repository.
 - Derived views (`list`, `inbox`, `status`, `query`) replay the ledger on
   every invocation and hold no persistent cache. This stays fast in practice
   (measured ~8 ms for `list` and `inbox` over 300 changes). Any future
@@ -171,4 +193,3 @@ Independent of hooks, `arc query --commit <revision>` reports the changes
 whose patchset heads or integration/closure commit match a revision (a unique
 prefix is accepted). It searches the ledger only; it does not scan commit
 trailers.
-

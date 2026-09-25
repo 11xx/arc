@@ -37,6 +37,8 @@ pub struct Store {
     /// the policy, and the closure event would then be refused by a rule that
     /// did not exist when the merge was authorised.
     pub require_declared_actor: bool,
+    /// Files that enabled the declared-actor requirement.
+    pub require_declared_actor_sources: Vec<String>,
 }
 
 /// A process-scoped transition guard. The lock file is intentionally
@@ -59,10 +61,21 @@ impl Store {
         let root = Self::resolve_root(cwd)?;
         // Read the repository's policy before creating anything, so an
         // unreadable one fails with the filesystem untouched.
-        let require_declared_actor = match gitio::toplevel(cwd) {
-            Ok(top) => crate::policy::load(&top)?.policy.require_declared_actor,
+        let (require_declared_actor, require_declared_actor_sources) = match gitio::toplevel(cwd) {
+            Ok(top) => {
+                let policy = crate::policy::load(&top)?;
+                let required = policy.policy.require_declared_actor;
+                let sources = if required {
+                    policy
+                        .sources
+                        .sources_for("policy.require_declared_actor=true")
+                } else {
+                    Vec::new()
+                };
+                (required, sources)
+            }
             // A store opened outside a repository has no policy to honour.
-            Err(_) => false,
+            Err(_) => (false, Vec::new()),
         };
         create_private_dir(&root)?;
         let config_path = root.join("config.json");
@@ -96,8 +109,10 @@ impl Store {
             root,
             repository_id,
             require_declared_actor,
+            require_declared_actor_sources,
         };
         store.repair_missing_format_three_stamp()?;
+        store.repair_missing_format_four_stamp()?;
         Ok(store)
     }
 
@@ -111,6 +126,7 @@ impl Store {
                 root: root.to_path_buf(),
                 repository_id,
                 require_declared_actor: false,
+                require_declared_actor_sources: Vec::new(),
             })),
             None => Ok(None),
         }
@@ -539,9 +555,9 @@ impl Store {
     fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
         let introduced_in = match payload {
             Payload::ChangeIntegrated {
-                authorization: Some(authorization),
+                authorization: Some(_),
                 ..
-            } if authorization.verdict_event_id.is_none() => Some(3),
+            } => Some(4),
             Payload::ChangeIntegrated { .. } | Payload::IntegrationAsserted { .. } => Some(2),
             _ => None,
         };
@@ -555,6 +571,14 @@ impl Store {
             .and_then(|value| value.get("event_type"))
             .and_then(serde_json::Value::as_str)
         {
+            Some("change-integrated")
+                if value
+                    .and_then(|value| value.get("authorization"))
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(authorization_has_policy_sources) =>
+            {
+                Some(4)
+            }
             Some("change-integrated")
                 if value
                     .and_then(|value| value.get("authorization"))
@@ -575,7 +599,7 @@ impl Store {
         };
         // Different changes have different transition locks, but all of them
         // update this one monotonic barrier. Serialize the read-modify-rename
-        // so a stale format-2 writer cannot land after a format-3 writer.
+        // so a stale writer for an older format cannot land after a newer one.
         let _format = self.lock_format()?;
         let config_path = self.root.join("config.json");
         let mut cfg: StoreConfig = serde_json::from_slice(&fs::read(&config_path)?)
@@ -603,6 +627,59 @@ impl Store {
             return Ok(());
         }
         self.stamp_format(Some(3))
+    }
+
+    /// Repair stores whose integration events carry policy declaration
+    /// sources but whose format stamp was not advanced with the event.
+    fn repair_missing_format_four_stamp(&self) -> Result<()> {
+        let config_path = self.root.join("config.json");
+        let cfg: StoreConfig = serde_json::from_slice(&fs::read(&config_path)?)
+            .context("malformed arc config.json")?;
+        if cfg.schema_version >= 4 || !self.contains_policy_source_integration()? {
+            return Ok(());
+        }
+        self.stamp_format(Some(4))
+    }
+
+    fn contains_policy_source_integration(&self) -> Result<bool> {
+        let changes = self.changes_dir();
+        let entries = match fs::read_dir(&changes) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", changes.display()))
+            }
+        };
+        for change in entries {
+            let events = change?.path().join("events");
+            let event_entries = match fs::read_dir(&events) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| format!("cannot read {}", events.display()))
+                }
+            };
+            for event in event_entries {
+                let path = event?.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                let Ok(value) = serde_json::from_slice::<serde_json::Value>(&fs::read(&path)?)
+                else {
+                    continue;
+                };
+                if value.get("event_type").and_then(serde_json::Value::as_str)
+                    == Some("change-integrated")
+                    && value
+                        .get("authorization")
+                        .and_then(serde_json::Value::as_object)
+                        .is_some_and(authorization_has_policy_sources)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     fn contains_waiver_only_integration(&self) -> Result<bool> {
@@ -671,7 +748,12 @@ impl Store {
             return Ok(());
         }
         bail!(
-            "policy requires a declared actor: {:?} on event {} was not declared by anyone.              Pass --actor or set ARC_ACTOR.",
+            "policy requires a declared actor (declared by {}): {:?} on event {} was not declared by anyone. Pass --actor or set ARC_ACTOR.",
+            if self.require_declared_actor_sources.is_empty() {
+                "source unavailable".to_string()
+            } else {
+                self.require_declared_actor_sources.join(", ")
+            },
             event.actor,
             event.event_id
         )
@@ -955,6 +1037,15 @@ fn authorization_has_no_verdict(
         .is_none_or(serde_json::Value::is_null)
 }
 
+fn authorization_has_policy_sources(
+    authorization: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    authorization
+        .get("policy")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|policy| policy.contains_key("declared_by"))
+}
+
 /// Whether this build may read a store at all.
 ///
 /// A store written by a newer arc may hold event types this build would skip
@@ -1038,6 +1129,7 @@ mod tests {
             root: root.to_path_buf(),
             repository_id: "repo".into(),
             require_declared_actor: false,
+            require_declared_actor_sources: Vec::new(),
         }
     }
 
@@ -1058,7 +1150,7 @@ mod tests {
         let root = dir.path().to_path_buf();
         let (sent, received) = mpsc::channel();
         let writer = std::thread::spawn(move || {
-            test_store(&root).stamp_format(Some(3)).unwrap();
+            test_store(&root).stamp_format(Some(4)).unwrap();
             sent.send(()).unwrap();
         });
 
@@ -1066,10 +1158,39 @@ mod tests {
         drop(held);
         received.recv_timeout(Duration::from_secs(1)).unwrap();
         writer.join().unwrap();
-        test_store(dir.path()).stamp_format(Some(2)).unwrap();
+        test_store(dir.path()).stamp_format(Some(3)).unwrap();
 
         let stored: StoreConfig =
             serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap()).unwrap();
-        assert_eq!(stored.schema_version, 3);
+        assert_eq!(stored.schema_version, 4);
+    }
+
+    #[test]
+    fn format_four_authorization_source_repairs_a_missing_store_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = StoreConfig {
+            schema_version: 3,
+            repository_id: "repo".into(),
+            created_at: chrono::Utc::now(),
+        };
+        fs::write(
+            dir.path().join("config.json"),
+            serde_json::to_vec_pretty(&config).unwrap(),
+        )
+        .unwrap();
+        let events = dir.path().join("changes/change/events");
+        fs::create_dir_all(&events).unwrap();
+        fs::write(
+            events.join("event.json"),
+            br#"{"event_type":"change-integrated","authorization":{"policy":{"declared_by":{}}}}"#,
+        )
+        .unwrap();
+
+        test_store(dir.path())
+            .repair_missing_format_four_stamp()
+            .unwrap();
+        let stored: StoreConfig =
+            serde_json::from_slice(&fs::read(dir.path().join("config.json")).unwrap()).unwrap();
+        assert_eq!(stored.schema_version, 4);
     }
 }

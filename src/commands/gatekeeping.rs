@@ -452,7 +452,10 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                         )
                 });
             if let Some(evidence) = reusable {
-                println!("gate {name}: skipped (green at head)");
+                println!(
+                    "gate {name}: skipped (green at head; declared by {})",
+                    gate.declared_by.join(", ")
+                );
                 reused.push((name.clone(), evidence.event_id.clone()));
             } else {
                 to_run.push((name, gate));
@@ -754,7 +757,10 @@ fn verify_against(
             status::matches_environment(evidence, gate, declared_environment(&environments, gate))
         });
         if let Some(evidence) = reusable {
-            println!("gate {name}: skipped (green at the merged tree)");
+            println!(
+                "gate {name}: skipped (green at the merged tree; declared by {})",
+                gate.declared_by.join(", ")
+            );
             reused.push((name.clone(), evidence.event_id.clone()));
         } else {
             to_run.push((name, gate));
@@ -1821,7 +1827,18 @@ fn append_verifications(
         ev.event_id = event_id;
         store.append_event(&ev)?;
         if let Some(gate) = gate_label {
-            println!("gate: {gate}");
+            let declared_by = gitio::toplevel(&ctx.cwd)
+                .ok()
+                .and_then(|top| crate::gates::inspect(&top).ok())
+                .and_then(|gates| {
+                    gates
+                        .gates
+                        .get(&gate)
+                        .map(|item| item.declared_by.join(", "))
+                })
+                .filter(|sources| !sources.is_empty())
+                .unwrap_or_else(|| "declaration source unavailable".to_string());
+            println!("gate: {gate} (declared by {declared_by})");
         }
         let marker = if attested { " (attested)" } else { "" };
         println!("verification: {result:?}{marker} at {revision}");
@@ -2838,6 +2855,7 @@ fn authorization_basis(
                     command: gate.command.clone(),
                     profiles: gate.profiles.clone(),
                     timeout: gate.timeout,
+                    declared_by: gate.declared_by.clone(),
                 },
             )
         })
@@ -2862,6 +2880,7 @@ fn authorization_basis(
             forbid_self_approval: policy.policy.forbid_self_approval,
             require_declared_actor: policy.policy.require_declared_actor,
             provenance_git_identity: policy.provenance.git_identity.as_str().to_string(),
+            declared_by: policy.sources.as_map(),
         },
         danger: Some(report.danger.clone()),
         // Only when the waiver is what let the approval stand. A debt declared

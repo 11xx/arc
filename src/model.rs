@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 /// store stamped newer than this, because the alternative is what silently
 /// went wrong before: an older binary skipping event types it does not know,
 /// concluding the change is still open, and closing it a second way.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {
@@ -1097,11 +1097,11 @@ pub enum Payload {
 
 /// The inputs to one guarded merge, recorded on the event that performed it.
 ///
-/// An auditor could otherwise only replay preceding events and recover the
-/// contemporaneous `.arc/gates.toml` and `.arc/policy.toml` from Git — and
-/// uncommitted policy state is unrecoverable entirely. This does not make the
-/// ledger a config store: arc records no configuration history, only the
-/// values one irreversible decision was actually taken on.
+/// An auditor could otherwise only replay preceding events and recover
+/// project policy from Git. Operator policy is local to the shared Git
+/// directory, so the declaration sources used by one decision are recorded
+/// beside its normalized values. This does not make the ledger a config store:
+/// arc records no configuration history, only the inputs to one decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorizationBasis {
     /// The verdict that approved the merged patchset, when one did. Absent
@@ -1192,6 +1192,8 @@ pub struct NormalizedGate {
     pub profiles: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+    #[serde(default)]
+    pub declared_by: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1199,6 +1201,8 @@ pub struct NormalizedPolicy {
     pub forbid_self_approval: bool,
     pub require_declared_actor: bool,
     pub provenance_git_identity: String,
+    #[serde(default)]
+    pub declared_by: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
