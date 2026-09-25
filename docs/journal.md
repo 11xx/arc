@@ -82,10 +82,13 @@ storage, resolution, resolution basis, latest position, and whether archived
 positions exist; unknown legacy facts remain explicit rather than becoming
 empty values.
 `journal inventory [FILE] [--archived] [--kind KIND] --json` emits
-`arc-journal-inventory/4`. It selects one hot or cold store from one observed
+`arc-journal-inventory/5`. It selects one hot or cold store from one observed
 set of events, keeps availability separate from storage and resolution, and
 reports claims, questions, exact change/brief promotions, source references,
-and whether the ledger was absent, readable, or unreadable. An exact file is
+and whether the ledger was absent, readable, or unreadable. A
+`patchset_citations` map names, per selected filename, the patchsets that
+recorded it among the links that framed them, with the digest recorded at
+link time. An exact file is
 inspected even when terminal; a missing exact file is an error.
 Inventory, `journal open`, journal catchup, and workspace item rows share the
 artifact projection. Rows include tier, checkpoint tips, current and historical

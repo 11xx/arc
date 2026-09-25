@@ -359,6 +359,10 @@ RUN A CHANGE
                                      and `delegate-exit:<handle>` are the
                                      expected evidence; any text is accepted.
   arc snapshot                       Record the current head as a patchset.
+    --journal-ref <file>             Name a journal artifact that framed the
+                                     work; recorded with the digest read now.
+    --thread <scheme:id>             Name the external thread it belongs to.
+                                     Identifiers only, never transcript text.
   arc verify --gate <name>           Run a declared gate; record the evidence.
   arc verify --command <cmd>         Same, for an ad hoc probe.
   arc verify --against <branch>      Run every required gate on the merge with
@@ -840,6 +844,15 @@ RULES THAT CHANGE WHAT YOU DO
     evaluated, and undoes it otherwise. A queue runs the ones with no answer
     at that tree, because it moves the target itself and every member behind
     the one it just landed is now evaluating a different merge.
+  - A snapshot may record the context that framed the work: `--journal-ref
+    <file>` links a journal artifact by filename with the body digest read at
+    record time, refusing a name that resolves to no artifact, and `--thread
+    <scheme:id>` records an opaque external thread reference. `arc show`,
+    `arc log`, and `arc status --json` render them, bundles carry them, and
+    `arc journal inventory` names the patchsets that cite an artifact. Arc
+    records identifiers only, never transcript text: retaining a recording is
+    not arc's promise, and a remote recording is read on the machine that
+    holds it.
   - A gate may declare an environment probe: a command whose output
     identifies the environment the gate's evidence applies to. `verify` runs
     the probe beside the gate and records its identity on the evidence. The

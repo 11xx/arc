@@ -31,6 +31,15 @@ pub struct Patchset {
     pub contributors: Vec<String>,
     pub claim_id: Option<String>,
     pub claim_actor: Option<String>,
+    /// Journal artifacts the patchset was recorded as being framed by, each
+    /// with the body digest read at record time. Empty on patchsets recorded
+    /// without links, which is not a claim that none framed the work.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub journal_refs: Vec<crate::model::JournalArtifactRef>,
+    /// The external thread the work belongs to, as a scheme and an id.
+    /// `None` when none was recorded; arc never infers one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<crate::model::ExternalThreadRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance_mismatch: Option<bool>,
     pub created_at: DateTime<Utc>,
@@ -1420,6 +1429,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 contributors,
                 claim_id,
                 claim_actor,
+                journal_refs,
+                thread,
             } => {
                 if let Some(claim_id) = claim_id {
                     crate::ids::validate_id_component(claim_id)?;
@@ -1479,6 +1490,8 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     contributors: contributors.clone(),
                     claim_id: claim_id.clone(),
                     claim_actor: claim_actor.clone(),
+                    journal_refs: journal_refs.clone(),
+                    thread: thread.clone(),
                     provenance_mismatch,
                     created_at: ev.created_at,
                 });
