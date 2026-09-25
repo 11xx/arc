@@ -17,6 +17,7 @@ mod lifecycle;
 pub(crate) mod messaging;
 mod observe;
 mod pass;
+mod policy_cmd;
 mod replica;
 mod rescue;
 pub(crate) mod review;
@@ -71,6 +72,7 @@ pub(crate) use lifecycle::{print_projected, status_output};
 pub use messaging::{catchup, inbox, message, messages};
 pub use observe::{events, watch, EventsArgs, WatchArgs, WatchQuorum};
 pub use pass::{abandon_pass, complete_pass, list_passes, open_pass};
+pub use policy_cmd::{path as policy_path, show as policy_show, write as policy_write};
 pub use replica::{
     export as replica_export, id as replica_id, import as replica_import, init as replica_init,
     offer as replica_offer, pair as replica_pair, reclaim as replica_reclaim,
@@ -322,9 +324,13 @@ impl Ctx {
         if !store.require_declared_actor {
             return Ok(());
         }
+        let source = if store.require_declared_actor_sources.is_empty() {
+            "source unavailable".to_string()
+        } else {
+            store.require_declared_actor_sources.join(", ")
+        };
         bail!(
-            "policy requires a declared actor: {:?} came from {}, which nobody claimed. \
-             Pass --actor or set ARC_ACTOR.",
+            "policy requires a declared actor (declared by {source}): {:?} came from {}, which nobody claimed. Pass --actor or set ARC_ACTOR.",
             self.actor,
             self.actor_source.assumed_from().unwrap_or_default()
         )

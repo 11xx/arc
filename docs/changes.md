@@ -360,7 +360,7 @@ inject identity into other commands.
 
 `arc resume [CHANGE]` renders the latest brief, claim and stage, open findings,
 head gate state, next action, live journal lanes, and matching open journal
-items in one view. `--json` emits the versioned `arc-resume/5` schema with the
+items in one view. `--json` emits the versioned `arc-resume/6` schema with the
 existing status payload and a journal block. `arc prompt [CHANGE]` prints the
 stable one-line change summary used by statuslines, and exits successfully
 with no output outside a change worktree.
@@ -458,7 +458,7 @@ condition is reached, with a JSON diagnostic containing the winning
 watch conditions are checked in their supplied order and the first reached
 condition wins.
 
-`arc status <change>` prints the versioned `arc-status/22` JSON report —
+`arc status <change>` prints the versioned `arc-status/23` JSON report —
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, claim owner/activity/stage timing, snapshot
 provenance, a `review_subject` naming the exact identities the independence

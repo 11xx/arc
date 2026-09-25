@@ -11,7 +11,7 @@ make test
 make lint
 ```
 
-Declared integration gates remain in `.arc/gates.toml`:
+Project integration gates are declared in `.arc/gates.toml`:
 
 ```toml
 # .arc/gates.toml
@@ -26,6 +26,15 @@ profiles = ["local", "forge", "release"]   # omit = required for every profile
 command = "cargo test --test integration"
 timeout = "10m"                              # optional; s, m, or h
 ```
+
+An operator may declare local gates in
+`<git-common-dir>/arc/operator-policy.toml` with the same `[gates.*]` tables.
+Both files apply. Gates combine by name when their commands and environment
+probes agree: profiles combine, an empty profile list means every profile, and
+the shorter timeout applies. A repeated name with a different command or
+environment probe is a conflict reported by
+`arc doctor`; `arc check` and gate execution refuse it and identify both files.
+Gate listings name the file or files that declared each command.
 
 A gate runs in the checkout that holds the change. `verify`, `snapshot
 --verify`, `done`, and `rebase --verify` execute the command in the change's
@@ -186,4 +195,3 @@ The other commands a script branches on carry their own contracts:
 - A repeat of a recorded source item writes nothing, prints the existing
   entry, and exits 0.
 - A spooled write prints `spooled: <path>` and exits 0.
-

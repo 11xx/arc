@@ -37,6 +37,8 @@ pub struct Store {
     /// the policy, and the closure event would then be refused by a rule that
     /// did not exist when the merge was authorised.
     pub require_declared_actor: bool,
+    /// Files that enabled the declared-actor requirement.
+    pub require_declared_actor_sources: Vec<String>,
 }
 
 /// A process-scoped transition guard. The lock file is intentionally
@@ -59,10 +61,21 @@ impl Store {
         let root = Self::resolve_root(cwd)?;
         // Read the repository's policy before creating anything, so an
         // unreadable one fails with the filesystem untouched.
-        let require_declared_actor = match gitio::toplevel(cwd) {
-            Ok(top) => crate::policy::load(&top)?.policy.require_declared_actor,
+        let (require_declared_actor, require_declared_actor_sources) = match gitio::toplevel(cwd) {
+            Ok(top) => {
+                let policy = crate::policy::load(&top)?;
+                let required = policy.policy.require_declared_actor;
+                let sources = if required {
+                    policy
+                        .sources
+                        .sources_for("policy.require_declared_actor=true")
+                } else {
+                    Vec::new()
+                };
+                (required, sources)
+            }
             // A store opened outside a repository has no policy to honour.
-            Err(_) => false,
+            Err(_) => (false, Vec::new()),
         };
         create_private_dir(&root)?;
         let config_path = root.join("config.json");
@@ -96,6 +109,7 @@ impl Store {
             root,
             repository_id,
             require_declared_actor,
+            require_declared_actor_sources,
         };
         store.repair_missing_format_three_stamp()?;
         Ok(store)
@@ -111,6 +125,7 @@ impl Store {
                 root: root.to_path_buf(),
                 repository_id,
                 require_declared_actor: false,
+                require_declared_actor_sources: Vec::new(),
             })),
             None => Ok(None),
         }
@@ -575,7 +590,7 @@ impl Store {
         };
         // Different changes have different transition locks, but all of them
         // update this one monotonic barrier. Serialize the read-modify-rename
-        // so a stale format-2 writer cannot land after a format-3 writer.
+        // so a stale writer for an older format cannot land after a newer one.
         let _format = self.lock_format()?;
         let config_path = self.root.join("config.json");
         let mut cfg: StoreConfig = serde_json::from_slice(&fs::read(&config_path)?)
@@ -671,7 +686,12 @@ impl Store {
             return Ok(());
         }
         bail!(
-            "policy requires a declared actor: {:?} on event {} was not declared by anyone.              Pass --actor or set ARC_ACTOR.",
+            "policy requires a declared actor (declared by {}): {:?} on event {} was not declared by anyone. Pass --actor or set ARC_ACTOR.",
+            if self.require_declared_actor_sources.is_empty() {
+                "source unavailable".to_string()
+            } else {
+                self.require_declared_actor_sources.join(", ")
+            },
             event.actor,
             event.event_id
         )
@@ -1038,6 +1058,7 @@ mod tests {
             root: root.to_path_buf(),
             repository_id: "repo".into(),
             require_declared_actor: false,
+            require_declared_actor_sources: Vec::new(),
         }
     }
 

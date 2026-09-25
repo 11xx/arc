@@ -81,6 +81,17 @@ fn importing_a_waiver_only_integration_stamps_store_format_three() {
     let mut integration: serde_json::Value =
         serde_json::from_slice(&fs::read(&integration_path).unwrap()).unwrap();
     integration["authorization"]["verdict_event_id"] = serde_json::Value::Null;
+    integration["authorization"]["policy"]
+        .as_object_mut()
+        .unwrap()
+        .remove("declared_by");
+    for gate in integration["authorization"]["gates"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+    {
+        gate.as_object_mut().unwrap().remove("declared_by");
+    }
     fs::write(
         &integration_path,
         serde_json::to_vec_pretty(&integration).unwrap(),
