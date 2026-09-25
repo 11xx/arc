@@ -874,7 +874,9 @@ pub enum Payload {
     },
     /// A merge arc performed under its own guard: the head equalled the
     /// approved patchset head, gates were green at it, no finding blocked and
-    /// no hold was active, and the merge commit's parents were verified.
+    /// no hold was active, and — when the merge existed at all — the merge
+    /// commit's parents were verified. `already_contained` marks the case
+    /// where the target already held the head and no merge was made.
     ChangeIntegrated {
         integrated_commit: String,
         source_patchset_id: String,
@@ -885,6 +887,13 @@ pub enum Payload {
         /// decision. Absent only on events written before arc recorded it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         authorization: Option<AuthorizationBasis>,
+        /// The target already contained the approved head when the guard ran,
+        /// so Git created no merge commit: `integrated_commit` is the target
+        /// revision that already held it, and `target_before` equals it. A
+        /// reader must not look for merge parents. False means
+        /// `integrated_commit` is the merge arc made.
+        #[serde(default, skip_serializing_if = "is_false")]
+        already_contained: bool,
     },
     /// An integration somebody performed elsewhere and asserted afterwards.
     /// Deliberately carries no authorization: arc did not guard this merge and

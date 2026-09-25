@@ -1117,7 +1117,8 @@ enum Cmd {
     /// modifications refuse, staged or unstaged. Untracked or ignored paths
     /// the merge does not write are left in place and named in the report; a
     /// path the merge would write that is already there without being tracked
-    /// is refused by name.
+    /// is refused by name. A head the target already contains closes at the
+    /// target revision that holds it, without a merge commit.
     Integrate {
         /// Changes to integrate. Several run as a queue, in dependency order,
         /// stopping at the first that needs a person. Omit only when

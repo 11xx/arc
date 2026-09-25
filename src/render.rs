@@ -1609,10 +1609,18 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
         Payload::ChangeIntegrated {
             integrated_commit,
             target_branch,
+            already_contained,
             ..
         } => (
             "change-integrated",
-            format!("{} into {target_branch}", short_sha(integrated_commit)),
+            if *already_contained {
+                format!(
+                    "{} into {target_branch} (already contained; no merge created)",
+                    short_sha(integrated_commit)
+                )
+            } else {
+                format!("{} into {target_branch}", short_sha(integrated_commit))
+            },
         ),
         Payload::IntegrationAsserted {
             integrated_commit,
