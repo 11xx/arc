@@ -86,6 +86,38 @@ that holds both events reports the overlap as `contested` in `arc replica
 status`, naming the acquirer, the reclaimer, and the offer. Check what the
 acquirer integrated in that interval.
 
+## Exchange journal artifacts
+
+A change bundle carries a ledger, not a journal. Selected artifacts travel as
+their own versioned file:
+
+```sh
+arc journal export 20260923T173916Z-topic-discussion.md --output discussion.json
+arc journal import discussion.json --dry-run
+arc journal import discussion.json
+```
+
+The bundle carries each artifact's body, the events the exporting journal
+recorded about it, its body digest, the exporting replica, and the artifacts
+the selection references by filename. `transition` links and `decision`
+references are the filename references that count; each is followed until the
+closure is complete, and an artifact this journal cannot produce refuses the
+export by name. A decision recorded in another project's journal cannot travel
+in a bundle for this one and refuses the export too.
+
+The whole bundle is validated before anything is written. A bundle naming
+another logical project, or a source replica that is not paired here, is
+refused and writes nothing. An artifact the receiving journal already holds in
+a different storage tier, or with a different digest, refuses the whole
+import. An artifact that is absent lands in the hot journal or the cold
+archive the bundle records, and the events arrive with the provenance they
+were recorded under. Importing the same bundle twice changes nothing: the
+first import records a receipt naming the source replica and bundle digest.
+
+A live claim arriving on an artifact a live local claim holds is reported as a
+contest naming both replicas, and nothing on either claim's behalf is
+recorded. Resolve it through the ordinary takeover path.
+
 ## Claims and local liveness
 
 Claims remain local liveness facts. When an imported change bundle brings a

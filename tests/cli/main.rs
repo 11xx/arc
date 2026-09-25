@@ -20,6 +20,7 @@ mod hooks;
 mod instructions;
 mod integrate;
 mod journal;
+mod journal_exchange;
 mod lifecycle;
 mod messaging;
 mod metadata;
