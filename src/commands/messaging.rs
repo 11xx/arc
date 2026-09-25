@@ -982,6 +982,7 @@ fn render_waiting_spools(ctx: &Ctx, states: &BTreeMap<String, crate::state::Chan
 /// one a session starting cold actually has.
 pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     let store = ctx.store()?;
+    let replica = crate::replica::status(&store)?;
     let mut inbox = collect_inbox(ctx, &store, None)?;
     if let Ok(unowned) = crate::context::unowned_surface(ctx) {
         inbox.absorb_unowned(unowned);
@@ -999,9 +1000,10 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-catchup/9",
+                "schema": "arc-catchup/10",
                 "ledger": inbox,
                 "journal": journal.as_ref().ok(),
+                "replica": replica,
                 // Open forks only: retired ones are history, and the JSON
                 // view answers the same question the text section does.
                 "forks": forks
@@ -1017,6 +1019,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     let debts = collect_debts(ctx, &states)?;
     let review_queue = collect_review_queue(&store, &states)?;
     println!("ledger: {}", store.root.display());
+    crate::replica::render_status(&replica);
     let mut any = false;
     let mut rendered_debt_details = BTreeSet::new();
     for (name, rows) in inbox.sections() {

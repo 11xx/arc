@@ -139,6 +139,7 @@ arc catchup            # what is waiting right now
 | [workspace](docs/workspace.md) | Cross-project views, scaffolds, acceptance probes, restack, bundles |
 | [forge](docs/forge.md) | Recording and validating the forge facts an agent observed |
 | [identity](docs/identity.md) | Actor, harness, session, model, and acting for a subject |
+| [replicas](docs/replicas.md) | Explicit store pairing, file exchange, and integration authority |
 | [configuration](docs/configuration.md) | Config, sandbox, storage guarantees, Git hooks |
 | [history](docs/history.md) | Rewrites, and how derived readings follow revisions forward |
 | [schemas](docs/schemas.md) | Every schema version, and which are commitments |

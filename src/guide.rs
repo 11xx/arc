@@ -382,6 +382,17 @@ RUN A CHANGE
   arc check                          Integration preflight; exit code names the blocker.
   arc integrate <c>...               Guarded --no-ff merge once the gates are green.
     <c> <c> <c>, or --tag <t>        Land a queue, in dependency order.
+  arc replica id --json              Read this store's repository ID for pairing.
+  arc replica init <name>             Start a logical project and hold authority.
+  arc replica pair <name> --repository-id <id>
+                                     Record a peer for explicit file exchange.
+  arc replica export --output <file>  Export known replica events.
+  arc replica import <file> [--dry-run]
+                                     Import pairing, offer, or authority events.
+  arc replica authority offer --to <name>
+                                     Relinquish authority to a paired recipient.
+  arc replica authority reclaim --because <reason>
+                                     Reclaim an unresolved offer with a reason.
   arc audit <change> --verdict <v>   Review an already-integrated revision.
   arc close                          Terminal outcome arc did not merge itself.
 
@@ -440,6 +451,22 @@ RUN A CHANGE
   worktree, so the next command infers the change without being told. A dirty
   checkout, or one standing elsewhere, is left exactly as it was — the change
   still opens, and arc prints the Git command that finishes the switch.
+
+PAIR REPLICA STORES
+  A store keeps its own repository ID as event provenance. `replica init`
+  records the first replica and logical project ID. `replica pair` records an
+  operator-named peer by its repository ID; that peer adopts the project only
+  by importing the exported pairing event. Replica files contain identities
+  and authority events, while checkout paths remain local to their store.
+
+  The first replica holds integration authority. `authority offer` relinquishes
+  it when the offer is recorded; the named replica acquires it when it imports
+  the offer file. Export the recipient's replica events back to the offering
+  store to report the acquisition there. Reclaiming an unresolved offer
+  requires a reason, and exporting that event reports the reclaim to peers.
+  Imports have a dry-run preview, are idempotent, and record a receipt with the
+  source replica and bundle digest. A paired replica without authority is
+  refused by `integrate`.
 
 KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)
   arc keep --kind rejected   --body "<why it failed>" --evidence "<what showed it>"
@@ -931,6 +958,8 @@ EXIT CODES
     `arc check` exits 15 when the change's branch is a fork's: fork work is
       unintegrated by intent, and the boundary binds to the change rather
       than to the directory the command runs in.
+    Arc exits 17 when a paired replica does not hold integration authority;
+      the refusal names the holder or an offer in flight.
 
   Codes 1 and 2 are also reachable without a blocker at all: `arc` exits 1 on
   an internal error and 2 on a usage error, which argument parsing decides

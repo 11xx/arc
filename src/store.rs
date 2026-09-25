@@ -696,7 +696,10 @@ impl Store {
     /// `arc doctor` reports the contradiction as `invalid-rewrite-mapping`,
     /// which is where the refusal points.
     pub fn state(&self, change_id: &str) -> Result<crate::state::ChangeState> {
-        crate::state::reduce_following(&self.load_events(change_id)?, &self.rewrites()?)
+        let events = self.load_events(change_id)?;
+        let mut state = crate::state::reduce_following(&events, &self.rewrites()?)?;
+        crate::replica::localize_change(&self.repository_id, &events, &mut state);
+        Ok(state)
     }
 
     /// Every history rewrite this repository recorded, flattened into one

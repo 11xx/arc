@@ -198,6 +198,7 @@
   would happen at all. `arc integrate <a> <b> <c>` and `arc integrate --tag '#series'` apply that same
   guarded path to a queue, in dependency order, stopping at the first member that needs a person.
   Refusals carry typed exit codes.
+  Arc exits 17 when a paired replica does not hold integration authority; the refusal names the holder or an offer in flight.
 
 ## Orientation
 

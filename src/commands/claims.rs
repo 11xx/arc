@@ -308,6 +308,7 @@ pub fn stage(
     let _transition = store.lock_transition(&change_id)?;
     let events = store.load_events(&change_id)?;
     let mut state = state::reduce_following(&events, &store.rewrites()?)?;
+    crate::replica::localize_change(&store.repository_id, &events, &mut state);
     let mut previous_event_id = events
         .last()
         .context("change has no opening event")?
