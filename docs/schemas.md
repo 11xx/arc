@@ -84,6 +84,3 @@ next one.
 `arc-bundle/N` sits in between and is checked in both directions: a bundle
 carries the store format it was written with, and arc refuses a bundle written
 by a newer arc rather than skipping lifecycle events it does not know.
-
-Store format 4 records the policy source labels used by guarded integration
-authorizations, alongside their normalized policy and gate declarations.
