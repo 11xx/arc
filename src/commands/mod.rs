@@ -17,6 +17,7 @@ mod lifecycle;
 pub(crate) mod messaging;
 mod observe;
 mod pass;
+mod replica;
 mod rescue;
 pub(crate) mod review;
 mod rewrite;
@@ -70,6 +71,11 @@ pub(crate) use lifecycle::{print_projected, status_output};
 pub use messaging::{catchup, inbox, message, messages};
 pub use observe::{events, watch, EventsArgs, WatchArgs, WatchQuorum};
 pub use pass::{abandon_pass, complete_pass, list_passes, open_pass};
+pub use replica::{
+    export as replica_export, id as replica_id, import as replica_import, init as replica_init,
+    offer as replica_offer, pair as replica_pair, reclaim as replica_reclaim,
+    status as replica_status,
+};
 pub use rescue::rescue;
 pub use review::{comment, finding, keep, read_review, reply, resolve, review, ReviewArgs};
 pub use rewrite::{
@@ -422,7 +428,8 @@ impl Ctx {
     ) -> Result<(String, ChangeState)> {
         let change_id = store.resolve_change(reference)?;
         let events = store.load_events(&change_id)?;
-        let state = state::reduce_following(&events, &store.rewrites()?)?;
+        let mut state = state::reduce_following(&events, &store.rewrites()?)?;
+        crate::replica::localize_change(&store.repository_id, &events, &mut state);
         Ok((change_id, state))
     }
 
@@ -431,7 +438,9 @@ impl Ctx {
         let rewrites = store.rewrites()?;
         for change_id in store.list_change_ids()? {
             let events = store.load_events(&change_id)?;
-            states.insert(change_id, state::reduce_following(&events, &rewrites)?);
+            let mut state = state::reduce_following(&events, &rewrites)?;
+            crate::replica::localize_change(&store.repository_id, &events, &mut state);
+            states.insert(change_id, state);
         }
         Ok(states)
     }
@@ -484,7 +493,10 @@ pub(crate) fn reduce_at(store: &Store, change_id: &str, event_id: &str) -> Resul
         .iter()
         .position(|event| event.event_id == event_id)
         .with_context(|| format!("unknown event {event_id:?} in {change_id}"))?;
-    state::reduce_following(&events[..=position], &store.rewrites()?)
+    let prefix = &events[..=position];
+    let mut state = state::reduce_following(prefix, &store.rewrites()?)?;
+    crate::replica::localize_change(&store.repository_id, prefix, &mut state);
+    Ok(state)
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

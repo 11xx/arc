@@ -30,6 +30,7 @@ mod provenance;
 mod queue;
 mod rebase;
 mod release;
+mod replicas;
 mod rescue;
 mod review;
 mod rewrite;

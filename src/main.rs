@@ -15,6 +15,7 @@ mod policy;
 mod project;
 mod registry;
 mod render;
+mod replica;
 mod rewrite;
 mod session_store;
 mod state;
@@ -663,6 +664,11 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Pair independent stores and move integration authority with files
+    Replica {
+        #[command(subcommand)]
+        cmd: ReplicaCmd,
+    },
     /// Integration preflight; exit code identifies the first blocker
     Check {
         /// Change to act on. Omitted, it is inferred from the current branch,
@@ -1159,6 +1165,9 @@ enum Cmd {
     /// target revision that holds it, without a merge commit. When no checkout
     /// holds the target, the merge takes over the change's own checkout if it
     /// still holds the change branch and leaves it on the target.
+    #[command(
+        after_help = "Arc exits 17 when a paired replica does not hold integration authority; the refusal names the holder or an offer in flight."
+    )]
     Integrate {
         /// Changes to integrate. Several run as a queue, in dependency order,
         /// stopping at the first that needs a person. Omit only when
@@ -1363,6 +1372,70 @@ enum Cmd {
     Journal {
         #[command(subcommand)]
         cmd: journal::JournalCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReplicaCmd {
+    /// Print this store's repository ID for an explicit pairing record
+    Id {
+        /// Emit the machine-readable JSON view
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start a logical project and hold its initial integration authority
+    Init {
+        /// Unique replica name within the logical project
+        name: String,
+    },
+    /// Record a peer identity that can adopt the project by importing an export
+    Pair {
+        /// Unique name for the paired replica
+        name: String,
+        /// That replica's local repository ID from `arc replica id`
+        #[arg(long = "repository-id")]
+        repository_id: String,
+    },
+    /// Export this replica's known identity and authority events
+    Export {
+        /// Output file ('-' for stdout)
+        #[arg(long)]
+        output: String,
+    },
+    /// Import a pairing record or authority offer from another replica
+    Import {
+        /// Input file ('-' for stdin)
+        input: String,
+        /// Validate and report without writing events or an import receipt
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show this store's replica, peers, and current authority
+    Status {
+        /// Emit the machine-readable JSON view
+        #[arg(long)]
+        json: bool,
+    },
+    /// Move or reclaim integration authority
+    Authority {
+        #[command(subcommand)]
+        cmd: ReplicaAuthorityCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReplicaAuthorityCmd {
+    /// Relinquish authority and create an offer for a paired recipient
+    Offer {
+        /// Paired recipient's replica name
+        #[arg(long)]
+        to: String,
+    },
+    /// Reclaim an unresolved offer and record the reason
+    Reclaim {
+        /// Reason the in-flight offer is being reclaimed
+        #[arg(long)]
+        because: String,
     },
 }
 
@@ -2484,6 +2557,44 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Cmd::Import { input, dry_run } => commands::import_bundle(&ctx, &input, dry_run),
+        Cmd::Replica { cmd } => match cmd {
+            ReplicaCmd::Id { json } => {
+                commands::replica_id(&ctx, json)?;
+                Ok(0)
+            }
+            ReplicaCmd::Init { name } => {
+                commands::replica_init(&ctx, &name)?;
+                Ok(0)
+            }
+            ReplicaCmd::Pair {
+                name,
+                repository_id,
+            } => {
+                commands::replica_pair(&ctx, &name, &repository_id)?;
+                Ok(0)
+            }
+            ReplicaCmd::Export { output } => {
+                commands::replica_export(&ctx, &output)?;
+                Ok(0)
+            }
+            ReplicaCmd::Import { input, dry_run } => {
+                commands::replica_import(&ctx, &input, dry_run)
+            }
+            ReplicaCmd::Status { json } => {
+                commands::replica_status(&ctx, json)?;
+                Ok(0)
+            }
+            ReplicaCmd::Authority { cmd } => match cmd {
+                ReplicaAuthorityCmd::Offer { to } => {
+                    commands::replica_offer(&ctx, &to)?;
+                    Ok(0)
+                }
+                ReplicaAuthorityCmd::Reclaim { because } => {
+                    commands::replica_reclaim(&ctx, &because)?;
+                    Ok(0)
+                }
+            },
+        },
         Cmd::Check {
             change,
             tag,
