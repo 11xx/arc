@@ -9,7 +9,16 @@
   recorded with `arc snapshot`. It binds to the latest brief unless
   `--brief-version <n>` selects another recorded contract; changing that
   contract records a new patchset even at an unchanged Git head. Reviews and
-  approvals bind to patchsets, never to moving branch names.
+  approvals bind to patchsets, never to moving branch names. A snapshot may
+  record the context that framed it: `--journal-ref <file>` links a journal
+  artifact by filename with the body digest read at record time, refusing a
+  name that resolves to no artifact, and `--thread <scheme:id>` records an
+  opaque external thread reference. Links travel in bundles. Arc records
+  identifiers only, never transcript text: retaining a recording is not
+  arc's promise, and a remote recording is read on the machine that holds
+  it. `arc show` and `arc log` render the links, `arc status --json` carries
+  them on the latest patchset, and `arc journal inventory` names the
+  patchsets that cite an artifact.
 - A **brief** is a change-scoped implementation contract stored in the ledger;
   goal-scoped analysis briefs stay in the project journal. A brief's prose
   never gates checking or integration, but the acceptance probes declared on

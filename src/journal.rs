@@ -16,7 +16,9 @@
 use crate::commands::Ctx;
 use crate::config;
 use crate::gitio;
-use crate::model::{BlockerRef, ClaimStage, DisplacedClaim, PlanSource, PlannerIdentity};
+use crate::model::{
+    BlockerRef, ClaimStage, DisplacedClaim, JournalArtifactRef, PlanSource, PlannerIdentity,
+};
 use crate::state::{self, ChangeState, ClaimIdentity, ClaimState, StageProgress};
 use crate::store::Store;
 use anyhow::{bail, Context, Result};
@@ -24,7 +26,7 @@ use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use clap::{Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -8597,6 +8599,40 @@ struct InventoryFacts {
     question_history: Vec<serde_json::Value>,
 }
 
+/// A patchset that recorded an artifact among the links that framed it.
+#[derive(Clone, Serialize)]
+pub(crate) struct PatchsetCitation {
+    pub(crate) change_id: String,
+    pub(crate) patchset_id: String,
+    /// The head the patchset recorded, so a reader can find the work the
+    /// artifact framed.
+    pub(crate) head: String,
+    /// The body digest recorded at link time, not a fresh reading. An
+    /// artifact whose body changed since is a fact about the artifact, not
+    /// about who cited it.
+    pub(crate) digest: String,
+}
+
+fn inventory_citations(changes: &[ChangeState], filename: &str) -> Vec<PatchsetCitation> {
+    let mut citations = Vec::new();
+    for change in changes {
+        for patchset in &change.patchsets {
+            for link in &patchset.journal_refs {
+                if link.file == filename {
+                    citations.push(PatchsetCitation {
+                        change_id: change.change_id.clone(),
+                        patchset_id: patchset.id.clone(),
+                        head: patchset.head.clone(),
+                        digest: link.digest.clone(),
+                    });
+                }
+            }
+        }
+    }
+    citations.sort_by(|a, b| (&a.change_id, &a.patchset_id).cmp(&(&b.change_id, &b.patchset_id)));
+    citations
+}
+
 #[derive(Clone, Serialize)]
 pub(crate) struct InventoryPromotion {
     pub(crate) change_id: String,
@@ -9695,6 +9731,11 @@ struct JournalInventory {
     observed_at: String,
     ledger: InventoryLedger,
     items: Vec<ArtifactEntry>,
+    /// Patchsets that recorded each artifact among the links that framed
+    /// them, keyed by filename. Kept beside the artifact rows rather than on
+    /// them so the projections that reuse a row keep their shape.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    patchset_citations: BTreeMap<String, Vec<PatchsetCitation>>,
     #[serde(skip)]
     questions: Vec<WorkspaceQuestion>,
 }
@@ -9898,6 +9939,7 @@ fn project_inventory(
             .collect()
     };
     let mut items = Vec::new();
+    let mut patchset_citations: BTreeMap<String, Vec<PatchsetCitation>> = BTreeMap::new();
     for name in names {
         ensure_storage_settled(&hot, &events, &name)?;
         let Some((ts, topic, file_kind)) = parse_artifact_name(&name) else {
@@ -9936,6 +9978,14 @@ fn project_inventory(
         let amendments = Amendments::collect(&events, &name);
         let promotions =
             (ledger.state != "unreadable").then(|| inventory_promotions(&changes, &name));
+        let citations = if ledger.state != "unreadable" {
+            inventory_citations(&changes, &name)
+        } else {
+            Vec::new()
+        };
+        if !citations.is_empty() {
+            patchset_citations.insert(name.clone(), citations);
+        }
         let promotion_state = promotion_state_of(&file_kind, promotions.as_deref());
         let question_history = all_questions.iter().filter(|q| q.file == name).map(|question| {
             let answer = events.iter().rev().find(|e| e.file.as_deref() == Some(name.as_str()) && e.event == "answer" && e.question_id.as_deref() == Some(question.question.as_str()));
@@ -10001,12 +10051,13 @@ fn project_inventory(
         });
     }
     Ok(JournalInventory {
-        schema: "arc-journal-inventory/4",
+        schema: "arc-journal-inventory/5",
         journal_dir: hot.display().to_string(),
         anchor: project.is_dir().then(|| project.display().to_string()),
         observed_at: observed.to_rfc3339_opts(SecondsFormat::AutoSi, true),
         ledger,
         items,
+        patchset_citations,
         questions: question_rows,
     })
 }
@@ -10106,6 +10157,17 @@ fn inventory(
         );
         for item in &report.items {
             render_open_entry(item);
+            for citation in report
+                .patchset_citations
+                .get(&item.file)
+                .into_iter()
+                .flatten()
+            {
+                println!(
+                    "  cited by {} {} ({})",
+                    citation.change_id, citation.patchset_id, citation.digest
+                );
+            }
         }
         if report.items.is_empty() {
             println!("no inventory items");
@@ -10591,6 +10653,24 @@ pub fn read_artifact_body(ctx: &Ctx, filename: &str) -> Result<String> {
         "no such artifact {filename} in {} or its cold archive",
         hot.display()
     )
+}
+
+/// Resolve a journal artifact filename into the reference a patchset records:
+/// the filename, and `sha256:` over the body read now.
+///
+/// The name must be an artifact filename and must resolve in the hot journal
+/// or its cold archive, so a recorded link always names something that
+/// existed when it was recorded. Retention is a separate question; arc
+/// records the identifier and never promises the file survives.
+pub fn artifact_reference(ctx: &Ctx, filename: &str) -> Result<JournalArtifactRef> {
+    if parse_artifact_name(filename).is_none() {
+        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+    }
+    let body = read_artifact_body(ctx, filename)?;
+    Ok(JournalArtifactRef {
+        file: filename.to_string(),
+        digest: format!("sha256:{}", hex::encode(Sha256::digest(body.as_bytes()))),
+    })
 }
 
 /// Validate that a filename identifies an existing plan in the hot journal or
