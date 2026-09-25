@@ -696,6 +696,14 @@ fn check_and_show_name_the_missing_gate_rather_than_gates_passing() {
         "{out}"
     );
     assert!(!out.contains("all integration gates pass"), "{out}");
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", "ungated-check"]),
+    ))
+    .unwrap();
+    assert_eq!(
+        status["ready_reason"],
+        "no gates declared for profile local"
+    );
 
     let assertion = repo
         .arc(&repo.root)
@@ -778,4 +786,68 @@ fn rebase_without_declared_gates_names_the_missing_gate() {
         !out.contains("every required gate is green at head"),
         "a rebase must not report gates passing where none exist:\n{out}"
     );
+}
+
+#[test]
+fn a_merged_file_over_an_ignored_directory_is_refused_by_name() {
+    let repo = repo_with_gates();
+    fs::write(repo.root.join(".gitignore"), "packed/\n").unwrap();
+    git(&repo.root, &["add", ".gitignore"]);
+    git(&repo.root, &["commit", "-m", "test: ignore packed/"]);
+    let (_change, _wt) = approved_change(&repo, "file-over-dir", "packed", "now a file\n");
+    fs::create_dir_all(repo.root.join("packed")).unwrap();
+    fs::write(repo.root.join("packed/local.bin"), b"local ignored bytes\n").unwrap();
+
+    repo.arc(&repo.root)
+        .args(["integrate", "file-over-dir"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("untracked or ignored: packed"));
+    assert_eq!(
+        fs::read(repo.root.join("packed/local.bin")).unwrap(),
+        b"local ignored bytes\n"
+    );
+}
+
+#[test]
+fn cleanup_after_an_already_contained_closure_removes_the_change_checkout() {
+    let repo = repo_with_gates();
+    let (first_id, _) = approved_change(&repo, "cleanup-first", "first.txt", "first\n");
+    repo.arc(&repo.root)
+        .args(["integrate", "cleanup-first"])
+        .assert()
+        .success();
+    let target = repo.head(&repo.root);
+    let (verify_id, verify_wt) = verification_only(&repo, "cleanup-verify", &target, &[&first_id]);
+
+    repo.arc(&repo.root)
+        .args(["integrate", &verify_id, "--cleanup"])
+        .assert()
+        .success();
+    assert!(
+        !verify_wt.exists(),
+        "the contained change's checkout is removed"
+    );
+    assert!(git_out(&repo.root, &["branch", "--list", "arc/cleanup-verify"]).is_empty());
+}
+
+#[test]
+fn cleanup_after_a_take_over_keeps_the_checkout_and_drops_the_branch() {
+    let repo = repo_with_gates();
+    let _change = in_place_change(&repo, "stranded-cleanup");
+
+    repo.arc(&repo.root)
+        .args(["integrate", "stranded-cleanup", "--cleanup"])
+        .assert()
+        .success();
+    assert!(
+        repo.root.exists(),
+        "the repository checkout is never removed"
+    );
+    assert_eq!(
+        git_out(&repo.root, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "master"
+    );
+    assert!(git_out(&repo.root, &["branch", "--list", "arc/stranded-cleanup"]).is_empty());
+    assert!(repo.root.join("stranded-cleanup.txt").exists());
 }
