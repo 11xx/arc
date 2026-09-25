@@ -993,7 +993,9 @@ enum Cmd {
         #[arg(long, value_name = "BRANCH")]
         against: Option<String>,
     },
-    /// Finish implementation: snapshot, verify all gates, then print check state
+    /// Finish implementation: snapshot, verify all gates, then print check
+    /// state. A profile with no declared gate records no evidence and prints
+    /// that no gate is declared instead of a pass.
     Done {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in

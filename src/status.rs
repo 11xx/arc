@@ -1525,7 +1525,12 @@ fn build_report(
 
     let ready = blockers.is_empty();
     let ready_reason = if ready {
-        "all integration gates pass".into()
+        // Ready with no declared gate is not a gate that passed.
+        if gate_statuses.is_empty() {
+            format!("no gates declared for profile {}", state.profile)
+        } else {
+            "all integration gates pass".into()
+        }
     } else {
         blockers
             .iter()
