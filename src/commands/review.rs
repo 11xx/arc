@@ -290,6 +290,7 @@ fn warn_fewer_contributors_than_hands(ctx: &Ctx, base: &str, head: &str, contrib
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn snapshot(
     ctx: &Ctx,
     reference: &str,
@@ -297,6 +298,8 @@ pub fn snapshot(
     brief_version: Option<usize>,
     contributors: Option<Vec<String>>,
     solo: bool,
+    journal_refs: Vec<String>,
+    thread: Option<String>,
 ) -> Result<()> {
     let requested_contributors = contributor_declaration(ctx, contributors, solo)?;
     let store = ctx.store()?;
@@ -311,6 +314,12 @@ pub fn snapshot(
     if let Some(worktree) = st.worktree.as_deref() {
         crate::journal::promote_worktree_spool(ctx, std::path::Path::new(worktree));
     }
+    // Links are resolved before anything is written, so a name that does not
+    // resolve refuses the snapshot instead of recording a dead reference.
+    let journal_refs = resolve_journal_refs(ctx, &journal_refs)?;
+    let thread = thread
+        .map(|thread| parse_thread_reference(&thread))
+        .transpose()?;
     let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
     let merge_base = gitio::branch_head(&ctx.cwd, &st.target_branch)
         .ok()
@@ -347,7 +356,17 @@ pub fn snapshot(
     });
     let unchanged_patchset = st
         .latest_patchset()
-        .filter(|p| p.head == head && p.base == base_rev && p.brief_ref == brief_ref)
+        .filter(|p| {
+            p.head == head
+                && p.base == base_rev
+                && p.brief_ref == brief_ref
+                // Links supplied now are part of what the patchset records: a
+                // rerun that adds or changes them is a new patchset. A rerun
+                // that supplies none leaves an existing patchset's links in
+                // place, which is what makes a bare snapshot idempotent.
+                && ((journal_refs.is_empty() && thread.is_none())
+                    || (p.journal_refs == journal_refs && p.thread == thread))
+        })
         .map(|p| p.id.clone());
     let identity = gitio::commit_identity(&ctx.cwd, &head)?;
     let now = chrono::Utc::now();
@@ -390,6 +409,8 @@ pub fn snapshot(
         contributors,
         claim_id: snapshot_claim.map(|claim| claim.claim_id.clone()),
         claim_actor: snapshot_claim.map(|claim| claim.owner.actor.clone()),
+        journal_refs,
+        thread,
     };
     ensure_append_allowed(&st, &payload)?;
     if let Some(patchset_id) = unchanged_patchset {
@@ -421,6 +442,62 @@ pub fn snapshot(
     }
     println!("event: {}", ev.event_id);
     Ok(())
+}
+
+/// Turn `--journal-ref` filenames into the references a patchset records,
+/// reading each body for the digest.
+///
+/// A filename is resolved against the hot journal and its cold archive before
+/// anything is written; a name that resolves to no artifact is refused. One
+/// filename given twice is refused rather than recorded twice, because the
+/// second would say nothing the first did not.
+fn resolve_journal_refs(ctx: &Ctx, files: &[String]) -> Result<Vec<JournalArtifactRef>> {
+    let mut seen = BTreeSet::new();
+    let mut refs = Vec::new();
+    for file in files {
+        if !seen.insert(file.as_str()) {
+            bail!("--journal-ref {file:?} was given more than once");
+        }
+        refs.push(crate::journal::artifact_reference(ctx, file)?);
+    }
+    Ok(refs)
+}
+
+/// Parse `SCHEME:ID` into the identifiers a patchset records.
+///
+/// The pair is opaque: arc validates its shape and stores it, and never
+/// fetches, resolves, or reads anything behind it. An empty half is refused
+/// because a scheme without an id names no thread, and an id without a scheme
+/// does not say where to look.
+fn parse_thread_reference(value: &str) -> Result<ExternalThreadRef> {
+    let Some((scheme, id)) = value.split_once(':') else {
+        bail!("--thread must be SCHEME:ID, e.g. t3:thread-123");
+    };
+    let scheme = scheme.trim();
+    let id = id.trim();
+    if scheme.is_empty() || id.is_empty() {
+        bail!("--thread must name both a scheme and an id, e.g. t3:thread-123");
+    }
+    let valid_scheme = scheme
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    if !valid_scheme {
+        bail!(
+            "--thread scheme {scheme:?} is not a scheme name (a letter followed by letters, \
+             digits, +, -, or .)"
+        );
+    }
+    if id.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        bail!("--thread id must not contain whitespace or control characters");
+    }
+    Ok(ExternalThreadRef {
+        scheme: scheme.to_string(),
+        id: id.to_string(),
+    })
 }
 
 fn payload_contributors(payload: &Payload) -> &[String] {
@@ -763,7 +840,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         {
             bail!("review --snapshot requires the change branch checked out in a clean worktree");
         }
-        snapshot(ctx, reference, None, None, None, false)?;
+        snapshot(ctx, reference, None, None, None, false, Vec::new(), None)?;
     }
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;

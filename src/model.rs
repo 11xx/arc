@@ -29,6 +29,34 @@ pub struct BriefRef {
     pub event_id: String,
 }
 
+/// A journal artifact a patchset was framed by.
+///
+/// The link carries identifiers and a digest, never the artifact's text: a
+/// reader follows the filename to the store that holds it, and the digest
+/// says whether the body is still the one that framed the work. Nothing here
+/// promises the file survives — keeping a recording is not arc's promise.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JournalArtifactRef {
+    /// The artifact's filename inside the journal directory.
+    pub file: String,
+    /// `sha256:` over the body read when the link was recorded.
+    pub digest: String,
+}
+
+/// Where work was discussed, as identifiers arc stores and never resolves.
+///
+/// A thread belongs to some external system — a remote UI, a chat service, a
+/// forge issue tracker. Arc records the scheme and the id so a reader can
+/// take them to that system, and makes no network call, fetches no URL, and
+/// reads no transcript.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExternalThreadRef {
+    /// The system the thread belongs to, e.g. `t3` or `github`.
+    pub scheme: String,
+    /// The thread's identifier within that system, opaque to arc.
+    pub id: String,
+}
+
 /// The earlier ledger fact that caused a brief version. Each variant names a
 /// specific object rather than a generic edge, so replay can validate the
 /// reference against the kind it claims to be.
@@ -534,6 +562,14 @@ pub enum Payload {
         claim_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         claim_actor: Option<String>,
+        /// Journal artifacts recorded as framing this patchset, each with the
+        /// body digest read when the link was recorded.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        journal_refs: Vec<JournalArtifactRef>,
+        /// An external thread this work belongs to, as a scheme and an id.
+        /// Arc stores the pair and never resolves or fetches it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<ExternalThreadRef>,
     },
     /// An explicit contributor declaration for one patchset. The patchset's
     /// contributor set may change only before its first verdict.

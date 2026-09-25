@@ -6,6 +6,7 @@ mod changelog;
 mod claims;
 mod common;
 mod context;
+mod cross_links;
 mod diff;
 mod docs;
 mod doctor;

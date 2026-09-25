@@ -151,6 +151,20 @@ struct BodyOpts {
     body_file: Option<String>,
 }
 
+/// Cross-links a patchset records to where its work was framed.
+#[derive(clap::Args)]
+struct LinkOpts {
+    /// Journal artifact this patchset was framed by, as a filename in the
+    /// journal dir (repeatable). Its body digest is read when the patchset is
+    /// recorded, and a name that resolves to no artifact is refused
+    #[arg(long = "journal-ref", value_name = "FILE")]
+    journal_ref: Vec<String>,
+    /// External thread this work belongs to, as SCHEME:ID. Arc stores the
+    /// identifiers and never fetches or resolves them
+    #[arg(long, value_name = "SCHEME:ID")]
+    thread: Option<String>,
+}
+
 /// CLI spelling of `KeptKind`, kept separate so clap's value names stay a
 /// surface decision rather than leaking the ledger's serde spelling.
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -760,9 +774,19 @@ enum Cmd {
         #[arg(
             long,
             value_name = "PATCHSET",
-            conflicts_with_all = ["base", "brief_version", "verify", "gate", "all"]
+            conflicts_with_all = [
+                "base",
+                "brief_version",
+                "verify",
+                "gate",
+                "all",
+                "journal_ref",
+                "thread"
+            ]
         )]
         amend: Option<String>,
+        #[command(flatten)]
+        links: LinkOpts,
     },
     /// Keep a fact this work discovered, so `arc resume` hands it back to a
     /// compacted or cold session instead of it being re-derived
@@ -1010,6 +1034,8 @@ enum Cmd {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
+        #[command(flatten)]
+        links: LinkOpts,
     },
     /// Replay a change's branch onto its target, then snapshot the new head
     Rebase {
@@ -2555,6 +2581,7 @@ fn run(cli: Cli) -> Result<i32> {
             contributors,
             solo,
             amend,
+            links,
         } => {
             let change = infer(change.as_deref())?;
             if let Some(patchset) = amend {
@@ -2571,6 +2598,8 @@ fn run(cli: Cli) -> Result<i32> {
                     all,
                     contributors,
                     solo,
+                    links.journal_ref,
+                    links.thread,
                 )
             }
         }
@@ -2749,9 +2778,9 @@ fn run(cli: Cli) -> Result<i32> {
                 },
             )
         }
-        Cmd::Done { change } => {
+        Cmd::Done { change, links } => {
             let change = infer(change.as_deref())?;
-            commands::done(&ctx, &change)
+            commands::done(&ctx, &change, links.journal_ref, links.thread)
         }
         Cmd::Rebase { change, verify } => {
             let change = infer(change.as_deref())?;
