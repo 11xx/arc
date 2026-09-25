@@ -997,7 +997,8 @@ fn append_reuses(
     }
     let _transition = store.lock_transition(change_id)?;
     let events = store.load_events(change_id)?;
-    let state = state::reduce_following(&events, &store.rewrites()?)?;
+    let mut state = state::reduce_following(&events, &store.rewrites()?)?;
+    crate::replica::localize_change(&store.repository_id, &events, &mut state);
     let mut previous_id = events
         .last()
         .context("change has no opening event")?
@@ -1729,7 +1730,8 @@ fn append_verifications(
     // Acquire the append lock only after they return, then re-check closure.
     let _transition = store.lock_transition(change_id)?;
     let events = store.load_events(change_id)?;
-    let st = state::reduce_following(&events, &store.rewrites()?)?;
+    let mut st = state::reduce_following(&events, &store.rewrites()?)?;
+    crate::replica::localize_change(&store.repository_id, &events, &mut st);
     let mut previous_id = events
         .last()
         .context("change has no opening event")?
@@ -2055,6 +2057,33 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
         dry_run,
         debt,
     } = args;
+    if references.is_empty() && tags.is_empty() {
+        bail!("provide a change or at least one --tag");
+    }
+    if !references.is_empty() && !tags.is_empty() {
+        bail!("provide a change or --tag, not both");
+    }
+    if references.len() != 1 {
+        if into.is_some() {
+            bail!("--into is only valid when integrating one change");
+        }
+        if message.is_some() {
+            bail!("--message is only valid when integrating one change");
+        }
+        if debt.is_some() {
+            bail!(
+                "--debt is only valid when integrating one change: a debt reason binds to \
+                 one change's patchset, and a queue is for changes that are already green or \
+                 already carry their verdict"
+            );
+        }
+    }
+    let authority_store = ctx.store()?;
+    let _authority_lock = crate::replica::lock(&authority_store)?;
+    if let Some(refusal) = crate::replica::integration_refusal(&authority_store)? {
+        eprintln!("Cannot integrate: {refusal}");
+        return Ok(crate::replica::INTEGRATION_AUTHORITY_EXIT_CODE);
+    }
     match (references, tags.is_empty()) {
         ([reference], true) => {
             // A fork's branch cannot integrate from anywhere, so declaring an
@@ -2765,6 +2794,7 @@ fn authorization_basis(
         })?;
         let mut blocker_id = blocker.clone();
         let mut blocker_state = state::reduce_following(&events, &store.rewrites()?)?;
+        crate::replica::localize_change(&store.repository_id, &events, &mut blocker_state);
         // Dependency readiness follows supersession, so the basis must record
         // the closure that actually satisfied the dependency rather than the
         // superseded one, whose integrated commit is null.
@@ -2784,6 +2814,7 @@ fn authorization_basis(
             seen.push(successor.clone());
             blocker_id = successor;
             blocker_state = state::reduce_following(&events, &store.rewrites()?)?;
+            crate::replica::localize_change(&store.repository_id, &events, &mut blocker_state);
         }
         if let Some(closure) = &blocker_state.closure {
             prerequisites.push(crate::model::PrerequisiteClosure {

@@ -52,18 +52,26 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
 
     if dry_run {
         let plan = classify_import_events(&root, &validated)?;
+        let mut claim_contest = None;
         if plan.conflicts.is_empty() {
             let store = local_repository_id.as_ref().map(|repository_id| Store {
                 root: root.clone(),
                 repository_id: repository_id.clone(),
                 require_declared_actor: false,
             });
-            validate_import_candidate(store.as_ref(), &validated, &plan.new_events)?;
+            if let Some(store) = store.as_ref() {
+                claim_contest = claim_contest_for_import(store, &validated, &plan.new_events)?;
+            }
+            if claim_contest.is_none() {
+                validate_import_candidate(store.as_ref(), &validated, &plan.new_events)?;
+            }
             // The same refusals the import makes: a preflight that reports
             // success for a bundle the real path rejects is believed, and
             // wrong. A destination with no store still checks the bundle
             // against itself.
-            plan_repository_events(store.as_ref(), &validated)?;
+            if claim_contest.is_none() {
+                plan_repository_events(store.as_ref(), &validated)?;
+            }
         }
         print_import_report(
             &validated,
@@ -79,16 +87,27 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
             println!("aborted: no events or refs written");
             return Ok(1);
         }
+        if let Some(contest) = claim_contest {
+            println!("{}", contest.render(&validated.bundle.change_id));
+            println!("aborted: no events or refs written");
+            return Ok(1);
+        }
         return Ok(0);
     }
 
     let store = Store::discover(&ctx.cwd)?;
+    let _replica_state = crate::replica::lock(&store)?;
     let transition = store.lock_transition(&validated.bundle.change_id)?;
     // Classification and candidate replay must happen after taking the same
     // per-change lock used by claim, release, stage, and snapshot. Otherwise a
     // local transition could land between validation and the raw appends.
     let plan = classify_import_events(&root, &validated)?;
-    if plan.conflicts.is_empty() {
+    let claim_contest = if plan.conflicts.is_empty() {
+        claim_contest_for_import(&store, &validated, &plan.new_events)?
+    } else {
+        None
+    };
+    if plan.conflicts.is_empty() && claim_contest.is_none() {
         validate_import_candidate(Some(&store), &validated, &plan.new_events)?;
     }
 
@@ -103,6 +122,11 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         false,
     );
     if !plan.conflicts.is_empty() {
+        println!("aborted: no events or refs written");
+        return Ok(1);
+    }
+    if let Some(contest) = claim_contest {
+        println!("{}", contest.render(&validated.bundle.change_id));
         println!("aborted: no events or refs written");
         return Ok(1);
     }
@@ -141,6 +165,25 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         gitio::update_ref(&ctx.cwd, &name, &head)?;
     }
     Ok(0)
+}
+
+fn claim_contest_for_import(
+    store: &Store,
+    validated: &ValidatedBundle,
+    new_event_ids: &[String],
+) -> Result<Option<crate::replica::ClaimContest>> {
+    let incoming = validated
+        .events
+        .iter()
+        .filter_map(|event| event.typed.clone())
+        .collect::<Vec<_>>();
+    let new_event_ids = new_event_ids.iter().cloned().collect::<BTreeSet<_>>();
+    crate::replica::live_claim_contest(
+        store,
+        &validated.bundle.change_id,
+        &incoming,
+        &new_event_ids,
+    )
 }
 
 /// The repository events an import would write, refusing every contradiction

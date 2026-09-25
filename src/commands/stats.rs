@@ -221,7 +221,8 @@ pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, by_model_view: bo
     let rewrites = store.rewrites()?;
     for change_id in change_ids {
         let events = store.load_events(&change_id)?;
-        let state = state::reduce_following(&events, &rewrites)?;
+        let mut state = state::reduce_following(&events, &rewrites)?;
+        crate::replica::localize_change(&store.repository_id, &events, &mut state);
         for (gate, seconds) in observed_gate_runs(&events) {
             gate_runs.entry(gate).or_default().push(seconds);
         }
