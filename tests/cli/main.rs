@@ -12,6 +12,7 @@ mod doctor;
 mod findings;
 mod forge;
 mod fork;
+mod gate_environment;
 mod hooks;
 mod instructions;
 mod integrate;
