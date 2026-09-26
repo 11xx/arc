@@ -48,6 +48,26 @@ fn write_operator_policy(repo: &Repo, clone: &std::path::Path, text: &str) {
     );
 }
 
+#[test]
+fn audit_policy_show_includes_effective_environment_probe() {
+    let repo = Repo::new();
+    write_operator_policy(
+        &repo,
+        &repo.root,
+        "[gates.build]\ncommand = \"true\"\nenvironment = \"printf host\"\n",
+    );
+    let view = arc_output(&repo, &repo.root, &["policy", "show"]);
+    let gate = view
+        .lines()
+        .find(|line| line.starts_with("gate build:"))
+        .unwrap();
+    assert!(gate.contains("environment = \"printf host\""), "{view}");
+    assert!(
+        gate.contains("<git-common-dir>/arc/operator-policy.toml"),
+        "{view}"
+    );
+}
+
 pub(super) fn operator_policy_unions_with_project_policy_without_tracked_changes() {
     let repo = Repo::new();
     let clone = upstream_clone(

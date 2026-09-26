@@ -637,6 +637,8 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   check` and gate execution refuse it. `arc status`, `arc show`, and `arc policy
   show` name the file that declared each rule. The operator file is outside
   the work tree, so local policy does not add tracked files to a contribution.
+  `arc policy show` includes each gate's command, profiles, timeout, and
+  environment probe.
 
   Work sent to a repository you do not own is decided by its receiver.
   `arc external verdict <change> --verdict <v> --decided-by <who>
