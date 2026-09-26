@@ -133,13 +133,20 @@ fn preserve_obstructions(worktree: &Path, head: &str) -> Result<()> {
         if metadata.split_whitespace().nth(1) != Some("blob") {
             continue;
         }
-        let name = std::str::from_utf8(&entry[separator + 1..])
-            .context("cannot safely restore a non-UTF-8 squash path")?;
-        let path = Path::new(name);
+        #[cfg(unix)]
+        let path = {
+            use std::os::unix::ffi::OsStrExt;
+            Path::new(std::ffi::OsStr::from_bytes(&entry[separator + 1..]))
+        };
+        #[cfg(not(unix))]
+        let path = Path::new(
+            std::str::from_utf8(&entry[separator + 1..])
+                .context("cannot represent the original squash path")?,
+        );
         let mut relative = PathBuf::new();
         for component in path.components() {
             if !matches!(component, Component::Normal(_)) {
-                bail!("cannot safely restore squash path {name:?}");
+                bail!("cannot safely restore squash path {path:?}");
             }
             relative.push(component);
             let metadata = match fs::symlink_metadata(worktree.join(&relative)) {
