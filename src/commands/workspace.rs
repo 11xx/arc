@@ -58,6 +58,10 @@ pub enum WorkspaceView {
         show_unreachable: bool,
         rank_by: RankBasis,
     },
+    Report {
+        scope: WorkspaceScope,
+        previous: Option<PathBuf>,
+    },
 }
 
 /// The fact `workspace backlog` ranks projects by, descending. Every row
@@ -358,6 +362,9 @@ pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
             rank_by,
             json,
         ),
+        WorkspaceView::Report { scope, previous } => {
+            workspace_report(ctx, scope, previous.as_deref(), json)
+        }
     }
 }
 
@@ -1002,16 +1009,22 @@ struct UnreachableProject {
     reason: &'static str,
 }
 
+/// Whether an anchor sits where probes and scratch sessions live — the
+/// system temporary directory, `/var/tmp`, or any `scratchpad` directory — so
+/// its disappearance is housekeeping rather than lost work.
+pub(super) fn is_temporary_or_scratch_anchor(anchor: &Path) -> bool {
+    anchor.starts_with(std::env::temp_dir())
+        || anchor.starts_with("/var/tmp")
+        || anchor
+            .components()
+            .any(|component| component.as_os_str() == "scratchpad")
+}
+
 impl UnreachableProject {
     fn is_temporary_or_scratch(&self) -> bool {
-        let Some(anchor) = self.anchor.as_deref().map(Path::new) else {
-            return false;
-        };
-        anchor.starts_with(std::env::temp_dir())
-            || anchor.starts_with("/var/tmp")
-            || anchor
-                .components()
-                .any(|component| component.as_os_str() == "scratchpad")
+        self.anchor
+            .as_deref()
+            .is_some_and(|anchor| is_temporary_or_scratch_anchor(Path::new(anchor)))
     }
 
     fn render(&self) {
@@ -1471,15 +1484,23 @@ fn project_row(
 /// Ranked by what is blocked, never by comparing items across projects: arc
 /// records no priority that spans repositories, and inventing one here would
 /// be a routing opinion rather than a derived fact.
-fn workspace_backlog(
+/// One observation of the workspace backlog, shared by `workspace backlog`
+/// and `workspace report` so both read the same projects the same way.
+struct CollectedBacklog {
+    backlog: Backlog,
+    scope: ResolvedWorkspaceScope,
+    selection: BacklogSelection,
+    partial: bool,
+}
+
+fn collect_backlog(
     ctx: &Ctx,
     since: Option<&str>,
     show_items: bool,
     scope: WorkspaceScope,
     show_unreachable: bool,
     rank_by: RankBasis,
-    json: bool,
-) -> Result<i32> {
+) -> Result<CollectedBacklog> {
     let cfg = crate::config::load()?;
     let scope = ResolvedWorkspaceScope::resolve(scope)?;
     let cutoff = match since {
@@ -1594,39 +1615,66 @@ fn workspace_backlog(
     };
     let partial = collection.failed > 0;
 
+    let backlog = Backlog {
+        schema: "arc-workspace-backlog/18",
+        scope: scope.view(),
+        observation: Observation {
+            started_at: observed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            finished_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            consistency: "sequential",
+        },
+        collection,
+        ordering: Ordering {
+            basis: rank_by.as_str(),
+            direction: "descending",
+        },
+        selection: JournalSelection {
+            since: cutoff.map(normalized_cutoff),
+            journal_counts: if cutoff.is_some() {
+                "arrivals"
+            } else {
+                "outstanding"
+            },
+            includes_unknown_time: cutoff.is_some(),
+        },
+        summary,
+        projects,
+        unreachable,
+    };
+    Ok(CollectedBacklog {
+        backlog,
+        scope,
+        selection,
+        partial,
+    })
+}
+
+fn workspace_backlog(
+    ctx: &Ctx,
+    since: Option<&str>,
+    show_items: bool,
+    scope: WorkspaceScope,
+    show_unreachable: bool,
+    rank_by: RankBasis,
+    json: bool,
+) -> Result<i32> {
+    let CollectedBacklog {
+        backlog,
+        scope,
+        selection,
+        partial,
+    } = collect_backlog(ctx, since, show_items, scope, show_unreachable, rank_by)?;
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&Backlog {
-                schema: "arc-workspace-backlog/18",
-                scope: scope.view(),
-                observation: Observation {
-                    started_at: observed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    finished_at: chrono::Utc::now()
-                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                    consistency: "sequential",
-                },
-                collection,
-                ordering: Ordering {
-                    basis: rank_by.as_str(),
-                    direction: "descending",
-                },
-                selection: JournalSelection {
-                    since: cutoff.map(normalized_cutoff),
-                    journal_counts: if cutoff.is_some() {
-                        "arrivals"
-                    } else {
-                        "outstanding"
-                    },
-                    includes_unknown_time: cutoff.is_some(),
-                },
-                summary,
-                projects,
-                unreachable,
-            })?
-        );
+        println!("{}", serde_json::to_string_pretty(&backlog)?);
         return Ok(if partial { 16 } else { 0 });
     }
+    let Backlog {
+        collection,
+        summary,
+        projects,
+        unreachable,
+        ..
+    } = backlog;
 
     println!("scope: {}", scope.text());
     println!("ordering: {} (descending)", rank_by.as_str());
@@ -1848,6 +1896,100 @@ fn workspace_backlog(
     Ok(if partial { 16 } else { 0 })
 }
 
+/// The workspace backlog classified by `workspace_report`'s rules, with
+/// deltas against a previous report when one is given. Every artifact that
+/// left the backlog since that report is looked up in its journal, hot and
+/// archived, so its reason is the recorded one.
+fn workspace_report(
+    ctx: &Ctx,
+    scope: WorkspaceScope,
+    previous: Option<&Path>,
+    json: bool,
+) -> Result<i32> {
+    let collected = collect_backlog(ctx, None, true, scope, false, RankBasis::Blocking)?;
+    let backlog = serde_json::to_value(&collected.backlog)?;
+    let previous = match previous {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("cannot read previous report {}", path.display()))?;
+            let value: serde_json::Value = serde_json::from_str(&raw)
+                .with_context(|| format!("previous report {} is not JSON", path.display()))?;
+            let schema = value.get("schema").and_then(serde_json::Value::as_str);
+            ensure!(
+                schema == Some(report::SCHEMA),
+                "previous report {} has schema {:?}; expected {}",
+                path.display(),
+                schema.unwrap_or("none"),
+                report::SCHEMA
+            );
+            Some(value)
+        }
+        None => None,
+    };
+    let mut fates = BTreeMap::new();
+    if let Some(previous) = &previous {
+        let anchors: BTreeMap<String, String> = previous
+            .get("projects")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|project| {
+                Some((
+                    project.get("project")?.as_str()?.to_string(),
+                    project.get("anchor")?.as_str()?.to_string(),
+                ))
+            })
+            .collect();
+        let mut wanted: BTreeMap<(String, String), Vec<(String, String)>> = BTreeMap::new();
+        for (project, file, dir) in report::departed(&backlog, previous) {
+            let (Some(dir), Some(anchor)) = (dir, anchors.get(&project).cloned()) else {
+                continue;
+            };
+            wanted
+                .entry((dir, anchor))
+                .or_default()
+                .push((project, file));
+        }
+        for ((dir, anchor), files) in wanted {
+            let dir = PathBuf::from(dir);
+            let anchor = PathBuf::from(anchor);
+            // A journal that cannot be read leaves its departures without a
+            // fate, which the report states as unknown rather than guessing.
+            let Ok(facts) = crate::journal::reconciliation_facts(&dir) else {
+                continue;
+            };
+            let mut entries = Vec::new();
+            for archived in [false, true] {
+                if let Ok(found) = crate::journal::inventory_artifacts(ctx, &dir, &anchor, archived)
+                {
+                    entries.extend(found);
+                }
+            }
+            for (project, file) in files {
+                if let Some(entry) = entries.iter().find(|entry| entry.file == file) {
+                    let reconciled = reconcile_artifact(entry, &facts);
+                    fates.insert(
+                        (project, file),
+                        report::Fate {
+                            explanation: reconciled.explanation.to_string(),
+                            storage: reconciled.storage,
+                            resolution: reconciled.resolution,
+                            superseded_by: reconciled.superseded_by,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    let report = report::build(&backlog, previous.as_ref(), &fates);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        report.render();
+    }
+    Ok(if collected.partial { 16 } else { 0 })
+}
+
 /// The two ledger buckets a lead reads across projects: what awaits a verdict,
 /// and what shipped owing one.
 /// What one project's ledger owes, read once so the buckets cannot disagree.
@@ -2033,4 +2175,1064 @@ pub fn restack(ctx: &Ctx, reference: &str, advise: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `arc workspace report`: the workspace backlog, classified by named rules.
+///
+/// The backlog states facts; this module applies the rules a reader needs to
+/// act on them — which status an artifact is in, which section it belongs to,
+/// and which facts deserve attention — so any consumer, model or not, reads the
+/// same classification from the same ledger. It is a pure function of one
+/// backlog observation, an optional previous report, and the recorded fate of
+/// each artifact that left the backlog since that report.
+mod report {
+    use serde::Serialize;
+    use serde_json::Value;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    pub(crate) const SCHEMA: &str = "arc-workspace-report/1";
+
+    /// A decision question open longer than this is flagged `stale-question`.
+    pub(crate) const STALE_QUESTION_DAYS: u64 = 7;
+    /// A handoff unresolved longer than this is flagged `stale-handoff`.
+    pub(crate) const STALE_HANDOFF_DAYS: u64 = 14;
+
+    /// Scaffold headings arc prepends to artifacts. A row titled by one of them
+    /// names the template, not the artifact, so the topic titles it instead.
+    const SCAFFOLD_HEADINGS: &[&str] = &[
+        "How to append a position",
+        "Positions",
+        "How it resolves",
+        "Questions only a person settles",
+    ];
+
+    /// Where an artifact that left the backlog went, as the journal records it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct Fate {
+        /// `present`, `terminal`, `archived`, or `superseded`, as
+        /// `workspace inventory` explains it.
+        pub explanation: String,
+        /// `hot` or `archived`.
+        pub storage: String,
+        pub resolution: Option<String>,
+        pub superseded_by: Option<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    pub(crate) struct Report {
+        schema: &'static str,
+        observation: Value,
+        scope: Value,
+        collection: Value,
+        /// The compared report's `observation.finished_at`, or null.
+        previous: Option<String>,
+        tallies: BTreeMap<&'static str, Tally>,
+        sections: Sections,
+        attention: Vec<Attention>,
+        projects: Vec<ProjectSummary>,
+    }
+
+    #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct Tally {
+        value: u64,
+        previous: Option<u64>,
+    }
+
+    #[derive(Debug, Serialize, Default)]
+    struct Sections {
+        needs_person: Vec<QuestionRow>,
+        in_flight: Vec<ChangeRow>,
+        review_owed: Vec<DebtRow>,
+        deferred: Vec<DeferredRow>,
+        work: Vec<Row>,
+        proposals: Vec<Row>,
+        parked: Vec<Row>,
+        resolved_since_previous: Vec<ResolvedRow>,
+    }
+
+    /// One journal artifact, in whichever section its status places it.
+    #[derive(Debug, Serialize, Clone, PartialEq)]
+    pub(crate) struct Row {
+        project: String,
+        file: String,
+        topic: String,
+        kind: String,
+        title: String,
+        filed_at: Option<String>,
+        age_days: Option<u64>,
+        status: &'static str,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        flags: Vec<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        claimed_by: Option<String>,
+        new_since_previous: Option<bool>,
+        path: String,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct QuestionRow {
+        project: String,
+        file: String,
+        question: String,
+        text: String,
+        placement: String,
+        asked_at: Option<String>,
+        age_days: Option<u64>,
+        options: Vec<Value>,
+        delivery: Option<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct ChangeRow {
+        project: String,
+        change_id: String,
+        title: String,
+        /// The inbox bucket the change sits in, or `no-patchset`.
+        bucket: String,
+        next_actor: Option<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct DebtRow {
+        project: String,
+        change_id: String,
+        title: String,
+        kind: String,
+        age_days: Option<u64>,
+        implementer: Option<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct DeferredRow {
+        project: String,
+        id: String,
+        summary: String,
+        subject: String,
+        why: String,
+    }
+
+    #[derive(Debug, Serialize, PartialEq)]
+    struct ResolvedRow {
+        project: String,
+        file: String,
+        kind: String,
+        title: String,
+        /// `consumed`, `archived`, `superseded`, `not-actionable`, `unobserved`,
+        /// or `unknown`. Never inferred from absence alone.
+        reason: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        outcome: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        superseded_by: Option<String>,
+    }
+
+    #[derive(Debug, Serialize, PartialEq)]
+    pub(crate) struct Attention {
+        rule: &'static str,
+        project: String,
+        subject: String,
+        evidence: String,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct ProjectSummary {
+        project: String,
+        anchor: Option<String>,
+        journal_dir: Option<String>,
+        work: u64,
+        proposals: u64,
+        parked: u64,
+        in_flight: u64,
+        review_owed: u64,
+        questions: u64,
+    }
+
+    fn text(value: &Value, key: &str) -> String {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn opt_text(value: &Value, key: &str) -> Option<String> {
+        value.get(key).and_then(Value::as_str).map(str::to_string)
+    }
+
+    fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
+        value
+            .get(key)
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// The row title: the artifact's heading without its `#` marks, unless the
+    /// heading is absent, a scaffold heading, or a position block's, in which
+    /// case the topic with hyphens as spaces.
+    fn title(item: &Value) -> String {
+        let heading = text(item, "heading");
+        let heading = heading.trim_start_matches('#').trim();
+        let scaffold = heading.is_empty()
+            || heading == "(none)"
+            || SCAFFOLD_HEADINGS.contains(&heading)
+            || heading.starts_with("Position ");
+        if scaffold {
+            text(item, "topic").replace('-', " ")
+        } else {
+            heading.to_string()
+        }
+    }
+
+    /// The status rule, applied in this order:
+    /// `delivered` when every promotion is closed and at least one closed
+    /// integrated; `abandoned-promotion` when every promotion is closed and none
+    /// integrated; `claimed` when an active claim occupies the artifact;
+    /// otherwise the tier's own status — `unresolved`, `proposal`, or `parked`.
+    fn status(item: &Value, tier: &str) -> &'static str {
+        let promotions = array(item, "promotions");
+        let all_closed = !promotions.is_empty()
+            && promotions
+                .iter()
+                .all(|promotion| promotion.get("status").and_then(Value::as_str) == Some("closed"));
+        if all_closed {
+            let integrated = promotions.iter().any(|promotion| {
+                promotion
+                    .pointer("/closure/outcome")
+                    .and_then(Value::as_str)
+                    == Some("integrated")
+            });
+            return if integrated {
+                "delivered"
+            } else {
+                "abandoned-promotion"
+            };
+        }
+        if item.get("availability").and_then(Value::as_str) == Some("occupied") {
+            return "claimed";
+        }
+        match tier {
+            "later" => "parked",
+            "feature_requests" => "proposal",
+            _ => "unresolved",
+        }
+    }
+
+    fn claimed_by(item: &Value) -> Option<String> {
+        array(item, "claims").iter().find_map(|claim| {
+            claim
+                .pointer("/owner/actor")
+                .or_else(|| claim.get("actor"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+    }
+
+    fn age_days(seconds: Option<u64>) -> Option<u64> {
+        seconds.map(|seconds| seconds / 86_400)
+    }
+
+    fn kind_order(kind: &str) -> u8 {
+        match kind {
+            "handoff" => 0,
+            "plan" => 1,
+            "todo" => 2,
+            "discussion" => 3,
+            _ => 4,
+        }
+    }
+
+    fn previous_rows(previous: &Value) -> BTreeMap<(String, String), (String, String)> {
+        let mut rows = BTreeMap::new();
+        for section in ["work", "proposals", "parked"] {
+            for row in previous
+                .pointer(&format!("/sections/{section}"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                rows.insert(
+                    (text(row, "project"), text(row, "file")),
+                    (text(row, "kind"), text(row, "title")),
+                );
+            }
+        }
+        rows
+    }
+
+    fn previous_project_debt(previous: &Value) -> BTreeMap<String, u64> {
+        array(previous, "projects")
+            .iter()
+            .map(|project| {
+                (
+                    text(project, "project"),
+                    project
+                        .get("review_owed")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                )
+            })
+            .collect()
+    }
+
+    /// Every artifact that left the backlog since `previous`, keyed by project
+    /// and file, with the journal directory that holds it. The caller looks each
+    /// one up in the journal so its reason is recorded, not inferred.
+    pub(crate) fn departed(
+        backlog: &Value,
+        previous: &Value,
+    ) -> Vec<(String, String, Option<String>)> {
+        let current: BTreeSet<(String, String)> = array(backlog, "projects")
+            .iter()
+            .flat_map(|project| {
+                let name = text(project, "project");
+                ["open", "later", "feature_requests"]
+                    .into_iter()
+                    .flat_map(move |tier| {
+                        array(project.get("items").unwrap_or(&Value::Null), tier).to_vec()
+                    })
+                    .map(move |item| (name.clone(), text(&item, "file")))
+            })
+            .collect();
+        let dirs: BTreeMap<String, String> = array(previous, "projects")
+            .iter()
+            .filter_map(|project| {
+                Some((text(project, "project"), opt_text(project, "journal_dir")?))
+            })
+            .collect();
+        previous_rows(previous)
+            .into_keys()
+            .filter(|key| !current.contains(key))
+            .map(|(project, file)| {
+                let dir = dirs.get(&project).cloned();
+                (project, file, dir)
+            })
+            .collect()
+    }
+
+    /// Classify one backlog observation (`arc-workspace-backlog`, collected with
+    /// `--items`) into the report.
+    pub(crate) fn build(
+        backlog: &Value,
+        previous: Option<&Value>,
+        fates: &BTreeMap<(String, String), Fate>,
+    ) -> Report {
+        let known_before = previous.map(previous_rows);
+        let mut sections = Sections::default();
+        let mut attention = Vec::new();
+        let mut projects = Vec::new();
+
+        for project in array(backlog, "projects") {
+            let name = text(project, "project");
+            let journal_dir = opt_text(project, "journal_dir");
+            let items = project.get("items").unwrap_or(&Value::Null);
+            let mut summary = ProjectSummary {
+                project: name.clone(),
+                anchor: opt_text(project, "anchor"),
+                journal_dir: journal_dir.clone(),
+                work: 0,
+                proposals: 0,
+                parked: 0,
+                in_flight: 0,
+                review_owed: 0,
+                questions: 0,
+            };
+
+            for tier in ["open", "later", "feature_requests"] {
+                for item in array(items, tier) {
+                    let status = status(item, tier);
+                    let age = age_days(item.get("age_seconds").and_then(Value::as_u64));
+                    let kind = text(item, "kind");
+                    let mut flags = Vec::new();
+                    if status == "delivered" {
+                        flags.push("delivered-unconsumed");
+                    }
+                    if kind == "handoff"
+                        && tier == "open"
+                        && age.is_some_and(|days| days > STALE_HANDOFF_DAYS)
+                    {
+                        flags.push("stale-handoff");
+                    }
+                    if item.get("availability").and_then(Value::as_str) == Some("reclaimable") {
+                        flags.push("stale-claim");
+                    }
+                    let file = text(item, "file");
+                    let row = Row {
+                        project: name.clone(),
+                        file: file.clone(),
+                        topic: text(item, "topic"),
+                        kind: kind.clone(),
+                        title: title(item),
+                        filed_at: opt_text(item, "filed_at"),
+                        age_days: age,
+                        status,
+                        flags: flags.clone(),
+                        claimed_by: (status == "claimed").then(|| claimed_by(item)).flatten(),
+                        new_since_previous: known_before
+                            .as_ref()
+                            .map(|known| !known.contains_key(&(name.clone(), file.clone()))),
+                        path: journal_dir
+                            .as_ref()
+                            .map(|dir| format!("{dir}/{file}"))
+                            .unwrap_or_else(|| file.clone()),
+                    };
+                    for flag in &flags {
+                        attention.push(Attention {
+                            rule: flag,
+                            project: name.clone(),
+                            subject: file.clone(),
+                            evidence: match *flag {
+                                "delivered-unconsumed" => {
+                                    "every promotion closed and one integrated; the artifact was never consumed".to_string()
+                                }
+                                "stale-handoff" => format!("handoff unresolved for {} days", age.unwrap_or(0)),
+                                _ => "its claim lapsed and can be reclaimed".to_string(),
+                            },
+                        });
+                    }
+                    match tier {
+                        "later" => {
+                            summary.parked += 1;
+                            sections.parked.push(row);
+                        }
+                        "feature_requests" => {
+                            summary.proposals += 1;
+                            sections.proposals.push(row);
+                        }
+                        _ => {
+                            summary.work += 1;
+                            sections.work.push(row);
+                        }
+                    }
+                }
+            }
+
+            for question in array(project, "open_questions") {
+                if question.get("disposition").and_then(Value::as_str) != Some("open") {
+                    continue;
+                }
+                let asked_at = opt_text(question, "asked_at");
+                let observed = backlog
+                    .pointer("/observation/finished_at")
+                    .and_then(Value::as_str);
+                let age = match (&asked_at, observed) {
+                    (Some(asked), Some(observed)) => chrono::DateTime::parse_from_rfc3339(asked)
+                        .ok()
+                        .zip(chrono::DateTime::parse_from_rfc3339(observed).ok())
+                        .map(|(asked, observed)| {
+                            u64::try_from((observed - asked).num_days()).unwrap_or(0)
+                        }),
+                    _ => None,
+                };
+                if age.is_some_and(|days| days > STALE_QUESTION_DAYS) {
+                    attention.push(Attention {
+                        rule: "stale-question",
+                        project: name.clone(),
+                        subject: text(question, "question"),
+                        evidence: format!(
+                            "open for {} days on {}",
+                            age.unwrap_or(0),
+                            text(question, "file")
+                        ),
+                    });
+                }
+                summary.questions += 1;
+                sections.needs_person.push(QuestionRow {
+                    project: name.clone(),
+                    file: text(question, "file"),
+                    question: text(question, "question"),
+                    text: text(question, "heading"),
+                    placement: text(question, "placement"),
+                    asked_at,
+                    age_days: age,
+                    options: array(question, "options").to_vec(),
+                    delivery: opt_text(question, "delivery"),
+                });
+            }
+
+            let changes = project.get("changes").unwrap_or(&Value::Null);
+            let mut in_flight_ids = BTreeSet::new();
+            if let Some(buckets) = changes.as_object() {
+                for (bucket, rows) in buckets {
+                    if matches!(
+                        bucket.as_str(),
+                        "schema" | "debt-owed" | "debt-owed-by-kind" | "deferred"
+                    ) {
+                        continue;
+                    }
+                    for row in rows.as_array().into_iter().flatten() {
+                        in_flight_ids.insert(text(row, "change_id"));
+                        summary.in_flight += 1;
+                        sections.in_flight.push(ChangeRow {
+                            project: name.clone(),
+                            change_id: text(row, "change_id"),
+                            title: text(row, "title"),
+                            bucket: bucket.clone(),
+                            next_actor: opt_text(row, "next_actor"),
+                        });
+                    }
+                }
+            }
+            for change in array(project, "no_patchset") {
+                let id = change.as_str().unwrap_or("").to_string();
+                if in_flight_ids.insert(id.clone()) {
+                    summary.in_flight += 1;
+                    sections.in_flight.push(ChangeRow {
+                        project: name.clone(),
+                        change_id: id,
+                        title: String::new(),
+                        bucket: "no-patchset".to_string(),
+                        next_actor: None,
+                    });
+                }
+            }
+
+            let debt_titles: BTreeMap<String, String> = array(changes, "debt-owed")
+                .iter()
+                .map(|row| (text(row, "change_id"), text(row, "title")))
+                .collect();
+            for debt in array(project, "debt_owed") {
+                let change_id = text(debt, "change_id");
+                summary.review_owed += 1;
+                sections.review_owed.push(DebtRow {
+                    project: name.clone(),
+                    title: debt_titles.get(&change_id).cloned().unwrap_or_default(),
+                    change_id,
+                    kind: text(debt, "effective_missing"),
+                    age_days: debt.get("age_days").and_then(Value::as_u64),
+                    implementer: debt
+                        .pointer("/production/implementer/model")
+                        .or_else(|| debt.pointer("/production/implementer/actor"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
+            }
+            for deferred in array(changes, "deferred") {
+                sections.deferred.push(DeferredRow {
+                    project: name.clone(),
+                    id: text(deferred, "id"),
+                    summary: text(deferred, "summary"),
+                    subject: text(deferred, "subject"),
+                    why: text(deferred, "why"),
+                });
+            }
+
+            if let Some(before) = previous.map(previous_project_debt) {
+                let earlier = before.get(&name).copied().unwrap_or(0);
+                if summary.review_owed > earlier {
+                    attention.push(Attention {
+                        rule: "debt-grew",
+                        project: name.clone(),
+                        subject: name.clone(),
+                        evidence: format!(
+                            "review owed rose from {earlier} to {}",
+                            summary.review_owed
+                        ),
+                    });
+                }
+            }
+            projects.push(summary);
+        }
+
+        // A vanished anchor is reported once, as unreachable; the collection
+        // failure it also produces names the same fact.
+        for failure in array(
+            backlog.get("collection").unwrap_or(&Value::Null),
+            "failures",
+        ) {
+            if text(failure, "component") == "anchor" {
+                continue;
+            }
+            attention.push(Attention {
+                rule: "collection-failed",
+                project: text(failure, "project"),
+                subject: text(failure, "component"),
+                evidence: text(failure, "reason"),
+            });
+        }
+        let mut scratch = 0usize;
+        for unreachable in array(backlog, "unreachable") {
+            let anchor = text(unreachable, "anchor");
+            if !anchor.is_empty()
+                && super::is_temporary_or_scratch_anchor(std::path::Path::new(&anchor))
+            {
+                scratch += 1;
+                continue;
+            }
+            attention.push(Attention {
+                rule: "unreachable-anchor",
+                project: text(unreachable, "slug"),
+                subject: anchor,
+                evidence: text(unreachable, "reason"),
+            });
+        }
+        if scratch > 0 {
+            attention.push(Attention {
+                rule: "unreachable-scratch",
+                project: String::new(),
+                subject: format!("{scratch} journals"),
+                evidence: "registered journals whose temporary or scratch anchors are gone; housekeeping, not lost work".to_string(),
+            });
+        }
+
+        if let Some(previous) = previous {
+            let failed: BTreeSet<String> = array(
+                backlog.get("collection").unwrap_or(&Value::Null),
+                "failures",
+            )
+            .iter()
+            .map(|failure| text(failure, "project"))
+            .collect();
+            let before = previous_rows(previous);
+            for (project, file, _) in departed(backlog, previous) {
+                let (kind, title) = before
+                    .get(&(project.clone(), file.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                let fate = fates.get(&(project.clone(), file.clone()));
+                let (reason, outcome, superseded_by) = match fate {
+                    _ if failed.contains(&project) => ("unobserved", None, None),
+                    // Shelving records the resolution `unresolved` and moves the
+                    // artifact to the archive; only a consumption is `consumed`.
+                    Some(fate) if fate.explanation == "superseded" => (
+                        "superseded",
+                        fate.resolution.clone(),
+                        fate.superseded_by.clone(),
+                    ),
+                    Some(fate)
+                        if fate.storage == "archived"
+                            && fate
+                                .resolution
+                                .as_deref()
+                                .is_none_or(|outcome| outcome == "unresolved") =>
+                    {
+                        ("archived", fate.resolution.clone(), None)
+                    }
+                    Some(fate) if fate.explanation == "terminal" => {
+                        ("consumed", fate.resolution.clone(), None)
+                    }
+                    Some(fate) if fate.explanation == "archived" => {
+                        ("archived", fate.resolution.clone(), None)
+                    }
+                    Some(fate) => ("not-actionable", fate.resolution.clone(), None),
+                    None => ("unknown", None, None),
+                };
+                sections.resolved_since_previous.push(ResolvedRow {
+                    project,
+                    file,
+                    kind,
+                    title,
+                    reason,
+                    outcome,
+                    superseded_by,
+                });
+            }
+        }
+
+        let order = |row: &Row| {
+            (
+                row.project.clone(),
+                kind_order(&row.kind),
+                row.filed_at.clone().unwrap_or_default(),
+                row.file.clone(),
+            )
+        };
+        sections.work.sort_by_key(order);
+        sections.proposals.sort_by_key(order);
+        sections.parked.sort_by_key(order);
+        sections.in_flight.sort_by(|a, b| {
+            (&a.project, &a.bucket, &a.change_id).cmp(&(&b.project, &b.bucket, &b.change_id))
+        });
+        sections
+            .review_owed
+            .sort_by(|a, b| (&a.project, &a.change_id).cmp(&(&b.project, &b.change_id)));
+        sections.needs_person.sort_by(|a, b| {
+            (&a.project, &a.asked_at, &a.question).cmp(&(&b.project, &b.asked_at, &b.question))
+        });
+        projects.sort_by(|a, b| a.project.cmp(&b.project));
+        attention.sort_by(|a, b| {
+            (a.rule, &a.project, &a.subject).cmp(&(b.rule, &b.project, &b.subject))
+        });
+
+        let previous_tally = |key: &str| {
+            previous.and_then(|previous| {
+                previous
+                    .pointer(&format!("/tallies/{key}/value"))
+                    .and_then(Value::as_u64)
+            })
+        };
+        let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+        let mut tallies = BTreeMap::new();
+        let delivered = sections
+            .work
+            .iter()
+            .chain(&sections.proposals)
+            .chain(&sections.parked)
+            .filter(|row| row.status == "delivered")
+            .count();
+        for (key, value) in [
+            ("needs_person", count(sections.needs_person.len())),
+            ("in_flight", count(sections.in_flight.len())),
+            ("review_owed", count(sections.review_owed.len())),
+            ("deferred", count(sections.deferred.len())),
+            ("work", count(sections.work.len())),
+            ("proposals", count(sections.proposals.len())),
+            ("parked", count(sections.parked.len())),
+            ("delivered", count(delivered)),
+            ("projects", count(projects.len())),
+            ("attention", count(attention.len())),
+        ] {
+            tallies.insert(
+                key,
+                Tally {
+                    value,
+                    previous: previous_tally(key),
+                },
+            );
+        }
+
+        Report {
+            schema: SCHEMA,
+            observation: backlog.get("observation").cloned().unwrap_or(Value::Null),
+            scope: backlog.get("scope").cloned().unwrap_or(Value::Null),
+            collection: backlog.get("collection").cloned().unwrap_or(Value::Null),
+            previous: previous.and_then(|previous| {
+                previous
+                    .pointer("/observation/finished_at")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }),
+            tallies,
+            sections,
+            attention,
+            projects,
+        }
+    }
+
+    impl Report {
+        /// A compact text summary; `--json` carries every row.
+        pub(crate) fn render(&self) {
+            let tally = |key: &str| {
+                self.tallies
+                    .get(key)
+                    .map_or_else(String::new, |tally| match tally.previous {
+                        Some(previous) if previous != tally.value => {
+                            format!("{} (was {previous})", tally.value)
+                        }
+                        _ => tally.value.to_string(),
+                    })
+            };
+            println!(
+                "needs a person {}  in flight {}  review owed {}  deferred {}",
+                tally("needs_person"),
+                tally("in_flight"),
+                tally("review_owed"),
+                tally("deferred")
+            );
+            println!(
+                "work {}  proposals {}  parked {}  delivered but unconsumed {}  across {} projects",
+                tally("work"),
+                tally("proposals"),
+                tally("parked"),
+                tally("delivered"),
+                tally("projects")
+            );
+            if let Some(previous) = &self.previous {
+                println!(
+                    "since {previous}: {} new, {} resolved",
+                    self.sections
+                        .work
+                        .iter()
+                        .chain(&self.sections.proposals)
+                        .chain(&self.sections.parked)
+                        .filter(|row| row.new_since_previous == Some(true))
+                        .count(),
+                    self.sections.resolved_since_previous.len()
+                );
+            }
+            for entry in &self.attention {
+                println!(
+                    "attention  {}  {}  {}  {}",
+                    entry.rule, entry.project, entry.subject, entry.evidence
+                );
+            }
+            println!("detail: arc workspace report --json");
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use serde_json::json;
+
+        fn item(file: &str, kind: &str, heading: &str) -> Value {
+            json!({
+                "file": file,
+                "topic": file.trim_end_matches(".md"),
+                "kind": kind,
+                "heading": heading,
+                "filed_at": "2026-09-01T00:00:00Z",
+                "age_seconds": 20 * 86_400,
+                "availability": "available",
+                "promotions": [],
+            })
+        }
+
+        fn backlog(open: Vec<Value>, feature_requests: Vec<Value>) -> Value {
+            json!({
+                "schema": "arc-workspace-backlog/18",
+                "observation": {"started_at": "2026-09-26T00:00:00Z", "finished_at": "2026-09-26T00:00:01Z"},
+                "scope": {"mode": "global"},
+                "collection": {"failures": []},
+                "projects": [{
+                    "project": "demo",
+                    "anchor": "/code/demo",
+                    "journal_dir": "/journals/demo",
+                    "items": {"open": open, "later": [], "feature_requests": feature_requests},
+                    "open_questions": [],
+                    "changes": {},
+                    "no_patchset": [],
+                    "debt_owed": [],
+                }],
+                "unreachable": [],
+            })
+        }
+
+        fn rows(report: &Report) -> Vec<&Row> {
+            report
+                .sections
+                .work
+                .iter()
+                .chain(&report.sections.proposals)
+                .collect()
+        }
+
+        #[test]
+        fn a_delivered_plan_reads_delivered_and_is_flagged() {
+            let mut plan = item("plan.md", "plan", "# Plan");
+            plan["promotions"] = json!([
+                {"status": "closed", "closure": {"outcome": "integrated"}},
+                {"status": "closed", "closure": {"outcome": "abandoned"}},
+            ]);
+            let mut abandoned = item("gone.md", "plan", "# Gone");
+            abandoned["promotions"] =
+                json!([{"status": "closed", "closure": {"outcome": "abandoned"}}]);
+            let report = build(
+                &backlog(vec![plan, abandoned], vec![]),
+                None,
+                &BTreeMap::new(),
+            );
+            let statuses: Vec<_> = rows(&report)
+                .iter()
+                .map(|row| (row.file.as_str(), row.status))
+                .collect();
+            assert!(statuses.contains(&("plan.md", "delivered")), "{statuses:?}");
+            assert!(
+                statuses.contains(&("gone.md", "abandoned-promotion")),
+                "{statuses:?}"
+            );
+            assert!(report
+                .attention
+                .iter()
+                .any(|entry| entry.rule == "delivered-unconsumed" && entry.subject == "plan.md"));
+            assert_eq!(report.tallies["delivered"].value, 1);
+        }
+
+        #[test]
+        fn an_unresolved_record_is_never_new_work_and_a_scaffold_heading_yields_the_topic() {
+            let restored = item("restored.md", "todo", "# Restored from the archive");
+            let scaffolded = item("argue-it.md", "discussion", "## How to append a position");
+            let report = build(
+                &backlog(vec![restored, scaffolded], vec![]),
+                None,
+                &BTreeMap::new(),
+            );
+            for row in rows(&report) {
+                assert_eq!(row.status, "unresolved", "{row:?}");
+                assert_eq!(
+                    row.new_since_previous, None,
+                    "no previous report, no novelty claim"
+                );
+            }
+            let titles: Vec<_> = rows(&report).iter().map(|row| row.title.as_str()).collect();
+            assert!(titles.contains(&"argue it"), "{titles:?}");
+            assert!(titles.contains(&"Restored from the archive"), "{titles:?}");
+        }
+
+        #[test]
+        fn a_claimed_record_names_its_holder_and_a_lapsed_claim_is_flagged() {
+            let mut held = item("held.md", "todo", "# Held");
+            held["availability"] = json!("occupied");
+            held["claims"] = json!([{"owner": {"actor": "someone"}}]);
+            let mut lapsed = item("lapsed.md", "todo", "# Lapsed");
+            lapsed["availability"] = json!("reclaimable");
+            let report = build(&backlog(vec![held, lapsed], vec![]), None, &BTreeMap::new());
+            let held = rows(&report)
+                .into_iter()
+                .find(|row| row.file == "held.md")
+                .unwrap();
+            assert_eq!(held.status, "claimed");
+            assert_eq!(held.claimed_by.as_deref(), Some("someone"));
+            assert!(report
+                .attention
+                .iter()
+                .any(|entry| entry.rule == "stale-claim"));
+        }
+
+        #[test]
+        fn departures_carry_their_recorded_reason_and_a_failed_project_reads_unobserved() {
+            let first = build(
+                &backlog(
+                    vec![
+                        item("done.md", "todo", "# Done"),
+                        item("shelved.md", "todo", "# Shelved"),
+                        item("mystery.md", "todo", "# Mystery"),
+                    ],
+                    vec![],
+                ),
+                None,
+                &BTreeMap::new(),
+            );
+            let previous = serde_json::to_value(&first).unwrap();
+            let now = backlog(vec![item("fresh.md", "todo", "# Fresh")], vec![]);
+            let departed_files: Vec<_> = departed(&now, &previous)
+                .into_iter()
+                .map(|(_, file, dir)| (file, dir))
+                .collect();
+            assert!(departed_files
+                .contains(&("done.md".to_string(), Some("/journals/demo".to_string()))));
+            let mut fates = BTreeMap::new();
+            fates.insert(
+                ("demo".to_string(), "done.md".to_string()),
+                Fate {
+                    explanation: "terminal".into(),
+                    storage: "hot".into(),
+                    resolution: Some("done".into()),
+                    superseded_by: None,
+                },
+            );
+            fates.insert(
+                ("demo".to_string(), "shelved.md".to_string()),
+                Fate {
+                    explanation: "terminal".into(),
+                    storage: "archived".into(),
+                    resolution: Some("unresolved".into()),
+                    superseded_by: None,
+                },
+            );
+            let report = build(&now, Some(&previous), &fates);
+            let reason = |file: &str| {
+                report
+                    .sections
+                    .resolved_since_previous
+                    .iter()
+                    .find(|row| row.file == file)
+                    .map(|row| (row.reason, row.outcome.clone()))
+            };
+            assert_eq!(
+                reason("done.md"),
+                Some(("consumed", Some("done".to_string())))
+            );
+            assert_eq!(
+                reason("shelved.md"),
+                Some(("archived", Some("unresolved".to_string())))
+            );
+            assert_eq!(
+                reason("mystery.md"),
+                Some(("unknown", None)),
+                "absence alone establishes nothing"
+            );
+            let fresh = report
+                .sections
+                .work
+                .iter()
+                .find(|row| row.file == "fresh.md")
+                .unwrap();
+            assert_eq!(fresh.new_since_previous, Some(true));
+            assert_eq!(
+                report.tallies["work"],
+                Tally {
+                    value: 1,
+                    previous: Some(3)
+                }
+            );
+
+            let mut failed = now.clone();
+            failed["collection"]["failures"] =
+                json!([{"project": "demo", "component": "journal", "reason": "unreadable"}]);
+            let report = build(&failed, Some(&previous), &fates);
+            assert!(report
+                .sections
+                .resolved_since_previous
+                .iter()
+                .all(|row| row.reason == "unobserved"));
+            assert!(report
+                .attention
+                .iter()
+                .any(|entry| entry.rule == "collection-failed"));
+        }
+
+        #[test]
+        fn a_vanished_anchor_is_reported_once_and_scratch_anchors_fold_together() {
+            let mut data = backlog(vec![], vec![]);
+            let scratch = std::env::temp_dir().join("probe-fixture");
+            data["collection"]["failures"] = json!([
+                {"project": "kept", "component": "anchor", "reason": "anchor does not exist"},
+                {"project": "demo", "component": "journal", "reason": "unreadable"},
+            ]);
+            data["unreachable"] = json!([
+                {"slug": "kept", "anchor": "/code/kept", "reason": "anchor does not exist"},
+                {"slug": "probe-a", "anchor": scratch.join("a").to_str().unwrap(), "reason": "anchor does not exist"},
+                {"slug": "probe-b", "anchor": scratch.join("b").to_str().unwrap(), "reason": "anchor does not exist"},
+            ]);
+            let report = build(&data, None, &BTreeMap::new());
+            let rules: Vec<_> = report
+                .attention
+                .iter()
+                .map(|entry| (entry.rule, entry.project.as_str()))
+                .collect();
+            assert!(rules.contains(&("unreachable-anchor", "kept")), "{rules:?}");
+            assert!(
+                !rules.contains(&("collection-failed", "kept")),
+                "one fact, one entry: {rules:?}"
+            );
+            assert!(rules.contains(&("collection-failed", "demo")), "{rules:?}");
+            let scratch = report
+                .attention
+                .iter()
+                .find(|entry| entry.rule == "unreachable-scratch")
+                .unwrap();
+            assert_eq!(scratch.subject, "2 journals");
+        }
+
+        #[test]
+        fn debt_growth_against_the_previous_report_is_flagged() {
+            let quiet = backlog(vec![], vec![]);
+            let previous = serde_json::to_value(build(&quiet, None, &BTreeMap::new())).unwrap();
+            let mut owing = quiet.clone();
+            owing["projects"][0]["debt_owed"] =
+                json!([{"change_id": "c-1", "effective_missing": "nothing-read", "age_days": 2}]);
+            let report = build(&owing, Some(&previous), &BTreeMap::new());
+            assert!(report
+                .attention
+                .iter()
+                .any(|entry| entry.rule == "debt-grew" && entry.project == "demo"));
+            assert_eq!(report.sections.review_owed[0].kind, "nothing-read");
+        }
+
+        #[test]
+        fn a_stale_question_and_a_stale_handoff_are_flagged() {
+            let mut data = backlog(vec![item("hand.md", "handoff", "# Hand")], vec![]);
+            data["projects"][0]["open_questions"] = json!([{
+                "file": "d.md", "question": "q-1", "heading": "Which?", "placement": "closing",
+                "asked_at": "2026-09-10T00:00:00Z", "disposition": "open", "options": [], "delivery": "delivered"
+            }]);
+            let report = build(&data, None, &BTreeMap::new());
+            assert_eq!(report.sections.needs_person.len(), 1);
+            assert_eq!(report.sections.needs_person[0].age_days, Some(16));
+            let rules: Vec<_> = report.attention.iter().map(|entry| entry.rule).collect();
+            assert!(rules.contains(&"stale-question"), "{rules:?}");
+            assert!(rules.contains(&"stale-handoff"), "{rules:?}");
+        }
+    }
 }

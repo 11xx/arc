@@ -194,6 +194,64 @@ rest; `--json` carries them all. A debt whose recorded range cannot be read
 carries `surfaces: null` and is excluded from exact-path correlation without
 being presented as known to touch nothing.
 
+### Workspace report
+
+`arc workspace report` reads the same projects the same way as `workspace
+backlog --items` and classifies them by named rules, so a reader of any kind —
+a person, a renderer, a model — gets the same answer from the same ledger. Its
+JSON is versioned `arc-workspace-report/1`; the text view prints the tallies
+and the attention list. The report writes nothing.
+
+Every journal artifact takes one `status`, decided in this order:
+
+- `delivered` — every promotion is closed and at least one closed
+  integrated: the work landed and the artifact was never consumed.
+- `abandoned-promotion` — every promotion is closed and none integrated.
+- `claimed` — an active claim occupies it; `claimed_by` names the holder.
+- otherwise the tier's own status: `unresolved` for the primary tier,
+  `proposal` for feature requests, `parked` for later.
+
+`unresolved` states that the journal records no resolution. It is not a claim
+that work remains: shipped work whose artifact nobody consumed reads
+`unresolved` until something records otherwise, unless its promotions say
+`delivered`.
+
+A row's `title` is the artifact's heading without its `#` marks, or its topic
+with hyphens as spaces when the heading is absent or belongs to a scaffold
+(`How to append a position`, `Positions`, `How it resolves`, `Questions only a
+person settles`) or to a position block.
+
+`sections` groups the rows: `needs_person` holds decision questions still open
+on unresolved artifacts; `in_flight` every open change by inbox bucket, plus
+changes with no patchset; `review_owed` each debt with its kind and age;
+`deferred` round deferrals; `work`, `proposals`, and `parked` the journal
+tiers, ordered by project, then kind (handoff, plan, todo, discussion, other),
+then filing time.
+
+`attention` lists named facts that deserve a look, each `{rule, project,
+subject, evidence}`:
+
+- `delivered-unconsumed` — an artifact whose status is `delivered`.
+- `stale-question` — a decision question open longer than 7 days.
+- `stale-handoff` — a handoff unresolved longer than 14 days.
+- `stale-claim` — a claim that lapsed and can be reclaimed.
+- `debt-grew` — a project whose review owed rose against `--previous`.
+- `collection-failed` — a component of a project that could not be read.
+- `unreachable-anchor` — a registered project whose anchor is gone; anchors
+  under the temporary directory, `/var/tmp`, or a `scratchpad` fold into one
+  `unreachable-scratch` entry, since their disappearance is housekeeping.
+
+With `--previous <file>`, an earlier report of the same schema, each tally
+carries its earlier value, each row says whether it is `new_since_previous`,
+and `resolved_since_previous` lists every artifact the earlier report held
+that is no longer in the backlog, with the reason its journal records:
+`consumed` with its outcome, `archived` (shelving records the outcome
+`unresolved`), `superseded` with the successor, `not-actionable` when it is
+still present but left the actionable tiers, `unobserved` when its project
+failed collection, and `unknown` when the journal holds no record of it.
+Absence alone is never a reason. A file of another schema is refused as a
+baseline.
+
 ## Brief scaffolds
 
 `arc brief <change> --scaffold <name>` prepends a template to the brief being

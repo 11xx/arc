@@ -1679,6 +1679,29 @@ enum WorkspaceCmd {
         #[arg(long)]
         json: bool,
     },
+    /// The backlog classified by named rules: each artifact's status, the
+    /// section it belongs to, and the facts that deserve attention, versioned
+    /// `arc-workspace-report/1`. With `--previous`, tallies carry their
+    /// earlier values, new rows are marked, and every artifact that left the
+    /// backlog is listed with the reason its journal records. A partial
+    /// collection exits 16
+    Report {
+        /// Report only projects whose canonical anchor is beneath this path
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
+        under: Option<PathBuf>,
+        /// Report only projects beneath the current directory
+        #[arg(long, conflicts_with_all = ["under", "global"])]
+        here: bool,
+        /// Report every registered project, the default when no scope is set
+        #[arg(long, conflicts_with_all = ["under", "here"])]
+        global: bool,
+        /// An earlier `arc workspace report --json` to compare against
+        #[arg(long, value_name = "FILE")]
+        previous: Option<PathBuf>,
+        /// Emit the machine-readable JSON view instead of text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3493,6 +3516,19 @@ fn run(cli: Cli) -> Result<i32> {
                     commands::WorkspaceView::Inventory {
                         scope: workspace_scope(under, here)?,
                         storage,
+                    },
+                    json,
+                ),
+                WorkspaceCmd::Report {
+                    under,
+                    here,
+                    global: _,
+                    previous,
+                    json,
+                } => (
+                    commands::WorkspaceView::Report {
+                        scope: workspace_scope(under, here)?,
+                        previous,
                     },
                     json,
                 ),
