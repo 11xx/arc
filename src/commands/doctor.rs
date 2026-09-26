@@ -163,7 +163,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
 
     let exit = i32::from(!problems.is_empty());
     let report = Report {
-        schema: "arc-doctor/4",
+        schema: "arc-doctor/5",
         roots: Roots::resolve(&ctx.cwd, &root)?,
         replica,
         problems,
