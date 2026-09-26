@@ -1896,6 +1896,74 @@ fn workspace_backlog(
     Ok(if partial { 16 } else { 0 })
 }
 
+/// Read each reported project's ledger once for what the backlog does not
+/// carry: how long every open change has been open, and which closed changes
+/// left a worktree on disk. A ledger that cannot be read contributes nothing;
+/// the backlog already names its failure.
+fn report_ledger_facts(
+    backlog: &serde_json::Value,
+) -> Result<BTreeMap<String, report::LedgerFacts>> {
+    let observed = backlog
+        .pointer("/observation/finished_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+        .map(|at| at.with_timezone(&chrono::Utc))
+        .unwrap_or_else(chrono::Utc::now);
+    let reported: BTreeSet<String> = backlog
+        .get("projects")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|project| Some(project.get("project")?.as_str()?.to_string()))
+        .collect();
+    let cfg = crate::config::load()?;
+    let mut facts = BTreeMap::new();
+    for project in crate::registry::projects(&cfg)? {
+        let label = project.label();
+        if !reported.contains(&label) {
+            continue;
+        }
+        let Some(root) = &project.ledger else {
+            continue;
+        };
+        let anchor = project.anchor.clone();
+        let Ok(Some(store)) = Store::open_at(root) else {
+            continue;
+        };
+        let Ok(states) = repo_states(&store) else {
+            continue;
+        };
+        let mut ledger = report::LedgerFacts::default();
+        for (change_id, state) in states {
+            match &state.closure {
+                None => {
+                    let days = u64::try_from((observed - state.opened_at).num_days()).unwrap_or(0);
+                    ledger.open.insert(change_id, (state.title.clone(), days));
+                }
+                Some(_) => {
+                    // A change begun without a worktree records the main
+                    // checkout, which outlives every change by design; only
+                    // a separate checkout left behind is worth a look.
+                    let separate = |path: &&str| {
+                        let path = Path::new(path);
+                        path.exists()
+                            && anchor.as_ref().is_none_or(|anchor| {
+                                path.canonicalize().ok() != anchor.canonicalize().ok()
+                            })
+                    };
+                    if let Some(worktree) = state.worktree.as_deref().filter(separate) {
+                        ledger
+                            .closed_worktrees
+                            .push((change_id, worktree.to_string()));
+                    }
+                }
+            }
+        }
+        facts.insert(label, ledger);
+    }
+    Ok(facts)
+}
+
 /// The workspace backlog classified by `workspace_report`'s rules, with
 /// deltas against a previous report when one is given. Every artifact that
 /// left the backlog since that report is looked up in its journal, hot and
@@ -1981,7 +2049,8 @@ fn workspace_report(
             }
         }
     }
-    let report = report::build(&backlog, previous.as_ref(), &fates);
+    let ledgers = report_ledger_facts(&backlog)?;
+    let report = report::build(&backlog, previous.as_ref(), &fates, &ledgers);
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -2196,6 +2265,21 @@ mod report {
     pub(crate) const STALE_QUESTION_DAYS: u64 = 7;
     /// A handoff unresolved longer than this is flagged `stale-handoff`.
     pub(crate) const STALE_HANDOFF_DAYS: u64 = 14;
+    /// A change open longer than this without a patchset is flagged
+    /// `stale-no-patchset`.
+    pub(crate) const STALE_NO_PATCHSET_DAYS: u64 = 7;
+
+    /// What one project's ledger says that the backlog observation does not:
+    /// how long each open change has been open, and which closed changes
+    /// still have their worktree on disk.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub(crate) struct LedgerFacts {
+        /// Open change id -> (title, whole days open at the observation).
+        pub open: BTreeMap<String, (String, u64)>,
+        /// (change id, worktree path) for each closed change whose recorded
+        /// worktree still exists.
+        pub closed_worktrees: Vec<(String, String)>,
+    }
 
     /// Scaffold headings arc prepends to artifacts. A row titled by one of them
     /// names the template, not the artifact, so the topic titles it instead.
@@ -2290,6 +2374,8 @@ mod report {
         /// The inbox bucket the change sits in, or `no-patchset`.
         bucket: String,
         next_actor: Option<String>,
+        /// Whole days since the change opened, when its ledger was read.
+        age_days: Option<u64>,
     }
 
     #[derive(Debug, Serialize)]
@@ -2516,6 +2602,7 @@ mod report {
         backlog: &Value,
         previous: Option<&Value>,
         fates: &BTreeMap<(String, String), Fate>,
+        ledgers: &BTreeMap<String, LedgerFacts>,
     ) -> Report {
         let known_before = previous.map(previous_rows);
         let mut sections = Sections::default();
@@ -2651,6 +2738,8 @@ mod report {
             }
 
             let changes = project.get("changes").unwrap_or(&Value::Null);
+            let empty = LedgerFacts::default();
+            let ledger = ledgers.get(&name).unwrap_or(&empty);
             let mut in_flight_ids = BTreeSet::new();
             if let Some(buckets) = changes.as_object() {
                 for (bucket, rows) in buckets {
@@ -2663,9 +2752,11 @@ mod report {
                     for row in rows.as_array().into_iter().flatten() {
                         in_flight_ids.insert(text(row, "change_id"));
                         summary.in_flight += 1;
+                        let change_id = text(row, "change_id");
                         sections.in_flight.push(ChangeRow {
                             project: name.clone(),
-                            change_id: text(row, "change_id"),
+                            age_days: ledger.open.get(&change_id).map(|(_, days)| *days),
+                            change_id,
                             title: text(row, "title"),
                             bucket: bucket.clone(),
                             next_actor: opt_text(row, "next_actor"),
@@ -2675,16 +2766,34 @@ mod report {
             }
             for change in array(project, "no_patchset") {
                 let id = change.as_str().unwrap_or("").to_string();
+                let opened = ledger.open.get(&id);
+                if let Some((_, days)) = opened.filter(|(_, days)| *days > STALE_NO_PATCHSET_DAYS) {
+                    attention.push(Attention {
+                        rule: "stale-no-patchset",
+                        project: name.clone(),
+                        subject: id.clone(),
+                        evidence: format!("open for {days} days with no patchset recorded"),
+                    });
+                }
                 if in_flight_ids.insert(id.clone()) {
                     summary.in_flight += 1;
                     sections.in_flight.push(ChangeRow {
                         project: name.clone(),
+                        title: opened.map(|(title, _)| title.clone()).unwrap_or_default(),
+                        age_days: opened.map(|(_, days)| *days),
                         change_id: id,
-                        title: String::new(),
                         bucket: "no-patchset".to_string(),
                         next_actor: None,
                     });
                 }
+            }
+            for (change_id, path) in &ledger.closed_worktrees {
+                attention.push(Attention {
+                    rule: "worktree-outlives-change",
+                    project: name.clone(),
+                    subject: change_id.clone(),
+                    evidence: format!("the change is closed and its worktree is still at {path}"),
+                });
             }
 
             let debt_titles: BTreeMap<String, String> = array(changes, "debt-owed")
@@ -3021,6 +3130,7 @@ mod report {
                 &backlog(vec![plan, abandoned], vec![]),
                 None,
                 &BTreeMap::new(),
+                &BTreeMap::new(),
             );
             let statuses: Vec<_> = rows(&report)
                 .iter()
@@ -3046,6 +3156,7 @@ mod report {
                 &backlog(vec![restored, scaffolded], vec![]),
                 None,
                 &BTreeMap::new(),
+                &BTreeMap::new(),
             );
             for row in rows(&report) {
                 assert_eq!(row.status, "unresolved", "{row:?}");
@@ -3066,7 +3177,12 @@ mod report {
             held["claims"] = json!([{"owner": {"actor": "someone"}}]);
             let mut lapsed = item("lapsed.md", "todo", "# Lapsed");
             lapsed["availability"] = json!("reclaimable");
-            let report = build(&backlog(vec![held, lapsed], vec![]), None, &BTreeMap::new());
+            let report = build(
+                &backlog(vec![held, lapsed], vec![]),
+                None,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+            );
             let held = rows(&report)
                 .into_iter()
                 .find(|row| row.file == "held.md")
@@ -3091,6 +3207,7 @@ mod report {
                     vec![],
                 ),
                 None,
+                &BTreeMap::new(),
                 &BTreeMap::new(),
             );
             let previous = serde_json::to_value(&first).unwrap();
@@ -3120,7 +3237,7 @@ mod report {
                     superseded_by: None,
                 },
             );
-            let report = build(&now, Some(&previous), &fates);
+            let report = build(&now, Some(&previous), &fates, &BTreeMap::new());
             let reason = |file: &str| {
                 report
                     .sections
@@ -3160,7 +3277,7 @@ mod report {
             let mut failed = now.clone();
             failed["collection"]["failures"] =
                 json!([{"project": "demo", "component": "journal", "reason": "unreadable"}]);
-            let report = build(&failed, Some(&previous), &fates);
+            let report = build(&failed, Some(&previous), &fates, &BTreeMap::new());
             assert!(report
                 .sections
                 .resolved_since_previous
@@ -3185,7 +3302,7 @@ mod report {
                 {"slug": "probe-a", "anchor": scratch.join("a").to_str().unwrap(), "reason": "anchor does not exist"},
                 {"slug": "probe-b", "anchor": scratch.join("b").to_str().unwrap(), "reason": "anchor does not exist"},
             ]);
-            let report = build(&data, None, &BTreeMap::new());
+            let report = build(&data, None, &BTreeMap::new(), &BTreeMap::new());
             let rules: Vec<_> = report
                 .attention
                 .iter()
@@ -3206,13 +3323,57 @@ mod report {
         }
 
         #[test]
+        fn ledger_facts_flag_a_stale_no_patchset_change_and_a_surviving_worktree() {
+            let mut data = backlog(vec![], vec![]);
+            data["projects"][0]["no_patchset"] = json!(["idle-1", "fresh-2"]);
+            let mut facts = LedgerFacts::default();
+            facts.open.insert("idle-1".into(), ("Idle work".into(), 12));
+            facts
+                .open
+                .insert("fresh-2".into(), ("Fresh work".into(), 1));
+            facts
+                .closed_worktrees
+                .push(("done-3".into(), "/worktrees/done-3".into()));
+            let mut ledgers = BTreeMap::new();
+            ledgers.insert("demo".to_string(), facts);
+            let report = build(&data, None, &BTreeMap::new(), &ledgers);
+            let rules: Vec<_> = report
+                .attention
+                .iter()
+                .map(|entry| (entry.rule, entry.subject.as_str()))
+                .collect();
+            assert!(
+                rules.contains(&("stale-no-patchset", "idle-1")),
+                "{rules:?}"
+            );
+            assert!(
+                !rules.contains(&("stale-no-patchset", "fresh-2")),
+                "{rules:?}"
+            );
+            assert!(
+                rules.contains(&("worktree-outlives-change", "done-3")),
+                "{rules:?}"
+            );
+            let idle = report
+                .sections
+                .in_flight
+                .iter()
+                .find(|row| row.change_id == "idle-1")
+                .unwrap();
+            assert_eq!(idle.title, "Idle work");
+            assert_eq!(idle.age_days, Some(12));
+        }
+
+        #[test]
         fn debt_growth_against_the_previous_report_is_flagged() {
             let quiet = backlog(vec![], vec![]);
-            let previous = serde_json::to_value(build(&quiet, None, &BTreeMap::new())).unwrap();
+            let previous =
+                serde_json::to_value(build(&quiet, None, &BTreeMap::new(), &BTreeMap::new()))
+                    .unwrap();
             let mut owing = quiet.clone();
             owing["projects"][0]["debt_owed"] =
                 json!([{"change_id": "c-1", "effective_missing": "nothing-read", "age_days": 2}]);
-            let report = build(&owing, Some(&previous), &BTreeMap::new());
+            let report = build(&owing, Some(&previous), &BTreeMap::new(), &BTreeMap::new());
             assert!(report
                 .attention
                 .iter()
@@ -3227,7 +3388,7 @@ mod report {
                 "file": "d.md", "question": "q-1", "heading": "Which?", "placement": "closing",
                 "asked_at": "2026-09-10T00:00:00Z", "disposition": "open", "options": [], "delivery": "delivered"
             }]);
-            let report = build(&data, None, &BTreeMap::new());
+            let report = build(&data, None, &BTreeMap::new(), &BTreeMap::new());
             assert_eq!(report.sections.needs_person.len(), 1);
             assert_eq!(report.sections.needs_person[0].age_days, Some(16));
             let rules: Vec<_> = report.attention.iter().map(|entry| entry.rule).collect();
