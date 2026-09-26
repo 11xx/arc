@@ -1555,7 +1555,7 @@ enum InstructionsCmd {
 
 #[derive(Subcommand)]
 enum PolicyCmd {
-    /// Show effective policy and the file that declared each rule
+    /// Show effective policy, gate environment probes, and each declaring file
     Show,
     /// Print the operator policy file path for this repository
     Path,

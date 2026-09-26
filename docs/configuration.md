@@ -78,7 +78,8 @@ Project policy lives in `.arc/policy.toml` and project gates live in
 `<git-common-dir>/arc/operator-policy.toml`, outside the work tree and shared
 by linked worktrees. `arc policy path` prints its full path,
 `arc policy write --body-file FILE` replaces it from TOML, and `arc policy
-show` prints effective rules with their declaring file. Reading or writing
+show` prints effective rules with their declaring file, including each gate's
+command, profiles, timeout, and environment probe. Reading or writing
 operator policy does not change tracked files.
 
 Both policy files apply. Boolean requirements apply when either file enables
