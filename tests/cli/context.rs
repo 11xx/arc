@@ -182,9 +182,9 @@ fn env_detects_claude_model_from_transcript() {
     fs::write(
         project.join(format!("{session}.jsonl")),
         concat!(
-            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-4-8\"}}\n",
             "not a json line\n",
-            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fable-5\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-fable-5\"}}\n",
         ),
     )
     .unwrap();
@@ -213,11 +213,11 @@ fn env_detects_claude_effort_and_skips_synthetic_entries() {
     fs::write(
         project.join(format!("{session}.jsonl")),
         concat!(
-            "{\"type\":\"assistant\",\"effort\":\"medium\",\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+            "{\"type\":\"assistant\",\"effort\":\"medium\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-4-8\"}}\n",
             "{\"type\":\"assistant\",\"effort\":\"medium\",\"perTurnEffort\":\"high\",",
-            "\"message\":{\"model\":\"claude-fable-5\"}}\n",
+            "\"message\":{\"role\":\"assistant\",\"model\":\"claude-fable-5\"}}\n",
             "{\"type\":\"assistant\",\"isApiErrorMessage\":true,",
-            "\"message\":{\"model\":\"<synthetic>\"}}\n",
+            "\"message\":{\"role\":\"assistant\",\"model\":\"<synthetic>\"}}\n",
         ),
     )
     .unwrap();
@@ -248,9 +248,9 @@ fn env_falls_back_to_the_claude_session_effort() {
         project.join(format!("{session}.jsonl")),
         concat!(
             "{\"type\":\"assistant\",\"perTurnEffort\":\"high\",",
-            "\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+            "\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-4-8\"}}\n",
             "{\"type\":\"assistant\",\"effort\":\"low\",\"perTurnEffort\":null,",
-            "\"message\":{\"model\":\"claude-fable-5\"}}\n",
+            "\"message\":{\"role\":\"assistant\",\"model\":\"claude-fable-5\"}}\n",
         ),
     )
     .unwrap();
@@ -280,7 +280,7 @@ fn env_resolves_the_claude_store_under_its_config_dir_override() {
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join(format!("{session}.jsonl")),
-        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fable-5\"}}\n",
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-fable-5\"}}\n",
     )
     .unwrap();
     // The default store holds the same session under a different model, so a
@@ -290,7 +290,7 @@ fn env_resolves_the_claude_store_under_its_config_dir_override() {
     fs::create_dir_all(&default).unwrap();
     fs::write(
         default.join(format!("{session}.jsonl")),
-        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-elsewhere\"}}\n",
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-elsewhere\"}}\n",
     )
     .unwrap();
 
@@ -320,14 +320,14 @@ fn env_takes_the_newest_claude_recording_across_project_directories() {
     let stale_file = stale.join(format!("{session}.jsonl"));
     fs::write(
         &stale_file,
-        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-stale\"}}\n",
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-stale\"}}\n",
     )
     .unwrap();
     fs::create_dir_all(&live).unwrap();
     let live_file = live.join(format!("{session}.jsonl"));
     fs::write(
         &live_file,
-        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-live\"}}\n",
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-live\"}}\n",
     )
     .unwrap();
     set_modified(&stale_file, 1_700_000_000);
@@ -365,7 +365,7 @@ fn env_detects_claude_code_session_variable() {
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join(format!("{session}.jsonl")),
-        "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fable-5\"}}\n",
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-fable-5\"}}\n",
     )
     .unwrap();
 
@@ -408,9 +408,10 @@ fn env_detects_codex_model_and_effort_from_rollout() {
     fs::write(
         day.join(format!("rollout-2026-07-20T00-00-00-{session}.jsonl")),
         concat!(
-            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\"}}\n",
-            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.5\"}}\n",
-            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.6-sol\",",
+            "{\"type\":\"session_meta\",\"timestamp\":\"1\",",
+            "\"payload\":{\"id\":\"019f7890-5c01-7ec1-9240-2eba1613e5d2\"}}\n",
+            "{\"type\":\"turn_context\",\"timestamp\":\"2\",\"payload\":{\"model\":\"gpt-5.5\"}}\n",
+            "{\"type\":\"turn_context\",\"timestamp\":\"3\",\"payload\":{\"model\":\"gpt-5.6-sol\",",
             "\"effort\":\"high\"}}\n",
         ),
     )
@@ -433,22 +434,60 @@ fn env_detects_codex_model_and_effort_from_rollout() {
 }
 
 #[test]
+fn env_requires_exact_codex_identity_not_year_substring() {
+    let repo = Repo::new();
+    let codex_home = repo.home.join("codex-state");
+    let day = codex_home.join("sessions/2026/09/25");
+    fs::create_dir_all(&day).unwrap();
+    fs::write(
+        day.join("rollout-2026-09-25T10-00-00-00000000-0000-4000-8000-000000000001.jsonl"),
+        concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"different-session\"}}\n",
+            "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-fixture\",\"effort\":\"high\"}}\n",
+        ),
+    )
+    .unwrap();
+
+    repo.arc(&repo.root)
+        .args(["env"])
+        .env("CODEX_THREAD_ID", "2026")
+        .env("CODEX_HOME", &codex_home)
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='codex' ARC_SESSION='2026'\n{}",
+            uncorroborated("codex")
+        ));
+}
+
+#[test]
 fn env_detects_opencode_model_and_variant_from_session_store() {
     let repo = Repo::new();
     let session = "ses_test123";
     let data_home = repo.home.join("data");
-    let store = data_home.join("opencode/opencode-next.db");
+    let store = data_home.join("opencode/opencode.db");
     fs::create_dir_all(store.parent().unwrap()).unwrap();
-    fs::write(&store, "test placeholder").unwrap();
+    // tapes reads the stable OpenCode store through sqlite3, so the fixture
+    // supplies a database carrying the one header byte sequence that marks a
+    // SQLite file and a deterministic reader on PATH, rather than depending
+    // on a host SQLite installation.
+    fs::write(&store, b"SQLite format 3\0").unwrap();
 
-    // Detection deliberately shells only to sqlite3, so the test supplies a
-    // deterministic reader without depending on a host SQLite installation.
     let bin = repo.home.join("bin");
     fs::create_dir_all(&bin).unwrap();
     let sqlite = bin.join("sqlite3");
     fs::write(
         &sqlite,
-        "#!/bin/sh\nprintf '%s\\n' '{\"id\":\"kimi-k3\",\"providerID\":\"opencode-go\",\"variant\":\"max\"}'\n",
+        concat!(
+            "#!/bin/sh\n",
+            "printf '%s\\n' 'row'\n",
+            "printf '%s\\n' '{\"id\":\"ses_test123\",\"model\":\"{\\\"id\\\":\\\"kimi-k3\\\",",
+            "\\\"providerID\\\":\\\"opencode-go\\\",\\\"variant\\\":\\\"max\\\"}\"}'\n",
+        ),
     )
     .unwrap();
     fs::set_permissions(&sqlite, fs::Permissions::from_mode(0o755)).unwrap();
@@ -483,9 +522,17 @@ fn env_detects_pi_model_and_thinking_level_from_session_store() {
     fs::write(
         sessions.join(format!("2026-07-18T12-07-52Z_{session}.jsonl")),
         concat!(
-            "{\"type\":\"session\",\"id\":\"x\"}\n",
-            "{\"type\":\"model_change\",\"modelId\":\"gpt-5.6-sol\"}\n",
-            "{\"type\":\"thinking_level_change\",\"thinkingLevel\":\"medium\"}\n",
+            "{\"type\":\"session\",\"version\":3,\"id\":\"019f7520-3278-7736-a3d9-2442c7a51fa0\",",
+            "\"timestamp\":\"2026-07-18T12:07:52Z\",\"cwd\":\"/fixture\"}\n",
+            "{\"type\":\"model_change\",\"id\":\"model-1\",\"parentId\":null,",
+            "\"timestamp\":\"2026-07-18T12:07:53Z\",\"provider\":\"openai-codex\",",
+            "\"modelId\":\"gpt-5.6-sol\"}\n",
+            "{\"type\":\"thinking_level_change\",\"id\":\"thinking-1\",\"parentId\":\"model-1\",",
+            "\"timestamp\":\"2026-07-18T12:07:54Z\",\"thinkingLevel\":\"medium\"}\n",
+            "{\"type\":\"message\",\"id\":\"assistant-1\",\"parentId\":\"thinking-1\",",
+            "\"timestamp\":\"2026-07-18T12:07:55Z\",\"message\":{\"role\":\"assistant\",",
+            "\"timestamp\":1767261604000,\"provider\":\"openai-codex\",\"model\":\"gpt-5.6-sol\",",
+            "\"content\":[{\"type\":\"text\",\"text\":\"The recording's answer.\"}]}}\n",
         ),
     )
     .unwrap();

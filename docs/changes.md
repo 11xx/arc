@@ -345,15 +345,14 @@ leaves it untouched and prints the generated block to stdout.
 this order: `CLAUDE_SESSION_ID`, `CLAUDE_CODE_SESSION_ID` (the name Claude
 Code itself exports), `CODEX_THREAD_ID`, `OPENCODE_SESSION`, `PI_SESSION_ID`.
 When the harness's own session store yields the model, it appends an
-`ARC_MODEL` export (`model-slug[#effort]`): Claude reads the newest
-assistant model and that turn's effort from its project transcript, skipping
-the `<synthetic>` entries it writes for API errors; Codex honors `CODEX_HOME`
-and reads the latest turn's model and effort; OpenCode reads the selected model and
-variant from its SQLite session row when `sqlite3` is available; and Pi reads
-model and thinking-level changes from its JSONL session. Failure while reading
-a session store is a silent omission, never an error. OpenCode v2 is recognized
-without a session when `OPENCODE_TERMINAL` or process ancestry identifies it;
-it prints `ARC_HARNESS` plus a commented `ARC_SESSION` and succeeds. `arc env`
+`ARC_MODEL` export (`model-slug[#effort]`). Where a store lives, how a
+recording is shaped, and the model and effort it records are the tapes library
+arc links; arc keeps its own projection of a recording, not a second model of
+any harness's store. Failure while
+reading a session store is a silent omission, never an error. OpenCode v2 is
+recognized without a session when `OPENCODE_TERMINAL` or process ancestry
+identifies it; it prints `ARC_HARNESS` plus a commented `ARC_SESSION` and
+succeeds. `arc env`
 exits 1 and prints the export template when no harness is detected. That is
 the normal path for setting identity by hand rather than a failure. It does not
 inject identity into other commands.
@@ -377,19 +376,16 @@ expired foreign claim as abandoned. Rescue is read-only unless `--take` is
 given; takeover follows the same stale-claim rules as `arc claim --takeover`,
 records the displaced owner, and narrates the handover to journal auto-log.
 `--json` emits the versioned `arc-rescue/3` object.
-`--transcript [--tail N]` includes the claimed session's latest operator turns;
-it tries `tapes` when that CLI is installed and falls back to arc's own readers
-otherwise. Each reader takes the newest 4 MiB of a recording file as its
-window, so `--tail N` counts the same turns whichever one answers. The
-rendering names the reader that
-supplied the turns and the readers that declined, and a read that stopped before
-the start of the recording states the window it rested on: the bytes it skipped
-when the native reader measured them, or the `tapes show --full` command that
-reaches the unread text. An empty answer carries a `cause` field naming an
+`--transcript [--tail N]` includes the claimed session's latest operator turns,
+read through the tapes library arc links rather than a `tapes` program. The
+read takes the newest 4 MiB of a recording file as its window, and `--tail N`
+counts turns of the operator projection. The rendering names the reader that
+supplied the turns and states the bound a read stopped at: the bytes it skipped
+and the `tapes show --full` command that reaches the unread text. An empty
+answer carries a `cause` field naming an
 unknown identity, an absent recording, or text outside the read window, so a
 machine consumer reading `count: 0` separates them without parsing prose.
-`tapes` is what covers OpenCode sessions, while arc continues to work without
-`tapes` for its native readers. Arc prints what the transcript contains and
+Arc prints what the transcript contains and
 performs no redaction, so the option is opt-in and its output should be treated
 as sensitive.
 
