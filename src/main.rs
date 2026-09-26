@@ -1570,7 +1570,8 @@ enum PolicyCmd {
 #[derive(Subcommand)]
 enum ExternalCmd {
     /// Record an external verdict at the revision its decision covered. A
-    /// rejection of the latest patchset closes the change as abandoned
+    /// rejection of the latest patchset closes the change as abandoned.
+    /// An external approval never supersedes a local refusal
     Verdict {
         /// Change that received the external decision
         change: String,
