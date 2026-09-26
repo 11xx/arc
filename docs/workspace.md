@@ -197,7 +197,9 @@ being presented as known to touch nothing.
 ### Workspace report
 
 `arc workspace report` reads the same projects the same way as `workspace
-backlog --items` and classifies them by named rules, so a reader of any kind —
+backlog --items`, reads each project's ledger once for how long its open
+changes have been open and which closed changes left a worktree, and
+classifies them by named rules, so a reader of any kind —
 a person, a renderer, a model — gets the same answer from the same ledger. Its
 JSON is versioned `arc-workspace-report/1`; the text view prints the tallies
 and the attention list. The report writes nothing.
@@ -223,7 +225,7 @@ person settles`) or to a position block.
 
 `sections` groups the rows: `needs_person` holds decision questions still open
 on unresolved artifacts; `in_flight` every open change by inbox bucket, plus
-changes with no patchset; `review_owed` each debt with its kind and age;
+changes with no patchset, each with the days since it opened; `review_owed` each debt with its kind and age;
 `deferred` round deferrals; `work`, `proposals`, and `parked` the journal
 tiers, ordered by project, then kind (handoff, plan, todo, discussion, other),
 then filing time.
@@ -235,6 +237,10 @@ subject, evidence}`:
 - `stale-question` — a decision question open longer than 7 days.
 - `stale-handoff` — a handoff unresolved longer than 14 days.
 - `stale-claim` — a claim that lapsed and can be reclaimed.
+- `stale-no-patchset` — a change open longer than 7 days with no patchset.
+- `worktree-outlives-change` — a closed change whose separate worktree is
+  still on disk; a change begun without a worktree records the main checkout
+  and is never flagged for it.
 - `debt-grew` — a project whose review owed rose against `--previous`.
 - `collection-failed` — a component of a project that could not be read.
 - `unreachable-anchor` — a registered project whose anchor is gone; anchors
