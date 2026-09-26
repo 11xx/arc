@@ -38,13 +38,14 @@ const HARNESS_ENV: [(&str, &str); 5] = [
     ("PI_SESSION_ID", "pi"),
 ];
 
-/// A harness whose session id reaches its tool children only through the
-/// prompt. The v1 CLI exports `OPENCODE_SESSION` and is handled by the env
-/// ladder; the v2 beta (`opencode2`) exports none, so it is recognized by the
-/// witnesses it cannot help carrying: `OPENCODE_TERMINAL` in every tool-shell
-/// environment, and its own process name in the PPID chain. One label covers
-/// both versions — v2 is the same project — and the session id stays unset,
-/// which is the honest report rather than a guessed one.
+/// A harness that names no session variable of its own. OpenCode's installed
+/// versions export none; `OPENCODE_SESSION` is an id a caller sets, read from
+/// the variable list like any other. Because the harness itself names no
+/// session, a run whose id nobody set is recognized by witnesses it cannot
+/// help carrying: `OPENCODE_TERMINAL` in every tool-shell environment, and its
+/// own process name in the PPID chain. One label covers both versions — v2 is
+/// the same project — and an id nobody set stays unset, which is the honest
+/// report rather than a guessed one.
 const OPENCODE_COMMS: [&str; 2] = ["opencode", "opencode2"];
 
 /// How far up the PPID chain ancestry detection looks. A harness sits within
@@ -249,6 +250,9 @@ pub struct DetectedIdentity {
     /// record.
     pub session: Option<DetectedSession>,
     pub model: Option<String>,
+    /// Why no model is named, where the store answered without one. `None`
+    /// beside an absent model means the model was never asked for.
+    pub model_unavailable: Option<&'static str>,
 }
 
 /// One harness's session variable, as this process carries it.
@@ -337,24 +341,61 @@ fn opencode_witness() -> Detection {
             harness: "opencode".to_string(),
             session: None,
             model: None,
+            model_unavailable: None,
         });
     }
     Detection::None
 }
 
 fn resolved(claim: &SessionClaim) -> DetectedIdentity {
-    let (found, model) = session_store::session_model(claim.harness, &claim.session);
+    let identity = session_store::session_identity(claim.harness, &claim.session);
+    let recorded = !matches!(identity, session_store::SessionIdentity::NoRecording);
+    let (mut model, mut model_unavailable) = match identity {
+        session_store::SessionIdentity::Named(model) => (Some(model), None),
+        session_store::SessionIdentity::Unnamed(reason) => (None, Some(reason.line())),
+        session_store::SessionIdentity::NoRecording => (None, None),
+    };
+    if let Some(live) = live_pi_model(claim) {
+        model = Some(live);
+        model_unavailable = None;
+    }
     DetectedIdentity {
         harness: claim.harness.to_string(),
         session: Some(DetectedSession {
             id: claim.session.clone(),
-            resolution: if found {
+            resolution: if recorded {
                 SessionResolution::Corroborated
             } else {
                 SessionResolution::Uncorroborated
             },
         }),
         model,
+        model_unavailable,
+    }
+}
+
+/// The model Pi's live values name for the acting session, when `PI_SESSION_ID`
+/// is the one being recorded. Pi re-sets `PI_MODEL` and `PI_REASONING_LEVEL`
+/// for every tool call, so they describe the turn in flight; the recording is
+/// the fallback. A reasoning level without a live model says nothing about
+/// which model it belongs to, so the recording answers both then.
+fn live_pi_model(claim: &SessionClaim) -> Option<String> {
+    if claim.harness != "pi" {
+        return None;
+    }
+    let acting = std::env::var("PI_SESSION_ID")
+        .ok()
+        .is_some_and(|id| id == claim.session);
+    if !acting {
+        return None;
+    }
+    let model = std::env::var("PI_MODEL").ok()?.trim().to_string();
+    if model.is_empty() {
+        return None;
+    }
+    match std::env::var("PI_REASONING_LEVEL") {
+        Ok(level) if !level.trim().is_empty() => Some(format!("{model}#{}", level.trim())),
+        _ => Some(model),
     }
 }
 
@@ -362,6 +403,10 @@ const EXPORT_TEMPLATE: &str = concat!(
     "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id>",
     " ARC_MODEL=<model[#effort]>"
 );
+
+/// The three fields one identity is made of. `arc env` accounts for every one
+/// of them, so evaluating its output leaves no stale value behind.
+const IDENTITY_VARIABLES: &str = "ARC_HARNESS ARC_SESSION ARC_MODEL";
 
 pub fn print_env() -> i32 {
     let identity = match detect_identity() {
@@ -372,10 +417,12 @@ pub fn print_env() -> i32 {
                 "# ambiguous: {}; set ARC_HARNESS and ARC_SESSION by hand",
                 ambiguity_report(&claims)
             );
+            println!("unset {IDENTITY_VARIABLES}");
             return 1;
         }
         Detection::None => {
             println!("{EXPORT_TEMPLATE}");
+            println!("unset {IDENTITY_VARIABLES}");
             return 1;
         }
     };
@@ -384,6 +431,7 @@ pub fn print_env() -> i32 {
         // never reachable. The export line is real and eval-able; the comment
         // carries the report a full-detection run would not need.
         println!("export ARC_HARNESS={}", shell_quote(&identity.harness));
+        println!("unset ARC_SESSION ARC_MODEL");
         println!(
             "# export ARC_SESSION=<session-id>  # unavailable: {} does not \
              export a session variable; set it by hand",
@@ -391,18 +439,24 @@ pub fn print_env() -> i32 {
         );
         return 0;
     };
-    match identity.model {
+    match &identity.model {
         Some(model) => println!(
             "export ARC_HARNESS={} ARC_SESSION={} ARC_MODEL={}",
             shell_quote(&identity.harness),
             shell_quote(&session.id),
-            shell_quote(&model)
+            shell_quote(model)
         ),
-        None => println!(
-            "export ARC_HARNESS={} ARC_SESSION={}",
-            shell_quote(&identity.harness),
-            shell_quote(&session.id)
-        ),
+        None => {
+            println!(
+                "export ARC_HARNESS={} ARC_SESSION={}",
+                shell_quote(&identity.harness),
+                shell_quote(&session.id)
+            );
+            println!("unset ARC_MODEL");
+        }
+    }
+    if let Some(reason) = identity.model_unavailable {
+        println!("# export ARC_MODEL=<model[#effort]>  # unavailable: {reason}");
     }
     println!(
         "# {}",

@@ -99,7 +99,7 @@ fn env_detects_codex_thread_and_prints_exports() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='codex' ARC_SESSION='thread-123'\n{}",
+            "export ARC_HARNESS='codex' ARC_SESSION='thread-123'\nunset ARC_MODEL\n{}",
             uncorroborated("codex")
         ));
 }
@@ -393,7 +393,7 @@ fn env_prefers_hand_set_claude_session_over_ambient() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='hand-set'\n{}",
+            "export ARC_HARNESS='claude' ARC_SESSION='hand-set'\nunset ARC_MODEL\n{}",
             uncorroborated("claude")
         ));
 }
@@ -459,7 +459,7 @@ fn env_requires_exact_codex_identity_not_year_substring() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='codex' ARC_SESSION='2026'\n{}",
+            "export ARC_HARNESS='codex' ARC_SESSION='2026'\nunset ARC_MODEL\n{}",
             uncorroborated("codex")
         ));
 }
@@ -565,7 +565,7 @@ fn env_detects_opencode2_by_terminal_variable_and_leaves_the_session_unset() {
         .env("OPENCODE_TERMINAL", "1")
         .assert()
         .success()
-        .stdout("export ARC_HARNESS='opencode'\n# export ARC_SESSION=<session-id>  # unavailable: opencode does not export a session variable; set it by hand\n");
+        .stdout("export ARC_HARNESS='opencode'\nunset ARC_SESSION ARC_MODEL\n# export ARC_SESSION=<session-id>  # unavailable: opencode does not export a session variable; set it by hand\n");
 }
 
 #[test]
@@ -585,26 +585,13 @@ fn env_detects_opencode2_by_process_ancestry() {
 
     // assert_cmd execs the binary directly, which would leave the test runner
     // as the parent; spawn through the wrapper so the ancestry is real.
-    let mut wrapped = Command::new(&harness);
-    wrapped
-        .current_dir(&repo.root)
-        .arg(assert_cmd::cargo_bin!("arc"))
-        .arg("env")
-        .env("HOME", &repo.home)
-        .env_remove("CLAUDE_SESSION_ID")
-        .env_remove("CLAUDE_CODE_SESSION_ID")
-        .env_remove("CODEX_THREAD_ID")
-        .env_remove("OPENCODE_SESSION")
-        .env_remove("PI_SESSION_ID")
-        .env_remove("OPENCODE_TERMINAL")
-        .env_remove("ARC_HARNESS")
-        .env_remove("ARC_SESSION")
-        .env_remove("ARC_MODEL");
+    let mut wrapped = fixture_arc(&repo, &harness);
+    wrapped.arg(assert_cmd::cargo_bin!("arc")).arg("env");
     let output = output_past_busy_text(&mut wrapped);
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "export ARC_HARNESS='opencode'\n# export ARC_SESSION=<session-id>  # unavailable: opencode does not export a session variable; set it by hand\n"
+        "export ARC_HARNESS='opencode'\nunset ARC_SESSION ARC_MODEL\n# export ARC_SESSION=<session-id>  # unavailable: opencode does not export a session variable; set it by hand\n"
     );
 }
 
@@ -714,7 +701,7 @@ fn env_reports_the_nested_harness_that_owns_the_process() {
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
             format!(
-                "export ARC_HARNESS='{inner}' ARC_SESSION='{inner_session}'\n{}",
+                "export ARC_HARNESS='{inner}' ARC_SESSION='{inner_session}'\nunset ARC_MODEL\n{}",
                 uncorroborated(inner)
             ),
             "{inner} under {outer} reported the wrong owner"
@@ -845,7 +832,8 @@ fn env_reports_ambiguity_when_no_ancestor_names_the_owner() {
             "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id> ",
             "ARC_MODEL=<model[#effort]>\n",
             "# ambiguous: CLAUDE_CODE_SESSION_ID (claude) and PI_SESSION_ID (pi); ",
-            "set ARC_HARNESS and ARC_SESSION by hand\n"
+            "set ARC_HARNESS and ARC_SESSION by hand\n",
+            "unset ARC_HARNESS ARC_SESSION ARC_MODEL\n"
         ));
 }
 
@@ -871,6 +859,437 @@ fn ambiguous_detection_records_no_identity_on_an_undeclared_event() {
     assert!(event.get("session_resolution").is_none(), "{event}");
     assert_eq!(event["actor"], "Tester", "{event}");
     assert_eq!(event["actor_source"], "git-fallback", "{event}");
+}
+
+/// A Pi recording in the fixture's store: the header, the thinking level in
+/// effect, and one assistant turn naming the model. Returns the file, so a
+/// caller can also name it as the live recording.
+fn pi_recording(repo: &Repo, session: &str, model: &str, level: &str) -> PathBuf {
+    let sessions = repo.home.join("pi-sessions/project");
+    fs::create_dir_all(&sessions).unwrap();
+    let path = sessions.join(format!("2026-07-18T12-07-52Z_{session}.jsonl"));
+    fs::write(
+        &path,
+        format!(
+            concat!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{session}\",",
+                "\"timestamp\":\"2026-07-18T12:07:52Z\",\"cwd\":\"/fixture\"}}\n",
+                "{{\"type\":\"thinking_level_change\",\"id\":\"thinking-1\",\"parentId\":null,",
+                "\"timestamp\":\"2026-07-18T12:07:53Z\",\"thinkingLevel\":\"{level}\"}}\n",
+                "{{\"type\":\"message\",\"id\":\"assistant-1\",\"parentId\":\"thinking-1\",",
+                "\"timestamp\":\"2026-07-18T12:07:54Z\",\"message\":{{\"role\":\"assistant\",",
+                "\"timestamp\":1767261604000,\"provider\":\"openai-codex\",\"model\":\"{model}\",",
+                "\"content\":[{{\"type\":\"text\",\"text\":\"The recording's answer.\"}}]}}}}\n",
+            ),
+            session = session,
+            model = model,
+            level = level,
+        ),
+    )
+    .unwrap();
+    path
+}
+
+/// A Claude session that has spawned one subagent, with the subagent's own
+/// recording beside it. `completed` decides whether the parent recorded the
+/// subagent as finished.
+fn claude_with_subagent(repo: &Repo, session: &str, agent: &str, completed: bool) {
+    let project = repo.home.join(".claude/projects/-test-repo");
+    fs::create_dir_all(&project).unwrap();
+    let mut parent = vec![
+        format!(
+            "{{\"type\":\"user\",\"sessionId\":\"{session}\",\"uuid\":\"u1\",\"parentUuid\":null,\"timestamp\":\"2026-01-01T10:00:00Z\",\"message\":{{\"role\":\"user\",\"content\":\"work\"}}}}"
+        ),
+        format!(
+            "{{\"type\":\"assistant\",\"sessionId\":\"{session}\",\"uuid\":\"a1\",\"parentUuid\":\"u1\",\"timestamp\":\"2026-01-01T10:00:01Z\",\"message\":{{\"role\":\"assistant\",\"model\":\"claude-parent\",\"content\":[{{\"type\":\"text\",\"text\":\"starting\"}}]}}}}"
+        ),
+        format!(
+            "{{\"type\":\"assistant\",\"sessionId\":\"{session}\",\"uuid\":\"a2\",\"parentUuid\":\"a1\",\"timestamp\":\"2026-01-01T10:00:02Z\",\"message\":{{\"role\":\"assistant\",\"model\":\"claude-parent\",\"content\":[{{\"type\":\"tool_use\",\"id\":\"tool-agent-1\",\"name\":\"Agent\",\"input\":{{\"subagent_type\":\"Explore\",\"description\":\"Inspect the fixture.\"}}}}]}}}}"
+        ),
+    ];
+    if completed {
+        parent.push(format!(
+            "{{\"type\":\"user\",\"sessionId\":\"{session}\",\"uuid\":\"r1\",\"parentUuid\":\"a2\",\"timestamp\":\"2026-01-01T10:00:04Z\",\"toolUseResult\":{{\"status\":\"completed\",\"agentId\":\"{agent}\",\"agentType\":\"Explore\"}},\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"tool-agent-1\",\"content\":\"Subagent complete.\"}}]}}}}"
+        ));
+    }
+    fs::write(
+        project.join(format!("{session}.jsonl")),
+        parent.join("\n") + "\n",
+    )
+    .unwrap();
+
+    let directory = project.join(session).join("subagents");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(
+        directory.join(format!("agent-{agent}.jsonl")),
+        format!(
+            "{{\"type\":\"assistant\",\"sessionId\":\"{session}\",\"uuid\":\"s1\",\"parentUuid\":null,\"timestamp\":\"2026-01-01T10:00:03Z\",\"message\":{{\"role\":\"assistant\",\"model\":\"claude-subagent\",\"content\":[{{\"type\":\"text\",\"text\":\"subagent work\"}}]}}}}\n"
+        ),
+    )
+    .unwrap();
+    if completed {
+        fs::write(
+            directory.join(format!("agent-{agent}.meta.json")),
+            "{\"agentType\":\"Explore\",\"description\":\"Inspect the fixture.\",\"toolUseId\":\"tool-agent-1\",\"spawnDepth\":1,\"model\":\"sonnet\"}\n",
+        )
+        .unwrap();
+    }
+}
+
+/// Pi re-sets its model and reasoning level for every tool call, so while
+/// `PI_SESSION_ID` is the acting session those live values answer and the
+/// recording is the fallback. A level without a live model names no model.
+#[test]
+fn env_reports_the_live_pi_values_for_the_acting_session() {
+    let repo = Repo::new();
+    let session = "019f7520-3278-7736-a3d9-2442c7a51fa0";
+    pi_recording(&repo, session, "gpt-5.6-recorded", "low");
+
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("PI_SESSION_ID", session)
+        .env("PI_CODING_AGENT_SESSION_DIR", repo.home.join("pi-sessions"))
+        .env("PI_MODEL", "gpt-5.6-live")
+        .env("PI_REASONING_LEVEL", "high")
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-live#high'\n{}",
+            corroborated("pi")
+        ));
+
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("PI_SESSION_ID", session)
+        .env("PI_CODING_AGENT_SESSION_DIR", repo.home.join("pi-sessions"))
+        .env("PI_REASONING_LEVEL", "high")
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-recorded#low'\n{}",
+            corroborated("pi")
+        ));
+}
+
+/// A session opened with `--session`/`--session-dir` lives outside the
+/// configured store; `PI_SESSION_FILE` names its recording, so the session is
+/// corroborated from there.
+#[test]
+fn env_corroborates_a_pi_session_recorded_at_the_live_file() {
+    let repo = Repo::new();
+    let session = "019f7520-3278-7736-a3d9-2442c7a51fa0";
+    let recorded = pi_recording(&repo, session, "gpt-5.6-recorded", "medium");
+    let elsewhere = repo.home.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("PI_SESSION_ID", session)
+        .env("PI_SESSION_FILE", &recorded)
+        .env("PI_CODING_AGENT_SESSION_DIR", &elsewhere)
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-recorded#medium'\n{}",
+            corroborated("pi")
+        ));
+
+    // Without the live file the recording is outside every configured root.
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("PI_SESSION_ID", session)
+        .env("PI_CODING_AGENT_SESSION_DIR", &elsewhere)
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='pi' ARC_SESSION='{session}'\nunset ARC_MODEL\n{}",
+            uncorroborated("pi")
+        ));
+}
+
+/// A subagent's tool shell carries its parent's session id, and the store does
+/// not say which subagent a shell belongs to. While the session has not
+/// recorded a subagent as finished, `arc env` names no model and says why
+/// rather than report the parent's.
+#[test]
+fn env_withholds_the_model_while_a_subagent_recording_is_live() {
+    let repo = Repo::new();
+    let session = "4074d881-1111-2222-3333-444444444444";
+    claude_with_subagent(&repo, session, "aef42352478f33196", false);
+
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("CLAUDE_CODE_SESSION_ID", session)
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
+        .assert()
+        .success()
+        .stdout(format!(
+            concat!(
+                "export ARC_HARNESS='claude' ARC_SESSION='{session}'\n",
+                "unset ARC_MODEL\n",
+                "# export ARC_MODEL=<model[#effort]>  # unavailable: a subagent recording ",
+                "is newer than the session's last turn, so the session's model need not ",
+                "be the acting one\n",
+                "{}"
+            ),
+            corroborated("claude"),
+            session = session
+        ));
+
+    // A subagent the session recorded as finished leaves the session's own
+    // model in place.
+    claude_with_subagent(&repo, session, "aef42352478f33196", true);
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("CLAUDE_CODE_SESSION_ID", session)
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-parent'\n{}",
+            corroborated("claude")
+        ));
+}
+
+/// Every identity field `arc env` cannot establish is unset, so evaluating
+/// its output never leaves a stale value beside a fresh one.
+#[test]
+fn env_unsets_the_identity_fields_it_cannot_establish() {
+    let repo = Repo::new();
+    let binary = assert_cmd::cargo_bin!("arc");
+    let read_after_eval = |extra: &[(&str, &str)]| -> String {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!(
+                "eval \"$('{}' env)\"; printf '%s\\n' \
+                 \"ARC_HARNESS=${{ARC_HARNESS-<unset>}}\" \
+                 \"ARC_SESSION=${{ARC_SESSION-<unset>}}\" \
+                 \"ARC_MODEL=${{ARC_MODEL-<unset>}}\"",
+                binary.display()
+            ))
+            .current_dir(&repo.root)
+            .env("HOME", &repo.home)
+            .env("ARC_SANDBOX", &repo.home)
+            .envs(NO_EDITOR)
+            .env("ARC_SESSION", "old-session")
+            .env("ARC_MODEL", "old-model")
+            .env_remove("ARC_ACTOR")
+            .env_remove("ARC_HARNESS")
+            .env_remove("ARC_ROLE")
+            .env_remove("ARC_ON_BEHALF_OF")
+            .env_remove("ARC_DATA_DIR")
+            .env_remove("ARC_DATA_ROOT")
+            .env_remove("ARC_WORKTREES_DIR")
+            .env_remove("AI_HOME")
+            .env_remove("CLAUDE_SESSION_ID")
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("OPENCODE_SESSION")
+            .env_remove("OPENCODE_TERMINAL")
+            .env_remove("PI_SESSION_ID")
+            .env_remove("PI_SESSION_FILE")
+            .env_remove("PI_MODEL")
+            .env_remove("PI_REASONING_LEVEL");
+        for (key, value) in extra {
+            command.env(key, value);
+        }
+        let output = command.output().unwrap();
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    // A harness recognized without a session variable keeps its export and
+    // clears the fields it cannot establish.
+    assert_eq!(
+        read_after_eval(&[("OPENCODE_TERMINAL", "1")]),
+        "ARC_HARNESS=opencode\nARC_SESSION=<unset>\nARC_MODEL=<unset>\n"
+    );
+    // Nothing detected at all clears every field.
+    assert_eq!(
+        read_after_eval(&[]),
+        "ARC_HARNESS=<unset>\nARC_SESSION=<unset>\nARC_MODEL=<unset>\n"
+    );
+}
+
+/// A detected model belongs to the session detection resolved. Filling it
+/// beside a different acting session would record one session's identity with
+/// another's model.
+#[test]
+fn ambient_fill_pairs_a_model_only_with_the_session_it_answers_for() {
+    let repo = Repo::new();
+    enable_identity_detection(&repo);
+    let detected = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
+    let day = repo.home.join(".codex/sessions/2026/07/24");
+    fs::create_dir_all(&day).unwrap();
+    fs::write(
+        day.join(format!("rollout-2026-07-24T00-00-00-{detected}.jsonl")),
+        concat!(
+            "{\"type\":\"session_meta\",\"timestamp\":\"1\",",
+            "\"payload\":{\"id\":\"019f7890-5c01-7ec1-9240-2eba1613e5d2\"}}\n",
+            "{\"type\":\"turn_context\",\"timestamp\":\"2\",",
+            "\"payload\":{\"model\":\"gpt-5.6-sol\",\"effort\":\"low\"}}\n",
+        ),
+    )
+    .unwrap();
+
+    let output = stdout(
+        repo.arc(&repo.root)
+            .args(["--session", "hand-set-session", "begin", "model-pairing"])
+            .env_remove("ARC_ACTOR")
+            .env_remove("ARC_HARNESS")
+            .env_remove("ARC_SESSION")
+            .env_remove("ARC_MODEL")
+            .env("CODEX_THREAD_ID", detected)
+            .env("CODEX_HOME", repo.home.join(".codex")),
+    );
+    let event = opened_event(&repo, &opened_change_id(&output));
+    assert_eq!(event["harness"], "codex", "{event}");
+    assert_eq!(event["session"], "hand-set-session", "{event}");
+    assert!(event["model"].is_null(), "{event}");
+}
+
+/// Pi's active conversation is the ancestry of the last entry, so a model on
+/// an abandoned branch is not the session's model even when it is the last
+/// one written.
+#[test]
+fn env_reports_the_active_pi_branch_s_model() {
+    let repo = Repo::new();
+    let session = "019f7520-3278-7736-a3d9-2442c7a51fa0";
+    let sessions = repo.home.join("pi-sessions/project");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join(format!("2026-07-18T12-07-52Z_{session}.jsonl")),
+        concat!(
+            "{\"type\":\"session\",\"version\":3,\"id\":\"019f7520-3278-7736-a3d9-2442c7a51fa0\",\"timestamp\":\"2026-07-18T12:07:52Z\",\"cwd\":\"/fixture\"}\n",
+            "{\"type\":\"model_change\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"2026-07-18T12:07:53Z\",\"provider\":\"p\",\"modelId\":\"pi-model-a\"}\n",
+            "{\"type\":\"thinking_level_change\",\"id\":\"t1\",\"parentId\":\"m1\",\"timestamp\":\"2026-07-18T12:07:54Z\",\"thinkingLevel\":\"low\"}\n",
+            "{\"type\":\"message\",\"id\":\"u1\",\"parentId\":\"t1\",\"timestamp\":\"2026-07-18T12:07:55Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"work\"}]}}\n",
+            "{\"type\":\"model_change\",\"id\":\"m2\",\"parentId\":\"m1\",\"timestamp\":\"2026-07-18T12:07:56Z\",\"provider\":\"p\",\"modelId\":\"pi-abandoned\"}\n",
+            "{\"type\":\"message\",\"id\":\"a1\",\"parentId\":\"u1\",\"timestamp\":\"2026-07-18T12:07:57Z\",\"message\":{\"role\":\"assistant\",\"provider\":\"p\",\"model\":\"pi-model-a\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n",
+        ),
+    )
+    .unwrap();
+
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("PI_SESSION_ID", session)
+        .env("PI_CODING_AGENT_SESSION_DIR", repo.home.join("pi-sessions"))
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='pi-model-a#low'\n{}",
+            corroborated("pi")
+        ));
+}
+
+/// A store row without a model is a real session with no model, not an absent
+/// session: the id is what resolution answers on.
+#[test]
+fn env_corroborates_an_opencode_session_that_names_no_model() {
+    let repo = Repo::new();
+    let session = "ses_test123";
+    let data_home = repo.home.join("data");
+    let store = data_home.join("opencode/opencode.db");
+    fs::create_dir_all(store.parent().unwrap()).unwrap();
+    fs::write(&store, b"SQLite format 3\0").unwrap();
+    let bin = repo.home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let sqlite = bin.join("sqlite3");
+    fs::write(
+        &sqlite,
+        concat!(
+            "#!/bin/sh\n",
+            "printf '%s\\n' 'row'\n",
+            "printf '%s\\n' '{\"id\":\"ses_test123\",\"model\":null}'\n",
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&sqlite, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    repo.arc(&repo.root)
+        .arg("env")
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env("OPENCODE_SESSION", session)
+        .env_remove("PI_SESSION_ID")
+        .env("XDG_DATA_HOME", &data_home)
+        .env("PATH", path)
+        .assert()
+        .success()
+        .stdout(format!(
+            concat!(
+                "export ARC_HARNESS='opencode' ARC_SESSION='{session}'\n",
+                "unset ARC_MODEL\n",
+                "# export ARC_MODEL=<model[#effort]>  # unavailable: the recording names ",
+                "no model for this session\n",
+                "{}"
+            ),
+            corroborated("opencode"),
+            session = session
+        ));
+}
+
+/// An effort belongs to the turn that wrote it: a later `turn_context` that
+/// changes model without one does not inherit the earlier effort.
+#[test]
+fn env_does_not_carry_a_codex_effort_across_a_model_change() {
+    let repo = Repo::new();
+    let session = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
+    let codex_home = repo.home.join("codex-state");
+    let day = codex_home.join("sessions/2026/07/20");
+    fs::create_dir_all(&day).unwrap();
+    fs::write(
+        day.join(format!("rollout-2026-07-20T00-00-00-{session}.jsonl")),
+        concat!(
+            "{\"type\":\"session_meta\",\"timestamp\":\"1\",",
+            "\"payload\":{\"id\":\"019f7890-5c01-7ec1-9240-2eba1613e5d2\"}}\n",
+            "{\"type\":\"turn_context\",\"timestamp\":\"2\",",
+            "\"payload\":{\"model\":\"gpt-5.5-a\",\"effort\":\"high\"}}\n",
+            "{\"type\":\"turn_context\",\"timestamp\":\"3\",",
+            "\"payload\":{\"model\":\"gpt-5.5-b\"}}\n",
+        ),
+    )
+    .unwrap();
+
+    repo.arc(&repo.root)
+        .arg("env")
+        .env_remove("CLAUDE_SESSION_ID")
+        .env("CODEX_THREAD_ID", session)
+        .env("CODEX_HOME", &codex_home)
+        .env_remove("OPENCODE_SESSION")
+        .env_remove("PI_SESSION_ID")
+        .assert()
+        .success()
+        .stdout(format!(
+            "export ARC_HARNESS='codex' ARC_SESSION='{session}' ARC_MODEL='gpt-5.5-b'\n{}",
+            corroborated("codex")
+        ));
 }
 
 /// Documented examples are part of the command contract: a stale command or a
@@ -913,7 +1332,7 @@ fn env_omits_model_when_no_session_store_matches() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='codex' ARC_SESSION='no-such-thread'\n{}",
+            "export ARC_HARNESS='codex' ARC_SESSION='no-such-thread'\nunset ARC_MODEL\n{}",
             uncorroborated("codex")
         ));
 

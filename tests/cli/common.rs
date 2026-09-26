@@ -66,7 +66,10 @@ impl Repo {
             .env_remove("CODEX_THREAD_ID")
             .env_remove("OPENCODE_SESSION")
             .env_remove("OPENCODE_TERMINAL")
-            .env_remove("PI_SESSION_ID");
+            .env_remove("PI_SESSION_ID")
+            .env_remove("PI_SESSION_FILE")
+            .env_remove("PI_MODEL")
+            .env_remove("PI_REASONING_LEVEL");
         cmd
     }
 

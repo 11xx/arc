@@ -1088,13 +1088,23 @@ enum Cmd {
     /// `PI_CODING_AGENT_DIR` — before its default under `$HOME`. The store's
     /// answer for the session is reported with the exports: an id the store
     /// does not hold is uncorroborated, and the events the identity writes
-    /// carry that verdict. Not every harness exports one, and a harness that
+    /// carry that verdict. Every field the detection establishes is exported
+    /// and every field it does not is explicitly unset, so evaluating the
+    /// output never leaves a stale value beside a fresh one. Pi re-sets
+    /// `PI_SESSION_FILE`, `PI_MODEL`, and `PI_REASONING_LEVEL` for every tool
+    /// call, so those answer in preference to the recording while
+    /// `PI_SESSION_ID` is the acting session, and a Claude subagent shares
+    /// its parent's session id, so while the session has an unfinished
+    /// subagent recording no model is named and the line says why. Not every
+    /// harness exports a session variable, and a harness that
     /// does may not in every mode. OpenCode v2 exports none and is recognized
     /// by `OPENCODE_TERMINAL` or its process ancestry, printing the harness
-    /// export with the session left as a comment to set by hand.
+    /// export, unsetting the session and model, and leaving the session as a
+    /// comment to set by hand.
     ///
     /// With nothing to detect at all, or several harnesses and no owner the
-    /// ancestry can name, it prints the export template as a comment and
+    /// ancestry can name, it prints the export template as a comment, unsets
+    /// every identity field, and
     /// exits non-zero, which is a report that identity must be
     /// set by hand rather than a failure. Every value it emits can be set
     /// directly: explicit identity always wins over a detected one
@@ -2185,16 +2195,23 @@ fn run(cli: Cli) -> Result<i32> {
                 // A harness recognized without its cooperation carries no
                 // session id; recording the harness alone is the honest half
                 // of the detection, not a partial failure.
-                if session.is_none() {
-                    if let Some(detected_session) = detected.session {
-                        // The store's answer is about the session detection
-                        // supplied; a session the caller declared was never
-                        // asked about, so it carries no report.
-                        session_resolution = Some(detected_session.resolution);
-                        session = Some(detected_session.id);
+                let acting = match &detected.session {
+                    Some(detected_session) => {
+                        if session.is_none() {
+                            // The store's answer is about the session detection
+                            // supplied; a session the caller declared was never
+                            // asked about, so it carries no report.
+                            session_resolution = Some(detected_session.resolution);
+                            session = Some(detected_session.id.clone());
+                        }
+                        session.as_deref() == Some(detected_session.id.as_str())
                     }
-                }
-                if model.is_none() {
+                    None => false,
+                };
+                // The detected model belongs to the detected session: filling
+                // it beside a different acting session would record one
+                // session's identity with another's model.
+                if acting && model.is_none() {
                     model = detected.model;
                 }
             }

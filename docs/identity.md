@@ -40,6 +40,17 @@ ambiguity and records no harness, session, or model rather than resolving by
 variable order. A lone harness is unchanged, and a harness that exports no
 session variable is recognized by its own witnesses alone.
 
+The acting model is detected as `model-slug[#effort]` from the harness's
+recording, and Pi re-sets `PI_SESSION_FILE`, `PI_MODEL`, and
+`PI_REASONING_LEVEL` for every tool call, so those live values answer in
+preference to the recording while `PI_SESSION_ID` is the acting session. A
+Claude subagent's tool shell carries its parent's session id, and the store
+does not say which subagent a shell belongs to: while the session has an
+unfinished subagent recording, detection names no model and says why rather
+than report the parent's. Detection names every identity field it establishes
+and explicitly unsets each it cannot, so evaluating its output never leaves a
+stale field beside a fresh one.
+
 Journal events additionally record the acting model via `--model` or
 `ARC_MODEL`, a `model-slug[#effort]` string (e.g. `kimi-k3#high`,
 `gpt-5.6-sol#low`) matching the `Assisted-by: Harness:Model#Effort` grammar.
