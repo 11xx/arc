@@ -32,6 +32,14 @@ environment down — is recorded as uncorroborated rather than left to be
 inferred from an absent model. A session declared with `ARC_SESSION` or
 `--session` was never looked up, so it carries no verdict either way.
 
+The harness that owns the process is the one that exported its session id into
+it: a harness passes its id to the tool shells it starts, so when several
+harnesses' variables are present, the nearest ancestor that exported one names
+the session. Where the ancestry names no single owner, detection reports the
+ambiguity and records no harness, session, or model rather than resolving by
+variable order. A lone harness is unchanged, and a harness that exports no
+session variable is recognized by its own witnesses alone.
+
 Journal events additionally record the acting model via `--model` or
 `ARC_MODEL`, a `model-slug[#effort]` string (e.g. `kimi-k3#high`,
 `gpt-5.6-sol#low`) matching the `Assisted-by: Harness:Model#Effort` grammar.
