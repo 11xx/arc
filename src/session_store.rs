@@ -126,25 +126,77 @@ pub fn read_session(harness: &str, session: &str) -> SessionAnswer {
     SessionAnswer::Read(SessionRead { turns, bound, path })
 }
 
-/// Whether a harness's store holds the session, and the model and effort its
-/// recording shows last, as `model#effort` when both are recorded. The
-/// recording's bounded read decides the model; the store's listing answers
-/// only when that read does not.
-pub fn session_model(harness: &str, session: &str) -> (bool, Option<String>) {
+/// What a store holds for one session, and what arc may report from it.
+pub enum SessionIdentity {
+    /// The store holds a recording naming this model, as `model#effort` when
+    /// the recording carries an effort.
+    Named(String),
+    /// The store holds a recording whose model arc will not report, with the
+    /// reason.
+    Unnamed(ModelUnavailable),
+    /// No store of the harness holds a recording for the id.
+    NoRecording,
+}
+
+/// Why a recording arc found names no model it may report.
+pub enum ModelUnavailable {
+    /// The recording carries no model selection to attribute.
+    NotRecorded,
+    /// The store holds a subagent recording the session has not recorded as
+    /// finished. A subagent's tool shell carries its parent's session id, and
+    /// the store does not say which subagent a shell belongs to, so the
+    /// parent's model need not be the acting one.
+    SubagentActivity,
+}
+
+impl ModelUnavailable {
+    /// What an operator reads: why no model is named.
+    pub fn line(self) -> &'static str {
+        match self {
+            ModelUnavailable::NotRecorded => "the recording names no model for this session",
+            ModelUnavailable::SubagentActivity => {
+                "a subagent recording is newer than the session's last turn, so the session's model need not be the acting one"
+            }
+        }
+    }
+}
+
+/// What a harness's store holds for one session. The recording's bounded read
+/// decides the model; the store's listing answers only when that read does
+/// not.
+pub fn session_identity(harness: &str, session: &str) -> SessionIdentity {
     let backends = harness_backends(harness);
     let Ok(resolved) = tapes_core::resolve_session(&backends, session) else {
-        return (false, None);
+        return SessionIdentity::NoRecording;
     };
-    let model = backends[resolved.backend_index]
+    let backend = &backends[resolved.backend_index];
+    if harness == "claude" && subagent_may_be_acting(backend.as_ref(), &resolved.session) {
+        return SessionIdentity::Unnamed(ModelUnavailable::SubagentActivity);
+    }
+    let model = backend
         .transcript(&resolved.session, 1)
         .ok()
         .and_then(|transcript| transcript.session.model)
         .or(resolved.session.model);
-    let model = model.map(|model| match model.variant {
-        Some(variant) => format!("{}#{variant}", model.id),
-        None => model.id,
-    });
-    (true, model)
+    match model {
+        Some(model) => SessionIdentity::Named(match model.variant {
+            Some(variant) => format!("{}#{variant}", model.id),
+            None => model.id,
+        }),
+        None => SessionIdentity::Unnamed(ModelUnavailable::NotRecorded),
+    }
+}
+
+/// Whether the store holds a subagent recording the session has not recorded
+/// as finished. Such a child may be the process whose shell is asking, and
+/// reading its parent's model would answer for the wrong agent.
+fn subagent_may_be_acting(backend: &dyn Backend, session: &tapes_core::model::Session) -> bool {
+    backend.lineage(session).is_ok_and(|lineage| {
+        lineage
+            .children
+            .iter()
+            .any(|child| child.resolved && child.completed_at.is_none())
+    })
 }
 
 /// The operator's view of a transcript: what they asked, plus where the
