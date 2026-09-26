@@ -19,6 +19,7 @@ use crate::gitio;
 use crate::model::{
     BlockerRef, ClaimStage, DisplacedClaim, JournalArtifactRef, PlanSource, PlannerIdentity,
 };
+use crate::replica::ReplicaIdentity;
 use crate::state::{self, ChangeState, ClaimIdentity, ClaimState, StageProgress};
 use crate::store::Store;
 use anyhow::{bail, Context, Result};
@@ -26,7 +27,7 @@ use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use clap::{Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -1122,6 +1123,27 @@ pub enum JournalCmd {
         /// Archived artifact filename inside the journal dir (a name, not a path)
         filename: String,
     },
+    /// Export selected journal artifacts as a versioned bundle for another
+    /// replica. The bundle carries each artifact body, the events recorded
+    /// about it, its body digest, the exporting replica, and every artifact
+    /// the selection references by filename
+    Export {
+        /// Artifact filenames inside the journal dir (names, not paths); the
+        /// dependency closure of what they reference travels with them
+        #[arg(required = true)]
+        files: Vec<String>,
+        /// Output file ('-' for stdout)
+        #[arg(long)]
+        output: String,
+    },
+    /// Import a journal bundle exported by another paired replica
+    Import {
+        /// Input file ('-' for stdin)
+        input: String,
+        /// Validate and report without writing artifacts, events, or a receipt
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 impl JournalCmd {
@@ -1144,6 +1166,7 @@ impl JournalCmd {
             | JournalCmd::Show { .. }
             | JournalCmd::Latest { .. }
             | JournalCmd::Discussion { .. }
+            | JournalCmd::Export { .. }
             | JournalCmd::Stamp => false,
             JournalCmd::Spool { promote } => *promote,
             JournalCmd::Lane { command } => matches!(
@@ -1437,6 +1460,8 @@ pub fn run(ctx: &Ctx, cmd: JournalCmd) -> Result<i32> {
             &acknowledge_claim,
         ),
         JournalCmd::Unarchive { filename } => unarchive(ctx, &filename),
+        JournalCmd::Export { files, output } => export_artifacts(ctx, &files, &output).map(|()| 0),
+        JournalCmd::Import { input, dry_run } => import_artifacts(ctx, &input, dry_run),
     }
 }
 
@@ -1446,6 +1471,526 @@ pub fn archive_dir(hot: &Path) -> PathBuf {
     let mut cold = hot.as_os_str().to_os_string();
     cold.push("-archive");
     PathBuf::from(cold)
+}
+
+// ---------------------------------------------------------------------------
+// Selected journal exchange
+// ---------------------------------------------------------------------------
+
+const EXCHANGE_DIR: &str = "exchange";
+const EXCHANGE_IMPORTS_DIR: &str = "imports";
+
+/// Where one journal keeps the receipts of the bundles it imported.
+fn exchange_imports_dir(hot: &Path) -> PathBuf {
+    hot.join(EXCHANGE_DIR).join(EXCHANGE_IMPORTS_DIR)
+}
+
+/// A reference one recorded event makes to another journal artifact.
+pub(crate) enum ArtifactReference {
+    /// An artifact this journal holds; the dependency closure carries it.
+    Local(String),
+    /// A decision recorded in another project's journal, which a bundle for
+    /// this project cannot carry.
+    ForeignProject { file: String, project: String },
+}
+
+fn export_artifacts(ctx: &Ctx, files: &[String], output: &str) -> Result<()> {
+    let hot = resolve_dir(&ctx.cwd)?;
+    let store = ctx.store()?;
+    let replica = crate::replica::status(&store)?;
+    let local = replica.local.clone().context(
+        "this store is not a replica; record one with `arc replica init <name>` \
+         before exporting journal artifacts",
+    )?;
+    let project_id = replica.project_id.clone().context(
+        "this store is not a replica; record one with `arc replica init <name>` \
+         before exporting journal artifacts",
+    )?;
+    let events = read_events(&hot)?;
+    let artifacts = collect_exchange_artifacts(&hot, &events, files)?;
+    let bundle = crate::journal_exchange::JournalBundle::new(project_id, local, artifacts)?;
+    let digest = bundle.digest()?;
+    let bytes = bundle.to_bytes()?;
+    let reported = format!(
+        "source replica: {} ({})\nartifacts: {}\nsha256: {digest}",
+        bundle.source_replica.name,
+        bundle.source_replica.repository_id,
+        bundle.artifacts.len()
+    );
+    if output == "-" {
+        use std::io::Write as _;
+        std::io::stdout().write_all(&bytes)?;
+        eprintln!("{reported}");
+    } else {
+        std::fs::write(output, bytes)
+            .with_context(|| format!("cannot write journal bundle {output}"))?;
+        println!("{reported}");
+        println!("output: {output}");
+    }
+    Ok(())
+}
+
+/// The selected artifacts and everything their recorded events reference by
+/// filename, read from the hot journal or its cold archive.
+fn collect_exchange_artifacts(
+    hot: &Path,
+    events: &[JournalEvent],
+    requested: &[String],
+) -> Result<Vec<crate::journal_exchange::BundledArtifact>> {
+    let mut selected: BTreeMap<String, &'static str> = BTreeMap::new();
+    let mut pending: BTreeMap<String, Option<String>> =
+        requested.iter().map(|file| (file.clone(), None)).collect();
+    while let Some((file, referrer)) = pending.pop_first() {
+        if selected.contains_key(&file) {
+            continue;
+        }
+        let storage = match locate_exchange_artifact(hot, &file) {
+            Ok(storage) => storage,
+            Err(error) => match referrer {
+                Some(referrer) => bail!(
+                    "{referrer} references {file}, which is not in {} or its cold archive; \
+                     export nothing",
+                    hot.display()
+                ),
+                None => return Err(error),
+            },
+        };
+        ensure_storage_settled(hot, events, &file)?;
+        for event in events
+            .iter()
+            .filter(|event| event.file.as_deref() == Some(file.as_str()))
+        {
+            for reference in artifact_references(event)? {
+                match reference {
+                    ArtifactReference::Local(referenced) => {
+                        if !selected.contains_key(&referenced) {
+                            pending
+                                .entry(referenced)
+                                .or_insert_with(|| Some(file.clone()));
+                        }
+                    }
+                    ArtifactReference::ForeignProject { file, project } => bail!(
+                        "{referenced} records a decision in {file} from project {project:?}, \
+                         whose journal this bundle cannot carry; export nothing",
+                        referenced = event.file.as_deref().unwrap_or("an event")
+                    ),
+                }
+            }
+        }
+        selected.insert(file, storage);
+    }
+    let mut artifacts = Vec::with_capacity(selected.len());
+    for (file, storage) in selected {
+        let path = if storage == crate::journal_exchange::COLD_STORAGE {
+            archive_dir(hot).join(&file)
+        } else {
+            hot.join(&file)
+        };
+        let bytes =
+            std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
+        let body = String::from_utf8(bytes).with_context(|| {
+            format!("{file} is not UTF-8 text; journal bundles carry Markdown artifacts")
+        })?;
+        let digest = crate::journal_exchange::body_digest(&body);
+        let recorded = events
+            .iter()
+            .filter(|event| event.file.as_deref() == Some(file.as_str()))
+            .cloned()
+            .collect();
+        artifacts.push(crate::journal_exchange::BundledArtifact {
+            file,
+            storage: storage.to_string(),
+            body,
+            digest,
+            events: recorded,
+        });
+    }
+    Ok(artifacts)
+}
+
+/// Where one artifact's body lives for an exchange, refusing a name that is
+/// not an artifact inside this journal.
+fn locate_exchange_artifact(hot: &Path, file: &str) -> Result<&'static str> {
+    if file.contains(['/', '\\']) {
+        bail!("journal exchange takes artifact filenames inside the journal dir, not paths");
+    }
+    if parse_artifact_name(file).is_none() {
+        bail!("{file:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
+    }
+    if hot.join(file).is_file() {
+        return Ok(crate::journal_exchange::HOT_STORAGE);
+    }
+    if archive_dir(hot).join(file).is_file() {
+        return Ok(crate::journal_exchange::COLD_STORAGE);
+    }
+    bail!(
+        "no such artifact {file} in {} or its cold archive",
+        hot.display()
+    )
+}
+
+/// The other artifacts one recorded event names by filename. A transition
+/// names the artifact it supersedes, and a consumption names the decision
+/// that settled the work; both are followed so the bundle can stand alone.
+pub(crate) fn artifact_references(event: &JournalEvent) -> Result<Vec<ArtifactReference>> {
+    let mut references = Vec::new();
+    if let Some(source) = event.supersedes.as_deref() {
+        if parse_artifact_name(source).is_some() {
+            references.push(ArtifactReference::Local(source.to_string()));
+        }
+    }
+    if let Some(decision) = event.decision.as_deref() {
+        if let Some(project) = event.decision_project.as_deref() {
+            references.push(ArtifactReference::ForeignProject {
+                file: decision.to_string(),
+                project: project.to_string(),
+            });
+        } else if parse_artifact_name(decision).is_some() {
+            references.push(ArtifactReference::Local(decision.to_string()));
+        } else {
+            bail!(
+                "{} records a decision reference {decision:?} that is not an artifact name",
+                event.file.as_deref().unwrap_or("an event")
+            );
+        }
+    }
+    Ok(references)
+}
+
+/// One artifact an import would place, with what the receiving journal
+/// already holds of it.
+struct ExchangeImportPlan {
+    artifact: crate::journal_exchange::BundledArtifact,
+    local_digest: Option<String>,
+    new_events: Vec<JournalEvent>,
+}
+
+fn import_artifacts(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
+    let bytes = if input == "-" {
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        std::io::stdin().read_to_end(&mut bytes)?;
+        bytes
+    } else {
+        std::fs::read(input).with_context(|| format!("cannot read journal bundle {input}"))?
+    };
+    let bundle = crate::journal_exchange::JournalBundle::parse(&bytes)?;
+    let digest = bundle.digest()?;
+    let hot = resolve_dir(&ctx.cwd)?;
+    let cold = archive_dir(&hot);
+    let store = ctx.store()?;
+    let replica = crate::replica::status(&store)?;
+    let local_replica = replica.local.clone().context(
+        "this store is not a replica; record one with `arc replica init <name>` \
+         before importing journal artifacts",
+    )?;
+    let project_id = replica.project_id.clone().context(
+        "this store is not a replica; record one with `arc replica init <name>` \
+         before importing journal artifacts",
+    )?;
+    if bundle.project_id != project_id {
+        bail!(
+            "journal bundle belongs to logical project {}; replica {} belongs to {}; \
+             nothing was imported",
+            bundle.project_id,
+            local_replica.name,
+            project_id
+        );
+    }
+    let paired = bundle.source_replica.repository_id == store.repository_id
+        || replica
+            .peers
+            .iter()
+            .any(|peer| peer.repository_id == bundle.source_replica.repository_id);
+    if !paired {
+        bail!(
+            "journal bundle source {} ({}) is not paired with replica {}; record the \
+             pairing first; nothing was imported",
+            bundle.source_replica.name,
+            bundle.source_replica.repository_id,
+            local_replica.name
+        );
+    }
+    let receipt_path = exchange_imports_dir(&hot).join(format!("{digest}.json"));
+    let _replica_state = crate::replica::lock(&store)?;
+    let _transition = lock_journal_transition(&hot)?;
+    let local_events = read_events(&hot)?;
+    let mut held = BTreeSet::new();
+    for event in &local_events {
+        held.insert(serde_json::to_vec(event)?);
+    }
+    let now = Utc::now();
+    let mut plan = Vec::with_capacity(bundle.artifacts.len());
+    for artifact in &bundle.artifacts {
+        let hot_path = hot.join(&artifact.file);
+        let cold_path = cold.join(&artifact.file);
+        let hot_digest = hot_path
+            .is_file()
+            .then(|| body_digest(&hot_path))
+            .transpose()?;
+        let cold_digest = cold_path
+            .is_file()
+            .then(|| body_digest(&cold_path))
+            .transpose()?;
+        if let (Some(hot_digest), Some(cold_digest)) = (hot_digest.as_ref(), cold_digest.as_ref()) {
+            if hot_digest != cold_digest {
+                bail!(
+                    "conflicting hot and cold bodies for {}; nothing was imported",
+                    artifact.file
+                );
+            }
+        }
+        let local_digest = hot_digest.or(cold_digest);
+        if let Some(local_digest) = &local_digest {
+            if local_digest != &artifact.digest {
+                bail!(
+                    "{} is present locally with digest {local_digest}, the bundle carries {}; \
+                     nothing was imported",
+                    artifact.file,
+                    artifact.digest
+                );
+            }
+            let local_storage = if hot_path.is_file() {
+                crate::journal_exchange::HOT_STORAGE
+            } else {
+                crate::journal_exchange::COLD_STORAGE
+            };
+            if local_storage != artifact.storage {
+                bail!(
+                    "{} is present locally in {local_storage} storage, the bundle carries it \
+                     from {} storage; nothing was imported",
+                    artifact.file,
+                    artifact.storage
+                );
+            }
+        }
+        let mut new_events = Vec::new();
+        for event in &artifact.events {
+            if !held.contains(&serde_json::to_vec(event)?) {
+                new_events.push(event.clone());
+            }
+        }
+        if !new_events.is_empty() {
+            if let Some(contest) = exchange_claim_contest(
+                &local_events,
+                &new_events,
+                &artifact.file,
+                &local_replica,
+                &bundle.source_replica,
+                now,
+            ) {
+                println!("{}", contest.render());
+                println!("aborted: no artifacts or events written");
+                return Ok(1);
+            }
+        }
+        plan.push(ExchangeImportPlan {
+            artifact: artifact.clone(),
+            local_digest,
+            new_events,
+        });
+    }
+    if dry_run {
+        print_exchange_import(&bundle, &digest, &plan, true);
+        return Ok(0);
+    }
+    if receipt_path.is_file() {
+        println!(
+            "source replica: {} ({})",
+            bundle.source_replica.name, bundle.source_replica.repository_id
+        );
+        println!("bundle sha256: {digest}");
+        println!("artifacts: 0 imported (receipt already recorded); no changes");
+        return Ok(0);
+    }
+    ctx.ensure_declared_actor(&store)?;
+    if let Err(error) = ensure_bound(ctx, &hot) {
+        eprintln!("warning: could not record this journal's project binding: {error:#}");
+    }
+    for entry in &plan {
+        if entry.local_digest.is_some() {
+            continue;
+        }
+        let dir = if entry.artifact.storage == crate::journal_exchange::COLD_STORAGE {
+            cold.clone()
+        } else {
+            hot.clone()
+        };
+        write_exchange_artifact(&dir, &dir.join(&entry.artifact.file), &entry.artifact.body)?;
+    }
+    append_exchange_events(&hot, &plan)?;
+    let receipt = crate::journal_exchange::ImportReceipt {
+        schema: crate::journal_exchange::IMPORT_RECEIPT_SCHEMA.to_string(),
+        bundle_sha256: digest.clone(),
+        source_replica: bundle.source_replica.clone(),
+        imported_by: local_replica.clone(),
+        imported_at: Utc::now(),
+        artifacts: plan
+            .iter()
+            .map(|entry| crate::journal_exchange::ImportedArtifact {
+                file: entry.artifact.file.clone(),
+                storage: entry.artifact.storage.clone(),
+                digest: entry.artifact.digest.clone(),
+                events: entry.new_events.len(),
+            })
+            .collect(),
+    };
+    write_exchange_receipt(&receipt_path, &receipt)?;
+    print_exchange_import(&bundle, &digest, &plan, false);
+    Ok(0)
+}
+
+fn print_exchange_import(
+    bundle: &crate::journal_exchange::JournalBundle,
+    digest: &str,
+    plan: &[ExchangeImportPlan],
+    dry_run: bool,
+) {
+    println!(
+        "source replica: {} ({})",
+        bundle.source_replica.name, bundle.source_replica.repository_id
+    );
+    println!("bundle sha256: {digest}");
+    for entry in plan {
+        if entry.local_digest.is_none() {
+            println!("new: {} ({})", entry.artifact.file, entry.artifact.storage);
+        } else {
+            println!("skipped: {}", entry.artifact.file);
+        }
+    }
+    let artifacts = plan
+        .iter()
+        .filter(|entry| entry.local_digest.is_none())
+        .count();
+    let events: usize = plan.iter().map(|entry| entry.new_events.len()).sum();
+    if dry_run {
+        println!("dry-run: would import {artifacts} artifact(s) and {events} event(s)");
+        println!("receipt: would record source replica and bundle digest");
+    } else {
+        println!("artifacts: {artifacts} imported");
+        println!("events: {events} imported");
+        println!("receipt: recorded");
+    }
+}
+
+/// Write one imported body into the journal storage the bundle recorded,
+/// creating that directory and refusing a name that has appeared since the
+/// destination was checked.
+fn write_exchange_artifact(dir: &Path, path: &Path, body: &str) -> Result<()> {
+    use std::io::Write as _;
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("cannot create journal directory {}", dir.display()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "cannot create {} (an artifact with this name already exists)",
+                path.display()
+            )
+        })?;
+    file.write_all(body.as_bytes())
+        .with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// Append the events an import brings, keeping the identity each was recorded
+/// under rather than recording the importer's.
+fn append_exchange_events(hot: &Path, plan: &[ExchangeImportPlan]) -> Result<()> {
+    use std::io::Write as _;
+    let _events = lock_journal_events(hot)?;
+    let path = hot.join("events.jsonl");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    for entry in plan {
+        for event in &entry.new_events {
+            let mut line = serde_json::to_string(event)?;
+            line.push('\n');
+            file.write_all(line.as_bytes())
+                .with_context(|| format!("cannot append to {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn write_exchange_receipt(
+    path: &Path,
+    receipt: &crate::journal_exchange::ImportReceipt,
+) -> Result<()> {
+    use std::io::Write as _;
+    let dir = path
+        .parent()
+        .context("journal import receipt has no parent")?;
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("cannot create journal exchange directory {}", dir.display()))?;
+    let mut bytes = serde_json::to_vec_pretty(receipt)?;
+    bytes.push(b'\n');
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("cannot record journal import receipt {}", path.display()))?;
+    file.write_all(&bytes)
+        .with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// A live claim arriving with a bundle on an artifact a live local claim
+/// holds. Resolution is the ordinary takeover path; the import records
+/// nothing on either claim's behalf.
+struct ExchangeClaimContest {
+    file: String,
+    local_replica: String,
+    local_owner: String,
+    incoming_replica: String,
+    incoming_owner: String,
+}
+
+impl ExchangeClaimContest {
+    fn render(&self) -> String {
+        format!(
+            "claim contest on artifact {}: replica {} holds a live local claim by {}; \
+             incoming replica {} holds a live claim by {}",
+            self.file,
+            self.local_replica,
+            self.local_owner,
+            self.incoming_replica,
+            self.incoming_owner
+        )
+    }
+}
+
+fn exchange_claim_contest(
+    local_events: &[JournalEvent],
+    new_events: &[JournalEvent],
+    file: &str,
+    local_replica: &ReplicaIdentity,
+    source_replica: &ReplicaIdentity,
+    now: DateTime<Utc>,
+) -> Option<ExchangeClaimContest> {
+    let local = artifact_claims(local_events, file);
+    let local_live = local
+        .iter()
+        .find(|claim| claim.is_open() && state::claim_timing_at(&claim.state, now).active)?;
+    let incoming = artifact_claims(new_events, file);
+    let incoming_live = incoming
+        .iter()
+        .find(|claim| claim.is_open() && state::claim_timing_at(&claim.state, now).active)?;
+    if local
+        .iter()
+        .any(|claim| claim.state.claim_id == incoming_live.state.claim_id)
+    {
+        return None;
+    }
+    Some(ExchangeClaimContest {
+        file: file.to_string(),
+        local_replica: local_replica.name.clone(),
+        local_owner: local_live.state.owner.actor.clone(),
+        incoming_replica: source_replica.name.clone(),
+        incoming_owner: incoming_live.state.owner.actor.clone(),
+    })
 }
 
 const SPOOL_SCHEMA: &str = "arc-journal-spool/1";
@@ -6138,7 +6683,7 @@ impl JournalEvent {
             .map(|v| v.with_timezone(&Utc))
     }
 
-    fn known(&self) -> bool {
+    pub(crate) fn known(&self) -> bool {
         if self.schema != JOURNAL_SCHEMA || self.timestamp().is_none() || !valid_topic(&self.topic)
         {
             return false;

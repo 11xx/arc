@@ -1204,7 +1204,7 @@ fn validate_event(event: &ReplicaEvent) -> Result<()> {
     Ok(())
 }
 
-fn validate_identity(identity: &ReplicaIdentity) -> Result<()> {
+pub(crate) fn validate_identity(identity: &ReplicaIdentity) -> Result<()> {
     ids::validate_slug(&identity.name).context("replica names must use [a-z0-9-]")?;
     ids::validate_id_component(&identity.repository_id).context("invalid replica repository ID")?;
     Ok(())
