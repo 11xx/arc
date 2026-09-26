@@ -10,6 +10,7 @@ mod guide;
 mod ids;
 mod inbox;
 mod journal;
+mod journal_exchange;
 mod model;
 mod policy;
 mod project;

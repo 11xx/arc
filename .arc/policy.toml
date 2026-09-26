@@ -82,6 +82,8 @@ paths = [
   "src/trailers.rs",
   # Artifact storage operations move the only copy of journal history.
   "src/journal.rs",
+  # Bundle import writes foreign artifact bodies and events into the journal.
+  "src/journal_exchange.rs",
 ]
 
 # Roots inside which classification is closed: every tracked file under one of

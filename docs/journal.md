@@ -77,6 +77,13 @@ retry validates the recorded paths and bytes and completes the same operation.
 Pending operations block competing writes and appear in `journal doctor`.
 Unclassified cold discussions require explicit `archive --unresolved --note`
 adoption before accepting positions. Duplicate bodies are reported as conflicts.
+Selected artifacts move to a paired replica as a versioned journal bundle:
+`journal export <file>... --output <file>` writes it and `journal import
+<file> [--dry-run]` files it into the receiving journal. Bodies and their
+events travel together, an artifact the destination already holds at a
+different digest refuses the whole bundle, and the first import records a
+receipt naming the source replica and bundle digest. `docs/replicas.md` holds
+the replica contract.
 `journal catchup --archived --json` uses `arc-journal-catchup/8` and marks each row's
 storage, resolution, resolution basis, latest position, and whether archived
 positions exist; unknown legacy facts remain explicit rather than becoming

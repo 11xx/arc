@@ -70,6 +70,8 @@ apply and the field is omitted.
 | `arc-replica-event/1` | One identity or authority event carried by an `arc-replica-bundle/1` file | commitment |
 | `arc-replica-bundle/1` | `arc replica export` / `arc replica import` — a logical project's explicit replica identities and authority events | commitment |
 | `arc-replica-import/1` | Local receipt batch naming the source replica and imported bundle digest | internal |
+| `arc-journal-bundle/1` | `arc journal export` / `arc journal import` — selected journal artifacts with their bodies, recorded events, body digests, and the reference closure | commitment |
+| `arc-journal-exchange-import/1` | Local receipt naming the source and receiving replicas and the imported journal bundle digest | internal |
 | `store-format/4` | `.git/arc/config.json` and the change ledger, including external verdicts, their source references, and ready-to-send records | internal |
 | `journal-events/1` | `events.jsonl`, streamed by `arc journal events` — the canonical agent-written event log | commitment |
 | `arc-journal-spool/1` | `.arc/outbox/<ts>-<kind>-<topic>.json` — a journal write parked for later promotion | commitment |
