@@ -112,7 +112,9 @@ can include findings. A rejected verdict at the current patchset closes the
 change as abandoned and keeps the external reference on the closure.
 
 An external approval can satisfy the approval gate where independent review is
-not required. On a dangerous path, it never satisfies
+not required and no local changes-requested or comment-only verdict refuses the
+current patchset. An external approval never supersedes a local refusal.
+On a dangerous path, it never satisfies
 `forbid_self_approval`: Arc cannot check the external identity, so a separate
 local independent verdict is required. When the upstream accepts and integrates
 the contribution, `arc close --assert-integrated <revision>

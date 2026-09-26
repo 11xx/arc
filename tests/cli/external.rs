@@ -93,6 +93,41 @@ fn an_external_approval_at_the_head_gates_and_is_recorded_as_external() {
 }
 
 #[test]
+fn audit_external_approval_preserves_a_local_refusal_until_local_approval() {
+    for refusal in ["changes-requested", "comment-only"] {
+        for external_first in [false, true] {
+            let repo = repo_with_gates(None);
+            let (_, worktree, head) = gated_change(&repo, "local-refusal", "ok.txt");
+            if external_first {
+                record(&repo, &worktree, "local-refusal", "approved", &head);
+            }
+            let mut review = repo.arc(&worktree);
+            review.args(["review", "local-refusal", "--verdict", refusal]);
+            if refusal == "changes-requested" {
+                review.args(["--cause", "executor"]);
+            }
+            review.assert().success();
+            if !external_first {
+                record(&repo, &worktree, "local-refusal", "approved", &head);
+            }
+            let status = json_stdout(repo.arc(&worktree).args(["status", "--json"]));
+            assert_eq!(status["has_valid_approval"], false, "{status}");
+            assert_eq!(status["external_verdicts"][0]["gates_current_head"], false);
+            repo.arc(&worktree).args(["check"]).assert().code(3);
+            repo.arc(&repo.root)
+                .args(["integrate", "local-refusal"])
+                .assert()
+                .code(3);
+            repo.arc(&worktree)
+                .args(["review", "--verdict", "approved"])
+                .assert()
+                .success();
+            repo.arc(&worktree).args(["check"]).assert().success();
+        }
+    }
+}
+
+#[test]
 fn an_external_approval_covers_only_the_revision_it_names() {
     let repo = repo_with_gates(None);
     let (_, worktree, head) = gated_change(&repo, "ext-moved", "moved.txt");

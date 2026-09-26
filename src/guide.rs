@@ -644,7 +644,8 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   `arc external verdict <change> --verdict <v> --decided-by <who>
   --reference <ref> --revision <rev>` records that decision beside, never as,
   a verdict arc witnessed: an approval gates only the revision it names and
-  never alone on a dangerous path, a change request carries findings, and a
+  never alone on a dangerous path. An external approval never supersedes a
+  local refusal. A change request carries findings, and a
   rejection of the head closes the change. A `[contribution] history =
   "squash"|"preserve"` declaration makes `integrate` record the change ready to
   send instead of merging it, refusing merge commits and, under squash, more
