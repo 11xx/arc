@@ -467,6 +467,10 @@ fn forwarded_recipient_cannot_confirm_a_stale_return_request() {
         ])
         .assert()
         .success();
+    let old_offer_id = replica_status(&origin)["authority"]["reclaim_request"]["offer_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let request = origin.home.join("request.json");
     export_replica(&origin, &request);
     peer.arc(&peer.root)
@@ -488,6 +492,86 @@ fn forwarded_recipient_cannot_confirm_a_stale_return_request() {
     );
     import_replica(&origin, &forwarded);
     assert!(replica_status(&origin)["authority"]["holder"].is_null());
+
+    successor
+        .arc(&successor.root)
+        .args(["replica", "authority", "offer", "--to", "peer"])
+        .assert()
+        .success();
+    let return_offer = successor.home.join("return-offer.json");
+    export_replica(&successor, &return_offer);
+    import_replica(&peer, &return_offer);
+    peer.arc(&peer.root)
+        .args(["replica", "authority", "confirm-return"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "no current applicable return request",
+        ));
+    successor
+        .arc(&successor.root)
+        .args([
+            "replica",
+            "authority",
+            "reclaim",
+            "--because",
+            "current return requested",
+        ])
+        .assert()
+        .success();
+    let current_request = successor.home.join("current-request.json");
+    export_replica(&successor, &current_request);
+    import_replica(&peer, &current_request);
+    let current = replica_status(&peer);
+    assert_eq!(current["authority"]["holder"]["name"], "peer");
+    assert_eq!(
+        current["authority"]["reclaim_request"]["from"]["name"],
+        "successor"
+    );
+    assert_ne!(
+        current["authority"]["reclaim_request"]["offer_id"],
+        old_offer_id
+    );
+    let current_offer_id = current["authority"]["reclaim_request"]["offer_id"].clone();
+    peer.arc(&peer.root)
+        .args(["replica", "authority", "confirm-return"])
+        .assert()
+        .success();
+    assert_eq!(
+        replica_status(&peer)["authority"]["holder"]["name"],
+        "successor"
+    );
+    peer.arc(&peer.root)
+        .args(["integrate", "nonexistent"])
+        .assert()
+        .code(17);
+    assert!(replica_status(&successor)["authority"]["holder"].is_null());
+    let confirmation = peer.home.join("current-confirmation.json");
+    export_replica(&peer, &confirmation);
+    let bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(&confirmation).unwrap()).unwrap();
+    let recorded_confirmation = bundle["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["payload"]["event_type"] == "authority-return-confirmed")
+        .unwrap();
+    assert_eq!(
+        recorded_confirmation["payload"]["offer_id"],
+        current_offer_id
+    );
+    import_replica(&successor, &confirmation);
+    assert_eq!(
+        replica_status(&successor)["authority"]["holder"]["name"],
+        "successor"
+    );
+    peer.arc(&peer.root)
+        .args(["replica", "authority", "confirm-return"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "no current applicable return request",
+        ));
 }
 
 #[test]
