@@ -8,7 +8,18 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
-pub const BUNDLE_SCHEMA: &str = "arc-bundle/2";
+pub const BUNDLE_SCHEMA: &str = "arc-bundle/3";
+
+/// The prefix a delta bundle extends: the checksum of the exported history
+/// before its suffix, and how many events that prefix covers. A bundle's
+/// `events_sha256` is the checksum of the whole history, so it doubles as the
+/// token a later `--since` names.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundlePrefix {
+    pub sha256: String,
+    pub event_count: usize,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Bundle {
@@ -17,6 +28,10 @@ pub struct Bundle {
     pub change_id: String,
     pub event_count: usize,
     pub events_sha256: String,
+    /// The prefix this bundle carries only the suffix after, when the caller
+    /// named one with `--since`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<BundlePrefix>,
     /// The store format the exporting build wrote. An importer that would skip
     /// event types it does not know refuses instead: skipping a lifecycle
     /// event means reading a closed change as open, and then closing it a
@@ -40,15 +55,18 @@ fn legacy_store_format() -> u32 {
 }
 
 impl Bundle {
-    pub fn export(store: &Store, change_id: &str) -> Result<Self> {
+    /// Export one change. `since` names the checksum of a prefix the caller
+    /// holds; the bundle then carries only the events after it, and its own
+    /// `events_sha256` remains the checksum of the whole history so the
+    /// receiver can verify the suffix against that prefix.
+    pub fn export(store: &Store, change_id: &str, since: Option<&str>) -> Result<Self> {
         ids::validate_id_component(change_id)?;
         let raw = store.raw_events(change_id)?;
         if raw.is_empty() {
             bail!("change {change_id:?} has no events");
         }
 
-        let mut events = Vec::with_capacity(raw.len());
-        let mut origin_repository_id: Option<String> = None;
+        let mut all = Vec::with_capacity(raw.len());
         for (file_event_id, value) in raw {
             let envelope = event_envelope(&value)?;
             if envelope.event_id != file_event_id {
@@ -64,20 +82,37 @@ impl Bundle {
                     envelope.change_id
                 );
             }
-            // The opening event identifies the originating store. Later
-            // events may legitimately come from other stores after transfer.
-            if origin_repository_id.is_none() {
-                origin_repository_id = Some(envelope.repository_id.to_string());
-            }
-            events.push(value);
+            all.push(value);
         }
-        events.sort_by(|a, b| {
+        all.sort_by(|a, b| {
             event_id(a)
                 .expect("validated event")
                 .cmp(event_id(b).expect("validated event"))
         });
+        // The opening event identifies the originating store. Later events
+        // may legitimately come from other stores after transfer, and a
+        // suffix bundle begins at neither the opener nor its own start.
+        let repository_id = event_envelope(&all[0])?.repository_id.to_string();
+        // The checksum always covers the complete history at export: for a
+        // full bundle that is its events, and for a delta it is the prefix
+        // plus the suffix, which is what doubles as the next `--since` token
+        // and what the receiver verifies the suffix against.
+        let history_sha256 = checksum(&all)?;
+        let (events, since) = match since {
+            None => (all, None),
+            Some(prefix_sha256) => {
+                let (prefix_event_count, suffix) = split_at_prefix(&all, prefix_sha256)?;
+                (
+                    suffix,
+                    Some(BundlePrefix {
+                        sha256: prefix_sha256.to_string(),
+                        event_count: prefix_event_count,
+                    }),
+                )
+            }
+        };
 
-        let events_sha256 = checksum(&events)?;
+        let events_sha256 = history_sha256;
         // The checksum covers the change's events, which is what the receiver
         // replays. Repository events travel beside them: they are context for
         // resolving recorded revisions, not part of this change's history.
@@ -89,10 +124,11 @@ impl Bundle {
         Ok(Bundle {
             schema: BUNDLE_SCHEMA.to_string(),
             store_format: crate::model::SCHEMA_VERSION,
-            repository_id: origin_repository_id.expect("non-empty event list"),
+            repository_id,
             change_id: change_id.to_string(),
             event_count: events.len(),
             events_sha256,
+            since,
             events,
             repository_events,
         })
@@ -167,12 +203,39 @@ impl Bundle {
                 bundle.events.len()
             );
         }
-        let actual_checksum = checksum(&bundle.events)?;
-        if bundle.events_sha256 != actual_checksum {
+        if !valid_checksum(&bundle.events_sha256) {
             bail!(
-                "events checksum mismatch: bundle says {}, computed {actual_checksum}",
+                "events checksum {:?} is not a sha256 digest",
                 bundle.events_sha256
             );
+        }
+        match &bundle.since {
+            None => {
+                let actual_checksum = checksum(&bundle.events)?;
+                if bundle.events_sha256 != actual_checksum {
+                    bail!(
+                        "events checksum mismatch: bundle says {}, computed {actual_checksum}",
+                        bundle.events_sha256
+                    );
+                }
+            }
+            Some(prefix) => {
+                if !valid_checksum(&prefix.sha256) {
+                    bail!(
+                        "bundle names prefix checksum {:?}, which is not a sha256 digest",
+                        prefix.sha256
+                    );
+                }
+                if prefix.event_count == 0 {
+                    bail!("bundle names an empty prefix to extend");
+                }
+                // A delta bundle's checksum covers the prefix and the suffix
+                // together, so it is verified against the receiving store's
+                // prefix rather than against the suffix alone.
+                if bundle.events.is_empty() {
+                    bail!("a delta bundle must carry the events after its prefix");
+                }
+            }
         }
 
         let mut events = Vec::with_capacity(bundle.events.len());
@@ -182,7 +245,10 @@ impl Bundle {
         let mut patchset_ids = HashSet::new();
         for value in &bundle.events {
             let envelope = event_envelope(value)?;
-            if prior_event_id.is_none() && envelope.repository_id != bundle.repository_id {
+            if prior_event_id.is_none()
+                && bundle.since.is_none()
+                && envelope.repository_id != bundle.repository_id
+            {
                 bail!(
                     "first event {} has repository_id {:?}, expected bundle origin {:?}",
                     envelope.event_id,
@@ -248,7 +314,12 @@ impl Bundle {
             .iter()
             .filter_map(|event| event.typed.clone())
             .collect::<Vec<_>>();
-        state::reduce(&typed_events).context("bundled known events are not replayable")?;
+        // A full bundle is a complete ledger and replays on its own. A delta
+        // bundle begins mid-history, so its replay is judged at import
+        // against the prefix the receiving store holds.
+        if bundle.since.is_none() {
+            state::reduce(&typed_events).context("bundled known events are not replayable")?;
+        }
 
         Ok(ValidatedBundle {
             bundle,
@@ -436,7 +507,7 @@ fn event_type(payload: &Payload) -> &'static str {
     }
 }
 
-fn event_id(value: &Value) -> Option<&str> {
+pub(crate) fn event_id(value: &Value) -> Option<&str> {
     value.get("event_id").and_then(Value::as_str)
 }
 
@@ -447,6 +518,46 @@ pub fn checksum(events: &[Value]) -> Result<String> {
         digest.update(b"\n");
     }
     Ok(hex::encode(digest.finalize()))
+}
+
+fn valid_checksum(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The count of events an earlier export digested, and the suffix after them.
+///
+/// Every export prints the checksum of the history it represents, so that
+/// checksum names a prefix of every later export of the same change. A
+/// checksum no prefix produces means the caller holds a different history.
+fn split_at_prefix(events: &[Value], prefix_sha256: &str) -> Result<(usize, Vec<Value>)> {
+    if !valid_checksum(prefix_sha256) {
+        bail!(
+            "--since takes the 64-character events checksum an earlier export printed, \
+             not {prefix_sha256:?}"
+        );
+    }
+    let mut digest = Sha256::new();
+    let mut matched = None;
+    for (index, event) in events.iter().enumerate() {
+        digest.update(serde_json::to_vec(event)?);
+        digest.update(b"\n");
+        if matched.is_none() && hex::encode(digest.clone().finalize()) == prefix_sha256 {
+            matched = Some(index + 1);
+        }
+    }
+    let Some(event_count) = matched else {
+        bail!(
+            "no prefix of this change's history has checksum {prefix_sha256}; \
+             export the change in full"
+        );
+    };
+    if event_count == events.len() {
+        bail!(
+            "this change's history already ends at checksum {prefix_sha256}; \
+             there is nothing to export"
+        );
+    }
+    Ok((event_count, events[event_count..].to_vec()))
 }
 
 fn event_file_bytes(event: &Value) -> Result<Vec<u8>> {
