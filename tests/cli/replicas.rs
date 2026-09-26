@@ -364,6 +364,17 @@ fn authority_moves_only_through_an_imported_offer() {
         replica_status(&recipient)["authority"]["holder"]["name"],
         "peer"
     );
+    let (peer_change, _, _) = change_with_patchset(&recipient, "concurrent-work");
+    recipient
+        .arc(&recipient.root)
+        .args(["review", &peer_change, "--verdict", "approved"])
+        .assert()
+        .success();
+    recipient
+        .arc(&recipient.root)
+        .args(["integrate", &peer_change])
+        .assert()
+        .success();
     import_replica(&recipient, &requested);
     assert_eq!(
         replica_status(&recipient)["authority"]["holder"]["name"],
