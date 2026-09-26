@@ -657,6 +657,10 @@ enum Cmd {
         /// Output file ('-' for stdout)
         #[arg(long)]
         output: String,
+        /// Export only the events after this history checksum, which the
+        /// receiving store must already hold
+        #[arg(long, value_name = "SHA256")]
+        since: Option<String>,
     },
     /// Import a versioned JSON bundle into this repository's local store
     Import {
@@ -2619,8 +2623,12 @@ fn run(cli: Cli) -> Result<i32> {
                 },
             )
         }
-        Cmd::Export { change, output } => {
-            commands::export_bundle(&ctx, &change, &output)?;
+        Cmd::Export {
+            change,
+            output,
+            since,
+        } => {
+            commands::export_bundle(&ctx, &change, &output, since.as_deref())?;
             Ok(0)
         }
         Cmd::Import { input, dry_run } => commands::import_bundle(&ctx, &input, dry_run),
