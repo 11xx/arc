@@ -41,8 +41,7 @@ struct RescueTranscript {
     path: Option<PathBuf>,
     count: usize,
     turns: Vec<Turn>,
-    /// Which reader answered: `tapes` or `native`. A reader who cannot tell
-    /// where turns came from cannot tell what a missing turn means.
+    /// The reader that supplied the turns, when any did.
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<&'static str>,
     /// The window the answer rests on, when a reader stopped before the start
@@ -63,8 +62,8 @@ struct RescueTranscript {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum TranscriptBound {
     /// A recording file read from its end: the newest `window_bytes`, with
-    /// `skipped_bytes` of older recording before it when the reader could
-    /// measure the file.
+    /// `skipped_bytes` of older recording before it when the read measured
+    /// the file.
     FileTail {
         window_bytes: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,29 +89,27 @@ enum TranscriptCause {
     OutsideReadBound,
 }
 
-impl From<session_store::TapesBound> for TranscriptBound {
-    fn from(bound: session_store::TapesBound) -> Self {
+impl From<session_store::ReadBound> for TranscriptBound {
+    fn from(bound: session_store::ReadBound) -> Self {
         match bound {
-            session_store::TapesBound::FileTail { bytes } => TranscriptBound::FileTail {
+            session_store::ReadBound::FileTail { bytes, skipped } => TranscriptBound::FileTail {
                 window_bytes: bytes,
-                skipped_bytes: None,
+                skipped_bytes: (skipped > 0).then_some(skipped),
             },
-            session_store::TapesBound::RecordPage { records, of } => {
+            session_store::ReadBound::RecordPage { records, of } => {
                 TranscriptBound::RecordPage { records, of }
             }
-            session_store::TapesBound::TurnText { turns, chars } => {
+            session_store::ReadBound::TurnText { turns, chars } => {
                 TranscriptBound::TextCut { turns, chars }
             }
-            session_store::TapesBound::Unknown => TranscriptBound::Unnamed,
+            session_store::ReadBound::Other => TranscriptBound::Unnamed,
         }
     }
 }
 
 impl TranscriptBound {
-    /// What a human reads: what was read, what was not, and how to reach it
-    /// when the reader could not measure the gap. Every variant but the native
-    /// window comes from `tapes`, so the recovery command is always installed
-    /// for the lines that name it.
+    /// What a human reads: what was read, what was not, and how to reach the
+    /// rest with the `tapes` command, which reads a whole recording.
     fn line(&self, session: &str) -> String {
         match self {
             TranscriptBound::FileTail {
@@ -148,7 +145,8 @@ impl TranscriptCause {
                 "Unavailable: claim harness/session is unknown".to_string()
             }
             TranscriptCause::NoRecording => {
-                "Unavailable: no transcript for the claimed session in tapes or on disk".to_string()
+                "Unavailable: no recording of the claimed session in its harness's store"
+                    .to_string()
             }
             TranscriptCause::OutsideReadBound => {
                 "Outside read bound: the read window holds no operator turn".to_string()
@@ -157,21 +155,19 @@ impl TranscriptCause {
     }
 }
 
-/// Read the claimed session's transcript as a function of the recording
-/// rather than of which readers are installed. `tapes` answers first because
-/// it covers harnesses arc cannot read itself; an empty answer falls through
-/// to native, which shares its byte window. A reader's own omission is
+/// Read the claimed session's transcript through the tapes library, which
+/// holds every harness's store knowledge. A bound the read rested on is
 /// reported rather than hidden, and the cause of an empty answer is carried
 /// into the machine view.
 fn read_transcript(owner: Option<&ClaimIdentity>, tail: usize) -> Result<RescueTranscript> {
-    let readerable = owner.is_some_and(|owner| {
+    let readable = owner.is_some_and(|owner| {
         !owner.session.trim().is_empty()
             && matches!(
                 owner.harness.as_str(),
                 "claude" | "codex" | "opencode" | "pi"
             )
     });
-    let Some(owner) = owner.filter(|_| readerable) else {
+    let Some(owner) = owner.filter(|_| readable) else {
         return Ok(RescueTranscript {
             path: None,
             count: 0,
@@ -180,71 +176,25 @@ fn read_transcript(owner: Option<&ClaimIdentity>, tail: usize) -> Result<RescueT
             bound: None,
             cause: Some(TranscriptCause::UnknownIdentity),
             lines: vec![
-                "Source: none (the claim names no session either reader can read)".to_string(),
+                "Source: none (the claim names no session a reader can read)".to_string(),
                 TranscriptCause::UnknownIdentity.line(),
             ],
         });
     };
 
-    let mut other: Vec<String> = Vec::new();
-    let mut bound: Option<TranscriptBound> = None;
-    let mut withheld = false;
-    let mut recording = false;
-    let mut turns: Vec<Turn> = Vec::new();
-    let mut source: Option<&'static str> = None;
-    let mut path: Option<PathBuf> = None;
-
-    match session_store::tapes_turns(&owner.session) {
-        session_store::TapesTurns::Answered {
-            turns: answered,
-            bound: reported,
-        } => {
-            recording = true;
-            if let Some(reported) = reported {
-                withheld = reported.withholds_turns();
-                bound = Some(reported.into());
-            }
-            if answered.is_empty() {
-                other.push("tapes: answered with no turns".to_string());
-            } else {
-                turns = answered;
-                source = Some("tapes");
-            }
-        }
-        session_store::TapesTurns::Absent => other.push("tapes: not installed".to_string()),
-        session_store::TapesTurns::Declined => other.push("tapes: declined".to_string()),
-    }
-
-    if source.is_none() {
-        if !session_store::native_supported(&owner.harness) {
-            other.push(format!("native: no reader for {}", owner.harness));
-        } else if let Some(found) = session_store::transcript_path(&owner.harness, &owner.session) {
-            recording = true;
-            let read = session_store::operator_turns(&found)?;
-            if read.skipped_bytes > 0 {
-                bound = Some(TranscriptBound::FileTail {
-                    window_bytes: read.window_bytes,
-                    skipped_bytes: Some(read.skipped_bytes),
-                });
-                withheld = true;
-            } else {
-                bound = None;
-                withheld = false;
-            }
-            path = Some(found);
-            if read.turns.is_empty() {
-                other.push("native: answered with no turns".to_string());
-            } else {
-                turns = read.turns;
-                source = Some("native");
-            }
-        } else {
-            other.push("native: no recording".to_string());
-        }
-    } else {
-        other.push("native: not consulted".to_string());
-    }
-
+    let (read, unreadable) = match session_store::read_session(&owner.harness, &owner.session) {
+        session_store::SessionAnswer::Read(read) => (Some(read), None),
+        session_store::SessionAnswer::NoRecording => (None, None),
+        session_store::SessionAnswer::Unreadable(reason) => (None, Some(reason)),
+    };
+    let recording = read.is_some() || unreadable.is_some();
+    let (turns, bound, path) = match read {
+        Some(read) => (read.turns, read.bound, read.path),
+        None => (Vec::new(), None, None),
+    };
+    let withheld = bound.as_ref().is_some_and(|bound| bound.withholds_turns());
+    let bound: Option<TranscriptBound> = bound.map(Into::into);
+    let source = (!turns.is_empty()).then_some("tapes");
     let cause = if !recording {
         Some(TranscriptCause::NoRecording)
     } else if turns.is_empty() && withheld {
@@ -253,9 +203,10 @@ fn read_transcript(owner: Option<&ClaimIdentity>, tail: usize) -> Result<RescueT
         None
     };
     let turns = session_store::operator_view(turns, tail);
-    let mut lines = vec![match source {
-        Some(source) => format!("Source: {source} ({})", other.join("; ")),
-        None => format!("Source: none ({})", other.join("; ")),
+    let mut lines = vec![match (source, &unreadable) {
+        (Some(source), _) => format!("Source: {source}"),
+        (None, Some(reason)) => format!("Source: none (tapes could not read it: {reason})"),
+        (None, None) => "Source: none".to_string(),
     }];
     if let Some(path) = &path {
         lines.push(format!("Path: `{}`", path.display()));

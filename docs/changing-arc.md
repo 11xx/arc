@@ -81,6 +81,12 @@ The package is published as `arc-ledger`, because the bare name belongs to
 an unrelated crate; the binary it installs, the repository, and the command
 are `arc`.
 
+**A release links published tapes crates at pinned versions.** Session reads
+rest on the tapes crates, so the manifest names a version for each. A
+development dependency also names a sibling checkout by path; `cargo publish`
+strips the path and keeps only the version, so a release whose tapes version is
+not on the registry cannot be built by anybody who installs it.
+
 The checklist a release passes, in order:
 
 1. Every commit reachable from the release head is signed by one key

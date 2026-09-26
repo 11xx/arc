@@ -1131,12 +1131,11 @@ enum Cmd {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
-        /// Include the claimed session's sensitive transcript; both readers
-        /// share one read window
+        /// Include the claimed session's sensitive transcript; the read takes
+        /// the newest 4 MiB of the recorded file
         #[arg(long)]
         transcript: bool,
-        /// Maximum operator turns to include; both readers share one read
-        /// window
+        /// Maximum operator turns to include from the operator projection
         #[arg(long, default_value_t = 5, requires = "transcript")]
         tail: usize,
         /// Take over another session's stale or expired claim
