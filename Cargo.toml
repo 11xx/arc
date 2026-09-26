@@ -14,7 +14,7 @@ name = "arc"
 path = "src/main.rs"
 
 [dependencies]
-tapes-core = { path = "../tapes/crates/tapes-core", version = "0.1.0" }
+tapes-core = "2026.9.25"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
