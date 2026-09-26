@@ -33,11 +33,17 @@ SAY WHO YOU ARE (before the first write)
   party to an approval.
 
   `arc env` detects a harness by the session variable it exports; not every
-  harness exports one. It reads that harness's own session store for the
-  model, honouring the store's own override — `CLAUDE_CONFIG_DIR`,
-  `CODEX_HOME`, `PI_CODING_AGENT_SESSION_DIR`, `PI_CODING_AGENT_DIR` — before
-  the default under `$HOME`, and reports whether the store corroborates the
-  session. Events record that verdict beside the session they carry.
+  harness exports one. A harness exports its session id into the processes it
+  starts, so when several harnesses' variables are present it is the nearest
+  ancestor that exported one that owns this process: a pi run inside a Claude
+  Code tool shell reports pi, not the shell's claude. Where the ancestry names
+  no single owner the ambiguity is reported and no harness, session, or model
+  is set, rather than choosing by variable order. It reads that harness's own
+  session store for the model, honouring the store's own override —
+  `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_SESSION_DIR`,
+  `PI_CODING_AGENT_DIR` — before the default under `$HOME`, and reports
+  whether the store corroborates the session. Events record that verdict
+  beside the session they carry.
   OpenCode v2 (`opencode2`) is recognized without one — by
   `OPENCODE_TERMINAL` or its process ancestry — and prints the harness
   export with the session left as a comment to set by hand. With nothing to
