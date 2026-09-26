@@ -82,9 +82,12 @@ FROM A WORKSPACE ROOT (outside a project)
                        status (unresolved, delivered, claimed, ...), the
                        sections a reader acts from, and attention facts, so
                        any renderer draws the same page from the same ledger.
-                       --previous adds deltas and the recorded reason each
-                       departed artifact left. Versioned
-                       `arc-workspace-report/1`.
+                       --previous compares the same schema and scope. Deltas
+                       require observed facts; departures keep their recorded
+                       reasons and do not imply resolution. Each change is
+                       counted once with all its inbox predicates; questions
+                       retain who may settle them. Versioned
+                       `arc-workspace-report/2`.
   cd <anchor>          Enter one project named by the report, then orient there.
 
 ORIENT INSIDE A PROJECT (start here, in this order)
