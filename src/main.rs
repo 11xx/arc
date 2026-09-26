@@ -755,7 +755,9 @@ enum Cmd {
     /// record it as a new patchset. Evidence and verdicts on the earlier
     /// heads stay with those heads; the single commit is gated and reviewed
     /// like any other patchset. A failed commit or hook-modified tree restores
-    /// the original head, index, and tracked files; untracked files are retained
+    /// the original head, index, and tracked files; untracked files are retained.
+    /// Obstructing paths are moved to a reported recovery directory under
+    /// <git-common-dir>/arc/squash-recovery/
     Squash {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in

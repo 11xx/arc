@@ -202,3 +202,61 @@ fn audit_squash_restores_tracked_state_after_a_hook_changes_it() {
         assert_eq!(status["latest_patchset"]["id"], "ps-01", "{status}");
     }
 }
+
+#[test]
+fn squash_preserves_untracked_content_obstructing_a_tracked_path() {
+    use std::os::unix::fs::PermissionsExt;
+    for hook_exit in [0, 1] {
+        for replace_parent in [false, true] {
+            let repo = contribution_repo("squash");
+            let worktree = open(&repo, "obstructed");
+            fs::create_dir(worktree.join("dir")).unwrap();
+            commit_file(&worktree, "dir/a.txt", "original\n");
+            commit_file(&worktree, "b.txt", "second\n");
+            gate_and_approve(&repo, &worktree, "obstructed");
+            let original_head = repo.head(&worktree);
+            let original_tree = git_out(&worktree, &["write-tree"]);
+            let hook = repo.root.join(".git/hooks/pre-commit");
+            let mutation = if replace_parent {
+                "rm -r dir\nprintf 'preserved\\n' > dir"
+            } else {
+                "rm dir/a.txt\nmkdir dir/a.txt\nprintf 'preserved\\n' > dir/a.txt/output.txt"
+            };
+            fs::write(&hook, format!("#!/bin/sh\n{mutation}\nexit {hook_exit}\n")).unwrap();
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+            let result = repo
+                .arc(&worktree)
+                .args(["squash", "-m", "feat: combine"])
+                .output()
+                .unwrap();
+            assert!(!result.status.success());
+            let recoveries = repo.root.join(".git/arc/squash-recovery");
+            assert!(
+                recoveries.is_dir(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let saved = fs::read_dir(recoveries)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let output = saved.join(if replace_parent {
+                "dir"
+            } else {
+                "dir/a.txt/output.txt"
+            });
+            assert_eq!(fs::read_to_string(output).unwrap(), "preserved\n");
+            assert!(String::from_utf8_lossy(&result.stderr).contains(saved.to_str().unwrap()));
+            assert_eq!(repo.head(&worktree), original_head);
+            assert_eq!(git_out(&worktree, &["write-tree"]), original_tree);
+            assert_eq!(
+                fs::read_to_string(worktree.join("dir/a.txt")).unwrap(),
+                "original\n"
+            );
+            let status = json_stdout(repo.arc(&worktree).args(["status", "--json"]));
+            assert_eq!(status["latest_patchset"]["id"], "ps-01");
+        }
+    }
+}
