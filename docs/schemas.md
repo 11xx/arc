@@ -21,7 +21,7 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-status/25` | `arc status` — the actionable state of one change, including dependencies, claim timing, blockers, `next_action`, local and external verdicts, the current review subject, the review map, advisories, the forge block, captured plan provenance, the fork a promotion came from, the environment each gate's evidence applies to, the source files for effective policy rules and gates, and the head a contribution was found ready to send at | commitment |
 | `arc-check/3` | `arc check --json` — every blocker with its exit code, plus never-blocking advisories | commitment |
 | `arc-inbox/10` | `arc inbox --json` — the lead-facing queue buckets across open changes, unowned branches and worktrees, and the journal backlog | commitment |
-| `arc-catchup/10` | `arc catchup --json` — ledger buckets, journal lanes and shared inventory rows, memories, forks with what they hold, unowned refs and checkouts, worktree cost, replica peers and integration authority, and a plan's settled promotion state | commitment |
+| `arc-catchup/11` | `arc catchup --json` — ledger buckets, journal lanes and shared inventory rows, memories, forks with what they hold, unowned refs and checkouts, worktree cost, replica peers and integration authority, and a plan's settled promotion state | commitment |
 | `arc-journal-catchup/8` | `arc journal catchup --json` — artifact storage/resolution facts, converged checkpoint tips, promotion state, and journal activity | commitment |
 | `arc-resume/7` | `arc resume --json` — one change's brief, live state, and journal context, including captured plan provenance, the source fork's artifacts, external verdicts, and policy declaration sources | commitment |
 | `arc-brief/1` | `arc brief --json` — one selected brief and its immutable plan-source snapshot | commitment |
@@ -37,7 +37,7 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-stats-by-model/1` | `arc stats --by-model --json` — one row per delegated identity, a different shape rather than a wider one | commitment |
 | `arc-changelog/1` | `arc changelog --json` — the projected release copy for integrated changes | commitment |
 | `arc-forks/2` | `arc fork list --json` — every fork from markers and branches together, with its age, head, worktree dirty counts, and the changes promoted from it | commitment |
-| `arc-doctor/4` | `arc doctor --json` — the ledger health report, replica pairing and authority, problems apart from advice | commitment |
+| `arc-doctor/5` | `arc doctor --json` — the ledger health report, replica pairing and authority, problems apart from advice | commitment |
 | `arc-workspace/1` | `arc workspace list --json` and `arc workspace inbox --json` — rows aggregated across registered projects | commitment |
 | `arc-workspace-backlog/18` | `arc workspace backlog --json` — what is blocked on a decision per project, with its scope stated, its collection manifest and failures, its separate blocking, availability, and coverage facts, the ordering basis used, every open change with its predicate buckets and round deferrals, and each plan's settled promotion state | commitment |
 | `arc-workspace-inventory/1` | `arc workspace inventory --json` — every artifact across the selected stores with its storage, recorded resolution, transition successor, promotions, and reconciliation explanation | commitment |
@@ -45,7 +45,7 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-sandbox-clone/1` | `arc sandbox clone --json` — the roots the copy was given | commitment |
 | `arc-sandbox-diff/1` | `arc sandbox diff --json` — what the copy's events and refs differ by, in both directions | commitment |
 | `arc-replica-id/1` | `arc replica id --json` — the local store's repository ID for an explicit pairing | commitment |
-| `arc-replica/1` | `arc replica status --json` — the local identity, peers, and integration authority state | commitment |
+| `arc-replica/2` | `arc replica status --json` — the local identity, peers, authority holder, offer in flight, and return request | commitment |
 
 ## Journal views
 
@@ -67,9 +67,9 @@ apply and the field is omitted.
 | Schema | Surface | Stability |
 | --- | --- | --- |
 | `arc-bundle/3` | `arc export` / `arc import` — one change's ledger, complete or as the suffix after a prefix checksum the receiver holds, as a deterministic JSON file | commitment |
-| `arc-replica-event/1` | One identity or authority event carried by an `arc-replica-bundle/1` file | commitment |
-| `arc-replica-bundle/1` | `arc replica export` / `arc replica import` — a logical project's explicit replica identities and authority events | commitment |
-| `arc-replica-import/1` | Local receipt batch naming the source replica and imported bundle digest | internal |
+| `arc-replica-event/2` | One identity or authority event, including return request and confirmation, carried by an `arc-replica-bundle/2` file | commitment |
+| `arc-replica-bundle/2` | `arc replica export` / `arc replica import` — a logical project's explicit replica identities and authority events | commitment |
+| `arc-replica-import/2` | Local receipt batch naming the source replica and imported bundle digest | internal |
 | `arc-journal-bundle/1` | `arc journal export` / `arc journal import` — selected journal artifacts with their bodies, recorded events, body digests, and the reference closure | commitment |
 | `arc-journal-exchange-import/1` | Local receipt naming the source and receiving replicas and the imported journal bundle digest | internal |
 | `store-format/4` | `.git/arc/config.json` and the change ledger, including external verdicts, their source references, and ready-to-send records | internal |

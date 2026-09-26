@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const EVENT_SCHEMA: &str = "arc-replica-event/1";
-const BUNDLE_SCHEMA: &str = "arc-replica-bundle/1";
-const IMPORT_SCHEMA: &str = "arc-replica-import/1";
+const EVENT_SCHEMA: &str = "arc-replica-event/2";
+const BUNDLE_SCHEMA: &str = "arc-replica-bundle/2";
+const IMPORT_SCHEMA: &str = "arc-replica-import/2";
 const STATE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const STATE_LOCK_RETRY: Duration = Duration::from_millis(10);
 pub const INTEGRATION_AUTHORITY_EXIT_CODE: i32 = 17;
@@ -71,6 +71,14 @@ pub enum ReplicaPayload {
         offer_id: String,
         reason: String,
     },
+    AuthorityReclaimRequested {
+        offer_id: String,
+        reason: String,
+    },
+    AuthorityReturnConfirmed {
+        offer_id: String,
+        request_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,19 +121,7 @@ pub struct ReplicaStatus {
 pub struct AuthorityStatus {
     pub holder: Option<ReplicaIdentity>,
     pub offer_in_flight: Option<AuthorityOffer>,
-    pub last_reclaim: Option<AuthorityReclaim>,
-    /// Offers both acquired by their recipient and reclaimed by their offerer.
-    /// The reclaim decides the holder, so every replica converges on one; the
-    /// acquirer believed it held authority until it imported the reclaim, and
-    /// may have integrated in that interval.
-    pub contested: Vec<AuthorityContest>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AuthorityContest {
-    pub offer_id: String,
-    pub acquired_by: ReplicaIdentity,
-    pub reclaimed_by: ReplicaIdentity,
+    pub reclaim_request: Option<AuthorityReclaim>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -228,7 +224,7 @@ pub fn status(store: &Store) -> Result<ReplicaStatus> {
 fn status_from_snapshot(store: &Store, snapshot: Option<ReplicaSnapshot>) -> ReplicaStatus {
     match snapshot {
         Some(snapshot) => ReplicaStatus {
-            schema: "arc-replica/1",
+            schema: "arc-replica/2",
             repository_id: store.repository_id.clone(),
             project_id: Some(snapshot.project_id),
             peers: snapshot
@@ -241,7 +237,7 @@ fn status_from_snapshot(store: &Store, snapshot: Option<ReplicaSnapshot>) -> Rep
             authority: Some(snapshot.authority),
         },
         None => ReplicaStatus {
-            schema: "arc-replica/1",
+            schema: "arc-replica/2",
             repository_id: store.repository_id.clone(),
             project_id: None,
             local: None,
@@ -290,18 +286,9 @@ pub fn render_status(status: &ReplicaStatus) {
     } else {
         println!("  integration authority: none");
     }
-    for contest in &authority.contested {
+    if let Some(reclaim) = &authority.reclaim_request {
         println!(
-            "  contested: {} acquired offer {} before {} reclaimed it; {} may have integrated while it believed it held authority",
-            contest.acquired_by.name,
-            contest.offer_id,
-            contest.reclaimed_by.name,
-            contest.acquired_by.name
-        );
-    }
-    if let Some(reclaim) = &authority.last_reclaim {
-        println!(
-            "  last reclaim: {} from offer {} ({})",
+            "  reclaim requested: {} for offer {} ({})",
             reclaim.reason, reclaim.offer_id, reclaim.from.name
         );
     }
@@ -638,28 +625,108 @@ pub fn reclaim(ctx: &Ctx, store: &Store, reason: &str) -> Result<()> {
     let events = load_events(store)?;
     let current =
         snapshot(&events, &store.repository_id)?.context("this store has no replica project")?;
-    let offer = current
+    let offer_id = current
         .authority
         .offer_in_flight
         .as_ref()
         .filter(|offer| offer.from.repository_id == store.repository_id)
-        .cloned()
-        .context("this replica has no integration authority offer in flight to reclaim")?;
+        .map(|offer| offer.offer_id.clone())
+        .or_else(|| {
+            events.iter().find_map(|event| match &event.payload {
+                ReplicaPayload::AuthorityAcquired { offer_id }
+                    if event.event_id == current.authority_event_id =>
+                {
+                    Some(offer_id.clone())
+                }
+                _ => None,
+            })
+        })
+        .context("this replica has no active authority offer to reclaim")?;
+    let offer = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            ReplicaPayload::AuthorityOffered {
+                offer_id: id, to, ..
+            } if id == &offer_id && event.actor.repository_id == store.repository_id => {
+                Some(AuthorityOffer {
+                    offer_id: id.clone(),
+                    from: event.actor.clone(),
+                    to: to.clone(),
+                })
+            }
+            _ => None,
+        })
+        .context("this replica has no active authority offer to reclaim")?;
+    if events.iter().any(|event| {
+        matches!(&event.payload,
+        ReplicaPayload::AuthorityReclaimRequested { offer_id: id, .. } if id == &offer_id)
+    }) {
+        bail!("authority return has already been requested for offer {offer_id}");
+    }
     let event = make_event(
         ctx,
         store,
         &current.project_id,
         current.local,
-        ReplicaPayload::AuthorityReclaimed {
+        ReplicaPayload::AuthorityReclaimRequested {
             offer_id: offer.offer_id.clone(),
             reason: reason.to_string(),
         },
     );
     write_local_event(store, &event)?;
-    println!("authority offer reclaimed: {}", offer.offer_id);
+    println!("authority return requested for offer: {}", offer.offer_id);
     println!("reason: {reason}");
-    println!("integration authority: held by {}", offer.from.name);
-    println!("export the reclaim with `arc replica export`");
+    println!(
+        "integration authority: blocked until {} confirms return",
+        offer.to.name
+    );
+    println!("export the request with `arc replica export`");
+    Ok(())
+}
+
+pub fn confirm_return(ctx: &Ctx, store: &Store) -> Result<()> {
+    ctx.ensure_declared_actor(store)?;
+    let _lock = lock(store)?;
+    let events = load_events(store)?;
+    let current =
+        snapshot(&events, &store.repository_id)?.context("this store has no replica project")?;
+    let request = events
+        .iter()
+        .find(|event| {
+            let ReplicaPayload::AuthorityReclaimRequested { offer_id, .. } = &event.payload else {
+                return false;
+            };
+            events.iter().any(|offer| {
+                matches!(&offer.payload,
+            ReplicaPayload::AuthorityOffered { offer_id: id, to, .. }
+                if id == offer_id && to.repository_id == store.repository_id)
+            }) && !events.iter().any(|confirmation| {
+                matches!(&confirmation.payload,
+                ReplicaPayload::AuthorityReturnConfirmed { request_id, .. }
+                    if request_id == &event.event_id)
+            })
+        })
+        .context("no reclaim request awaits this recipient")?;
+    let offer_id = match &request.payload {
+        ReplicaPayload::AuthorityReclaimRequested { offer_id, .. } => offer_id.clone(),
+        _ => unreachable!(),
+    };
+    let event = make_event(
+        ctx,
+        store,
+        &current.project_id,
+        current.local,
+        ReplicaPayload::AuthorityReturnConfirmed {
+            offer_id: offer_id.clone(),
+            request_id: request.event_id.clone(),
+        },
+    );
+    let mut candidate = events;
+    candidate.push(event.clone());
+    snapshot(&candidate, &store.repository_id)?;
+    write_local_event(store, &event)?;
+    println!("authority return confirmed for offer: {offer_id}");
+    println!("integration authority: blocked here; export the confirmation to the origin");
     Ok(())
 }
 
@@ -898,7 +965,9 @@ fn snapshot(events: &[ReplicaEvent], local_repository_id: &str) -> Result<Option
                 }
             }
             ReplicaPayload::AuthorityAcquired { .. }
-            | ReplicaPayload::AuthorityReclaimed { .. } => {
+            | ReplicaPayload::AuthorityReclaimed { .. }
+            | ReplicaPayload::AuthorityReclaimRequested { .. }
+            | ReplicaPayload::AuthorityReturnConfirmed { .. } => {
                 if members.get(&event.actor.repository_id) != Some(&event.actor) {
                     bail!(
                         "authority event {} is authored by an unknown replica",
@@ -975,7 +1044,8 @@ fn authority_state(
         bail!("replica project contains duplicate authority offer IDs");
     }
     let mut acquires = BTreeMap::<&str, &ReplicaEvent>::new();
-    let mut reclaims = BTreeMap::<&str, &ReplicaEvent>::new();
+    let mut requests = BTreeMap::<&str, &ReplicaEvent>::new();
+    let mut confirmations = BTreeMap::<&str, &ReplicaEvent>::new();
     for event in events {
         match &event.payload {
             ReplicaPayload::AuthorityAcquired { offer_id } => {
@@ -993,7 +1063,7 @@ fn authority_state(
                     bail!("authority offer {offer_id} was acquired more than once");
                 }
             }
-            ReplicaPayload::AuthorityReclaimed { offer_id, reason } => {
+            ReplicaPayload::AuthorityReclaimRequested { offer_id, reason } => {
                 let offer = offers
                     .get(offer_id.as_str())
                     .with_context(|| format!("authority reclaim names missing offer {offer_id}"))?;
@@ -1003,11 +1073,45 @@ fn authority_state(
                 if reason.trim().is_empty() {
                     bail!("authority offer {offer_id} has a reclaim without a reason");
                 }
-                if reclaims.insert(offer_id, event).is_some() {
-                    bail!("authority offer {offer_id} was reclaimed more than once");
+                if requests.insert(offer_id, event).is_some() {
+                    bail!("authority offer {offer_id} has more than one reclaim request");
+                }
+            }
+            ReplicaPayload::AuthorityReturnConfirmed {
+                offer_id,
+                request_id,
+            } => {
+                let offer = offers.get(offer_id.as_str()).with_context(|| {
+                    format!("authority confirmation names missing offer {offer_id}")
+                })?;
+                let to = match &offer.payload {
+                    ReplicaPayload::AuthorityOffered { to, .. } => to,
+                    _ => unreachable!(),
+                };
+                if event.actor.repository_id != to.repository_id {
+                    bail!("authority offer {offer_id} was confirmed by a non-recipient replica");
+                }
+                if confirmations.insert(offer_id, event).is_some() {
+                    bail!("authority offer {offer_id} has more than one return confirmation");
+                }
+                let request = requests.get(offer_id.as_str());
+                if request.is_some_and(|request| request.event_id != *request_id) {
+                    bail!("authority offer {offer_id} confirmation names a different request");
                 }
             }
             _ => {}
+        }
+    }
+    for (offer_id, confirmation) in &confirmations {
+        let ReplicaPayload::AuthorityReturnConfirmed { request_id, .. } = &confirmation.payload
+        else {
+            unreachable!()
+        };
+        if requests
+            .get(offer_id)
+            .is_none_or(|request| request.event_id != *request_id)
+        {
+            bail!("authority offer {offer_id} confirmation names a missing request");
         }
     }
     let mut offers_by_parent = BTreeMap::<&str, &ReplicaEvent>::new();
@@ -1028,6 +1132,14 @@ fn authority_state(
         }
         if payload_id != offer_id {
             bail!("authority offer ID does not match its event ID");
+        }
+    }
+    for offer_id in confirmations.keys() {
+        if acquires
+            .get(offer_id)
+            .is_some_and(|acquired| offers_by_parent.contains_key(acquired.event_id.as_str()))
+        {
+            bail!("authority offer {offer_id} was forwarded; its recipient cannot confirm return");
         }
     }
     let mut grants = BTreeMap::<String, String>::new();
@@ -1072,10 +1184,10 @@ fn authority_state(
                     acquired.actor.repository_id.clone(),
                 );
             }
-            if let Some(reclaimed) = reclaims.get(offer_id.as_str()) {
+            if let Some(confirmed) = confirmations.get(offer_id.as_str()) {
                 grants.insert(
-                    reclaimed.event_id.clone(),
-                    reclaimed.actor.repository_id.clone(),
+                    confirmed.event_id.clone(),
+                    event.actor.repository_id.clone(),
                 );
             }
         }
@@ -1086,7 +1198,8 @@ fn authority_state(
     for event in events {
         match &event.payload {
             ReplicaPayload::AuthorityAcquired { offer_id }
-            | ReplicaPayload::AuthorityReclaimed { offer_id, .. }
+            | ReplicaPayload::AuthorityReclaimRequested { offer_id, .. }
+            | ReplicaPayload::AuthorityReturnConfirmed { offer_id, .. }
                 if !offer_grants.contains_key(offer_id) =>
             {
                 bail!("authority event names an unreachable offer {offer_id}");
@@ -1096,8 +1209,7 @@ fn authority_state(
     }
     let mut holder_id = initial.actor.repository_id.clone();
     let mut grant_id = initial.event_id.clone();
-    let mut last_reclaim = None;
-    let mut contested = Vec::new();
+    let mut reclaim_request = None;
     let mut visited = BTreeSet::new();
     loop {
         if !visited.insert(grant_id.clone()) {
@@ -1108,8 +1220,7 @@ fn authority_state(
                 AuthorityStatus {
                     holder: members.get(&holder_id).cloned(),
                     offer_in_flight: None,
-                    last_reclaim,
-                    contested,
+                    reclaim_request,
                 },
                 grant_id,
             ));
@@ -1118,25 +1229,21 @@ fn authority_state(
             ReplicaPayload::AuthorityOffered { offer_id, .. } => offer_id,
             _ => unreachable!("offers_by_parent contains only authority offers"),
         };
-        if let Some(reclaimed) = reclaims.get(offer_id.as_str()) {
-            let reason = match &reclaimed.payload {
-                ReplicaPayload::AuthorityReclaimed { reason, .. } => reason.clone(),
-                _ => unreachable!("reclaims contains only reclaim events"),
+        if let Some(request) = requests.get(offer_id.as_str()) {
+            let reason = match &request.payload {
+                ReplicaPayload::AuthorityReclaimRequested { reason, .. } => reason.clone(),
+                _ => unreachable!("requests contains only reclaim request events"),
             };
-            last_reclaim = Some(AuthorityReclaim {
+            reclaim_request = Some(AuthorityReclaim {
                 offer_id: offer_id.clone(),
                 from: offer.actor.clone(),
                 reason,
             });
-            if let Some(acquired) = acquires.get(offer_id.as_str()) {
-                contested.push(AuthorityContest {
-                    offer_id: offer_id.clone(),
-                    acquired_by: acquired.actor.clone(),
-                    reclaimed_by: reclaimed.actor.clone(),
-                });
-            }
+        }
+        if let Some(confirmed) = confirmations.get(offer_id.as_str()) {
+            reclaim_request = None;
             holder_id = offer.actor.repository_id.clone();
-            grant_id = reclaimed.event_id.clone();
+            grant_id = confirmed.event_id.clone();
             continue;
         }
         if let Some(acquired) = acquires.get(offer_id.as_str()) {
@@ -1156,8 +1263,7 @@ fn authority_state(
                     from: offer.actor.clone(),
                     to,
                 }),
-                last_reclaim,
-                contested,
+                reclaim_request,
             },
             grant_id,
         ));
@@ -1165,8 +1271,20 @@ fn authority_state(
 }
 
 fn validate_event(event: &ReplicaEvent) -> Result<()> {
-    if event.schema != EVENT_SCHEMA {
+    if event.schema != EVENT_SCHEMA && event.schema != "arc-replica-event/1" {
         bail!("unsupported replica event schema {:?}", event.schema);
+    }
+    if matches!(&event.payload, ReplicaPayload::AuthorityReclaimed { .. }) {
+        bail!("legacy authority reclaim cannot prove recipient relinquishment; this replica history requires explicit migration");
+    }
+    if event.schema == "arc-replica-event/1"
+        && matches!(
+            &event.payload,
+            ReplicaPayload::AuthorityReclaimRequested { .. }
+                | ReplicaPayload::AuthorityReturnConfirmed { .. }
+        )
+    {
+        bail!("confirmed return requires replica event/2");
     }
     ids::validate_id_component(&event.event_id)?;
     ids::validate_id_component(&event.project_id)?;
@@ -1194,11 +1312,19 @@ fn validate_event(event: &ReplicaEvent) -> Result<()> {
             }
         }
         ReplicaPayload::AuthorityAcquired { offer_id } => ids::validate_id_component(offer_id)?,
-        ReplicaPayload::AuthorityReclaimed { offer_id, reason } => {
+        ReplicaPayload::AuthorityReclaimed { .. } => unreachable!(),
+        ReplicaPayload::AuthorityReclaimRequested { offer_id, reason } => {
             ids::validate_id_component(offer_id)?;
             if reason.trim().is_empty() {
-                bail!("authority reclaim reason cannot be empty");
+                bail!("authority reclaim request reason cannot be empty");
             }
+        }
+        ReplicaPayload::AuthorityReturnConfirmed {
+            offer_id,
+            request_id,
+        } => {
+            ids::validate_id_component(offer_id)?;
+            ids::validate_id_component(request_id)?;
         }
     }
     Ok(())
@@ -1278,7 +1404,7 @@ fn load_events(store: &Store) -> Result<Vec<ReplicaEvent>> {
         for path in json_files(&imported_dir)? {
             let batch: ImportBatch = serde_json::from_slice(&fs::read(&path)?)
                 .with_context(|| format!("malformed replica import receipt {}", path.display()))?;
-            if batch.schema != IMPORT_SCHEMA {
+            if batch.schema != IMPORT_SCHEMA && batch.schema != "arc-replica-import/1" {
                 bail!(
                     "unsupported replica import receipt schema in {}",
                     path.display()
@@ -1373,4 +1499,133 @@ fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<()> {
     })();
     let _ = fs::remove_file(&temporary);
     publish
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+
+    fn event(id: &str, actor: &ReplicaIdentity, payload: ReplicaPayload) -> ReplicaEvent {
+        ReplicaEvent {
+            schema: EVENT_SCHEMA.to_string(),
+            event_id: id.to_string(),
+            project_id: "project".to_string(),
+            repository_id: actor.repository_id.clone(),
+            actor: actor.clone(),
+            recorded_by: "operator".to_string(),
+            harness: None,
+            session: None,
+            model: None,
+            created_at: Utc::now(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn forwarded_grant_and_return_confirmation_cannot_coexist() {
+        let origin = ReplicaIdentity {
+            name: "origin".into(),
+            repository_id: "origin-id".into(),
+        };
+        let peer = ReplicaIdentity {
+            name: "peer".into(),
+            repository_id: "peer-id".into(),
+        };
+        let successor = ReplicaIdentity {
+            name: "successor".into(),
+            repository_id: "successor-id".into(),
+        };
+        let events = vec![
+            event("initial", &origin, ReplicaPayload::Initialized),
+            event(
+                "pair-peer",
+                &origin,
+                ReplicaPayload::Paired { peer: peer.clone() },
+            ),
+            event(
+                "pair-successor",
+                &origin,
+                ReplicaPayload::Paired {
+                    peer: successor.clone(),
+                },
+            ),
+            event(
+                "first-offer",
+                &origin,
+                ReplicaPayload::AuthorityOffered {
+                    offer_id: "first-offer".into(),
+                    to: peer.clone(),
+                    parent_event_id: "initial".into(),
+                },
+            ),
+            event(
+                "first-acquire",
+                &peer,
+                ReplicaPayload::AuthorityAcquired {
+                    offer_id: "first-offer".into(),
+                },
+            ),
+            event(
+                "request",
+                &origin,
+                ReplicaPayload::AuthorityReclaimRequested {
+                    offer_id: "first-offer".into(),
+                    reason: "return needed".into(),
+                },
+            ),
+            event(
+                "confirmation",
+                &peer,
+                ReplicaPayload::AuthorityReturnConfirmed {
+                    offer_id: "first-offer".into(),
+                    request_id: "request".into(),
+                },
+            ),
+        ];
+        assert_eq!(
+            snapshot(&events, &origin.repository_id)
+                .unwrap()
+                .unwrap()
+                .authority
+                .holder
+                .unwrap()
+                .name,
+            "origin"
+        );
+        let mut conflicting = events;
+        conflicting.push(event(
+            "forwarded",
+            &peer,
+            ReplicaPayload::AuthorityOffered {
+                offer_id: "forwarded".into(),
+                to: successor,
+                parent_event_id: "first-acquire".into(),
+            },
+        ));
+        assert!(snapshot(&conflicting, &origin.repository_id)
+            .unwrap_err()
+            .to_string()
+            .contains("forwarded"));
+    }
+
+    #[test]
+    fn legacy_reclaim_event_is_refused() {
+        let origin = ReplicaIdentity {
+            name: "origin".into(),
+            repository_id: "origin-id".into(),
+        };
+        let mut reclaimed = event(
+            "old-reclaim",
+            &origin,
+            ReplicaPayload::AuthorityReclaimed {
+                offer_id: "offer".into(),
+                reason: "lost".into(),
+            },
+        );
+        reclaimed.schema = "arc-replica-event/1".into();
+        assert!(validate_event(&reclaimed)
+            .unwrap_err()
+            .to_string()
+            .contains("legacy authority reclaim"));
+    }
 }

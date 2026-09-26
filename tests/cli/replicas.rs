@@ -144,7 +144,7 @@ fn authority_moves_only_through_an_imported_offer() {
     import_replica(&offline_peer, &pairing);
 
     let source_status = replica_status(&source);
-    assert_eq!(source_status["schema"], "arc-replica/1");
+    assert_eq!(source_status["schema"], "arc-replica/2");
     assert_eq!(source_status["local"]["name"], "origin", "{source_status}");
     assert!(
         source_status["peers"]
@@ -156,7 +156,7 @@ fn authority_moves_only_through_an_imported_offer() {
     );
 
     let catchup = json_stdout(recipient.arc(&recipient.root).args(["catchup", "--json"]));
-    assert_eq!(catchup["schema"], "arc-catchup/10", "{catchup}");
+    assert_eq!(catchup["schema"], "arc-catchup/11", "{catchup}");
     assert_eq!(catchup["replica"]["local"]["name"], "peer", "{catchup}");
     assert!(
         catchup["replica"]["peers"]
@@ -168,7 +168,7 @@ fn authority_moves_only_through_an_imported_offer() {
     );
     assert_eq!(catchup["replica"]["authority"]["holder"]["name"], "origin");
     let doctor = json_stdout(recipient.arc(&recipient.root).args(["doctor", "--json"]));
-    assert_eq!(doctor["schema"], "arc-doctor/4", "{doctor}");
+    assert_eq!(doctor["schema"], "arc-doctor/5", "{doctor}");
     assert_eq!(doctor["replica"]["local"]["name"], "peer", "{doctor}");
 
     let _ = change_with_patchset(&recipient, "authority-work");
@@ -177,7 +177,12 @@ fn authority_moves_only_through_an_imported_offer() {
         .args(["review", "authority-work", "--verdict", "approved"])
         .assert()
         .success();
-    let source_change = begin_change(&source, "origin-work", None);
+    let (source_change, _, _) = change_with_patchset(&source, "origin-work");
+    source
+        .arc(&source.root)
+        .args(["review", &source_change, "--verdict", "approved"])
+        .assert()
+        .success();
     let offline_change = begin_change(&offline_peer, "offline-work", None);
     let source_head = source.head(&source.root);
     let recipient_head = recipient.head(&recipient.root);
@@ -339,36 +344,203 @@ fn authority_moves_only_through_an_imported_offer() {
         ])
         .assert()
         .success();
-    let reclaimed = source.home.join("reclaimed.json");
-    export_replica(&source, &reclaimed);
-    import_replica(&recipient, &reclaimed);
-    let after_reclaim = replica_status(&recipient);
-    assert_eq!(after_reclaim["authority"]["holder"]["name"], "origin");
+    let requested = source.home.join("return-request.json");
+    export_replica(&source, &requested);
+    let awaiting_return = replica_status(&source);
+    assert!(
+        awaiting_return["authority"]["holder"].is_null(),
+        "{awaiting_return}"
+    );
     assert_eq!(
-        after_reclaim["authority"]["last_reclaim"]["reason"],
+        awaiting_return["authority"]["reclaim_request"]["reason"],
         "The handoff file was reported missing."
     );
-    // The peer had already acquired that offer, so both replicas held
-    // authority for a while. The reclaim decides the holder; the overlap is
-    // reported on both sides rather than disappearing.
-    let contest = &after_reclaim["authority"]["contested"][0];
-    assert_eq!(contest["acquired_by"]["name"], "peer");
-    assert_eq!(contest["reclaimed_by"]["name"], "origin");
-    let acknowledgement = recipient.home.join("contest-ack.json");
-    export_replica(&recipient, &acknowledgement);
-    import_replica(&source, &acknowledgement);
-    let source_view = replica_status(&source);
-    assert_eq!(source_view["authority"]["holder"]["name"], "origin");
+    source
+        .arc(&source.root)
+        .args(["integrate", &source_change])
+        .assert()
+        .code(17);
     assert_eq!(
-        source_view["authority"]["contested"][0]["acquired_by"]["name"],
+        replica_status(&recipient)["authority"]["holder"]["name"],
+        "peer"
+    );
+    import_replica(&recipient, &requested);
+    assert_eq!(
+        replica_status(&recipient)["authority"]["holder"]["name"],
         "peer"
     );
     recipient
         .arc(&recipient.root)
-        .args(["replica", "status"])
+        .args(["replica", "authority", "confirm-return"])
         .assert()
-        .success()
-        .stdout(predicates::str::contains("contested: peer acquired offer"));
+        .success();
+    let relinquished = replica_status(&recipient);
+    assert!(
+        !relinquished["authority"]["holder"].is_null(),
+        "{relinquished}"
+    );
+    assert_eq!(relinquished["authority"]["holder"]["name"], "origin");
+    recipient
+        .arc(&recipient.root)
+        .args(["integrate", "authority-work"])
+        .assert()
+        .code(17);
+    assert!(replica_status(&source)["authority"]["holder"].is_null());
+    let confirmation = recipient.home.join("return-confirmation.json");
+    export_replica(&recipient, &confirmation);
+    import_replica(&source, &confirmation);
+    let returned = replica_status(&source);
+    assert_eq!(returned["authority"]["holder"]["name"], "origin");
+    source
+        .arc(&source.root)
+        .args(["integrate", &source_change])
+        .assert()
+        .success();
+    let receipts = replica_import_count(&source);
+    import_replica(&source, &confirmation);
+    assert_eq!(replica_import_count(&source), receipts);
+    import_replica(&recipient, &source_offer);
+    import_replica(&recipient, &requested);
+    assert_eq!(
+        replica_status(&recipient)["authority"]["holder"]["name"],
+        "origin"
+    );
+}
+
+#[test]
+fn forwarded_recipient_cannot_confirm_a_stale_return_request() {
+    let origin = Repo::new();
+    let peer = Repo::new();
+    let successor = Repo::new();
+    origin
+        .arc(&origin.root)
+        .args(["replica", "init", "origin"])
+        .assert()
+        .success();
+    for (name, repo) in [("peer", &peer), ("successor", &successor)] {
+        origin
+            .arc(&origin.root)
+            .args([
+                "replica",
+                "pair",
+                name,
+                "--repository-id",
+                &repository_id(repo),
+            ])
+            .assert()
+            .success();
+    }
+    let pairing = origin.home.join("pairing.json");
+    export_replica(&origin, &pairing);
+    import_replica(&peer, &pairing);
+    import_replica(&successor, &pairing);
+    origin
+        .arc(&origin.root)
+        .args(["replica", "authority", "offer", "--to", "peer"])
+        .assert()
+        .success();
+    let offer = origin.home.join("offer.json");
+    export_replica(&origin, &offer);
+    import_replica(&peer, &offer);
+    let acquisition = peer.home.join("acquisition.json");
+    export_replica(&peer, &acquisition);
+    import_replica(&origin, &acquisition);
+    origin
+        .arc(&origin.root)
+        .args([
+            "replica",
+            "authority",
+            "reclaim",
+            "--because",
+            "request return",
+        ])
+        .assert()
+        .success();
+    let request = origin.home.join("request.json");
+    export_replica(&origin, &request);
+    peer.arc(&peer.root)
+        .args(["replica", "authority", "offer", "--to", "successor"])
+        .assert()
+        .success();
+    let forwarded = peer.home.join("forwarded.json");
+    export_replica(&peer, &forwarded);
+    import_replica(&peer, &request);
+    peer.arc(&peer.root)
+        .args(["replica", "authority", "confirm-return"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("forwarded"));
+    import_replica(&successor, &forwarded);
+    assert_eq!(
+        replica_status(&successor)["authority"]["holder"]["name"],
+        "successor"
+    );
+    import_replica(&origin, &forwarded);
+    assert!(replica_status(&origin)["authority"]["holder"].is_null());
+}
+
+#[test]
+fn reclaim_before_offer_delivery_waits_for_recipient_confirmation() {
+    let origin = Repo::new();
+    let peer = Repo::new();
+    origin
+        .arc(&origin.root)
+        .args(["replica", "init", "origin"])
+        .assert()
+        .success();
+    origin
+        .arc(&origin.root)
+        .args([
+            "replica",
+            "pair",
+            "peer",
+            "--repository-id",
+            &repository_id(&peer),
+        ])
+        .assert()
+        .success();
+    let pairing = origin.home.join("pairing.json");
+    export_replica(&origin, &pairing);
+    import_replica(&peer, &pairing);
+    origin
+        .arc(&origin.root)
+        .args(["replica", "authority", "offer", "--to", "peer"])
+        .assert()
+        .success();
+    let offer = origin.home.join("offer.json");
+    export_replica(&origin, &offer);
+    origin
+        .arc(&origin.root)
+        .args([
+            "replica",
+            "authority",
+            "reclaim",
+            "--because",
+            "return requested",
+        ])
+        .assert()
+        .success();
+    assert!(replica_status(&origin)["authority"]["holder"].is_null());
+    let request = origin.home.join("request.json");
+    export_replica(&origin, &request);
+    import_replica(&peer, &request);
+    assert_eq!(replica_status(&peer)["authority"]["holder"]["name"], "peer");
+    peer.arc(&peer.root)
+        .args(["replica", "authority", "confirm-return"])
+        .assert()
+        .success();
+    let confirmation = peer.home.join("confirmation.json");
+    export_replica(&peer, &confirmation);
+    import_replica(&origin, &confirmation);
+    assert_eq!(
+        replica_status(&origin)["authority"]["holder"]["name"],
+        "origin"
+    );
+    import_replica(&peer, &offer);
+    assert_eq!(
+        replica_status(&peer)["authority"]["holder"]["name"],
+        "origin"
+    );
 }
 
 /// An imported live claim cannot displace a different live local claim. The
