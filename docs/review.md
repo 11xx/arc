@@ -146,7 +146,9 @@ rejection or a change request, and `arc close --assert-integrated` records the
 merge the receiver made. Declaring `squash` in either policy file wins over
 `preserve`. A failed squash commit, a changed commit tree, or tracked edits left
 by a hook restore the original head, index, and tracked files. Untracked files
-created by hooks are retained for inspection.
+created by hooks are retained for inspection. Paths obstructing restoration
+are moved under `<git-common-dir>/arc/squash-recovery/`; the command prints
+the recovery directory before moving them.
 
 Set `[policy] require_declared_actor = true` to refuse an event whose effective
 author nobody claimed. `begin`, `verify`, and `integrate` check before they

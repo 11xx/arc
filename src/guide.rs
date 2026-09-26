@@ -653,7 +653,9 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   a new patchset with its own gates and verdict. A failed squash commit, a
   changed commit tree, or tracked edits left by a hook restore the original
   head, index, and tracked files. Untracked files created by hooks are retained
-  for inspection.
+  for inspection. Paths obstructing restoration are moved under
+  `<git-common-dir>/arc/squash-recovery/`; the command prints the recovery
+  directory before moving them.
 
   If no independent verdict is available, integrate with
   `arc integrate <change> --debt "<why>"`. A debt already in force routes to
