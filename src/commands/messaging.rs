@@ -1000,7 +1000,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-catchup/10",
+                "schema": "arc-catchup/11",
                 "ledger": inbox,
                 "journal": journal.as_ref().ok(),
                 "replica": replica,

@@ -52,3 +52,8 @@ pub fn reclaim(ctx: &Ctx, reason: &str) -> Result<()> {
     let store = ctx.store()?;
     crate::replica::reclaim(ctx, &store, reason)
 }
+
+pub fn confirm_return(ctx: &Ctx) -> Result<()> {
+    let store = ctx.store()?;
+    crate::replica::confirm_return(ctx, &store)
+}

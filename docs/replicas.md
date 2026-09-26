@@ -65,26 +65,37 @@ The recipient can export its known replica events and the original store can
 import that file to learn that the offer was accepted. Arc makes no network
 call; operators move the files over an authenticated path they already use.
 Each view reflects the events in its local store. A replica learns about a
-remote offer or reclaim only when it imports a file carrying that event.
+remote offer or return request only when it imports a file carrying that event.
 
-An offering replica can reclaim an unresolved offer by recording a reason:
+The offering replica can request return of an active offer by recording a reason:
 
 ```sh
 arc replica authority reclaim --because "The transfer file was reported missing."
-arc replica export --output authority-reclaim.json
+arc replica export --output authority-return-request.json
 ```
 
-A reclaim is an explicit operator decision. Importing the reclaim event makes
-the offering replica the authority holder and records the reason. The file
-must be exchanged for a recipient that already imported the offer to learn the
-reclaim.
+The request grants nothing to the origin. The recipient imports it, explicitly
+confirms relinquishment, and exports the confirmation:
 
-When the recipient had already acquired the offer before the reclaim, both
-replicas held authority until the recipient imported the reclaim. The reclaim
-still decides the holder, so every replica converges on one, and every replica
-that holds both events reports the overlap as `contested` in `arc replica
-status`, naming the acquirer, the reclaimer, and the offer. Check what the
-acquirer integrated in that interval.
+```sh
+arc replica import authority-return-request.json
+arc replica authority confirm-return
+arc replica export --output authority-return-confirmation.json
+```
+
+The recipient is blocked as soon as it confirms. The origin remains blocked
+until it imports `authority-return-confirmation.json`. A recipient that has
+forwarded authority cannot confirm return of the earlier offer. An offline
+recipient cannot be assumed to have stopped integrating, so its missing
+confirmation leaves the origin blocked. Repeated and delayed imports preserve
+the recorded authority chain. A replica that later reacquires authority can
+confirm only a request for the offer that granted its current authority;
+requests for earlier forwarded offers do not select a return.
+
+Replica event, bundle, and import receipt schemas use version 2 for confirmed
+returns. Safe version 1 identity, pairing, offer, and acquisition events remain
+readable. A version 1 reclaim event is refused because it does not prove the
+recipient relinquished authority. Version 1 bundles are refused explicitly.
 
 ## Exchange journal artifacts
 
