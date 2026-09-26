@@ -751,11 +751,11 @@ enum Cmd {
         #[arg(long)]
         blocker: Option<String>,
     },
-    /// Record the current branch head as a new patchset
     /// Rewrite a change as one commit on its base, with the same tree, and
     /// record it as a new patchset. Evidence and verdicts on the earlier
     /// heads stay with those heads; the single commit is gated and reviewed
-    /// like any other patchset
+    /// like any other patchset. A failed commit or hook-modified tree restores
+    /// the original head, index, and tracked files; untracked files are retained
     Squash {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -764,6 +764,7 @@ enum Cmd {
         #[arg(long, short = 'm')]
         message: String,
     },
+    /// Record the current branch head as a new patchset
     Snapshot {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in

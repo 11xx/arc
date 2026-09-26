@@ -72,20 +72,35 @@ pub fn squash(ctx: &Ctx, reference: &str, message: &str) -> Result<()> {
     // the repository's own signing and hook configuration.
     gitio::git(&worktree, &["reset", "--soft", &base])?;
     if let Err(error) = gitio::git(&worktree, &["commit", "-m", message]) {
-        gitio::git(&worktree, &["reset", "--soft", &head])?;
-        return Err(error).context("the single commit failed; the branch is back where it was");
+        restore_tracked_state(&worktree, &head)?;
+        return Err(error).context(
+            "the single commit failed; restored the original head, index, and tracked files; untracked files are retained",
+        );
     }
     let squashed = gitio::branch_head(&ctx.cwd, &st.branch)?;
     let squashed_tree = tree_of(&ctx.cwd, &squashed)?;
-    if squashed_tree != tree {
-        gitio::git(&worktree, &["reset", "--soft", &head])?;
-        bail!("the single commit's tree differs from {head}; the branch is back where it was");
+    let tracked_dirt = gitio::git(
+        &worktree,
+        &["status", "--porcelain", "--untracked-files=no"],
+    )?;
+    if squashed_tree != tree || !tracked_dirt.is_empty() {
+        restore_tracked_state(&worktree, &head)?;
+        bail!("the single commit or tracked files differ from {head}; restored the original head, index, and tracked files; untracked files are retained");
     }
     println!(
         "squashed: {count} commits since {} into {squashed} (the tree of {head})",
         st.target_branch
     );
     super::review::snapshot(ctx, &change_id, None, None, None, false, Vec::new(), None)
+}
+
+fn restore_tracked_state(worktree: &std::path::Path, head: &str) -> Result<()> {
+    gitio::git(worktree, &["reset", "--mixed", head])?;
+    gitio::git(
+        worktree,
+        &["restore", "--source", head, "--worktree", "--", "."],
+    )?;
+    Ok(())
 }
 
 fn tree_of(cwd: &std::path::Path, commit: &str) -> Result<String> {

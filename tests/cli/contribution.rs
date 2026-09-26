@@ -160,3 +160,45 @@ fn a_merge_commit_in_contributed_history_is_refused() {
         .failure()
         .stderr(predicates::str::contains("merge commit"));
 }
+
+#[test]
+fn audit_squash_restores_tracked_state_after_a_hook_changes_it() {
+    use std::os::unix::fs::PermissionsExt;
+    for hook_exit in [0, 1] {
+        let repo = contribution_repo("squash");
+        let worktree = open(&repo, "hook-failure");
+        commit_file(&worktree, "a.txt", "original\n");
+        commit_file(&worktree, "b.txt", "second\n");
+        gate_and_approve(&repo, &worktree, "hook-failure");
+        let original_head = repo.head(&worktree);
+        let original_tree = git_out(&worktree, &["write-tree"]);
+        let hook = repo.root.join(".git/hooks/pre-commit");
+        fs::write(&hook, format!(
+            "#!/bin/sh\nprintf 'hook edit\\n' > a.txt\ngit add a.txt\nprintf 'retained\\n' > hook-output.txt\nexit {hook_exit}\n"
+        )).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        repo.arc(&worktree)
+            .args(["squash", "-m", "feat: combine"])
+            .assert()
+            .failure();
+        assert_eq!(repo.head(&worktree), original_head);
+        assert_eq!(git_out(&worktree, &["write-tree"]), original_tree);
+        assert_eq!(
+            fs::read_to_string(worktree.join("a.txt")).unwrap(),
+            "original\n"
+        );
+        assert_eq!(
+            fs::read_to_string(worktree.join("hook-output.txt")).unwrap(),
+            "retained\n"
+        );
+        assert_eq!(
+            git_out(
+                &worktree,
+                &["status", "--porcelain", "--untracked-files=no"]
+            ),
+            ""
+        );
+        let status = json_stdout(repo.arc(&worktree).args(["status", "--json"]));
+        assert_eq!(status["latest_patchset"]["id"], "ps-01", "{status}");
+    }
+}
