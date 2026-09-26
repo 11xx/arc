@@ -54,7 +54,15 @@ pub enum SessionAnswer {
     Read(SessionRead),
     /// No store of the harness holds a recording for the id.
     NoRecording,
+    /// More than one recording matches the claimed id.
+    Ambiguous(String),
     /// A store holds something it could not read; the reason is tapes' own.
+    Unreadable(String),
+}
+
+enum LookupIssue {
+    Missing,
+    Ambiguous(String),
     Unreadable(String),
 }
 
@@ -67,17 +75,40 @@ fn harness_backends(harness: &str) -> Vec<Box<dyn Backend>> {
         .collect()
 }
 
+/// Tapes resolves exact IDs and useful prefixes. Arc attributes an acting
+/// session only when the resolved record names the entire claimed ID.
+fn resolve_exact(
+    backends: &[Box<dyn Backend>],
+    session: &str,
+) -> Result<tapes_core::ResolvedSession, LookupIssue> {
+    if backends.is_empty() {
+        return Err(LookupIssue::Missing);
+    }
+    let resolved = match tapes_core::resolve_session(backends, session) {
+        Ok(resolved) => resolved,
+        Err(ResolveError::NotFound {
+            truncated: false, ..
+        }) => return Err(LookupIssue::Missing),
+        Err(error @ ResolveError::Ambiguous { .. }) => {
+            return Err(LookupIssue::Ambiguous(error.to_string()));
+        }
+        Err(error) => return Err(LookupIssue::Unreadable(error.to_string())),
+    };
+    if resolved.session.id != session {
+        return Err(LookupIssue::Missing);
+    }
+    Ok(resolved)
+}
+
 /// Read one session's recording through tapes, matched by its exact id, with
 /// the bounded read window tapes applies to every recording.
 pub fn read_session(harness: &str, session: &str) -> SessionAnswer {
     let backends = harness_backends(harness);
-    if backends.is_empty() {
-        return SessionAnswer::NoRecording;
-    }
-    let resolved = match tapes_core::resolve_session(&backends, session) {
+    let resolved = match resolve_exact(&backends, session) {
         Ok(resolved) => resolved,
-        Err(ResolveError::NotFound { .. }) => return SessionAnswer::NoRecording,
-        Err(error) => return SessionAnswer::Unreadable(format!("{error}")),
+        Err(LookupIssue::Missing) => return SessionAnswer::NoRecording,
+        Err(LookupIssue::Ambiguous(reason)) => return SessionAnswer::Ambiguous(reason),
+        Err(LookupIssue::Unreadable(reason)) => return SessionAnswer::Unreadable(reason),
     };
     let backend = &backends[resolved.backend_index];
     let transcript = match backend.transcript(&resolved.session, usize::MAX) {
@@ -136,6 +167,8 @@ pub enum SessionIdentity {
     Unnamed(ModelUnavailable),
     /// No store of the harness holds a recording for the id.
     NoRecording,
+    /// Store resolution or transcript reading could not establish identity.
+    Unresolved,
 }
 
 /// Why a recording arc found names no model it may report.
@@ -161,23 +194,27 @@ impl ModelUnavailable {
     }
 }
 
-/// What a harness's store holds for one session. The recording's bounded read
-/// decides the model; the store's listing answers only when that read does
-/// not.
+/// What a harness's store holds for one session. A successful bounded read
+/// decides the model; its listing may fill a model the read omitted, but a
+/// failed read cannot corroborate that listing or its model.
 pub fn session_identity(harness: &str, session: &str) -> SessionIdentity {
     let backends = harness_backends(harness);
-    let Ok(resolved) = tapes_core::resolve_session(&backends, session) else {
-        return SessionIdentity::NoRecording;
+    let resolved = match resolve_exact(&backends, session) {
+        Ok(resolved) => resolved,
+        Err(LookupIssue::Missing) => return SessionIdentity::NoRecording,
+        Err(LookupIssue::Ambiguous(_) | LookupIssue::Unreadable(_)) => {
+            return SessionIdentity::Unresolved;
+        }
     };
     let backend = &backends[resolved.backend_index];
+    let transcript = match backend.transcript(&resolved.session, 1) {
+        Ok(transcript) => transcript,
+        Err(_) => return SessionIdentity::Unresolved,
+    };
     if harness == "claude" && subagent_may_be_acting(backend.as_ref(), &resolved.session) {
         return SessionIdentity::Unnamed(ModelUnavailable::SubagentActivity);
     }
-    let model = backend
-        .transcript(&resolved.session, 1)
-        .ok()
-        .and_then(|transcript| transcript.session.model)
-        .or(resolved.session.model);
+    let model = transcript.session.model.or(resolved.session.model);
     match model {
         Some(model) => SessionIdentity::Named(match model.variant {
             Some(variant) => format!("{}#{variant}", model.id),

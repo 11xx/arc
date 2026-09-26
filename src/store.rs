@@ -172,6 +172,7 @@ impl Store {
 
     pub fn append_repository_event(&self, event: &Event) -> Result<()> {
         self.refuse_undeclared_author(event)?;
+        self.stamp_session_resolution(event.session_resolution)?;
         ids::validate_id_component(&event.event_id)?;
         let dir = self.repository_events_dir();
         create_private_dir_all(&dir)?;
@@ -531,6 +532,7 @@ impl Store {
     /// a ULID event ID indicates a real bug and fails loudly.
     pub fn append_event(&self, event: &Event) -> Result<()> {
         self.refuse_undeclared_author(event)?;
+        self.stamp_session_resolution(event.session_resolution)?;
         self.stamp_format_for(&event.payload)?;
         ids::validate_id_component(&event.change_id)?;
         ids::validate_id_component(&event.event_id)?;
@@ -551,6 +553,16 @@ impl Store {
     /// event is how a closed change gets read as open and closed a second way.
     /// Stamping at that moment, rather than on every open, means a build that
     /// only read a ledger never locks its owner out of it.
+    fn stamp_session_resolution(
+        &self,
+        resolution: Option<crate::model::SessionResolution>,
+    ) -> Result<()> {
+        if resolution == Some(crate::model::SessionResolution::Unresolved) {
+            self.stamp_format(Some(5))?;
+        }
+        Ok(())
+    }
+
     fn stamp_format_for(&self, payload: &Payload) -> Result<()> {
         let introduced_in = match payload {
             Payload::ExternalVerdictRecorded { .. }
@@ -580,6 +592,13 @@ impl Store {
     /// The same stamp, decided from raw imported JSON, so the import path and
     /// the typed record path cannot disagree about a wire-format addition.
     fn stamp_format_for_value(&self, value: Option<&serde_json::Value>) -> Result<()> {
+        if value
+            .and_then(|value| value.get("session_resolution"))
+            .and_then(serde_json::Value::as_str)
+            == Some("unresolved")
+        {
+            self.stamp_format(Some(5))?;
+        }
         let introduced_in = match value
             .and_then(|value| value.get("event_type"))
             .and_then(serde_json::Value::as_str)
@@ -958,6 +977,8 @@ impl Store {
     /// Idempotent: a rewrite already recorded here is the same fact.
     pub fn append_raw_repository_event(&self, event_id: &str, bytes: &[u8]) -> Result<bool> {
         ids::validate_id_component(event_id)?;
+        let value = serde_json::from_slice::<serde_json::Value>(bytes).ok();
+        self.stamp_format_for_value(value.as_ref())?;
         let dir = self.repository_events_dir();
         create_private_dir_all(&dir)?;
         let path = dir.join(format!("{event_id}.json"));
