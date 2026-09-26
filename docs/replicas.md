@@ -88,7 +88,9 @@ until it imports `authority-return-confirmation.json`. A recipient that has
 forwarded authority cannot confirm return of the earlier offer. An offline
 recipient cannot be assumed to have stopped integrating, so its missing
 confirmation leaves the origin blocked. Repeated and delayed imports preserve
-the recorded authority chain.
+the recorded authority chain. A replica that later reacquires authority can
+confirm only a request for the offer that granted its current authority;
+requests for earlier forwarded offers do not select a return.
 
 Replica event, bundle, and import receipt schemas use version 2 for confirmed
 returns. Safe version 1 identity, pairing, offer, and acquisition events remain

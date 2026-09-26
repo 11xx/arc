@@ -690,27 +690,41 @@ pub fn confirm_return(ctx: &Ctx, store: &Store) -> Result<()> {
     let events = load_events(store)?;
     let current =
         snapshot(&events, &store.repository_id)?.context("this store has no replica project")?;
+    if current
+        .authority
+        .holder
+        .as_ref()
+        .is_none_or(|holder| holder.repository_id != store.repository_id)
+    {
+        if current
+            .authority
+            .offer_in_flight
+            .as_ref()
+            .is_some_and(|offer| offer.from.repository_id == store.repository_id)
+        {
+            bail!("no current applicable return request; authority was forwarded");
+        }
+        bail!("no current applicable return request; this replica does not hold authority");
+    }
+    let offer_id = events
+        .iter()
+        .find_map(|event| match &event.payload {
+            ReplicaPayload::AuthorityAcquired { offer_id }
+                if event.event_id == current.authority_event_id =>
+            {
+                Some(offer_id.clone())
+            }
+            _ => None,
+        })
+        .context("no current applicable return request for this authority grant")?;
     let request = events
         .iter()
         .find(|event| {
-            let ReplicaPayload::AuthorityReclaimRequested { offer_id, .. } = &event.payload else {
-                return false;
-            };
-            events.iter().any(|offer| {
-                matches!(&offer.payload,
-            ReplicaPayload::AuthorityOffered { offer_id: id, to, .. }
-                if id == offer_id && to.repository_id == store.repository_id)
-            }) && !events.iter().any(|confirmation| {
-                matches!(&confirmation.payload,
-                ReplicaPayload::AuthorityReturnConfirmed { request_id, .. }
-                    if request_id == &event.event_id)
-            })
+            matches!(&event.payload,
+        ReplicaPayload::AuthorityReclaimRequested { offer_id: requested, .. }
+            if requested == &offer_id)
         })
-        .context("no reclaim request awaits this recipient")?;
-    let offer_id = match &request.payload {
-        ReplicaPayload::AuthorityReclaimRequested { offer_id, .. } => offer_id.clone(),
-        _ => unreachable!(),
-    };
+        .context("no current applicable return request for this authority grant")?;
     let event = make_event(
         ctx,
         store,
