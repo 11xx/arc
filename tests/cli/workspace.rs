@@ -3300,3 +3300,109 @@ fn workspace_backlog_counts_an_empty_vanished_journal_as_empty() {
         "{value}"
     );
 }
+
+/// The report classifies the backlog by named rules, and a second report
+/// against the first names why each artifact left: consumed with its outcome,
+/// or archived. A report of another schema is refused as a baseline.
+#[test]
+fn workspace_report_classifies_and_explains_departures() {
+    let repo = Repo::new();
+    let (_, finished) = journal_artifact(&repo, "finished", "todo", "# Finished soon\n");
+    let (_, shelved) = journal_artifact(&repo, "shelved", "discussion", "# Shelved soon\n");
+    let (_, staying) = journal_artifact(&repo, "staying", "todo", "# Still here\n");
+
+    let mut first = repo.arc(&repo.root);
+    first.args(["workspace", "report", "--json"]);
+    let first = json_stdout(&mut first);
+    assert_eq!(first["schema"], "arc-workspace-report/1");
+    assert!(first["previous"].is_null());
+    let work = first["sections"]["work"].as_array().unwrap();
+    let row = work
+        .iter()
+        .find(|row| row["file"] == staying.as_str())
+        .unwrap_or_else(|| panic!("{first}"));
+    assert_eq!(row["status"], "unresolved");
+    assert_eq!(row["title"], "Still here");
+    assert!(row["new_since_previous"].is_null(), "{row}");
+    let baseline = repo.home.join("report-1.json");
+    fs::write(&baseline, serde_json::to_string(&first).unwrap()).unwrap();
+
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &finished, "--outcome", "done"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "archive",
+            &shelved,
+            "--unresolved",
+            "--note",
+            "not now",
+        ])
+        .assert()
+        .success();
+    let (_, arrived) = journal_artifact(&repo, "arrived", "todo", "# Arrived later\n");
+
+    let mut second = repo.arc(&repo.root);
+    second.args(["workspace", "report", "--json", "--previous"]);
+    second.arg(&baseline);
+    let second = json_stdout(&mut second);
+    assert_eq!(second["previous"], first["observation"]["finished_at"]);
+    let resolved = second["sections"]["resolved_since_previous"]
+        .as_array()
+        .unwrap();
+    let reason = |file: &str| {
+        resolved
+            .iter()
+            .find(|row| row["file"] == file)
+            .unwrap_or_else(|| panic!("{file} missing: {second}"))
+            .clone()
+    };
+    assert_eq!(reason(&finished)["reason"], "consumed");
+    assert_eq!(reason(&finished)["outcome"], "done");
+    assert_eq!(reason(&shelved)["reason"], "archived");
+    let work = second["sections"]["work"].as_array().unwrap();
+    let new_row = work
+        .iter()
+        .find(|row| row["file"] == arrived.as_str())
+        .unwrap();
+    assert_eq!(new_row["new_since_previous"], true);
+    let kept = work
+        .iter()
+        .find(|row| row["file"] == staying.as_str())
+        .unwrap();
+    assert_eq!(kept["new_since_previous"], false);
+    assert_eq!(
+        second["tallies"]["work"]["previous"],
+        first["tallies"]["work"]["value"]
+    );
+
+    let text = stdout(repo.arc(&repo.root).args(["workspace", "report"]));
+    assert!(text.contains("needs a person"), "{text}");
+    assert!(
+        text.contains("detail: arc workspace report --json"),
+        "{text}"
+    );
+
+    let backlog = repo.home.join("backlog.json");
+    let mut raw = repo.arc(&repo.root);
+    raw.args(["workspace", "backlog", "--json"]);
+    fs::write(
+        &backlog,
+        serde_json::to_string(&json_stdout(&mut raw)).unwrap(),
+    )
+    .unwrap();
+    let refused = repo
+        .arc(&repo.root)
+        .args(["workspace", "report", "--previous"])
+        .arg(&backlog)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("expected arc-workspace-report/1"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
