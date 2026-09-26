@@ -1449,7 +1449,7 @@ enum ReplicaCmd {
         #[arg(long)]
         output: String,
     },
-    /// Import a pairing record or authority offer from another replica
+    /// Import a pairing record or authority exchange from another replica
     Import {
         /// Input file ('-' for stdin)
         input: String,
@@ -1463,7 +1463,7 @@ enum ReplicaCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Move or reclaim integration authority
+    /// Offer authority or request and confirm its return
     Authority {
         #[command(subcommand)]
         cmd: ReplicaAuthorityCmd,
@@ -1478,12 +1478,14 @@ enum ReplicaAuthorityCmd {
         #[arg(long)]
         to: String,
     },
-    /// Reclaim an unresolved offer and record the reason
+    /// Request return of an active offer; authority stays blocked here
     Reclaim {
-        /// Reason the in-flight offer is being reclaimed
+        /// Reason for requesting the recipient's confirmation
         #[arg(long)]
         because: String,
     },
+    /// Relinquish an offered grant after importing its reclaim request
+    ConfirmReturn,
 }
 
 #[derive(Subcommand)]
@@ -2693,6 +2695,10 @@ fn run(cli: Cli) -> Result<i32> {
                 }
                 ReplicaAuthorityCmd::Reclaim { because } => {
                     commands::replica_reclaim(&ctx, &because)?;
+                    Ok(0)
+                }
+                ReplicaAuthorityCmd::ConfirmReturn => {
+                    commands::replica_confirm_return(&ctx)?;
                     Ok(0)
                 }
             },

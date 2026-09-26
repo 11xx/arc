@@ -409,7 +409,9 @@ RUN A CHANGE
   arc replica authority offer --to <name>
                                      Relinquish authority to a paired recipient.
   arc replica authority reclaim --because <reason>
-                                     Reclaim an unresolved offer with a reason.
+                                     Request return without acquiring authority.
+  arc replica authority confirm-return
+                                     Relinquish authority to a requesting origin.
   arc journal export <file>... --output <file>
                                      Export selected journal artifacts with
                                      the events recorded about them.
@@ -484,8 +486,11 @@ PAIR REPLICA STORES
   The first replica holds integration authority. `authority offer` relinquishes
   it when the offer is recorded; the named replica acquires it when it imports
   the offer file. Export the recipient's replica events back to the offering
-  store to report the acquisition there. Reclaiming an unresolved offer
-  requires a reason, and exporting that event reports the reclaim to peers.
+  store to report the acquisition there. Reclaim requests return from the
+  recipient and leaves the origin blocked. The recipient imports the request,
+  records `authority confirm-return`, and exports that confirmation. The
+  origin reacquires authority only after importing it. A recipient that has
+  forwarded authority cannot confirm its return.
   Imports have a dry-run preview, are idempotent, and record a receipt with the
   source replica and bundle digest. A paired replica without authority is
   refused by `integrate`.
