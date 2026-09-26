@@ -77,6 +77,14 @@ FROM A WORKSPACE ROOT (outside a project)
                        `--under`/`--here`/`--global` scope, reports the same
                        collection manifest, exits 16 on a partial collection,
                        and is versioned `arc-workspace-inventory/1`.
+  arc workspace report [--previous FILE] --json
+                       The backlog classified by named rules: each artifact's
+                       status (unresolved, delivered, claimed, ...), the
+                       sections a reader acts from, and attention facts, so
+                       any renderer draws the same page from the same ledger.
+                       --previous adds deltas and the recorded reason each
+                       departed artifact left. Versioned
+                       `arc-workspace-report/1`.
   cd <anchor>          Enter one project named by the report, then orient there.
 
 ORIENT INSIDE A PROJECT (start here, in this order)
