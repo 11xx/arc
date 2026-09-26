@@ -88,7 +88,7 @@ impl Store {
             }
             Err(_) => {
                 let cfg = StoreConfig {
-                    schema_version: crate::model::SCHEMA_VERSION,
+                    schema_version: 1,
                     repository_id: ids::new_event_id(),
                     created_at: chrono::Utc::now(),
                 };

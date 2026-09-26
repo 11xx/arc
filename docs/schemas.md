@@ -94,4 +94,5 @@ by a newer arc rather than skipping lifecycle events it does not know.
 Store format 4 adds external verdicts with their source references, and the
 record that a contributed change is ready to send, to the change ledger. A
 build that reads format 3 would skip them, so a store holding either is
-stamped format 4.
+stamped format 4. A fresh store starts at format 1; recording or importing an
+event raises its format barrier only to the version that event requires.
