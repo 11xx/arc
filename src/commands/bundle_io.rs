@@ -1,21 +1,25 @@
 use super::*;
 
-pub fn export_bundle(ctx: &Ctx, reference: &str, output: &str) -> Result<()> {
+pub fn export_bundle(ctx: &Ctx, reference: &str, output: &str, since: Option<&str>) -> Result<()> {
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
-    let bundle = Bundle::export(&store, &change_id)?;
+    let bundle = Bundle::export(&store, &change_id, since)?;
     let bytes = bundle.to_bytes()?;
+    let mut reported = format!("events: {}", bundle.event_count);
+    if let Some(prefix) = &bundle.since {
+        reported.push_str(&format!(
+            "\nprefix: {} ({} events)",
+            prefix.sha256, prefix.event_count
+        ));
+    }
+    reported.push_str(&format!("\nsha256: {}", bundle.events_sha256));
     if output == "-" {
         std::io::stdout().write_all(&bytes)?;
-        eprintln!("events: {}", bundle.event_count);
-        eprintln!("sha256: {}", bundle.events_sha256);
-        eprintln!("output: -");
+        eprintln!("{reported}\noutput: -");
     } else {
         std::fs::write(output, bytes)
             .with_context(|| format!("cannot write export bundle {output}"))?;
-        println!("events: {}", bundle.event_count);
-        println!("sha256: {}", bundle.events_sha256);
-        println!("output: {output}");
+        println!("{reported}\noutput: {output}");
     }
     Ok(())
 }
@@ -33,6 +37,15 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     let validated = Bundle::parse(&bytes)?;
     let root = Store::resolve_root(&ctx.cwd)?;
     let local_repository_id = Store::repository_id_at(&root)?;
+    let local_store = local_repository_id.as_ref().map(|repository_id| Store {
+        root: root.clone(),
+        repository_id: repository_id.clone(),
+        require_declared_actor: false,
+        require_declared_actor_sources: Vec::new(),
+    });
+    // A suffix is only meaningful against the prefix it extends, and the
+    // checksum of the whole history is what ties the two together.
+    verify_bundle_prefix(local_store.as_ref(), &validated)?;
 
     let mut missing_objects = Vec::new();
     let mut pins = Vec::new();
@@ -54,24 +67,19 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         let plan = classify_import_events(&root, &validated)?;
         let mut claim_contest = None;
         if plan.conflicts.is_empty() {
-            let store = local_repository_id.as_ref().map(|repository_id| Store {
-                root: root.clone(),
-                repository_id: repository_id.clone(),
-                require_declared_actor: false,
-                require_declared_actor_sources: Vec::new(),
-            });
-            if let Some(store) = store.as_ref() {
+            let store = local_store.as_ref();
+            if let Some(store) = store {
                 claim_contest = claim_contest_for_import(store, &validated, &plan.new_events)?;
             }
             if claim_contest.is_none() {
-                validate_import_candidate(store.as_ref(), &validated, &plan.new_events)?;
+                validate_import_candidate(store, &validated, &plan.new_events)?;
             }
             // The same refusals the import makes: a preflight that reports
             // success for a bundle the real path rejects is believed, and
             // wrong. A destination with no store still checks the bundle
             // against itself.
             if claim_contest.is_none() {
-                plan_repository_events(store.as_ref(), &validated)?;
+                plan_repository_events(store, &validated)?;
             }
         }
         print_import_report(
@@ -99,6 +107,9 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     let store = Store::discover(&ctx.cwd)?;
     let _replica_state = crate::replica::lock(&store)?;
     let transition = store.lock_transition(&validated.bundle.change_id)?;
+    // The prefix is judged under the same lock as the replay it authorises,
+    // so a concurrent import cannot move the history between the two.
+    verify_bundle_prefix(Some(&store), &validated)?;
     // Classification and candidate replay must happen after taking the same
     // per-change lock used by claim, release, stage, and snapshot. Otherwise a
     // local transition could land between validation and the raw appends.
@@ -166,6 +177,69 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         gitio::update_ref(&ctx.cwd, &name, &head)?;
     }
     Ok(0)
+}
+
+/// A delta bundle carries the suffix of a history. The receiver must hold
+/// the prefix the bundle names: its first `event_count` events, in event-id
+/// order, must checksum to `sha256`, and that same prefix followed by the
+/// bundled events must checksum to the bundle's own `events_sha256`. Both
+/// halves are checked before the first write, so a suffix over a different
+/// history, or a tampered one, is refused with nothing imported.
+fn verify_bundle_prefix(store: Option<&Store>, validated: &ValidatedBundle) -> Result<()> {
+    let Some(prefix) = &validated.bundle.since else {
+        return Ok(());
+    };
+    let Some(store) = store else {
+        bail!(
+            "this destination holds no store, so it cannot hold prefix checksum {}; \
+             nothing was imported",
+            prefix.sha256
+        );
+    };
+    let mut held = Vec::new();
+    if store
+        .list_change_ids()?
+        .iter()
+        .any(|change_id| change_id == &validated.bundle.change_id)
+    {
+        held = store
+            .raw_events(&validated.bundle.change_id)?
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect();
+    }
+    if held.len() < prefix.event_count {
+        bail!(
+            "this store holds {} events for change {}; the bundle extends a prefix of {}; \
+             nothing was imported",
+            held.len(),
+            validated.bundle.change_id,
+            prefix.event_count
+        );
+    }
+    let head = &held[..prefix.event_count];
+    let actual = crate::bundle::checksum(head)?;
+    if actual != prefix.sha256 {
+        bail!(
+            "the receiving store's first {} events for change {} checksum to {actual}, \
+             the bundle extends {}; nothing was imported",
+            prefix.event_count,
+            validated.bundle.change_id,
+            prefix.sha256
+        );
+    }
+    let mut combined = head.to_vec();
+    combined.extend(validated.bundle.events.iter().cloned());
+    let history = crate::bundle::checksum(&combined)?;
+    if history != validated.bundle.events_sha256 {
+        bail!(
+            "the bundle's checksum {} does not cover prefix {} and its events; \
+             nothing was imported",
+            validated.bundle.events_sha256,
+            prefix.sha256
+        );
+    }
+    Ok(())
 }
 
 fn claim_contest_for_import(
@@ -366,6 +440,12 @@ fn print_import_report(
     pins: &[(String, String)],
     dry_run: bool,
 ) {
+    if let Some(prefix) = &validated.bundle.since {
+        println!(
+            "prefix: {} ({} events verified)",
+            prefix.sha256, prefix.event_count
+        );
+    }
     if let Some(local) = local_repository_id {
         if local != validated.bundle.repository_id {
             println!(
