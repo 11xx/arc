@@ -20,7 +20,8 @@ links carries that knowledge: Claude Code relocates its configuration
 directory — session history included — under `CLAUDE_CONFIG_DIR`, Codex under
 `CODEX_HOME`, and Pi under `PI_CODING_AGENT_SESSION_DIR` or
 `PI_CODING_AGENT_DIR`; each replaces the default under `$HOME` rather than
-adding to it. A session id resolves against those stores by exact match. A
+adding to it. A session id resolves against those stores by exact canonical
+ID; a unique prefix names no acting session for arc. A
 session recorded under more than one Claude project directory resolves to the
 most recently modified recording, with equal timestamps falling to path order.
 
@@ -29,7 +30,9 @@ reported: `arc env` says whether the store corroborates the session, and every
 event carries the same verdict as `session_resolution` beside `session`. An id
 the store does not hold — a stale export, a nested shell, a wrapper passing its
 environment down — is recorded as uncorroborated rather than left to be
-inferred from an absent model. A session declared with `ARC_SESSION` or
+inferred from an absent model. An ambiguous lookup, incomplete search, or
+unreadable recording is recorded as unresolved, since none establishes
+absence. A failed transcript read supplies no model from a listing. A session declared with `ARC_SESSION` or
 `--session` was never looked up, so it carries no verdict either way.
 
 The harness that owns the process is the one that exported its session id into

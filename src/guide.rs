@@ -42,8 +42,9 @@ SAY WHO YOU ARE (before the first write)
   session store for the model, honouring the store's own override —
   `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_SESSION_DIR`,
   `PI_CODING_AGENT_DIR` — before the default under `$HOME`, and reports
-  whether the store corroborates the session. Events record that verdict
-  beside the session they carry. It prints an export for every field it
+  whether the store corroborates the exact canonical session id. An
+  ambiguous or unreadable lookup remains unresolved rather than absent.
+  Events record that verdict beside the session they carry. It prints an export for every field it
   establishes and an explicit `unset` for each it does not, so evaluating it
   never leaves a stale session or model beside a fresh harness. Pi re-sets its
   live recording file, model, and reasoning level for each tool call, so those
@@ -914,10 +915,10 @@ RULES THAT CHANGE WHAT YOU DO
   - An executor that hangs never reaches its own release. Before leaving a
     delegated run unattended, arm `arc watch <change> --until stalled`; silence
     is unknown, not healthy. `arc rescue <change> --take` recovers it, and
-    `arc rescue <change> --transcript` reads the claimed session's latest
+    `arc rescue <change> --transcript` reads the exact claimed session's latest
     operator turns through the linked tapes library, taking the newest 4 MiB of
-    a recording file as its window, and names the reader that answered and the
-    bound a read stopped at.
+    a recording file as its window. It names the reader and the read bound, or
+    the cause and reason when lookup or reading cannot finish.
   - `arc watch <file.md> --until stalled` arms the same wait over an artifact
     claim, and `arc rescue <file.md> [--take]` reports where the work stopped
     and takes it over. An artifact answers only `stalled`; the rest of the

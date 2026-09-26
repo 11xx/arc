@@ -349,11 +349,19 @@ fn opencode_witness() -> Detection {
 
 fn resolved(claim: &SessionClaim) -> DetectedIdentity {
     let identity = session_store::session_identity(claim.harness, &claim.session);
-    let recorded = !matches!(identity, session_store::SessionIdentity::NoRecording);
+    let resolution = match identity {
+        session_store::SessionIdentity::NoRecording => SessionResolution::Uncorroborated,
+        session_store::SessionIdentity::Unresolved => SessionResolution::Unresolved,
+        _ => SessionResolution::Corroborated,
+    };
     let (mut model, mut model_unavailable) = match identity {
         session_store::SessionIdentity::Named(model) => (Some(model), None),
         session_store::SessionIdentity::Unnamed(reason) => (None, Some(reason.line())),
         session_store::SessionIdentity::NoRecording => (None, None),
+        session_store::SessionIdentity::Unresolved => (
+            None,
+            Some("the session store could not resolve or read this id"),
+        ),
     };
     if let Some(live) = live_pi_model(claim) {
         model = Some(live);
@@ -363,11 +371,7 @@ fn resolved(claim: &SessionClaim) -> DetectedIdentity {
         harness: claim.harness.to_string(),
         session: Some(DetectedSession {
             id: claim.session.clone(),
-            resolution: if recorded {
-                SessionResolution::Corroborated
-            } else {
-                SessionResolution::Uncorroborated
-            },
+            resolution,
         }),
         model,
         model_unavailable,
@@ -490,6 +494,9 @@ fn session_resolution_line(harness: &str, resolution: SessionResolution) -> Stri
         ),
         SessionResolution::Uncorroborated => format!(
             "session uncorroborated: the {harness} session store resolved no recording for this id"
+        ),
+        SessionResolution::Unresolved => format!(
+            "session unresolved: the {harness} session store could not establish whether this id has a readable recording"
         ),
     }
 }
