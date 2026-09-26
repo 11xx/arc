@@ -650,7 +650,10 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   "squash"|"preserve"` declaration makes `integrate` record the change ready to
   send instead of merging it, refusing merge commits and, under squash, more
   than one commit; `arc squash <change> -m <message>` makes that one commit as
-  a new patchset with its own gates and verdict.
+  a new patchset with its own gates and verdict. A failed squash commit, a
+  changed commit tree, or tracked edits left by a hook restore the original
+  head, index, and tracked files. Untracked files created by hooks are retained
+  for inspection.
 
   If no independent verdict is available, integrate with
   `arc integrate <change> --debt "<why>"`. A debt already in force routes to
