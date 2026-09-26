@@ -1,5 +1,24 @@
 use super::common::*;
 
+#[test]
+fn audit_empty_store_does_not_require_a_newer_event_format() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["replica", "id", "--json"])
+        .assert()
+        .success();
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
+    assert_eq!(config["schema_version"], 1, "{config}");
+    repo.arc(&repo.root)
+        .args(["begin", "format-base"])
+        .assert()
+        .success();
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
+    assert_eq!(config["schema_version"], 1, "{config}");
+}
+
 /// Skipping an event type is safe for a comment and fatal for a closure: a
 /// build that did not know an integration event would read the change as open
 /// and close it a second way. So the bundle carries the format it was written

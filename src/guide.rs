@@ -642,17 +642,25 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   check` and gate execution refuse it. `arc status`, `arc show`, and `arc policy
   show` name the file that declared each rule. The operator file is outside
   the work tree, so local policy does not add tracked files to a contribution.
+  `arc policy show` includes each gate's command, profiles, timeout, and
+  environment probe.
 
   Work sent to a repository you do not own is decided by its receiver.
   `arc external verdict <change> --verdict <v> --decided-by <who>
   --reference <ref> --revision <rev>` records that decision beside, never as,
   a verdict arc witnessed: an approval gates only the revision it names and
-  never alone on a dangerous path, a change request carries findings, and a
+  never alone on a dangerous path. An external approval never supersedes a
+  local refusal. A change request carries findings, and a
   rejection of the head closes the change. A `[contribution] history =
   "squash"|"preserve"` declaration makes `integrate` record the change ready to
   send instead of merging it, refusing merge commits and, under squash, more
   than one commit; `arc squash <change> -m <message>` makes that one commit as
-  a new patchset with its own gates and verdict.
+  a new patchset with its own gates and verdict. A failed squash commit, a
+  changed commit tree, or tracked edits left by a hook restore the original
+  head, index, and tracked files. Untracked files created by hooks are retained
+  for inspection. Paths obstructing restoration are moved under
+  `<git-common-dir>/arc/squash-recovery/`; the command prints the recovery
+  directory before moving them.
 
   If no independent verdict is available, integrate with
   `arc integrate <change> --debt "<why>"`. A debt already in force routes to

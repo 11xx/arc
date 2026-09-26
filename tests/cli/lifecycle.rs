@@ -1704,7 +1704,7 @@ fn guarded_and_asserted_integrations_have_distinct_event_types_and_targets() {
     // A barrier nothing stamps protects only stores this build created.
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
-    assert_eq!(config["schema_version"], 4, "{config}");
+    assert_eq!(config["schema_version"], 2, "{config}");
 
     // Asserted: somebody else merged it, and says so afterwards.
     stdout(repo.arc(&repo.root).args(["begin", "asserted"]));
