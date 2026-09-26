@@ -27,7 +27,7 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-brief/1` | `arc brief --json` — one selected brief and its immutable plan-source snapshot | commitment |
 | `arc-journal-artifact/2` | `arc journal show --json` — raw artifact bytes and planner metadata | commitment |
 | `arc-journal-inventory/5` | `arc journal inventory [FILE] [--archived] --json` — one read-only artifact projection with storage, claims, converged checkpoint tips, questions, promotions, promotion state, patchsets citing each artifact, and ledger observation | commitment |
-| `arc-rescue/3` | `arc rescue --json` — ledger state joined with worktree divergence, a foreign claim's standing, and the transcript reader's answer with its bound and cause | commitment |
+| `arc-rescue/4` | `arc rescue --json` — ledger state joined with worktree divergence, a foreign claim's standing, and the transcript reader's answer with its bound, cause, and unresolved-read reason | commitment |
 | `arc-review/4` | `arc review --json` — local and external verdict history, findings, causes, current review options, and the next action | commitment |
 | `arc-findings/2` | `arc findings --format json` — the open finding set, or the audit set with `--audit` | commitment |
 | `arc-blocker-status/1` | `arc blocker-status --json` — dependency detail for one change | commitment |
@@ -66,13 +66,13 @@ apply and the field is omitted.
 
 | Schema | Surface | Stability |
 | --- | --- | --- |
-| `arc-bundle/3` | `arc export` / `arc import` — one change's ledger, complete or as the suffix after a prefix checksum the receiver holds, as a deterministic JSON file | commitment |
+| `arc-bundle/4` | `arc export` / `arc import` — one change's ledger, complete or as the suffix after a prefix checksum the receiver holds, as a deterministic JSON file | commitment |
 | `arc-replica-event/2` | One identity or authority event, including return request and confirmation, carried by an `arc-replica-bundle/2` file | commitment |
 | `arc-replica-bundle/2` | `arc replica export` / `arc replica import` — a logical project's explicit replica identities and authority events | commitment |
 | `arc-replica-import/2` | Local receipt batch naming the source replica and imported bundle digest | internal |
 | `arc-journal-bundle/1` | `arc journal export` / `arc journal import` — selected journal artifacts with their bodies, recorded events, body digests, and the reference closure | commitment |
 | `arc-journal-exchange-import/1` | Local receipt naming the source and receiving replicas and the imported journal bundle digest | internal |
-| `store-format/4` | `.git/arc/config.json` and the change ledger, including external verdicts, their source references, and ready-to-send records | internal |
+| `store-format/5` | `.git/arc/config.json` and the change ledger, including external verdicts, ready-to-send records, and unresolved detected-session identity | internal |
 | `journal-events/1` | `events.jsonl`, streamed by `arc journal events` — the canonical agent-written event log | commitment |
 | `arc-journal-spool/1` | `.arc/outbox/<ts>-<kind>-<topic>.json` — a journal write parked for later promotion | commitment |
 | `arc-sandbox/2` | `.arc-sandbox.json` — the marker naming a prefix as arc's to remove | internal |
@@ -96,3 +96,6 @@ record that a contributed change is ready to send, to the change ledger. A
 build that reads format 3 would skip them, so a store holding either is
 stamped format 4. A fresh store starts at format 1; recording or importing an
 event raises its format barrier only to the version that event requires.
+Store format 5 admits an unresolved session resolution. A store is stamped
+format 5 when an event carries that value, because an older reader cannot
+attribute it without confusing uncertainty with absence.

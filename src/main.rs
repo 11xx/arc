@@ -1094,9 +1094,10 @@ enum Cmd {
     /// order. The store root is the harness's own override —
     /// `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_SESSION_DIR`, or
     /// `PI_CODING_AGENT_DIR` — before its default under `$HOME`. The store's
-    /// answer for the session is reported with the exports: an id the store
-    /// does not hold is uncorroborated, and the events the identity writes
-    /// carry that verdict. Every field the detection establishes is exported
+    /// answer for the exact canonical session id is reported with the exports:
+    /// an id the store does not hold is uncorroborated; an ambiguous or
+    /// unreadable lookup is unresolved. Events carry that verdict. Every
+    /// field the detection establishes is exported
     /// and every field it does not is explicitly unset, so evaluating the
     /// output never leaves a stale value beside a fresh one. Pi re-sets
     /// `PI_SESSION_FILE`, `PI_MODEL`, and `PI_REASONING_LEVEL` for every tool
@@ -1151,8 +1152,9 @@ enum Cmd {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
-        /// Include the claimed session's sensitive transcript; the read takes
-        /// the newest 4 MiB of the recorded file
+        /// Include an exact claimed session's sensitive transcript, or a
+        /// cause and reason when its recording cannot be read; file reads take
+        /// the newest 4 MiB
         #[arg(long)]
         transcript: bool,
         /// Maximum operator turns to include from the operator projection

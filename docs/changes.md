@@ -388,16 +388,18 @@ it joins the ledger state with worktree divergence and assesses a stale or
 expired foreign claim as abandoned. Rescue is read-only unless `--take` is
 given; takeover follows the same stale-claim rules as `arc claim --takeover`,
 records the displaced owner, and narrates the handover to journal auto-log.
-`--json` emits the versioned `arc-rescue/3` object.
+`--json` emits the versioned `arc-rescue/4` object.
 `--transcript [--tail N]` includes the claimed session's latest operator turns,
 read through the tapes library arc links rather than a `tapes` program. The
 read takes the newest 4 MiB of a recording file as its window, and `--tail N`
 counts turns of the operator projection. The rendering names the reader that
 supplied the turns and states the bound a read stopped at: the bytes it skipped
 and the `tapes show --full` command that reaches the unread text. An empty
-answer carries a `cause` field naming an
-unknown identity, an absent recording, or text outside the read window, so a
-machine consumer reading `count: 0` separates them without parsing prose.
+answer carries a `cause` field naming an unknown identity, an absent recording,
+an ambiguous or unreadable lookup, or text outside the read window. Ambiguous
+and unreadable lookups also carry the reader's `reason`, which the text view
+states beside the empty answer. A machine consumer reading `count: 0` can
+separate these cases without parsing prose.
 Arc prints what the transcript contains and
 performs no redaction, so the option is opt-in and its output should be treated
 as sensitive.
