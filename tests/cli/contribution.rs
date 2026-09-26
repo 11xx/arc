@@ -205,6 +205,7 @@ fn audit_squash_restores_tracked_state_after_a_hook_changes_it() {
 
 #[test]
 fn squash_preserves_untracked_content_obstructing_a_tracked_path() {
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
     for hook_exit in [0, 1] {
         for replace_parent in [false, true] {
@@ -213,6 +214,10 @@ fn squash_preserves_untracked_content_obstructing_a_tracked_path() {
             fs::create_dir(worktree.join("dir")).unwrap();
             commit_file(&worktree, "dir/a.txt", "original\n");
             commit_file(&worktree, "b.txt", "second\n");
+            let byte_name = std::ffi::OsStr::from_bytes(b"byte-\xff.txt");
+            fs::write(worktree.join(byte_name), "byte-named content\n").unwrap();
+            git(&worktree, &["add", "--", "."]);
+            git(&worktree, &["commit", "-m", "test: retain byte-named path"]);
             gate_and_approve(&repo, &worktree, "obstructed");
             let original_head = repo.head(&worktree);
             let original_tree = git_out(&worktree, &["write-tree"]);
@@ -250,6 +255,10 @@ fn squash_preserves_untracked_content_obstructing_a_tracked_path() {
             assert_eq!(fs::read_to_string(output).unwrap(), "preserved\n");
             assert!(String::from_utf8_lossy(&result.stderr).contains(saved.to_str().unwrap()));
             assert_eq!(repo.head(&worktree), original_head);
+            assert_eq!(
+                fs::read_to_string(worktree.join(byte_name)).unwrap(),
+                "byte-named content\n"
+            );
             assert_eq!(git_out(&worktree, &["write-tree"]), original_tree);
             assert_eq!(
                 fs::read_to_string(worktree.join("dir/a.txt")).unwrap(),
