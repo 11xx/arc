@@ -96,6 +96,20 @@ pub(crate) fn enable_identity_detection(repo: &Repo) {
     .unwrap();
 }
 
+pub(crate) fn codex_recording(repo: &Repo, session: &str, model: &str) -> PathBuf {
+    let day = repo.home.join("codex-state/sessions/2026/07/24");
+    fs::create_dir_all(&day).unwrap();
+    let path = day.join(format!("rollout-2026-07-24T00-00-00-{session}.jsonl"));
+    let rows = [
+        serde_json::json!({"type":"session_meta","timestamp":"2026-07-24T00:00:00Z","payload":{"id":session}}),
+        serde_json::json!({"type":"turn_context","timestamp":"2026-07-24T00:00:01Z","payload":{"model":model,"effort":"high"}}),
+        serde_json::json!({"type":"response_item","timestamp":"2026-07-24T00:00:02Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"private full-id prompt"}]}}),
+        serde_json::json!({"type":"response_item","timestamp":"2026-07-24T00:00:03Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"full-id answer"}]}}),
+    ];
+    fs::write(&path, rows.map(|row| row.to_string() + "\n").concat()).unwrap();
+    path
+}
+
 /// Git's editor, for every command this suite runs and every command the
 /// binary under test runs beneath it. A fixture that reaches the operator's
 /// editor stops the whole suite on a modal window it cannot answer, and

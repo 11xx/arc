@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 /// store stamped newer than this, because the alternative is what silently
 /// went wrong before: an older binary skipping event types it does not know,
 /// concluding the change is still open, and closing it a second way.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {
@@ -210,6 +210,8 @@ pub enum SessionResolution {
     Corroborated,
     /// No recording for the id resolved in the store.
     Uncorroborated,
+    /// The lookup or read could not decide whether the store holds the id.
+    Unresolved,
 }
 
 /// How the acting identity on an event was determined.

@@ -4,7 +4,7 @@ use crate::state::{Brief, ClaimIdentity};
 use crate::status::{self, BriefBaseDrift, FindingSummary, GateStatus};
 use std::path::PathBuf;
 
-const RESCUE_SCHEMA: &str = "arc-rescue/3";
+const RESCUE_SCHEMA: &str = "arc-rescue/4";
 
 #[derive(Serialize)]
 struct RescueOutput<'a> {
@@ -53,6 +53,9 @@ struct RescueTranscript {
     /// identity, and text outside the read window from this alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     cause: Option<TranscriptCause>,
+    /// The reader's diagnostic when lookup or reading could not finish.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
     /// The human rendering's lines, composed where the readers are known.
     #[serde(skip)]
     lines: Vec<String>,
@@ -84,6 +87,10 @@ enum TranscriptCause {
     UnknownIdentity,
     /// No reader found a recording for the session.
     NoRecording,
+    /// More than one recording matched the claimed id.
+    Ambiguous,
+    /// The reader could not establish or read the claimed recording.
+    Unreadable,
     /// A recording exists, and the read window holds no operator turn because
     /// older text lies outside it.
     OutsideReadBound,
@@ -148,6 +155,12 @@ impl TranscriptCause {
                 "Unavailable: no recording of the claimed session in its harness's store"
                     .to_string()
             }
+            TranscriptCause::Ambiguous => {
+                "Unavailable: the claimed session lookup is ambiguous".to_string()
+            }
+            TranscriptCause::Unreadable => {
+                "Unreadable: the claimed session lookup could not complete".to_string()
+            }
             TranscriptCause::OutsideReadBound => {
                 "Outside read bound: the read window holds no operator turn".to_string()
             }
@@ -175,6 +188,7 @@ fn read_transcript(owner: Option<&ClaimIdentity>, tail: usize) -> Result<RescueT
             source: None,
             bound: None,
             cause: Some(TranscriptCause::UnknownIdentity),
+            reason: None,
             lines: vec![
                 "Source: none (the claim names no session a reader can read)".to_string(),
                 TranscriptCause::UnknownIdentity.line(),
@@ -182,12 +196,19 @@ fn read_transcript(owner: Option<&ClaimIdentity>, tail: usize) -> Result<RescueT
         });
     };
 
-    let (read, unreadable) = match session_store::read_session(&owner.harness, &owner.session) {
-        session_store::SessionAnswer::Read(read) => (Some(read), None),
-        session_store::SessionAnswer::NoRecording => (None, None),
-        session_store::SessionAnswer::Unreadable(reason) => (None, Some(reason)),
-    };
-    let recording = read.is_some() || unreadable.is_some();
+    let (read, lookup_cause, reason) =
+        match session_store::read_session(&owner.harness, &owner.session) {
+            session_store::SessionAnswer::Read(read) => (Some(read), None, None),
+            session_store::SessionAnswer::NoRecording => {
+                (None, Some(TranscriptCause::NoRecording), None)
+            }
+            session_store::SessionAnswer::Ambiguous(reason) => {
+                (None, Some(TranscriptCause::Ambiguous), Some(reason))
+            }
+            session_store::SessionAnswer::Unreadable(reason) => {
+                (None, Some(TranscriptCause::Unreadable), Some(reason))
+            }
+        };
     let (turns, bound, path) = match read {
         Some(read) => (read.turns, read.bound, read.path),
         None => (Vec::new(), None, None),
@@ -195,15 +216,10 @@ fn read_transcript(owner: Option<&ClaimIdentity>, tail: usize) -> Result<RescueT
     let withheld = bound.as_ref().is_some_and(|bound| bound.withholds_turns());
     let bound: Option<TranscriptBound> = bound.map(Into::into);
     let source = (!turns.is_empty()).then_some("tapes");
-    let cause = if !recording {
-        Some(TranscriptCause::NoRecording)
-    } else if turns.is_empty() && withheld {
-        Some(TranscriptCause::OutsideReadBound)
-    } else {
-        None
-    };
+    let cause = lookup_cause
+        .or_else(|| (turns.is_empty() && withheld).then_some(TranscriptCause::OutsideReadBound));
     let turns = session_store::operator_view(turns, tail);
-    let mut lines = vec![match (source, &unreadable) {
+    let mut lines = vec![match (source, &reason) {
         (Some(source), _) => format!("Source: {source}"),
         (None, Some(reason)) => format!("Source: none (tapes could not read it: {reason})"),
         (None, None) => "Source: none".to_string(),
@@ -225,6 +241,7 @@ fn read_transcript(owner: Option<&ClaimIdentity>, tail: usize) -> Result<RescueT
         source,
         bound,
         cause,
+        reason,
         lines,
     })
 }

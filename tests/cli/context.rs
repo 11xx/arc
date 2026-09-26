@@ -32,6 +32,12 @@ fn uncorroborated(harness: &str) -> String {
     )
 }
 
+fn unresolved(harness: &str) -> String {
+    format!(
+        "# session unresolved: the {harness} session store could not establish whether this id has a readable recording\n"
+    )
+}
+
 #[test]
 fn no_arg_snapshot_stage_and_show_work_inside_change_worktree() {
     let repo = Repo::new();
@@ -465,7 +471,120 @@ fn env_requires_exact_codex_identity_not_year_substring() {
 }
 
 #[test]
-fn env_detects_opencode_model_and_variant_from_session_store() {
+fn env_requires_the_canonical_codex_id_before_using_its_model() {
+    let repo = Repo::new();
+    let full = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
+    let prefix = "019f7890";
+    codex_recording(&repo, full, "gpt-fixture");
+    let codex_home = repo.home.join("codex-state");
+
+    let exact = stdout(
+        repo.arc(&repo.root)
+            .arg("env")
+            .env("CODEX_HOME", &codex_home)
+            .env("CODEX_THREAD_ID", full),
+    );
+    assert!(exact.contains("ARC_MODEL='gpt-fixture#high'"), "{exact}");
+    assert!(exact.contains("session corroborated"), "{exact}");
+
+    let partial = stdout(
+        repo.arc(&repo.root)
+            .arg("env")
+            .env("CODEX_HOME", &codex_home)
+            .env("CODEX_THREAD_ID", prefix),
+    );
+    assert!(partial.contains("ARC_SESSION='019f7890'"), "{partial}");
+    assert!(partial.contains("unset ARC_MODEL"), "{partial}");
+    assert!(partial.contains("session uncorroborated"), "{partial}");
+    assert!(!partial.contains("gpt-fixture"), "{partial}");
+}
+
+#[test]
+fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
+    let repo = Repo::new();
+    let prefix = "019f7890";
+    codex_recording(&repo, "019f7890-5c01-7ec1-9240-2eba1613e5d2", "first-model");
+    codex_recording(
+        &repo,
+        "019f7890-1234-4444-8888-111111111111",
+        "second-model",
+    );
+    let codex_home = repo.home.join("codex-state");
+
+    let output = stdout(
+        repo.arc(&repo.root)
+            .arg("env")
+            .env("CODEX_HOME", &codex_home)
+            .env("CODEX_THREAD_ID", prefix),
+    );
+    assert!(output.contains("unset ARC_MODEL"), "{output}");
+    assert!(output.contains("session unresolved"), "{output}");
+    assert!(!output.contains("session uncorroborated"), "{output}");
+
+    enable_identity_detection(&repo);
+    let opened = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "ambiguous-codex-id"])
+            .env_remove("ARC_HARNESS")
+            .env_remove("ARC_SESSION")
+            .env("CODEX_HOME", &codex_home)
+            .env("CODEX_THREAD_ID", prefix),
+    );
+    let event = opened_event(&repo, &opened_change_id(&opened));
+    assert_eq!(event["session_resolution"], "unresolved", "{event}");
+    assert!(event.get("model").is_none(), "{event}");
+    assert_eq!(event["schema_version"], 5, "{event}");
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
+    assert_eq!(config["schema_version"], 5, "{config}");
+    let bundle = repo.home.join("unresolved-bundle.json");
+    repo.arc(&repo.root)
+        .args([
+            "export",
+            "ambiguous-codex-id",
+            "--output",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let exported: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    assert_eq!(exported["schema"], "arc-bundle/4", "{exported}");
+    assert_eq!(exported["store_format"], 5, "{exported}");
+
+    let recipient = Repo::new();
+    recipient
+        .arc(&recipient.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let imported = opened_event(&recipient, &opened_change_id(&opened));
+    assert_eq!(imported["session_resolution"], "unresolved", "{imported}");
+    let recipient_config: serde_json::Value =
+        serde_json::from_slice(&fs::read(recipient.root.join(".git/arc/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(recipient_config["schema_version"], 5, "{recipient_config}");
+}
+
+#[test]
+fn unreadable_codex_recording_does_not_corroborate_a_model() {
+    let repo = Repo::new();
+    let session = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
+    let path = codex_recording(&repo, session, "gpt-fixture");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    let output = stdout(
+        repo.arc(&repo.root)
+            .arg("env")
+            .env("CODEX_HOME", repo.home.join("codex-state"))
+            .env("CODEX_THREAD_ID", session),
+    );
+    assert!(output.contains("unset ARC_MODEL"), "{output}");
+    assert!(output.contains("session unresolved"), "{output}");
+    assert!(!output.contains("session uncorroborated"), "{output}");
+    assert!(!output.contains("gpt-fixture"), "{output}");
+}
+
+#[test]
+fn env_does_not_use_an_opencode_listing_model_when_the_read_fails() {
     let repo = Repo::new();
     let session = "ses_test123";
     let data_home = repo.home.join("data");
@@ -508,8 +627,8 @@ fn env_detects_opencode_model_and_variant_from_session_store() {
         .assert()
         .success()
         .stdout(format!(
-            "export ARC_HARNESS='opencode' ARC_SESSION='{session}' ARC_MODEL='kimi-k3#max'\n{}",
-            corroborated("opencode")
+            "export ARC_HARNESS='opencode' ARC_SESSION='{session}'\nunset ARC_MODEL\n# export ARC_MODEL=<model[#effort]>  # unavailable: the session store could not resolve or read this id\n{}",
+            unresolved("opencode")
         ));
 }
 
@@ -1203,10 +1322,10 @@ fn env_reports_the_active_pi_branch_s_model() {
         ));
 }
 
-/// A store row without a model is a real session with no model, not an absent
-/// session: the id is what resolution answers on.
+/// A listed row without a readable transcript establishes neither a model nor
+/// a corroborated session identity.
 #[test]
-fn env_corroborates_an_opencode_session_that_names_no_model() {
+fn env_marks_an_unreadable_opencode_recording_unresolved() {
     let repo = Repo::new();
     let session = "ses_test123";
     let data_home = repo.home.join("data");
@@ -1246,11 +1365,11 @@ fn env_corroborates_an_opencode_session_that_names_no_model() {
             concat!(
                 "export ARC_HARNESS='opencode' ARC_SESSION='{session}'\n",
                 "unset ARC_MODEL\n",
-                "# export ARC_MODEL=<model[#effort]>  # unavailable: the recording names ",
-                "no model for this session\n",
+                "# export ARC_MODEL=<model[#effort]>  # unavailable: the session store ",
+                "could not resolve or read this id\n",
                 "{}"
             ),
-            corroborated("opencode"),
+            unresolved("opencode"),
             session = session
         ));
 }
