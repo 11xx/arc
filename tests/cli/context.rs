@@ -608,6 +608,271 @@ fn env_detects_opencode2_by_process_ancestry() {
     );
 }
 
+/// One harness in a synthetic ancestry: its wrapper name, the session variable
+/// it exports, and the session that variable names.
+type HarnessLink<'a> = (&'a str, &'a str, &'a str);
+
+/// A `/bin/sh` process named `name` that exports its own session variable and
+/// runs `inner` as a child, the way a harness hands its session to the tool
+/// shells it starts. The trailing no-op keeps the wrapper alive as its child's
+/// parent instead of exec-optimizing itself away.
+fn harness_link(repo: &Repo, name: &str, variable: &str, session: &str, inner: &Path) -> PathBuf {
+    let bin = repo.home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let wrapper = bin.join(name);
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexport {variable}='{session}'\n\"{}\" \"$@\"\n:\n",
+            inner.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    wrapper
+}
+
+/// A command for the fixture binary with this suite's own actor and harness
+/// variables removed, so only what a test sets reaches the binary under test.
+fn fixture_arc(repo: &Repo, program: &Path) -> Command {
+    let mut command = Command::new(program);
+    command
+        .current_dir(&repo.root)
+        .env("HOME", &repo.home)
+        .env("ARC_SANDBOX", &repo.home)
+        .envs(NO_EDITOR)
+        .env_remove("ARC_ACTOR")
+        .env_remove("ARC_HARNESS")
+        .env_remove("ARC_SESSION")
+        .env_remove("ARC_MODEL")
+        .env_remove("ARC_ON_BEHALF_OF")
+        .env_remove("ARC_DATA_DIR")
+        .env_remove("ARC_DATA_ROOT")
+        .env_remove("ARC_WORKTREES_DIR")
+        .env_remove("AI_HOME")
+        .env_remove("CLAUDE_SESSION_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CODEX_THREAD_ID")
+        .env_remove("OPENCODE_SESSION")
+        .env_remove("OPENCODE_TERMINAL")
+        .env_remove("PI_SESSION_ID")
+        .env_remove("PI_SESSION_FILE")
+        .env_remove("PI_MODEL")
+        .env_remove("PI_REASONING_LEVEL");
+    command
+}
+
+/// Run the fixture binary under `chain`, outermost harness first. Each link is
+/// a real process that exports its own session variable, as a harness does for
+/// the tool shells it starts; no real harness is needed.
+fn nested_arc(repo: &Repo, chain: &[HarnessLink], args: &[&str]) -> std::process::Output {
+    let mut program = assert_cmd::cargo_bin!("arc").to_path_buf();
+    for (name, variable, session) in chain.iter().rev() {
+        program = harness_link(repo, name, variable, session, &program);
+    }
+    let mut command = fixture_arc(repo, &program);
+    command.args(args);
+    output_past_busy_text(&mut command)
+}
+
+/// Every nested pairing the harness variables can make: the outer harness
+/// starts the inner one, and the inner one starts arc.
+const NESTED_PAIRS: [(&str, &str, &str, &str); 4] = [
+    ("claude", "CLAUDE_CODE_SESSION_ID", "pi", "PI_SESSION_ID"),
+    (
+        "claude",
+        "CLAUDE_CODE_SESSION_ID",
+        "codex",
+        "CODEX_THREAD_ID",
+    ),
+    (
+        "codex",
+        "CODEX_THREAD_ID",
+        "claude",
+        "CLAUDE_CODE_SESSION_ID",
+    ),
+    ("codex", "CODEX_THREAD_ID", "pi", "PI_SESSION_ID"),
+];
+
+/// The harness that owns the process is the shell that exported the session
+/// id into it, not the first harness a fixed list happens to name.
+#[test]
+fn env_reports_the_nested_harness_that_owns_the_process() {
+    for (outer, outer_variable, inner, inner_variable) in NESTED_PAIRS {
+        let repo = Repo::new();
+        let outer_session = format!("{outer}-outer-session");
+        let inner_session = format!("{inner}-inner-session");
+        let chain = [
+            (outer, outer_variable, outer_session.as_str()),
+            (inner, inner_variable, inner_session.as_str()),
+        ];
+        let output = nested_arc(&repo, &chain, &["env"]);
+        assert!(
+            output.status.success(),
+            "{inner} under {outer} failed: {output:?}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!(
+                "export ARC_HARNESS='{inner}' ARC_SESSION='{inner_session}'\n{}",
+                uncorroborated(inner)
+            ),
+            "{inner} under {outer} reported the wrong owner"
+        );
+    }
+}
+
+/// Corroboration is not ownership. Both stores can hold a recording for their
+/// own session, and the harness that exported the nearest one still owns the
+/// process, with its own model and its store's verdict reported together.
+#[test]
+fn nested_detection_prefers_the_owner_over_a_corroborated_outer_session() {
+    let repo = Repo::new();
+    let outer_session = "11111111-2222-3333-4444-555555555555";
+    let inner_session = "019f7520-3278-7736-a3d9-2442c7a51fa0";
+    let project = repo.home.join(".claude/projects/-test-repo");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{outer_session}.jsonl")),
+        "{\"type\":\"assistant\",\"timestamp\":\"1\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-outer\"}}\n",
+    )
+    .unwrap();
+    let sessions = repo.home.join("pi-sessions/project");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join(format!("2026-07-18T12-07-52Z_{inner_session}.jsonl")),
+        concat!(
+            "{\"type\":\"session\",\"version\":3,\"id\":\"019f7520-3278-7736-a3d9-2442c7a51fa0\",",
+            "\"timestamp\":\"2026-07-18T12:07:52Z\",\"cwd\":\"/fixture\"}\n",
+            "{\"type\":\"thinking_level_change\",\"id\":\"thinking-1\",\"parentId\":null,",
+            "\"timestamp\":\"2026-07-18T12:07:53Z\",\"thinkingLevel\":\"medium\"}\n",
+            "{\"type\":\"message\",\"id\":\"assistant-1\",\"parentId\":\"thinking-1\",",
+            "\"timestamp\":\"2026-07-18T12:07:54Z\",\"message\":{\"role\":\"assistant\",",
+            "\"timestamp\":1767261604000,\"provider\":\"openai-codex\",\"model\":\"gpt-5.6-sol\",",
+            "\"content\":[{\"type\":\"text\",\"text\":\"The recording's answer.\"}]}}\n",
+        ),
+    )
+    .unwrap();
+
+    let mut program = assert_cmd::cargo_bin!("arc").to_path_buf();
+    program = harness_link(&repo, "pi", "PI_SESSION_ID", inner_session, &program);
+    program = harness_link(
+        &repo,
+        "claude",
+        "CLAUDE_CODE_SESSION_ID",
+        outer_session,
+        &program,
+    );
+    let mut command = fixture_arc(&repo, &program);
+    command
+        .env("PI_CODING_AGENT_SESSION_DIR", repo.home.join("pi-sessions"))
+        .arg("env");
+    let output = output_past_busy_text(&mut command);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "export ARC_HARNESS='pi' ARC_SESSION='{inner_session}' ARC_MODEL='gpt-5.6-sol#medium'\n{}",
+            corroborated("pi")
+        )
+    );
+}
+
+/// An event written with no declared identity carries the harness that owns
+/// the process, its own session, the store's verdict, and the derived actor —
+/// everything a later reader needs to reach the thread that did the work.
+#[test]
+fn nested_detection_records_the_owning_harness_on_an_undeclared_event() {
+    let repo = Repo::new();
+    enable_identity_detection(&repo);
+    let outer_session = "22222222-3333-4444-5555-666666666666";
+    let inner_session = "019f7520-3278-7736-a3d9-2442c7a51fa0";
+    let sessions = repo.home.join("pi-sessions/project");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join(format!("2026-07-18T12-07-52Z_{inner_session}.jsonl")),
+        concat!(
+            "{\"type\":\"session\",\"version\":3,\"id\":\"019f7520-3278-7736-a3d9-2442c7a51fa0\",",
+            "\"timestamp\":\"2026-07-18T12:07:52Z\",\"cwd\":\"/fixture\"}\n",
+            "{\"type\":\"message\",\"id\":\"assistant-1\",\"parentId\":null,",
+            "\"timestamp\":\"2026-07-18T12:07:53Z\",\"message\":{\"role\":\"assistant\",",
+            "\"timestamp\":1767261603000,\"provider\":\"openai-codex\",\"model\":\"gpt-5.6-sol\",",
+            "\"content\":[{\"type\":\"text\",\"text\":\"The recording's answer.\"}]}}\n",
+        ),
+    )
+    .unwrap();
+
+    let mut program = assert_cmd::cargo_bin!("arc").to_path_buf();
+    program = harness_link(&repo, "pi", "PI_SESSION_ID", inner_session, &program);
+    program = harness_link(
+        &repo,
+        "claude",
+        "CLAUDE_CODE_SESSION_ID",
+        outer_session,
+        &program,
+    );
+    let mut command = fixture_arc(&repo, &program);
+    command
+        .env("PI_CODING_AGENT_SESSION_DIR", repo.home.join("pi-sessions"))
+        .args(["begin", "nested-detect"]);
+    let output = output_past_busy_text(&mut command);
+    assert!(output.status.success(), "{output:?}");
+
+    let event = opened_event(
+        &repo,
+        &opened_change_id(&String::from_utf8_lossy(&output.stdout)),
+    );
+    assert_eq!(event["harness"], "pi", "{event}");
+    assert_eq!(event["session"], inner_session, "{event}");
+    assert_eq!(event["session_resolution"], "corroborated", "{event}");
+    assert_eq!(event["actor"], format!("pi:{inner_session}"), "{event}");
+    assert_eq!(event["actor_source"], "derived", "{event}");
+    assert_ne!(event["session"], outer_session, "{event}");
+}
+
+/// Several harnesses' session variables in a process whose ancestry names no
+/// owner is an ambiguity arc reports instead of resolving by list position.
+#[test]
+fn env_reports_ambiguity_when_no_ancestor_names_the_owner() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .arg("env")
+        .env("CLAUDE_CODE_SESSION_ID", "outer-session")
+        .env("PI_SESSION_ID", "inner-session")
+        .assert()
+        .code(1)
+        .stdout(concat!(
+            "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id> ",
+            "ARC_MODEL=<model[#effort]>\n",
+            "# ambiguous: CLAUDE_CODE_SESSION_ID (claude) and PI_SESSION_ID (pi); ",
+            "set ARC_HARNESS and ARC_SESSION by hand\n"
+        ));
+}
+
+/// The same ambiguity leaves an undeclared event's identity unset: nothing is
+/// recorded that a later reader could mistake for the owning thread.
+#[test]
+fn ambiguous_detection_records_no_identity_on_an_undeclared_event() {
+    let repo = Repo::new();
+    enable_identity_detection(&repo);
+    let output = stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "ambiguous-detect"])
+            .env_remove("ARC_ACTOR")
+            .env_remove("ARC_HARNESS")
+            .env_remove("ARC_SESSION")
+            .env("CLAUDE_CODE_SESSION_ID", "outer-session")
+            .env("PI_SESSION_ID", "inner-session"),
+    );
+    let event = opened_event(&repo, &opened_change_id(&output));
+    assert!(event["harness"].is_null(), "{event}");
+    assert!(event["session"].is_null(), "{event}");
+    assert!(event["model"].is_null(), "{event}");
+    assert!(event.get("session_resolution").is_none(), "{event}");
+    assert_eq!(event["actor"], "Tester", "{event}");
+    assert_eq!(event["actor_source"], "git-fallback", "{event}");
+}
+
 /// Documented examples are part of the command contract: a stale command or a
 /// stale exit-status claim sends a cold session down a path the CLI does not
 /// accept.

@@ -1077,7 +1077,13 @@ enum Cmd {
     /// `CLAUDE_SESSION_ID` or `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`,
     /// `OPENCODE_SESSION`, or `PI_SESSION_ID` — and then that harness's own
     /// session store for the model, and the effort where the store records
-    /// one. The store root is the harness's own override —
+    /// one. A harness exports its session id into the processes it starts, so
+    /// when several harnesses' variables are present it is the nearest
+    /// ancestor that exported one that owns this process: a pi run inside a
+    /// Claude Code tool shell reports pi, not the shell's claude. Where the
+    /// ancestry names no single owner the ambiguity is reported and no
+    /// harness, session, or model is set, rather than choosing by variable
+    /// order. The store root is the harness's own override —
     /// `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_SESSION_DIR`, or
     /// `PI_CODING_AGENT_DIR` — before its default under `$HOME`. The store's
     /// answer for the session is reported with the exports: an id the store
@@ -1087,8 +1093,9 @@ enum Cmd {
     /// by `OPENCODE_TERMINAL` or its process ancestry, printing the harness
     /// export with the session left as a comment to set by hand.
     ///
-    /// With nothing to detect at all it prints the export template as a
-    /// comment and exits non-zero, which is a report that identity must be
+    /// With nothing to detect at all, or several harnesses and no owner the
+    /// ancestry can name, it prints the export template as a comment and
+    /// exits non-zero, which is a report that identity must be
     /// set by hand rather than a failure. Every value it emits can be set
     /// directly: explicit identity always wins over a detected one
     Env,
@@ -2165,7 +2172,11 @@ fn run(cli: Cli) -> Result<i32> {
         .map(|config| config.identity_detect)
         .unwrap_or(false)
     {
-        if let Some(detected) = context::detect_identity() {
+        // A process carrying several harnesses' session variables and no
+        // ancestry that names the owner records no identity at all: picking
+        // one by list position is how work gets attributed to a thread that
+        // was only supervising.
+        if let context::Detection::Resolved(detected) = context::detect_identity() {
             if harness
                 .as_deref()
                 .is_none_or(|explicit| explicit == detected.harness)

@@ -341,14 +341,20 @@ configured file does not have a Keep a Changelog release shape, `--write`
 leaves it untouched and prints the generated block to stdout.
 
 `arc env` is the explicit identity bootstrap. It prints eval-able
-`ARC_HARNESS` and `ARC_SESSION` exports from the first available variable in
-this order: `CLAUDE_SESSION_ID`, `CLAUDE_CODE_SESSION_ID` (the name Claude
-Code itself exports), `CODEX_THREAD_ID`, `OPENCODE_SESSION`, `PI_SESSION_ID`.
+`ARC_HARNESS` and `ARC_SESSION` exports for the acting session. Detection
+reads the session variables a harness exports — `CLAUDE_SESSION_ID` or
+`CLAUDE_CODE_SESSION_ID` (the name Claude Code itself exports),
+`CODEX_THREAD_ID`, `OPENCODE_SESSION`, and `PI_SESSION_ID` — and the process
+ancestry decides which one belongs to the harness that owns the command.
 When the harness's own session store yields the model, it appends an
 `ARC_MODEL` export (`model-slug[#effort]`). Where a store lives, how a
 recording is shaped, and the model and effort it records are the tapes library
 arc links; arc keeps its own projection of a recording, not a second model of
-any harness's store. Failure while
+any harness's store. A harness exports its session id into the processes it
+starts, so when several harnesses' variables are present it is the nearest
+ancestor that exported one that owns this process, and where the ancestry names
+no single owner the ambiguity is reported and no harness, session, or model is
+recorded rather than choosing by variable order. Failure while
 reading a session store is a silent omission, never an error. OpenCode v2 is
 recognized without a session when `OPENCODE_TERMINAL` or process ancestry
 identifies it; it prints `ARC_HARNESS` plus a commented `ARC_SESSION` and

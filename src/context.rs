@@ -18,13 +18,18 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Environment variables recognized for opt-in identity detection, in
-/// precedence order. Explicit identity always wins over detected values.
+/// Environment variables recognized for opt-in identity detection, in the
+/// order one harness's own spellings are tried. Explicit identity always wins
+/// over detected values.
 ///
 /// Claude has two spellings: `CLAUDE_CODE_SESSION_ID` is what Claude Code
 /// exports into its tool shells, and `CLAUDE_SESSION_ID` is the hand-set
 /// form. The hand-set one comes first so a deliberately exported id beats
-/// the ambient one.
+/// the ambient one. The order between harnesses decides nothing: a harness
+/// exports its session id into the environment of the processes it starts,
+/// so which harness owns this process is a question for the process
+/// ancestry, and a tie it cannot break is reported as ambiguous rather than
+/// resolved here.
 const HARNESS_ENV: [(&str, &str); 5] = [
     ("CLAUDE_SESSION_ID", "claude"),
     ("CLAUDE_CODE_SESSION_ID", "claude"),
@@ -47,6 +52,47 @@ const OPENCODE_COMMS: [&str; 2] = ["opencode", "opencode2"];
 /// bounded rather than trusting it to terminate.
 const ANCESTRY_DEPTH: usize = 32;
 
+/// The environment a process was started with, or `None` when it is gone or
+/// is not this user's to read. Runtime changes to a process's environment do
+/// not reach this file, so it holds what the process inherited at exec.
+fn process_environ(pid: u32) -> Option<Vec<u8>> {
+    std::fs::read(format!("/proc/{pid}/environ")).ok()
+}
+
+/// The parent of `pid`, or `None` at the top of the chain or when `/proc`
+/// keeps no such answer.
+fn parent_pid(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:"))
+        .and_then(|rest| rest.trim().parse::<u32>().ok())
+        .filter(|parent| *parent != pid && *parent != 0)
+}
+
+/// How far above this process the process that exported `variable` with this
+/// exact value sits, where 1 is the immediate parent. A harness exports its
+/// session id into the environment of the processes it starts, so the
+/// process that put the variable into this chain is the harness that owns
+/// this one. `None` means the chain could not be read, or every ancestor
+/// already carried the entry.
+fn export_depth(variable: &str, value: &str) -> Option<usize> {
+    let entry = format!("{variable}={value}");
+    let mut pid = std::process::id();
+    for depth in 1..=ANCESTRY_DEPTH {
+        let parent = parent_pid(pid)?;
+        let environ = process_environ(parent)?;
+        let carried = environ
+            .split(|byte| *byte == 0)
+            .any(|line| line == entry.as_bytes());
+        if !carried {
+            return Some(depth);
+        }
+        pid = parent;
+    }
+    None
+}
+
 /// Whether the process ancestry carries an OpenCode marker. Reads `/proc`
 /// directly, so this is a Linux witness: anywhere else it finds nothing.
 fn detect_opencode_ancestry() -> bool {
@@ -58,16 +104,9 @@ fn detect_opencode_ancestry() -> bool {
         if OPENCODE_COMMS.contains(&comm.trim()) {
             return true;
         }
-        let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
-            return false;
-        };
-        let ppid = status
-            .lines()
-            .find_map(|line| line.strip_prefix("PPid:"))
-            .and_then(|rest| rest.trim().parse::<u32>().ok());
-        match ppid {
-            Some(parent) if parent != pid && parent != 0 => pid = parent,
-            _ => return false,
+        match parent_pid(pid) {
+            Some(parent) => pid = parent,
+            None => return false,
         }
     }
     false
@@ -212,46 +251,133 @@ pub struct DetectedIdentity {
     pub model: Option<String>,
 }
 
-pub fn detect_identity() -> Option<DetectedIdentity> {
+/// One harness's session variable, as this process carries it.
+pub struct SessionClaim {
+    pub harness: &'static str,
+    pub variable: &'static str,
+    pub session: String,
+}
+
+/// What identity detection found.
+pub enum Detection {
+    /// One harness owns this process, or stands alone in it.
+    Resolved(DetectedIdentity),
+    /// Several harnesses' session variables are set and the ancestry names no
+    /// single owner. Recording nothing is the honest answer: picking one by
+    /// list position would attribute the work to a thread that may only have
+    /// been supervising.
+    Ambiguous(Vec<SessionClaim>),
+    /// No harness evidence at all.
+    None,
+}
+
+/// The session variable each harness present in this process exports, in the
+/// order its own spellings are tried. One harness contributes one claim
+/// however many spellings it carries.
+fn session_claims() -> Vec<SessionClaim> {
+    let mut claims: Vec<SessionClaim> = Vec::new();
     for (variable, harness) in HARNESS_ENV {
-        if let Some(session) = std::env::var_os(variable) {
-            let session = session.to_string_lossy().into_owned();
-            if session.is_empty() {
-                continue;
+        let Some(value) = std::env::var_os(variable) else {
+            continue;
+        };
+        let session = value.to_string_lossy().into_owned();
+        if session.is_empty() || claims.iter().any(|claim| claim.harness == harness) {
+            continue;
+        }
+        claims.push(SessionClaim {
+            harness,
+            variable,
+            session,
+        });
+    }
+    claims
+}
+
+pub fn detect_identity() -> Detection {
+    let claims = session_claims();
+    match claims.as_slice() {
+        [] => opencode_witness(),
+        [claim] => Detection::Resolved(resolved(claim)),
+        _ => {
+            let origins = claims
+                .iter()
+                .map(|claim| export_depth(claim.variable, &claim.session))
+                .collect::<Vec<_>>();
+            // A chain that cannot be read is not evidence of distance: an
+            // unknown origin could sit nearer than every known one, so it
+            // leaves ownership undecided rather than losing by default.
+            if origins.iter().any(Option::is_none) {
+                return Detection::Ambiguous(claims);
             }
-            let (found, model) = session_store::session_model(harness, &session);
-            let resolution = if found {
-                SessionResolution::Corroborated
-            } else {
-                SessionResolution::Uncorroborated
-            };
-            return Some(DetectedIdentity {
-                harness: harness.to_string(),
-                session: Some(DetectedSession {
-                    id: session,
-                    resolution,
-                }),
-                model,
-            });
+            let nearest = origins
+                .iter()
+                .flatten()
+                .min()
+                .copied()
+                .expect("claims exist and every origin is known");
+            let mut winners = origins
+                .iter()
+                .zip(&claims)
+                .filter(|(origin, _)| **origin == Some(nearest));
+            let claim = winners.next().expect("the minimum has a claim").1;
+            if winners.next().is_some() {
+                return Detection::Ambiguous(claims);
+            }
+            Detection::Resolved(resolved(claim))
         }
     }
+}
+
+/// A harness recognized without a session variable: OpenCode v2 exports none,
+/// so it is known by `OPENCODE_TERMINAL` or by its own process name in the
+/// PPID chain.
+fn opencode_witness() -> Detection {
     if detect_opencode_harness() {
-        return Some(DetectedIdentity {
+        return Detection::Resolved(DetectedIdentity {
             harness: "opencode".to_string(),
             session: None,
             model: None,
         });
     }
-    None
+    Detection::None
 }
 
+fn resolved(claim: &SessionClaim) -> DetectedIdentity {
+    let (found, model) = session_store::session_model(claim.harness, &claim.session);
+    DetectedIdentity {
+        harness: claim.harness.to_string(),
+        session: Some(DetectedSession {
+            id: claim.session.clone(),
+            resolution: if found {
+                SessionResolution::Corroborated
+            } else {
+                SessionResolution::Uncorroborated
+            },
+        }),
+        model,
+    }
+}
+
+const EXPORT_TEMPLATE: &str = concat!(
+    "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id>",
+    " ARC_MODEL=<model[#effort]>"
+);
+
 pub fn print_env() -> i32 {
-    let Some(identity) = detect_identity() else {
-        println!(
-            "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id> \
-             ARC_MODEL=<model[#effort]>"
-        );
-        return 1;
+    let identity = match detect_identity() {
+        Detection::Resolved(identity) => identity,
+        Detection::Ambiguous(claims) => {
+            println!("{EXPORT_TEMPLATE}");
+            println!(
+                "# ambiguous: {}; set ARC_HARNESS and ARC_SESSION by hand",
+                ambiguity_report(&claims)
+            );
+            return 1;
+        }
+        Detection::None => {
+            println!("{EXPORT_TEMPLATE}");
+            return 1;
+        }
     };
     let Some(session) = identity.session else {
         // The harness resolved without its cooperation, so the session id was
@@ -283,6 +409,21 @@ pub fn print_env() -> i32 {
         session_resolution_line(&identity.harness, session.resolution)
     );
     0
+}
+
+/// Name every harness whose session variable this process carries, so an
+/// operator can see which variables to unset or override.
+fn ambiguity_report(claims: &[SessionClaim]) -> String {
+    let named = claims
+        .iter()
+        .map(|claim| format!("{} ({})", claim.variable, claim.harness))
+        .collect::<Vec<_>>();
+    match named.as_slice() {
+        [] => String::new(),
+        [only] => only.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
 }
 
 /// What `arc env` says about a detected session's backing. The store is
