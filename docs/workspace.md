@@ -196,12 +196,13 @@ being presented as known to touch nothing.
 
 ### Workspace report
 
-`arc workspace report` reads the same projects the same way as `workspace
-backlog --items`, reads each project's ledger once for how long its open
-changes have been open and which closed changes left a worktree, and
+`arc workspace report` uses the same project selection as `workspace
+backlog --items`, including projects whose backlog is empty, reads each
+project's ledger for how long its open changes have been open and which
+closed changes left a worktree, and
 classifies them by named rules, so a reader of any kind —
 a person, a renderer, a model — gets the same answer from the same ledger. Its
-JSON is versioned `arc-workspace-report/1`; the text view prints the tallies
+JSON is versioned `arc-workspace-report/2`; the text view prints the tallies
 and the attention list. The report writes nothing.
 
 Every journal artifact takes one `status`, decided in this order:
@@ -223,9 +224,13 @@ with hyphens as spaces when the heading is absent or belongs to a scaffold
 (`How to append a position`, `Positions`, `How it resolves`, `Questions only a
 person settles`) or to a position block.
 
-`sections` groups the rows: `needs_person` holds decision questions still open
-on unresolved artifacts; `in_flight` every open change by inbox bucket, plus
-changes with no patchset, each with the days since it opened; `review_owed` each debt with its kind and age;
+`sections` groups the rows: `needs_person` holds open questions whose
+`settle_by` is `person`; `needs_agent` holds questions anyone or a named
+delegate may settle, with that authority carried in `settle_by`. `in_flight`
+holds one row per change, with all its `buckets`, distinct `next_actors`, and
+days since it opened. A change with no patchset also carries `no-patchset`
+in its buckets. Counts measure changes, not bucket memberships.
+`review_owed` holds each debt with its kind and age;
 `deferred` round deferrals; `work`, `proposals`, and `parked` the journal
 tiers, ordered by project, then kind (handoff, plan, todo, discussion, other),
 then filing time.
@@ -247,16 +252,21 @@ subject, evidence}`:
   under the temporary directory, `/var/tmp`, or a `scratchpad` fold into one
   `unreachable-scratch` entry, since their disappearance is housekeeping.
 
-With `--previous <file>`, an earlier report of the same schema, each tally
-carries its earlier value, each row says whether it is `new_since_previous`,
-and `resolved_since_previous` lists every artifact the earlier report held
+With `--previous <file>`, an earlier report of the same schema and scope,
+each tally carries its earlier value when both collections are complete.
+A row says whether it is `new_since_previous` only when its project was
+read successfully in both observations; otherwise the field is null.
+Debt growth likewise requires two successful project observations.
+`departed_since_previous` lists every artifact the earlier report held
 that is no longer in the backlog, with the reason its journal records:
 `consumed` with its outcome, `archived` (shelving records the outcome
-`unresolved`), `superseded` with the successor, `not-actionable` when it is
-still present but left the actionable tiers, `unobserved` when its project
-failed collection, and `unknown` when the journal holds no record of it.
-Absence alone is never a reason. A file of another schema is refused as a
-baseline.
+`unresolved`), `superseded` with the successor, `unobserved` when its project
+failed collection, and `unknown` when the journal cannot establish a reason.
+An artifact still recorded as present has no established departure reason.
+A departure is not a resolution. A file of another schema or scope is refused
+as a baseline. Every failed component read, including the report's ledger
+read, enters the collection manifest and makes the command exit 16. The
+observation ends after the ledger and departure reads finish.
 
 ## Brief scaffolds
 

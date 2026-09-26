@@ -1500,6 +1500,7 @@ fn collect_backlog(
     scope: WorkspaceScope,
     show_unreachable: bool,
     rank_by: RankBasis,
+    include_empty: bool,
 ) -> Result<CollectedBacklog> {
     let cfg = crate::config::load()?;
     let scope = ResolvedWorkspaceScope::resolve(scope)?;
@@ -1589,6 +1590,9 @@ fn collect_backlog(
             projects.push(entry);
         } else if entry.is_empty() {
             empty += 1;
+            if include_empty {
+                projects.push(entry);
+            }
         } else {
             non_empty += 1;
             projects.push(entry);
@@ -1663,7 +1667,15 @@ fn workspace_backlog(
         scope,
         selection,
         partial,
-    } = collect_backlog(ctx, since, show_items, scope, show_unreachable, rank_by)?;
+    } = collect_backlog(
+        ctx,
+        since,
+        show_items,
+        scope,
+        show_unreachable,
+        rank_by,
+        false,
+    )?;
     if json {
         println!("{}", serde_json::to_string_pretty(&backlog)?);
         return Ok(if partial { 16 } else { 0 });
@@ -1898,26 +1910,26 @@ fn workspace_backlog(
 
 /// Read each reported project's ledger once for what the backlog does not
 /// carry: how long every open change has been open, and which closed changes
-/// left a worktree on disk. A ledger that cannot be read contributes nothing;
-/// the backlog already names its failure.
+/// left a worktree on disk. Failures belong to this observation even when an
+/// earlier read of the ledger succeeded.
 fn report_ledger_facts(
-    backlog: &serde_json::Value,
-) -> Result<BTreeMap<String, report::LedgerFacts>> {
-    let observed = backlog
-        .pointer("/observation/finished_at")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+    backlog: &Backlog,
+) -> Result<(
+    BTreeMap<String, report::LedgerFacts>,
+    Vec<CollectionFailure>,
+)> {
+    let observed = chrono::DateTime::parse_from_rfc3339(&backlog.observation.finished_at)
+        .ok()
         .map(|at| at.with_timezone(&chrono::Utc))
         .unwrap_or_else(chrono::Utc::now);
     let reported: BTreeSet<String> = backlog
-        .get("projects")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|project| Some(project.get("project")?.as_str()?.to_string()))
+        .projects
+        .iter()
+        .map(|project| project.project.clone())
         .collect();
     let cfg = crate::config::load()?;
     let mut facts = BTreeMap::new();
+    let mut failures = Vec::new();
     for project in crate::registry::projects(&cfg)? {
         let label = project.label();
         if !reported.contains(&label) {
@@ -1927,11 +1939,20 @@ fn report_ledger_facts(
             continue;
         };
         let anchor = project.anchor.clone();
-        let Ok(Some(store)) = Store::open_at(root) else {
-            continue;
-        };
-        let Ok(states) = repo_states(&store) else {
-            continue;
+        let states = Store::open_at(root)
+            .and_then(|store| store.context("ledger is missing"))
+            .and_then(|store| repo_states(&store));
+        let states = match states {
+            Ok(states) => states,
+            Err(error) => {
+                failures.push(CollectionFailure {
+                    project: label,
+                    anchor: anchor.as_ref().map(|path| path.display().to_string()),
+                    component: "report-ledger",
+                    reason: format!("{error:#}"),
+                });
+                continue;
+            }
         };
         let mut ledger = report::LedgerFacts::default();
         for (change_id, state) in states {
@@ -1961,7 +1982,7 @@ fn report_ledger_facts(
         }
         facts.insert(label, ledger);
     }
-    Ok(facts)
+    Ok((facts, failures))
 }
 
 /// The workspace backlog classified by `workspace_report`'s rules, with
@@ -1974,7 +1995,30 @@ fn workspace_report(
     previous: Option<&Path>,
     json: bool,
 ) -> Result<i32> {
-    let collected = collect_backlog(ctx, None, true, scope, false, RankBasis::Blocking)?;
+    let mut collected = collect_backlog(ctx, None, true, scope, false, RankBasis::Blocking, true)?;
+    let (ledgers, failures) = report_ledger_facts(&collected.backlog)?;
+    for failure in failures {
+        let collection = &mut collected.backlog.collection;
+        if !collection
+            .failures
+            .iter()
+            .any(|prior| prior.project == failure.project)
+        {
+            collection.failed += 1;
+            if collected
+                .backlog
+                .projects
+                .iter()
+                .any(|project| project.project == failure.project && project.is_empty())
+            {
+                collection.empty -= 1;
+            } else {
+                collection.non_empty -= 1;
+            }
+        }
+        collection.failures.push(failure);
+        collected.partial = true;
+    }
     let backlog = serde_json::to_value(&collected.backlog)?;
     let previous = match previous {
         Some(path) => {
@@ -1990,6 +2034,9 @@ fn workspace_report(
                 schema.unwrap_or("none"),
                 report::SCHEMA
             );
+            ensure!(value.get("scope") == backlog.get("scope"),
+                "previous report {} has a different workspace scope; compare the same scope or start without --previous",
+                path.display());
             Some(value)
         }
         None => None,
@@ -2049,7 +2096,10 @@ fn workspace_report(
             }
         }
     }
-    let ledgers = report_ledger_facts(&backlog)?;
+    let mut backlog = backlog;
+    backlog["observation"]["finished_at"] = chrono::Utc::now()
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        .into();
     let report = report::build(&backlog, previous.as_ref(), &fates, &ledgers);
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -2259,7 +2309,7 @@ mod report {
     use serde_json::Value;
     use std::collections::{BTreeMap, BTreeSet};
 
-    pub(crate) const SCHEMA: &str = "arc-workspace-report/1";
+    pub(crate) const SCHEMA: &str = "arc-workspace-report/2";
 
     /// A decision question open longer than this is flagged `stale-question`.
     pub(crate) const STALE_QUESTION_DAYS: u64 = 7;
@@ -2325,13 +2375,14 @@ mod report {
     #[derive(Debug, Serialize, Default)]
     struct Sections {
         needs_person: Vec<QuestionRow>,
+        needs_agent: Vec<QuestionRow>,
         in_flight: Vec<ChangeRow>,
         review_owed: Vec<DebtRow>,
         deferred: Vec<DeferredRow>,
         work: Vec<Row>,
         proposals: Vec<Row>,
         parked: Vec<Row>,
-        resolved_since_previous: Vec<ResolvedRow>,
+        departed_since_previous: Vec<DepartedRow>,
     }
 
     /// One journal artifact, in whichever section its status places it.
@@ -2364,6 +2415,7 @@ mod report {
         age_days: Option<u64>,
         options: Vec<Value>,
         delivery: Option<String>,
+        settle_by: String,
     }
 
     #[derive(Debug, Serialize)]
@@ -2371,9 +2423,9 @@ mod report {
         project: String,
         change_id: String,
         title: String,
-        /// The inbox bucket the change sits in, or `no-patchset`.
-        bucket: String,
-        next_actor: Option<String>,
+        /// Every inbox predicate that holds, plus `no-patchset` when applicable.
+        buckets: Vec<String>,
+        next_actors: Vec<String>,
         /// Whole days since the change opened, when its ledger was read.
         age_days: Option<u64>,
     }
@@ -2398,12 +2450,12 @@ mod report {
     }
 
     #[derive(Debug, Serialize, PartialEq)]
-    struct ResolvedRow {
+    struct DepartedRow {
         project: String,
         file: String,
         kind: String,
         title: String,
-        /// `consumed`, `archived`, `superseded`, `not-actionable`, `unobserved`,
+        /// `consumed`, `archived`, `superseded`, `unobserved`,
         /// or `unknown`. Never inferred from absence alone.
         reason: &'static str,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -2561,6 +2613,13 @@ mod report {
             .collect()
     }
 
+    fn failed_projects(report: &Value) -> BTreeSet<String> {
+        array(report.get("collection").unwrap_or(&Value::Null), "failures")
+            .iter()
+            .map(|failure| text(failure, "project"))
+            .collect()
+    }
+
     /// Every artifact that left the backlog since `previous`, keyed by project
     /// and file, with the journal directory that holds it. The caller looks each
     /// one up in the journal so its reason is recorded, not inferred.
@@ -2605,6 +2664,8 @@ mod report {
         ledgers: &BTreeMap<String, LedgerFacts>,
     ) -> Report {
         let known_before = previous.map(previous_rows);
+        let failed_now = failed_projects(backlog);
+        let failed_before = previous.map(failed_projects).unwrap_or_default();
         let mut sections = Sections::default();
         let mut attention = Vec::new();
         let mut projects = Vec::new();
@@ -2657,6 +2718,9 @@ mod report {
                         claimed_by: (status == "claimed").then(|| claimed_by(item)).flatten(),
                         new_since_previous: known_before
                             .as_ref()
+                            .filter(|_| {
+                                !failed_before.contains(&name) && !failed_now.contains(&name)
+                            })
                             .map(|known| !known.contains_key(&(name.clone(), file.clone()))),
                         path: journal_dir
                             .as_ref()
@@ -2724,7 +2788,13 @@ mod report {
                     });
                 }
                 summary.questions += 1;
-                sections.needs_person.push(QuestionRow {
+                let settle_by = opt_text(question, "settle_by").unwrap_or_else(|| "person".into());
+                let target = if settle_by == "person" {
+                    &mut sections.needs_person
+                } else {
+                    &mut sections.needs_agent
+                };
+                target.push(QuestionRow {
                     project: name.clone(),
                     file: text(question, "file"),
                     question: text(question, "question"),
@@ -2734,13 +2804,14 @@ mod report {
                     age_days: age,
                     options: array(question, "options").to_vec(),
                     delivery: opt_text(question, "delivery"),
+                    settle_by,
                 });
             }
 
             let changes = project.get("changes").unwrap_or(&Value::Null);
             let empty = LedgerFacts::default();
             let ledger = ledgers.get(&name).unwrap_or(&empty);
-            let mut in_flight_ids = BTreeSet::new();
+            let mut in_flight = BTreeMap::<String, ChangeRow>::new();
             if let Some(buckets) = changes.as_object() {
                 for (bucket, rows) in buckets {
                     if matches!(
@@ -2750,17 +2821,22 @@ mod report {
                         continue;
                     }
                     for row in rows.as_array().into_iter().flatten() {
-                        in_flight_ids.insert(text(row, "change_id"));
-                        summary.in_flight += 1;
                         let change_id = text(row, "change_id");
-                        sections.in_flight.push(ChangeRow {
-                            project: name.clone(),
-                            age_days: ledger.open.get(&change_id).map(|(_, days)| *days),
-                            change_id,
-                            title: text(row, "title"),
-                            bucket: bucket.clone(),
-                            next_actor: opt_text(row, "next_actor"),
-                        });
+                        let change =
+                            in_flight
+                                .entry(change_id.clone())
+                                .or_insert_with(|| ChangeRow {
+                                    project: name.clone(),
+                                    age_days: ledger.open.get(&change_id).map(|(_, days)| *days),
+                                    change_id,
+                                    title: text(row, "title"),
+                                    buckets: Vec::new(),
+                                    next_actors: Vec::new(),
+                                });
+                        change.buckets.push(bucket.clone());
+                        if let Some(actor) = opt_text(row, "next_actor") {
+                            change.next_actors.push(actor);
+                        }
                     }
                 }
             }
@@ -2775,17 +2851,26 @@ mod report {
                         evidence: format!("open for {days} days with no patchset recorded"),
                     });
                 }
-                if in_flight_ids.insert(id.clone()) {
-                    summary.in_flight += 1;
-                    sections.in_flight.push(ChangeRow {
+                in_flight
+                    .entry(id.clone())
+                    .or_insert_with(|| ChangeRow {
                         project: name.clone(),
                         title: opened.map(|(title, _)| title.clone()).unwrap_or_default(),
                         age_days: opened.map(|(_, days)| *days),
                         change_id: id,
-                        bucket: "no-patchset".to_string(),
-                        next_actor: None,
-                    });
-                }
+                        buckets: Vec::new(),
+                        next_actors: Vec::new(),
+                    })
+                    .buckets
+                    .push("no-patchset".into());
+            }
+            summary.in_flight = in_flight.len() as u64;
+            for mut change in in_flight.into_values() {
+                change.buckets.sort();
+                change.buckets.dedup();
+                change.next_actors.sort();
+                change.next_actors.dedup();
+                sections.in_flight.push(change);
             }
             for (change_id, path) in &ledger.closed_worktrees {
                 attention.push(Attention {
@@ -2828,7 +2913,10 @@ mod report {
 
             if let Some(before) = previous.map(previous_project_debt) {
                 let earlier = before.get(&name).copied().unwrap_or(0);
-                if summary.review_owed > earlier {
+                if summary.review_owed > earlier
+                    && !failed_before.contains(&name)
+                    && !failed_now.contains(&name)
+                {
                     attention.push(Attention {
                         rule: "debt-grew",
                         project: name.clone(),
@@ -2923,10 +3011,9 @@ mod report {
                     Some(fate) if fate.explanation == "archived" => {
                         ("archived", fate.resolution.clone(), None)
                     }
-                    Some(fate) => ("not-actionable", fate.resolution.clone(), None),
-                    None => ("unknown", None, None),
+                    _ => ("unknown", None, None),
                 };
-                sections.resolved_since_previous.push(ResolvedRow {
+                sections.departed_since_previous.push(DepartedRow {
                     project,
                     file,
                     kind,
@@ -2949,13 +3036,16 @@ mod report {
         sections.work.sort_by_key(order);
         sections.proposals.sort_by_key(order);
         sections.parked.sort_by_key(order);
-        sections.in_flight.sort_by(|a, b| {
-            (&a.project, &a.bucket, &a.change_id).cmp(&(&b.project, &b.bucket, &b.change_id))
-        });
+        sections
+            .in_flight
+            .sort_by(|a, b| (&a.project, &a.change_id).cmp(&(&b.project, &b.change_id)));
         sections
             .review_owed
             .sort_by(|a, b| (&a.project, &a.change_id).cmp(&(&b.project, &b.change_id)));
         sections.needs_person.sort_by(|a, b| {
+            (&a.project, &a.asked_at, &a.question).cmp(&(&b.project, &b.asked_at, &b.question))
+        });
+        sections.needs_agent.sort_by(|a, b| {
             (&a.project, &a.asked_at, &a.question).cmp(&(&b.project, &b.asked_at, &b.question))
         });
         projects.sort_by(|a, b| a.project.cmp(&b.project));
@@ -2964,11 +3054,13 @@ mod report {
         });
 
         let previous_tally = |key: &str| {
-            previous.and_then(|previous| {
-                previous
-                    .pointer(&format!("/tallies/{key}/value"))
-                    .and_then(Value::as_u64)
-            })
+            previous
+                .filter(|_| failed_now.is_empty() && failed_before.is_empty())
+                .and_then(|previous| {
+                    previous
+                        .pointer(&format!("/tallies/{key}/value"))
+                        .and_then(Value::as_u64)
+                })
         };
         let count = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
         let mut tallies = BTreeMap::new();
@@ -2981,6 +3073,7 @@ mod report {
             .count();
         for (key, value) in [
             ("needs_person", count(sections.needs_person.len())),
+            ("needs_agent", count(sections.needs_agent.len())),
             ("in_flight", count(sections.in_flight.len())),
             ("review_owed", count(sections.review_owed.len())),
             ("deferred", count(sections.deferred.len())),
@@ -3032,8 +3125,9 @@ mod report {
                     })
             };
             println!(
-                "needs a person {}  in flight {}  review owed {}  deferred {}",
+                "needs a person {}  agent-answerable {}  in flight {}  review owed {}  deferred {}",
                 tally("needs_person"),
+                tally("needs_agent"),
                 tally("in_flight"),
                 tally("review_owed"),
                 tally("deferred")
@@ -3048,7 +3142,7 @@ mod report {
             );
             if let Some(previous) = &self.previous {
                 println!(
-                    "since {previous}: {} new, {} resolved",
+                    "since {previous}: {} new, {} departed",
                     self.sections
                         .work
                         .iter()
@@ -3056,7 +3150,7 @@ mod report {
                         .chain(&self.sections.parked)
                         .filter(|row| row.new_since_previous == Some(true))
                         .count(),
-                    self.sections.resolved_since_previous.len()
+                    self.sections.departed_since_previous.len()
                 );
             }
             for entry in &self.attention {
@@ -3241,7 +3335,7 @@ mod report {
             let reason = |file: &str| {
                 report
                     .sections
-                    .resolved_since_previous
+                    .departed_since_previous
                     .iter()
                     .find(|row| row.file == file)
                     .map(|row| (row.reason, row.outcome.clone()))
@@ -3280,7 +3374,7 @@ mod report {
             let report = build(&failed, Some(&previous), &fates, &BTreeMap::new());
             assert!(report
                 .sections
-                .resolved_since_previous
+                .departed_since_previous
                 .iter()
                 .all(|row| row.reason == "unobserved"));
             assert!(report
@@ -3379,6 +3473,30 @@ mod report {
                 .iter()
                 .any(|entry| entry.rule == "debt-grew" && entry.project == "demo"));
             assert_eq!(report.sections.review_owed[0].kind, "nothing-read");
+        }
+
+        #[test]
+        fn incomplete_observations_do_not_prove_arrival_or_debt_growth() {
+            let mut unread = backlog(vec![], vec![]);
+            unread["collection"]["failures"] = json!([
+                {"project": "demo", "component": "ledger", "reason": "unreadable"}
+            ]);
+            let previous =
+                serde_json::to_value(build(&unread, None, &BTreeMap::new(), &BTreeMap::new()))
+                    .unwrap();
+            let mut current = backlog(vec![item("existing.md", "todo", "# Existing")], vec![]);
+            current["projects"][0]["debt_owed"] = json!([
+                {"change_id": "existing", "effective_missing": "nothing-read"}
+            ]);
+            let report = build(
+                &current,
+                Some(&previous),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+            );
+            assert_eq!(report.sections.work[0].new_since_previous, None);
+            assert_eq!(report.tallies["work"].previous, None);
+            assert!(!report.attention.iter().any(|a| a.rule == "debt-grew"));
         }
 
         #[test]

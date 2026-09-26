@@ -1681,10 +1681,13 @@ enum WorkspaceCmd {
     },
     /// The backlog classified by named rules: each artifact's status, the
     /// section it belongs to, and the facts that deserve attention, versioned
-    /// `arc-workspace-report/1`. With `--previous`, tallies carry their
-    /// earlier values, new rows are marked, and every artifact that left the
-    /// backlog is listed with the reason its journal records. A partial
-    /// collection exits 16
+    /// `arc-workspace-report/2`. With `--previous`, tallies carry their
+    /// earlier values when both collections are complete, new rows are marked
+    /// when their project was observed both times, and every artifact that left
+    /// the backlog is listed with its recorded reason. The baseline must have
+    /// the same schema and scope. Every failed component read, including the
+    /// report's ledger read, enters the collection manifest and makes the
+    /// command exit 16. The report writes nothing.
     Report {
         /// Report only projects whose canonical anchor is beneath this path
         #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
