@@ -3224,6 +3224,10 @@ fn workspace_rollups_skip_an_unreadable_project_with_a_warning() {
         .args(["workspace", "list", "--json"])
         .output()
         .unwrap();
+    let classified = shared(&healthy)
+        .args(["workspace", "report", "--json"])
+        .output()
+        .unwrap();
     fs::set_permissions(&changes, fs::Permissions::from_mode(0o755)).unwrap();
     let list_stderr = String::from_utf8_lossy(&listed.stderr);
     assert!(listed.status.success(), "{list_stderr}");
@@ -3241,6 +3245,20 @@ fn workspace_rollups_skip_an_unreadable_project_with_a_warning() {
     let report: serde_json::Value = serde_json::from_slice(&backlog.stdout).unwrap();
     assert_eq!(backlog.status.code(), Some(16), "{report}");
     assert_eq!(report["collection"]["failed"], 1, "{report}");
+    let classified_report: serde_json::Value = serde_json::from_slice(&classified.stdout).unwrap();
+    assert_eq!(classified.status.code(), Some(16), "{classified_report}");
+    assert_eq!(
+        classified_report["collection"]["failed"], 1,
+        "{classified_report}"
+    );
+    assert!(
+        classified_report["collection"]["failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|failure| failure["component"] == "report-ledger"),
+        "{classified_report}"
+    );
     assert!(
         report["collection"]["failures"]
             .as_array()
@@ -3314,7 +3332,7 @@ fn workspace_report_classifies_and_explains_departures() {
     let mut first = repo.arc(&repo.root);
     first.args(["workspace", "report", "--json"]);
     let first = json_stdout(&mut first);
-    assert_eq!(first["schema"], "arc-workspace-report/1");
+    assert_eq!(first["schema"], "arc-workspace-report/2");
     assert!(first["previous"].is_null());
     let work = first["sections"]["work"].as_array().unwrap();
     let row = work
@@ -3349,7 +3367,7 @@ fn workspace_report_classifies_and_explains_departures() {
     second.arg(&baseline);
     let second = json_stdout(&mut second);
     assert_eq!(second["previous"], first["observation"]["finished_at"]);
-    let resolved = second["sections"]["resolved_since_previous"]
+    let resolved = second["sections"]["departed_since_previous"]
         .as_array()
         .unwrap();
     let reason = |file: &str| {
@@ -3401,8 +3419,115 @@ fn workspace_report_classifies_and_explains_departures() {
         .unwrap();
     assert!(!refused.status.success());
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("expected arc-workspace-report/1"),
+        String::from_utf8_lossy(&refused.stderr).contains("expected arc-workspace-report/2"),
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );
+}
+
+#[test]
+fn workspace_report_counts_changes_once_across_buckets() {
+    let repo = Repo::new();
+    let change = begin_no_worktree(&repo, "many-states", &[]);
+    repo.arc(&repo.root)
+        .args(["hold", &change, "--reason", "inspection"])
+        .assert()
+        .success();
+    let report = json_stdout(repo.arc(&repo.root).args(["workspace", "report", "--json"]));
+    assert_eq!(report["tallies"]["in_flight"]["value"], 1, "{report}");
+    let rows = report["sections"]["in_flight"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["buckets"],
+        serde_json::json!(["held", "needs-review", "no-patchset"])
+    );
+}
+
+#[test]
+fn workspace_report_keeps_question_settlement_authority() {
+    let repo = Repo::new();
+    let (_, file) = journal_artifact(&repo, "question-routing", "discussion", "# Decision\n");
+    let body = repo.home.join("question.md");
+    fs::write(&body, "Which option?\n").unwrap();
+    for audience in ["person", "anyone", "delegate"] {
+        let mut cmd = repo.arc(&repo.root);
+        cmd.args([
+            "journal",
+            "question",
+            &file,
+            "--placement",
+            "opening",
+            "--option",
+            "a",
+            "--option",
+            "b",
+            "--settle-by",
+            audience,
+            "--body-file",
+        ])
+        .arg(&body);
+        if audience == "delegate" {
+            cmd.args(["--delegate", "reviewer"]);
+        }
+        cmd.assert().success();
+    }
+    let report = json_stdout(repo.arc(&repo.root).args(["workspace", "report", "--json"]));
+    assert_eq!(report["tallies"]["needs_person"]["value"], 1, "{report}");
+    assert_eq!(report["tallies"]["needs_agent"]["value"], 2, "{report}");
+    let agent = report["sections"]["needs_agent"].as_array().unwrap();
+    assert!(agent.iter().any(|q| q["settle_by"] == "delegate:reviewer"));
+    assert!(agent.iter().any(|q| q["settle_by"] == "anyone"));
+}
+
+#[test]
+fn workspace_report_keeps_worktrees_from_otherwise_empty_projects() {
+    let repo = Repo::new();
+    let started = stdout(repo.arc(&repo.root).args(["begin", "leftover"]));
+    let change = started
+        .lines()
+        .find_map(|l| l.strip_prefix("change: "))
+        .unwrap();
+    repo.arc(&repo.root)
+        .args(["close", change, "--abandoned"])
+        .assert()
+        .success();
+    let report = json_stdout(repo.arc(&repo.root).args(["workspace", "report", "--json"]));
+    assert!(
+        report["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["rule"] == "worktree-outlives-change" && row["subject"] == change),
+        "{report}"
+    );
+    let backlog = json_stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "backlog", "--json"]),
+    );
+    assert!(
+        backlog["projects"].as_array().unwrap().is_empty(),
+        "{backlog}"
+    );
+}
+
+#[test]
+fn workspace_report_refuses_comparisons_across_scopes() {
+    let repo = Repo::new();
+    journal_artifact(&repo, "live", "todo", "# Live\n");
+    let previous = json_stdout(repo.arc(&repo.root).args(["workspace", "report", "--json"]));
+    let path = repo.home.join("previous.json");
+    fs::write(&path, serde_json::to_vec(&previous).unwrap()).unwrap();
+    let result = repo
+        .arc(&repo.root)
+        .args(["workspace", "report", "--under"])
+        .arg(&repo.root)
+        .arg("--previous")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        !result.status.success(),
+        "a changed selection is not a departure"
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("scope"));
 }
