@@ -264,7 +264,7 @@ change has no dependents. It says so on the way out.
 
 ## Export / import
 
-Move one change's complete ledger as a deterministic `arc-bundle/2`
+Move one change's complete ledger as a deterministic `arc-bundle/3`
 JSON file:
 
 ```sh
@@ -282,3 +282,14 @@ excluded from typed replay. Missing Git commits are warnings rather than
 data loss: available patchset heads are restored under
 `refs/arc/keep/<change>/<patchset>`, while unavailable objects are
 reported for separate transfer.
+
+A long-lived exchange can carry only what the other side is missing.
+`arc export <change> --since <checksum>` writes a bundle whose events are
+the suffix after the prefix that checksum names, where the checksum is the
+one an earlier export printed. The receiving store must already hold that
+prefix, or the import refuses and writes nothing. Both halves of the claim
+are checked before anything is written: the prefix's own checksum against
+the events the store holds, and the checksum the bundle carries over that
+prefix and the new events together. There is no kind-filtered partial
+bundle, so a bundle is either a complete ledger or a contiguous suffix of
+one whose prefix the receiver already holds.

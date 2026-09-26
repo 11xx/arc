@@ -1114,3 +1114,250 @@ fn export_import_preserves_plan_links_on_every_brief_version() {
         );
     }
 }
+
+fn bundle_events(path: &Path) -> Vec<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    value["events"].as_array().unwrap().clone()
+}
+
+fn bundle_checksum(events: &[serde_json::Value]) -> String {
+    let mut digest = Sha256::new();
+    for event in events {
+        digest.update(serde_json::to_vec(event).unwrap());
+        digest.update(b"\n");
+    }
+    hex::encode(digest.finalize())
+}
+
+fn event_files(repo: &Repo, change_id: &str) -> Vec<(String, Vec<u8>)> {
+    let mut files = fs::read_dir(event_dir(repo, change_id))
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (
+                entry.file_name().to_string_lossy().to_string(),
+                fs::read(entry.path()).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    files
+}
+
+/// A delta bundle carries the suffix after a prefix the receiver already
+/// holds. Its own checksum covers that prefix and the suffix together, so the
+/// receiver can verify both halves without the prefix travelling again.
+#[test]
+fn a_delta_bundle_extends_a_verified_prefix() {
+    let source = Repo::new();
+    let recipient = Repo::new();
+    let (change_id, worktree, _head) = change_with_patchset(&source, "delta");
+    let full = source.home.join("delta-full.json");
+    let reported = stdout(source.arc(&source.root).args([
+        "export",
+        &change_id,
+        "--output",
+        full.to_str().unwrap(),
+    ]));
+    let token = reported
+        .lines()
+        .find_map(|line| line.strip_prefix("sha256: "))
+        .unwrap()
+        .to_string();
+    let prefix_events = bundle_events(&full).len();
+    recipient
+        .arc(&recipient.root)
+        .args(["import", full.to_str().unwrap()])
+        .assert()
+        .success();
+    let prefix_only = event_files(&recipient, &change_id);
+
+    source.commit(&worktree, "delta-more.txt", "more\n", "feat: delta more");
+    stdout(source.arc(&worktree).args(["snapshot", "delta"]));
+    let delta = source.home.join("delta-suffix.json");
+    let reported = stdout(source.arc(&source.root).args([
+        "export",
+        &change_id,
+        "--since",
+        &token,
+        "--output",
+        delta.to_str().unwrap(),
+    ]));
+    assert!(
+        reported.contains(&format!("prefix: {token} ({prefix_events} events)")),
+        "{reported}"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(&delta).unwrap()).unwrap();
+    assert_eq!(value["schema"], "arc-bundle/3", "{value}");
+    assert_eq!(value["since"]["sha256"], token.as_str(), "{value}");
+    assert_eq!(
+        value["since"]["event_count"].as_u64(),
+        Some(prefix_events as u64),
+        "{value}"
+    );
+    let suffix = bundle_events(&delta);
+    assert!(!suffix.is_empty());
+    assert_ne!(
+        value["events_sha256"].as_str().unwrap(),
+        bundle_checksum(&suffix),
+        "a suffix bundle's checksum covers the history it extends"
+    );
+
+    let preview = stdout(recipient.arc(&recipient.root).args([
+        "import",
+        delta.to_str().unwrap(),
+        "--dry-run",
+    ]));
+    assert!(
+        preview.contains(&format!(
+            "prefix: {token} ({prefix_events} events verified)"
+        )),
+        "{preview}"
+    );
+    recipient
+        .arc(&recipient.root)
+        .args(["import", delta.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // The delta-imported store holds what a full import of the same history
+    // would have produced.
+    let full_after = source.home.join("delta-full-after.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            &change_id,
+            "--output",
+            full_after.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let other = Repo::new();
+    other
+        .arc(&other.root)
+        .args(["import", full_after.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(
+        event_files(&recipient, &change_id),
+        event_files(&other, &change_id)
+    );
+    assert_ne!(prefix_only, event_files(&recipient, &change_id));
+
+    // Re-importing the same suffix changes nothing.
+    let after = event_files(&recipient, &change_id);
+    let again = stdout(
+        recipient
+            .arc(&recipient.root)
+            .args(["import", delta.to_str().unwrap()]),
+    );
+    assert!(again.contains("summary: new=0"), "{again}");
+    assert_eq!(event_files(&recipient, &change_id), after);
+
+    // A receiver already at the end has nothing to extend: the checksum of
+    // the current history names it, and no events follow.
+    let current = value["events_sha256"].as_str().unwrap();
+    let empty = source.home.join("empty.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            &change_id,
+            "--since",
+            current,
+            "--output",
+            empty.to_str().unwrap(),
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("nothing to export"));
+    assert!(!empty.exists());
+}
+
+/// A suffix means nothing without the prefix it extends: an export names a
+/// checksum no prefix produces, a receiver missing the prefix refuses the
+/// import, and a tampered suffix is caught against the prefix it claims.
+#[test]
+fn a_suffix_over_an_unheld_prefix_is_refused() {
+    let source = Repo::new();
+    let (change_id, worktree, _head) = change_with_patchset(&source, "wrong-prefix");
+    let bogus = source.home.join("bogus.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            &change_id,
+            "--since",
+            &"0".repeat(64),
+            "--output",
+            bogus.to_str().unwrap(),
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("no prefix"));
+    assert!(!bogus.exists());
+
+    let full = source.home.join("wrong-full.json");
+    let reported = stdout(source.arc(&source.root).args([
+        "export",
+        &change_id,
+        "--output",
+        full.to_str().unwrap(),
+    ]));
+    let token = reported
+        .lines()
+        .find_map(|line| line.strip_prefix("sha256: "))
+        .unwrap()
+        .to_string();
+    let prefix_events = bundle_events(&full).len();
+    source.commit(&worktree, "wrong-more.txt", "more\n", "feat: wrong more");
+    stdout(source.arc(&worktree).args(["snapshot", "wrong-prefix"]));
+    let delta = source.home.join("wrong-suffix.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            &change_id,
+            "--since",
+            &token,
+            "--output",
+            delta.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let delta_value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&delta).unwrap()).unwrap();
+    assert_eq!(
+        delta_value["since"]["event_count"].as_u64(),
+        Some(prefix_events as u64),
+        "{delta_value}"
+    );
+
+    let fresh = Repo::new();
+    fresh
+        .arc(&fresh.root)
+        .args(["import", delta.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("nothing was imported"));
+    assert!(!event_dir(&fresh, &change_id).exists());
+
+    let holder = Repo::new();
+    holder
+        .arc(&holder.root)
+        .args(["import", full.to_str().unwrap()])
+        .assert()
+        .success();
+    let before = event_files(&holder, &change_id);
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&delta).unwrap()).unwrap();
+    value["events"][0]["actor"] = serde_json::json!("tampered");
+    fs::write(&delta, json_file_bytes(&value)).unwrap();
+    holder
+        .arc(&holder.root)
+        .args(["import", delta.to_str().unwrap()])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("does not cover prefix"));
+    assert_eq!(event_files(&holder, &change_id), before);
+}

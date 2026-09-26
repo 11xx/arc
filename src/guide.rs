@@ -1024,6 +1024,8 @@ EXIT CODES
     `arc env` exits 1 and prints the export template when no harness is
       detected.
     `arc import` exits 1 and writes nothing when an event conflicts.
+    `arc import` refuses a delta bundle whose prefix this store does not
+      hold, and writes nothing.
     `arc forge link` exits 10 when the observed tuple or the declared policy
       does not match, appending no event.
     `arc history resolve` exits 2 when nothing moved the revision.

@@ -66,7 +66,7 @@ apply and the field is omitted.
 
 | Schema | Surface | Stability |
 | --- | --- | --- |
-| `arc-bundle/2` | `arc export` / `arc import` — one change's complete ledger as a deterministic JSON file | commitment |
+| `arc-bundle/3` | `arc export` / `arc import` — one change's ledger, complete or as the suffix after a prefix checksum the receiver holds, as a deterministic JSON file | commitment |
 | `arc-replica-event/1` | One identity or authority event carried by an `arc-replica-bundle/1` file | commitment |
 | `arc-replica-bundle/1` | `arc replica export` / `arc replica import` — a logical project's explicit replica identities and authority events | commitment |
 | `arc-replica-import/1` | Local receipt batch naming the source replica and imported bundle digest | internal |
