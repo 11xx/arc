@@ -122,7 +122,7 @@ pub fn show(ctx: &Ctx) -> Result<i32> {
     }
     for (name, gate) in &gates.gates {
         println!(
-            "gate {name}: command = {:?}; profiles = {}; timeout = {}; declared by {}",
+            "gate {name}: command = {:?}; profiles = {}; timeout = {}; environment = {:?}; declared by {}",
             gate.command,
             if gate.profiles.is_empty() {
                 "all".to_string()
@@ -130,6 +130,7 @@ pub fn show(ctx: &Ctx) -> Result<i32> {
                 gate.profiles.join(", ")
             },
             option_value(gate.timeout),
+            gate.environment.as_deref().unwrap_or("none"),
             gate.declared_by.join(", ")
         );
     }

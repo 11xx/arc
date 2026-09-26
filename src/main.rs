@@ -751,11 +751,13 @@ enum Cmd {
         #[arg(long)]
         blocker: Option<String>,
     },
-    /// Record the current branch head as a new patchset
     /// Rewrite a change as one commit on its base, with the same tree, and
     /// record it as a new patchset. Evidence and verdicts on the earlier
     /// heads stay with those heads; the single commit is gated and reviewed
-    /// like any other patchset
+    /// like any other patchset. A failed commit or hook-modified tree restores
+    /// the original head, index, and tracked files; untracked files are retained.
+    /// Obstructing paths are moved to a reported recovery directory under
+    /// <git-common-dir>/arc/squash-recovery/
     Squash {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -764,6 +766,7 @@ enum Cmd {
         #[arg(long, short = 'm')]
         message: String,
     },
+    /// Record the current branch head as a new patchset
     Snapshot {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1557,7 +1560,7 @@ enum InstructionsCmd {
 
 #[derive(Subcommand)]
 enum PolicyCmd {
-    /// Show effective policy and the file that declared each rule
+    /// Show effective policy, gate environment probes, and each declaring file
     Show,
     /// Print the operator policy file path for this repository
     Path,
@@ -1572,7 +1575,8 @@ enum PolicyCmd {
 #[derive(Subcommand)]
 enum ExternalCmd {
     /// Record an external verdict at the revision its decision covered. A
-    /// rejection of the latest patchset closes the change as abandoned
+    /// rejection of the latest patchset closes the change as abandoned.
+    /// An external approval never supersedes a local refusal
     Verdict {
         /// Change that received the external decision
         change: String,

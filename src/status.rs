@@ -1161,6 +1161,12 @@ fn build_report(
             valid_for_current_head: valid,
         }
     });
+    let local_verdict_refuses_this_head = verdict.as_ref().is_some_and(|verdict| {
+        verdict.verdict != Verdict::Approved
+            && latest_patchset
+                .as_ref()
+                .is_some_and(|patchset| patchset.id == verdict.patchset_id)
+    });
     let external_verdicts: Vec<ExternalVerdictStatus> = state
         .external_verdicts
         .iter()
@@ -1184,6 +1190,7 @@ fn build_report(
                 matches_current_patchset,
                 gates_current_head: matches_current_patchset
                     && external.verdict == crate::model::ExternalVerdict::Approved
+                    && !local_verdict_refuses_this_head
                     && !danger.requires_independent_review(policy),
                 findings: external.findings.clone(),
             }
@@ -1200,20 +1207,14 @@ fn build_report(
         .is_some_and(|external| external.verdict != crate::model::ExternalVerdict::Approved);
     let external_approval_valid = current_external_verdict.is_some_and(|external| {
         external.verdict == crate::model::ExternalVerdict::Approved
+            && !local_verdict_refuses_this_head
             && !danger.requires_independent_review(policy)
     });
     let local_approval_valid = verdict
         .as_ref()
         .is_some_and(|verdict| verdict.valid_for_current_head);
-    let external_overrides_local = external_approval_valid;
-    let local_verdict_refuses_this_head = verdict.as_ref().is_some_and(|verdict| {
-        verdict.verdict != Verdict::Approved
-            && latest_patchset
-                .as_ref()
-                .is_some_and(|patchset| patchset.id == verdict.patchset_id)
-    });
-    let verdict_refuses_this_head = local_verdict_refuses_this_head && !external_overrides_local;
-    let approval_valid = if external_refuses_this_head {
+    let verdict_refuses_this_head = local_verdict_refuses_this_head;
+    let approval_valid = if external_refuses_this_head || local_verdict_refuses_this_head {
         false
     } else if current_external_verdict.is_some() {
         external_approval_valid
