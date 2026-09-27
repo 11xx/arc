@@ -59,12 +59,16 @@ that every exit code and every refusal or guarantee sentence in `docs/`
 appears in the guide or in a command's help.
 
 **The semantic model is independent of the implementation.** A pure Haskell
-model of arc's authorization lives in `spec/arc-model/`, characterizes the
-revision its `comparisonRevision` names rather than translating the Rust
-implementation, and stays outside the Rust build and its gate targets so no
-arc change needs a Haskell toolchain. Run it with `cd spec/arc-model &&
-cabal v2-test --test-show-details=direct`; its README records the fixture
-format, the dependencies, and the replay seed.
+model of arc's authorization lives in its own repository, `arc-model`, beside
+this one. It characterizes the arc revision its `comparisonRevision` names
+rather than translating the Rust implementation, and nothing in this build,
+its gates, or its releases reads it, so no arc change needs a Haskell
+toolchain. Its differential replays generated histories through an installed
+`arc` binary and compares `arc check --json` with the model's grounds; its
+README records the commands, the fixture format, and the replay seed, and its
+REPORT states how the model's refusals map onto this implementation's
+blockers. A change here that alters what integration permits or refuses is
+one the model has to be re-pinned to.
 
 ## Releasing
 
