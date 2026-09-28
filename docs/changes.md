@@ -336,9 +336,14 @@ target = "NEWS.md"
 renderer = "keep-a-changelog"
 ```
 
-Both keys default to the values above with `CHANGELOG.md` as the target. If the
-configured file does not have a Keep a Changelog release shape, `--write`
-leaves it untouched and prints the generated block to stdout.
+Both keys default to the values above with `CHANGELOG.md` as the target. The
+built-in renderer replaces the block under the target's `## [Unreleased]`
+heading, which runs to the next `## [` heading or, in a file with no release
+yet, to the end of the file. It neither creates a missing target nor adds a
+heading the file lacks.
+`arc changelog --write` exits 1 and writes nothing when the renderer cannot
+perform the write, naming the target and the reason on stderr. Standard output
+stays empty, so a refusal never reads like a dry run.
 
 `arc env` is the explicit identity bootstrap. It prints eval-able
 `ARC_HARNESS`, `ARC_SESSION`, and `ARC_MODEL` exports for the acting session,

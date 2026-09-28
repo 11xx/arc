@@ -446,7 +446,10 @@ enum Cmd {
         /// wrap at 75 columns, continuations indented under their marker. The
         /// block is judged paragraph by paragraph, on words rather than the
         /// column they are wrapped at, and refused, naming each paragraph,
-        /// while it holds prose no recorded entry produced
+        /// while it holds prose no recorded entry produced. The block runs to
+        /// the next release heading or the end of the file; a missing target,
+        /// or one with no [Unreleased] heading, is refused with exit 1 and
+        /// nothing written
         #[arg(long)]
         write: bool,
         /// Keep the block's unrecorded paragraphs whole above the projected
