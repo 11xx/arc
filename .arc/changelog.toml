@@ -1,0 +1,5 @@
+# arc's own release copy, rendered by the built-in renderer. Selecting
+# `renderer = "command"` here runs a program with the authority of whoever
+# runs `arc changelog`, so this file is a danger path in `.arc/policy.toml`.
+target = "CHANGELOG.md"
+renderer = "keep-a-changelog"

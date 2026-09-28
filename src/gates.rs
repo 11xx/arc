@@ -5,6 +5,7 @@
 //! retained for diagnostics and refused by gate-dependent operations.
 
 use crate::commands::parse_duration;
+use crate::process_group::{kill_process_group, read_tail, STDERR_TAIL_BYTES};
 use anyhow::{bail, Context, Result};
 use serde::{de::Error as _, Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
@@ -23,14 +24,6 @@ use std::time::{Duration, Instant};
 /// would stall every one of them. A gate that needs longer declares its own
 /// timeout, which bounds the probe too.
 pub const DEFAULT_PROBE_TIMEOUT_SECONDS: u64 = 30;
-
-/// Bound on the probe stderr a failure warning carries.
-const PROBE_STDERR_BYTES: usize = 4096;
-const SIGKILL: i32 = 9;
-
-extern "C" {
-    fn kill(pid: i32, signal: i32) -> i32;
-}
 
 /// Declared verification gates. A gate with no `profiles` list is required
 /// for every profile. This is the local analogue of required CI checks.
@@ -207,7 +200,7 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
         }
         Ok((hex::encode(digest.finalize()), printed))
     });
-    let stderr_reader = std::thread::spawn(move || read_tail(stderr, PROBE_STDERR_BYTES));
+    let stderr_reader = std::thread::spawn(move || read_tail(stderr, STDERR_TAIL_BYTES));
 
     let mut status = None;
     let mut timed_out = false;
@@ -221,7 +214,8 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
             break;
         }
         if Instant::now() >= deadline {
-            kill_process_group(child.id())?;
+            kill_process_group(child.id())
+                .context("failed to kill overrunning environment probe")?;
             status = Some(
                 child
                     .wait()
@@ -257,44 +251,6 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
             failure: None,
         }
     })
-}
-
-/// The final `limit` bytes of a reader, for a bounded diagnostic.
-fn read_tail(mut reader: impl Read, limit: usize) -> std::io::Result<String> {
-    let mut tail = Vec::with_capacity(limit);
-    let mut chunk = [0_u8; 8192];
-    loop {
-        let read = reader.read(&mut chunk)?;
-        if read == 0 {
-            return Ok(String::from_utf8_lossy(&tail).into_owned());
-        }
-        if read >= limit {
-            tail.clear();
-            tail.extend_from_slice(&chunk[read - limit..read]);
-            continue;
-        }
-        let overflow = tail.len().saturating_add(read).saturating_sub(limit);
-        if overflow > 0 {
-            tail.drain(..overflow);
-        }
-        tail.extend_from_slice(&chunk[..read]);
-    }
-}
-
-fn kill_process_group(pid: u32) -> Result<()> {
-    let pid =
-        i32::try_from(pid).map_err(|_| anyhow::anyhow!("environment probe pid exceeds i32"))?;
-    // SAFETY: `kill` is called with a negated child PID created as the leader
-    // of its own process group; SIGKILL requires no borrowed memory contract.
-    if unsafe { kill(-pid, SIGKILL) } == -1 {
-        let error = std::io::Error::last_os_error();
-        // The group may have exited between the completion poll and kill(2);
-        // that race is not a failure to reap it.
-        if error.raw_os_error() != Some(3) {
-            return Err(error).context("failed to kill overrunning environment probe");
-        }
-    }
-    Ok(())
 }
 
 fn source_name(path: &Path, repo_toplevel: &Path) -> String {
