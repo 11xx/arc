@@ -452,9 +452,11 @@ fn configured_target_uses_keep_a_changelog_renderer() {
     repo.arc(&repo.root)
         .args(["changelog", "--write"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("## [Unreleased]"))
-        .stdout(predicate::str::contains("- configured target"));
+        .code(1)
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "NEWS.md holds no `## [Unreleased]` heading",
+        ));
     assert_eq!(
         fs::read_to_string(repo.root.join("NEWS.md")).unwrap(),
         "format arc does not understand\n"
@@ -515,6 +517,81 @@ fn write_splices_only_unreleased_and_is_idempotent() {
         .assert()
         .success();
     assert_eq!(fs::read(repo.root.join("CHANGELOG.md")).unwrap(), once);
+}
+
+#[test]
+fn write_fills_an_unreleased_block_that_ends_the_file() {
+    for (name, original) in [
+        ("trailing-newline", "# Changelog\n\n## [Unreleased]\n"),
+        ("no-trailing-newline", "# Changelog\n\n## [Unreleased]"),
+    ] {
+        let repo = Repo::new();
+        repo.commit(&repo.root, "CHANGELOG.md", original, "docs: add changelog");
+        begin(&repo, "first-release");
+        let worktree = repo.home.join(".worktrees/repo-first-release");
+        record(
+            &repo,
+            &worktree,
+            "first-release",
+            "added",
+            "- first entry\n",
+        );
+        integrate(&repo, "first-release");
+
+        let projected = stdout(repo.arc(&repo.root).args(["changelog"]));
+        repo.arc(&repo.root)
+            .args(["changelog", "--write"])
+            .assert()
+            .success()
+            .stdout("");
+        let once = fs::read_to_string(repo.root.join("CHANGELOG.md")).unwrap();
+        assert_eq!(once, format!("# Changelog\n\n{projected}"), "{name}");
+        repo.arc(&repo.root)
+            .args(["changelog", "--write"])
+            .assert()
+            .success();
+        assert_eq!(
+            fs::read_to_string(repo.root.join("CHANGELOG.md")).unwrap(),
+            once,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn write_refuses_a_target_the_built_in_renderer_cannot_update() {
+    let repo = Repo::new();
+    repo.commit(
+        &repo.root,
+        "CHANGELOG.md",
+        "# Changelog\n\n## 1.0.0\n\nreleased\n",
+        "docs: add changelog",
+    );
+    begin(&repo, "unshaped");
+    let worktree = repo.home.join(".worktrees/repo-unshaped");
+    record(&repo, &worktree, "unshaped", "added", "- projected\n");
+    integrate(&repo, "unshaped");
+
+    let before = fs::read(repo.root.join("CHANGELOG.md")).unwrap();
+    repo.arc(&repo.root)
+        .args(["changelog", "--write"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(predicate::str::contains("CHANGELOG.md"))
+        .stderr(predicate::str::contains("## [Unreleased]"))
+        .stderr(predicate::str::contains("nothing was written"));
+    assert_eq!(fs::read(repo.root.join("CHANGELOG.md")).unwrap(), before);
+
+    fs::remove_file(repo.root.join("CHANGELOG.md")).unwrap();
+    repo.arc(&repo.root)
+        .args(["changelog", "--write"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(predicate::str::contains("CHANGELOG.md does not exist"))
+        .stderr(predicate::str::contains("nothing was written"));
+    assert!(!repo.root.join("CHANGELOG.md").exists());
 }
 
 #[test]
