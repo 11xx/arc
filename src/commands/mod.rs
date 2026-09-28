@@ -708,6 +708,47 @@ pub fn read_body_file_verbatim(path: &str) -> Result<String> {
     }
 }
 
+/// Replace `path` with `contents` so a reader sees the old file or the new
+/// one and never a partial write. The bytes go to a sibling temporary file
+/// created with `mode` (subject to the umask), are synced, and are renamed
+/// over `path`; the directory is synced after. A failure leaves `path` as it
+/// was and removes the temporary file.
+pub fn write_atomically(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} names no file", path.display()))?;
+    let temp = parent.join(format!(
+        ".{}-{}.tmp",
+        name.to_string_lossy(),
+        crate::ids::new_event_id()
+    ));
+    let publish = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&temp)
+            .with_context(|| format!("cannot create {}", temp.display()))?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)
+            .with_context(|| format!("cannot publish {}", path.display()))?;
+        std::fs::File::open(parent)
+            .with_context(|| format!("cannot open {}", parent.display()))?
+            .sync_all()
+            .with_context(|| format!("cannot sync {}", parent.display()))?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&temp);
+    publish
+}
+
 pub fn parse_duration(raw: &str) -> Result<u64> {
     let Some((suffix_index, suffix)) = raw.char_indices().last() else {
         bail!("duration is empty; expected a positive integer followed by s, m, or h");

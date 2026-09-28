@@ -13,6 +13,7 @@ mod journal;
 mod journal_exchange;
 mod model;
 mod policy;
+mod process_group;
 mod project;
 mod registry;
 mod render;
