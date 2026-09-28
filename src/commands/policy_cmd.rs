@@ -26,7 +26,7 @@ pub fn write(ctx: &Ctx, text: &str) -> Result<i32> {
         .create(parent)
         .or_else(|error| if parent.is_dir() { Ok(()) } else { Err(error) })
         .with_context(|| format!("cannot create {}", parent.display()))?;
-    super::write_atomically(&path, text.as_bytes(), 0o600)?;
+    super::write_atomically(&path, text.as_bytes(), super::FileMode::Create(0o600))?;
     println!("operator policy written: {}", path.display());
     Ok(0)
 }

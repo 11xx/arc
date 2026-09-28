@@ -43,7 +43,22 @@ impl Repo {
     /// `HOME` is set as well because the harness running this suite may export
     /// a session store under its own home, and identity detection reads it.
     pub(crate) fn arc(&self, cwd: &Path) -> AssertCommand {
-        let mut cmd = AssertCommand::cargo_bin("arc").unwrap();
+        self.fixture_env(AssertCommand::cargo_bin("arc").unwrap(), cwd)
+    }
+
+    /// `arc`, run under an explicit umask, so a test about the permissions
+    /// arc gives a file does not depend on the umask the suite inherited.
+    pub(crate) fn arc_under_umask(&self, cwd: &Path, umask: &str) -> AssertCommand {
+        let mut sh = AssertCommand::new("sh");
+        sh.args([
+            "-c",
+            &format!("umask {umask} && exec \"$0\" \"$@\""),
+            env!("CARGO_BIN_EXE_arc"),
+        ]);
+        self.fixture_env(sh, cwd)
+    }
+
+    fn fixture_env(&self, mut cmd: AssertCommand, cwd: &Path) -> AssertCommand {
         cmd.current_dir(cwd)
             .env("HOME", &self.home)
             .env("ARC_SANDBOX", &self.home)

@@ -708,13 +708,28 @@ pub fn read_body_file_verbatim(path: &str) -> Result<String> {
     }
 }
 
+/// The permission bits `write_atomically` gives the file it publishes.
+pub enum FileMode {
+    /// A file being created: the bits are requested and the umask applies.
+    Create(u32),
+    /// A file being replaced: exactly these bits, whatever the umask.
+    Keep(u32),
+}
+
 /// Replace `path` with `contents` so a reader sees the old file or the new
 /// one and never a partial write. The bytes go to a sibling temporary file
-/// created with `mode` (subject to the umask), are synced, and are renamed
-/// over `path`; the directory is synced after. A failure leaves `path` as it
-/// was and removes the temporary file.
-pub fn write_atomically(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
+/// given `mode`, are synced, and are renamed over `path`; the directory is
+/// synced after. The rename is the commit point: a failure before it leaves
+/// `path` as it was, and a failure after it (opening or syncing the
+/// directory) is reported with the new contents already in place but not
+/// yet known durable. The temporary file is removed either way.
+pub fn write_atomically(path: &Path, contents: &[u8], mode: FileMode) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let (create_mode, exact_mode) = match mode {
+        FileMode::Create(bits) => (bits, None),
+        FileMode::Keep(bits) => (0o600, Some(bits)),
+    };
 
     let parent = path
         .parent()
@@ -731,9 +746,13 @@ pub fn write_atomically(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(mode)
+            .mode(create_mode)
             .open(&temp)
             .with_context(|| format!("cannot create {}", temp.display()))?;
+        if let Some(bits) = exact_mode {
+            file.set_permissions(std::fs::Permissions::from_mode(bits))
+                .with_context(|| format!("cannot set the mode of {}", temp.display()))?;
+        }
         file.write_all(contents)?;
         file.sync_all()?;
         drop(file);
