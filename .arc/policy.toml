@@ -58,6 +58,9 @@ paths = [
   "src/render.rs",
   "src/config.rs",
   ".arc/policy.toml",
+  # Kills an overrunning declared command with its whole process group. A
+  # defect leaves the command running past its bound.
+  "src/process_group.rs",
   # Bundle import writes foreign events into the append-only store.
   "src/commands/bundle_io.rs",
   "src/commands/replica.rs",

@@ -3,10 +3,8 @@
 use crate::commands::Ctx;
 use crate::gitio;
 use anyhow::{Context, Result};
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::Path;
+use std::fs;
+use std::os::unix::fs::DirBuilderExt;
 
 pub fn path(ctx: &Ctx) -> Result<i32> {
     let top = gitio::toplevel(&ctx.cwd)?;
@@ -19,7 +17,16 @@ pub fn write(ctx: &Ctx, text: &str) -> Result<i32> {
     crate::gates::validate_operator_text(text)?;
     let top = gitio::toplevel(&ctx.cwd)?;
     let path = crate::policy::operator_path(&top)?;
-    write_atomically(&path, text.as_bytes())?;
+    let parent = path
+        .parent()
+        .context("operator policy path has no parent")?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)
+        .or_else(|error| if parent.is_dir() { Ok(()) } else { Err(error) })
+        .with_context(|| format!("cannot create {}", parent.display()))?;
+    super::write_atomically(&path, text.as_bytes(), 0o600)?;
     println!("operator policy written: {}", path.display());
     Ok(0)
 }
@@ -159,41 +166,4 @@ fn option_value<T: std::fmt::Display>(value: Option<T>) -> String {
     value
         .map(|item| item.to_string())
         .unwrap_or_else(|| "none".to_string())
-}
-
-fn write_atomically(path: &Path, contents: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("operator policy path has no parent")?;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(parent)
-        .or_else(|error| if parent.is_dir() { Ok(()) } else { Err(error) })
-        .with_context(|| format!("cannot create {}", parent.display()))?;
-
-    let temp = path.with_file_name(format!(
-        ".operator-policy-{}.tmp",
-        crate::ids::new_event_id()
-    ));
-    let publish = (|| -> Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp)
-            .with_context(|| format!("cannot create {}", temp.display()))?;
-        file.write_all(contents)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temp, path)
-            .with_context(|| format!("cannot publish operator policy at {}", path.display()))?;
-        File::open(parent)
-            .with_context(|| format!("cannot open {}", parent.display()))?
-            .sync_all()
-            .with_context(|| format!("cannot sync {}", parent.display()))?;
-        Ok(())
-    })();
-    let _ = fs::remove_file(&temp);
-    publish
 }
