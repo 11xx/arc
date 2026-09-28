@@ -29,6 +29,7 @@ paths = [
   "src/policy.rs",
   "src/gates.rs",
   "src/status.rs",
+  "src/blockers.rs",
   "src/inbox.rs",
   "src/commands/review.rs",
   "src/commands/audit.rs",

@@ -1,3 +1,4 @@
+use crate::blockers::{self, BlockerFacts, GateFact};
 use crate::gates::GatesFile;
 use crate::gitio;
 use crate::model::{
@@ -10,6 +11,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
+
+pub use crate::blockers::Blocker;
 
 pub const STATUS_SCHEMA: &str = "arc-status/25";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
@@ -30,59 +33,6 @@ pub const UNDECLARED_APPROVAL_REASON: &str =
 
 fn short_revision(revision: &str) -> &str {
     &revision[..revision.len().min(8)]
-}
-
-/// Typed integration blockers, ordered by exit-code precedence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Blocker {
-    Closed,
-    BranchMissing,
-    ForkBranch,
-    Iterating,
-    BlockedByChanges,
-    NeedsRebase,
-    MergedTreeUnevaluated,
-    BlockingFindings,
-    NoValidApproval,
-    GatesNotGreen,
-    AcceptanceProbesNotGreen,
-    HoldActive,
-}
-
-impl Blocker {
-    pub fn exit_code(self) -> i32 {
-        match self {
-            Blocker::Closed | Blocker::BranchMissing => 6,
-            Blocker::ForkBranch => 15,
-            Blocker::Iterating => 13,
-            Blocker::BlockedByChanges => 7,
-            Blocker::NeedsRebase => 11,
-            Blocker::MergedTreeUnevaluated => 14,
-            Blocker::BlockingFindings => 2,
-            Blocker::NoValidApproval => 3,
-            Blocker::GatesNotGreen => 5,
-            Blocker::AcceptanceProbesNotGreen => 12,
-            Blocker::HoldActive => 4,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Blocker::Closed => "closed",
-            Blocker::BranchMissing => "branch-missing",
-            Blocker::ForkBranch => "fork-branch",
-            Blocker::Iterating => "iterating",
-            Blocker::BlockedByChanges => "blocked-by-changes",
-            Blocker::NeedsRebase => "needs-rebase",
-            Blocker::MergedTreeUnevaluated => "merged-tree-unevaluated",
-            Blocker::BlockingFindings => "blocking-findings",
-            Blocker::NoValidApproval => "no-valid-approval",
-            Blocker::GatesNotGreen => "gates-not-green",
-            Blocker::AcceptanceProbesNotGreen => "acceptance-probes-not-green",
-            Blocker::HoldActive => "hold-active",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1562,43 +1512,6 @@ fn build_report(
         })
         .unwrap_or_default();
 
-    let mut blockers = Vec::new();
-    if state.is_closed() {
-        blockers.push(Blocker::Closed);
-    }
-    if current_head.is_none() {
-        blockers.push(Blocker::BranchMissing);
-    }
-    // A fork's branch is where work stays unintegrated on purpose, whoever
-    // asks and from wherever they ask it. The refusal reads the change, so
-    // standing in the fork's worktree is neither required nor enough.
-    if fork.is_some() {
-        blockers.push(Blocker::ForkBranch);
-    }
-    if state.iterating {
-        blockers.push(Blocker::Iterating);
-    }
-    if dependency_status.blocked {
-        blockers.push(Blocker::BlockedByChanges);
-    }
-    if needs_rebase {
-        blockers.push(Blocker::NeedsRebase);
-    }
-    // Nothing has been run against the content that would ship. A tree some
-    // gates have answered for and others have not is an ordinary red gate;
-    // this is the case where the whole evaluation is missing, and where
-    // running a gate at the head would record it against the wrong tree.
-    let merged_tree_unevaluated = evaluated_tree.is_some()
-        && !gate_statuses.is_empty()
-        && !gate_statuses
-            .iter()
-            .any(|gate| gate.evidence_event_id.is_some());
-    if merged_tree_unevaluated {
-        blockers.push(Blocker::MergedTreeUnevaluated);
-    }
-    if !open_blocking.is_empty() {
-        blockers.push(Blocker::BlockingFindings);
-    }
     // A waiver stands in for a verdict nobody recorded. It does not stand over
     // one that refused: a reviewer who read this patchset and asked for changes
     // has said something a waiver has no business overriding, and letting the
@@ -1611,21 +1524,33 @@ fn build_report(
     // `arc query --debt` finds it.
     let waiver_satisfies_approval =
         debt_waives_current_head && !local_verdict_refuses_this_head && !external_refuses_this_head;
-    if !state.iterating && !approval_valid && !waiver_satisfies_approval {
-        blockers.push(Blocker::NoValidApproval);
-    }
-    if gate_statuses.iter().any(|g| !g.green_at_head) {
-        blockers.push(Blocker::GatesNotGreen);
-    }
-    if probe_statuses
-        .iter()
-        .any(|probe| !probe.discriminating_at_head)
-    {
-        blockers.push(Blocker::AcceptanceProbesNotGreen);
-    }
-    if !state.holds.is_empty() {
-        blockers.push(Blocker::HoldActive);
-    }
+    let blockers = blockers::derive(&BlockerFacts {
+        closed: state.is_closed(),
+        branch_missing: current_head.is_none(),
+        // A fork's branch is where work stays unintegrated on purpose, whoever
+        // asks and from wherever they ask it. The refusal reads the change, so
+        // standing in the fork's worktree is neither required nor enough.
+        on_fork: fork.is_some(),
+        iterating: state.iterating,
+        blocked_by_changes: dependency_status.blocked,
+        needs_rebase,
+        merged_tree_evaluated: evaluated_tree.is_some(),
+        gates: gate_statuses
+            .iter()
+            .map(|gate| GateFact {
+                green_at_head: gate.green_at_head,
+                evidence_recorded: gate.evidence_event_id.is_some(),
+            })
+            .collect(),
+        open_blocking_findings: !open_blocking.is_empty(),
+        approval_valid,
+        waiver_satisfies_approval,
+        probes_discriminating: probe_statuses
+            .iter()
+            .map(|probe| probe.discriminating_at_head)
+            .collect(),
+        hold_active: !state.holds.is_empty(),
+    });
 
     let gate_summary = gate_statuses
         .iter()
@@ -1949,25 +1874,7 @@ pub fn check_exit_code(report: &StatusReport) -> i32 {
     if report.integrate_ready {
         return 0;
     }
-    for blocker in [
-        Blocker::Closed,
-        Blocker::BranchMissing,
-        Blocker::ForkBranch,
-        Blocker::Iterating,
-        Blocker::BlockedByChanges,
-        Blocker::NeedsRebase,
-        Blocker::MergedTreeUnevaluated,
-        Blocker::BlockingFindings,
-        Blocker::NoValidApproval,
-        Blocker::GatesNotGreen,
-        Blocker::AcceptanceProbesNotGreen,
-        Blocker::HoldActive,
-    ] {
-        if report.blockers.contains(&blocker) {
-            return blocker.exit_code();
-        }
-    }
-    6
+    blockers::exit_code(&report.blockers).unwrap_or(6)
 }
 
 fn verification_result_label(result: Option<VerifyResult>) -> String {
