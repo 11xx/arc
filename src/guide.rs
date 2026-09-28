@@ -431,6 +431,9 @@ RUN A CHANGE
                                      File a journal bundle into this journal.
   arc audit <change> --verdict <v>   Review an already-integrated revision.
   arc close                          Terminal outcome arc did not merge itself.
+  arc changelog <c> --category <k> --body-file <f>
+                                     Record the change's release copy.
+  arc changelog [--json | --write]   Render unreleased copy, or write the target.
 
   A gate runs where its change lives. `verify`, `snapshot --verify`, `done`,
   and `rebase --verify` execute the command in the change's recorded worktree
@@ -487,6 +490,16 @@ RUN A CHANGE
   worktree, so the next command infers the change without being told. A dirty
   checkout, or one standing elsewhere, is left exactly as it was — the change
   still opens, and arc prints the Git command that finishes the switch.
+
+  Release copy is recorded per change and rendered at release; arc imposes
+  no file convention. The built-in renderer replaces the `## [Unreleased]`
+  block of the target `.arc/changelog.toml` names, `CHANGELOG.md` by default.
+  A project whose file follows another convention selects `renderer =
+  "command"` with a `renderer_command` argv. That command runs from the
+  repository root without a shell, with the authority of whoever runs `arc
+  changelog`, reads an `arc-changelog-render-request/1` document on stdin,
+  and answers on stdout: the rendering for a read, and for `--write` the
+  complete replacement file, written atomically after it exits 0.
 
 PAIR REPLICA STORES
   A store keeps its own repository ID as event provenance. `replica init`
@@ -1064,6 +1077,10 @@ EXIT CODES
     `arc import` exits 1 and writes nothing when an event conflicts.
     `arc changelog --write` exits 1 and writes nothing when the renderer
       cannot perform the write, naming the target and the reason on stderr.
+    `arc changelog` exits 1 and leaves the target byte-identical when a
+      command renderer cannot start, exits non-zero, overruns its timeout,
+      prints more than 16 MiB or output that is not UTF-8, or prints nothing
+      for `--write`.
     `arc import` refuses a delta bundle whose prefix this store does not
       hold, and writes nothing.
     `arc forge link` exits 10 when the observed tuple or the declared policy

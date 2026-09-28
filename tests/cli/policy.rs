@@ -248,3 +248,23 @@ pub(super) fn layered_gates_take_the_stricter_timeout_and_refuse_a_different_env
             "environment probe \"echo project\"",
         ));
 }
+
+#[test]
+fn operator_policy_is_written_owner_only_whatever_the_umask() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    let source = repo.home.join("operator-policy.toml");
+    fs::write(&source, "[gates.build]\ncommand = \"true\"\n").unwrap();
+    let path = PathBuf::from(arc_output(&repo, &repo.root, &["policy", "path"]).trim());
+    for _ in 0..2 {
+        repo.arc_under_umask(&repo.root, "000")
+            .args(["policy", "write", "--body-file", source.to_str().unwrap()])
+            .assert()
+            .success();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+}
