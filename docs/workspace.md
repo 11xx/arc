@@ -265,7 +265,9 @@ failed collection, and `unknown` when the journal cannot establish a reason.
 An artifact still recorded as present has no established departure reason.
 A departure is not a resolution. A file of another schema or scope is refused
 as a baseline. Every failed component read, including the report's ledger
-read, enters the collection manifest and makes the command exit 16. The
+read, enters the collection manifest and makes the command exit 16.
+Departure reconciliation and hot or archived artifact reads follow the same
+failure contract; unreadable records leave the project's departures `unobserved`. The
 observation ends after the ledger and departure reads finish.
 
 ## Brief scaffolds

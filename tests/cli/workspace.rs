@@ -3531,3 +3531,73 @@ fn workspace_report_refuses_comparisons_across_scopes() {
     );
     assert!(String::from_utf8_lossy(&result.stderr).contains("scope"));
 }
+
+#[test]
+fn workspace_report_records_unreadable_departure_artifacts() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    let (dir, departed) = journal_artifact(&repo, "departed", "todo", "# Departed\n");
+    journal_artifact(&repo, "staying", "todo", "# Staying\n");
+    let first = json_stdout(repo.arc(&repo.root).args(["workspace", "report", "--json"]));
+    let baseline = repo.home.join("baseline.json");
+    fs::write(&baseline, serde_json::to_vec(&first).unwrap()).unwrap();
+    repo.arc(&repo.root)
+        .args(["journal", "consume", &departed, "--outcome", "done"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["journal", "archive", &departed])
+        .assert()
+        .success();
+    let control = json_stdout(
+        repo.arc(&repo.root)
+            .args(["workspace", "report", "--json", "--previous"])
+            .arg(&baseline),
+    );
+    assert_eq!(
+        control["sections"]["departed_since_previous"][0]["reason"],
+        "consumed"
+    );
+    assert_eq!(
+        control["sections"]["departed_since_previous"][0]["outcome"],
+        "done"
+    );
+    let archive = dir.with_file_name(format!(
+        "{}-archive",
+        dir.file_name().unwrap().to_string_lossy()
+    ));
+    let file = archive.join(&departed);
+    let permissions = fs::metadata(&file).unwrap().permissions();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    let output = repo
+        .arc(&repo.root)
+        .args(["workspace", "report", "--json", "--previous"])
+        .arg(&baseline)
+        .output()
+        .unwrap();
+    fs::set_permissions(&file, permissions).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(16),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let failed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(failed["collection"]["failed"], 1);
+    assert_eq!(failed["collection"]["non_empty"], 0);
+    assert_eq!(
+        failed["collection"]["failures"][0]["component"],
+        "departure-journal"
+    );
+    assert!(failed["collection"]["failures"][0]["reason"]
+        .as_str()
+        .unwrap()
+        .contains(&departed));
+    assert_eq!(
+        failed["sections"]["departed_since_previous"][0]["reason"],
+        "unobserved"
+    );
+    assert!(failed["sections"]["work"][0]["new_since_previous"].is_null());
+    assert!(failed["tallies"]["work"]["previous"].is_null());
+}
