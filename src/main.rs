@@ -1,5 +1,6 @@
 mod bundle;
 mod chain;
+mod changelog_render;
 mod commands;
 mod config;
 mod context;
@@ -423,6 +424,14 @@ enum Cmd {
         json: bool,
     },
     /// Record, read, or project changelog entries
+    ///
+    /// The projection is rendered by the renderer `.arc/changelog.toml`
+    /// selects: the built-in `keep-a-changelog`, or `command`, whose
+    /// `renderer_command` argv runs from the repository root without a shell,
+    /// with the authority of whoever runs arc changelog. It reads an
+    /// arc-changelog-render-request/1 document on stdin and answers on stdout;
+    /// `renderer_timeout` bounds it (default 60s), and its process group is
+    /// killed at the deadline. `--json` never runs it
     Changelog {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -442,18 +451,21 @@ enum Cmd {
         /// Override the latest-tag release boundary
         #[arg(long)]
         since: Option<String>,
-        /// Replace the generated [Unreleased] block in CHANGELOG.md; entries
-        /// wrap at 75 columns, continuations indented under their marker. The
-        /// block is judged paragraph by paragraph, on words rather than the
-        /// column they are wrapped at, and refused, naming each paragraph,
-        /// while it holds prose no recorded entry produced. The block runs to
-        /// the next release heading or the end of the file; a missing target,
-        /// or one with no [Unreleased] heading, is refused with exit 1 and
-        /// nothing written
+        /// Write the configured target. The built-in renderer replaces the
+        /// generated [Unreleased] block in CHANGELOG.md; entries wrap at 75
+        /// columns, continuations indented under their marker. The block is
+        /// judged paragraph by paragraph, on words rather than the column they
+        /// are wrapped at, and refused, naming each paragraph, while it holds
+        /// prose no recorded entry produced. The block runs to the next release
+        /// heading or the end of the file; a missing target, or one with no
+        /// [Unreleased] heading, is refused with exit 1 and nothing written. A
+        /// command renderer's stdout replaces the whole target, atomically,
+        /// only after it exits 0 with a non-empty answer
         #[arg(long)]
         write: bool,
         /// Keep the block's unrecorded paragraphs whole above the projected
-        /// entries, under an unrecorded marker, instead of refusing to write
+        /// entries, under an unrecorded marker, instead of refusing to write.
+        /// Built-in renderer only
         #[arg(long)]
         keep_unrecorded: bool,
     },

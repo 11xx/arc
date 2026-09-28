@@ -345,6 +345,50 @@ heading the file lacks.
 perform the write, naming the target and the reason on stderr. Standard output
 stays empty, so a refusal never reads like a dry run.
 
+A project whose file follows another convention selects a command renderer,
+and arc hands it the projection instead of imposing a format:
+
+```toml
+target = "NEWS"
+renderer = "command"
+renderer_command = ["python3", "tools/render_news.py"]
+renderer_timeout = "60s"
+```
+
+`renderer_command` is an argv, required and non-empty for `command` and
+refused for `keep-a-changelog`. It runs from the repository root without a
+shell, as the leader of its own process group, with the environment and the
+authority of whoever runs `arc changelog` — the same trust a declared gate
+command gets, which is why `.arc/changelog.toml` belongs among a project's
+danger paths. `renderer_timeout` takes the gate duration syntax and defaults
+to 60s. The command reads one `arc-changelog-render-request/1` document on
+stdin:
+
+```json
+{
+  "schema": "arc-changelog-render-request/1",
+  "operation": "write",
+  "target": "NEWS",
+  "target_content": "the file as it stands, or null",
+  "include_provenance": false,
+  "projection": { "schema": "arc-changelog/1", "entries": [] }
+}
+```
+
+`projection` is exactly what `arc changelog --json` prints for the same
+selection, so a renderer and a `--json` consumer read one shape. Plain `arc
+changelog` sends `operation: "render"` with a null `target_content` and prints
+the command's stdout; `--provenance` sets `include_provenance`. `--write`
+sends `operation: "write"` with the target's current text, or null when it
+does not exist, and replaces the target with the command's stdout, atomically
+and only once the command has succeeded. `--json` never runs the renderer, and
+`--keep-unrecorded` belongs to the built-in renderer. The command's stdout is
+capped at 16 MiB and its stderr kept as a bounded tail for the refusal.
+`arc changelog` exits 1 and leaves the target byte-identical when a command
+renderer cannot start, exits non-zero, overruns its timeout, prints more than
+16 MiB or output that is not UTF-8, or prints nothing for `--write`.
+At the timeout the renderer's whole process group is killed.
+
 `arc env` is the explicit identity bootstrap. It prints eval-able
 `ARC_HARNESS`, `ARC_SESSION`, and `ARC_MODEL` exports for the acting session,
 and an explicit `unset` for each of the three it cannot establish, so

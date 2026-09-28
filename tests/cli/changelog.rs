@@ -487,8 +487,9 @@ fn configured_target_uses_keep_a_changelog_renderer() {
         .args(["changelog"])
         .assert()
         .failure()
+        .stderr(predicate::str::contains(".arc/changelog.toml"))
         .stderr(predicate::str::contains(
-            "unsupported changelog renderer `command`",
+            "renderer `command` requires a non-empty renderer_command",
         ));
 }
 
@@ -580,7 +581,10 @@ fn write_refuses_a_target_the_built_in_renderer_cannot_update() {
         .stdout("")
         .stderr(predicate::str::contains("CHANGELOG.md"))
         .stderr(predicate::str::contains("## [Unreleased]"))
-        .stderr(predicate::str::contains("nothing was written"));
+        .stderr(predicate::str::contains("nothing was written"))
+        .stderr(predicate::str::contains(
+            "can select renderer = \"command\" with a renderer_command in .arc/changelog.toml",
+        ));
     assert_eq!(fs::read(repo.root.join("CHANGELOG.md")).unwrap(), before);
 
     fs::remove_file(repo.root.join("CHANGELOG.md")).unwrap();
@@ -809,4 +813,248 @@ fn reviewer_role_is_refused_when_recording() {
         .stderr(predicate::str::contains(
             "role refusal: reviewer may not changelog",
         ));
+}
+
+/// A repository whose `.arc/changelog.toml` selects a command renderer that
+/// runs `render.sh`, holding one integrated entry. The script is the
+/// project's program, so the fixture writes it into the repository.
+fn command_renderer_repo(script: &str, extra_config: &str) -> Repo {
+    let repo = Repo::new();
+    fs::create_dir(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/changelog.toml"),
+        format!(
+            "target = \"NEWS\"\nrenderer = \"command\"\nrenderer_command = [\"sh\", \"render.sh\"]\n{extra_config}"
+        ),
+    )
+    .unwrap();
+    fs::write(repo.root.join("render.sh"), script).unwrap();
+    git(&repo.root, &["add", "."]);
+    git(
+        &repo.root,
+        &["commit", "-m", "chore: configure a news renderer"],
+    );
+    begin(&repo, "rendered");
+    let worktree = repo.home.join(".worktrees/repo-rendered");
+    record(&repo, &worktree, "rendered", "added", "- rendered entry\n");
+    integrate(&repo, "rendered");
+    repo
+}
+
+fn read_request(path: &Path) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn command_renderer_writes_a_target_in_its_own_format() {
+    let repo = command_renderer_repo(
+        "cat > \"$REQUEST_OUT\"\nprintf 'NEWS\\n====\\n\\n  * rendered entry\\n'\n",
+        "",
+    );
+    let request_out = repo.home.join("request.json");
+    let projection = json_stdout(repo.arc(&repo.root).args(["changelog", "--json"]));
+    assert_eq!(projection["renderer"], "command");
+
+    repo.arc(&repo.root)
+        .env("REQUEST_OUT", &request_out)
+        .args(["changelog", "--write"])
+        .assert()
+        .success()
+        .stdout("");
+    assert_eq!(
+        fs::read_to_string(repo.root.join("NEWS")).unwrap(),
+        "NEWS\n====\n\n  * rendered entry\n"
+    );
+    let request = read_request(&request_out);
+    assert_eq!(request["schema"], "arc-changelog-render-request/1");
+    assert_eq!(request["operation"], "write");
+    assert_eq!(request["target"], "NEWS");
+    assert_eq!(request["target_content"], serde_json::Value::Null);
+    assert_eq!(request["include_provenance"], false);
+    assert_eq!(request["projection"], projection);
+
+    fs::write(repo.root.join("NEWS"), "old news\n").unwrap();
+    repo.arc(&repo.root)
+        .env("REQUEST_OUT", &request_out)
+        .args(["changelog", "--write"])
+        .assert()
+        .success();
+    assert_eq!(read_request(&request_out)["target_content"], "old news\n");
+    assert_eq!(
+        fs::read_to_string(repo.root.join("NEWS")).unwrap(),
+        "NEWS\n====\n\n  * rendered entry\n"
+    );
+}
+
+#[test]
+fn command_renderer_answers_a_plain_read() {
+    let repo = command_renderer_repo("cat > \"$REQUEST_OUT\"\nprintf 'rendered view\\n'\n", "");
+    let request_out = repo.home.join("request.json");
+    repo.arc(&repo.root)
+        .env("REQUEST_OUT", &request_out)
+        .args(["changelog", "--provenance"])
+        .assert()
+        .success()
+        .stdout("rendered view\n");
+    let request = read_request(&request_out);
+    assert_eq!(request["operation"], "render");
+    assert_eq!(request["target_content"], serde_json::Value::Null);
+    assert_eq!(request["include_provenance"], true);
+    assert!(!repo.root.join("NEWS").exists());
+
+    // `--json` is the projection itself and never runs the renderer.
+    fs::remove_file(&request_out).unwrap();
+    repo.arc(&repo.root)
+        .env("REQUEST_OUT", &request_out)
+        .args(["changelog", "--json"])
+        .assert()
+        .success();
+    assert!(!request_out.exists());
+}
+
+#[test]
+fn command_renderer_failures_leave_the_target_untouched() {
+    for (name, script, cause) in [
+        (
+            "non-zero exit",
+            "cat > /dev/null\necho 'renderer broke' >&2\nexit 3\n",
+            "exited with status 3",
+        ),
+        ("empty output", "cat > /dev/null\n", "printed nothing"),
+        (
+            "non-UTF-8 output",
+            "cat > /dev/null\nprintf '\\377\\376\\n'\n",
+            "printed output that is not UTF-8",
+        ),
+        (
+            "oversized output",
+            "cat > /dev/null\nhead -c 16777217 /dev/zero | tr '\\0' 'x'\n",
+            "printed more than 16 MiB",
+        ),
+    ] {
+        let repo = command_renderer_repo(script, "");
+        fs::write(repo.root.join("NEWS"), "kept\n").unwrap();
+        let assert = repo
+            .arc(&repo.root)
+            .args(["changelog", "--write"])
+            .assert()
+            .code(1)
+            .stdout("")
+            .stderr(predicate::str::contains(cause))
+            .stderr(predicate::str::contains("NEWS was not written"));
+        if name == "non-zero exit" {
+            assert.stderr(predicate::str::contains("renderer broke"));
+        }
+        assert_eq!(
+            fs::read_to_string(repo.root.join("NEWS")).unwrap(),
+            "kept\n",
+            "{name}"
+        );
+    }
+
+    let repo = command_renderer_repo("exit 0\n", "");
+    fs::write(
+        repo.root.join(".arc/changelog.toml"),
+        "target = \"NEWS\"\nrenderer = \"command\"\nrenderer_command = [\"./no-such-renderer\"]\n",
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args(["changelog", "--write"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(predicate::str::contains("could not start"));
+    assert!(!repo.root.join("NEWS").exists());
+}
+
+#[test]
+fn command_renderer_is_killed_with_its_group_at_the_deadline() {
+    let repo = command_renderer_repo(
+        "cat > /dev/null\nsleep 30 &\necho $! > \"$PID_OUT\"\nwait\n",
+        "renderer_timeout = \"1s\"\n",
+    );
+    let pid_out = repo.home.join("renderer.pid");
+    fs::write(repo.root.join("NEWS"), "kept\n").unwrap();
+    let started = std::time::Instant::now();
+    repo.arc(&repo.root)
+        .env("PID_OUT", &pid_out)
+        .args(["changelog", "--write"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(predicate::str::contains("did not finish within 1s"))
+        .stderr(predicate::str::contains("NEWS was not written"));
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert_eq!(
+        fs::read_to_string(repo.root.join("NEWS")).unwrap(),
+        "kept\n"
+    );
+
+    // The background child shared the renderer's process group, so the kill
+    // reached it: it is gone, or a zombie awaiting its new parent's reap.
+    let pid = fs::read_to_string(&pid_out).unwrap().trim().to_owned();
+    let stat = Path::new("/proc").join(&pid).join("stat");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let alive = fs::read_to_string(&stat)
+            .map(|stat| !stat.contains(") Z "))
+            .unwrap_or(false);
+        if !alive {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "renderer child {pid} survived"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn renderer_configuration_is_checked_at_load() {
+    let repo = Repo::new();
+    fs::create_dir(repo.root.join(".arc")).unwrap();
+    for (config, refusal) in [
+        (
+            "renderer = \"command\"\nrenderer_command = []\n",
+            "renderer `command` requires a non-empty renderer_command",
+        ),
+        (
+            "renderer = \"keep-a-changelog\"\nrenderer_command = [\"sh\", \"render.sh\"]\n",
+            "renderer_command applies only to renderer `command`",
+        ),
+        (
+            "renderer = \"keep-a-changelog\"\nrenderer_timeout = \"5s\"\n",
+            "renderer_timeout applies only to renderer `command`",
+        ),
+        (
+            "renderer = \"command\"\nrenderer_command = [\"sh\"]\nrenderer_timeout = \"soon\"\n",
+            "renderer_timeout",
+        ),
+        (
+            "renderer = \"pandoc\"\n",
+            "unsupported changelog renderer `pandoc`",
+        ),
+    ] {
+        fs::write(repo.root.join(".arc/changelog.toml"), config).unwrap();
+        repo.arc(&repo.root)
+            .args(["changelog"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(".arc/changelog.toml"))
+            .stderr(predicate::str::contains(refusal));
+    }
+}
+
+#[test]
+fn keep_unrecorded_belongs_to_the_built_in_renderer() {
+    let repo = command_renderer_repo("cat > /dev/null\necho news\n", "");
+    repo.arc(&repo.root)
+        .args(["changelog", "--write", "--keep-unrecorded"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--keep-unrecorded applies only to the keep-a-changelog renderer",
+        ));
+    assert!(!repo.root.join("NEWS").exists());
 }

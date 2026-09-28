@@ -1,4 +1,5 @@
-use super::{ensure_append_allowed, locked_state, Ctx};
+use super::{ensure_append_allowed, locked_state, parse_duration, write_atomically, Ctx};
+use crate::changelog_render;
 use crate::gitio;
 use crate::model::{Closure, Payload};
 use crate::state::{ChangeState, ChangelogEntry};
@@ -8,11 +9,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 const CHANGELOG_SCHEMA: &str = "arc-changelog/1";
+const RENDER_REQUEST_SCHEMA: &str = "arc-changelog-render-request/1";
+const CHANGELOG_CONFIG: &str = ".arc/changelog.toml";
 const DEFAULT_CHANGELOG_TARGET: &str = "CHANGELOG.md";
 const CHANGELOG_RENDERER: &str = "keep-a-changelog";
+const COMMAND_RENDERER: &str = "command";
+const DEFAULT_RENDERER_TIMEOUT: &str = "60s";
 /// Introduces the lines a release block holds that no recorded entry
 /// produced, so a later projection can tell them from its own output and
 /// carry them forward unchanged.
@@ -23,6 +30,8 @@ const UNRECORDED_MARKER: &str = "<!-- unrecorded -->";
 struct ChangelogConfig {
     target: String,
     renderer: String,
+    renderer_command: Vec<String>,
+    renderer_timeout: Option<String>,
 }
 
 impl Default for ChangelogConfig {
@@ -30,8 +39,34 @@ impl Default for ChangelogConfig {
         Self {
             target: DEFAULT_CHANGELOG_TARGET.into(),
             renderer: CHANGELOG_RENDERER.into(),
+            renderer_command: Vec::new(),
+            renderer_timeout: None,
         }
     }
+}
+
+/// A validated `.arc/changelog.toml`: the target, the renderer's name as the
+/// projection reports it, and the command when the project selected one.
+struct Changelog {
+    target: String,
+    renderer: String,
+    command: Option<CommandRenderer>,
+}
+
+struct CommandRenderer {
+    argv: Vec<String>,
+    timeout: Duration,
+}
+
+/// What a command renderer reads on stdin.
+#[derive(Serialize)]
+struct RenderRequest<'a> {
+    schema: &'static str,
+    operation: &'static str,
+    target: &'a str,
+    target_content: Option<&'a str>,
+    include_provenance: bool,
+    projection: &'a ChangelogProjection<'a>,
 }
 
 #[derive(Serialize)]
@@ -170,19 +205,25 @@ pub fn changelog(
         .map(|(_, entry)| entry)
         .collect::<Vec<_>>();
 
+    let projection = ChangelogProjection {
+        schema: CHANGELOG_SCHEMA,
+        boundary: boundary.as_deref(),
+        target: &config.target,
+        renderer: &config.renderer,
+        entries,
+    };
     if json {
-        let projection = ChangelogProjection {
-            schema: CHANGELOG_SCHEMA,
-            boundary: boundary.as_deref(),
-            target: &config.target,
-            renderer: &config.renderer,
-            entries,
-        };
         println!("{}", serde_json::to_string_pretty(&projection)?);
         return Ok(0);
     }
+    if let Some(command) = &config.command {
+        if keep_unrecorded {
+            bail!("--keep-unrecorded applies only to the {CHANGELOG_RENDERER} renderer");
+        }
+        return render_with_command(ctx, &config, command, &projection, provenance, write);
+    }
 
-    let rendered = render_unreleased(&entries, provenance);
+    let rendered = render_unreleased(&projection.entries, provenance);
     if !write {
         print!("{rendered}");
         return Ok(0);
@@ -191,6 +232,10 @@ pub fn changelog(
         WriteOutcome::Written => Ok(0),
         WriteOutcome::Unwritable(reason) => {
             eprintln!("{} {reason}; nothing was written", config.target);
+            eprintln!(
+                "a project whose file follows another convention can select renderer = \
+                 \"{COMMAND_RENDERER}\" with a renderer_command in {CHANGELOG_CONFIG}"
+            );
             Ok(1)
         }
         WriteOutcome::Unrecorded(paragraphs) => {
@@ -494,23 +539,150 @@ fn provenance_line(entry: &ProjectedEntry<'_>) -> String {
     )
 }
 
-fn load_changelog_config(ctx: &Ctx) -> Result<ChangelogConfig> {
+fn load_changelog_config(ctx: &Ctx) -> Result<Changelog> {
     let root = gitio::toplevel(&ctx.cwd)?;
-    let path = root.join(".arc/changelog.toml");
+    let path = root.join(CHANGELOG_CONFIG);
     let config = match fs::read_to_string(&path) {
         Ok(contents) => toml::from_str::<ChangelogConfig>(&contents)
             .with_context(|| format!("parse {}", path.display()))?,
         Err(error) if error.kind() == ErrorKind::NotFound => ChangelogConfig::default(),
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
-    if config.renderer != CHANGELOG_RENDERER {
-        bail!(
-            "unsupported changelog renderer `{}`; only `{CHANGELOG_RENDERER}` is available",
-            config.renderer
-        );
-    }
+    let command = match config.renderer.as_str() {
+        CHANGELOG_RENDERER => {
+            if !config.renderer_command.is_empty() {
+                bail!("{CHANGELOG_CONFIG}: renderer_command applies only to renderer `{COMMAND_RENDERER}`");
+            }
+            if config.renderer_timeout.is_some() {
+                bail!("{CHANGELOG_CONFIG}: renderer_timeout applies only to renderer `{COMMAND_RENDERER}`");
+            }
+            None
+        }
+        COMMAND_RENDERER => {
+            if config.renderer_command.first().is_none_or(String::is_empty) {
+                bail!(
+                    "{CHANGELOG_CONFIG}: renderer `{COMMAND_RENDERER}` requires a non-empty \
+                     renderer_command, the argv of the program that renders the target"
+                );
+            }
+            let timeout = config
+                .renderer_timeout
+                .as_deref()
+                .unwrap_or(DEFAULT_RENDERER_TIMEOUT);
+            let timeout = parse_duration(timeout)
+                .with_context(|| format!("{CHANGELOG_CONFIG}: renderer_timeout"))?;
+            Some(CommandRenderer {
+                argv: config.renderer_command,
+                timeout: Duration::from_secs(timeout),
+            })
+        }
+        other => bail!(
+            "{CHANGELOG_CONFIG}: unsupported changelog renderer `{other}`; expected \
+             `{CHANGELOG_RENDERER}` or `{COMMAND_RENDERER}`"
+        ),
+    };
     normalize_target(&config.target)?;
-    Ok(config)
+    Ok(Changelog {
+        target: config.target,
+        renderer: config.renderer,
+        command,
+    })
+}
+
+/// Hand the projection to the project's renderer. A read prints its answer;
+/// a write replaces the target with it. Anything short of an answer leaves
+/// the target byte-identical, says why on stderr, and exits 1.
+fn render_with_command(
+    ctx: &Ctx,
+    config: &Changelog,
+    command: &CommandRenderer,
+    projection: &ChangelogProjection<'_>,
+    provenance: bool,
+    write: bool,
+) -> Result<i32> {
+    let root = gitio::toplevel(&ctx.cwd)?;
+    let path = target_path(&root, &config.target)?;
+    let target_content = if write {
+        match fs::read(&path) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(content) => Some(content),
+                Err(_) => {
+                    eprintln!(
+                        "{} is not UTF-8, so the renderer cannot be given it; nothing was written",
+                        config.target
+                    );
+                    return Ok(1);
+                }
+            },
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
+            Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        }
+    } else {
+        None
+    };
+    let request = RenderRequest {
+        schema: RENDER_REQUEST_SCHEMA,
+        operation: if write { "write" } else { "render" },
+        target: &config.target,
+        target_content: target_content.as_deref(),
+        include_provenance: provenance,
+        projection,
+    };
+    let request = serde_json::to_vec(&request)?;
+    let outcome = changelog_render::run(&command.argv, &root, &request, command.timeout)?;
+    let consequence = if write {
+        format!("{} was not written", config.target)
+    } else {
+        "nothing was rendered".to_owned()
+    };
+    let rendered = match outcome {
+        Ok(rendered) if write && rendered.is_empty() => {
+            eprintln!(
+                "changelog renderer `{}` printed nothing; {consequence}",
+                command.argv.join(" ")
+            );
+            return Ok(1);
+        }
+        Ok(rendered) => rendered,
+        Err(refusal) => {
+            eprintln!(
+                "changelog renderer `{}` {}; {consequence}",
+                command.argv.join(" "),
+                refusal.cause
+            );
+            if !refusal.stderr_tail.trim().is_empty() {
+                eprintln!("renderer stderr:");
+                eprint!("{}", refusal.stderr_tail);
+                if !refusal.stderr_tail.ends_with('\n') {
+                    eprintln!();
+                }
+            }
+            return Ok(1);
+        }
+    };
+    if write {
+        replace_target(&path, rendered.as_bytes())?;
+    } else {
+        print!("{rendered}");
+    }
+    Ok(0)
+}
+
+/// Replace the target atomically, through a symlink to the file it names, and
+/// keep the permissions it had. A new file gets the umask's.
+fn replace_target(path: &Path, contents: &[u8]) -> Result<()> {
+    let (path, mode) = match fs::canonicalize(path) {
+        Ok(resolved) => {
+            let mode = fs::metadata(&resolved)
+                .with_context(|| format!("read {}", resolved.display()))?
+                .permissions()
+                .mode();
+            (resolved, mode & 0o7777)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => (path.to_path_buf(), 0o666),
+        Err(error) => return Err(error).with_context(|| format!("resolve {}", path.display())),
+    };
+    write_atomically(&path, contents, mode)
 }
 
 fn normalize_target(target: &str) -> Result<PathBuf> {
@@ -642,7 +814,7 @@ fn unrecorded_paragraphs(block: &str, projected: &str) -> Vec<Paragraph> {
 
 fn write_changelog(
     ctx: &Ctx,
-    config: &ChangelogConfig,
+    config: &Changelog,
     rendered: &str,
     keep_unrecorded: bool,
 ) -> Result<WriteOutcome> {
@@ -723,7 +895,7 @@ fn write_changelog(
         }
         updated.push_str(&original[next_release..]);
     }
-    fs::write(&path, updated).with_context(|| format!("write {}", path.display()))?;
+    replace_target(&path, updated.as_bytes())?;
     Ok(WriteOutcome::Written)
 }
 
