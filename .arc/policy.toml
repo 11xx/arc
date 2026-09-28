@@ -58,6 +58,10 @@ paths = [
   "src/render.rs",
   "src/config.rs",
   ".arc/policy.toml",
+  # The changelog renderer runs the program `.arc/changelog.toml` declares,
+  # with the invoking user's authority, the way a gate runs its command.
+  ".arc/changelog.toml",
+  "src/changelog_render.rs",
   # Kills an overrunning declared command with its whole process group. A
   # defect leaves the command running past its bound.
   "src/process_group.rs",

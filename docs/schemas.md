@@ -36,6 +36,7 @@ Parsing an internal shape means tracking arc's implementation.
 | `arc-stats/1` | `arc stats --json` — durations, counts, rework rounds, and suggested stage budgets | commitment |
 | `arc-stats-by-model/1` | `arc stats --by-model --json` — one row per delegated identity, a different shape rather than a wider one | commitment |
 | `arc-changelog/1` | `arc changelog --json` — the projected release copy for integrated changes | commitment |
+| `arc-changelog-render-request/1` | stdin of a `command` changelog renderer — the operation (`render` or `write`), the target and its current content, whether provenance was asked for, and the `arc-changelog/1` projection | commitment |
 | `arc-forks/2` | `arc fork list --json` — every fork from markers and branches together, with its age, head, worktree dirty counts, and the changes promoted from it | commitment |
 | `arc-doctor/5` | `arc doctor --json` — the ledger health report, replica pairing and authority, problems apart from advice | commitment |
 | `arc-workspace/1` | `arc workspace list --json` and `arc workspace inbox --json` — rows aggregated across registered projects | commitment |
