@@ -189,9 +189,9 @@ pub fn changelog(
     }
     match write_changelog(ctx, &config, &rendered, keep_unrecorded)? {
         WriteOutcome::Written => Ok(0),
-        WriteOutcome::NoReleaseBlock => {
-            print!("{rendered}");
-            Ok(0)
+        WriteOutcome::Unwritable(reason) => {
+            eprintln!("{} {reason}; nothing was written", config.target);
+            Ok(1)
         }
         WriteOutcome::Unrecorded(paragraphs) => {
             eprintln!(
@@ -213,9 +213,10 @@ pub fn changelog(
 /// What one `--write` did to the target file.
 enum WriteOutcome {
     Written,
-    /// No file, or no `[Unreleased]` block followed by a released section, so
-    /// there is nothing whose bounds a projection could replace.
-    NoReleaseBlock,
+    /// The target holds nothing this renderer can replace: the file is
+    /// missing, or it has no `## [Unreleased]` heading. The reason completes
+    /// a sentence whose subject is the target.
+    Unwritable(&'static str),
     /// The block holds prose the ledger cannot account for, and replacing it
     /// would destroy the only copy. Each unaccounted paragraph is named by
     /// enough of itself to find it in the file.
@@ -650,7 +651,9 @@ fn write_changelog(
     let original = match fs::read_to_string(&path) {
         Ok(original) => original,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok(WriteOutcome::NoReleaseBlock)
+            return Ok(WriteOutcome::Unwritable(
+                "does not exist, and the keep-a-changelog renderer does not create it",
+            ))
         }
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
@@ -663,29 +666,30 @@ fn write_changelog(
             .is_none_or(|byte| *byte == b'\n' || *byte == b'\r');
         (line_start && line_end).then_some(offset)
     }) else {
-        return Ok(WriteOutcome::NoReleaseBlock);
+        return Ok(WriteOutcome::Unwritable(
+            "holds no `## [Unreleased]` heading for the keep-a-changelog renderer to replace",
+        ));
     };
     let after_heading = original[heading_start..]
         .find('\n')
         .map(|offset| heading_start + offset + 1)
         .unwrap_or(original.len());
-    let Some(next_release) =
-        original[after_heading..]
-            .match_indices("## [")
-            .find_map(|(offset, _)| {
-                let absolute = after_heading + offset;
-                (absolute == 0 || original.as_bytes()[absolute - 1] == b'\n').then_some(absolute)
-            })
-    else {
-        return Ok(WriteOutcome::NoReleaseBlock);
-    };
+    // The block runs to the next release heading, or to the end of a file
+    // that has never been released.
+    let next_release = original[after_heading..]
+        .match_indices("## [")
+        .find_map(|(offset, _)| {
+            let absolute = after_heading + offset;
+            (original.as_bytes()[absolute - 1] == b'\n').then_some(absolute)
+        });
+    let block_end = next_release.unwrap_or(original.len());
     let replacement = rendered
         .strip_prefix("## [Unreleased]\n")
         .expect("renderer always emits the unreleased heading");
     // The projection is authoritative only over the entries it can produce.
     // Prose the ledger never saw exists in the file and nowhere else, so the
     // write either keeps it under the marker or declines to run at all.
-    let unrecorded = unrecorded_paragraphs(&original[after_heading..next_release], replacement);
+    let unrecorded = unrecorded_paragraphs(&original[after_heading..block_end], replacement);
     if !unrecorded.is_empty() && !keep_unrecorded {
         return Ok(WriteOutcome::Unrecorded(
             unrecorded.iter().map(Paragraph::summary).collect(),
@@ -709,11 +713,16 @@ fn write_changelog(
     block.push_str(replacement);
     let mut updated = String::with_capacity(original.len() + block.len());
     updated.push_str(&original[..after_heading]);
-    updated.push_str(&block);
-    if !block.ends_with("\n\n") {
+    if !updated.ends_with('\n') {
         updated.push('\n');
     }
-    updated.push_str(&original[next_release..]);
+    updated.push_str(&block);
+    if let Some(next_release) = next_release {
+        if !block.ends_with("\n\n") {
+            updated.push('\n');
+        }
+        updated.push_str(&original[next_release..]);
+    }
     fs::write(&path, updated).with_context(|| format!("write {}", path.display()))?;
     Ok(WriteOutcome::Written)
 }
