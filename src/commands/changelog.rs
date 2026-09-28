@@ -1,4 +1,4 @@
-use super::{ensure_append_allowed, locked_state, parse_duration, write_atomically, Ctx};
+use super::{ensure_append_allowed, locked_state, parse_duration, write_atomically, Ctx, FileMode};
 use crate::changelog_render;
 use crate::gitio;
 use crate::model::{Closure, Payload};
@@ -669,17 +669,19 @@ fn render_with_command(
 }
 
 /// Replace the target atomically, through a symlink to the file it names, and
-/// keep the permissions it had. A new file gets the umask's.
+/// keep the permission bits it had. A new file gets the umask's.
 fn replace_target(path: &Path, contents: &[u8]) -> Result<()> {
     let (path, mode) = match fs::canonicalize(path) {
         Ok(resolved) => {
-            let mode = fs::metadata(&resolved)
+            let bits = fs::metadata(&resolved)
                 .with_context(|| format!("read {}", resolved.display()))?
                 .permissions()
                 .mode();
-            (resolved, mode & 0o7777)
+            (resolved, FileMode::Keep(bits & 0o777))
         }
-        Err(error) if error.kind() == ErrorKind::NotFound => (path.to_path_buf(), 0o666),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            (path.to_path_buf(), FileMode::Create(0o666))
+        }
         Err(error) => return Err(error).with_context(|| format!("resolve {}", path.display())),
     };
     write_atomically(&path, contents, mode)

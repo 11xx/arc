@@ -1058,3 +1058,77 @@ fn keep_unrecorded_belongs_to_the_built_in_renderer() {
         ));
     assert!(!repo.root.join("NEWS").exists());
 }
+
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn write_keeps_the_permissions_an_existing_target_had() {
+    let repo = Repo::new();
+    repo.commit(
+        &repo.root,
+        "CHANGELOG.md",
+        "# Changelog\n\n## [Unreleased]\n",
+        "docs: add changelog",
+    );
+    begin(&repo, "moded");
+    let worktree = repo.home.join(".worktrees/repo-moded");
+    record(&repo, &worktree, "moded", "added", "- kept mode\n");
+    integrate(&repo, "moded");
+
+    let changelog = repo.root.join("CHANGELOG.md");
+    set_mode(&changelog, 0o666);
+    repo.arc_under_umask(&repo.root, "022")
+        .args(["changelog", "--write"])
+        .assert()
+        .success();
+    assert!(fs::read_to_string(&changelog)
+        .unwrap()
+        .contains("- kept mode"));
+    assert_eq!(mode_of(&changelog), 0o666);
+
+    // Through a symlink, the file it names is replaced and keeps its mode;
+    // the link stays a link to the same file.
+    fs::create_dir(repo.root.join("docs")).unwrap();
+    fs::rename(&changelog, repo.root.join("docs/CHANGES.md")).unwrap();
+    std::os::unix::fs::symlink("docs/CHANGES.md", &changelog).unwrap();
+    let named = repo.root.join("docs/CHANGES.md");
+    fs::write(&named, "# Changelog\n\n## [Unreleased]\n").unwrap();
+    set_mode(&named, 0o660);
+    repo.arc_under_umask(&repo.root, "022")
+        .args(["changelog", "--write"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_link(&changelog).unwrap(),
+        Path::new("docs/CHANGES.md")
+    );
+    assert!(fs::read_to_string(&named).unwrap().contains("- kept mode"));
+    assert_eq!(mode_of(&named), 0o660);
+}
+
+#[test]
+fn command_renderer_keeps_an_existing_mode_and_creates_under_the_umask() {
+    let repo = command_renderer_repo("cat > /dev/null\necho news\n", "");
+    let news = repo.root.join("NEWS");
+    repo.arc_under_umask(&repo.root, "027")
+        .args(["changelog", "--write"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&news).unwrap(), "news\n");
+    assert_eq!(mode_of(&news), 0o640);
+
+    set_mode(&news, 0o666);
+    repo.arc_under_umask(&repo.root, "022")
+        .args(["changelog", "--write"])
+        .assert()
+        .success();
+    assert_eq!(mode_of(&news), 0o666);
+}
