@@ -1996,29 +1996,7 @@ fn workspace_report(
     json: bool,
 ) -> Result<i32> {
     let mut collected = collect_backlog(ctx, None, true, scope, false, RankBasis::Blocking, true)?;
-    let (ledgers, failures) = report_ledger_facts(&collected.backlog)?;
-    for failure in failures {
-        let collection = &mut collected.backlog.collection;
-        if !collection
-            .failures
-            .iter()
-            .any(|prior| prior.project == failure.project)
-        {
-            collection.failed += 1;
-            if collected
-                .backlog
-                .projects
-                .iter()
-                .any(|project| project.project == failure.project && project.is_empty())
-            {
-                collection.empty -= 1;
-            } else {
-                collection.non_empty -= 1;
-            }
-        }
-        collection.failures.push(failure);
-        collected.partial = true;
-    }
+    let (ledgers, mut failures) = report_ledger_facts(&collected.backlog)?;
     let backlog = serde_json::to_value(&collected.backlog)?;
     let previous = match previous {
         Some(path) => {
@@ -2068,18 +2046,34 @@ fn workspace_report(
         for ((dir, anchor), files) in wanted {
             let dir = PathBuf::from(dir);
             let anchor = PathBuf::from(anchor);
-            // A journal that cannot be read leaves its departures without a
-            // fate, which the report states as unknown rather than guessing.
-            let Ok(facts) = crate::journal::reconciliation_facts(&dir) else {
-                continue;
-            };
-            let mut entries = Vec::new();
-            for archived in [false, true] {
-                if let Ok(found) = crate::journal::inventory_artifacts(ctx, &dir, &anchor, archived)
-                {
-                    entries.extend(found);
+            let observation = (|| -> Result<_> {
+                let facts = crate::journal::reconciliation_facts(&dir)?;
+                let mut entries = Vec::new();
+                for archived in [false, true] {
+                    entries.extend(crate::journal::inventory_artifacts(
+                        ctx, &dir, &anchor, archived,
+                    )?);
                 }
-            }
+                Ok((facts, entries))
+            })();
+            let (facts, entries) = match observation {
+                Ok(observation) => observation,
+                Err(error) => {
+                    let projects: BTreeSet<_> = files.iter().map(|(project, _)| project).collect();
+                    for project in projects {
+                        failures.push(CollectionFailure {
+                            project: project.clone(),
+                            anchor: Some(anchor.display().to_string()),
+                            component: "departure-journal",
+                            reason: format!(
+                                "cannot reconcile departures in {}: {error:#}",
+                                dir.display()
+                            ),
+                        });
+                    }
+                    continue;
+                }
+            };
             for (project, file) in files {
                 if let Some(entry) = entries.iter().find(|entry| entry.file == file) {
                     let reconciled = reconcile_artifact(entry, &facts);
@@ -2096,7 +2090,31 @@ fn workspace_report(
             }
         }
     }
-    let mut backlog = backlog;
+    for failure in failures {
+        let collection = &mut collected.backlog.collection;
+        if !collection
+            .failures
+            .iter()
+            .any(|prior| prior.project == failure.project)
+        {
+            if let Some(project) = collected
+                .backlog
+                .projects
+                .iter()
+                .find(|project| project.project == failure.project)
+            {
+                collection.failed += 1;
+                if project.is_empty() {
+                    collection.empty -= 1;
+                } else {
+                    collection.non_empty -= 1;
+                }
+            }
+        }
+        collection.failures.push(failure);
+        collected.partial = true;
+    }
+    let mut backlog = serde_json::to_value(&collected.backlog)?;
     backlog["observation"]["finished_at"] = chrono::Utc::now()
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         .into();
