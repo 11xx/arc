@@ -722,7 +722,7 @@ pub fn brief(
         )?);
         let store = ctx.store()?;
         let (change_id, _transition, state) = locked_state(&store, reference)?;
-        warn_on_gate_shaped_probes(ctx, &state.profile, &acceptance_probes)?;
+        warn_on_gate_shaped_probes(ctx, &state, &acceptance_probes)?;
         let next_version = state.briefs.len() + 1;
         let causes = resolve_brief_causes(&state, &caused_by, cause_note.as_deref())?;
         let has_causes = !causes.is_empty();
@@ -853,15 +853,22 @@ pub fn brief(
 /// can genuinely fail before the change and pass after. So this says what is
 /// suspicious rather than refusing what it cannot prove, at the moment of the
 /// declaration instead of rounds later as an integration blocker.
-fn warn_on_gate_shaped_probes(ctx: &Ctx, profile: &str, probes: &[AcceptanceProbe]) -> Result<()> {
+fn warn_on_gate_shaped_probes(
+    ctx: &Ctx,
+    state: &ChangeState,
+    probes: &[AcceptanceProbe],
+) -> Result<()> {
     if probes.is_empty() {
         return Ok(());
     }
-    let toplevel = gitio::toplevel(&ctx.cwd)?;
-    let gates = crate::gates::load(&toplevel)?;
+    let declarations = crate::declarations::for_change(&ctx.cwd, state)?;
+    if declarations.target_unreadable {
+        return Ok(());
+    }
+    let gates = declarations.gates;
     for probe in probes {
         let matched = gates
-            .required_for(profile)
+            .required_for(&state.profile)
             .into_iter()
             .find(|(_, gate)| same_command(&gate.command, &probe.command));
         if let Some((name, _)) = matched {
@@ -1239,7 +1246,8 @@ fn show(
         };
         print!("{}", render::markdown(&st, &report, &alternatives));
         if !matches!(role, ExecutionRole::Implementer) {
-            let policy = policy::load(&gitio::toplevel(&ctx.cwd)?)?;
+            let declarations = crate::declarations::for_change(&ctx.cwd, &st)?;
+            let policy = declarations.policy;
             if !policy.review.checklist.is_empty() {
                 println!("\n## Review checklist\n");
                 for item in policy.review.checklist {

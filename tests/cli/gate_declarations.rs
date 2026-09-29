@@ -127,6 +127,61 @@ fn status_names_where_the_checkout_and_the_target_disagree() {
 }
 
 #[test]
+fn brief_warns_for_target_gate_despite_local_gate_edits() {
+    let repo = repo_declaring(TARGET_GATES);
+    let worktree = open_change(&repo, "target-probe-warning");
+    let local_gates = "[gates.local]\ncommand = \"false\"\n";
+    fs::write(worktree.join(".arc/gates.toml"), local_gates).unwrap();
+    fs::write(repo.root.join(".arc/gates.toml"), local_gates).unwrap();
+
+    for (cwd, cause) in [(&worktree, None), (&repo.root, Some("second brief"))] {
+        let mut command = repo.arc(cwd);
+        command.args(["brief", "target-probe-warning", "--body-file", "-"]);
+        if let Some(cause) = cause {
+            command.args(["--cause-note", cause]);
+        }
+        command
+            .args([
+                "--probes-json",
+                r#"[{"name":"guard-probe","command":"test -f MARKER"}]"#,
+            ])
+            .write_stdin("acceptance\n")
+            .assert()
+            .success()
+            .stderr(predicates::str::contains("runs gate \"guard\""));
+    }
+}
+
+#[test]
+fn show_uses_target_review_checklist_despite_local_policy_edits() {
+    let repo = repo_declaring(TARGET_GATES);
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[review]\nchecklist = [\"review target rule\"]\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: declare review checklist"],
+    );
+    let worktree = open_change(&repo, "target-checklist");
+    let local_policy = "[review]\nchecklist = [\"review local rule\"]\n";
+    fs::write(worktree.join(".arc/policy.toml"), local_policy).unwrap();
+    fs::write(repo.root.join(".arc/policy.toml"), local_policy).unwrap();
+
+    for cwd in [&worktree, &repo.root] {
+        repo.arc(cwd)
+            .env("ARC_ROLE", "lead")
+            .args(["show", "target-checklist"])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains("review target rule"))
+            .stdout(predicates::str::contains("review local rule").not());
+    }
+}
+
+#[test]
 fn a_gate_the_change_adds_is_owed_beside_the_targets() {
     let repo = repo_declaring(TARGET_GATES);
     let worktree = open_change(&repo, "adds-gate");
