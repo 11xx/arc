@@ -61,6 +61,8 @@ paths = [
   "src/render.rs",
   "src/config.rs",
   ".arc/policy.toml",
+  # Gate declarations decide which commands and probes can satisfy integration.
+  ".arc/gates.toml",
   # The changelog renderer runs the program `.arc/changelog.toml` declares,
   # with the invoking user's authority, the way a gate runs its command.
   ".arc/changelog.toml",

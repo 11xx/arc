@@ -512,4 +512,13 @@ mod tests {
         assert_eq!(hits, vec!["src/commands/integrate.rs", "src/state.rs"]);
         assert!(danger.matching(vec!["README.md"]).is_empty());
     }
+
+    #[test]
+    fn project_policy_requires_independent_review_for_declaration_files() {
+        let project: PolicyLayer = toml::from_str(include_str!("../.arc/policy.toml")).unwrap();
+        let danger = project.danger.unwrap();
+        let paths = danger.paths.unwrap();
+        assert!(paths.contains(&".arc/gates.toml".to_string()));
+        assert!(paths.contains(&".arc/policy.toml".to_string()));
+    }
 }

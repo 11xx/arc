@@ -305,14 +305,7 @@ pub fn inspect_at(cwd: &Path, revision: &str) -> Result<GatesFile> {
     layered(cwd, project)
 }
 
-/// Load declarations for operations that must reject ambiguous gate commands.
-pub fn load(repo_toplevel: &Path) -> Result<GatesFile> {
-    let gates = inspect(repo_toplevel)?;
-    gates.ensure_unconflicted()?;
-    Ok(gates)
-}
-
-/// Like `load`, with the project layer read at `revision`.
+/// Load declarations at `revision`, rejecting ambiguous gate commands.
 pub fn load_at(cwd: &Path, revision: &str) -> Result<GatesFile> {
     let gates = inspect_at(cwd, revision)?;
     gates.ensure_unconflicted()?;
