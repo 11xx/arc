@@ -1122,7 +1122,8 @@ fn assert_resumed(repo: &Repo, pinned: &str, key: &Key) {
         1,
         "a rewrite finished in two runs is one recorded rewrite, not two"
     );
-    let mapping = fs::read_to_string(&events[0]).unwrap();
+    let event: serde_json::Value = serde_json::from_slice(&fs::read(&events[0]).unwrap()).unwrap();
+    let mapping = event["mapping"].to_string();
     assert_eq!(
         mapping.matches(pinned).count(),
         1,
@@ -1453,4 +1454,210 @@ fn a_trailer_rewrite_without_a_range_or_an_edit_is_refused() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("--append"));
+}
+
+/// An open change with a gate green and an approval on its only patchset, the
+/// worktree it lives in, and the commit it approved.
+fn approved_change(repo: &Repo, slug: &str) -> (PathBuf, String) {
+    let (_, worktree, head) = change_with_patchset(repo, slug);
+    repo.arc(&worktree)
+        .args(["verify", slug, "--all"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
+    assert!(approval_valid(repo, slug), "the fixture approval is valid");
+    repo.arc(&worktree).args(["check", slug]).assert().success();
+    (worktree, head)
+}
+
+fn approval_valid(repo: &Repo, slug: &str) -> bool {
+    let status = json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]));
+    status["verdict"]["valid_for_current_head"] == true
+}
+
+/// Point the change's branch at a commit of different content, the way an
+/// amend or a squash does, and return that commit.
+fn replace_head_with_other_content(repo: &Repo, worktree: &Path) -> String {
+    git(worktree, &["reset", "--hard", "HEAD~1"]);
+    repo.commit(worktree, "other.txt", "other\n", "test: other content");
+    repo.head(worktree)
+}
+
+/// A map that names a successor with a different tree moves the patchset,
+/// and must not move the approval with it.
+#[test]
+fn a_map_naming_a_different_tree_leaves_the_approval_stale() {
+    let repo = repo_with_gates();
+    let (worktree, approved) = approved_change(&repo, "alpha");
+    let successor = replace_head_with_other_content(&repo, &worktree);
+    assert!(!approval_valid(&repo, "alpha"), "a new head is stale");
+
+    repo.arc(&repo.root)
+        .args(["history", "rewrite", "--map", "-", "--reason", "amended"])
+        .write_stdin(format!("{approved} {successor}\n"))
+        .assert()
+        .success();
+
+    assert!(
+        !approval_valid(&repo, "alpha"),
+        "the map moved the patchset onto content nobody approved"
+    );
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "alpha", "--json"]));
+    assert_eq!(status["has_valid_approval"], false, "{status}");
+    assert!(
+        status["blockers"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("no-valid-approval")),
+        "{status}"
+    );
+    repo.arc(&worktree)
+        .args(["check", "alpha"])
+        .assert()
+        .failure();
+}
+
+/// Signing changes the signature and nothing the reviewer read, so an
+/// approval survives it.
+#[test]
+fn re_signing_an_approved_change_keeps_the_approval() {
+    let repo = repo_with_gates();
+    let Some(key) = signing_key(&repo) else {
+        return;
+    };
+    let (worktree, approved) = approved_change(&repo, "alpha");
+
+    arc_signing(&repo, &key, &worktree)
+        .args(["rewrite", "sign", "--key", &key.fingerprint])
+        .assert()
+        .success();
+
+    assert_ne!(repo.head(&worktree), approved, "the commit was recreated");
+    assert!(
+        approval_valid(&repo, "alpha"),
+        "a signature-only rewrite must keep the approval"
+    );
+    repo.arc(&worktree)
+        .args(["check", "alpha"])
+        .assert()
+        .success();
+}
+
+/// A trailer edit keeps the tree and changes the message, and the message is
+/// part of what was approved.
+#[test]
+fn editing_a_trailer_of_an_approved_change_leaves_the_approval_stale() {
+    let repo = repo_with_gates();
+    let (worktree, approved) = approved_change(&repo, "alpha");
+
+    repo.arc(&worktree)
+        .args([
+            "rewrite",
+            "trailers",
+            "--no-sign",
+            "--append",
+            "Reviewed-by: Someone <someone@example.invalid>",
+            "--from",
+            &approved,
+        ])
+        .assert()
+        .success();
+
+    assert_ne!(repo.head(&worktree), approved, "the message was edited");
+    assert!(
+        !approval_valid(&repo, "alpha"),
+        "a reworded commit is not the commit that was approved"
+    );
+    repo.arc(&worktree)
+        .args(["check", "alpha"])
+        .assert()
+        .failure();
+}
+
+/// A recorded map arriving in a bundle is judged against this repository's
+/// objects, whatever the sender claimed about it.
+#[test]
+fn an_imported_map_naming_a_different_tree_leaves_the_approval_stale() {
+    let repo = repo_with_gates();
+    let (worktree, approved) = approved_change(&repo, "alpha");
+    let successor = replace_head_with_other_content(&repo, &worktree);
+    repo.arc(&repo.root)
+        .args(["history", "rewrite", "--map", "-", "--reason", "amended"])
+        .write_stdin(format!("{approved} {successor}\n"))
+        .assert()
+        .success();
+    let bundle_path = repo.home.join("alpha.json");
+    repo.arc(&repo.root)
+        .args(["export", "alpha", "--output", bundle_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // The sender vouches for a rewrite that changed content.
+    let mut bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
+    let events = bundle["repository_events"].as_array_mut().unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    events[0]["signature_only"] = serde_json::json!([approved]);
+    fs::write(&bundle_path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+
+    // The receiving side has never seen the map.
+    for path in repository_events(&repo) {
+        fs::remove_file(path).unwrap();
+    }
+    assert!(!approval_valid(&repo, "alpha"));
+    repo.arc(&repo.root)
+        .args(["import", bundle_path.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let recorded = repository_events(&repo);
+    assert_eq!(recorded.len(), 1, "the map was imported");
+    let event: serde_json::Value =
+        serde_json::from_slice(&fs::read(&recorded[0]).unwrap()).unwrap();
+    assert!(
+        event.get("signature_only").is_none(),
+        "the sender's judgement was kept: {event}"
+    );
+    assert!(
+        !approval_valid(&repo, "alpha"),
+        "an imported map moved the approval onto unreviewed content"
+    );
+    repo.arc(&worktree)
+        .args(["check", "alpha"])
+        .assert()
+        .failure();
+
+    // Importing the same bundle again is the same fact, not a contradiction.
+    repo.arc(&repo.root)
+        .args(["import", bundle_path.to_str().unwrap()])
+        .assert()
+        .success();
+}
+
+/// A rewrite recorded without a judgement, as every one written before the
+/// judgement was recorded, verifies nothing.
+#[test]
+fn a_recorded_rewrite_without_a_judgement_does_not_carry_an_approval() {
+    let repo = repo_with_gates();
+    let Some(key) = signing_key(&repo) else {
+        return;
+    };
+    let (worktree, _) = approved_change(&repo, "alpha");
+    arc_signing(&repo, &key, &worktree)
+        .args(["rewrite", "sign", "--key", &key.fingerprint])
+        .assert()
+        .success();
+    assert!(approval_valid(&repo, "alpha"));
+
+    for path in repository_events(&repo) {
+        let mut event: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(event["signature_only"].as_array().is_some(), "{event}");
+        event.as_object_mut().unwrap().remove("signature_only");
+        fs::write(&path, serde_json::to_vec_pretty(&event).unwrap()).unwrap();
+    }
+    assert!(!approval_valid(&repo, "alpha"));
 }

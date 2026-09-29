@@ -1207,7 +1207,7 @@ fn a_delta_bundle_extends_a_verified_prefix() {
         "{reported}"
     );
     let value: serde_json::Value = serde_json::from_slice(&fs::read(&delta).unwrap()).unwrap();
-    assert_eq!(value["schema"], "arc-bundle/4", "{value}");
+    assert_eq!(value["schema"], "arc-bundle/5", "{value}");
     assert_eq!(value["since"]["sha256"], token.as_str(), "{value}");
     assert_eq!(
         value["since"]["event_count"].as_u64(),

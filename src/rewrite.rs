@@ -15,7 +15,8 @@
 use crate::model::Payload;
 use crate::store::Store;
 use anyhow::Result;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 /// What became of a recorded revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +92,9 @@ pub struct RewriteIntent {
 #[derive(Debug, Default, Clone)]
 pub struct RewriteMap {
     steps: BTreeMap<String, Option<String>>,
+    /// The keys of `steps` whose successor differs in nothing but its
+    /// signature, as the event that recorded them judged.
+    signature_only: BTreeSet<String>,
 }
 
 impl RewriteMap {
@@ -104,8 +108,14 @@ impl RewriteMap {
     /// revision, which no per-event check can see.
     pub fn from_events<'a>(events: impl Iterator<Item = &'a crate::model::Event>) -> Result<Self> {
         let mut steps: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut signature_only: BTreeSet<String> = BTreeSet::new();
         for event in events {
-            if let Payload::HistoryRewritten { mapping, .. } = &event.payload {
+            if let Payload::HistoryRewritten {
+                mapping,
+                signature_only: judged,
+                ..
+            } = &event.payload
+            {
                 // Both write paths refuse a mapping that cannot mean what it
                 // says, so a valid ledger holds none. One that arrived another
                 // way is skipped rather than made fatal: a map nobody can read
@@ -131,9 +141,20 @@ impl RewriteMap {
                     }
                     steps.insert(old.clone(), new.clone());
                 }
+                // A claim about a revision the event does not map is not a
+                // claim about anything.
+                signature_only.extend(
+                    judged
+                        .iter()
+                        .filter(|old| mapping.contains_key(*old))
+                        .cloned(),
+                );
             }
         }
-        Ok(Self { steps })
+        Ok(Self {
+            steps,
+            signature_only,
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -204,6 +225,37 @@ impl RewriteMap {
         Ok(())
     }
 
+    /// The revision an approval of `revision` still stands on: `revision`
+    /// followed through every recorded rewrite that changed its signature and
+    /// nothing else, and stopping before the first that changed anything, that
+    /// dropped it, or that no event verified.
+    ///
+    /// An approval binds to what was reviewed. Following a rewrite that moved
+    /// the commit onto a different tree, message or author would carry it to
+    /// content nobody approved.
+    pub fn approved_successor(&self, revision: &str) -> Result<String> {
+        let mut visited: Vec<String> = Vec::new();
+        let mut current = revision.to_string();
+        loop {
+            match self.step(&current)? {
+                Step::Mapped {
+                    key,
+                    fate: Some(next),
+                } if self.signature_only.contains(&key) => {
+                    if visited.contains(&key) {
+                        anyhow::bail!(
+                            "recorded rewrites lead {revision} back to {key}; the chain names no \
+                             surviving commit"
+                        );
+                    }
+                    visited.push(key);
+                    current = next;
+                }
+                Step::Unmapped | Step::Mapped { .. } => return Ok(current),
+            }
+        }
+    }
+
     /// Follow an optional recorded revision forward in place.
     pub fn advance_opt(&self, revision: &mut Option<String>) -> Result<()> {
         match revision.as_mut() {
@@ -267,6 +319,49 @@ impl RewriteMap {
             ),
         }
     }
+}
+
+/// The old revisions of `mapping` whose successor is the same commit signed
+/// differently: the same tree, author, committer, message and every other
+/// header, with parents that differ only as `rewrites` translates them.
+///
+/// This is decided from the two commit objects, which is why it has to be
+/// decided when a mapping is recorded. A revision either commit of which is
+/// not readable here is left out: nothing vouches for a rewrite nobody can
+/// compare, and the old commit is the one Git discards first.
+pub fn signature_only_successors(
+    cwd: &Path,
+    mapping: &BTreeMap<String, Option<String>>,
+    rewrites: &RewriteMap,
+) -> Vec<String> {
+    mapping
+        .iter()
+        .filter_map(|(old, new)| {
+            let new = new.as_deref()?;
+            let (old_commit, new_commit) = (
+                crate::gitio::read_commit(cwd, old).ok()?,
+                crate::gitio::read_commit(cwd, new).ok()?,
+            );
+            let carried = |commit: &crate::gitio::RawCommit| {
+                commit
+                    .headers
+                    .iter()
+                    .filter(|header| header.field != "parent")
+                    .map(|header| header.block.clone())
+                    .collect::<Vec<_>>()
+            };
+            let same_parents = old_commit.parents.len() == new_commit.parents.len()
+                && old_commit
+                    .parents
+                    .iter()
+                    .zip(&new_commit.parents)
+                    .all(|(before, after)| rewrites.same(before, after).unwrap_or(false));
+            (carried(&old_commit) == carried(&new_commit)
+                && old_commit.message == new_commit.message
+                && same_parents)
+                .then(|| old.clone())
+        })
+        .collect()
 }
 
 /// Parse a commit map: `<old> <new>` per line, which is what `git filter-repo`
@@ -374,6 +469,7 @@ mod tests {
                 .iter()
                 .map(|(old, new)| (old.to_string(), new.map(str::to_string)))
                 .collect(),
+            ..RewriteMap::default()
         }
     }
 
@@ -525,12 +621,8 @@ mod tests {
         assert!(parse_commit_map("aaaaaaaaaa bbbbbbbbbb\naaaaaaaaaa bbbbbbbbbb\n").is_ok());
     }
 
-    /// Two events, two IDs, one revision, two answers. Neither event is
-    /// wrong on its own, which is exactly why the combination has to be
-    /// judged rather than each event in turn.
-    #[test]
-    fn separate_events_that_disagree_about_one_revision_are_refused() {
-        let event = |id: &str, old: &str, new: &str| crate::model::Event {
+    fn rewrite_event(id: &str, old: &str, new: &str, judged: &[&str]) -> crate::model::Event {
+        crate::model::Event {
             schema_version: crate::model::SCHEMA_VERSION,
             event_id: id.to_string(),
             repository_id: "repo".into(),
@@ -548,8 +640,52 @@ mod tests {
                 mapping: BTreeMap::from([(old.to_string(), Some(new.to_string()))]),
                 reason: "test".into(),
                 tool: None,
+                signature_only: judged.iter().map(|old| old.to_string()).collect(),
             },
-        };
+        }
+    }
+
+    /// An approval follows a chain only while every link was judged to differ
+    /// by signature alone, and stops before the first that was not.
+    #[test]
+    fn an_approval_follows_only_signature_only_links() {
+        let events = [
+            rewrite_event("01A", "aaaaaaaaaa", "bbbbbbbbbb", &["aaaaaaaaaa"]),
+            rewrite_event("01B", "bbbbbbbbbb", "cccccccccc", &[]),
+            rewrite_event("01C", "cccccccccc", "dddddddddd", &["cccccccccc"]),
+        ];
+        let map = RewriteMap::from_events(events.iter()).unwrap();
+        assert_eq!(map.approved_successor("aaaaaaaaaa").unwrap(), "bbbbbbbbbb");
+        assert_eq!(map.approved_successor("bbbbbbbbbb").unwrap(), "bbbbbbbbbb");
+        assert_eq!(map.approved_successor("cccccccccc").unwrap(), "dddddddddd");
+        assert_eq!(map.approved_successor("eeeeeeeeee").unwrap(), "eeeeeeeeee");
+        assert_eq!(
+            map.current("aaaaaaaaaa").unwrap(),
+            "dddddddddd",
+            "every other recorded revision follows the whole chain"
+        );
+    }
+
+    /// A judgement about a revision the event does not map is about nothing.
+    #[test]
+    fn a_judgement_of_an_unmapped_revision_verifies_nothing() {
+        let events = [rewrite_event(
+            "01A",
+            "aaaaaaaaaa",
+            "bbbbbbbbbb",
+            &["cccccccccc"],
+        )];
+        let map = RewriteMap::from_events(events.iter()).unwrap();
+        assert_eq!(map.approved_successor("cccccccccc").unwrap(), "cccccccccc");
+        assert_eq!(map.approved_successor("aaaaaaaaaa").unwrap(), "aaaaaaaaaa");
+    }
+
+    /// Two events, two IDs, one revision, two answers. Neither event is
+    /// wrong on its own, which is exactly why the combination has to be
+    /// judged rather than each event in turn.
+    #[test]
+    fn separate_events_that_disagree_about_one_revision_are_refused() {
+        let event = |id: &str, old: &str, new: &str| rewrite_event(id, old, new, &[]);
         let agreeing = [
             event("01A", "aaaaaaaaaa", "bbbbbbbbbb"),
             event("01B", "aaaaaaaaaa", "bbbbbbbbbb"),
