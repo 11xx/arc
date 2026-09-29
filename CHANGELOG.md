@@ -1,10 +1,11 @@
 # Changelog
 
-Notable user-facing changes, one line per integrated arc change, newest
-first within each section. The append-only ledger remains the source of
-truth for full detail (`arc list`, `arc show <change>`); this file is the
-human-readable projection. Add a line under `[Unreleased]` as part of each
-integrated change.
+Notable user-facing changes, one entry per integrated arc change. The
+append-only ledger is the source of truth (`arc list`, `arc show <change>`);
+this file is its human-readable projection. Each change records its entry
+with `arc changelog <change> --category <category> --body-file <file>`, and
+the `[Unreleased]` block is generated from those entries by
+`arc changelog --write`, never edited by hand.
 
 The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
