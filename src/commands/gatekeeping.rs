@@ -439,17 +439,18 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             // as satisfied by a run of something else. Evidence from another
             // environment is not reuse either: it ran, but not here.
             let reusable = skip_green
-                .then(|| st.gate_evidence_at(name, &head))
+                .then(|| {
+                    st.gate_evidence_at_matching(name, &head, |evidence| {
+                        status::matches_declaration(evidence, gate)
+                            && status::matches_environment(
+                                evidence,
+                                gate,
+                                declared_environment(&environments, gate),
+                            )
+                    })
+                })
                 .flatten()
-                .filter(|evidence| {
-                    evidence.green_at_head(st.dirty_tree_waiver.as_ref())
-                        && status::matches_declaration(evidence, gate)
-                        && status::matches_environment(
-                            evidence,
-                            gate,
-                            declared_environment(&environments, gate),
-                        )
-                });
+                .filter(|evidence| evidence.green_at_head(st.dirty_tree_waiver.as_ref()));
             if let Some(evidence) = reusable {
                 println!(
                     "gate {name}: skipped (green at head; declared by {})",
@@ -709,12 +710,13 @@ fn verify_against(
     // leaves nothing to run.
     let cheap_reusable = |name: &String, gate: &gates::Gate| {
         skip_green
-            .then(|| st.gate_evidence_at_tree(name, &merged_tree, &resolve_tree))
-            .flatten()
-            .filter(|evidence| {
-                evidence.green_at_head(st.dirty_tree_waiver.as_ref())
-                    && status::matches_declaration(evidence, gate)
+            .then(|| {
+                st.gate_evidence_at_tree_matching(name, &merged_tree, &resolve_tree, |evidence| {
+                    status::matches_declaration(evidence, gate)
+                })
             })
+            .flatten()
+            .filter(|evidence| evidence.green_at_head(st.dirty_tree_waiver.as_ref()))
     };
     let any_probe = required.iter().any(|(_, gate)| gate.environment.is_some());
     let answered_already = required
@@ -742,9 +744,19 @@ fn verify_against(
         // satisfied by a run of something else. Evidence from another
         // environment is not reuse either: it ran, but not against this
         // content.
-        let reusable = cheap_reusable(name, gate).filter(|evidence| {
-            status::matches_environment(evidence, gate, declared_environment(&environments, gate))
-        });
+        let reusable = skip_green
+            .then(|| {
+                st.gate_evidence_at_tree_matching(name, &merged_tree, &resolve_tree, |evidence| {
+                    status::matches_declaration(evidence, gate)
+                        && status::matches_environment(
+                            evidence,
+                            gate,
+                            declared_environment(&environments, gate),
+                        )
+                })
+            })
+            .flatten()
+            .filter(|evidence| evidence.green_at_head(st.dirty_tree_waiver.as_ref()));
         if let Some(evidence) = reusable {
             println!(
                 "gate {name}: skipped (green at the merged tree; declared by {})",
