@@ -3,6 +3,29 @@
 version = 4
 
 [[package]]
+name = "agent-tapes-core"
+version = "2026.9.29"
+source = "git+https://github.com/11xx/tapes?rev=da4a69f5b1c694735646706a5641c946d01a4e2b#da4a69f5b1c694735646706a5641c946d01a4e2b"
+dependencies = [
+ "agent-tapes-discovery",
+ "anyhow",
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "agent-tapes-discovery"
+version = "2026.9.29"
+source = "git+https://github.com/11xx/tapes?rev=da4a69f5b1c694735646706a5641c946d01a4e2b#da4a69f5b1c694735646706a5641c946d01a4e2b"
+dependencies = [
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -80,6 +103,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 name = "arc-ledger"
 version = "2026.9.9"
 dependencies = [
+ "agent-tapes-core",
  "anyhow",
  "assert_cmd",
  "chrono",
@@ -92,7 +116,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tapes-core",
  "tempfile",
  "toml",
  "ulid",
@@ -777,27 +800,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "tapes-core"
-version = "2026.9.25"
-dependencies = [
- "anyhow",
- "chrono",
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "tapes-discovery",
-]
-
-[[package]]
-name = "tapes-discovery"
-version = "2026.9.25"
-dependencies = [
- "libc",
- "serde_json",
 ]
 
 [[package]]

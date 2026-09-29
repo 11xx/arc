@@ -6,11 +6,12 @@ identity, and run one change end to end.
 ## 1. Install
 
 ```sh
-cargo install arc-ledger --locked
+cargo install --git https://github.com/11xx/arc --locked
 ```
 
-The package is named `arc-ledger`; its executable is `arc`. From a source
-checkout, use `cargo install --path . --locked`.
+From a source checkout, use `cargo install --path . --locked`. The package is
+named `arc-ledger`; its executable is `arc`. The `arc-ledger` release on
+crates.io is a September 2026 snapshot.
 
 This puts `arc` on your `$PATH` (typically `~/.cargo/bin` or
 `~/.local/share/cargo/bin`). Shell completions and a man page are optional:
