@@ -1748,6 +1748,22 @@ fn differing_explicit_harness_suppresses_detected_session() {
 fn bare_arc_prints_the_workflow_guide() {
     let repo = Repo::new();
     let guide = stdout(&mut repo.arc(&repo.root));
+    let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+    for expected in [
+        "An event's effective author is its `--on-behalf-of` subject when set, otherwise its actor.",
+        "A patchset's effective contributors are its recorded set when nonempty, otherwise its effective author alone.",
+        "`check` reports `iterating` and suppresses `no-valid-approval`; every other blocker still applies.",
+        "baseline evidence fails at that brief's base and final evidence passes at the patchset's head",
+        "the newest run for each phase at its required revision decides",
+        "A brief with no base, or with a base equal to the patchset head, cannot discharge a probe.",
+        "one passing verification event per required gate, each prerequisite's satisfying closure, the empty blocking-finding and hold vectors",
+        "A debt declaration is recorded in the basis only when its waiver supplied the approval or let it stand.",
+        "if readiness fails or the basis differs, nothing is written",
+        "any passing evidence for that gate at the counted tree (or revision when the tree is unresolved) names a falsification",
+        "A later pass without one does not retract it.",
+    ] {
+        assert!(flat.contains(expected), "guide missing {expected:?}:\n{guide}");
+    }
     for expected in [
         "arc catchup",
         "arc fork <slug>",

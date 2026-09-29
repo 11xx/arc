@@ -467,6 +467,17 @@ RUN A CHANGE
   than reporting a pass, and `verify --all` and `verify --against` still
   refuse because there is nothing to run.
 
+  While a change declares `iterating`, `check` reports `iterating` and
+  suppresses `no-valid-approval`; every other blocker still applies.
+  `arc iterating <change> --off` restores the approval check.
+
+  Each acceptance probe declared on the patchset's brief blocks readiness
+  until baseline evidence fails at that brief's base and final evidence passes
+  at the patchset's head. Both runs must name that brief and probe; the newest
+  run for each phase at its required revision decides. A brief with no base,
+  or with a base equal to the patchset head, cannot discharge a probe. The pair
+  proves discrimination, not relevance.
+
   `arc rebase` is what `check` names when the target moved with conflicting
   changes. A conflict stops it and leaves the rebase in progress — the partial
   resolution is yours, and aborting would throw it away — with the conflicting
@@ -497,6 +508,17 @@ RUN A CHANGE
   to make: the guard still runs every check, closes the change at the target
   revision that already holds the head, and records that no merge was
   created. A successor behind such a change proceeds normally.
+
+  A guarded integration records the shipped patchset and head, the target
+  branch and its preceding revision, and its authorization basis: the
+  approving verdict and its provisional reason when present, an external
+  approval when consumed, one passing verification event per required gate,
+  each prerequisite's satisfying closure, the empty blocking-finding and hold
+  vectors, the normalized gate and policy values consumed, and the danger
+  determination. A debt declaration is recorded in the basis only when its
+  waiver supplied the approval or let it stand. `integrate --dry-run` prints
+  the basis it would record. Before merging, readiness is recomputed and the
+  basis rebuilt; if readiness fails or the basis differs, nothing is written.
 
   When no checkout holds the target, `integrate` takes over the change's own
   checkout if it still holds the change branch, checks the target out there,
@@ -629,6 +651,10 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   `latest_patchset` remains the later history. `arc show` and `arc check` name
   them beside an approval rejection, and `arc catchup` repeats the subject
   beneath each open change and each integrated debt item.
+
+  An event's effective author is its `--on-behalf-of` subject when set,
+  otherwise its actor. A patchset's effective contributors are its recorded
+  set when nonempty, otherwise its effective author alone.
 
   For ordinary work outside the independent-review scope, status offers the
   lead a choice: review_options carries declare_debt first, then
@@ -1035,6 +1061,9 @@ RULES THAT CHANGE WHAT YOU DO
     --predicted "<why it should fail>"`; the gate line then reads
     `discriminating` instead of `undiscriminated`. Advisory: it changes no
     result and no exit code, and arc infers it from nothing.
+    A passing gate row is `discriminating` when any passing evidence for that
+    gate at the counted tree (or revision when the tree is unresolved) names
+    a falsification. A later pass without one does not retract it.
   - The journal lives outside the repo, so worktrees stay clean. Cross-session
     context goes there, never into tracked files. A sandbox that cannot reach
     it is not a reason to leave the record in a transcript: every kind verb
