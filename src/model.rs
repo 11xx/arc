@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 /// store stamped newer than this, because the alternative is what silently
 /// went wrong before: an older binary skipping event types it does not know,
 /// concluding the change is still open, and closing it a second way.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {
@@ -1038,6 +1038,16 @@ pub enum Payload {
         /// What performed the rewrite, when the operator says so.
         #[serde(skip_serializing_if = "Option::is_none")]
         tool: Option<String>,
+        /// The old revisions, spelled as in `mapping`, whose successor
+        /// differs from them in nothing but its signature: the same tree,
+        /// author, committer, message and other headers, with parents
+        /// differing only as the rewrite translates them. An approval follows
+        /// a rewrite only through these. It is judged by whoever records the
+        /// event, while both commits exist, so an old commit that is gone
+        /// leaves its entry out rather than assumed. Events written without
+        /// it verify nothing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        signature_only: Vec<String>,
     },
     /// A caller-declared review pass over exact change and patchset members.
     /// The declaration records coverage only; it grants no authority to any

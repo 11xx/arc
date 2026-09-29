@@ -43,7 +43,9 @@
   `arc show`; comment replies render beneath their parent comment.
 - **Approval staleness is structural:** a verdict is valid only while
   the branch head equals the approved patchset head. Any new commit
-  makes it stale. Which patchset a verdict binds to is therefore a fact worth
+  makes it stale. A recorded history rewrite carries the approval forward only
+  when the successor differs from the approved head in nothing but its
+  signature (see `docs/history.md`). Which patchset a verdict binds to is therefore a fact worth
   stating: `arc review --patchset` takes the patchset id or the revision the
   reviewer actually read, and without it the verdict claims the newest patchset
   — which is not always the one that was reviewed.

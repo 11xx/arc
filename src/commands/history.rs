@@ -26,7 +26,8 @@ pub fn record_rewrite(ctx: &Ctx, map: &str, reason: String, tool: Option<String>
 /// Every write path lands here, so a map arc computed and a map an operator
 /// supplied are judged by one set of rules: the successors must be commits in
 /// this repository, and the result must not contradict a rewrite already
-/// recorded.
+/// recorded. It also records which successors differ from their old commit by
+/// signature alone, the only rewrites an approval follows.
 pub fn record_mapping(
     ctx: &Ctx,
     mapping: std::collections::BTreeMap<String, Option<String>>,
@@ -68,19 +69,30 @@ pub fn record_mapping(
     // an import is: two rewrites can disagree about one revision.
     let mut combined = store.load_repository_events()?;
     let count = mapping.len();
-    let event = ctx.event(
+    let mut event = ctx.event(
         &store,
         Store::REPOSITORY_SCOPE,
         Payload::HistoryRewritten {
             mapping,
             reason,
             tool,
+            signature_only: Vec::new(),
         },
     );
     combined.push(event.clone());
     combined.sort_by(|a, b| a.event_id.cmp(&b.event_id));
-    RewriteMap::from_events(combined.iter())
+    let rewrites = RewriteMap::from_events(combined.iter())
         .context("this rewrite contradicts one already recorded; nothing was written")?;
+    // Judged here, while the old commits still exist: an approval follows a
+    // rewrite only when this says the successor differs by signature alone.
+    if let Payload::HistoryRewritten {
+        mapping,
+        signature_only,
+        ..
+    } = &mut event.payload
+    {
+        *signature_only = crate::rewrite::signature_only_successors(&ctx.cwd, mapping, &rewrites);
+    }
     store.append_repository_event(&event)?;
     println!("history rewrite recorded: {count} revisions");
     Ok(event.event_id)

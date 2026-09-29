@@ -141,8 +141,8 @@ fn post_commit(ctx: &Ctx) -> Result<()> {
                 .iter()
                 .find(|patchset| patchset.id == verdict.patchset_id)
             {
-                if patchset.head != head {
-                    let short: String = patchset.head.chars().take(12).collect();
+                if patchset.approved_head != head {
+                    let short: String = patchset.approved_head.chars().take(12).collect();
                     println!(
                         "arc: approval on {} is now stale ({} approved at {short})",
                         state.change_id, patchset.id
