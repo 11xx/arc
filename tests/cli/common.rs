@@ -97,6 +97,43 @@ impl Repo {
     pub(crate) fn head(&self, cwd: &Path) -> String {
         git_out(cwd, &["rev-parse", "HEAD"])
     }
+
+    /// Declare gates in the operator policy, which lives outside every tree:
+    /// redeclaring one moves no change's tree, so recorded evidence keeps the
+    /// tree it was recorded against.
+    pub(crate) fn declare_gates_locally(&self, text: &str) {
+        let dir = self.root.join(".git/arc");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("operator-policy.toml"), text).unwrap();
+    }
+
+    /// Commit `text` as `.arc/gates.toml` on master, the branch every change
+    /// here merges into. Integration reads declarations from that branch, so
+    /// this is how a fixture declares or redeclares a gate for changes already
+    /// open, whichever branch the primary checkout stands on.
+    pub(crate) fn redeclare_gates(&self, text: &str) {
+        let on_master = git_out(&self.root, &["branch", "--show-current"]) == "master";
+        let checkout = if on_master {
+            self.root.clone()
+        } else {
+            let side = self.home.join("master-checkout");
+            git(
+                &self.root,
+                &["worktree", "add", "-q", side.to_str().unwrap(), "master"],
+            );
+            side
+        };
+        fs::create_dir_all(checkout.join(".arc")).unwrap();
+        fs::write(checkout.join(".arc/gates.toml"), text).unwrap();
+        git(&checkout, &["add", ".arc/gates.toml"]);
+        git(&checkout, &["commit", "-q", "-m", "test: declare gates"]);
+        if !on_master {
+            git(
+                &self.root,
+                &["worktree", "remove", "--force", checkout.to_str().unwrap()],
+            );
+        }
+    }
 }
 
 /// Turn on the opt-in ambient identity detection this suite's harness

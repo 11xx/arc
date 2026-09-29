@@ -52,7 +52,10 @@ Project integration policy is declared in `.arc/policy.toml`; operator policy
 for a repository is stored at
 `<git-common-dir>/arc/operator-policy.toml`. Both files apply, and
 `arc policy show` names the file that declared each effective rule. Policies
-are disabled when both files omit the setting. Set
+are disabled when both files omit the setting. Integration reads
+`.arc/policy.toml` from the change's target branch at its current head,
+wherever the command is typed, so a change's own edit of the file binds only
+once it is merged. Set
 `[policy] forbid_self_approval = true` to reject an approval when its effective
 author matches a contributor on the patchset it approves, or when arc assumed
 the *reviewing* identity (from the harness session or `git config user.name`)

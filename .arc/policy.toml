@@ -28,6 +28,8 @@ paths = [
   # Verdict, gate, and check logic: a broken gate reports green.
   "src/policy.rs",
   "src/gates.rs",
+  # Chooses whose gate and policy declarations a change is judged by.
+  "src/declarations.rs",
   "src/status.rs",
   "src/blockers.rs",
   "src/inbox.rs",

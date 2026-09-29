@@ -74,7 +74,8 @@ says.
 ### Repository policy
 
 Project policy lives in `.arc/policy.toml` and project gates live in
-`.arc/gates.toml`. Operator policy for one repository lives at
+`.arc/gates.toml`; a change is judged by the copies committed on its target
+branch, not by the checkout the command is typed in. Operator policy for one repository lives at
 `<git-common-dir>/arc/operator-policy.toml`, outside the work tree and shared
 by linked worktrees. `arc policy path` prints its full path,
 `arc policy write --body-file FILE` replaces it from TOML, and `arc policy

@@ -998,6 +998,31 @@ fn piped_output_with(
     Ok(out.stdout)
 }
 
+/// A tracked file's text as committed at `rev`, or `None` when that revision
+/// holds no such path.
+pub fn file_at(cwd: &Path, rev: &str, path: &str) -> Result<Option<String>> {
+    let object = format!("{rev}:{path}");
+    let out = git_command()
+        .args(["rev-parse", "--verify", "-q", &object])
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+    if out.status.code() == Some(1) {
+        return Ok(None);
+    }
+    if !out.status.success() {
+        bail!(
+            "git rev-parse --verify -q {object} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let blob = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let bytes = git_bytes(cwd, &["cat-file", "blob", &blob])?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .with_context(|| format!("{object} is not UTF-8"))
+}
+
 /// Git's raw output, for the callers that read objects rather than text.
 fn git_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let mut command = git_command();
