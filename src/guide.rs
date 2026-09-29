@@ -31,6 +31,10 @@ SAY WHO YOU ARE (before the first write)
   `<harness>:<session>` when both are known, else `git config user.name`.
   Either is assumed rather than declared, so it cannot be the independent
   party to an approval.
+  The ledger's append guard reads `require_declared_actor` from the invoking
+  checkout once per command, including for repository-wide events with no
+  change target. Integration also checks the change target's policy before
+  merging.
 
   Claude Code's Remote Control supplies `CLAUDE_CODE_BRIDGE_SESSION_ID` to
   connected tool shells. For a resolved Claude harness, `arc env` derives
@@ -453,6 +457,8 @@ RUN A CHANGE
   change cannot delete or weaken a gate its target declares, and `status` lists
   where the declarations in play differ. A change whose target branch cannot be
   resolved is blocked (`target-unreadable`), since nothing says what it owes.
+  A recorded brief's gate-shaped probe warning and `arc show`'s review
+  checklist use the change's target declarations wherever they are run.
   A change whose worktree is gone has nowhere to gate: give it one with `git
   worktree add`, or record evidence arc did not run with `verify --attest`.
 
@@ -669,6 +675,9 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   pressure to ship. `arc check` names the rule that fired, and `arc doctor`
   reports a declared literal that can never match — one that names nothing, or
   a directory, since declared paths are matched against changed files.
+  Gate and policy declaration files can change these integration rules, so
+  changes touching `.arc/gates.toml` or `.arc/policy.toml` need independent
+  review when those paths are declared dangerous.
 
   Required booleans apply when either policy enables them, danger and safe
   declarations combine with danger taking priority, debt thresholds use the
@@ -680,6 +689,10 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   check` and gate execution refuse it. `arc status`, `arc show`, and `arc policy
   show` name the file that declared each rule. The operator file is outside
   the work tree, so local policy does not add tracked files to a contribution.
+  `arc doctor` diagnoses the invoking checkout's declarations and tracked
+  files, including uncommitted local edits. The debt priority advisory also
+  uses that checkout's thresholds because it summarizes repository-wide debt,
+  not a particular change's readiness.
   `arc policy show` includes each gate's command, profiles, timeout, and
   environment probe.
 

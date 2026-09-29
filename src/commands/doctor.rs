@@ -125,6 +125,9 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     inspect_repository_events(&store, &mut problems);
     inspect_dangling_revisions(&ctx.cwd, &store, &states, &mut problems, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
+    // Doctor diagnoses the invoking checkout, including uncommitted
+    // declarations and tracked files. A change's target would hide local
+    // mistakes until they reached that branch.
     inspect_gate_conflicts(&ctx.cwd, &mut problems);
     inspect_danger_paths(&ctx.cwd, &mut problems);
     inspect_danger_classification(&ctx.cwd, &mut problems);

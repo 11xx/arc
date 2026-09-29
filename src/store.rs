@@ -30,7 +30,9 @@ pub struct Store {
     pub root: PathBuf,
     pub repository_id: String,
     /// Whether this repository requires every writer to declare itself, read
-    /// once when the store was opened from its repository.
+    /// once from the invoking checkout when the store was opened. This guard
+    /// covers repository-wide events that have no change target; integration
+    /// also checks the change target's policy before merging.
     ///
     /// Reading it per append would let a command's own merge change the rule
     /// it is being judged by: `integrate` can bring in a commit that enables
@@ -59,8 +61,9 @@ impl Store {
     /// subdirectory, sandbox-friendly) > the repository's Git common dir.
     pub fn discover(cwd: &Path) -> Result<Store> {
         let root = Self::resolve_root(cwd)?;
-        // Read the repository's policy before creating anything, so an
-        // unreadable one fails with the filesystem untouched.
+        // Read the invoking checkout's policy before creating anything. An
+        // unreadable local policy fails with the filesystem untouched, and
+        // repository-wide appends have no change target to read instead.
         let (require_declared_actor, require_declared_actor_sources) = match gitio::toplevel(cwd) {
             Ok(top) => {
                 let policy = crate::policy::load(&top)?;

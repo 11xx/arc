@@ -962,6 +962,13 @@ fn debt_summary_threshold_is_strict_and_opt_in() {
     assert!(over_limit.contains("priority: advisory"), "{over_limit}");
     let over_limit_doctor = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
     assert!(over_limit_doctor.to_string().contains("priority: advisory"));
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\ndebt_count_threshold = 10\n",
+    )
+    .unwrap();
+    let local_limit = stdout(repo.arc(&repo.root).args(["catchup"]));
+    assert!(!local_limit.contains("priority: advisory"), "{local_limit}");
 
     let no_threshold = Repo::new();
     integrated_debt(
@@ -1681,6 +1688,29 @@ fn doctor_reports_a_declared_danger_path_that_matches_nothing() {
         hits[0]["detail"].as_str().unwrap().starts_with("gone.rs"),
         "{:?}",
         hits[0]
+    );
+}
+
+#[test]
+fn doctor_checks_uncommitted_local_danger_declarations() {
+    let repo = repo_with_danger("\"README.md\"");
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[danger]\npaths = [\"missing.rs\"]\n",
+    )
+    .unwrap();
+    let report = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
+    assert!(
+        report["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|problem| problem["code"] == "danger-path-matches-nothing"
+                && problem["detail"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("missing.rs")),
+        "{report}"
     );
 }
 

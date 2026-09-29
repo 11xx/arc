@@ -195,6 +195,8 @@ pub(crate) fn collect_debts(
     let priority_advisory = if entries.is_empty() {
         false
     } else {
+        // Debt belongs to the repository, not to one change's target. This
+        // project-wide advisory uses the invoking checkout's local policy.
         let policy = crate::policy::load(&crate::gitio::toplevel(&ctx.cwd)?)?;
         policy
             .policy
