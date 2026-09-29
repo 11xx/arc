@@ -862,8 +862,8 @@ HISTORY REWRITES
                        another key; --dry-run prints the map, the tags it
                        would re-point or leave alone, and stops; --retag
                        recreates the annotated tags whose targets were
-                       rewritten. Run again to finish one that was
-                       interrupted.
+                       rewritten, signed like the commits. Run again to
+                       finish one that was interrupted.
     arc rewrite trailers --from <rev> [--drop <key>] [--append <line>]
                        Edit the trailer block of every commit message from
                        --from through the branch head, and carry the result
@@ -901,8 +901,12 @@ HISTORY REWRITES
   moving the ref would not re-point it. Left alone it keeps naming a replaced
   commit, and `git describe` and the changelog projection have no release
   boundary on the branch until it is re-pointed; the rewrite says so for each
-  one. `--retag` recreates them, carrying name, message, tagger and date, and
-  signing where the original was signed.
+  one. `--retag` recreates them, carrying name, message, tagger and date. A
+  tag signature covers the tag object, so none carries over: every recreated
+  tag is signed afresh by the key the commits are signed with (`--key`, or
+  Git's configured signing key), whether or not the original was signed, and
+  `--no-sign` leaves them unsigned. `--dry-run` says which tags would be
+  signed.
 
   Every ref moves in one Git transaction, so a rewrite leaves the branch and
   arc's evidence refs on one history or leaves them all alone. The map and

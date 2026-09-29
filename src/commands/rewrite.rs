@@ -30,7 +30,7 @@ pub struct SignArgs {
     /// record — where no signing key is available.
     pub no_sign: bool,
     /// Recreate each annotated tag whose target the rewrite moved, on the
-    /// commit that replaced it.
+    /// commit that replaced it, signed by the key the commits are signed with.
     pub retag: bool,
 }
 
@@ -87,7 +87,7 @@ pub struct TrailerArgs {
     /// Recreate the edited commits without signing them.
     pub no_sign: bool,
     /// Recreate each annotated tag whose target the rewrite moved, on the
-    /// commit that replaced it.
+    /// commit that replaced it, signed by the key the commits are signed with.
     pub retag: bool,
 }
 
@@ -340,7 +340,7 @@ fn complete(
                 planned.name,
                 short(&planned.old),
                 short(&planned.target),
-                unsigned_note(planned.signed && sign.is_none())
+                signature_note(sign.is_some(), planned.signed)
             );
         }
         for name in &moves.left {
@@ -394,7 +394,7 @@ fn complete(
             retag.name,
             short(&retag.old),
             short(&retag.new),
-            unsigned_note(retag.signature_dropped)
+            signature_note(retag.signed, retag.was_signed)
         );
     }
     for name in &moves.left {
@@ -417,11 +417,14 @@ fn complete(
     Ok(0)
 }
 
-/// What a tag recreation says about a signature it could not make.
-fn unsigned_note(dropped: bool) -> &'static str {
-    match dropped {
-        true => ", unsigned because the rewrite signs nothing",
-        false => "",
+/// What a tag recreation says about its signature: that it is made, or that
+/// the original's could not be. An unsigned original recreated unsigned has
+/// nothing to say.
+fn signature_note(signs: bool, was_signed: bool) -> &'static str {
+    match (signs, was_signed) {
+        (true, _) => ", signed",
+        (false, true) => ", unsigned because the rewrite signs nothing",
+        (false, false) => "",
     }
 }
 
@@ -654,7 +657,7 @@ struct RefMoves {
 
 /// One annotated tag a rewrite is to recreate, as the plan knows it: the tag
 /// object the ref names, the commit it is to name instead, and whether it
-/// carries a signature a recreation would have to make again.
+/// carried a signature.
 struct PlannedRetag {
     name: String,
     old: String,
@@ -668,9 +671,11 @@ struct Retag {
     /// The tag object the ref named, and the one it is to name.
     old: String,
     new: String,
-    /// Whether the original carried a signature this recreation could not
-    /// make, which is the case when the rewrite signs nothing.
-    signature_dropped: bool,
+    /// Whether the new object is signed, which is whether the rewrite signs.
+    signed: bool,
+    /// Whether the original carried a signature. A signature covers the tag
+    /// object it sits on, so the new object's is made afresh or is absent.
+    was_signed: bool,
 }
 
 /// Every ref that points at a rewritten commit, and what becomes of it.
@@ -755,10 +760,12 @@ fn plan_ref_moves(
 /// the ref move that names the object written for it.
 ///
 /// The tag name, message, tagger and date are the original's, so the only
-/// thing a new object says differently is which commit it names. It is signed
-/// when the original was and a key is available; a rewrite that signs nothing
-/// cannot sign a tag either, and dropping the signature is reported rather
-/// than passed off as the tag it recreated.
+/// thing a new object says differently is which commit it names and its
+/// signature. A signature covers the object it sits on, so none carries over:
+/// every tag is signed afresh by the key the commits are signed with, whether
+/// or not the original was. A rewrite that signs nothing writes unsigned tags,
+/// and dropping a signature is reported rather than passed off as the tag it
+/// recreated.
 ///
 /// The objects are written here and the refs moved later, alongside every
 /// other ref: an unreferenced tag object changes nothing about what the
@@ -773,12 +780,12 @@ fn write_retags(
     for planned in &moves.retags {
         let mut tag = gitio::read_tag(cwd, &planned.old)?;
         tag.object = planned.target.clone();
-        let sign = if tag.signed { sign } else { None };
         let retag = Retag {
             name: planned.name.clone(),
             old: planned.old.clone(),
             new: gitio::write_tag_object(cwd, &tag, sign)?,
-            signature_dropped: tag.signed && sign.is_none(),
+            signed: sign.is_some(),
+            was_signed: tag.signed,
         };
         moves.moves.insert(
             retag.name.clone(),

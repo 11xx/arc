@@ -826,6 +826,133 @@ fn an_annotated_tag_is_re_pointed_on_request() {
     );
 }
 
+/// A tag signature covers the tag object, so a tag whose signature was lost
+/// is signed anew when it is recreated, by the key the commits are signed
+/// with, under the tagger and date it already had.
+#[test]
+fn a_recreated_tag_is_signed_even_when_the_original_was_not() {
+    let repo = Repo::new();
+    let Some(key) = signing_key(&repo) else {
+        return;
+    };
+    repo.commit(&repo.root, "one.txt", "one\n", "feat: one");
+    let tagged = repo.head(&repo.root);
+    let dated = Command::new("git")
+        .args(["tag", "-a", "-m", "the first release", "v0.1.0"])
+        .current_dir(&repo.root)
+        .env("GIT_COMMITTER_DATE", "2001-02-03T04:05:06 +0000")
+        .output()
+        .unwrap();
+    assert!(dated.status.success());
+    let tagger = || {
+        git_out(
+            &repo.root,
+            &[
+                "for-each-ref",
+                "--format=%(taggerdate:raw) %(taggername) %(taggeremail)",
+                "refs/tags/v0.1.0",
+            ],
+        )
+    };
+    let original = tagger();
+    assert!(original.starts_with("981173106 "), "{original}");
+    let old_tag = git_out(&repo.root, &["rev-parse", "v0.1.0"]);
+    repo.commit(&repo.root, "two.txt", "two\n", "feat: two");
+
+    let previewed = stdout(arc_signing(&repo, &key, &repo.root).args([
+        "rewrite",
+        "sign",
+        "--key",
+        &key.fingerprint,
+        "--from",
+        &tagged,
+        "--dry-run",
+        "--retag",
+    ]));
+    assert!(
+        previewed
+            .lines()
+            .any(|line| line.starts_with("would re-point refs/tags/v0.1.0:")
+                && line.ends_with(", signed")),
+        "{previewed}"
+    );
+
+    let retagged = stdout(arc_signing(&repo, &key, &repo.root).args([
+        "rewrite",
+        "sign",
+        "--key",
+        &key.fingerprint,
+        "--from",
+        &tagged,
+        "--retag",
+    ]));
+    assert!(
+        retagged
+            .lines()
+            .any(|line| line.starts_with("re-pointed refs/tags/v0.1.0:")
+                && line.ends_with(", signed")),
+        "{retagged}"
+    );
+    let new_tag = git_out(&repo.root, &["rev-parse", "v0.1.0"]);
+    assert_ne!(new_tag, old_tag);
+    assert_eq!(
+        git_signing(
+            &repo.root,
+            &key,
+            &["tag", "--format=%(objectname)", "--verify", "v0.1.0"]
+        ),
+        new_tag,
+        "the recreated tag carries a signature that verifies"
+    );
+    assert_eq!(tagger(), original, "the tagger and the date are kept");
+    assert_eq!(
+        git_out(
+            &repo.root,
+            &[
+                "for-each-ref",
+                "--format=%(contents:subject)",
+                "refs/tags/v0.1.0"
+            ]
+        ),
+        "the first release"
+    );
+}
+
+/// `--no-sign` recreates a tag without a signature, and says so when the
+/// original had one.
+#[test]
+fn no_sign_recreates_a_signed_tag_unsigned() {
+    let repo = Repo::new();
+    let Some(key) = signing_key(&repo) else {
+        return;
+    };
+    let old_tag = repo_with_a_signed_tag(&repo, &key);
+    let tagged = git_out(&repo.root, &["rev-parse", "v0.1.0^{commit}"]);
+
+    let retagged = stdout(repo.arc(&repo.root).args([
+        "rewrite",
+        "trailers",
+        "--no-sign",
+        "--append",
+        "Assisted-by: a:b#c (lead)",
+        "--from",
+        &tagged,
+        "--retag",
+    ]));
+    let reported = retagged
+        .lines()
+        .find(|line| line.starts_with("re-pointed refs/tags/v0.1.0:"))
+        .unwrap_or_else(|| panic!("{retagged}"));
+    assert!(
+        reported.ends_with(", unsigned because the rewrite signs nothing"),
+        "{reported}"
+    );
+    let new_tag = git_out(&repo.root, &["rev-parse", "v0.1.0"]);
+    assert_ne!(new_tag, old_tag);
+    let raw = git_out(&repo.root, &["cat-file", "tag", "v0.1.0"]);
+    assert!(!raw.contains("BEGIN PGP SIGNATURE"), "{raw}");
+}
+
 /// Every repository-scoped event file, oldest first. A repository that has
 /// recorded none has no directory, which is an answer rather than an error.
 fn repository_events(repo: &Repo) -> Vec<PathBuf> {
