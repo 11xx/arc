@@ -482,6 +482,8 @@ fn watch_approved_does_not_return_on_an_approval_policy_refuses() {
         "[policy]\nforbid_self_approval = true\n",
     )
     .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "test: forbid self-approval"]);
     let (_, worktree, _) = change_with_patchset(&repo, "watch-selfapproved");
     // The default actor is the one that recorded the patchset, so this is the
     // author approving its own work.

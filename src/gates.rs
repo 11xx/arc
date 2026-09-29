@@ -67,7 +67,34 @@ pub struct GateDeclaration {
     pub source: String,
 }
 
+/// A gate a change declares as a different check than the target's.
+#[derive(Debug, Clone)]
+pub struct GateDivergence {
+    pub name: String,
+    pub target: GateDeclaration,
+    pub change: GateDeclaration,
+}
+
+impl GateDivergence {
+    pub fn describe(&self) -> String {
+        format!(
+            "gate {:?}: {}; {}; the target's is evaluated",
+            self.name,
+            self.target.describe(),
+            self.change.describe()
+        )
+    }
+}
+
 impl GateDeclaration {
+    fn of(gate: &Gate, source: &str) -> Self {
+        GateDeclaration {
+            command: gate.command.clone(),
+            environment: gate.environment.clone(),
+            source: source.to_string(),
+        }
+    }
+
     /// One declaration as a conflict report names it.
     pub fn describe(&self) -> String {
         match &self.environment {
@@ -253,13 +280,8 @@ pub fn environment_probe(cwd: &Path, probe: &str, timeout: Option<u64>) -> Resul
     })
 }
 
-fn source_name(path: &Path, repo_toplevel: &Path) -> String {
-    if path == repo_toplevel.join(".arc/gates.toml") {
-        ".arc/gates.toml".to_string()
-    } else {
-        "<git-common-dir>/arc/operator-policy.toml".to_string()
-    }
-}
+const PROJECT_SOURCE: &str = ".arc/gates.toml";
+const OPERATOR_SOURCE: &str = "<git-common-dir>/arc/operator-policy.toml";
 
 /// Validate the gate portion of an operator-policy document.
 pub fn validate_operator_text(text: &str) -> Result<()> {
@@ -267,23 +289,58 @@ pub fn validate_operator_text(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Load both declarations while retaining conflicts for `arc doctor`.
+/// Load both declarations from the checkout at `repo_toplevel`, retaining
+/// conflicts for `arc doctor`.
 pub fn inspect(repo_toplevel: &Path) -> Result<GatesFile> {
-    let in_tree = repo_toplevel.join(".arc/gates.toml");
-    let operator = crate::policy::operator_path(repo_toplevel)?;
+    let path = repo_toplevel.join(PROJECT_SOURCE);
+    let project = read_optional(&path)?.map(|text| (path.display().to_string(), text));
+    layered(repo_toplevel, project)
+}
+
+/// Load both declarations with the project layer read from the tree committed
+/// at `revision`, wherever `cwd` stands in the repository.
+pub fn inspect_at(cwd: &Path, revision: &str) -> Result<GatesFile> {
+    let project = crate::gitio::file_at(cwd, revision, PROJECT_SOURCE)?
+        .map(|text| (format!("{PROJECT_SOURCE} at {revision}"), text));
+    layered(cwd, project)
+}
+
+/// Load declarations for operations that must reject ambiguous gate commands.
+pub fn load(repo_toplevel: &Path) -> Result<GatesFile> {
+    let gates = inspect(repo_toplevel)?;
+    gates.ensure_unconflicted()?;
+    Ok(gates)
+}
+
+/// Like `load`, with the project layer read at `revision`.
+pub fn load_at(cwd: &Path, revision: &str) -> Result<GatesFile> {
+    let gates = inspect_at(cwd, revision)?;
+    gates.ensure_unconflicted()?;
+    Ok(gates)
+}
+
+fn read_optional(path: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+/// Layer the project declaration, given as its origin and text, under the
+/// operator's. `repo` is any path inside the repository.
+fn layered(repo: &Path, project: Option<(String, String)>) -> Result<GatesFile> {
+    let operator = crate::policy::operator_path(repo)?;
+    let operator = read_optional(&operator)?.map(|text| (operator.display().to_string(), text));
     let mut merged = GatesFile::default();
 
-    for path in [in_tree, operator] {
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error).with_context(|| format!("cannot read {}", path.display()))
-            }
+    for (source, layer) in [(PROJECT_SOURCE, project), (OPERATOR_SOURCE, operator)] {
+        let Some((origin, text)) = layer else {
+            continue;
         };
-        let layer = toml::from_str::<GatesFile>(&text)
-            .with_context(|| format!("malformed {}", path.display()))?;
-        let source = source_name(&path, repo_toplevel);
+        let layer =
+            toml::from_str::<GatesFile>(&text).with_context(|| format!("malformed {origin}"))?;
+        let source = source.to_string();
 
         for (name, mut gate) in layer.gates {
             gate.declared_by.push(source.clone());
@@ -294,10 +351,7 @@ pub fn inspect(repo_toplevel: &Path) -> Result<GatesFile> {
                 // A gate is its command and the environment its evidence
                 // applies to; two layers disagreeing on either declare two
                 // different checks under one name.
-                Some(current)
-                    if current.command != gate.command
-                        || current.environment != gate.environment =>
-                {
+                Some(current) if !current.same_check(&gate) => {
                     merged.conflicts.push(GateConflict {
                         name,
                         declarations: vec![
@@ -317,24 +371,7 @@ pub fn inspect(repo_toplevel: &Path) -> Result<GatesFile> {
                     current.declared_by.sort();
                     current.declared_by.dedup();
                 }
-                Some(current) => {
-                    if current.profiles.is_empty() || gate.profiles.is_empty() {
-                        current.profiles.clear();
-                    } else {
-                        current.profiles.extend(gate.profiles);
-                        let profiles: BTreeSet<_> = current.profiles.drain(..).collect();
-                        current.profiles.extend(profiles);
-                    }
-                    // The stricter bound wins, as every other layered rule
-                    // does: one layer cannot loosen a gate the other bounds.
-                    current.timeout = match (current.timeout, gate.timeout) {
-                        (Some(left), Some(right)) => Some(left.min(right)),
-                        (left, right) => left.or(right),
-                    };
-                    current.declared_by.extend(gate.declared_by);
-                    current.declared_by.sort();
-                    current.declared_by.dedup();
-                }
+                Some(current) => current.absorb(gate),
             }
         }
     }
@@ -342,14 +379,64 @@ pub fn inspect(repo_toplevel: &Path) -> Result<GatesFile> {
     Ok(merged)
 }
 
-/// Load declarations for operations that must reject ambiguous gate commands.
-pub fn load(repo_toplevel: &Path) -> Result<GatesFile> {
-    let gates = inspect(repo_toplevel)?;
-    gates.ensure_unconflicted()?;
-    Ok(gates)
+impl Gate {
+    /// Whether two declarations name the same check: one command run against
+    /// one environment.
+    fn same_check(&self, other: &Gate) -> bool {
+        self.command == other.command && self.environment == other.environment
+    }
+
+    /// Fold another declaration of the same check into this one. Profiles
+    /// widen and the stricter timeout wins, so one declaration cannot loosen
+    /// a gate the other bounds.
+    fn absorb(&mut self, other: Gate) {
+        if self.profiles.is_empty() || other.profiles.is_empty() {
+            self.profiles.clear();
+        } else {
+            self.profiles.extend(other.profiles);
+            let profiles: BTreeSet<_> = self.profiles.drain(..).collect();
+            self.profiles.extend(profiles);
+        }
+        self.timeout = match (self.timeout, other.timeout) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (left, right) => left.or(right),
+        };
+        self.declared_by.extend(other.declared_by);
+        self.declared_by.sort();
+        self.declared_by.dedup();
+    }
 }
 
 impl GatesFile {
+    /// Add what a change's own declarations require on top of this set, the
+    /// target's. A gate the change adds is owed. A gate the target already
+    /// declares stays the target's check: the change can widen its profiles
+    /// or tighten its timeout but cannot substitute another command or
+    /// environment, and such a substitution is returned so it can be reported.
+    /// `target_label` and `change_label` name the two sides in that report.
+    pub fn owe_also(
+        &mut self,
+        own: GatesFile,
+        target_label: &str,
+        change_label: &str,
+    ) -> Vec<GateDivergence> {
+        let mut divergences = Vec::new();
+        for (name, gate) in own.gates {
+            match self.gates.get_mut(&name) {
+                None => {
+                    self.gates.insert(name, gate);
+                }
+                Some(current) if current.same_check(&gate) => current.absorb(gate),
+                Some(current) => divergences.push(GateDivergence {
+                    target: GateDeclaration::of(current, target_label),
+                    change: GateDeclaration::of(&gate, change_label),
+                    name,
+                }),
+            }
+        }
+        divergences
+    }
+
     pub fn ensure_unconflicted(&self) -> Result<()> {
         if self.conflicts.is_empty() {
             return Ok(());
@@ -378,5 +465,44 @@ impl GatesFile {
                 gate.profiles.is_empty() || gate.profiles.iter().any(|item| item == profile)
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn declared(text: &str) -> GatesFile {
+        toml::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn a_change_adds_gates_and_cannot_replace_the_targets_check() {
+        let mut target =
+            declared("[gates.guard]\ncommand = \"test -f A\"\n[gates.lint]\ncommand = \"lint\"\n");
+        let own =
+            declared("[gates.guard]\ncommand = \"true\"\n[gates.extra]\ncommand = \"test -f B\"\n");
+        let divergences = target.owe_also(own, "master", "change");
+
+        assert_eq!(target.gates["guard"].command, "test -f A");
+        assert!(target.gates.contains_key("lint"));
+        assert_eq!(target.gates["extra"].command, "test -f B");
+        assert_eq!(divergences.len(), 1);
+        assert_eq!(divergences[0].name, "guard");
+        assert!(divergences[0]
+            .describe()
+            .contains("the target's is evaluated"));
+    }
+
+    #[test]
+    fn the_same_check_declared_twice_takes_the_stricter_timeout() {
+        let mut target = declared("[gates.unit]\ncommand = \"t\"\ntimeout = \"10m\"\n");
+        let own = declared("[gates.unit]\ncommand = \"t\"\ntimeout = \"1m\"\n");
+        assert!(target.owe_also(own, "master", "change").is_empty());
+        assert_eq!(target.gates["unit"].timeout, Some(60));
+
+        let unbounded = declared("[gates.unit]\ncommand = \"t\"\n");
+        assert!(target.owe_also(unbounded, "master", "change").is_empty());
+        assert_eq!(target.gates["unit"].timeout, Some(60));
     }
 }

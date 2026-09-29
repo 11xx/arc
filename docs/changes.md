@@ -49,7 +49,9 @@
   stating: `arc review --patchset` takes the patchset id or the revision the
   reviewer actually read, and without it the verdict claims the newest patchset
   — which is not always the one that was reviewed.
-- **Gates** are declared in `.arc/gates.toml` (committed). `arc verify`
+- **Gates** are declared in `.arc/gates.toml`, committed on the change's target
+  branch; the target's declarations bind the change wherever a command is
+  typed. `arc verify`
   runs a gate and records command, exact revision, result, exit code, duration,
   and hostname — local evidence with provenance, the local analogue of required
   CI checks. Attested verification records no exit code or duration because arc
@@ -520,7 +522,7 @@ condition is reached, with a JSON diagnostic containing the winning
 watch conditions are checked in their supplied order and the first reached
 condition wins.
 
-`arc status <change>` prints the versioned `arc-status/25` JSON report —
+`arc status <change>` prints the versioned `arc-status/26` JSON report —
 the contract orchestrating agents program against. It includes dependency
 state, inverse `blocks` links, tags, claim owner/activity/stage timing, snapshot
 provenance, a `review_subject` naming the exact identities the independence

@@ -440,9 +440,13 @@ RUN A CHANGE
   and record the evidence at that worktree's head, whichever checkout of the
   repository the command was typed in; the run says which tree it used when
   that is not the one you are standing in. Which gates are required is read
-  where you stand, so `status` and `verify` agree on what is owed. A change
-  whose worktree is gone has nowhere to gate: give it one with `git worktree
-  add`, or record evidence arc did not run with `verify --attest`.
+  from the change's target branch, wherever you stand, plus any gate the change
+  itself adds, so `status`, `verify`, and `integrate` agree on what is owed; a
+  change cannot delete or weaken a gate its target declares, and `status` lists
+  where the declarations in play differ. A change whose target branch cannot be
+  resolved is blocked (`target-unreadable`), since nothing says what it owes.
+  A change whose worktree is gone has nowhere to gate: give it one with `git
+  worktree add`, or record evidence arc did not run with `verify --attest`.
 
   A profile with no declared gate runs none: `done` still snapshots and
   prints the check state, saying plainly that no gate is declared rather
@@ -647,7 +651,8 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   Which changes need one is declared in `[danger] paths` in
   `.arc/policy.toml` or the operator policy at
   `<git-common-dir>/arc/operator-policy.toml`. Both path lists apply, so a
-  path declared dangerous by either file is dangerous. A change touching a declared
+  path declared dangerous by either file is dangerous. Integration reads
+  `.arc/policy.toml` from the change's target branch, wherever it is run. A change touching a declared
   path needs a verdict from somebody other than its author; elsewhere a
   self-recorded verdict satisfies the gate. Declare no danger paths and the
   gate stays uniform. `arc begin --dangerous` raises a single change
@@ -1047,8 +1052,8 @@ EXIT CODES
     `arc check` exits 3 when no valid approval covers the current head.
     `arc check` exits 4 while a hold is active.
     `arc check` exits 5 when a required gate is not green at the head.
-    `arc check` exits 6 for a closed change, a missing branch, or malformed
-      state.
+    `arc check` exits 6 for a closed change, a missing branch, a target branch
+      that cannot be resolved, or malformed state.
     `arc check` exits 7 while a prerequisite change is unresolved.
     `arc check` exits 11 when the target moved with conflicting changes and
       the branch needs rebasing.

@@ -15,21 +15,13 @@ fn write_env_gate(repo: &Repo) {
     );
 }
 
-/// Write a gates file, without committing it.
-fn declare_gate(repo: &Repo, command: &str, environment: &str, timeout: Option<&str>) {
-    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+/// Declare a gate for every change without touching any tree.
+fn write_gate(repo: &Repo, command: &str, environment: &str, timeout: Option<&str>) {
     let mut text = format!("[gates.build]\ncommand = {command:?}\nenvironment = {environment:?}\n");
     if let Some(timeout) = timeout {
         text.push_str(&format!("timeout = {timeout:?}\n"));
     }
-    fs::write(repo.root.join(".arc/gates.toml"), text).unwrap();
-}
-
-/// Write a gates file and commit it, so the head tree carries it.
-fn write_gate(repo: &Repo, command: &str, environment: &str, timeout: Option<&str>) {
-    declare_gate(repo, command, environment, timeout);
-    git(&repo.root, &["add", ".arc/gates.toml"]);
-    git(&repo.root, &["commit", "-m", "test: declare a gate"]);
+    repo.declare_gates_locally(&text);
 }
 
 fn status(repo: &Repo, env: &str) -> serde_json::Value {
@@ -181,17 +173,7 @@ fn a_gate_counts_evidence_only_in_the_environment_its_probe_reports() {
 #[test]
 fn evidence_recorded_without_an_identity_satisfies_only_probe_less_gates() {
     let repo = Repo::new();
-    fs::create_dir_all(repo.root.join(".arc")).unwrap();
-    fs::write(
-        repo.root.join(".arc/gates.toml"),
-        "[gates.build]\ncommand = \"true\"\n",
-    )
-    .unwrap();
-    git(&repo.root, &["add", ".arc/gates.toml"]);
-    git(
-        &repo.root,
-        &["commit", "-m", "test: declare a probe-less gate"],
-    );
+    repo.declare_gates_locally("[gates.build]\ncommand = \"true\"\n");
     stdout(
         repo.arc(&repo.root)
             .args(["begin", "env-gate", "--no-worktree"]),
@@ -206,11 +188,7 @@ fn evidence_recorded_without_an_identity_satisfies_only_probe_less_gates() {
     assert!(state["gates"][0]["environment"].is_null(), "{state}");
 
     // Declaring a probe afterwards does not retroactively qualify the run.
-    fs::write(
-        repo.root.join(".arc/gates.toml"),
-        "[gates.build]\ncommand = \"true\"\nenvironment = \"true\"\n",
-    )
-    .unwrap();
+    repo.declare_gates_locally("[gates.build]\ncommand = \"true\"\nenvironment = \"true\"\n");
     let state = json_stdout(repo.arc(&repo.root).args(["status", "env-gate"]));
     assert_eq!(state["gates"][0]["green_at_head"], false, "{state}");
     let explain = stdout(
@@ -384,9 +362,8 @@ fn probe_stderr_does_not_change_the_identity() {
         .success();
 
     // The same stdout with incidental stderr still names the same
-    // environment. This is a working-tree declaration change, so the head
-    // tree carrying the evidence is unchanged.
-    declare_gate(&repo, "true", "printf %s A; echo warning >&2", None);
+    // environment. The change's head tree carrying the evidence is unchanged.
+    write_gate(&repo, "true", "printf %s A; echo warning >&2", None);
     let state = json_stdout(repo.arc(&repo.root).args(["status", "env-gate"]));
     let gate = &state["gates"][0];
     assert_eq!(gate["green_at_head"], true, "{state}");

@@ -17,8 +17,8 @@ Parsing an internal shape means tracking arc's implementation.
 
 | Schema | Surface | Stability |
 | --- | --- | --- |
-| `arc-state/2` | `arc show --json` — the reduced change ledger state, including external verdicts marked with their source and the head a contribution was found ready to send at | commitment |
-| `arc-status/25` | `arc status` — the actionable state of one change, including dependencies, claim timing, blockers, `next_action`, local and external verdicts, the current review subject, the review map, advisories, the forge block, captured plan provenance, the fork a promotion came from, the environment each gate's evidence applies to, the source files for effective policy rules and gates, and the head a contribution was found ready to send at | commitment |
+| `arc-state/2` | `arc show --json` — the reduced change ledger state, including external verdicts marked with their source the head a contribution was found ready to send at, and where the declarations readiness evaluated differ from the checkout's or the change's own | commitment |
+| `arc-status/26` | `arc status` — the actionable state of one change, including dependencies, claim timing, blockers, `next_action`, local and external verdicts, the current review subject, the review map, advisories, the forge block, captured plan provenance, the fork a promotion came from, the environment each gate's evidence applies to, the source files for effective policy rules and gates, and the head a contribution was found ready to send at | commitment |
 | `arc-check/3` | `arc check --json` — every blocker with its exit code, plus never-blocking advisories | commitment |
 | `arc-inbox/10` | `arc inbox --json` — the lead-facing queue buckets across open changes, unowned branches and worktrees, and the journal backlog | commitment |
 | `arc-catchup/11` | `arc catchup --json` — ledger buckets, journal lanes and shared inventory rows, memories, forks with what they hold, unowned refs and checkouts, worktree cost, replica peers and integration authority, and a plan's settled promotion state | commitment |

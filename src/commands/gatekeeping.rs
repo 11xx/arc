@@ -273,11 +273,10 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         gate_run_ctx(ctx, &st)?
     };
     let run_ctx = redirected.as_ref().unwrap_or(ctx);
-    // Which gates are required is read from the checkout the command was
-    // typed in, the same one `arc status` reads, so what a run discharges and
-    // what status still owes cannot disagree. Only the tree the command reads
-    // follows the change.
-    let toplevel = gitio::toplevel(&ctx.cwd)?;
+    // Which gates are required is read where `arc status` reads it, from the
+    // change's target and the change's own branch, so what a run discharges
+    // and what status still owes cannot disagree. Only the tree the command
+    // reads follows the change.
     // Declared before anything runs, so the evidence this invocation records
     // is judged under the waiver rather than needing a second pass to excuse
     // it. It names the head it was declared at — the head of the checkout the
@@ -410,7 +409,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         None => ensure_at_change_head(run_ctx, &st)?,
     }
     if all {
-        let gates = gates::load(&toplevel)?;
+        let gates = ctx.declarations(&st)?.gates;
         let required = gates.required_for(&st.profile);
         if required.is_empty() {
             bail!("no gates declared for profile {}", st.profile);
@@ -508,7 +507,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
     }
     let (cmd, timeout, declared_environment) = match (&gate, command) {
         (Some(name), None) => {
-            let gates = gates::load(&toplevel)?;
+            let gates = ctx.declarations(&st)?.gates;
             let declared = match gates.gates.get(name) {
                 Some(declared) => declared,
                 // A gate and a probe are different objects run by adjacent
@@ -655,8 +654,7 @@ fn verify_against(
     note: Option<String>,
     skip_green: bool,
 ) -> Result<i32> {
-    let toplevel = gitio::toplevel(&ctx.cwd)?;
-    let declarations = gates::load(&toplevel)?;
+    let declarations = ctx.declarations(st)?.gates;
     let required = declarations.required_for(&st.profile);
     if required.is_empty() {
         bail!("no gates declared for profile {}", st.profile);
@@ -1095,8 +1093,7 @@ pub fn snapshot_with_verify(
         let (change_id, st) = ctx.load_state(&store, reference)?;
         let redirected = gate_run_ctx(ctx, &st)?;
         let run_ctx = redirected.as_ref().unwrap_or(ctx);
-        let toplevel = gitio::toplevel(&ctx.cwd)?;
-        let declarations = gates::load(&toplevel)?;
+        let declarations = ctx.declarations(&st)?.gates;
         let selected = gates
             .iter()
             .map(|name| {
@@ -1215,7 +1212,7 @@ pub fn done(
     // nobody declared.
     let store = ctx.store()?;
     let (_, st) = ctx.load_state(&store, reference)?;
-    let declarations = gates::load(&gitio::toplevel(&ctx.cwd)?)?;
+    let declarations = ctx.declarations(&st)?.gates;
     let required = declarations.required_for(&st.profile);
     if required.is_empty() {
         println!(
@@ -1827,11 +1824,12 @@ fn append_verifications(
         ev.event_id = event_id;
         store.append_event(&ev)?;
         if let Some(gate) = gate_label {
-            let declared_by = gitio::toplevel(&ctx.cwd)
+            let declared_by = ctx
+                .declarations(&st)
                 .ok()
-                .and_then(|top| crate::gates::inspect(&top).ok())
-                .and_then(|gates| {
-                    gates
+                .and_then(|declarations| {
+                    declarations
+                        .gates
                         .gates
                         .get(&gate)
                         .map(|item| item.declared_by.join(", "))
@@ -2566,6 +2564,7 @@ fn integrate_one(
     // The same store the merge's closure event will be appended to, so the
     // merge and the record are judged by one reading of the policy.
     ctx.ensure_declared_actor(&store)?;
+    ctx.ensure_target_declares_actor(&initial)?;
     // Cross-change order is always target, then change. This serializes the
     // target worktree without allowing an integration/metadata lock cycle.
     let target_lock = store.lock_target(&target)?;
@@ -2630,7 +2629,7 @@ fn integrate_one(
         );
     }
 
-    if let Some(contribution) = contribution_policy(ctx)? {
+    if let Some(contribution) = contribution_policy(ctx, &st)? {
         return record_ready_to_send(
             ctx,
             &store,
@@ -2877,9 +2876,8 @@ fn authorization_basis(
         }
     }
 
-    let toplevel = gitio::toplevel(&ctx.cwd)?;
-    let gates = crate::gates::load(&toplevel)?;
-    let policy = crate::policy::load(&toplevel)?;
+    let declarations = ctx.declarations(st)?;
+    let (gates, policy) = (declarations.gates, declarations.policy);
     let normalized_gates = gates
         .required_for(&st.profile)
         .into_iter()
@@ -2930,12 +2928,9 @@ fn authorization_basis(
     })
 }
 
-/// The contribution declaration in force where the command runs, if any.
-fn contribution_policy(ctx: &Ctx) -> Result<Option<crate::policy::Contribution>> {
-    match gitio::toplevel(&ctx.cwd) {
-        Ok(top) => Ok(crate::policy::load(&top)?.contribution),
-        Err(_) => Ok(None),
-    }
+/// The contribution declaration in force at the change's target, if any.
+fn contribution_policy(ctx: &Ctx, st: &ChangeState) -> Result<Option<crate::policy::Contribution>> {
+    Ok(ctx.declarations(st)?.policy.contribution)
 }
 
 /// Refuse a head whose history is not the shape the receiver declared: a merge
@@ -3027,7 +3022,8 @@ fn integrate_dry_run(
     // undeclared actor, and a target worktree that is missing or dirty. A dry
     // run that skipped them would report a merge the real path refuses.
     ctx.ensure_declared_actor(store)?;
-    if let Some(contribution) = contribution_policy(ctx)? {
+    ctx.ensure_target_declares_actor(st)?;
+    if let Some(contribution) = contribution_policy(ctx, st)? {
         let report = ctx.report(store, st)?;
         if !report.integrate_ready {
             eprint!("{}", render::blocker_explanation(st, &report));
