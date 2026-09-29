@@ -960,6 +960,7 @@ mod tests {
             opened_harness: Some("test".into()),
             opened_model: None,
             opened_session: Some("session".into()),
+            opened_session_link: None,
             journal_ref: None,
             from_fork: None,
             blocked_by: blocked_by.iter().map(|id| (*id).into()).collect(),
