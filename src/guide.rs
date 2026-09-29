@@ -1050,6 +1050,11 @@ RULES THAT CHANGE WHAT YOU DO
     `arc inbox` and `arc catchup` carry the ones still open.
   - arc holds no routing opinion. It records the --actor, --harness, and --model
     it is given; who to delegate to is the caller's policy, not arc's.
+  - A delegated session binds its boundary with `ARC_ROLE` or `--role`. An
+    implementer may not record a verdict, an external verdict, `resolve`,
+    `hold`, `release-hold`, `audit`, `debt`, `close`, or `integrate`. A
+    reviewer may not run `debt`, `close`, or `integrate`. Recording a brief
+    is a lead's. An unset role is `lead`, with full access.
 
 EXIT CODES
   `arc check` is the integration preflight and its code names the blocker.
@@ -1116,6 +1121,55 @@ EXIT CODES
     A repeat of a recorded source item writes nothing, prints the existing
       entry, and exits 0.
     A spooled write prints `spooled: <path>` and exits 0.
+
+FILES
+  User configuration is `<ai-home>/arc/config.toml`; the AI data home is
+  `~/.local/ai/` unless AI_HOME names another. ARC_WORKTREES_DIR and
+  ARC_DATA_ROOT override their keys, and ARC_DATA_DIR names one exact ledger
+  directory for one repository, above both. `arc config` prints the resolved
+  paths.
+
+    worktrees_dir = "~/.worktrees"       where change worktrees are created
+    data_root = "<dir>"                  ledgers at <dir>/<repo-path-slug>/
+                                         rather than <git-common-dir>/arc/
+    [journals] dirs = { "<prefix>" = "<journal-dir>" }
+                                         journal by path prefix; the longest
+                                         matching prefix wins
+    [journal] auto_log = true            begin, integrate, and close append a
+                                         journal log event
+    [identity] detect = true             an undeclared harness, session, and
+                                         model are read from the session store
+    [provenance] git_identity = "per-actor" | "shared"
+
+  Policy is `.arc/policy.toml`, read from the change's target branch, and
+  the operator policy at `<git-common-dir>/arc/operator-policy.toml`, outside
+  every tree (`arc policy path|show|write`). Both apply, the stricter reading
+  winning.
+
+    [policy] forbid_self_approval = true
+    [policy] require_declared_actor = true
+    [policy] debt_count_threshold = <n>          debt turns advisory past n
+    [policy] debt_age_threshold_seconds = <n>    or once the oldest is older
+    [policy] worktree_free_floor_bytes = <n>     `arc begin` warns below it
+    [danger] paths = ["<glob>"]                  `*` in a segment, `**` across
+    [danger] acknowledged_safe = ["<glob>"]
+    [danger] source_roots = ["<dir>/"]           every file inside is classified
+    [review] checklist = ["<item>"]              printed by `arc show`
+    [contribution] history = "squash" | "preserve"
+
+  Gates are `[gates.<name>]` tables in `.arc/gates.toml` or the operator
+  policy:
+
+    command = "<shell command>"
+    profiles = ["<profile>"]            omitted: required for every profile
+    timeout = "10m"                     s, m, or h; omitted: unbounded
+    environment = "<probe command>"     evidence counts only where the probe
+                                        prints the same output
+
+  Every reviewed head is pinned by `refs/arc/keep/<change>/<patchset>` so
+  Git's garbage collection cannot take it. A pin is released only once its
+  head is reachable from the integration commit; release any other with
+  `git update-ref -d`.
 
 SCHEMAS
   Every structured surface carries a `schema` string `<name>/<n>`, and any
