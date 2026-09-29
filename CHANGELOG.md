@@ -10,17 +10,385 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [2026.9.29] - 2026-09-29
+
+### Added
+
+- A private session link travels with identity. `--session-link`, backed by
+  `ARC_SESSION_LINK`, is recorded as `session_link` on every ledger and
+  journal event written with it set, and on the records derived from them.
+  For a Claude identity, `arc env` derives it from Claude Code's Remote
+  Control bridge session id, and clears it when there is none. The link is
+  never written into commit or merge messages, trailers, the changelog, or
+  forge text.
+
+- `.arc/changelog.toml` can select `renderer = "command"`: a
+  `renderer_command` argv, run from the repository root without a shell and
+  with the invoking user's authority, receives the projection as an
+  `arc-changelog-render-request/1` document on stdin and answers with the
+  rendering, or with the complete replacement target for `--write`. It is
+  bounded by `renderer_timeout` (default 60s, the process group killed at
+  the deadline) and a 16 MiB output cap; any failure to answer exits 1 and
+  leaves the target byte-identical.
+
+- Selected journal artifacts move between paired replicas as a versioned
+  bundle. `arc journal export FILE... --output FILE` carries each body, the
+  events recorded about it, and the artifacts it references by filename;
+  `arc journal import FILE [--dry-run]` files a bundle all-or-nothing and
+  records a receipt naming the source replica and bundle digest, so
+  importing
+  it twice changes nothing.
+
+- A [contribution] history policy makes integrate record a change ready to
+  send instead of merging it, refusing merge commits and, under squash,
+  more than one commit; arc squash makes that single commit as a new
+  patchset with its own gates and verdict.
+
+- Operators record decisions made outside arc with arc external verdict:
+  the decider, an opaque source reference, and the exact revision. An
+  external approval gates only that revision, never alone on a dangerous
+  path; a change request carries findings; a rejection of the head closes
+  the change.
+
+- Combine repository policy with a local operator file in the Git common
+  directory so contributions remain free of operator configuration. Report
+  each rule's source and refuse conflicting gate commands.
+
+- Pair independent stores under a logical project identity and move
+  integration authority through imported offers; refuse contested live
+  claims and keep foreign checkout paths local.
+
+- `arc snapshot` and `arc done` accept `--journal-ref <file>` links to
+  journal artifacts that framed the work, recorded as filename plus body
+  digest read at record time and refused when the name resolves to no
+  artifact, and `--thread <scheme:id>` for an opaque external thread
+  reference. `arc show`, `arc log`, and `arc status --json` render them,
+  bundles carry them, and `arc journal inventory` names the patchsets that
+  cite an artifact. Arc records identifiers only, never transcript text.
+
+- Gate declarations may name an `environment` probe whose stdout identifies
+  the environment a gate's evidence applies to. `arc verify` records a
+  digest of a successful, non-empty probe run beside the evidence, and
+  readiness counts that evidence only where the same probe yields the same
+  identity; a receipt from another environment is reported inapplicable,
+  naming both identities, and a receipt with no identity is reported
+  unknown. A probe that fails, prints nothing, or overruns its bound leaves
+  the gate's receipts not-green and names the failure. `arc verify
+  --attest` names the identity with `--environment` for a run arc did not
+  observe. A gate with no probe takes evidence from any environment.
+
+- `arc instructions git` prints `docs/contribution-trailers.md`, the
+  canonical `arc-contribution-trailers/1` specification: `Planned-by`,
+  `Implemented-by`, `Reviewed-by`, and `Orchestrated-by` name material
+  contributions in agent `harness:model[#effort]` or human `Name <email>`
+  form, one line per role and identity, with canonical casing and order,
+  retained unknown and legacy `Assisted-by` values, and the rule that
+  importing these strings never grants approval or discharges debt. It runs
+  outside any repository with no configuration, ledger, journal, identity,
+  or network, and embeds the page at build time so there is one copy. `arc
+  instructions git --check <file>` distinguishes a malformed role value
+  (exit 1) from a key outside the convention and never rewrites the
+  message. The `Review-deferred:` marker is deliberately not part of
+  version 1.
+
+- Worktree accounting names every open change a path holds, attributes the
+  size to the path once, and for a change whose branch is not the one
+  checked out there prints the same `git -C <path> checkout <branch>`
+  command `arc verify` names, so a stacked series through one checkout is
+  reported rather than hidden. `arc doctor`'s usage advice names the same
+  owners, and its advice codes and problems are unchanged. `arc-catchup`
+  moves to 9.
+
+- `arc inbox` and `arc catchup` report the branches and worktrees no open
+  change and no active fork owns: local branches split into unmerged work
+  and merged cleanup candidates, and registered checkouts, each with its
+  age, distance from the integration target, holding worktree, dirty and
+  untracked file counts, and the action that gives it an owner (`arc begin
+  <slug> --adopt <branch>`, `arc fork adopt <slug> --branch <branch>`, or
+  `git branch -d <merged ref>`). The scan reads refs, `git worktree list`,
+  and index stat data only — no tree is walked and no file content is read.
+  `arc-inbox` moves to 10 and `arc-catchup` to 8.
+
+- `arc workspace inventory [--storage hot|archived|all]` reconciles every
+  registered project's stores: each artifact is a row keyed by project and
+  filename, carrying the store it sits in, the resolution the events record
+  (absent when none does), the transition successor that superseded it, its
+  promotions, and an explanation — `present`, `terminal`, `archived`, or
+  `superseded`. Nothing is classified from a missing row alone, so a
+  completed item and a shelved one are distinguished and a legacy
+  artifact's unrecorded resolution stays unknown. It shares the workspace
+  scope and collection manifest, exits 16 on a partial collection, and is
+  versioned `arc-workspace-inventory/1`.
+
+- `arc workspace backlog` carries a `collection` manifest: how many
+  registered projects were discovered, selected, skipped by scope, observed
+  empty, observed with facts, and failed, with one entry per failed
+  component (an unreachable anchor, ledger, change observation, journal, or
+  fork inventory). A failed component no longer aborts the collection or
+  reads as emptiness: the project keeps the facts that were read, names its
+  failure, and the command exits 16 to say the report is partial.
+  `arc-workspace-backlog` moves to 18.
+
+- `arc workspace backlog` carries every open change per project with the
+  predicate buckets it satisfies — held, iterating, changes-requested,
+  dependency-blocked, stalled, ready-to-integrate, and unclassified — plus
+  the per-kind debt split and outstanding round deferrals, observed from
+  each project's own checkout; a project whose only fact is a held change
+  or an uncollected deferral stays on the report. `arc workspace inbox`
+  takes the same `--under`/`--here`/`--global` scope as the backlog and
+  observes each project from its own anchor rather than from recorded heads
+  under default policy. `arc-workspace-backlog` moves to 17.
+
+- A plan whose promotions have all closed (integrated or abandoned) reads
+  `promotions: closed` in `journal open`, `journal catchup`, and `arc
+  catchup` while staying live and listed; an untouched plan and one with
+  work still open keep the ordinary row. `integrate` and `close` print the
+  `arc journal consume` command for a `journal_ref` plan whose last open
+  promotion they just closed, and nothing is consumed automatically.
+  `arc-catchup` moves to 7, `arc-journal-catchup` to 8,
+  `arc-journal-inventory` to 4, and `arc-workspace-backlog` to 15 for the
+  added row state.
+
+- `arc journal reattribute <file>
+  --set-actor/--set-harness/--set-session/--set-model [--dry-run]` repairs
+  one artifact's recorded creation authorship. It changes only the named
+  fields, validates the whole log, retains `events.jsonl.bak`, and
+  publishes by fsync and rename. Repair and all event appends share a write
+  lock so successful concurrent appends survive replacement. Other event
+  kinds and delegated creation records are refused; dry-run reports the
+  selected record and other references without changing history.
+
+- `arc journal suggest <file> --question <id> --option <opt> --body-file -`
+  records a typed suggestion: the suggesting identity and the reason, shown
+  beside the question in `journal questions` and `journal discussion` as
+  `suggested: <option> by <identity>`. A suggestion never settles a
+  question and never counts toward the stance tally, and an `answer` that
+  names a different option warns that it departed from the standing
+  suggestions. A suggestion naming an option the question never offered, or
+  a question already answered, is refused. `journal questions --json` moves
+  to `arc-journal-questions/3` and `journal discussion --json` to
+  `journal-discussion/4` for the added `suggestions`.
+
+- `arc journal` read-only commands run from inside the project's journal
+  directory: the directory's binding names the project, and the command
+  answers exactly as it would from that checkout, `journal dir --explain`
+  included. A journal write from there refuses and names the checkout to
+  run from, and a journal directory that records no project says so instead
+  of listing the resolution sources it tried.
+
+- Detected identity is corroborated against the harness's own session store
+  and reported: `arc env` says whether the store holds the session, every
+  event records the verdict as `session_resolution` beside `session`, and
+  an id no store holds is uncorroborated rather than left to be inferred
+  from an absent model. Claude session history resolves under
+  `CLAUDE_CONFIG_DIR`, and when several project directories hold the
+  session the most recently modified recording answers, with equal
+  timestamps falling to path order.
+
+- `arc begin <slug> --from-fork <fork>` promotes fork work onto an ordinary
+  change: its own branch from the integration target with the fork's
+  commits
+  replayed onto it, and a recorded link naming the fork and the source
+  base,
+  head, and tree. The link grants no review credit, the fork keeps its
+  branch,
+  worktree, and marker, and `arc resume` lists the artifacts filed under
+  the
+  fork's topic.
+
 ### Changed
 
-- Use the description "Persistent context and guarded workflow state over
-  plain Git for agentic coding arcs." in package and CLI metadata for the
-  next crate release. Keep claimed-row help beside journal open, and retain
-  healthy workspace list rows when another project cannot be read.
+- arc builds its session reads on `agent-tapes-core` from tapes' Git
+  repository at a pinned revision, so a clean clone builds with no machine
+  configuration. The package is not published to crates.io (`publish =
+  false`).
+
+- Read harness session recordings through the linked tapes library instead
+  of arc's own per-harness store readers and a `tapes` subprocess. `arc
+  env` model detection and `arc rescue --transcript` keep their output
+  shapes, and a session id resolves by exact match rather than substring.
+
+- `arc export --since <checksum>` ships only the events after a prefix the
+  receiving store already holds (`arc-bundle/3`), so a long exchange stops
+  re-sending history it has already delivered; a suffix over a different or
+  unheld prefix refuses with nothing written.
+
+- Package and CLI metadata describe arc as "Persistent context and guarded
+  workflow state over plain Git for agentic coding arcs." `journal open`
+  keeps the help for claimed rows, and `workspace list` keeps the healthy
+  rows
+  when another project cannot be read.
+
+- `arc workspace backlog` ranks projects by the fact `--rank-by` names —
+  `blocking` (verdicts owed plus decisions waiting on a person) by default,
+  or `availability` (primary work ready to pick up) or `coverage` (review
+  obligations owed on shipped work). Every project row carries those three
+  as separate fields, so a completed project holding routine coverage debt
+  no longer ranks as blocked on a decision, and both the JSON `ordering`
+  object and the text report state the basis used. `arc-workspace-backlog`
+  moves to 16.
+
+- `journal checkpoint` treats a claim's later checkpoints as replacing its
+  earlier ones, so ordinary sequential progress leaves one current
+  continuation without a `--supersedes` edge, and it follows `--supersedes`
+  across claims, so a takeover converges the tip an earlier identity left.
+  `--supersedes` repeats in one checkpoint, converging several ended claims
+  at once; the event carries the extra targets as an optional
+  `supersedes_checkpoints` list beside the first, which readers that
+  predate the field still follow. `journal doctor` reports
+  `contested-checkpoint-tip` only when tips remain across claims.
+  `arc-journal-inventory` moves to 3, `arc-journal-catchup` to 7, and
+  `arc-workspace-backlog` to 14.
+
+- Identity: with no --actor or ARC_ACTOR and a known harness and session,
+  events record the actor as <harness>:<session> with actor_source
+  "derived" and keep git user.name as "operator". A derived actor is
+  assumed: require_declared_actor refuses it and it cannot be the
+  independent party to an approval.
+
+### Removed
+
+- Session identity no longer records `child_session`, and `arc env` no
+  longer reports it. `CLAUDE_CODE_CHILD_SESSION` is set in the tool shells
+  of an ordinary lead Claude Code session, not only a subagent's, so the
+  mark named no parentage: it was true for leads and subagents alike. Store
+  corroboration (`session_resolution`) and `CLAUDE_CONFIG_DIR` resolution
+  are unchanged.
 
 ### Fixed
 
+- `arc integrate`, `check`, `verify`, and `status` judge a change by the
+  gate and policy declarations committed on its target branch, wherever the
+  command is run. A change that deletes or edits a gate in
+  `.arc/gates.toml`, or loosens `.arc/policy.toml`, no longer integrates
+  under its own rules from its worktree; it still owes the gates its own
+  branch adds. `arc status` reports where the checkout, the change, and the
+  target disagree (`declaration_notes`, `arc-status/26`).
+
+- An approval now survives a recorded history rewrite only when the
+  successor differs from the approved head in nothing but its signature. A
+  map naming a different tree, a reworded message, a changed author or a
+  commit arc could not compare leaves the approval stale in `arc status`
+  and `arc check`. `arc rewrite sign` keeps approvals; `arc rewrite
+  trailers` does not. Rewrites recorded before this judgement was stored,
+  and bundles from other repositories, verify nothing until re-recorded.
+
+- `arc changelog --write` fills an `[Unreleased]` block that ends the file,
+  so a project that has never released gets its first section written. A
+  missing target, or one with no `## [Unreleased]` heading, writes nothing,
+  names the file and the reason on stderr, and exits 1 instead of printing
+  the projection as if it had written.
+
+- Workspace reports record failed departure reads in the collection
+  manifest, mark affected departures unobserved, and exit 16.
+
+- Arc requires an exact canonical session ID before attributing a model or
+  reading turns, and reports ambiguous or unreadable rescue lookups with a
+  cause and reason.
+
+- Keep local review refusals blocking beside external approvals; display
+  gate environment probes in policy output; advance empty store formats
+  only when required events are recorded; restore tracked state after
+  failed or hook-modified squash commits, preserving obstructing hook
+  output in a reported recovery directory.
+
+- Require recipient confirmation before replica authority returns to an
+  offerer; reclaim requests leave the origin blocked, select the current
+  acquired grant despite older forwarded requests, and refuse legacy
+  unilateral reclaim events.
+
+- Read Pi's live model and reasoning level while `PI_SESSION_ID` is the
+  acting session, and corroborate a session from the live recording file
+  outside the configured store. Withhold a Claude session's model while it
+  has an unfinished subagent recording, pair a detected model only with the
+  session it answers for, and unset every identity field `arc env` cannot
+  establish so evaluating it leaves no stale value behind.
+
+- Detect the harness that owns the process by its ancestry rather than by a
+  fixed variable order, so a pi or codex run inside another harness's tool
+  shell records its own session id. Where several harnesses' variables are
+  present and the ancestry names no owner, `arc env` reports the ambiguity
+  and leaves harness, session, and model unset.
+
+- `arc done` snapshots and prints the check state when no gate is declared
+  for
+  the change's profile, saying that no gate was run, and every view names
+  the
+  missing declaration instead of reporting gates passing.
+
+- `integrate` merges in the change's own checkout when `begin
+  --no-worktree`
+  left the target on no checkout, checking the target out there and leaving
+  the checkout on it as it stood before begin; a dry run says so.
+
+- `integrate` closes a change whose approved head the target already
+  contains,
+  including a verification-only slice sharing its predecessor's head, at
+  the
+  target revision that holds it and without fabricating a merge commit; the
+  changes behind it integrate normally.
+
+- `integrate` refuses a target checkout only where the merge could change
+  or
+  lose bytes there: tracked modifications still block, untracked and
+  ignored
+  paths the merge does not write are left in place and named, and a path
+  the
+  merge would write that is already untracked or ignored is refused by
+  name.
+
 - `arc env` appends the Claude turn's effort to `ARC_MODEL`, and no longer
   reports `<synthetic>` as the model when an API error ends the transcript.
+
+- A ledger whose changes directory cannot be read is an error, never an
+  empty ledger: `workspace backlog` names it and exits 16, and `workspace
+  inbox` warns and skips that project instead of aborting. An empty,
+  never-bound journal at a vanished path counts as empty rather than
+  failed.
+
+- `arc journal latest` breaks a tie inside one timestamp second by the
+  recorded transition relation — the terminal successor answers — and then
+  by the order the event log filed the artifacts; a numeric filename suffix
+  is never an ordering of its own. A plan transitioned to `later` and back
+  to `plan` within a second now resolves to the successor that carries the
+  current metadata instead of the retired original. Hot storage still wins
+  over the cold archive and distinct-second ordering is unchanged.
+
+- `arc rescue --transcript` reads the claimed session's latest operator
+  turns through both the `tapes` CLI and arc's own readers under one window
+  — the newest 4 MiB of the recording file — so `--tail N` counts the same
+  turns whichever reader answers. The rendering names the reader that
+  supplied the turns and the readers that declined, and a read that stopped
+  before the start of the recording states the window it rested on: the
+  bytes it skipped, or the `tapes show --full` command that reaches the
+  unread text. An empty answer carries a `cause` field naming an unknown
+  identity, an absent recording, or text outside the read window, so a
+  `count: 0` consumer separates them without parsing prose.
+
+- `arc fork adopt <slug> --branch <branch>` records any local branch as a
+  fork
+  and keeps the name it carries, and refuses a branch an open change
+  records,
+  naming the change rather than leaving it unintegrable. A fork's listing
+  reports
+  when it opened, its head, the uncommitted and untracked counts in its
+  checkout,
+  and the changes promoted from it; adoption reports the checkout Git
+  records for
+  the branch, the same one the listing names. The refusal for a change on a
+  fork
+  branch names the branch and its fork, not the directory the command runs
+  in.
+
+- A change whose branch is a fork's is refused by `arc integrate` and `arc
+  check`
+  from every directory, with a typed `fork-branch` blocker and exit code
+  15, and
+  `begin` refuses to open one. The fork boundary previously read the
+  caller's
+  current directory, so a change on a fork branch integrated from the
+  project
+  root and an ordinary change was refused from inside a fork worktree.
 
 ## [2026.9.9] - 2026-09-09
 
