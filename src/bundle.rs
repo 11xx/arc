@@ -8,7 +8,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
-pub const BUNDLE_SCHEMA: &str = "arc-bundle/4";
+pub const BUNDLE_SCHEMA: &str = "arc-bundle/5";
 
 /// The prefix a delta bundle extends: the checksum of the exported history
 /// before its suffix, and how many events that prefix covers. A bundle's

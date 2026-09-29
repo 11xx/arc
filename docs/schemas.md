@@ -68,13 +68,13 @@ apply and the field is omitted.
 
 | Schema | Surface | Stability |
 | --- | --- | --- |
-| `arc-bundle/4` | `arc export` / `arc import` — one change's ledger, complete or as the suffix after a prefix checksum the receiver holds, as a deterministic JSON file | commitment |
+| `arc-bundle/5` | `arc export` / `arc import` — one change's ledger, complete or as the suffix after a prefix checksum the receiver holds, as a deterministic JSON file | commitment |
 | `arc-replica-event/2` | One identity or authority event, including return request and confirmation, carried by an `arc-replica-bundle/2` file | commitment |
 | `arc-replica-bundle/2` | `arc replica export` / `arc replica import` — a logical project's explicit replica identities and authority events | commitment |
 | `arc-replica-import/2` | Local receipt batch naming the source replica and imported bundle digest | internal |
 | `arc-journal-bundle/1` | `arc journal export` / `arc journal import` — selected journal artifacts with their bodies, recorded events, body digests, and the reference closure | commitment |
 | `arc-journal-exchange-import/1` | Local receipt naming the source and receiving replicas and the imported journal bundle digest | internal |
-| `store-format/5` | `.git/arc/config.json` and the change ledger, including external verdicts, ready-to-send records, and unresolved detected-session identity | internal |
+| `store-format/6` | `.git/arc/config.json` and the change ledger, including external verdicts, ready-to-send records, unresolved detected-session identity, and the signature-only judgement on recorded history rewrites | internal |
 | `journal-events/1` | `events.jsonl`, streamed by `arc journal events` — the canonical agent-written event log | commitment |
 | `arc-journal-spool/1` | `.arc/outbox/<ts>-<kind>-<topic>.json` — a journal write parked for later promotion | commitment |
 | `arc-sandbox/2` | `.arc-sandbox.json` — the marker naming a prefix as arc's to remove | internal |
@@ -101,3 +101,7 @@ event raises its format barrier only to the version that event requires.
 Store format 5 admits an unresolved session resolution. A store is stamped
 format 5 when an event carries that value, because an older reader cannot
 attribute it without confusing uncertainty with absence.
+Store format 6 admits the `signature_only` judgement on a recorded history
+rewrite. A store is stamped format 6 when a rewrite is recorded or imported,
+because an older reader would carry an approval across every rewrite,
+including one that changed content.
