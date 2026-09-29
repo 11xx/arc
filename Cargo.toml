@@ -1,6 +1,6 @@
 [package]
 name = "arc-ledger"
-version = "2026.9.9"
+version = "2026.9.29"
 edition = "2021"
 description = "Persistent context and guarded workflow state over plain Git for agentic coding arcs."
 license = "Unlicense"
