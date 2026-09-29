@@ -59,9 +59,10 @@ that every exit code and every refusal or guarantee sentence in `docs/`
 appears in the guide or in a command's help.
 
 **The semantic model is independent of the implementation.** A pure Haskell
-model of arc's authorization lives in its own repository, `arc-model`, beside
-this one. It characterizes the arc revision its `comparisonRevision` names
-rather than translating the Rust implementation, and nothing in this build,
+model of arc's authorization lives in its own repository,
+[`arc-model`](https://github.com/11xx/arc-model), beside this one. It
+characterizes the arc revision its `comparisonRevision` names rather than
+translating the Rust implementation, and nothing in this build,
 its gates, or its releases reads it, so no arc change needs a Haskell
 toolchain. Its differential replays generated histories through an installed
 `arc` binary and compares `arc check --json` with the model's grounds; its
