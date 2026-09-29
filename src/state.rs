@@ -1205,29 +1205,35 @@ impl ChangeState {
         self.closure.is_some()
     }
 
-    /// Latest verification evidence per gate name at an exact revision.
-    pub fn gate_evidence_at(&self, gate: &str, revision: &str) -> Option<&VerificationEntry> {
+    /// Latest matching verification evidence per gate name at an exact revision.
+    pub fn gate_evidence_at_matching(
+        &self,
+        gate: &str,
+        revision: &str,
+        matches: impl Fn(&VerificationEntry) -> bool,
+    ) -> Option<&VerificationEntry> {
         self.verifications
             .iter()
-            .rfind(|v| v.gate.as_deref() == Some(gate) && v.revision == revision)
+            .rfind(|v| v.gate.as_deref() == Some(gate) && v.revision == revision && matches(v))
     }
 
-    /// Latest verification evidence per gate name at an exact tree.
+    /// Latest matching verification evidence per gate name at an exact tree.
     ///
     /// A gate holds for content, so the tree is the key wherever what ships is
     /// the content of no commit either side made. Evidence written before arc
     /// recorded the tree names only a revision; `resolve` turns that revision
     /// into the tree it points at, and a revision resolving to nothing matches
     /// no tree, which is unknown rather than a match.
-    pub fn gate_evidence_at_tree(
+    pub fn gate_evidence_at_tree_matching(
         &self,
         gate: &str,
         tree: &str,
         resolve: &dyn Fn(&str) -> Option<String>,
+        matches: impl Fn(&VerificationEntry) -> bool,
     ) -> Option<&VerificationEntry> {
-        self.verifications
-            .iter()
-            .rfind(|v| v.gate.as_deref() == Some(gate) && v.describes_tree(tree, resolve))
+        self.verifications.iter().rfind(|v| {
+            v.gate.as_deref() == Some(gate) && v.describes_tree(tree, resolve) && matches(v)
+        })
     }
 
     /// The latest passing evidence that showed this gate able to fail at this

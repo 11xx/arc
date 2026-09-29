@@ -1345,36 +1345,53 @@ fn build_report(
     // probe under the same bound share one run.
     let mut probe_runs: BTreeMap<(String, Option<u64>), crate::gates::ProbeRun> = BTreeMap::new();
     for (name, gate) in gates.required_for(&state.profile) {
-        let evidence = match (&lookup_tree, current_head.as_deref()) {
-            (Some(tree), _) => state.gate_evidence_at_tree(name, tree, &resolve_tree),
-            (None, Some(head)) => state.gate_evidence_at(name, head),
+        let evidence_at = |matches: &dyn Fn(&state::VerificationEntry) -> bool| match (
+            &lookup_tree,
+            current_head.as_deref(),
+        ) {
+            (Some(tree), _) => {
+                state.gate_evidence_at_tree_matching(name, tree, &resolve_tree, matches)
+            }
+            (None, Some(head)) => state.gate_evidence_at_matching(name, head, matches),
             (None, None) => None,
         };
+        let newest = evidence_at(&|_| true);
+        let (current, probe_failed) = match (gate.environment.as_deref(), probe_cwd) {
+            (Some(probe), Some(cwd)) if evidence_at(&|e| e.environment.is_some()).is_some() => {
+                let key = (probe.to_owned(), gate.timeout);
+                if !probe_runs.contains_key(&key) {
+                    probe_runs.insert(
+                        key.clone(),
+                        crate::gates::environment_probe(cwd, probe, gate.timeout)?,
+                    );
+                }
+                let run = probe_runs.get(&key).expect("probe run just cached");
+                (
+                    run.identity.clone(),
+                    run.failure.as_ref().map(|failure| failure.describe()),
+                )
+            }
+            _ => (None, None),
+        };
+        let evidence = evidence_at(&|e| {
+            matches_declaration(e, gate)
+                && if probe_cwd.is_some() {
+                    matches_environment(e, gate, current.as_deref())
+                } else {
+                    gate.environment.is_none() || e.environment.is_some()
+                }
+        })
+        .or(newest);
         // Applicability is asked where the checkout being evaluated exists. A
         // ledger replay observes no environment and takes a recorded identity
         // at its word; only a live report can say whether the probe answers
         // here.
         let environment = match gate.environment.as_deref() {
             None => None,
-            Some(probe) => {
+            Some(_) => {
                 let recorded = evidence
                     .and_then(|e| e.environment.as_ref())
                     .map(|environment| environment.identity.clone());
-                let (current, probe_failed) = match probe_cwd {
-                    Some(cwd) if recorded.is_some() => {
-                        let key = (probe.to_owned(), gate.timeout);
-                        if !probe_runs.contains_key(&key) {
-                            let run = crate::gates::environment_probe(cwd, probe, gate.timeout)?;
-                            probe_runs.insert(key.clone(), run);
-                        }
-                        let run = probe_runs.get(&key).expect("probe run just cached");
-                        (
-                            run.identity.clone(),
-                            run.failure.as_ref().map(|failure| failure.describe()),
-                        )
-                    }
-                    _ => (None, None),
-                };
                 let inapplicable = current
                     .as_deref()
                     .zip(recorded.as_deref())

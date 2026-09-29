@@ -1009,8 +1009,10 @@ RULES THAT CHANGE WHAT YOU DO
     environment identity satisfies only gates that declare no probe, and a
     gate that declares none takes evidence from any environment. A probe is
     bounded by the gate's declared timeout, or thirty seconds when the gate
-    declares none. An attested run happened where arc observes nothing, so
-    `--attest` takes the identity with `--environment <IDENTITY>`.
+    declares none. The newest run at the evaluated tree under the declared
+    gate and applicable environment decides; other runs cannot hide it. An
+    attested run happened where arc observes nothing, so `--attest` takes the
+    identity with `--environment <IDENTITY>`.
   - A gate that passed is not evidence that it could have failed. Watch it
     fail first, then record the pass with `--falsified-by <failing-event>
     --predicted "<why it should fail>"`; the gate line then reads
