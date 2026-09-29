@@ -360,7 +360,7 @@ fn prompt_is_empty_outside_change_worktree() {
 fn env_detects_claude_model_from_transcript() {
     let repo = Repo::new();
     let session = "11111111-2222-3333-4444-555555555555";
-    let project = repo.home.join(".claude/projects/-home-lobo");
+    let project = repo.home.join(".claude/projects/-home-user");
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join(format!("{session}.jsonl")),
@@ -391,7 +391,7 @@ fn env_detects_claude_model_from_transcript() {
 fn env_detects_claude_effort_and_skips_synthetic_entries() {
     let repo = Repo::new();
     let session = "11111111-2222-3333-4444-555555555555";
-    let project = repo.home.join(".claude/projects/-home-lobo");
+    let project = repo.home.join(".claude/projects/-home-user");
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join(format!("{session}.jsonl")),
@@ -425,7 +425,7 @@ fn env_detects_claude_effort_and_skips_synthetic_entries() {
 fn env_falls_back_to_the_claude_session_effort() {
     let repo = Repo::new();
     let session = "11111111-2222-3333-4444-555555555555";
-    let project = repo.home.join(".claude/projects/-home-lobo");
+    let project = repo.home.join(".claude/projects/-home-user");
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join(format!("{session}.jsonl")),
@@ -459,7 +459,7 @@ fn env_resolves_the_claude_store_under_its_config_dir_override() {
     let repo = Repo::new();
     let session = "22222222-3333-4444-5555-666666666666";
     let relocated = repo.home.join("relocated-claude");
-    let project = relocated.join("projects/-home-lobo");
+    let project = relocated.join("projects/-home-user");
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join(format!("{session}.jsonl")),
@@ -469,7 +469,7 @@ fn env_resolves_the_claude_store_under_its_config_dir_override() {
     // The default store holds the same session under a different model, so a
     // store consulted in addition to the override would answer with it: the
     // override replaces the configuration directory rather than extending it.
-    let default = repo.home.join(".claude/projects/-home-lobo");
+    let default = repo.home.join(".claude/projects/-home-user");
     fs::create_dir_all(&default).unwrap();
     fs::write(
         default.join(format!("{session}.jsonl")),
@@ -544,7 +544,7 @@ fn set_modified(path: &Path, seconds: u64) {
 fn env_detects_claude_code_session_variable() {
     let repo = Repo::new();
     let session = "66666666-7777-8888-9999-000000000000";
-    let project = repo.home.join(".claude/projects/-home-lobo");
+    let project = repo.home.join(".claude/projects/-home-user");
     fs::create_dir_all(&project).unwrap();
     fs::write(
         project.join(format!("{session}.jsonl")),
