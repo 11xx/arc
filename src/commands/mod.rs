@@ -339,7 +339,13 @@ impl Ctx {
         if self.actor_source.declared() || self.on_behalf_of.is_some() {
             return Ok(());
         }
-        let policy = self.declarations(state)?.policy;
+        let declarations = crate::declarations::for_change(&self.cwd, state)?;
+        // An unreadable target is refused by readiness, with the blocker that
+        // names it, rather than here as an unexplained error.
+        if declarations.target_unreadable {
+            return Ok(());
+        }
+        let policy = declarations.policy;
         if !policy.policy.require_declared_actor {
             return Ok(());
         }
@@ -479,27 +485,36 @@ impl Ctx {
     }
 
     /// The declarations this change is judged by, wherever this command runs.
+    ///
+    /// Refuses when the target branch cannot be resolved: nothing then says
+    /// what the change owes, and a run or a merge must not proceed on a guess.
     pub(crate) fn declarations(
         &self,
         state: &ChangeState,
     ) -> Result<crate::declarations::Declarations> {
-        crate::declarations::for_change(&self.cwd, state)
+        let declarations = crate::declarations::for_change(&self.cwd, state)?;
+        if declarations.target_unreadable {
+            bail!(
+                "target branch {:?} of {} cannot be resolved, so the gate and policy \
+                 declarations the change is judged by could not be read",
+                state.target_branch,
+                state.change_id
+            );
+        }
+        Ok(declarations)
     }
 
     pub(crate) fn report(&self, store: &Store, state: &ChangeState) -> Result<StatusReport> {
-        let declarations = self.declarations(state)?;
+        let declarations = crate::declarations::for_change(&self.cwd, state)?;
         let states = self.load_all_states(store)?;
-        let mut report = status::build(
+        status::build(
             state,
             &self.cwd,
-            &declarations.gates,
-            &declarations.policy,
+            &declarations,
             dependency_status(state, &states),
             changes_blocked_by(&state.change_id, &states),
             fork::fork_slug_for_branch(&self.cwd, &state.branch)?,
-        )?;
-        report.declaration_notes = declarations.notes;
-        Ok(report)
+        )
     }
 
     /// Build a report for a state replayed to a past event: the derived
@@ -509,12 +524,13 @@ impl Ctx {
     /// against the present ledger.
     pub(crate) fn report_as_of(&self, store: &Store, state: &ChangeState) -> Result<StatusReport> {
         let toplevel = gitio::toplevel(&self.cwd)?;
-        let declarations = self.declarations(state)?;
+        let declarations = crate::declarations::for_change(&self.cwd, state)?;
         let states = self.load_all_states(store)?;
         let mut report = status::build_as_of(
             state,
             &declarations.gates,
             &declarations.policy,
+            declarations.target_unreadable,
             dependency_status(state, &states),
             changes_blocked_by(&state.change_id, &states),
             chrono::Utc::now(),
