@@ -584,7 +584,7 @@ fn env_prefers_hand_set_claude_session_over_ambient() {
 #[test]
 fn env_detects_codex_model_and_effort_from_rollout() {
     let repo = Repo::new();
-    let session = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
+    let session = "019f0000-0000-7000-8000-000000000002";
     let codex_home = repo.home.join("custom-codex-state");
     let day = codex_home.join("sessions/2026/07/20");
     fs::create_dir_all(&day).unwrap();
@@ -592,7 +592,7 @@ fn env_detects_codex_model_and_effort_from_rollout() {
         day.join(format!("rollout-2026-07-20T00-00-00-{session}.jsonl")),
         concat!(
             "{\"type\":\"session_meta\",\"timestamp\":\"1\",",
-            "\"payload\":{\"id\":\"019f7890-5c01-7ec1-9240-2eba1613e5d2\"}}\n",
+            "\"payload\":{\"id\":\"019f0000-0000-7000-8000-000000000002\"}}\n",
             "{\"type\":\"turn_context\",\"timestamp\":\"2\",\"payload\":{\"model\":\"gpt-5.5\"}}\n",
             "{\"type\":\"turn_context\",\"timestamp\":\"3\",\"payload\":{\"model\":\"gpt-5.6-sol\",",
             "\"effort\":\"high\"}}\n",
@@ -650,8 +650,8 @@ fn env_requires_exact_codex_identity_not_year_substring() {
 #[test]
 fn env_requires_the_canonical_codex_id_before_using_its_model() {
     let repo = Repo::new();
-    let full = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
-    let prefix = "019f7890";
+    let full = "019f0000-0000-7000-8000-000000000002";
+    let prefix = "019f0000";
     codex_recording(&repo, full, "gpt-fixture");
     let codex_home = repo.home.join("codex-state");
 
@@ -670,7 +670,7 @@ fn env_requires_the_canonical_codex_id_before_using_its_model() {
             .env("CODEX_HOME", &codex_home)
             .env("CODEX_THREAD_ID", prefix),
     );
-    assert!(partial.contains("ARC_SESSION='019f7890'"), "{partial}");
+    assert!(partial.contains("ARC_SESSION='019f0000'"), "{partial}");
     assert!(partial.contains("unset ARC_MODEL"), "{partial}");
     assert!(partial.contains("session uncorroborated"), "{partial}");
     assert!(!partial.contains("gpt-fixture"), "{partial}");
@@ -679,11 +679,11 @@ fn env_requires_the_canonical_codex_id_before_using_its_model() {
 #[test]
 fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
     let repo = Repo::new();
-    let prefix = "019f7890";
-    codex_recording(&repo, "019f7890-5c01-7ec1-9240-2eba1613e5d2", "first-model");
+    let prefix = "019f0000";
+    codex_recording(&repo, "019f0000-0000-7000-8000-000000000002", "first-model");
     codex_recording(
         &repo,
-        "019f7890-1234-4444-8888-111111111111",
+        "019f0000-1234-4444-8888-111111111111",
         "second-model",
     );
     let codex_home = repo.home.join("codex-state");
@@ -745,7 +745,7 @@ fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
 #[test]
 fn unreadable_codex_recording_does_not_corroborate_a_model() {
     let repo = Repo::new();
-    let session = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
+    let session = "019f0000-0000-7000-8000-000000000002";
     let path = codex_recording(&repo, session, "gpt-fixture");
     fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
     let output = stdout(
@@ -812,13 +812,13 @@ fn env_does_not_use_an_opencode_listing_model_when_the_read_fails() {
 #[test]
 fn env_detects_pi_model_and_thinking_level_from_session_store() {
     let repo = Repo::new();
-    let session = "019f7520-3278-7736-a3d9-2442c7a51fa0";
+    let session = "019f0000-0000-7000-8000-000000000001";
     let sessions = repo.home.join("pi-sessions/project");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
         sessions.join(format!("2026-07-18T12-07-52Z_{session}.jsonl")),
         concat!(
-            "{\"type\":\"session\",\"version\":3,\"id\":\"019f7520-3278-7736-a3d9-2442c7a51fa0\",",
+            "{\"type\":\"session\",\"version\":3,\"id\":\"019f0000-0000-7000-8000-000000000001\",",
             "\"timestamp\":\"2026-07-18T12:07:52Z\",\"cwd\":\"/fixture\"}\n",
             "{\"type\":\"model_change\",\"id\":\"model-1\",\"parentId\":null,",
             "\"timestamp\":\"2026-07-18T12:07:53Z\",\"provider\":\"openai-codex\",",
@@ -1014,7 +1014,7 @@ fn env_reports_the_nested_harness_that_owns_the_process() {
 fn nested_detection_prefers_the_owner_over_a_corroborated_outer_session() {
     let repo = Repo::new();
     let outer_session = "11111111-2222-3333-4444-555555555555";
-    let inner_session = "019f7520-3278-7736-a3d9-2442c7a51fa0";
+    let inner_session = "019f0000-0000-7000-8000-000000000001";
     let project = repo.home.join(".claude/projects/-test-repo");
     fs::create_dir_all(&project).unwrap();
     fs::write(
@@ -1027,7 +1027,7 @@ fn nested_detection_prefers_the_owner_over_a_corroborated_outer_session() {
     fs::write(
         sessions.join(format!("2026-07-18T12-07-52Z_{inner_session}.jsonl")),
         concat!(
-            "{\"type\":\"session\",\"version\":3,\"id\":\"019f7520-3278-7736-a3d9-2442c7a51fa0\",",
+            "{\"type\":\"session\",\"version\":3,\"id\":\"019f0000-0000-7000-8000-000000000001\",",
             "\"timestamp\":\"2026-07-18T12:07:52Z\",\"cwd\":\"/fixture\"}\n",
             "{\"type\":\"thinking_level_change\",\"id\":\"thinking-1\",\"parentId\":null,",
             "\"timestamp\":\"2026-07-18T12:07:53Z\",\"thinkingLevel\":\"medium\"}\n",
@@ -1071,13 +1071,13 @@ fn nested_detection_records_the_owning_harness_on_an_undeclared_event() {
     let repo = Repo::new();
     enable_identity_detection(&repo);
     let outer_session = "22222222-3333-4444-5555-666666666666";
-    let inner_session = "019f7520-3278-7736-a3d9-2442c7a51fa0";
+    let inner_session = "019f0000-0000-7000-8000-000000000001";
     let sessions = repo.home.join("pi-sessions/project");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
         sessions.join(format!("2026-07-18T12-07-52Z_{inner_session}.jsonl")),
         concat!(
-            "{\"type\":\"session\",\"version\":3,\"id\":\"019f7520-3278-7736-a3d9-2442c7a51fa0\",",
+            "{\"type\":\"session\",\"version\":3,\"id\":\"019f0000-0000-7000-8000-000000000001\",",
             "\"timestamp\":\"2026-07-18T12:07:52Z\",\"cwd\":\"/fixture\"}\n",
             "{\"type\":\"message\",\"id\":\"assistant-1\",\"parentId\":null,",
             "\"timestamp\":\"2026-07-18T12:07:53Z\",\"message\":{\"role\":\"assistant\",",
@@ -1240,7 +1240,7 @@ fn claude_with_subagent(repo: &Repo, session: &str, agent: &str, completed: bool
 #[test]
 fn env_reports_the_live_pi_values_for_the_acting_session() {
     let repo = Repo::new();
-    let session = "019f7520-3278-7736-a3d9-2442c7a51fa0";
+    let session = "019f0000-0000-7000-8000-000000000001";
     pi_recording(&repo, session, "gpt-5.6-recorded", "low");
 
     repo.arc(&repo.root)
@@ -1281,7 +1281,7 @@ fn env_reports_the_live_pi_values_for_the_acting_session() {
 #[test]
 fn env_corroborates_a_pi_session_recorded_at_the_live_file() {
     let repo = Repo::new();
-    let session = "019f7520-3278-7736-a3d9-2442c7a51fa0";
+    let session = "019f0000-0000-7000-8000-000000000001";
     let recorded = pi_recording(&repo, session, "gpt-5.6-recorded", "medium");
     let elsewhere = repo.home.join("elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
@@ -1436,14 +1436,14 @@ fn env_unsets_the_identity_fields_it_cannot_establish() {
 fn ambient_fill_pairs_a_model_only_with_the_session_it_answers_for() {
     let repo = Repo::new();
     enable_identity_detection(&repo);
-    let detected = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
+    let detected = "019f0000-0000-7000-8000-000000000002";
     let day = repo.home.join(".codex/sessions/2026/07/24");
     fs::create_dir_all(&day).unwrap();
     fs::write(
         day.join(format!("rollout-2026-07-24T00-00-00-{detected}.jsonl")),
         concat!(
             "{\"type\":\"session_meta\",\"timestamp\":\"1\",",
-            "\"payload\":{\"id\":\"019f7890-5c01-7ec1-9240-2eba1613e5d2\"}}\n",
+            "\"payload\":{\"id\":\"019f0000-0000-7000-8000-000000000002\"}}\n",
             "{\"type\":\"turn_context\",\"timestamp\":\"2\",",
             "\"payload\":{\"model\":\"gpt-5.6-sol\",\"effort\":\"low\"}}\n",
         ),
@@ -1472,13 +1472,13 @@ fn ambient_fill_pairs_a_model_only_with_the_session_it_answers_for() {
 #[test]
 fn env_reports_the_active_pi_branch_s_model() {
     let repo = Repo::new();
-    let session = "019f7520-3278-7736-a3d9-2442c7a51fa0";
+    let session = "019f0000-0000-7000-8000-000000000001";
     let sessions = repo.home.join("pi-sessions/project");
     fs::create_dir_all(&sessions).unwrap();
     fs::write(
         sessions.join(format!("2026-07-18T12-07-52Z_{session}.jsonl")),
         concat!(
-            "{\"type\":\"session\",\"version\":3,\"id\":\"019f7520-3278-7736-a3d9-2442c7a51fa0\",\"timestamp\":\"2026-07-18T12:07:52Z\",\"cwd\":\"/fixture\"}\n",
+            "{\"type\":\"session\",\"version\":3,\"id\":\"019f0000-0000-7000-8000-000000000001\",\"timestamp\":\"2026-07-18T12:07:52Z\",\"cwd\":\"/fixture\"}\n",
             "{\"type\":\"model_change\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"2026-07-18T12:07:53Z\",\"provider\":\"p\",\"modelId\":\"pi-model-a\"}\n",
             "{\"type\":\"thinking_level_change\",\"id\":\"t1\",\"parentId\":\"m1\",\"timestamp\":\"2026-07-18T12:07:54Z\",\"thinkingLevel\":\"low\"}\n",
             "{\"type\":\"message\",\"id\":\"u1\",\"parentId\":\"t1\",\"timestamp\":\"2026-07-18T12:07:55Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"work\"}]}}\n",
@@ -1560,7 +1560,7 @@ fn env_marks_an_unreadable_opencode_recording_unresolved() {
 #[test]
 fn env_does_not_carry_a_codex_effort_across_a_model_change() {
     let repo = Repo::new();
-    let session = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
+    let session = "019f0000-0000-7000-8000-000000000002";
     let codex_home = repo.home.join("codex-state");
     let day = codex_home.join("sessions/2026/07/20");
     fs::create_dir_all(&day).unwrap();
@@ -1568,7 +1568,7 @@ fn env_does_not_carry_a_codex_effort_across_a_model_change() {
         day.join(format!("rollout-2026-07-20T00-00-00-{session}.jsonl")),
         concat!(
             "{\"type\":\"session_meta\",\"timestamp\":\"1\",",
-            "\"payload\":{\"id\":\"019f7890-5c01-7ec1-9240-2eba1613e5d2\"}}\n",
+            "\"payload\":{\"id\":\"019f0000-0000-7000-8000-000000000002\"}}\n",
             "{\"type\":\"turn_context\",\"timestamp\":\"2\",",
             "\"payload\":{\"model\":\"gpt-5.5-a\",\"effort\":\"high\"}}\n",
             "{\"type\":\"turn_context\",\"timestamp\":\"3\",",
@@ -1672,7 +1672,7 @@ fn ambient_identity_detection_is_off_without_config() {
 fn ambient_identity_detection_fills_harness_session_and_model() {
     let repo = Repo::new();
     enable_identity_detection(&repo);
-    let session = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
+    let session = "019f0000-0000-7000-8000-000000000002";
     let day = repo.home.join(".codex/sessions/2026/07/24");
     fs::create_dir_all(&day).unwrap();
     fs::write(
