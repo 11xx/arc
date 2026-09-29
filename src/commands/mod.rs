@@ -115,6 +115,8 @@ pub struct Ctx {
     pub fallback_announced: std::cell::Cell<bool>,
     pub harness: Option<String>,
     pub session: Option<String>,
+    /// Private session link stored in events, never in Git-published text.
+    pub session_link: Option<String>,
     /// What the harness's own store said about `session` when detection
     /// resolved it. `None` when the session was declared or detection did not
     /// run, which is the absence of a lookup rather than a claim about the
@@ -279,6 +281,7 @@ impl Ctx {
             fallback_announced: self.fallback_announced.clone(),
             harness: self.harness.clone(),
             session: self.session.clone(),
+            session_link: self.session_link.clone(),
             session_resolution: self.session_resolution,
             model: self.model.clone(),
             on_behalf_of: self.on_behalf_of.clone(),
@@ -454,6 +457,7 @@ impl Ctx {
             model: self.model.clone(),
             harness: self.harness.clone(),
             session: self.session.clone(),
+            session_link: self.session_link.clone(),
             session_resolution: self.session_resolution,
             created_at,
             payload,

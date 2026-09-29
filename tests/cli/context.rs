@@ -21,20 +21,20 @@ fn opened_event(repo: &Repo, change_id: &str) -> serde_json::Value {
 /// `arc env`'s line for a session the harness's own store backs.
 fn corroborated(harness: &str) -> String {
     format!(
-        "# session corroborated: the {harness} session store resolved a recording for this id\n"
+        "unset ARC_SESSION_LINK\n# session corroborated: the {harness} session store resolved a recording for this id\n"
     )
 }
 
 /// `arc env`'s line for a session id the harness's own store does not hold.
 fn uncorroborated(harness: &str) -> String {
     format!(
-        "# session uncorroborated: the {harness} session store resolved no recording for this id\n"
+        "unset ARC_SESSION_LINK\n# session uncorroborated: the {harness} session store resolved no recording for this id\n"
     )
 }
 
 fn unresolved(harness: &str) -> String {
     format!(
-        "# session unresolved: the {harness} session store could not establish whether this id has a readable recording\n"
+        "unset ARC_SESSION_LINK\n# session unresolved: the {harness} session store could not establish whether this id has a readable recording\n"
     )
 }
 
@@ -108,6 +108,183 @@ fn env_detects_codex_thread_and_prints_exports() {
             "export ARC_HARNESS='codex' ARC_SESSION='thread-123'\nunset ARC_MODEL\n{}",
             uncorroborated("codex")
         ));
+}
+
+#[test]
+fn env_exports_only_a_well_formed_link_for_the_acting_claude_harness() {
+    let repo = Repo::new();
+    for (id, expected) in [
+        ("session_01abc", "https://claude.ai/code/session_01abc"),
+        (
+            "session_a_staging_b",
+            "https://claude-ai.staging.ant.dev/code/session_a_staging_b",
+        ),
+        (
+            "session_a_local_b",
+            "http://localhost:4000/code/session_a_local_b",
+        ),
+    ] {
+        let output = stdout(
+            repo.arc(&repo.root)
+                .arg("env")
+                .env("CLAUDE_CODE_SESSION_ID", "claude-session")
+                .env("CLAUDE_CODE_BRIDGE_SESSION_ID", id),
+        );
+        assert!(
+            output.contains(&format!("export ARC_SESSION_LINK='{expected}'\n")),
+            "{output}"
+        );
+    }
+    for id in [
+        None,
+        Some("session_"),
+        Some("session_abc/other"),
+        Some("wrong_abc"),
+    ] {
+        let mut command = repo.arc(&repo.root);
+        command
+            .arg("env")
+            .env("CLAUDE_CODE_SESSION_ID", "claude-session");
+        if let Some(id) = id {
+            command.env("CLAUDE_CODE_BRIDGE_SESSION_ID", id);
+        }
+        assert!(stdout(&mut command).contains("unset ARC_SESSION_LINK\n"));
+    }
+    let output = stdout(
+        repo.arc(&repo.root)
+            .arg("env")
+            .env("CODEX_THREAD_ID", "codex-session")
+            .env("CLAUDE_CODE_BRIDGE_SESSION_ID", "session_01abc"),
+    );
+    assert!(output.contains("unset ARC_SESSION_LINK\n"), "{output}");
+}
+
+#[test]
+fn session_link_round_trips_in_ledger_and_journal_events_only_when_supplied() {
+    let repo = Repo::new();
+    let link = "https://claude.ai/code/session_fixture123";
+    let linked = opened_change_id(&stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "linked-session"])
+            .env("ARC_SESSION_LINK", link),
+    ));
+    let event = opened_event(&repo, &linked);
+    assert_eq!(event["session_link"], link);
+    assert_eq!(
+        json_stdout(repo.arc(&repo.root).args(["show", &linked, "--json"]))["opened_session_link"],
+        link
+    );
+    let flagged = opened_change_id(&stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "flagged-session", "--session-link", link])
+            .env("ARC_SESSION_LINK", "https://example.invalid/overridden"),
+    ));
+    assert_eq!(opened_event(&repo, &flagged)["session_link"], link);
+
+    let unlinked = opened_change_id(&stdout(
+        repo.arc(&repo.root).args(["begin", "plain-session"]),
+    ));
+    let old_event = opened_event(&repo, &unlinked);
+    assert!(old_event.get("session_link").is_none(), "{old_event}");
+    assert!(
+        json_stdout(repo.arc(&repo.root).args(["show", &unlinked, "--json"]))
+            .get("opened_session_link")
+            .is_none()
+    );
+
+    repo.arc(&repo.root)
+        .args(["journal", "note", "linked-note", "--title", "Linked"])
+        .env("ARC_SESSION_LINK", link)
+        .assert()
+        .success();
+    assert_eq!(recorded_journal_event(&repo)["session_link"], link);
+    repo.arc(&repo.root)
+        .args(["journal", "note", "plain-note", "--title", "Plain"])
+        .assert()
+        .success();
+    assert!(recorded_journal_event(&repo).get("session_link").is_none());
+    let events = stdout(repo.arc(&repo.root).args(["journal", "events"]));
+    assert!(events.contains(link));
+}
+
+#[test]
+fn session_link_stays_out_of_git_messages_trailers_and_changelog() {
+    let repo = Repo::new();
+    let link = "https://claude.ai/code/session_privatefixture";
+    let slug = "private-provenance";
+    stdout(repo.arc(&repo.root).args(["begin", slug]));
+    let worktree = repo.home.join(".worktrees/repo-private-provenance");
+    let base = git_out(&worktree, &["rev-parse", "HEAD"]);
+    repo.commit(&worktree, "private.txt", "content\n", "feat: content");
+
+    let rewrite = repo
+        .arc(&worktree)
+        .args([
+            "rewrite",
+            "trailers",
+            "--from",
+            &base,
+            "--append",
+            "Implemented-by: fixture",
+            "--no-sign",
+            "--dry-run",
+        ])
+        .env("ARC_SESSION_LINK", link)
+        .output()
+        .unwrap();
+    assert!(rewrite.status.success(), "{rewrite:?}");
+    assert!(!String::from_utf8_lossy(&rewrite.stdout).contains(link));
+    assert!(!String::from_utf8_lossy(&rewrite.stderr).contains(link));
+
+    repo.arc(&worktree)
+        .args(["changelog", slug, "--category", "added", "--body-file", "-"])
+        .write_stdin("- Added content\n")
+        .env("ARC_SESSION_LINK", link)
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["snapshot", slug])
+        .env("ARC_SESSION_LINK", link)
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["review", slug, "--verdict", "approved"])
+        .env("ARC_SESSION_LINK", link)
+        .assert()
+        .success();
+    let dry_run = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", slug, "--dry-run"])
+            .env("ARC_SESSION_LINK", link),
+    );
+    assert!(dry_run.contains("merge message:"), "{dry_run}");
+    assert!(!dry_run.contains(link), "{dry_run}");
+    repo.arc(&repo.root)
+        .args(["integrate", slug])
+        .env("ARC_SESSION_LINK", link)
+        .assert()
+        .success();
+    assert!(!git_out(&repo.root, &["log", "-1", "--format=%B"]).contains(link));
+
+    let projection = stdout(
+        repo.arc(&repo.root)
+            .args(["changelog", "--json"])
+            .env("ARC_SESSION_LINK", link),
+    );
+    assert!(!projection.contains(link), "{projection}");
+    fs::write(
+        repo.root.join("CHANGELOG.md"),
+        "# Changelog\n\n## [Unreleased]\n",
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .args(["changelog", "--write"])
+        .env("ARC_SESSION_LINK", link)
+        .assert()
+        .success();
+    assert!(!fs::read_to_string(repo.root.join("CHANGELOG.md"))
+        .unwrap()
+        .contains(link));
 }
 
 #[test]
@@ -684,7 +861,7 @@ fn env_detects_opencode2_by_terminal_variable_and_leaves_the_session_unset() {
         .env("OPENCODE_TERMINAL", "1")
         .assert()
         .success()
-        .stdout("export ARC_HARNESS='opencode'\nunset ARC_SESSION ARC_MODEL\n# export ARC_SESSION=<session-id>  # unavailable: opencode does not export a session variable; set it by hand\n");
+        .stdout("export ARC_HARNESS='opencode'\nunset ARC_SESSION ARC_MODEL ARC_SESSION_LINK\n# export ARC_SESSION=<session-id>  # unavailable: opencode does not export a session variable; set it by hand\n");
 }
 
 #[test]
@@ -710,7 +887,7 @@ fn env_detects_opencode2_by_process_ancestry() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "export ARC_HARNESS='opencode'\nunset ARC_SESSION ARC_MODEL\n# export ARC_SESSION=<session-id>  # unavailable: opencode does not export a session variable; set it by hand\n"
+        "export ARC_HARNESS='opencode'\nunset ARC_SESSION ARC_MODEL ARC_SESSION_LINK\n# export ARC_SESSION=<session-id>  # unavailable: opencode does not export a session variable; set it by hand\n"
     );
 }
 
@@ -751,6 +928,7 @@ fn fixture_arc(repo: &Repo, program: &Path) -> Command {
         .env_remove("ARC_HARNESS")
         .env_remove("ARC_SESSION")
         .env_remove("ARC_MODEL")
+        .env_remove("ARC_SESSION_LINK")
         .env_remove("ARC_ON_BEHALF_OF")
         .env_remove("ARC_DATA_DIR")
         .env_remove("ARC_DATA_ROOT")
@@ -758,6 +936,7 @@ fn fixture_arc(repo: &Repo, program: &Path) -> Command {
         .env_remove("AI_HOME")
         .env_remove("CLAUDE_SESSION_ID")
         .env_remove("CLAUDE_CODE_SESSION_ID")
+        .env_remove("CLAUDE_CODE_BRIDGE_SESSION_ID")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("OPENCODE_SESSION")
         .env_remove("OPENCODE_TERMINAL")
@@ -949,10 +1128,10 @@ fn env_reports_ambiguity_when_no_ancestor_names_the_owner() {
         .code(1)
         .stdout(concat!(
             "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id> ",
-            "ARC_MODEL=<model[#effort]>\n",
+            "ARC_MODEL=<model[#effort]> ARC_SESSION_LINK=<url>\n",
             "# ambiguous: CLAUDE_CODE_SESSION_ID (claude) and PI_SESSION_ID (pi); ",
             "set ARC_HARNESS and ARC_SESSION by hand\n",
-            "unset ARC_HARNESS ARC_SESSION ARC_MODEL\n"
+            "unset ARC_HARNESS ARC_SESSION ARC_MODEL ARC_SESSION_LINK\n"
         ));
 }
 
@@ -1202,7 +1381,8 @@ fn env_unsets_the_identity_fields_it_cannot_establish() {
                 "eval \"$('{}' env)\"; printf '%s\\n' \
                  \"ARC_HARNESS=${{ARC_HARNESS-<unset>}}\" \
                  \"ARC_SESSION=${{ARC_SESSION-<unset>}}\" \
-                 \"ARC_MODEL=${{ARC_MODEL-<unset>}}\"",
+                 \"ARC_MODEL=${{ARC_MODEL-<unset>}}\" \
+                 \"ARC_SESSION_LINK=${{ARC_SESSION_LINK-<unset>}}\"",
                 binary.display()
             ))
             .current_dir(&repo.root)
@@ -1211,6 +1391,7 @@ fn env_unsets_the_identity_fields_it_cannot_establish() {
             .envs(NO_EDITOR)
             .env("ARC_SESSION", "old-session")
             .env("ARC_MODEL", "old-model")
+            .env("ARC_SESSION_LINK", "old-link")
             .env_remove("ARC_ACTOR")
             .env_remove("ARC_HARNESS")
             .env_remove("ARC_ROLE")
@@ -1239,12 +1420,12 @@ fn env_unsets_the_identity_fields_it_cannot_establish() {
     // clears the fields it cannot establish.
     assert_eq!(
         read_after_eval(&[("OPENCODE_TERMINAL", "1")]),
-        "ARC_HARNESS=opencode\nARC_SESSION=<unset>\nARC_MODEL=<unset>\n"
+        "ARC_HARNESS=opencode\nARC_SESSION=<unset>\nARC_MODEL=<unset>\nARC_SESSION_LINK=<unset>\n"
     );
     // Nothing detected at all clears every field.
     assert_eq!(
         read_after_eval(&[]),
-        "ARC_HARNESS=<unset>\nARC_SESSION=<unset>\nARC_MODEL=<unset>\n"
+        "ARC_HARNESS=<unset>\nARC_SESSION=<unset>\nARC_MODEL=<unset>\nARC_SESSION_LINK=<unset>\n"
     );
 }
 
