@@ -404,6 +404,9 @@ RUN A CHANGE
   arc verify --command <cmd>         Same, for an ad hoc probe.
   arc verify --against <branch>      Run every required gate on the merge with
                                      that branch, not on this head.
+                                     A textual conflict refuses before any
+                                     gate runs or evidence is recorded;
+                                     rebase first.
     --attest --environment <id>      Record a run arc did not perform, naming
                                      the environment it applies to.
     --falsified-by <id> --predicted <why>

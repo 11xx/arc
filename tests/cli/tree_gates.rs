@@ -194,6 +194,141 @@ fn a_target_that_moves_again_spends_the_evidence_for_the_earlier_merge() {
     assert_eq!(stale["next_action"], "verify_against:master", "{stale}");
 }
 
+fn deleting_change(repo: &Repo) -> (String, PathBuf) {
+    repo.redeclare_gates("[gates.unit]\ncommand = 'true'\n");
+    let begun = stdout(repo.arc(&repo.root).args(["begin", "delete"]));
+    let change_id = opened_change_id(&begun);
+    let worktree = repo.home.join(".worktrees/repo-delete");
+    git(&worktree, &["rm", "README.md"]);
+    git(&worktree, &["commit", "-m", "test: delete README"]);
+    repo.arc(&worktree).args(["snapshot"]).assert().success();
+    (change_id, worktree)
+}
+
+#[test]
+fn a_modify_delete_conflict_refuses_verification_without_recording_any_event() {
+    let repo = Repo::new();
+    let (change_id, worktree) = deleting_change(&repo);
+    repo.commit(
+        &repo.root,
+        "README.md",
+        "target edit\n",
+        "test: edit deleted README",
+    );
+    let merge = Command::new("git")
+        .current_dir(&repo.root)
+        .args(["merge-tree", "--write-tree", "master", "arc/delete"])
+        .output()
+        .unwrap();
+    assert_eq!(merge.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&merge.stdout).contains("CONFLICT (modify/delete): README.md"));
+
+    let recorded = event_count(&repo, &change_id);
+    let refs = git_out(&repo.root, &["show-ref"]);
+    for skip_green in [false, true] {
+        let mut verify = repo.arc(&worktree);
+        verify.args(["verify", "--against", "master"]);
+        if skip_green {
+            verify.arg("--skip-green");
+        }
+        verify
+            .assert()
+            .code(1)
+            .stderr(predicates::str::contains("conflicts textually"))
+            .stderr(predicates::str::contains("rebase first"));
+        assert_eq!(event_count(&repo, &change_id), recorded);
+        assert_eq!(git_out(&repo.root, &["show-ref"]), refs);
+        assert!(!repo.home.join(".worktrees/repo-delete-against").exists());
+    }
+    let state = json_stdout(repo.arc(&repo.root).args(["show", &change_id, "--json"]));
+    assert!(state["verifications"].as_array().unwrap().is_empty());
+    assert!(state["verification_runs"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn earlier_merge_evidence_does_not_answer_a_target_that_conflicts() {
+    for verify_head in [false, true] {
+        let repo = Repo::new();
+        let (change_id, worktree) = deleting_change(&repo);
+        if verify_head {
+            repo.arc(&worktree)
+                .args(["verify", "--all"])
+                .assert()
+                .success();
+        }
+        repo.commit(
+            &repo.root,
+            "sibling.txt",
+            "sibling\n",
+            "test: unrelated target edit",
+        );
+        let target = repo.head(&repo.root);
+        repo.arc(&worktree)
+            .args(["verify", "--against", "master"])
+            .assert()
+            .success();
+        let evaluated = json_stdout(repo.arc(&repo.root).args(["status", &change_id]));
+        assert_eq!(evaluated["gates"][0]["green_at_head"], true, "{evaluated}");
+        assert!(evaluated["merged_tree"].is_string(), "{evaluated}");
+        let evidence = json_stdout(repo.arc(&repo.root).args(["show", &change_id, "--json"]));
+        assert_eq!(
+            evidence["verifications"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["against_target"],
+            target
+        );
+
+        repo.commit(
+            &repo.root,
+            "README.md",
+            "target edit\n",
+            "test: edit deleted README",
+        );
+        let stale = json_stdout(repo.arc(&repo.root).args(["status", &change_id]));
+        assert_eq!(stale["needs_rebase"], true, "{stale}");
+        assert!(stale["merged_tree"].is_null(), "{stale}");
+        assert_eq!(stale["gates"][0]["green_at_head"], verify_head, "{stale}");
+        assert_eq!(
+            stale["gates"][0]["result"],
+            if verify_head { "pass" } else { "pending" },
+            "{stale}"
+        );
+        assert_eq!(stale["next_action"], "rebase", "{stale}");
+        assert_eq!(stale["ready_to_integrate"], false, "{stale}");
+        let checked = repo
+            .arc(&repo.root)
+            .args(["check", &change_id, "--json"])
+            .assert()
+            .code(11)
+            .get_output()
+            .stdout
+            .clone();
+        let checked: serde_json::Value = serde_json::from_slice(&checked).unwrap();
+        assert!(checked["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["blocker"] == "needs-rebase"));
+        assert!(!checked["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["blocker"] == "merged-tree-unevaluated"));
+        assert_eq!(
+            json_stdout(repo.arc(&repo.root).args(["show", &change_id, "--json"]))["verifications"],
+            evidence["verifications"],
+        );
+        let recorded = event_count(&repo, &change_id);
+        repo.arc(&worktree)
+            .args(["verify", "--against", "master", "--skip-green"])
+            .assert()
+            .code(1);
+        assert_eq!(event_count(&repo, &change_id), recorded);
+    }
+}
+
 #[test]
 fn a_head_already_on_the_target_tip_integrates_on_its_own_evidence() {
     let repo = Repo::new();
