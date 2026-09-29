@@ -1592,30 +1592,26 @@ fn env_does_not_carry_a_codex_effort_across_a_model_change() {
         ));
 }
 
-/// Documented examples are part of the command contract: a stale command or a
-/// stale exit-status claim sends a cold session down a path the CLI does not
-/// accept.
+/// The guide and help are the command contract: a stale command or a stale
+/// exit-status claim sends a cold session down a path the CLI does not accept.
 #[test]
-fn docs_document_current_debt_and_partial_opencode_identity() {
-    let review = include_str!("../../docs/review.md");
-    let normalized = review.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        normalized.contains("arc integrate <change> --debt"),
-        "{review}"
-    );
-    assert!(normalized.contains("arc query --debt"), "{review}");
-    assert!(!normalized.contains("--audit-debt"), "{review}");
-    assert!(!normalized.contains("audit-debt"), "{review}");
+fn guide_and_help_teach_current_debt_and_partial_opencode_identity() {
+    let repo = Repo::new();
+    let normalize = |text: String| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let integrate = normalize(stdout(repo.arc(&repo.root).args(["integrate", "--help"])));
+    assert!(integrate.contains("--debt <REASON>"), "{integrate}");
+    assert!(integrate.contains("arc query --debt"), "{integrate}");
+    assert!(!integrate.contains("audit-debt"), "{integrate}");
 
-    let changes = include_str!("../../docs/changes.md");
-    let normalized = changes.split_whitespace().collect::<Vec<_>>().join(" ");
+    let guide = normalize(stdout(&mut repo.arc(&repo.root)));
+    assert!(!guide.contains("audit-debt"), "{guide}");
     assert!(
-        normalized.contains("OpenCode v2 is recognized without a session"),
-        "{changes}"
+        guide.contains("OpenCode v2 (`opencode2`) is recognized without one"),
+        "{guide}"
     );
     assert!(
-        normalized.contains("`arc env` exits 1 and prints the export template"),
-        "{changes}"
+        guide.contains("`arc env` exits 1 and prints the export template"),
+        "{guide}"
     );
 }
 
