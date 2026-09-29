@@ -1907,7 +1907,9 @@ enum RewriteCmd {
         #[arg(long = "no-sign", conflicts_with = "key")]
         no_sign: bool,
         /// Recreate each annotated tag whose target was rewritten on the
-        /// commit that replaced it, carrying its message, tagger and signature
+        /// commit that replaced it, carrying its message, tagger and date, and
+        /// signing it with the key the commits are signed with; --no-sign
+        /// leaves it unsigned
         #[arg(long)]
         retag: bool,
     },
@@ -1938,7 +1940,9 @@ enum RewriteCmd {
         #[arg(long = "no-sign", conflicts_with = "key")]
         no_sign: bool,
         /// Recreate each annotated tag whose target was rewritten on the
-        /// commit that replaced it, carrying its message, tagger and signature
+        /// commit that replaced it, carrying its message, tagger and date, and
+        /// signing it with the key the commits are signed with; --no-sign
+        /// leaves it unsigned
         #[arg(long)]
         retag: bool,
     },
