@@ -494,6 +494,13 @@ pub struct KindWrite {
 #[derive(Subcommand)]
 pub enum JournalCmd {
     /// Print the resolved journal directory (creates nothing)
+    ///
+    /// Resolution takes the first source that answers: ARC_JOURNAL_DIR; the
+    /// longest `[journals] dirs` prefix of the repository root, or of the
+    /// directory outside a repository; `<ai-home>/journals/<repo-path-slug>`
+    /// for a Git repository; then a default-root journal whose
+    /// `bindings.jsonl` records this directory, or the one this directory's
+    /// slug names. A prefix covering repositories shadows their Git journals
     Dir {
         /// Print the cold sibling archive directory
         #[arg(long)]

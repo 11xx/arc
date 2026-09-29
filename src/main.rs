@@ -626,7 +626,9 @@ enum Cmd {
         /// Emit only events whose ULID is strictly greater than this cursor
         #[arg(long)]
         since: Option<ulid::Ulid>,
-        /// Run a shell command for every emitted event
+        /// Run `sh -c <cmd>` for every emitted event, with its NDJSON line on
+        /// stdin and ARC_EVENT_ID, ARC_EVENT_TYPE, and ARC_CHANGE_ID set. A
+        /// failing handler is a warning and never stops the stream
         #[arg(long = "exec")]
         exec_command: Option<String>,
     },
@@ -663,7 +665,10 @@ enum Cmd {
         /// Fail with exit 2 after this many seconds
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: Option<u64>,
-        /// Run a shell command once when a condition is reached
+        /// Run `sh -c <cmd>` once when a condition is reached, with a JSON
+        /// diagnostic naming the winning condition on stdin and ARC_EVENT_TYPE
+        /// set to `watch-reached`. ARC_EVENT_ID and ARC_CHANGE_ID carry the
+        /// diagnostic's values, empty where it names none
         #[arg(long = "exec")]
         exec_command: Option<String>,
         /// Emit the outcome as one JSON object, naming the change, the
@@ -724,7 +729,9 @@ enum Cmd {
         #[arg(long)]
         ttl: Option<String>,
         /// Override one stage budget as <name>=<duration> (repeatable; a
-        /// change's stages are budgeted, an artifact's lease is not)
+        /// change's stages are budgeted, an artifact's lease is not). Defaults:
+        /// launch=60s, started=5m, spec-read=2m, implementing=30m,
+        /// verifying=15m, blocked-on=15m, snapshotted=1h
         #[arg(long = "stage-budget")]
         stage_budget: Vec<String>,
         /// Explicitly displace a claim that may be taken over: a stale one on
@@ -1759,6 +1766,12 @@ enum SandboxCmd {
 #[derive(Subcommand)]
 enum HooksCmd {
     /// Install the arc hook scripts into this repository's hooks dir
+    ///
+    /// Both hooks are advisory and always exit 0. `post-commit` says when the
+    /// commit staled an approval or landed on a closed change's branch;
+    /// `prepare-commit-msg` appends an `Arc-Change: <change-id>` trailer on an
+    /// open change's branch when the message lacks one. The hooks directory
+    /// honours `core.hooksPath`
     Install {
         /// Replace a foreign hook, saving it as <hook>.pre-arc
         #[arg(long)]

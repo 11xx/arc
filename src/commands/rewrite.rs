@@ -91,17 +91,8 @@ pub struct TrailerArgs {
     pub retag: bool,
 }
 
-/// Edit the trailers of this branch's commit messages, carrying every
-/// recorded revision forward.
-///
-/// A commit the edit did not reach, sitting under nothing the edit reached,
-/// is left exactly as it is: no new object, and no entry in the map. That is
-/// what separates this from re-signing, where every commit in range is
-/// recreated because the one below it was.
-/// The portable contribution-trailer specification, embedded at build time
-/// from its canonical page so the printed guide and the repository document
-/// cannot drift apart.
-const CONTRIBUTION_SPEC: &str = include_str!("../../docs/contribution-trailers.md");
+/// The portable contribution-trailer specification, embedded at build time.
+const CONTRIBUTION_SPEC: &str = include_str!("contribution-trailers.md");
 
 /// Print the contribution-trailer specification, or check one message against
 /// it. Reads no ledger, journal, configuration, identity, or network, and
@@ -129,6 +120,13 @@ pub fn instructions_git(check: Option<&str>) -> Result<i32> {
     Ok(if malformed { 1 } else { 0 })
 }
 
+/// Edit the trailers of this branch's commit messages, carrying every
+/// recorded revision forward.
+///
+/// A commit the edit did not reach, sitting under nothing the edit reached,
+/// is left exactly as it is: no new object, and no entry in the map. That is
+/// what separates this from re-signing, where every commit in range is
+/// recreated because the one below it was.
 pub fn trailers(ctx: &Ctx, args: TrailerArgs) -> Result<i32> {
     let cwd = ctx.cwd.clone();
     let store = ctx.store()?;

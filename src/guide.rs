@@ -1050,6 +1050,11 @@ RULES THAT CHANGE WHAT YOU DO
     `arc inbox` and `arc catchup` carry the ones still open.
   - arc holds no routing opinion. It records the --actor, --harness, and --model
     it is given; who to delegate to is the caller's policy, not arc's.
+  - A delegated session binds its boundary with `ARC_ROLE` or `--role`. An
+    implementer may not record a verdict, an external verdict, `resolve`,
+    `hold`, `release-hold`, `audit`, `debt`, `close`, or `integrate`. A
+    reviewer may not run `debt`, `close`, or `integrate`. Recording a brief
+    is a lead's. An unset role is `lead`, with full access.
 
 EXIT CODES
   `arc check` is the integration preflight and its code names the blocker.
@@ -1116,6 +1121,121 @@ EXIT CODES
     A repeat of a recorded source item writes nothing, prints the existing
       entry, and exits 0.
     A spooled write prints `spooled: <path>` and exits 0.
+
+FILES
+  User configuration is `<ai-home>/arc/config.toml`; the AI data home is
+  `~/.local/ai/` unless AI_HOME names another. ARC_WORKTREES_DIR and
+  ARC_DATA_ROOT override their keys, and ARC_DATA_DIR names one exact ledger
+  directory for one repository, above both. `arc config` prints the resolved
+  paths.
+
+    worktrees_dir = "~/.worktrees"       where change worktrees are created
+    data_root = "<dir>"                  ledgers at <dir>/<repo-path-slug>/
+                                         rather than <git-common-dir>/arc/
+    [journals] dirs = { "<prefix>" = "<journal-dir>" }
+                                         journal by path prefix; the longest
+                                         matching prefix wins
+    [journal] auto_log = true            begin, integrate, and close append a
+                                         journal log event
+    [identity] detect = true             an undeclared harness, session, and
+                                         model are read from the session store
+    [provenance] git_identity = "per-actor" | "shared"
+
+  Policy is `.arc/policy.toml`, read from the change's target branch, and
+  the operator policy at `<git-common-dir>/arc/operator-policy.toml`, outside
+  every tree (`arc policy path|show|write`). Both apply, the stricter reading
+  winning.
+
+    [policy] forbid_self_approval = true
+    [policy] require_declared_actor = true
+    [policy] debt_count_threshold = <n>          debt turns advisory past n
+    [policy] debt_age_threshold_seconds = <n>    or once the oldest is older
+    [policy] worktree_free_floor_bytes = <n>     `arc begin` warns below it
+    [danger] paths = ["<glob>"]                  `*` in a segment, `**` across
+    [danger] acknowledged_safe = ["<glob>"]
+    [danger] source_roots = ["<dir>/"]           every file inside is classified
+    [review] checklist = ["<item>"]              printed by `arc show`
+    [contribution] history = "squash" | "preserve"
+
+  Gates are `[gates.<name>]` tables in `.arc/gates.toml` or the operator
+  policy:
+
+    command = "<shell command>"
+    profiles = ["<profile>"]            omitted: required for every profile
+    timeout = "10m"                     s, m, or h; omitted: unbounded
+    environment = "<probe command>"     evidence counts only where the probe
+                                        prints the same output
+
+  Every reviewed head is pinned by `refs/arc/keep/<change>/<patchset>` so
+  Git's garbage collection cannot take it. A pin is released only once its
+  head is reachable from the integration commit; release any other with
+  `git update-ref -d`.
+
+SCHEMAS
+  Every structured surface carries a `schema` string `<name>/<n>`, and any
+  change to what a surface emits takes the next version: adding a field as
+  much as removing, renaming, or redefining one. A commitment is a shape
+  callers outside arc read, and its version is a promise. An internal shape
+  is arc's own on-disk bookkeeping; parsing one means tracking arc's
+  implementation.
+
+  A stored input format is versioned from the reader's side: its version
+  marks what a reader must accept, so a new optional field that leaves every
+  older file valid keeps the version, and removing a field or making one
+  required takes the next. `journal-events/1` is one.
+
+  Commitments, derived views:
+    `arc-state/2`                    arc show --json
+    `arc-status/26`                  arc status
+    `arc-check/3`                    arc check --json
+    `arc-inbox/10`                   arc inbox --json
+    `arc-catchup/11`                 arc catchup --json
+    `arc-journal-catchup/8`          arc journal catchup --json
+    `arc-resume/7`                   arc resume --json
+    `arc-brief/1`                    arc brief --json
+    `arc-journal-artifact/2`         arc journal show --json
+    `arc-journal-inventory/5`        arc journal inventory --json
+    `arc-rescue/4`                   arc rescue --json
+    `arc-review/4`                   arc review --json
+    `arc-findings/2`                 arc findings --format json
+    `arc-blocker-status/1`           arc blocker-status --json
+    `arc-metadata/1`                 arc metadata --json
+    `arc-chain/4`                    arc chain --json
+    `arc-stats/1`                    arc stats --json
+    `arc-stats-by-model/1`           arc stats --by-model --json
+    `arc-changelog/1`                arc changelog --json
+    `arc-changelog-render-request/1` stdin of a command changelog renderer
+    `arc-forks/2`                    arc fork list --json
+    `arc-doctor/5`                   arc doctor --json
+    `arc-workspace/1`                arc workspace list|inbox --json
+    `arc-workspace-backlog/18`       arc workspace backlog --json
+    `arc-workspace-report/2`         arc workspace report --json
+    `arc-workspace-inventory/1`      arc workspace inventory --json
+    `arc-writability/1`              arc config --check-writable --json
+    `arc-sandbox-clone/1`            arc sandbox clone --json
+    `arc-sandbox-diff/1`             arc sandbox diff --json
+    `arc-replica-id/1`               arc replica id --json
+    `arc-replica/2`                  arc replica status --json
+    `arc-journal-questions/3`        arc journal questions --json
+    `journal-discussion/4`           arc journal discussion --json
+    `journal-source/1`               arc journal source --json
+    `arc-journal-latest/1`           arc journal latest --json
+    `arc-journal-scaffolds/1`        arc journal scaffolds --json
+
+  Commitments, files:
+    `arc-bundle/5`                   arc export / arc import
+    `arc-replica-bundle/2`           arc replica export / import
+    `arc-replica-event/2`            one event inside an arc-replica-bundle
+    `arc-journal-bundle/1`           arc journal export / import
+    `journal-events/1`               events.jsonl, streamed by arc journal events
+    `arc-journal-spool/1`            .arc/outbox/<ts>-<kind>-<topic>.json
+
+  Internal:
+    store format 6                   .git/arc/config.json and the change ledger
+    `arc-replica-import/2`           receipt of an imported replica bundle
+    `arc-journal-exchange-import/1`  receipt of an imported journal bundle
+    `arc-sandbox/2`                  .arc-sandbox.json
+    `journal-binding/1`              bindings.jsonl
 
 WHAT ARC WILL NOT DO
   Ledger and repository:
