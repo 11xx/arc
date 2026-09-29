@@ -6,11 +6,11 @@
 //! on the machine. What arc keeps is its own projection of a recording: the
 //! exchange turns and the operator's view of them.
 
+use agent_tapes_core::backend::{self, Backend};
+use agent_tapes_core::model::{Role, SourceBound};
+use agent_tapes_core::ResolveError;
 use serde::Serialize;
 use std::path::PathBuf;
-use tapes_core::backend::{self, Backend};
-use tapes_core::model::{Role, SourceBound};
-use tapes_core::ResolveError;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Turn {
@@ -80,11 +80,11 @@ fn harness_backends(harness: &str) -> Vec<Box<dyn Backend>> {
 fn resolve_exact(
     backends: &[Box<dyn Backend>],
     session: &str,
-) -> Result<tapes_core::ResolvedSession, LookupIssue> {
+) -> Result<agent_tapes_core::ResolvedSession, LookupIssue> {
     if backends.is_empty() {
         return Err(LookupIssue::Missing);
     }
-    let resolved = match tapes_core::resolve_session(backends, session) {
+    let resolved = match agent_tapes_core::resolve_session(backends, session) {
         Ok(resolved) => resolved,
         Err(ResolveError::NotFound {
             truncated: false, ..
@@ -227,7 +227,10 @@ pub fn session_identity(harness: &str, session: &str) -> SessionIdentity {
 /// Whether the store holds a subagent recording the session has not recorded
 /// as finished. Such a child may be the process whose shell is asking, and
 /// reading its parent's model would answer for the wrong agent.
-fn subagent_may_be_acting(backend: &dyn Backend, session: &tapes_core::model::Session) -> bool {
+fn subagent_may_be_acting(
+    backend: &dyn Backend,
+    session: &agent_tapes_core::model::Session,
+) -> bool {
     backend.lineage(session).is_ok_and(|lineage| {
         lineage
             .children

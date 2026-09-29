@@ -319,8 +319,8 @@ mod tests {
     #[test]
     fn path_slug_matches_journal_convention() {
         assert_eq!(
-            path_slug(Path::new("/home/lobo/code/muzaiten")),
-            "-home-lobo-code-muzaiten"
+            path_slug(Path::new("/home/user/code/demo")),
+            "-home-user-code-demo"
         );
     }
 }

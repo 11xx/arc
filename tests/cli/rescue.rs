@@ -275,7 +275,7 @@ fn claude_transcript_returns_newest_window_oldest_first() {
 #[test]
 fn codex_rollout_yields_operator_turns() {
     let repo = Repo::new();
-    let session = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
+    let session = "019f0000-0000-7000-8000-000000000002";
     let (_, worktree) = begin(&repo, "codex-transcript");
     claim_from_session(&repo, "codex-transcript", "codex", session);
     let codex_home = repo.home.join("codex-state");
@@ -285,7 +285,7 @@ fn codex_rollout_yields_operator_turns() {
         day.join(format!("rollout-2026-07-24T00-00-00-{session}.jsonl")),
         concat!(
             "{\"type\":\"session_meta\",\"timestamp\":\"2026-07-24T00:00:00Z\",",
-            "\"payload\":{\"id\":\"019f7890-5c01-7ec1-9240-2eba1613e5d2\"}}\n",
+            "\"payload\":{\"id\":\"019f0000-0000-7000-8000-000000000002\"}}\n",
             "{\"type\":\"response_item\",\"timestamp\":\"2026-07-24T00:00:01Z\",",
             "\"payload\":{\"type\":\"message\",\"role\":\"user\",",
             "\"content\":[{\"type\":\"input_text\",\"text\":\"do the work\"}]}}\n",
@@ -310,7 +310,7 @@ fn codex_rollout_yields_operator_turns() {
 #[test]
 fn codex_rescue_requires_the_canonical_session_id() {
     let repo = Repo::new();
-    let full = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
+    let full = "019f0000-0000-7000-8000-000000000002";
     codex_recording(&repo, full, "gpt-fixture");
     let codex_home = repo.home.join("codex-state");
     let (_, exact_worktree) = begin(&repo, "exact-codex-read");
@@ -328,7 +328,7 @@ fn codex_rescue_requires_the_canonical_session_id() {
     );
 
     let (_, prefix_worktree) = begin(&repo, "prefix-codex-read");
-    claim_from_session(&repo, "prefix-codex-read", "codex", "019f7890");
+    claim_from_session(&repo, "prefix-codex-read", "codex", "019f0000");
     let prefix: serde_json::Value = serde_json::from_str(&stdout(
         repo.arc(&prefix_worktree)
             .env("CODEX_HOME", &codex_home)
@@ -347,14 +347,14 @@ fn codex_rescue_requires_the_canonical_session_id() {
 #[test]
 fn ambiguous_codex_rescue_names_the_unreadable_lookup() {
     let repo = Repo::new();
-    codex_recording(&repo, "019f7890-5c01-7ec1-9240-2eba1613e5d2", "first-model");
+    codex_recording(&repo, "019f0000-0000-7000-8000-000000000002", "first-model");
     codex_recording(
         &repo,
-        "019f7890-1234-4444-8888-111111111111",
+        "019f0000-1234-4444-8888-111111111111",
         "second-model",
     );
     let (_, worktree) = begin(&repo, "ambiguous-codex-read");
-    claim_from_session(&repo, "ambiguous-codex-read", "codex", "019f7890");
+    claim_from_session(&repo, "ambiguous-codex-read", "codex", "019f0000");
     let codex_home = repo.home.join("codex-state");
     let output = stdout(repo.arc(&worktree).env("CODEX_HOME", &codex_home).args([
         "rescue",
@@ -380,7 +380,7 @@ fn ambiguous_codex_rescue_names_the_unreadable_lookup() {
 #[test]
 fn unreadable_codex_rescue_has_a_cause_and_reason() {
     let repo = Repo::new();
-    let session = "019f7890-5c01-7ec1-9240-2eba1613e5d2";
+    let session = "019f0000-0000-7000-8000-000000000002";
     let path = codex_recording(&repo, session, "gpt-fixture");
     fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
     let (_, worktree) = begin(&repo, "unreadable-codex-read");

@@ -25,11 +25,12 @@ rest on POSIX semantics: `0700` private directories, atomic hard-link event
 publication, and process-group kill for gate timeouts.
 
 ```sh
-cargo install arc-ledger --locked
+cargo install --git https://github.com/11xx/arc --locked
 ```
 
-The package is named `arc-ledger`; the installed command is `arc`. To build
-from a checkout, run `cargo install --path . --locked`.
+From a checkout, run `cargo install --path . --locked`. The package is named
+`arc-ledger`; the installed command is `arc`. The `arc-ledger` release on
+crates.io is a September 2026 snapshot.
 
 Released versions are the calendar date of publication in the `YYYY.M.D`
 shape, written without leading zeros. One release is cut per date, so a

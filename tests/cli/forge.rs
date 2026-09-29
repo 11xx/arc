@@ -46,11 +46,11 @@ fn forge_profile_without_declaration_is_undeclared_then_declared() {
             "--host",
             "github.com",
             "--base-repo",
-            "11xx/streamrip",
+            "example-owner/example-repo",
             "--base-ref",
             "dev",
             "--head-repo",
-            "11xx/streamrip",
+            "example-owner/example-repo",
             "--head-ref",
             "arc/proj-declare",
         ])
@@ -61,9 +61,15 @@ fn forge_profile_without_declaration_is_undeclared_then_declared() {
     let status = status_json(&repo, "proj-declare");
     assert_eq!(status["forge"]["projection"], "declared");
     assert_eq!(status["forge"]["declared"]["host"], "github.com");
-    assert_eq!(status["forge"]["declared"]["base_repo"], "11xx/streamrip");
+    assert_eq!(
+        status["forge"]["declared"]["base_repo"],
+        "example-owner/example-repo"
+    );
     assert_eq!(status["forge"]["declared"]["base_ref"], "dev");
-    assert_eq!(status["forge"]["declared"]["head_repo"], "11xx/streamrip");
+    assert_eq!(
+        status["forge"]["declared"]["head_repo"],
+        "example-owner/example-repo"
+    );
     assert_eq!(status["forge"]["declared"]["head_ref"], "arc/proj-declare");
     assert_eq!(
         status["forge"]["declared"]["policy"],
@@ -89,11 +95,11 @@ fn declare_same_repo(repo: &Repo, reference: &str, head_ref: &str) {
             "--host",
             "github.com",
             "--base-repo",
-            "11xx/streamrip",
+            "example-owner/example-repo",
             "--base-ref",
             "dev",
             "--head-repo",
-            "11xx/streamrip",
+            "example-owner/example-repo",
             "--head-ref",
             head_ref,
         ])
@@ -111,9 +117,9 @@ fn forge_link_matches_declaration_and_refuses_each_mismatch_axis() {
     // one axis is wrong per run; the rest match the declaration.
     let before = event_count(&repo, &change_id);
     for axis in ["base-repo", "base-ref", "head-repo", "head-ref"] {
-        let mut base_repo = "11xx/streamrip";
+        let mut base_repo = "example-owner/example-repo";
         let mut base_ref = "dev";
-        let mut head_repo = "11xx/streamrip";
+        let mut head_repo = "example-owner/example-repo";
         let mut head_ref = "arc/linker";
         match axis {
             "base-repo" => base_repo = "other/repo",
@@ -177,11 +183,11 @@ fn forge_link_same_repository_only_refuses_cross_repo_tuple() {
             "--host",
             "github.com",
             "--base-repo",
-            "nathom/streamrip",
+            "upstream-owner/example-repo",
             "--base-ref",
             "dev",
             "--head-repo",
-            "11xx/streamrip",
+            "example-owner/example-repo",
             "--head-ref",
             "arc/cross",
         ])
@@ -197,13 +203,13 @@ fn forge_link_same_repository_only_refuses_cross_repo_tuple() {
             "--pr",
             "2",
             "--url",
-            "https://github.com/nathom/streamrip/pull/2",
+            "https://github.com/upstream-owner/example-repo/pull/2",
             "--base-repo",
-            "nathom/streamrip",
+            "upstream-owner/example-repo",
             "--base-ref",
             "dev",
             "--head-repo",
-            "11xx/streamrip",
+            "example-owner/example-repo",
             "--head-ref",
             "arc/cross",
             "--head-sha",
@@ -227,15 +233,15 @@ fn forge_link_allowed_base_repo_accepts_target_and_refuses_others() {
             "--host",
             "github.com",
             "--base-repo",
-            "nathom/streamrip",
+            "upstream-owner/example-repo",
             "--base-ref",
             "dev",
             "--head-repo",
-            "11xx/streamrip",
+            "example-owner/example-repo",
             "--head-ref",
             "arc/allow",
             "--policy",
-            "allowed-base-repo=nathom/streamrip",
+            "allowed-base-repo=upstream-owner/example-repo",
         ])
         .assert()
         .success();
@@ -250,13 +256,13 @@ fn forge_link_allowed_base_repo_accepts_target_and_refuses_others() {
             "--pr",
             "3",
             "--url",
-            "https://github.com/nathom/streamrip/pull/3",
+            "https://github.com/upstream-owner/example-repo/pull/3",
             "--base-repo",
-            "nathom/streamrip",
+            "upstream-owner/example-repo",
             "--base-ref",
             "dev",
             "--head-repo",
-            "11xx/streamrip",
+            "example-owner/example-repo",
             "--head-ref",
             "arc/allow",
             "--head-sha",
@@ -276,11 +282,11 @@ fn forge_link_allowed_base_repo_accepts_target_and_refuses_others() {
             "--host",
             "github.com",
             "--base-repo",
-            "nathom/streamrip",
+            "upstream-owner/example-repo",
             "--base-ref",
             "dev",
             "--head-repo",
-            "11xx/streamrip",
+            "example-owner/example-repo",
             "--head-ref",
             "arc/allow",
             "--policy",
@@ -298,13 +304,13 @@ fn forge_link_allowed_base_repo_accepts_target_and_refuses_others() {
             "--pr",
             "4",
             "--url",
-            "https://github.com/nathom/streamrip/pull/4",
+            "https://github.com/upstream-owner/example-repo/pull/4",
             "--base-repo",
-            "nathom/streamrip",
+            "upstream-owner/example-repo",
             "--base-ref",
             "dev",
             "--head-repo",
-            "11xx/streamrip",
+            "example-owner/example-repo",
             "--head-ref",
             "arc/allow",
             "--head-sha",
@@ -325,13 +331,13 @@ fn link_at(repo: &Repo, reference: &str, pr: &str, head: &str, head_ref: &str) {
             "--pr",
             pr,
             "--url",
-            "https://github.com/11xx/streamrip/pull/1",
+            "https://github.com/example-owner/example-repo/pull/1",
             "--base-repo",
-            "11xx/streamrip",
+            "example-owner/example-repo",
             "--base-ref",
             "dev",
             "--head-repo",
-            "11xx/streamrip",
+            "example-owner/example-repo",
             "--head-ref",
             head_ref,
             "--head-sha",
@@ -675,13 +681,13 @@ fn forge_held_and_linked_renders_awaiting_user() {
     let status = status_json(&repo, "awaiting");
     assert_eq!(
         status["forge"]["awaiting_user"]["pr_url"],
-        "https://github.com/11xx/streamrip/pull/1"
+        "https://github.com/example-owner/example-repo/pull/1"
     );
     assert_eq!(status["forge"]["awaiting_user"]["head_sha"], head);
     // The awaiting-user fact also shows in the Markdown Forge section.
     let shown = stdout(repo.arc(&repo.root).args(["show", "awaiting"]));
     assert!(shown.contains("Awaiting user"));
-    assert!(shown.contains("https://github.com/11xx/streamrip/pull/1"));
+    assert!(shown.contains("https://github.com/example-owner/example-repo/pull/1"));
 }
 
 #[test]

@@ -559,9 +559,9 @@ mod tests {
     fn declared() -> ForgeProjectionRecord {
         ForgeProjectionRecord {
             host: "github.com".into(),
-            base_repo: "11xx/streamrip".into(),
+            base_repo: "example-owner/example-repo".into(),
             base_ref: "dev".into(),
-            head_repo: "11xx/streamrip".into(),
+            head_repo: "example-owner/example-repo".into(),
             head_ref: "arc/x".into(),
             policy: ForgePolicy::SameRepositoryOnly,
         }
@@ -721,7 +721,7 @@ mod tests {
         // A cross-repo tuple that still matches the declaration is refused
         // because the declared policy forbids base != head.
         let mut p = declared();
-        p.head_repo = "nathom/streamrip".into();
+        p.head_repo = "upstream-owner/example-repo".into();
         let t = observed(&p);
         assert!(matches!(
             validate_link(Some(&p), &t),
@@ -732,9 +732,9 @@ mod tests {
     #[test]
     fn allowed_base_repo_accepts_target_refuses_others() {
         let mut p = declared();
-        p.head_repo = "nathom/streamrip".into();
+        p.head_repo = "upstream-owner/example-repo".into();
         p.policy = ForgePolicy::AllowedBaseRepo {
-            repo: "11xx/streamrip".into(),
+            repo: "example-owner/example-repo".into(),
         };
         assert!(validate_link(Some(&p), &observed(&p)).is_ok());
 

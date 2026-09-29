@@ -8,13 +8,14 @@ readme = "README.md"
 repository = "https://github.com/11xx/arc"
 keywords = ["git", "changelog", "review", "workflow", "agents"]
 categories = ["command-line-utilities", "development-tools"]
+publish = false
 
 [[bin]]
 name = "arc"
 path = "src/main.rs"
 
 [dependencies]
-tapes-core = "2026.9.25"
+agent-tapes-core = { git = "https://github.com/11xx/tapes", rev = "da4a69f5b1c694735646706a5641c946d01a4e2b", version = "2026.9.29" }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }

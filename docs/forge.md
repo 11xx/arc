@@ -10,12 +10,12 @@ and lifecycle:
 
 ```sh
 arc forge declare tidal-fix --host github.com \
-  --base-repo 11xx/streamrip --base-ref dev \
-  --head-repo 11xx/streamrip --head-ref arc/tidal-fix \
+  --base-repo example-owner/example-repo --base-ref dev \
+  --head-repo example-owner/example-repo --head-ref arc/tidal-fix \
   --policy same-repository-only        # or allowed-base-repo=<owner/name>
-arc forge link tidal-fix --pr 1 --url https://github.com/11xx/streamrip/pull/1 \
-  --base-repo 11xx/streamrip --base-ref dev \
-  --head-repo 11xx/streamrip --head-ref arc/tidal-fix --head-sha <sha>
+arc forge link tidal-fix --pr 1 --url https://github.com/example-owner/example-repo/pull/1 \
+  --base-repo example-owner/example-repo --base-ref dev \
+  --head-repo example-owner/example-repo --head-ref arc/tidal-fix --head-sha <sha>
 arc forge checks tidal-fix --pr-head <sha> --state not-configured
 arc forge pr-state tidal-fix --state open   # merged requires --merge-sha
 ```

@@ -59,9 +59,10 @@ that every exit code and every refusal or guarantee sentence in `docs/`
 appears in the guide or in a command's help.
 
 **The semantic model is independent of the implementation.** A pure Haskell
-model of arc's authorization lives in its own repository, `arc-model`, beside
-this one. It characterizes the arc revision its `comparisonRevision` names
-rather than translating the Rust implementation, and nothing in this build,
+model of arc's authorization lives in its own repository,
+[`arc-model`](https://github.com/11xx/arc-model), beside this one. It
+characterizes the arc revision its `comparisonRevision` names rather than
+translating the Rust implementation, and nothing in this build,
 its gates, or its releases reads it, so no arc change needs a Haskell
 toolchain. Its differential replays generated histories through an installed
 `arc` binary and compares `arc check --json` with the model's grounds; its
@@ -85,21 +86,17 @@ The package is published as `arc-ledger`, because the bare name belongs to
 an unrelated crate; the binary it installs, the repository, and the command
 are `arc`.
 
-**A release links published tapes crates at pinned versions.** Session reads
-rest on the tapes crates, and the manifest requires each by version alone, as
-a registry dependency. Until those versions are published, a developer points
-the requirement at a local tapes checkout from the machine's Cargo
-configuration, never from this repository:
+**The tapes crates come from tapes' Git repository at a pinned revision.**
+Session reads rest on `agent-tapes-core`, which the manifest requires by
+`git` and `rev`, so a clean clone builds with no machine configuration. The
+`version` written beside the revision is the release that revision carries;
+Cargo builds from the Git source, and the version keeps the manifest
+publishable once the same release is on the registry. Moving to another
+tapes release changes the revision and the version together.
 
-```toml
-# $CARGO_HOME/config.toml, or a .cargo/config.toml above the checkout
-[patch.crates-io]
-tapes-core = { path = "/path/to/tapes/crates/tapes-core" }
-```
-
-A build without that override cannot resolve the crates, and neither can
-`cargo publish`, so arc cannot be released ahead of the tapes versions it
-requires.
+The package sets `publish = false`. Publishing is turned on only by a
+deliberate edit to the manifest, made when the tapes versions it requires
+are on the registry.
 
 The checklist a release passes, in order:
 
@@ -114,8 +111,10 @@ The checklist a release passes, in order:
 5. The release head is tagged. Until a tag names it, the changelog
    projection has no boundary to measure from and offers the whole history
    as unreleased.
-6. `cargo publish --dry-run` is clean, and the manifest names a repository
-   URL so the packaged crate points somewhere.
+6. The manifest names a repository URL, so an install from Git and any
+   later packaged crate point somewhere.
+7. A release that goes to crates.io first removes `publish = false`, and
+   `cargo publish --dry-run` is then clean.
 
 Publication itself is the operator's act: `cargo publish` is never run from
 a session.
