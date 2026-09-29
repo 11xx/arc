@@ -286,7 +286,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         let reason = reason.trim();
         if reason.is_empty() {
             bail!(
-                "--waive-dirty must say why dirty evidence should count;                  an empty reason waives the gate without recording a reason"
+                "--waive-dirty must say why dirty evidence should count; an empty reason waives the gate without recording a reason"
             );
         }
         let revision = gitio::head(&run_ctx.cwd)?;

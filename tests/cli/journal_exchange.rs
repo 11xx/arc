@@ -238,18 +238,24 @@ fn a_discussion_round_trips_with_its_bodies_events_and_provenance() {
         assert_eq!(event["session"], "session-a", "{event}");
         assert_eq!(event["actor"], "tester", "{event}");
     }
-    let source_view =
+    let mut source_view =
         json_stdout(
             source
                 .arc(&source.root)
                 .args(["journal", "discussion", &file, "--json"]),
         );
-    let recipient_view = json_stdout(recipient.arc(&recipient.root).args([
+    let mut recipient_view = json_stdout(recipient.arc(&recipient.root).args([
         "journal",
         "discussion",
         &file,
         "--json",
     ]));
+    // `age_seconds` is read from the clock, so two reads may straddle a second
+    // boundary. Every other field is derived from the exchanged records.
+    for view in [&mut source_view, &mut recipient_view] {
+        let age = view.as_object_mut().unwrap().remove("age_seconds");
+        assert!(age.is_some_and(|age| age.is_u64()), "{view}");
+    }
     assert_eq!(recipient_view, source_view, "{recipient_view}");
 
     assert_eq!(receipts(&recipient_dir), 1);
