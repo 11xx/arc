@@ -405,12 +405,32 @@ fn live_pi_model(claim: &SessionClaim) -> Option<String> {
 
 const EXPORT_TEMPLATE: &str = concat!(
     "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id>",
-    " ARC_MODEL=<model[#effort]>"
+    " ARC_MODEL=<model[#effort]> ARC_SESSION_LINK=<url>"
 );
 
-/// The three fields one identity is made of. `arc env` accounts for every one
-/// of them, so evaluating its output leaves no stale value behind.
-const IDENTITY_VARIABLES: &str = "ARC_HARNESS ARC_SESSION ARC_MODEL";
+/// Every identity value `arc env` establishes or clears.
+const IDENTITY_VARIABLES: &str = "ARC_HARNESS ARC_SESSION ARC_MODEL ARC_SESSION_LINK";
+
+fn claude_session_link() -> Option<String> {
+    let id = std::env::var("CLAUDE_CODE_BRIDGE_SESSION_ID").ok()?;
+    let suffix = id.strip_prefix("session_")?;
+    if suffix.is_empty()
+        || !suffix
+            .split('_')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    {
+        return None;
+    }
+    // Claude Code selects the Remote Control host from markers in its bridge session id.
+    let host = if id.contains("_staging_") {
+        "https://claude-ai.staging.ant.dev"
+    } else if id.contains("_local_") {
+        "http://localhost:4000"
+    } else {
+        "https://claude.ai"
+    };
+    Some(format!("{host}/code/{id}"))
+}
 
 pub fn print_env() -> i32 {
     let identity = match detect_identity() {
@@ -435,7 +455,7 @@ pub fn print_env() -> i32 {
         // never reachable. The export line is real and eval-able; the comment
         // carries the report a full-detection run would not need.
         println!("export ARC_HARNESS={}", shell_quote(&identity.harness));
-        println!("unset ARC_SESSION ARC_MODEL");
+        println!("unset ARC_SESSION ARC_MODEL ARC_SESSION_LINK");
         println!(
             "# export ARC_SESSION=<session-id>  # unavailable: {} does not \
              export a session variable; set it by hand",
@@ -461,6 +481,13 @@ pub fn print_env() -> i32 {
     }
     if let Some(reason) = identity.model_unavailable {
         println!("# export ARC_MODEL=<model[#effort]>  # unavailable: {reason}");
+    }
+    match identity.harness.as_str() {
+        "claude" => match claude_session_link() {
+            Some(link) => println!("export ARC_SESSION_LINK={}", shell_quote(&link)),
+            None => println!("unset ARC_SESSION_LINK"),
+        },
+        _ => println!("unset ARC_SESSION_LINK"),
     }
     println!(
         "# {}",

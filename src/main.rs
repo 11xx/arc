@@ -65,6 +65,9 @@ struct Cli {
     /// Native session ID of the acting harness thread
     #[arg(long, global = true, env = "ARC_SESSION")]
     session: Option<String>,
+    /// Private web link for the acting session; recorded only in arc events
+    #[arg(long, global = true, env = "ARC_SESSION_LINK")]
+    session_link: Option<String>,
     /// Model identity: a model slug with optional #effort, e.g. kimi-k3#high
     #[arg(long, global = true, env = "ARC_MODEL")]
     model: Option<String>,
@@ -2293,6 +2296,7 @@ fn run(cli: Cli) -> Result<i32> {
         fallback_announced: std::cell::Cell::new(false),
         harness,
         session,
+        session_link: cli.session_link.filter(|value| !value.trim().is_empty()),
         session_resolution,
         model,
         // An empty --on-behalf-of is the same as absent: today's behavior.

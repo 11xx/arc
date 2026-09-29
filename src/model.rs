@@ -186,6 +186,10 @@ pub struct Event {
     pub harness: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// Private acting-session link. Ledger and journal records may carry it;
+    /// Git commits, changelogs, trailers, and forge text must not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_link: Option<String>,
     /// What the harness's own store said about `session` when the event was
     /// written. A detected session id arrives from the environment and can
     /// name no session the harness ever wrote; this is the record that the
