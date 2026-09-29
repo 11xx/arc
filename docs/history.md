@@ -134,7 +134,7 @@ including its `old`/`new` column header. A new revision of all zeroes records a
 commit the rewrite dropped, which survives at nothing; a line mapping a commit
 to itself is not a move and is not recorded; and a revision mapped twice to
 different successors is refused. A supplied map is judged by the same rules as
-one arc computed. arc refuses a rewrite map claiming a revision survives as a
+one arc computed, including the signature-only judgement below. arc refuses a rewrite map claiming a revision survives as a
 commit this repository does not hold. A map from somewhere else, or one naming
 an object that is not a commit, is refused rather than recorded as fact.
 
@@ -179,10 +179,27 @@ this repository does not hold, with nothing on screen to say the map had been
 consulted. So every projection built on one refuses and points at `arc
 doctor`, which reports the contradiction as `invalid-rewrite-mapping`.
 
-Approval does not survive translation, and should not: a verdict binds to an
-exact patchset head, and only a content comparison could say whether a
-rewritten head is the same work. Re-approving a rewrite that preserved the
-tree is cheap; one that did not must be re-reviewed.
+An approval follows a recorded rewrite only when the successor differs from
+the approved head in nothing but its signature: the same tree, author,
+committer, message and other headers, with parents that differ only as the map
+translates them. Any other successor leaves the approval stale, and `arc
+status` and `arc check` report it so: a different tree, a reworded message, a
+changed author, or a map arc could not verify. `arc rewrite sign` produces
+exactly such successors, so an approved change keeps its approval across
+signing; `arc rewrite trailers` changes the message, so the approval must be
+given again. Everything else a recorded revision names — patchsets, gate
+evidence, waivers, closures — follows every rewrite regardless, since gate
+evidence is keyed by tree. Once a change has closed, its approval is the record
+of what authorized the close and follows every rewrite too.
+
+Whether a successor differs by signature alone is judged once, when the
+mapping is recorded, by comparing the old and the new commit, and is stored
+beside the mapping as `signature_only`, naming the old revisions that passed.
+It is never decided when a change is read: the old commit is the first thing
+Git discards. A mapping whose old commit is absent when it is recorded is
+recorded as not verified, and so is any rewrite recorded without the field. An
+import makes the judgement afresh against the objects the receiving repository
+holds and replaces the sender's, so a bundle cannot vouch for a rewrite.
 
 A rewrite is not change-scoped — it happens to every recorded revision at once
 — so it is stored as a repository-scoped event under `repository/events/`

@@ -897,8 +897,13 @@ HISTORY REWRITES
   as `invalid-rewrite-mapping`. A branch with commits of its own on top of the rewritten
   range shares no commit with the branch it was cut from — the rewrite names
   each one and the `git rebase --onto` that replays it, and until then no
-  comparison between the two has an answer. Approval does not travel: a
-  verdict binds to an exact head, so re-snapshot and re-approve.
+  comparison between the two has an answer. An approval follows a recorded
+  rewrite only when the successor differs from the approved head in nothing but
+  its signature — same tree, author, committer and message — which is what
+  `arc rewrite sign` produces. Any other successor leaves it stale in `arc
+  status` and `arc check`: re-approve after `arc rewrite trailers`, or a map
+  naming different content. Whether a successor differs by signature alone is
+  judged when the map is recorded or imported, never when a change is read.
 
 RULES THAT CHANGE WHAT YOU DO
   - A verdict binds to the exact approved patchset head. Any new commit makes

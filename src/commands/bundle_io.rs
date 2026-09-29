@@ -79,7 +79,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
             // wrong. A destination with no store still checks the bundle
             // against itself.
             if claim_contest.is_none() {
-                plan_repository_events(store, &validated)?;
+                plan_repository_events(&ctx.cwd, store, &validated)?;
             }
         }
         print_import_report(
@@ -157,7 +157,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     // whole, so two imports of different changes must not interleave between
     // the judgement and the write that makes it true.
     let _repository_events = store.lock_repository_events()?;
-    let incoming = plan_repository_events(Some(&store), &validated)?;
+    let incoming = plan_repository_events(&ctx.cwd, Some(&store), &validated)?;
     let mut rewrites = 0;
     for (event_id, bytes) in &incoming {
         if store.append_raw_repository_event(event_id, bytes)? {
@@ -265,6 +265,7 @@ fn claim_contest_for_import(
 /// before the first is written — including two bundled events sharing an ID,
 /// which no check against the destination can see.
 fn plan_repository_events(
+    cwd: &Path,
     store: Option<&Store>,
     validated: &ValidatedBundle,
 ) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -304,16 +305,49 @@ fn plan_repository_events(
         // bundle must still hold together on its own.
         None => Vec::new(),
     };
+    let held: BTreeSet<String> = combined
+        .iter()
+        .map(|event| event.event_id.clone())
+        .collect();
     for value in &validated.bundle.repository_events {
         if let Some(event) = crate::bundle::parse_typed_event(value)? {
-            if !combined.iter().any(|held| held.event_id == event.event_id) {
+            if !held.contains(&event.event_id) {
                 combined.push(event);
             }
         }
     }
     combined.sort_by(|a, b| a.event_id.cmp(&b.event_id));
-    crate::rewrite::RewriteMap::from_events(combined.iter())
+    let rewrites = crate::rewrite::RewriteMap::from_events(combined.iter())
         .context("the bundle's rewrites contradict this repository's; nothing was imported")?;
+    // Whether a successor differs from its old commit by signature alone is
+    // this repository's judgement to make, against the objects it holds. What
+    // the sender recorded is a claim about the sender's objects, and taking it
+    // would let a bundle move an approval onto content nobody reviewed.
+    for value in &validated.bundle.repository_events {
+        let Some(event) = crate::bundle::parse_typed_event(value)? else {
+            continue;
+        };
+        let Payload::HistoryRewritten { mapping, .. } = &event.payload else {
+            continue;
+        };
+        if held.contains(&event.event_id) {
+            continue;
+        }
+        let judged = crate::rewrite::signature_only_successors(cwd, mapping, &rewrites);
+        let mut value = value.clone();
+        if let Some(object) = value.as_object_mut() {
+            object.remove(crate::store::SIGNATURE_ONLY_FIELD);
+            if !judged.is_empty() {
+                object.insert(
+                    crate::store::SIGNATURE_ONLY_FIELD.to_string(),
+                    serde_json::json!(judged),
+                );
+            }
+        }
+        let mut bytes = serde_json::to_vec_pretty(&value)?;
+        bytes.push(b'\n');
+        incoming.insert(event.event_id.clone(), bytes);
+    }
     Ok(incoming)
 }
 

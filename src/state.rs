@@ -22,6 +22,12 @@ pub struct Patchset {
     pub on_behalf_of: Option<String>,
     pub base: String,
     pub head: String,
+    /// The commit an approval of this patchset still stands on: `head` as
+    /// recorded, followed only through rewrites that changed a signature and
+    /// nothing else. It differs from `head` once a recorded rewrite changed
+    /// content, which is what leaves an approval stale.
+    #[serde(skip)]
+    pub approved_head: String,
     pub merge_base: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub brief_ref: Option<BriefRef>,
@@ -1022,6 +1028,9 @@ impl ChangeState {
     /// Follow every revision this view holds forward through the recorded
     /// rewrites, so each one names the commit it names in this repository.
     ///
+    /// Every revision follows a rewrite except the one an approval stands on,
+    /// which follows only a rewrite that changed a signature and nothing else.
+    ///
     /// Trees and blobs are deliberately untouched. A rewrite that preserves
     /// content produces new commits over the same trees, so tree-keyed gate
     /// evidence must count identically across it; a rewrite that changes
@@ -1035,6 +1044,14 @@ impl ChangeState {
         for patchset in &mut self.patchsets {
             rewrites.advance(&mut patchset.base)?;
             rewrites.advance(&mut patchset.head)?;
+            // Once a change has closed, its approval is the record of what
+            // authorized the close rather than a gate, and follows every
+            // rewrite as the rest of the record does.
+            patchset.approved_head = if self.closure.is_some() {
+                patchset.head.clone()
+            } else {
+                rewrites.approved_successor(&patchset.approved_head)?
+            };
             rewrites.advance_opt(&mut patchset.merge_base)?;
         }
         for brief in &mut self.briefs {
@@ -1534,6 +1551,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     on_behalf_of: ev.on_behalf_of.clone(),
                     base: base.clone(),
                     head: head.clone(),
+                    approved_head: head.clone(),
                     merge_base: merge_base.clone(),
                     brief_ref: brief_ref.clone(),
                     brief_version,

@@ -1059,6 +1059,15 @@ fn build_report(
         (Some(h), Some(p)) => *h == p.head,
         _ => false,
     };
+    // An approval stands on the commit it approved, followed only through
+    // rewrites that changed its signature and nothing else. The patchset's own
+    // head follows every rewrite, so gate evidence and the review subject keep
+    // describing the branch; only the verdict is left behind by a rewrite that
+    // changed content.
+    let approved_head_matches = match (&current_head, &latest_patchset) {
+        (Some(h), Some(p)) => *h == p.approved_head,
+        _ => false,
+    };
     let base_drift = cwd.and_then(|cwd| {
         state.latest_brief().and_then(|brief| {
             brief_base_drift(cwd, brief.base_revision.as_deref(), current_head.as_deref())
@@ -1098,7 +1107,7 @@ fn build_report(
                 .as_ref()
                 .map(|p| p.id == v.patchset_id)
                 .unwrap_or(false)
-            && head_matches
+            && approved_head_matches
             && !rejected_self_approval;
         VerdictStatus {
             verdict: v.verdict,

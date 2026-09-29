@@ -340,7 +340,7 @@ change has no dependents. It says so on the way out.
 
 ## Export / import
 
-Move one change's complete ledger as a deterministic `arc-bundle/4`
+Move one change's complete ledger as a deterministic `arc-bundle/5`
 JSON file:
 
 ```sh

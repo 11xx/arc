@@ -173,6 +173,7 @@ impl Store {
     pub fn append_repository_event(&self, event: &Event) -> Result<()> {
         self.refuse_undeclared_author(event)?;
         self.stamp_session_resolution(event.session_resolution)?;
+        self.stamp_format_for(&event.payload)?;
         ids::validate_id_component(&event.event_id)?;
         let dir = self.repository_events_dir();
         create_private_dir_all(&dir)?;
@@ -583,6 +584,9 @@ impl Store {
                 authorization: Some(authorization),
                 ..
             } if authorization.verdict_event_id.is_none() => Some(3),
+            // An older reader follows an approval through every rewrite, the
+            // ones that changed content included.
+            Payload::HistoryRewritten { .. } => Some(6),
             Payload::ChangeIntegrated { .. } | Payload::IntegrationAsserted { .. } => Some(2),
             _ => None,
         };
@@ -604,6 +608,7 @@ impl Store {
             .and_then(serde_json::Value::as_str)
         {
             Some("external-verdict-recorded") | Some("ready-to-send") => Some(4),
+            Some("history-rewritten") => Some(6),
             Some("integration-asserted")
                 if value
                     .and_then(|value| value.get("external_reference"))
@@ -970,7 +975,7 @@ impl Store {
         }
         let existing: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
         let incoming: serde_json::Value = serde_json::from_slice(bytes)?;
-        Ok(existing != incoming)
+        Ok(!same_repository_event(&existing, &incoming))
     }
 
     /// Write a repository-scoped event verbatim, as import does for a change.
@@ -989,7 +994,7 @@ impl Store {
             // the bundle disagrees with.
             let existing: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
             let incoming: serde_json::Value = serde_json::from_slice(bytes)?;
-            if existing != incoming {
+            if !same_repository_event(&existing, &incoming) {
                 bail!(
                     "repository event {event_id} already exists here with different content; \
                      nothing was imported"
@@ -1017,6 +1022,27 @@ impl Store {
         write_exclusive(&path, bytes)
             .with_context(|| format!("event {event_id} already exists during import"))
     }
+}
+
+/// The field of a `history-rewritten` event that records what the recording
+/// repository found when it compared the commits.
+pub const SIGNATURE_ONLY_FIELD: &str = "signature_only";
+
+/// Whether two copies of one repository event are the same fact.
+///
+/// The signature-only judgement is the receiver's own: an import replaces the
+/// sender's with one made against the objects it holds, so the copy it holds
+/// and the copy a bundle carries are one event when they agree on everything
+/// else.
+fn same_repository_event(existing: &serde_json::Value, incoming: &serde_json::Value) -> bool {
+    let bare = |value: &serde_json::Value| {
+        let mut value = value.clone();
+        if let Some(object) = value.as_object_mut() {
+            object.remove(SIGNATURE_ONLY_FIELD);
+        }
+        value
+    };
+    bare(existing) == bare(incoming)
 }
 
 fn authorization_has_external_verdict(
