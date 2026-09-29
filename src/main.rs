@@ -1084,6 +1084,9 @@ enum Cmd {
         /// as soon as the target moves again, because that is a different
         /// merge. With --skip-green, a gate already green at that merged tree
         /// records reuse rather than running a second time.
+        ///
+        /// A textual conflict, including a modify/delete conflict, refuses
+        /// before any gate runs or evidence is recorded; rebase first.
         #[arg(long, value_name = "BRANCH")]
         against: Option<String>,
     },
