@@ -145,6 +145,13 @@ arc catchup            # what is waiting right now
 | [schemas](docs/schemas.md) | Every schema version, and which are commitments |
 | [changing arc](docs/changing-arc.md) | Rules for working on arc itself, non-goals, roadmap |
 
+`ARC_SESSION_LINK` (or `--session-link`) records a private acting-session URL
+beside event identity. `arc env` derives it from Claude Code's
+`CLAUDE_CODE_BRIDGE_SESSION_ID` when Claude owns the process. It stays in the
+local ledger and journal and in event bundles exchanged between the operator's
+replicas; arc excludes it from Git commits, trailers, changelogs, and forge or
+pull-request text.
+
 ## License
 
 [Unlicense](UNLICENSE) — public domain.

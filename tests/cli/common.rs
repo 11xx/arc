@@ -68,6 +68,7 @@ impl Repo {
             .envs(NO_EDITOR)
             .env_remove("ARC_ROLE")
             .env_remove("ARC_MODEL")
+            .env_remove("ARC_SESSION_LINK")
             .env_remove("ARC_ON_BEHALF_OF")
             .env_remove("ARC_DATA_DIR")
             .env_remove("ARC_DATA_ROOT")
@@ -78,6 +79,7 @@ impl Repo {
             // test, or `env` detects the runner instead of the fixture.
             .env_remove("CLAUDE_SESSION_ID")
             .env_remove("CLAUDE_CODE_SESSION_ID")
+            .env_remove("CLAUDE_CODE_BRIDGE_SESSION_ID")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("OPENCODE_SESSION")
             .env_remove("OPENCODE_TERMINAL")

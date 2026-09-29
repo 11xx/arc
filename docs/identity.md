@@ -4,11 +4,23 @@
 
 Every event records an actor, and optionally a harness and native
 session ID: `--actor/--harness/--session` or `ARC_ACTOR`, `ARC_HARNESS`,
-`ARC_SESSION`. With no actor declared, arc records `<harness>:<session>` when
-both are known, else `git config user.name`; either is an assumed identity
+`ARC_SESSION`. `--session-link` or `ARC_SESSION_LINK` supplies an optional
+private web link for the acting session. With no actor declared, arc records
+`<harness>:<session>` when both are known, else `git config user.name`;
+either is an assumed identity
 (see [review](review.md)). `claim`,
 `release-claim`, and `stage` require nonempty harness and session values;
 identity is the actor + harness + session tuple.
+
+Claude Code exports `CLAUDE_CODE_BRIDGE_SESSION_ID` while Remote Control is
+connected. When `arc env` resolves Claude as the acting harness and that value
+is a well-formed bridge session id, it derives `ARC_SESSION_LINK` from it.
+For every other harness or absent or malformed id, it unsets the link.
+The link is event provenance in the local ledger and journal. Arc excludes it
+from Git commit and merge messages, contribution trailers, changelog
+projections and files, and forge or pull-request text. Event bundles and
+journal export bundles exchanged between the operator's replicas retain it
+with the rest of an event's provenance.
 
 Explicit identity always wins. Set `[identity] detect = true` in the config
 file to fill omitted harness, session, and model values from the running

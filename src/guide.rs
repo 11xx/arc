@@ -22,15 +22,23 @@ Run `arc catchup` for live project state and `arc journal open` for work
 waiting for a session.
 
 SAY WHO YOU ARE (before the first write)
-  eval "$(arc env)"                    Detect harness, session, and model.
+  eval "$(arc env)"                    Detect harness, session, model, and session link.
   export ARC_ACTOR=<name> ARC_HARNESS=<claude|codex|opencode|pi> \
-         ARC_SESSION=<id> ARC_MODEL=<model[#effort]>
+         ARC_SESSION=<id> ARC_MODEL=<model[#effort]> ARC_SESSION_LINK=<url>
 
   Every event records who wrote it. Most writes accept an undeclared
   identity. In that case arc records an actor nobody claimed:
   `<harness>:<session>` when both are known, else `git config user.name`.
   Either is assumed rather than declared, so it cannot be the independent
   party to an approval.
+
+  Claude Code's Remote Control supplies `CLAUDE_CODE_BRIDGE_SESSION_ID` to
+  connected tool shells. For a resolved Claude harness, `arc env` derives
+  `ARC_SESSION_LINK` from that id; otherwise it unsets the link. The link is
+  private event provenance in the ledger and journal. Arc never projects it
+  into Git commits, trailers, changelogs, or forge text. Journal export
+  bundles between the operator's replicas carry event provenance, including
+  a recorded link.
 
   `arc env` detects a harness by the session variable it exports; not every
   harness exports one. A harness exports its session id into the processes it

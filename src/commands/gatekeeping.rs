@@ -725,18 +725,9 @@ fn verify_against(
     if any_probe || !answered_already {
         let path = super::lifecycle::worktree_path_for(&ctx.cwd, &format!("{}-against", st.slug))?;
         _scratch = Some(ScratchWorktree::create(&ctx.cwd, path, &synthesized)?);
-        scratch_ctx = _scratch.as_ref().map(|scratch| Ctx {
-            cwd: scratch.path.clone(),
-            actor: ctx.actor.clone(),
-            actor_source: ctx.actor_source,
-            operator: ctx.operator.clone(),
-            fallback_announced: ctx.fallback_announced.clone(),
-            harness: ctx.harness.clone(),
-            session: ctx.session.clone(),
-            session_resolution: ctx.session_resolution,
-            model: ctx.model.clone(),
-            on_behalf_of: ctx.on_behalf_of.clone(),
-        });
+        scratch_ctx = _scratch
+            .as_ref()
+            .map(|scratch| ctx.with_cwd(scratch.path.clone()));
     }
     let probe_ctx = scratch_ctx.as_ref().unwrap_or(ctx);
     let environments = gate_environments(
@@ -2195,18 +2186,7 @@ fn integrate_queue(
     cleanup: bool,
     dry_run: bool,
 ) -> Result<i32> {
-    let queue_ctx = Ctx {
-        cwd: gitio::primary_worktree(&ctx.cwd)?,
-        actor: ctx.actor.clone(),
-        actor_source: ctx.actor_source,
-        operator: ctx.operator.clone(),
-        fallback_announced: ctx.fallback_announced.clone(),
-        harness: ctx.harness.clone(),
-        session: ctx.session.clone(),
-        session_resolution: ctx.session_resolution,
-        model: ctx.model.clone(),
-        on_behalf_of: ctx.on_behalf_of.clone(),
-    };
+    let queue_ctx = ctx.with_cwd(gitio::primary_worktree(&ctx.cwd)?);
     let store = queue_ctx.store()?;
     let selected = match &selection {
         QueueSelection::Tagged(tags) => {
