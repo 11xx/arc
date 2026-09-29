@@ -103,7 +103,7 @@ A change bundle carries a ledger, not a journal. Selected artifacts travel as
 their own versioned file:
 
 ```sh
-arc journal export 20260923T173916Z-topic-discussion.md --output discussion.json
+arc journal export 20260101T000000Z-topic-discussion.md --output discussion.json
 arc journal import discussion.json --dry-run
 arc journal import discussion.json
 ```
