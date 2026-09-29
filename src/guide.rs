@@ -1117,6 +1117,72 @@ EXIT CODES
       entry, and exits 0.
     A spooled write prints `spooled: <path>` and exits 0.
 
+SCHEMAS
+  Every structured surface carries a `schema` string `<name>/<n>`, and any
+  change to what a surface emits takes the next version: adding a field as
+  much as removing, renaming, or redefining one. A commitment is a shape
+  callers outside arc read, and its version is a promise. An internal shape
+  is arc's own on-disk bookkeeping; parsing one means tracking arc's
+  implementation.
+
+  A stored input format is versioned from the reader's side: its version
+  marks what a reader must accept, so a new optional field that leaves every
+  older file valid keeps the version, and removing a field or making one
+  required takes the next. `journal-events/1` is one.
+
+  Commitments, derived views:
+    `arc-state/2`                    arc show --json
+    `arc-status/26`                  arc status
+    `arc-check/3`                    arc check --json
+    `arc-inbox/10`                   arc inbox --json
+    `arc-catchup/11`                 arc catchup --json
+    `arc-journal-catchup/8`          arc journal catchup --json
+    `arc-resume/7`                   arc resume --json
+    `arc-brief/1`                    arc brief --json
+    `arc-journal-artifact/2`         arc journal show --json
+    `arc-journal-inventory/5`        arc journal inventory --json
+    `arc-rescue/4`                   arc rescue --json
+    `arc-review/4`                   arc review --json
+    `arc-findings/2`                 arc findings --format json
+    `arc-blocker-status/1`           arc blocker-status --json
+    `arc-metadata/1`                 arc metadata --json
+    `arc-chain/4`                    arc chain --json
+    `arc-stats/1`                    arc stats --json
+    `arc-stats-by-model/1`           arc stats --by-model --json
+    `arc-changelog/1`                arc changelog --json
+    `arc-changelog-render-request/1` stdin of a command changelog renderer
+    `arc-forks/2`                    arc fork list --json
+    `arc-doctor/5`                   arc doctor --json
+    `arc-workspace/1`                arc workspace list|inbox --json
+    `arc-workspace-backlog/18`       arc workspace backlog --json
+    `arc-workspace-report/2`         arc workspace report --json
+    `arc-workspace-inventory/1`      arc workspace inventory --json
+    `arc-writability/1`              arc config --check-writable --json
+    `arc-sandbox-clone/1`            arc sandbox clone --json
+    `arc-sandbox-diff/1`             arc sandbox diff --json
+    `arc-replica-id/1`               arc replica id --json
+    `arc-replica/2`                  arc replica status --json
+    `arc-journal-questions/3`        arc journal questions --json
+    `journal-discussion/4`           arc journal discussion --json
+    `journal-source/1`               arc journal source --json
+    `arc-journal-latest/1`           arc journal latest --json
+    `arc-journal-scaffolds/1`        arc journal scaffolds --json
+
+  Commitments, files:
+    `arc-bundle/5`                   arc export / arc import
+    `arc-replica-bundle/2`           arc replica export / import
+    `arc-replica-event/2`            one event inside an arc-replica-bundle
+    `arc-journal-bundle/1`           arc journal export / import
+    `journal-events/1`               events.jsonl, streamed by arc journal events
+    `arc-journal-spool/1`            .arc/outbox/<ts>-<kind>-<topic>.json
+
+  Internal:
+    store format 6                   .git/arc/config.json and the change ledger
+    `arc-replica-import/2`           receipt of an imported replica bundle
+    `arc-journal-exchange-import/1`  receipt of an imported journal bundle
+    `arc-sandbox/2`                  .arc-sandbox.json
+    `journal-binding/1`              bindings.jsonl
+
 WHAT ARC WILL NOT DO
   Ledger and repository:
     arc never deletes or rewrites an event file.
