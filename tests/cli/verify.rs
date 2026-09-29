@@ -1498,7 +1498,10 @@ fn a_dirty_tree_waiver_lets_evidence_count_and_dies_at_the_next_commit() {
         .args(["verify", "waived", "--gate", "unit", "--waive-dirty", "   "])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("must say why"));
+        .stderr(predicates::str::contains(concat!(
+            "error: --waive-dirty must say why dirty evidence should count; ",
+            "an empty reason waives the gate without recording a reason\n",
+        )));
 
     // Declared: the same dirty evidence now counts, and the waiver is visible
     // to whoever reviews the change.
