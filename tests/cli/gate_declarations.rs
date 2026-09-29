@@ -251,3 +251,51 @@ fn a_change_cannot_loosen_the_targets_review_policy() {
         );
     }
 }
+
+#[test]
+fn a_change_whose_target_branch_is_gone_is_blocked_and_refused() {
+    let repo = repo_declaring(TARGET_GATES);
+    git(&repo.root, &["branch", "staging"]);
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "orphaned", "--target", "staging"]),
+    );
+    let worktree = repo.home.join(".worktrees/repo-orphaned");
+    commit_file(&worktree, "work.txt", "work\n");
+    snapshot_and_approve(&repo, &worktree, "orphaned");
+    verify(&repo, &worktree, "orphaned", "smoke");
+    verify(&repo, &worktree, "orphaned", "guard");
+    git(&repo.root, &["branch", "-D", "staging"]);
+
+    for cwd in [&worktree, &repo.root] {
+        let report = status(&repo, cwd, "orphaned");
+        assert_eq!(report["integrate_ready"], false, "{report}");
+        assert!(
+            report["blockers"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("target-unreadable")),
+            "{report}"
+        );
+        assert_eq!(report["next_action"], "restore_target:staging", "{report}");
+
+        repo.arc(cwd)
+            .args(["check", "orphaned"])
+            .assert()
+            .code(6)
+            .stdout(predicates::str::contains("`staging` cannot be resolved"));
+        repo.arc(cwd)
+            .args(["integrate", "orphaned"])
+            .assert()
+            .code(6)
+            .stderr(
+                predicates::str::contains("Target branch `staging` cannot be resolved")
+                    .and(predicates::str::contains("could not be read")),
+            );
+        repo.arc(cwd)
+            .args(["verify", "orphaned", "--gate", "smoke"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("\"staging\""));
+    }
+}

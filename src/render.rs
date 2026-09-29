@@ -1116,6 +1116,14 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
             Blocker::BranchMissing => {
                 let _ = writeln!(out, "  - Branch `{}` is missing", state.branch);
             }
+            Blocker::TargetUnreadable => {
+                let _ = writeln!(
+                    out,
+                    "  - Target branch `{}` cannot be resolved, so the gate and policy \
+                     declarations the change is judged by could not be read",
+                    state.target_branch
+                );
+            }
             Blocker::ForkBranch => {
                 // The refusal names the change's branch, not the directory the
                 // caller stands in. The report carries the fork; the branch
@@ -1323,6 +1331,7 @@ fn blocker_title(blocker: Blocker) -> &'static str {
     match blocker {
         Blocker::Closed => "change closed",
         Blocker::BranchMissing => "branch missing",
+        Blocker::TargetUnreadable => "target declarations unreadable",
         Blocker::ForkBranch => "change sits on fork work",
         Blocker::Iterating => "change is iterating",
         Blocker::BlockedByChanges => "prerequisite changes unresolved",
@@ -2024,6 +2033,16 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
         Blocker::BranchMissing,
         "branch present",
         format!("branch `{}` is missing", state.branch),
+    );
+    condition(
+        &mut out,
+        Blocker::TargetUnreadable,
+        "target declarations readable",
+        format!(
+            "target `{}` cannot be resolved, so the declarations the change is judged by \
+             could not be read",
+            state.target_branch
+        ),
     );
     condition(
         &mut out,

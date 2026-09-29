@@ -74,7 +74,10 @@ binds no change until it is committed there, and `arc status` lists it as a
 difference between the checkout and the target. The same list names each gate
 the change declares as a different check than the target's, saying that the
 target's is evaluated, and every refusal for a gate that is not green states
-which declarations were evaluated.
+which declarations were evaluated. A change whose target branch cannot be
+resolved has no declarations to be judged by: it is blocked with
+`target-unreadable`, naming the target, `integrate` and `verify` refuse, and
+`status` still reports it.
 
 A profile with no declared gate has nothing to run. `arc done` snapshots and
 prints the check state as it always does, saying that no gate is declared for
@@ -178,8 +181,8 @@ whether one change was integrated or twenty.
 - `arc check` exits 3 when no valid approval covers the current head.
 - `arc check` exits 4 while a hold is active.
 - `arc check` exits 5 when a required gate is not green at the head.
-- `arc check` exits 6 for a closed change, a missing branch, or malformed
-  state.
+- `arc check` exits 6 for a closed change, a missing branch, a target branch
+  that cannot be resolved, or malformed state.
 - `arc check` exits 7 while a prerequisite change is unresolved.
 - `arc check` exits 11 when the target moved with conflicting changes and the
   branch needs rebasing.

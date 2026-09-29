@@ -22,21 +22,30 @@ pub struct Declarations {
     /// One line per way the declarations in play disagree, so a refusal never
     /// rests on a declaration nobody was told about.
     pub notes: Vec<String>,
+    /// The target branch could not be resolved. Nothing then says what the
+    /// change owes, so the gates and policy here are a display fallback and
+    /// no decision may rest on them.
+    pub target_unreadable: bool,
 }
 
 /// The declarations `state` is judged by, from any checkout of its repository.
 ///
 /// Required gates are the target's plus those the change's branch head adds;
-/// policy is the target's. A repository whose target branch cannot be read
-/// has no other tree to answer to, so the declarations come from the checkout
-/// at `cwd`.
+/// policy is the target's. When the target branch cannot be resolved the
+/// result says so and carries only what the change's own branch declares, for
+/// display: a change is never judged by declarations it could have written.
 pub fn for_change(cwd: &Path, state: &ChangeState) -> Result<Declarations> {
     let toplevel = gitio::toplevel(cwd)?;
     let Ok(target_head) = gitio::branch_head(cwd, &state.target_branch) else {
+        let own = gitio::branch_head(cwd, &state.branch)
+            .ok()
+            .and_then(|head| gates::inspect_at(cwd, &head).ok())
+            .unwrap_or_default();
         return Ok(Declarations {
-            gates: gates::load(&toplevel)?,
-            policy: policy::load(&toplevel)?,
+            gates: own,
+            policy: PolicyFile::default(),
             notes: Vec::new(),
+            target_unreadable: true,
         });
     };
     let target = &state.target_branch;
@@ -56,6 +65,7 @@ pub fn for_change(cwd: &Path, state: &ChangeState) -> Result<Declarations> {
         gates: required,
         policy: policy::load_at(cwd, &target_head)?,
         notes,
+        target_unreadable: false,
     })
 }
 
