@@ -65,8 +65,12 @@ reads.
 
 Before tagging a release:
 
-1. Every commit reachable from the release head is signed by one key
-   (`git log --format=%G? <head>` is `G` throughout).
+1. The release head and its tag are signed by the operator's key. Work done
+   on another machine stays unsigned and enters only through a merge signed
+   on the integrating machine, whose hash covers it, so an unsigned commit
+   is reachable only beneath a signed merge: every commit on the head's
+   first-parent line is signed (`git log --first-parent --format=%G? <head>`
+   is `G` throughout).
 2. `arc catchup` shows no outstanding review debt, or each remaining one is
    waived with a recorded reason.
 3. The guide, `--help`, and SCHEMAS agree with the behaviour being released.
