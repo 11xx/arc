@@ -98,10 +98,8 @@ pub struct TrailerArgs {
 /// is left exactly as it is: no new object, and no entry in the map. That is
 /// what separates this from re-signing, where every commit in range is
 /// recreated because the one below it was.
-/// The portable contribution-trailer specification, embedded at build time
-/// from its canonical page so the printed guide and the repository document
-/// cannot drift apart.
-const CONTRIBUTION_SPEC: &str = include_str!("../../docs/contribution-trailers.md");
+/// The portable contribution-trailer specification, embedded at build time.
+const CONTRIBUTION_SPEC: &str = include_str!("contribution-trailers.md");
 
 /// Print the contribution-trailer specification, or check one message against
 /// it. Reads no ledger, journal, configuration, identity, or network, and
