@@ -8,15 +8,14 @@ of what is being worked on, what has been learned or decided, what remains to
 be done, and what is actually safe to integrate.
 
 Git owns content, branches, and history; `arc` owns the collaboration and
-execution state Git deliberately lacks — changes, patchsets, briefs,
-handoffs, findings, verdicts, verification evidence, holds, and guarded
-integration.
+execution state Git deliberately lacks: changes, patchsets, briefs, handoffs,
+findings, verdicts, verification evidence, holds, and guarded integration.
 
-This is durable project and workflow context: a cold session can reconstruct
-the state of work with `arc catchup`, using the journal and change ledger
-shared across worktrees and harnesses. Review verdicts bind to exact
-patchsets, and integration checks findings, holds, and required verification
-gates before merging. Arc runs as a single local CLI.
+A cold session reconstructs the state of work with `arc catchup`, from the
+journal and change ledger shared across worktrees and harnesses. Review
+verdicts bind to exact patchsets, and integration checks findings, holds, and
+required verification gates before merging. arc is a single local CLI: it
+makes no network call and runs no daemon.
 
 ## Install
 
@@ -32,126 +31,58 @@ From a checkout, run `cargo install --path . --locked`. The package is named
 `arc-ledger`; the installed command is `arc`. The `arc-ledger` release on
 crates.io is a September 2026 snapshot.
 
-Released versions are the calendar date of publication in the `YYYY.M.D`
-shape, written without leading zeros. One release is cut per date, so a
-second release waits for the next one.
-
-Optional shell completions and man page:
-
-```sh
-arc completions <bash|zsh|fish> > <completion-path>   # e.g. ~/.zfunc/_arc
-arc mangen <dir>                                      # writes <dir>/arc.1
-```
-
 ## Pick up where a session left off
 
 ```sh
 arc catchup                  # project state and work waiting for attention
 arc journal open             # decisions to settle and work to pick up
-arc journal inventory --json # structured artifact facts and coverage
-```
 
-Keep a concrete next step in the project journal:
-
-```sh
+# keep a concrete next step after the chat ends
 arc journal todo parser-diagnostics --body-file - <<'EOF'
 # Explain malformed configuration values
 
 Report the key and source location when a value cannot be parsed.
-Preserve the diagnostic in a CLI regression test.
 EOF
 ```
 
-The item remains discoverable after the chat ends. Discussions, plans, and
-handoffs preserve the context behind the work; `arc begin --from-journal`
-links an actionable item to a tracked change. See the [journal guide](docs/journal.md)
-for the full workflow.
+Discussions, plans, and handoffs keep the context behind the work, and
+`arc begin <slug> --from-journal <file>` turns a queued item into a tracked
+change.
 
 ## One change, end to end
 
-Say who you are first. Every event records an actor, and by default nothing
-refuses an undeclared one — the write succeeds and the ledger names whoever
-configured the checkout.
-
 ```sh
-eval "$(arc env)"                      # detect harness, session, and model
-export ARC_ACTOR=<name> ARC_HARNESS=<claude|codex|opencode|pi>
-```
-
-Then open a change, work it, and land it:
-
-```sh
-arc catchup                            # what is waiting: ledger + journal
+eval "$(arc env)"                      # record which harness, session, and model act
 arc begin radio-refill-fix --title "Keep radio refill from restarting playback"
-# → branch arc/radio-refill-fix + worktree ~/.worktrees/<repo>-radio-refill-fix
-
 cd ~/.worktrees/<repo>-radio-refill-fix
-arc brief radio-refill-fix --body-file executor-spec.md   # the implementation contract
-arc show                               # brief, state, findings, next action
-arc stage implementing --claim         # advisory liveness while working
+arc brief radio-refill-fix --body-file spec.md   # the implementation contract
 # ... implement, commit ...
-
-arc done                               # snapshot → run every gate → check
+arc done                               # snapshot, run every gate, check
 
 # a reviewer, in any harness or session:
-arc diff radio-refill-fix --findings   # the patchset diff, with anchor drift
-arc review radio-refill-fix --snapshot --verdict changes-requested \
-  --cause executor --body "The concurrency path still permits a stale commit." \
-  --findings-json -                    # a JSON array of findings on stdin
-
-# ... fix, then:
-arc resolve radio-refill-fix f01ABC... --status resolved --commit HEAD
+arc diff radio-refill-fix --findings
 arc review radio-refill-fix --snapshot --verdict approved
 
 arc check radio-refill-fix             # exit 0 = ready; any other code names the blocker
 arc integrate radio-refill-fix --cleanup
 ```
 
-`arc integrate` merges only when, atomically checked: the head equals the
-approved patchset head, no blocking finding is open, every required gate is
-green at that exact head, and no hold is active. A verdict binds to the exact
-patchset head it approved, so any new commit makes it stale.
+`arc integrate` merges only when the head equals the approved patchset head,
+no blocking finding is open, every required gate is green at that head, and
+no hold is active, all checked atomically. Any new commit makes an approval
+stale.
 
 ## Where the rest is
 
-**The CLI is the whole of what a session needs.** `arc` with no arguments
-prints the workflow guide — what the ledger owns, the command lifecycle in
-order, how to pick a profile, the exit codes, and the invariants that change
-what a session should do. `arc <verb> --help` is each command's full contract.
-Nothing an agent must know to act correctly lives only in a document.
+`arc` with no arguments prints the workflow guide: what the ledger owns, the
+command lifecycle, profiles, exit codes, configuration files, and schemas.
+`arc <verb> --help` is each command's full contract.
 
-```sh
-arc                    # the workflow guide
-arc <verb> --help      # one command's contract
-arc catchup            # what is waiting right now
-```
-
-`docs/` is the long form, as verbose as it needs to be, one page per area:
-
-| Page | What it covers |
-| --- | --- |
-| [QUICKSTART](docs/QUICKSTART.md) | A foreign repository from install to a first integrated change |
-| [changes](docs/changes.md) | The model, the lifecycle, patchsets, briefs, context awareness |
-| [gates](docs/gates.md) | Gate declaration, evidence, trees, `verify --against`, falsification, exit codes |
-| [review](docs/review.md) | Verdicts, dispositions, policy, dangerous surfaces, coverage, debt, audits |
-| [journal](docs/journal.md) | Artifacts, discussions, questions, claims, amendments, lanes, the spool |
-| [delegation](docs/delegation.md) | Execution roles, dependencies, chains, runs, rounds, deferrals |
-| [forks](docs/forks.md) | Worktrees outside the change lifecycle, and what they cost |
-| [workspace](docs/workspace.md) | Cross-project views, scaffolds, acceptance probes, restack, bundles |
-| [forge](docs/forge.md) | Recording and validating the forge facts an agent observed |
-| [identity](docs/identity.md) | Actor, harness, session, model, and acting for a subject |
-| [replicas](docs/replicas.md) | Explicit store pairing, file exchange, and integration authority |
-| [configuration](docs/configuration.md) | Config, sandbox, storage guarantees, Git hooks |
-| [history](docs/history.md) | Rewrites, and how derived readings follow revisions forward |
-| [schemas](docs/schemas.md) | Every schema version, and which are commitments |
-| [changing arc](docs/changing-arc.md) | Rules for working on arc itself, non-goals, roadmap |
-
-`ARC_SESSION_LINK` (or `--session-link`) records a private acting-session URL
-beside event identity. `arc env` derives it from Claude Code's
-`CLAUDE_CODE_BRIDGE_SESSION_ID` when Claude owns the process. It stays in the
-local ledger and journal and in event bundles exchanged between the operator's
-replicas; arc excludes it from Git commits, trailers, changelogs, and forge or
-pull-request text.
+Session transcripts are read through
+[tapes](https://github.com/11xx/tapes). The rules that decide what
+integration permits are modelled independently in
+[arc-model](https://github.com/11xx/arc-model), which replays generated
+histories through the `arc` binary and compares its answers with the model's.
 
 ## License
 
