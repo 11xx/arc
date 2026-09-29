@@ -4,7 +4,7 @@
 
 use crate::common::*;
 
-const SPEC: &str = include_str!("../../docs/contribution-trailers.md");
+const SPEC: &str = include_str!("../../src/commands/contribution-trailers.md");
 
 #[test]
 fn instructions_git_prints_the_canonical_spec_outside_a_repository() {
