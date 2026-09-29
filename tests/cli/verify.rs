@@ -9,10 +9,17 @@ fn write_two_gates(repo: &Repo, first: &str, second: &str) {
     .unwrap();
 }
 
+/// Declare two gates on the target, which every change is judged by.
+fn commit_two_gates(repo: &Repo, first: &str, second: &str) {
+    write_two_gates(repo, first, second);
+    git(&repo.root, &["add", ".arc/gates.toml"]);
+    git(&repo.root, &["commit", "-m", "test: declare two gates"]);
+}
+
 #[test]
 fn verify_all_records_every_passing_gate_and_summary() {
     let repo = Repo::new();
-    write_two_gates(&repo, "true", "true");
+    commit_two_gates(&repo, "true", "true");
     stdout(
         repo.arc(&repo.root)
             .args(["begin", "all-pass", "--no-worktree"]),
@@ -47,7 +54,7 @@ fn verify_all_records_every_passing_gate_and_summary() {
 #[test]
 fn verify_all_continues_after_a_failure() {
     let repo = Repo::new();
-    write_two_gates(&repo, "false", "true");
+    commit_two_gates(&repo, "false", "true");
     stdout(
         repo.arc(&repo.root)
             .args(["begin", "all-fail", "--no-worktree"]),
@@ -284,12 +291,7 @@ fn verify_all_parallel_stays_not_green_when_a_transient_change_is_restored() {
 #[test]
 fn failing_gate_exposes_only_the_final_4096_output_bytes_in_status() {
     let repo = Repo::new();
-    fs::create_dir_all(repo.root.join(".arc")).unwrap();
-    fs::write(
-        repo.root.join(".arc/gates.toml"),
-        "[gates.failure]\ncommand = \"printf discard; head -c 4096 /dev/zero | tr '\\\\000' x; printf err >&2; exit 1\"\n",
-    )
-    .unwrap();
+    repo.redeclare_gates("[gates.failure]\ncommand = \"printf discard; head -c 4096 /dev/zero | tr '\\\\000' x; printf err >&2; exit 1\"\n");
     stdout(
         repo.arc(&repo.root)
             .args(["begin", "output-tail", "--no-worktree"]),
@@ -312,12 +314,7 @@ fn failing_gate_exposes_only_the_final_4096_output_bytes_in_status() {
 #[test]
 fn gate_timeout_records_failure_and_kills_the_process_group() {
     let repo = Repo::new();
-    fs::create_dir_all(repo.root.join(".arc")).unwrap();
-    fs::write(
-        repo.root.join(".arc/gates.toml"),
-        "[gates.slow]\ncommand = \"sleep 5 &\"\ntimeout = \"1s\"\n",
-    )
-    .unwrap();
+    repo.redeclare_gates("[gates.slow]\ncommand = \"sleep 5 &\"\ntimeout = \"1s\"\n");
     stdout(
         repo.arc(&repo.root)
             .args(["begin", "gate-timeout", "--no-worktree"]),
@@ -344,12 +341,7 @@ fn gate_timeout_records_failure_and_kills_the_process_group() {
 #[test]
 fn passing_gate_output_is_not_rendered_in_show() {
     let repo = Repo::new();
-    fs::create_dir_all(repo.root.join(".arc")).unwrap();
-    fs::write(
-        repo.root.join(".arc/gates.toml"),
-        "[gates.success]\ncommand = \"printf '\\\\164\\\\157\\\\153\\\\145\\\\156\\\\064\\\\062'\"\n",
-    )
-    .unwrap();
+    repo.redeclare_gates("[gates.success]\ncommand = \"printf '\\\\164\\\\157\\\\153\\\\145\\\\156\\\\064\\\\062'\"\n");
     stdout(
         repo.arc(&repo.root)
             .args(["begin", "pass-tail", "--no-worktree"]),
@@ -970,7 +962,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
         .code(12);
 
     let status = json_stdout(repo.arc(&worktree).args(["status", "probe-readiness"]));
-    assert_eq!(status["schema"], "arc-status/25");
+    assert_eq!(status["schema"], "arc-status/26");
     assert_eq!(status["probes"][0]["name"], "marker-exists");
     assert_eq!(status["probes"][0]["brief_version"], 2);
     assert_eq!(status["probes"][0]["discriminating_at_head"], false);

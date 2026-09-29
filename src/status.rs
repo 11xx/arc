@@ -14,7 +14,7 @@ use std::path::Path;
 
 pub use crate::blockers::Blocker;
 
-pub const STATUS_SCHEMA: &str = "arc-status/25";
+pub const STATUS_SCHEMA: &str = "arc-status/26";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// A verdict graph with several tips has no authority to report, so the
@@ -585,6 +585,12 @@ pub struct StatusReport {
     /// Source files for the policy rules that apply to this change.
     /// Additive in `arc-status/23`.
     pub policy_sources: BTreeMap<String, Vec<String>>,
+    /// Where the declarations in play disagree: the checkout against the
+    /// target, or the change's gate against the target's. Readiness answers
+    /// for the target's declarations plus the gates the change adds, so
+    /// `status`, `check` and `integrate` agree. Additive in `arc-status/26`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub declaration_notes: Vec<String>,
     pub probes: Vec<ProbeStatus>,
     pub blocker_summary: BlockerSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1800,6 +1806,7 @@ fn build_report(
         holds: hold_entries(state),
         gates: gate_statuses,
         policy_sources: policy.sources.as_map(),
+        declaration_notes: Vec::new(),
         probes: probe_statuses,
         blocker_summary,
         approval_rejection_reason,

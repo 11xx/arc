@@ -126,6 +126,19 @@ pub fn gate_line(gate: &GateStatus) -> String {
     format!("{status}{}", gate_declaration_suffix(gate))
 }
 
+/// Which declarations readiness evaluated, and where they disagree with the
+/// checkout or the change's own. Empty when nothing disagrees.
+fn declaration_notes(report: &StatusReport) -> String {
+    let mut out = String::new();
+    if !report.declaration_notes.is_empty() {
+        let _ = writeln!(out, "Declarations differ:");
+        for note in &report.declaration_notes {
+            let _ = writeln!(out, "  - {note}");
+        }
+    }
+    out
+}
+
 fn gate_declaration_suffix(gate: &GateStatus) -> String {
     if gate.declared_by.is_empty() {
         " (declaration source unavailable)".to_string()
@@ -717,6 +730,13 @@ pub fn markdown(
         let _ = writeln!(w, "- none declared for profile {}", report.profile);
     }
 
+    if !report.declaration_notes.is_empty() {
+        let _ = writeln!(w, "\n## Declarations differ\n");
+        for note in &report.declaration_notes {
+            let _ = writeln!(w, "- {note}");
+        }
+    }
+
     if !report.policy_sources.is_empty() {
         let _ = writeln!(w, "\n## Policy declarations\n");
         for (rule, sources) in &report.policy_sources {
@@ -1212,6 +1232,11 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
                         gate_declaration_suffix(gate)
                     );
                 }
+                let _ = writeln!(
+                    out,
+                    "  Gates evaluated: those {}'s .arc/gates.toml declares, plus any {}'s adds",
+                    state.target_branch, state.branch
+                );
             }
             Blocker::AcceptanceProbesNotGreen => {
                 for probe in report
@@ -1247,6 +1272,10 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
             }
         }
         let _ = writeln!(out);
+    }
+    let notes = declaration_notes(report);
+    if !notes.is_empty() {
+        let _ = writeln!(out, "{notes}");
     }
     let _ = writeln!(out, "Next step: {}", report.next_action);
     out
@@ -2147,6 +2176,11 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
             .join("\n"),
     );
 
+    let notes = declaration_notes(report);
+    if !notes.is_empty() {
+        let _ = writeln!(out);
+        out.push_str(&notes);
+    }
     let _ = writeln!(out);
     if report.integrate_ready {
         let _ = writeln!(out, "Ready to integrate (exit 0)");

@@ -229,14 +229,8 @@ pub fn operator_path(repo_toplevel: &Path) -> Result<PathBuf> {
     Ok(crate::gitio::common_dir(repo_toplevel)?.join("arc/operator-policy.toml"))
 }
 
-/// A stable source name safe to retain in reports and ledger events.
-pub fn source_name(path: &Path, repo_toplevel: &Path) -> String {
-    if path == repo_toplevel.join(".arc/policy.toml") {
-        ".arc/policy.toml".to_string()
-    } else {
-        "<git-common-dir>/arc/operator-policy.toml".to_string()
-    }
-}
+const PROJECT_SOURCE: &str = ".arc/policy.toml";
+const OPERATOR_SOURCE: &str = "<git-common-dir>/arc/operator-policy.toml";
 
 /// Validate the policy portion of an operator-policy document.
 pub fn validate_operator_text(text: &str) -> Result<()> {
@@ -244,21 +238,42 @@ pub fn validate_operator_text(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Load the policy in force in the checkout at `repo_toplevel`.
 pub fn load(repo_toplevel: &Path) -> Result<PolicyFile> {
-    let in_tree = repo_toplevel.join(".arc/policy.toml");
-    let operator = operator_path(repo_toplevel)?;
+    let path = repo_toplevel.join(PROJECT_SOURCE);
+    let project = read_optional(&path)?.map(|text| (path.display().to_string(), text));
+    layered(repo_toplevel, project)
+}
+
+/// Load the policy with the project layer read from the tree committed at
+/// `revision`, wherever `cwd` stands in the repository.
+pub fn load_at(cwd: &Path, revision: &str) -> Result<PolicyFile> {
+    let project = crate::gitio::file_at(cwd, revision, PROJECT_SOURCE)?
+        .map(|text| (format!("{PROJECT_SOURCE} at {revision}"), text));
+    layered(cwd, project)
+}
+
+fn read_optional(path: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+/// Layer the project declaration, given as its origin and text, under the
+/// operator's. `repo` is any path inside the repository.
+fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile> {
+    let operator = operator_path(repo)?;
+    let operator = read_optional(&operator)?.map(|text| (operator.display().to_string(), text));
     let mut layers = Vec::new();
-    for path in [in_tree, operator] {
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error).with_context(|| format!("cannot read {}", path.display()))
-            }
+    for (source, layer) in [(PROJECT_SOURCE, project), (OPERATOR_SOURCE, operator)] {
+        let Some((origin, text)) = layer else {
+            continue;
         };
-        let layer = toml::from_str::<PolicyLayer>(&text)
-            .with_context(|| format!("malformed {}", path.display()))?;
-        layers.push((source_name(&path, repo_toplevel), layer));
+        let layer =
+            toml::from_str::<PolicyLayer>(&text).with_context(|| format!("malformed {origin}"))?;
+        layers.push((source.to_string(), layer));
     }
 
     let mut policy = Policy::default();

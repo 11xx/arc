@@ -328,10 +328,33 @@ impl Ctx {
         if !store.require_declared_actor {
             return Ok(());
         }
-        let source = if store.require_declared_actor_sources.is_empty() {
+        self.undeclared_actor_refusal(&store.require_declared_actor_sources)
+    }
+
+    /// Refuse now, if the change's target requires a declared actor and nobody
+    /// declared one. The store answers for the checkout the command was typed
+    /// in, which a change can edit; the target's policy is the one integration
+    /// answers to.
+    pub(crate) fn ensure_target_declares_actor(&self, state: &ChangeState) -> Result<()> {
+        if self.actor_source.declared() || self.on_behalf_of.is_some() {
+            return Ok(());
+        }
+        let policy = self.declarations(state)?.policy;
+        if !policy.policy.require_declared_actor {
+            return Ok(());
+        }
+        self.undeclared_actor_refusal(
+            &policy
+                .sources
+                .sources_for("policy.require_declared_actor=true"),
+        )
+    }
+
+    fn undeclared_actor_refusal(&self, sources: &[String]) -> Result<()> {
+        let source = if sources.is_empty() {
             "source unavailable".to_string()
         } else {
-            store.require_declared_actor_sources.join(", ")
+            sources.join(", ")
         };
         bail!(
             "policy requires a declared actor (declared by {source}): {:?} came from {}, which nobody claimed. Pass --actor or set ARC_ACTOR.",
@@ -455,20 +478,28 @@ impl Ctx {
         Ok(states)
     }
 
+    /// The declarations this change is judged by, wherever this command runs.
+    pub(crate) fn declarations(
+        &self,
+        state: &ChangeState,
+    ) -> Result<crate::declarations::Declarations> {
+        crate::declarations::for_change(&self.cwd, state)
+    }
+
     pub(crate) fn report(&self, store: &Store, state: &ChangeState) -> Result<StatusReport> {
-        let toplevel = gitio::toplevel(&self.cwd)?;
-        let gates = gates::load(&toplevel)?;
-        let policy = crate::policy::load(&toplevel)?;
+        let declarations = self.declarations(state)?;
         let states = self.load_all_states(store)?;
-        status::build(
+        let mut report = status::build(
             state,
             &self.cwd,
-            &gates,
-            &policy,
+            &declarations.gates,
+            &declarations.policy,
             dependency_status(state, &states),
             changes_blocked_by(&state.change_id, &states),
             fork::fork_slug_for_branch(&self.cwd, &state.branch)?,
-        )
+        )?;
+        report.declaration_notes = declarations.notes;
+        Ok(report)
     }
 
     /// Build a report for a state replayed to a past event: the derived
@@ -478,19 +509,20 @@ impl Ctx {
     /// against the present ledger.
     pub(crate) fn report_as_of(&self, store: &Store, state: &ChangeState) -> Result<StatusReport> {
         let toplevel = gitio::toplevel(&self.cwd)?;
-        let gates = gates::load(&toplevel)?;
-        let policy = crate::policy::load(&toplevel)?;
+        let declarations = self.declarations(state)?;
         let states = self.load_all_states(store)?;
-        status::build_as_of(
+        let mut report = status::build_as_of(
             state,
-            &gates,
-            &policy,
+            &declarations.gates,
+            &declarations.policy,
             dependency_status(state, &states),
             changes_blocked_by(&state.change_id, &states),
             chrono::Utc::now(),
             Some(toplevel.as_path()),
             fork::fork_slug_for_branch(&self.cwd, &state.branch)?,
-        )
+        )?;
+        report.declaration_notes = declarations.notes;
+        Ok(report)
     }
 }
 
