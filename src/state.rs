@@ -14,6 +14,8 @@ pub struct Patchset {
     pub model: Option<String>,
     pub harness: Option<String>,
     pub session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_link: Option<String>,
     /// Where `actor` came from. `None` on patchsets recorded before arc kept
     /// the provenance, which is unknown rather than declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,6 +109,8 @@ pub struct Brief {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_link: Option<String>,
     pub title: Option<String>,
     pub body: String,
     pub caused_by: Vec<BriefCause>,
@@ -129,6 +133,8 @@ pub struct ChangelogEntry {
     pub on_behalf_of: Option<String>,
     pub harness: Option<String>,
     pub session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_link: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -453,6 +459,8 @@ pub struct Debt {
     pub model: Option<String>,
     pub harness: Option<String>,
     pub session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_link: Option<String>,
     pub declared_at: chrono::DateTime<chrono::Utc>,
     /// What the versioned obligation says was missing. Absent on the
     /// pre-versioned obligation, whose meaning is legacy independent-review
@@ -751,6 +759,8 @@ pub struct MessageEntry {
     pub actor: String,
     pub harness: Option<String>,
     pub session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_link: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -861,6 +871,8 @@ pub struct ChangeState {
     pub opened_harness: Option<String>,
     pub opened_model: Option<String>,
     pub opened_session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opened_session_link: Option<String>,
     /// Journal artifact this change was opened from, if any.
     pub journal_ref: Option<String>,
     /// The fork `begin --from-fork` promoted work from, when one did. A
@@ -1339,6 +1351,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     opened_harness: ev.harness.clone(),
                     opened_model: ev.model.clone(),
                     opened_session: ev.session.clone(),
+                    opened_session_link: ev.session_link.clone(),
                     journal_ref: journal_ref.clone(),
                     from_fork: from_fork.clone(),
                     blocked_by: blocked_by.clone(),
@@ -1440,6 +1453,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 actor: ev.actor.clone(),
                 harness: ev.harness.clone(),
                 session: ev.session.clone(),
+                session_link: ev.session_link.clone(),
                 created_at: ev.created_at,
             }),
             Payload::BriefRecorded {
@@ -1459,6 +1473,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 harness: ev.harness.clone(),
                 model: ev.model.clone(),
                 session: ev.session.clone(),
+                session_link: ev.session_link.clone(),
                 title: title.clone(),
                 body: body.clone(),
                 caused_by: caused_by.clone(),
@@ -1482,6 +1497,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     on_behalf_of: ev.on_behalf_of.clone(),
                     harness: ev.harness.clone(),
                     session: ev.session.clone(),
+                    session_link: ev.session_link.clone(),
                     created_at: ev.created_at,
                 });
             }
@@ -1547,6 +1563,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     model: ev.model.clone(),
                     harness: ev.harness.clone(),
                     session: ev.session.clone(),
+                    session_link: ev.session_link.clone(),
                     actor_source: ev.actor_source,
                     on_behalf_of: ev.on_behalf_of.clone(),
                     base: base.clone(),
@@ -1960,6 +1977,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     model: ev.model.clone(),
                     harness: ev.harness.clone(),
                     session: ev.session.clone(),
+                    session_link: ev.session_link.clone(),
                     declared_at: ev.created_at,
                     missing: None,
                     coverage: None,
@@ -1983,6 +2001,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     model: ev.model.clone(),
                     harness: ev.harness.clone(),
                     session: ev.session.clone(),
+                    session_link: ev.session_link.clone(),
                     declared_at: ev.created_at,
                     missing: Some(*missing),
                     coverage: Some(coverage.clone()),
@@ -2889,6 +2908,7 @@ mod tests {
             model: None,
             harness: None,
             session: None,
+            session_link: None,
             session_resolution: None,
             created_at: Utc::now(),
             payload,

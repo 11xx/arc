@@ -5351,6 +5351,8 @@ pub(crate) struct QuestionDelivery {
     pub(crate) actor: Option<String>,
     harness: String,
     session: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_link: Option<String>,
     ts: String,
 }
 
@@ -5374,6 +5376,7 @@ fn question_deliveries(
             actor: event.actor.clone(),
             harness: event.harness.clone(),
             session: event.session.clone(),
+            session_link: event.session_link.clone(),
             ts: event.ts.clone(),
         })
         .collect()
@@ -6224,6 +6227,8 @@ pub(crate) struct JournalEvent {
     pub(crate) on_behalf_of: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_link: Option<String>,
     /// Planner identities asserted for a plan artifact. Optional so older
     /// journal events remain valid and headerless legacy plans stay distinct
     /// from explicitly attributed ones.
@@ -6611,6 +6616,7 @@ impl JournalEvent {
             session,
             actor: declared_actor(ctx),
             on_behalf_of: ctx.on_behalf_of.clone(),
+            session_link: ctx.session_link.clone(),
             // Model identity is optional end to end: absent means absent,
             // never "unknown".
             model: ctx
@@ -9215,6 +9221,8 @@ pub(crate) struct VerificationStamp {
     pub(crate) model: Option<String>,
     pub(crate) harness: String,
     pub(crate) session: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) session_link: Option<String>,
     /// `Some(false)` is current, `Some(true)` is moved, and `None` is unknown.
     pub(crate) moved: Option<bool>,
 }
@@ -10082,6 +10090,7 @@ fn verification_stamp(
         model: event.model.clone(),
         harness: event.harness.clone(),
         session: event.session.clone(),
+        session_link: event.session_link.clone(),
         moved,
     })
 }

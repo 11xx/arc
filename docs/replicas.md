@@ -116,6 +116,9 @@ closure is complete, and an artifact this journal cannot produce refuses the
 export by name. A decision recorded in another project's journal cannot travel
 in a bundle for this one and refuses the export too.
 
+A recorded `session_link` travels with its journal event between the operator's
+replicas. Treat an exported bundle as private provenance.
+
 The whole bundle is validated before anything is written. A bundle naming
 another logical project, or a source replica that is not paired here, is
 refused and writes nothing. An artifact the receiving journal already holds in
