@@ -8,8 +8,8 @@ of what is being worked on, what has been learned or decided, what remains to
 be done, and what is actually safe to integrate.
 
 Git owns content, branches, and history; `arc` owns the collaboration and
-execution state Git deliberately lacks: changes, patchsets, briefs, handoffs,
-findings, verdicts, verification evidence, holds, and guarded integration.
+execution state Git deliberately lacks: changes and their patchsets, review
+findings and verdicts, verification evidence, and guarded integration.
 
 A cold session reconstructs the state of work with `arc catchup`, from the
 journal and change ledger shared across worktrees and harnesses. Review
@@ -52,37 +52,40 @@ change.
 ## One change, end to end
 
 ```sh
-eval "$(arc env)"                      # record which harness, session, and model act
-arc begin radio-refill-fix --title "Keep radio refill from restarting playback"
-cd ~/.worktrees/<repo>-radio-refill-fix
-arc brief radio-refill-fix --body-file spec.md   # the implementation contract
+arc begin radio-refill-fix --title "Keep radio refill from restarting playback" \
+  --worktree ../radio-refill-fix
+cd ../radio-refill-fix
+arc brief radio-refill-fix --body-file - <<'EOF'   # the implementation contract
+Refill the queue without restarting the track that is playing.
+Cover it with a regression test.
+EOF
 # ... implement, commit ...
-arc done                               # snapshot, run every gate, check
+arc done                               # snapshot, run the gates the profile requires, check
 
 # a reviewer, in any harness or session:
 arc diff radio-refill-fix --findings
 arc review radio-refill-fix --snapshot --verdict approved
 
-arc check radio-refill-fix             # exit 0 = ready; any other code names the blocker
+arc check radio-refill-fix             # show what blocks integration
 arc integrate radio-refill-fix --cleanup
 ```
 
-`arc integrate` merges only when the head equals the approved patchset head,
-no blocking finding is open, every required gate is green at that head, and
-no hold is active, all checked atomically. Any new commit makes an approval
-stale.
+`arc integrate` merges only the patchset a verdict approved: a new commit
+makes the approval stale, unless a recorded rewrite changed nothing but
+signatures. It also requires every gate the profile names to be green for the
+tree the merge would ship, no open blocking finding, no active hold, and every
+prerequisite integrated. With no independent reviewer available,
+`--debt <reason>` integrates without a verdict and records the review still
+owed.
+
+[arc-model](https://github.com/11xx/arc-model) models these authorization
+rules independently and checks the `arc` binary against them on generated
+histories.
 
 ## Where the rest is
 
-`arc` with no arguments prints the workflow guide: what the ledger owns, the
-command lifecycle, profiles, exit codes, configuration files, and schemas.
-`arc <verb> --help` is each command's full contract.
-
-Session transcripts are read through
-[tapes](https://github.com/11xx/tapes). The rules that decide what
-integration permits are modelled independently in
-[arc-model](https://github.com/11xx/arc-model), which replays generated
-histories through the `arc` binary and compares its answers with the model's.
+`arc` with no arguments prints the workflow guide, and `arc <verb> --help` is
+each command's full contract.
 
 ## License
 
