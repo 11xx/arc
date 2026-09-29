@@ -46,6 +46,230 @@ fn verification_events(repo: &Repo) -> Vec<serde_json::Value> {
     .collect()
 }
 
+fn equal_tree_change(repo: &Repo, pass_here: bool, run_elsewhere: bool) -> (PathBuf, String) {
+    repo.declare_gates_locally(
+        "[gates.build]\ncommand = \"true\"\nenvironment = \"printf %s \\\"$ARC_TEST_ENV\\\"\"\n",
+    );
+    stdout(repo.arc(&repo.root).args(["begin", "env-gate"]));
+    let worktree = repo.home.join(".worktrees/repo-env-gate");
+    repo.commit(&worktree, "work.txt", "a\n", "test: first tree");
+    stdout(repo.arc(&worktree).args(["snapshot", "env-gate"]));
+    let first_tree = git_out(&worktree, &["rev-parse", "HEAD^{tree}"]);
+    let first_head = repo.head(&worktree);
+    if pass_here {
+        repo.arc(&worktree)
+            .env("ARC_TEST_ENV", "here")
+            .args(["verify", "env-gate", "--gate", "build"])
+            .assert()
+            .success();
+    }
+    repo.commit(&worktree, "work.txt", "a\nb\n", "test: second tree");
+    stdout(repo.arc(&worktree).args(["snapshot", "env-gate"]));
+    git(&worktree, &["revert", "--no-edit", "HEAD"]);
+    stdout(repo.arc(&worktree).args(["snapshot", "env-gate"]));
+    assert_eq!(
+        git_out(&worktree, &["rev-parse", "HEAD^{tree}"]),
+        first_tree
+    );
+    if run_elsewhere {
+        repo.arc(&worktree)
+            .env("ARC_TEST_ENV", "elsewhere")
+            .args(["verify", "env-gate", "--gate", "build"])
+            .assert()
+            .success();
+    }
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args([
+            "review",
+            "env-gate",
+            "--verdict",
+            "approved",
+            "--body",
+            "ok",
+        ])
+        .assert()
+        .success();
+    (worktree, first_head)
+}
+
+#[test]
+fn newer_other_environment_does_not_hide_an_inherited_pass() {
+    let repo = Repo::new();
+    let (worktree, first_head) = equal_tree_change(&repo, true, true);
+    let ready = status(&repo, "here");
+    assert_eq!(ready["ready_to_integrate"], true, "{ready}");
+    assert_eq!(ready["gates"][0]["inherited_from"], first_head);
+    let pass_id = verification_events(&repo)[0]["event_id"].clone();
+    assert_eq!(ready["gates"][0]["evidence_event_id"], pass_id);
+    repo.arc(&worktree)
+        .env("ARC_TEST_ENV", "here")
+        .args(["check", "env-gate", "--json"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_TEST_ENV", "here")
+        .args(["integrate", "env-gate"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn skip_green_reuses_the_applicable_run_at_the_same_head() {
+    let repo = Repo::new();
+    repo.declare_gates_locally(
+        "[gates.build]\ncommand = \"true\"\nenvironment = \"printf %s \\\"$ARC_TEST_ENV\\\"\"\n",
+    );
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "env-gate", "--no-worktree"]),
+    );
+    for environment in ["here", "elsewhere"] {
+        repo.arc(&repo.root)
+            .env("ARC_TEST_ENV", environment)
+            .args(["verify", "env-gate", "--gate", "build"])
+            .assert()
+            .success();
+    }
+    repo.arc(&repo.root)
+        .env("ARC_TEST_ENV", "here")
+        .args(["verify", "env-gate", "--all", "--skip-green"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("skipped (green at head"));
+    assert_eq!(verification_events(&repo).len(), 2);
+}
+
+#[test]
+fn an_inherited_pass_is_ready_without_the_other_environment_run() {
+    let repo = Repo::new();
+    let (worktree, first_head) = equal_tree_change(&repo, true, false);
+    let ready = status(&repo, "here");
+    assert_eq!(ready["ready_to_integrate"], true, "{ready}");
+    assert_eq!(ready["gates"][0]["inherited_from"], first_head);
+    repo.arc(&worktree)
+        .env("ARC_TEST_ENV", "here")
+        .args(["check", "env-gate"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn another_environment_is_inapplicable_without_a_local_pass() {
+    let repo = Repo::new();
+    let (worktree, _) = equal_tree_change(&repo, false, true);
+    let refused = status(&repo, "here");
+    assert_eq!(refused["ready_to_integrate"], false, "{refused}");
+    assert_eq!(refused["gates"][0]["environment"]["inapplicable"], true);
+    repo.arc(&worktree)
+        .env("ARC_TEST_ENV", "here")
+        .args(["check", "env-gate"])
+        .assert()
+        .code(5);
+    repo.arc(&repo.root)
+        .env("ARC_TEST_ENV", "here")
+        .args(["integrate", "env-gate"])
+        .assert()
+        .code(5);
+    repo.arc(&worktree)
+        .env("ARC_TEST_ENV", "here")
+        .args(["verify", "env-gate", "--all", "--skip-green"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("verification: Pass"));
+    assert_eq!(verification_events(&repo).len(), 2);
+}
+
+#[test]
+fn a_newer_run_under_another_declaration_does_not_hide_the_pass() {
+    let repo = Repo::new();
+    let (worktree, _) = equal_tree_change(&repo, true, false);
+    repo.declare_gates_locally(
+        "[gates.build]\ncommand = \"test -f README.md\"\nenvironment = \"printf %s \\\"$ARC_TEST_ENV\\\"\"\n",
+    );
+    repo.arc(&worktree)
+        .env("ARC_TEST_ENV", "here")
+        .args(["verify", "env-gate", "--gate", "build"])
+        .assert()
+        .success();
+    repo.declare_gates_locally(
+        "[gates.build]\ncommand = \"true\"\nenvironment = \"printf %s \\\"$ARC_TEST_ENV\\\"\"\n",
+    );
+    let ready = status(&repo, "here");
+    assert_eq!(ready["ready_to_integrate"], true, "{ready}");
+    assert_eq!(
+        ready["gates"][0]["evidence_event_id"],
+        verification_events(&repo)[0]["event_id"]
+    );
+}
+
+#[test]
+fn the_newest_run_within_the_same_key_decides() {
+    let repo = Repo::new();
+    let (worktree, _) = equal_tree_change(&repo, true, false);
+    let identity = status(&repo, "here")["gates"][0]["environment"]["current"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "env-gate",
+            "--attest",
+            "--gate",
+            "build",
+            "--result",
+            "fail",
+            "--tested-revision",
+            "HEAD",
+            "--execution-host",
+            "here",
+            "--runner",
+            "job-1",
+            "--environment",
+            &identity,
+        ])
+        .assert()
+        .code(1);
+    let refused = status(&repo, "here");
+    assert_eq!(refused["ready_to_integrate"], false, "{refused}");
+    assert_eq!(refused["gates"][0]["result"], "fail", "{refused}");
+    repo.arc(&worktree)
+        .env("ARC_TEST_ENV", "here")
+        .args(["check", "env-gate"])
+        .assert()
+        .code(5);
+}
+
+#[test]
+fn verify_against_reuses_the_applicable_run_at_the_merged_tree() {
+    let repo = Repo::new();
+    repo.declare_gates_locally(
+        "[gates.build]\ncommand = \"true\"\nenvironment = \"printf %s \\\"$ARC_TEST_ENV\\\"\"\n",
+    );
+    stdout(repo.arc(&repo.root).args(["begin", "env-gate"]));
+    let worktree = repo.home.join(".worktrees/repo-env-gate");
+    repo.commit(&worktree, "work.txt", "a\n", "test: change content");
+    stdout(repo.arc(&worktree).args(["snapshot", "env-gate"]));
+    repo.commit(&repo.root, "other.txt", "b\n", "test: target content");
+    for environment in ["here", "elsewhere"] {
+        repo.arc(&worktree)
+            .env("ARC_TEST_ENV", environment)
+            .args(["verify", "env-gate", "--against", "master"])
+            .assert()
+            .success();
+    }
+    repo.arc(&worktree)
+        .env("ARC_TEST_ENV", "here")
+        .args(["verify", "env-gate", "--against", "master", "--skip-green"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "skipped (green at the merged tree",
+        ));
+    assert_eq!(verification_events(&repo).len(), 2);
+}
+
 #[test]
 fn a_gate_counts_evidence_only_in_the_environment_its_probe_reports() {
     let repo = Repo::new();

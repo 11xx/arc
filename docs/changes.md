@@ -196,8 +196,10 @@
   it instead of reusing a run of something else. A gate that declares an
   environment probe is green only for the environment the probe yields at the
   tree under evaluation, so the same evidence that answers a gate on one
-  machine is reported inapplicable on another. Before merging, readiness is
-  recomputed and the basis rebuilt; if the two differ, nothing is written.
+  machine is reported inapplicable on another. The newest run for that tree,
+  declaration, and environment decides; runs under other keys cannot hide it.
+  Before merging, readiness is recomputed and the basis rebuilt; if the two
+  differ, nothing is written.
   `arc integrate --dry-run` prints the basis it would record, when the merge
   would happen at all. `arc integrate <a> <b> <c>` and `arc integrate --tag '#series'` apply that same
   guarded path to a queue, in dependency order, stopping at the first member that needs a person.
