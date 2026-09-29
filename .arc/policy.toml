@@ -130,6 +130,9 @@ acknowledged_safe = [
   "src/commands/messaging.rs",
   "src/commands/scaffold.rs",
   "src/commands/scaffolds/*.md",
+  # Text `arc instructions git` prints. The checker that judges a message
+  # against it is `src/trailers.rs`, not this file.
+  "src/commands/contribution-trailers.md",
   # Records carrying no gate authority. A forge fact mirrors what a forge said
   # and authorizes nothing on its own, and a delegated run record asserts what a
   # caller says it launched: nothing reads either to decide whether work ships.
