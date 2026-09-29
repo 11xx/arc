@@ -328,10 +328,39 @@ impl Ctx {
         if !store.require_declared_actor {
             return Ok(());
         }
-        let source = if store.require_declared_actor_sources.is_empty() {
+        self.undeclared_actor_refusal(&store.require_declared_actor_sources)
+    }
+
+    /// Refuse now, if the change's target requires a declared actor and nobody
+    /// declared one. The store answers for the checkout the command was typed
+    /// in, which a change can edit; the target's policy is the one integration
+    /// answers to.
+    pub(crate) fn ensure_target_declares_actor(&self, state: &ChangeState) -> Result<()> {
+        if self.actor_source.declared() || self.on_behalf_of.is_some() {
+            return Ok(());
+        }
+        let declarations = crate::declarations::for_change(&self.cwd, state)?;
+        // An unreadable target is refused by readiness, with the blocker that
+        // names it, rather than here as an unexplained error.
+        if declarations.target_unreadable {
+            return Ok(());
+        }
+        let policy = declarations.policy;
+        if !policy.policy.require_declared_actor {
+            return Ok(());
+        }
+        self.undeclared_actor_refusal(
+            &policy
+                .sources
+                .sources_for("policy.require_declared_actor=true"),
+        )
+    }
+
+    fn undeclared_actor_refusal(&self, sources: &[String]) -> Result<()> {
+        let source = if sources.is_empty() {
             "source unavailable".to_string()
         } else {
-            store.require_declared_actor_sources.join(", ")
+            sources.join(", ")
         };
         bail!(
             "policy requires a declared actor (declared by {source}): {:?} came from {}, which nobody claimed. Pass --actor or set ARC_ACTOR.",
@@ -455,16 +484,33 @@ impl Ctx {
         Ok(states)
     }
 
+    /// The declarations this change is judged by, wherever this command runs.
+    ///
+    /// Refuses when the target branch cannot be resolved: nothing then says
+    /// what the change owes, and a run or a merge must not proceed on a guess.
+    pub(crate) fn declarations(
+        &self,
+        state: &ChangeState,
+    ) -> Result<crate::declarations::Declarations> {
+        let declarations = crate::declarations::for_change(&self.cwd, state)?;
+        if declarations.target_unreadable {
+            bail!(
+                "target branch {:?} of {} cannot be resolved, so the gate and policy \
+                 declarations the change is judged by could not be read",
+                state.target_branch,
+                state.change_id
+            );
+        }
+        Ok(declarations)
+    }
+
     pub(crate) fn report(&self, store: &Store, state: &ChangeState) -> Result<StatusReport> {
-        let toplevel = gitio::toplevel(&self.cwd)?;
-        let gates = gates::load(&toplevel)?;
-        let policy = crate::policy::load(&toplevel)?;
+        let declarations = crate::declarations::for_change(&self.cwd, state)?;
         let states = self.load_all_states(store)?;
         status::build(
             state,
             &self.cwd,
-            &gates,
-            &policy,
+            &declarations,
             dependency_status(state, &states),
             changes_blocked_by(&state.change_id, &states),
             fork::fork_slug_for_branch(&self.cwd, &state.branch)?,
@@ -478,19 +524,21 @@ impl Ctx {
     /// against the present ledger.
     pub(crate) fn report_as_of(&self, store: &Store, state: &ChangeState) -> Result<StatusReport> {
         let toplevel = gitio::toplevel(&self.cwd)?;
-        let gates = gates::load(&toplevel)?;
-        let policy = crate::policy::load(&toplevel)?;
+        let declarations = crate::declarations::for_change(&self.cwd, state)?;
         let states = self.load_all_states(store)?;
-        status::build_as_of(
+        let mut report = status::build_as_of(
             state,
-            &gates,
-            &policy,
+            &declarations.gates,
+            &declarations.policy,
+            declarations.target_unreadable,
             dependency_status(state, &states),
             changes_blocked_by(&state.change_id, &states),
             chrono::Utc::now(),
             Some(toplevel.as_path()),
             fork::fork_slug_for_branch(&self.cwd, &state.branch)?,
-        )
+        )?;
+        report.declaration_notes = declarations.notes;
+        Ok(report)
     }
 }
 

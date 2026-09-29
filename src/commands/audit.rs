@@ -147,7 +147,7 @@ fn refuse_self_audit(ctx: &Ctx, state: &ChangeState, verdict: Verdict) -> Result
     if verdict != Verdict::Approved {
         return Ok(());
     }
-    let policy = crate::policy::load(&gitio::toplevel(&ctx.cwd)?)?;
+    let policy = ctx.declarations(state)?.policy;
     if !policy.policy.forbid_self_approval {
         return Ok(());
     }

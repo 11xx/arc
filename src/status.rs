@@ -1,4 +1,5 @@
 use crate::blockers::{self, BlockerFacts, GateFact};
+use crate::declarations::Declarations;
 use crate::gates::GatesFile;
 use crate::gitio;
 use crate::model::{
@@ -14,7 +15,7 @@ use std::path::Path;
 
 pub use crate::blockers::Blocker;
 
-pub const STATUS_SCHEMA: &str = "arc-status/25";
+pub const STATUS_SCHEMA: &str = "arc-status/26";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// A verdict graph with several tips has no authority to report, so the
@@ -585,6 +586,12 @@ pub struct StatusReport {
     /// Source files for the policy rules that apply to this change.
     /// Additive in `arc-status/23`.
     pub policy_sources: BTreeMap<String, Vec<String>>,
+    /// Where the declarations in play disagree: the checkout against the
+    /// target, or the change's gate against the target's. Readiness answers
+    /// for the target's declarations plus the gates the change adds, so
+    /// `status`, `check` and `integrate` agree. Additive in `arc-status/26`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub declaration_notes: Vec<String>,
     pub probes: Vec<ProbeStatus>,
     pub blocker_summary: BlockerSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -904,22 +911,24 @@ pub(crate) fn legacy_evidence_trees(state: &ChangeState, cwd: &Path) -> BTreeMap
 pub fn build(
     state: &ChangeState,
     cwd: &Path,
-    gates: &GatesFile,
-    policy: &PolicyFile,
+    declarations: &Declarations,
     dependency_status: BlockerStatus,
     blocks: Vec<String>,
     fork: Option<String>,
 ) -> Result<StatusReport> {
-    build_at(
+    let mut report = build_at(
         state,
         cwd,
-        gates,
-        policy,
+        &declarations.gates,
+        &declarations.policy,
+        declarations.target_unreadable,
         dependency_status,
         blocks,
         Utc::now(),
         fork,
-    )
+    )?;
+    report.declaration_notes = declarations.notes.clone();
+    Ok(report)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -928,6 +937,7 @@ pub fn build_at(
     cwd: &Path,
     gates: &GatesFile,
     policy: &PolicyFile,
+    target_unreadable: bool,
     dependency_status: BlockerStatus,
     blocks: Vec<String>,
     now: DateTime<Utc>,
@@ -959,6 +969,7 @@ pub fn build_at(
         state,
         gates,
         policy,
+        target_unreadable,
         dependency_status,
         blocks,
         now,
@@ -987,6 +998,7 @@ pub fn build_as_of(
     state: &ChangeState,
     gates: &GatesFile,
     policy: &PolicyFile,
+    target_unreadable: bool,
     dependency_status: BlockerStatus,
     blocks: Vec<String>,
     now: DateTime<Utc>,
@@ -1000,6 +1012,7 @@ pub fn build_as_of(
         state,
         gates,
         policy,
+        target_unreadable,
         dependency_status,
         blocks,
         now,
@@ -1025,6 +1038,7 @@ fn build_report(
     state: &ChangeState,
     gates: &GatesFile,
     policy: &PolicyFile,
+    target_unreadable: bool,
     dependency_status: BlockerStatus,
     blocks: Vec<String>,
     now: DateTime<Utc>,
@@ -1536,6 +1550,9 @@ fn build_report(
     let blockers = blockers::derive(&BlockerFacts {
         closed: state.is_closed(),
         branch_missing: current_head.is_none(),
+        // A closed change is judged by nothing further, so a target deleted
+        // after the fact is not something it still owes.
+        target_unreadable: target_unreadable && !state.is_closed(),
         // A fork's branch is where work stays unintegrated on purpose, whoever
         // asks and from wherever they ask it. The refusal reads the change, so
         // standing in the fork's worktree is neither required nor enough.
@@ -1608,6 +1625,8 @@ fn build_report(
             "none:closed".into()
         } else if current_head.is_none() {
             "restore_branch".into()
+        } else if target_unreadable {
+            format!("restore_target:{}", state.target_branch)
         } else if dependency_status
             .blockers_ready
             .iter()
@@ -1800,6 +1819,7 @@ fn build_report(
         holds: hold_entries(state),
         gates: gate_statuses,
         policy_sources: policy.sources.as_map(),
+        declaration_notes: Vec::new(),
         probes: probe_statuses,
         blocker_summary,
         approval_rejection_reason,
@@ -2224,6 +2244,7 @@ mod tests {
         let blockers = [
             Blocker::Closed,
             Blocker::BranchMissing,
+            Blocker::TargetUnreadable,
             Blocker::Iterating,
             Blocker::BlockedByChanges,
             Blocker::NeedsRebase,
@@ -2239,8 +2260,8 @@ mod tests {
                 .or_default()
                 .push(blocker.as_str());
         }
-        // Closed and BranchMissing deliberately share 6: both mean the change
-        // is not in a workable state and a caller acts identically on them.
+        // Closed, BranchMissing and TargetUnreadable deliberately share 6: each means
+        // the change is not in a workable state and a caller acts identically on them.
         for (code, names) in &seen {
             assert!(
                 names.len() == 1 || *code == 6,

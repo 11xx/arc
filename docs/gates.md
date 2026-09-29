@@ -46,8 +46,8 @@ A gate runs in the checkout that holds the change. `verify`, `snapshot
 --verify`, `done`, and `rebase --verify` execute the command in the change's
 recorded worktree and record the evidence at that worktree's head, whichever
 checkout of the repository the command was typed in, and the run names the tree
-it used when that is not the invoking one. The declarations come from the
-invoking checkout instead, the same place `arc status` reads them, so what a
+it used when that is not the invoking one. The declarations are the change
+target's, read as described below, wherever the command was typed, so what a
 run discharges and what status still owes cannot disagree. arc refuses a gate
 run only when the change's recorded worktree is missing or its HEAD is not the
 branch head. A run started from another checkout of the repository is
@@ -57,6 +57,27 @@ that restores it, because a gate run anywhere else would describe another
 tree, and a worktree standing off the branch head is refused with the checkout
 that puts it back, because evidence recorded there is evidence status will
 never count.
+
+Which gates a change owes is decided by its target, not by the checkout the
+command is typed in. `status`, `check`, `verify`, and `integrate` read
+`.arc/gates.toml` from the target branch at its current head, together with the
+operator's gates, and add the gates the change's own branch head declares under
+a name the target does not. A change therefore owes everything its target
+declares and can only add to it: a gate it deletes is still owed, and a gate
+whose command it edits is run and judged with the target's command. Where both
+declare one check, profiles and timeouts combine as they do across files.
+Integration reads `.arc/policy.toml` from the target the same way, so a change
+cannot loosen the policy it is merged under; the operator policy file is local
+and outside every tree, and applies as it is. Declarations are read from
+commits: a `.arc/gates.toml` that is untracked or uncommitted on the target
+binds no change until it is committed there, and `arc status` lists it as a
+difference between the checkout and the target. The same list names each gate
+the change declares as a different check than the target's, saying that the
+target's is evaluated, and every refusal for a gate that is not green states
+which declarations were evaluated. A change whose target branch cannot be
+resolved has no declarations to be judged by: it is blocked with
+`target-unreadable`, naming the target, `integrate` and `verify` refuse, and
+`status` still reports it.
 
 A profile with no declared gate has nothing to run. `arc done` snapshots and
 prints the check state as it always does, saying that no gate is declared for
@@ -160,8 +181,8 @@ whether one change was integrated or twenty.
 - `arc check` exits 3 when no valid approval covers the current head.
 - `arc check` exits 4 while a hold is active.
 - `arc check` exits 5 when a required gate is not green at the head.
-- `arc check` exits 6 for a closed change, a missing branch, or malformed
-  state.
+- `arc check` exits 6 for a closed change, a missing branch, a target branch
+  that cannot be resolved, or malformed state.
 - `arc check` exits 7 while a prerequisite change is unresolved.
 - `arc check` exits 11 when the target moved with conflicting changes and the
   branch needs rebasing.

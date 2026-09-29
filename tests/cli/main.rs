@@ -15,6 +15,7 @@ mod external;
 mod findings;
 mod forge;
 mod fork;
+mod gate_declarations;
 mod gate_environment;
 mod hooks;
 mod instructions;

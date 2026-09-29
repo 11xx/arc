@@ -5,6 +5,7 @@ mod changelog_render;
 mod commands;
 mod config;
 mod context;
+mod declarations;
 mod forge;
 mod gates;
 mod gitio;
@@ -572,7 +573,7 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/25 schema)
+    /// Machine-readable status report (the versioned arc-status/26 schema)
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in

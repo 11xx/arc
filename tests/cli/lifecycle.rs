@@ -952,7 +952,7 @@ fn conflicting_target_movement_requires_rebase_before_integration() {
         .code(11);
     let status: serde_json::Value =
         serde_json::from_str(&stdout(repo.arc(&wt).args(["status", "conflict-r"]))).unwrap();
-    assert_eq!(status["schema"], "arc-status/25");
+    assert_eq!(status["schema"], "arc-status/26");
     assert_eq!(status["needs_rebase"], true);
     assert!(status["blockers"]
         .as_array()
@@ -1349,13 +1349,13 @@ fn brief_author_only_review_warns_but_remains_integrate_ready() {
         .success();
 }
 
-/// `integrate` computes readiness from the invocation worktree's gate and
-/// policy files, the latest verdict, exact-head evidence, findings,
-/// dependencies and hold state — and before this, the closure it wrote
-/// retained none of it. An auditor had to replay preceding events and recover
-/// the contemporaneous config from Git, and uncommitted policy state was
-/// unrecoverable entirely. So the probe changes both files without committing
-/// them, and asserts the event holds those exact values.
+/// `integrate` computes readiness from the target's gate and policy
+/// declarations, the latest verdict, exact-head evidence, findings,
+/// dependencies and hold state, and the closure it writes retains all of it,
+/// so an auditor need not replay preceding events or recover the
+/// contemporaneous config from Git. The probe declares a policy on the target
+/// and a stricter gate timeout in the change, and asserts the event holds
+/// those exact values.
 #[test]
 fn guarded_integration_records_exact_authorization_basis() {
     let repo = Repo::new();
@@ -1403,6 +1403,14 @@ fn guarded_integration_records_exact_authorization_basis() {
         .assert()
         .success();
 
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nrequire_declared_actor = false\nforbid_self_approval = false\n\n[provenance]\ngit_identity = \"shared\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "test: declare a policy"]);
+
     let worktree = repo.home.join(".worktrees/repo-second");
     repo.commit(&worktree, "second.rs", "two\n", "feat: second");
     git(&worktree, &["merge", "--no-edit", "master"]);
@@ -1435,15 +1443,6 @@ fn guarded_integration_records_exact_authorization_basis() {
         .find_map(|line| line.strip_prefix("event: "))
         .expect("review prints its event")
         .to_string();
-
-    // Uncommitted policy in the *invocation* worktree: exactly the state Git
-    // cannot recover afterwards, and the state readiness is computed from.
-    // The target worktree must stay clean, so the edit belongs here.
-    fs::write(
-        worktree.join(".arc/policy.toml"),
-        "[policy]\nrequire_declared_actor = false\nforbid_self_approval = false\n\n[provenance]\ngit_identity = \"shared\"\n",
-    )
-    .unwrap();
 
     // The dry run prints the basis it would record, and writes nothing.
     let dry_out = repo
@@ -1508,7 +1507,7 @@ fn guarded_integration_records_exact_authorization_basis() {
     );
     assert_eq!(basis["blocking_findings"], serde_json::json!([]), "{event}");
     assert_eq!(basis["holds"], serde_json::json!([]), "{event}");
-    // The uncommitted values, not the committed ones.
+    // The stricter timeout the change declared, and the target's policy.
     assert_eq!(basis["gates"]["unit"]["timeout"], 90, "{event}");
     assert_eq!(
         basis["policy"]["provenance_git_identity"], "shared",
@@ -1565,14 +1564,7 @@ fn an_old_authorization_basis_reads_without_a_danger_determination() {
 #[test]
 fn changing_a_gate_declaration_ungreens_its_recorded_evidence() {
     let repo = Repo::new();
-    fs::create_dir_all(repo.root.join(".arc")).unwrap();
-    fs::write(
-        repo.root.join(".arc/gates.toml"),
-        "[gates.unit]\ncommand = \"true\"\n",
-    )
-    .unwrap();
-    git(&repo.root, &["add", ".arc/gates.toml"]);
-    git(&repo.root, &["commit", "-m", "test: declare a gate"]);
+    repo.declare_gates_locally("[gates.unit]\ncommand = \"true\"\n");
     stdout(repo.arc(&repo.root).args(["begin", "redeclared"]));
     let worktree = repo.home.join(".worktrees/repo-redeclared");
     repo.commit(&worktree, "work.rs", "done\n", "feat: work");
@@ -1586,11 +1578,7 @@ fn changing_a_gate_declaration_ungreens_its_recorded_evidence() {
     assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
 
     // A different command is a different check, which nothing has run.
-    fs::write(
-        worktree.join(".arc/gates.toml"),
-        "[gates.unit]\ncommand = \"true # a different check\"\n",
-    )
-    .unwrap();
+    repo.declare_gates_locally("[gates.unit]\ncommand = \"true # a different check\"\n");
     let status = json_stdout(repo.arc(&worktree).args(["status", "redeclared", "--json"]));
     assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
     assert_eq!(status["gates"][0]["declaration_changed"], true, "{status}");
@@ -1605,11 +1593,7 @@ fn changing_a_gate_declaration_ungreens_its_recorded_evidence() {
 
     // A timeout is part of the declaration too: the same command under a
     // laxer timeout is not evidence for a stricter one.
-    fs::write(
-        worktree.join(".arc/gates.toml"),
-        "[gates.unit]\ncommand = \"true\"\ntimeout = \"1s\"\n",
-    )
-    .unwrap();
+    repo.declare_gates_locally("[gates.unit]\ncommand = \"true\"\ntimeout = \"1s\"\n");
     let status = json_stdout(repo.arc(&worktree).args(["status", "redeclared", "--json"]));
     assert_eq!(status["gates"][0]["declaration_changed"], true, "{status}");
     assert_eq!(status["gates"][0]["green_at_head"], false, "{status}");
@@ -1624,11 +1608,7 @@ fn changing_a_gate_declaration_ungreens_its_recorded_evidence() {
     assert!(!reused.contains("skipped (green at head)"), "{reused}");
 
     // Back to a command nothing has run, for the reuse check below.
-    fs::write(
-        worktree.join(".arc/gates.toml"),
-        "[gates.unit]\ncommand = \"true # a different check\"\n",
-    )
-    .unwrap();
+    repo.declare_gates_locally("[gates.unit]\ncommand = \"true # a different check\"\n");
 
     // Reuse is reuse of a run: --skip-green must not report the old pass as
     // satisfying a declaration nothing has run.
@@ -1638,15 +1618,13 @@ fn changing_a_gate_declaration_ungreens_its_recorded_evidence() {
                 .args(["verify", "redeclared", "--all", "--skip-green"]),
         );
     assert!(!reused.contains("skipped (green at head)"), "{reused}");
-    // It ran the declaration that is current, and the evidence says so. It is
-    // still not green, because the edited declaration is uncommitted and the
-    // tree is therefore dirty — a separate rule, and the honest one.
+    // It ran the declaration that is current, and the evidence says so.
     let status = json_stdout(repo.arc(&worktree).args(["status", "redeclared", "--json"]));
     assert_eq!(
         status["gates"][0]["command"], "true # a different check",
         "{status}"
     );
-    assert_eq!(status["gates"][0]["worktree_dirty"], true, "{status}");
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
 }
 
 /// A merge arc guarded and a merge somebody performed elsewhere are different
@@ -1936,16 +1914,24 @@ fn gates_must_be_green_at_head() {
     assert_eq!(failed["blocker_summary"]["gate_status"]["fails"], "fail");
     assert_eq!(failed["gates"][0]["result"], "fail");
 
-    // Fix the gate in the worktree's .arc? Gate command comes from the
-    // toplevel of the invoking worktree, so run a passing command via a
-    // redefined gates file in the change worktree.
+    // A change cannot fix a gate by redeclaring it: the target's command is
+    // the one that runs.
     fs::write(
         wt.join(".arc/gates.toml"),
         "[gates.fails]\ncommand = \"true\"\nprofiles = [\"local\"]\n",
     )
     .unwrap();
     git(&wt, &["add", ".arc"]);
-    git(&wt, &["commit", "-m", "fix gate"]);
+    git(&wt, &["commit", "-m", "redeclare gate"]);
+    stdout(repo.arc(&wt).args(["snapshot", "fix-g"]));
+    repo.arc(&wt)
+        .args(["verify", "fix-g", "--gate", "fails"])
+        .assert()
+        .code(1);
+
+    // Fixing it on the target is what discharges it.
+    repo.redeclare_gates("[gates.fails]\ncommand = \"true\"\nprofiles = [\"local\"]\n");
+    git(&wt, &["merge", "--no-edit", "master"]);
     stdout(repo.arc(&wt).args(["snapshot", "fix-g"]));
     repo.arc(&wt)
         .args(["verify", "fix-g", "--gate", "fails"])
@@ -2064,7 +2050,7 @@ fn status_projection_and_stage_note_file_read_stdin() {
         .args(["status", "projected", "--get", "schema"])
         .assert()
         .success()
-        .stdout("arc-status/25\n");
+        .stdout("arc-status/26\n");
 
     repo.arc(&wt)
         .args([

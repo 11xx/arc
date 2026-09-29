@@ -16,6 +16,7 @@ use serde::Serialize;
 pub enum Blocker {
     Closed,
     BranchMissing,
+    TargetUnreadable,
     ForkBranch,
     Iterating,
     BlockedByChanges,
@@ -29,9 +30,10 @@ pub enum Blocker {
 }
 
 /// Every blocker, highest precedence first.
-pub const PRIORITY: [Blocker; 12] = [
+pub const PRIORITY: [Blocker; 13] = [
     Blocker::Closed,
     Blocker::BranchMissing,
+    Blocker::TargetUnreadable,
     Blocker::ForkBranch,
     Blocker::Iterating,
     Blocker::BlockedByChanges,
@@ -47,7 +49,7 @@ pub const PRIORITY: [Blocker; 12] = [
 impl Blocker {
     pub fn exit_code(self) -> i32 {
         match self {
-            Blocker::Closed | Blocker::BranchMissing => 6,
+            Blocker::Closed | Blocker::BranchMissing | Blocker::TargetUnreadable => 6,
             Blocker::ForkBranch => 15,
             Blocker::Iterating => 13,
             Blocker::BlockedByChanges => 7,
@@ -65,6 +67,7 @@ impl Blocker {
         match self {
             Blocker::Closed => "closed",
             Blocker::BranchMissing => "branch-missing",
+            Blocker::TargetUnreadable => "target-unreadable",
             Blocker::ForkBranch => "fork-branch",
             Blocker::Iterating => "iterating",
             Blocker::BlockedByChanges => "blocked-by-changes",
@@ -92,6 +95,9 @@ pub struct GateFact {
 pub struct BlockerFacts {
     pub closed: bool,
     pub branch_missing: bool,
+    /// The change's target branch cannot be resolved, so the declarations it
+    /// is judged by cannot be read either.
+    pub target_unreadable: bool,
     /// The change's branch is a fork's, where work stays unintegrated on
     /// purpose.
     pub on_fork: bool,
@@ -114,6 +120,7 @@ impl BlockerFacts {
         match blocker {
             Blocker::Closed => self.closed,
             Blocker::BranchMissing => self.branch_missing,
+            Blocker::TargetUnreadable => self.target_unreadable,
             Blocker::ForkBranch => self.on_fork,
             Blocker::Iterating => self.iterating,
             Blocker::BlockedByChanges => self.blocked_by_changes,
@@ -166,6 +173,7 @@ mod tests {
         BlockerFacts {
             closed: false,
             branch_missing: false,
+            target_unreadable: false,
             on_fork: false,
             iterating: false,
             blocked_by_changes: false,
@@ -194,9 +202,10 @@ mod tests {
 
     #[test]
     fn each_fact_alone_raises_its_blocker() {
-        let cases: [(Raise, Blocker); 12] = [
+        let cases: [(Raise, Blocker); 13] = [
             (|f| f.closed = true, Blocker::Closed),
             (|f| f.branch_missing = true, Blocker::BranchMissing),
+            (|f| f.target_unreadable = true, Blocker::TargetUnreadable),
             (|f| f.on_fork = true, Blocker::ForkBranch),
             (|f| f.iterating = true, Blocker::Iterating),
             (|f| f.blocked_by_changes = true, Blocker::BlockedByChanges),
@@ -246,6 +255,7 @@ mod tests {
         let facts = BlockerFacts {
             closed: true,
             branch_missing: true,
+            target_unreadable: true,
             on_fork: true,
             iterating: false,
             blocked_by_changes: true,
@@ -286,7 +296,7 @@ mod tests {
         seen.sort_by_key(|blocker| blocker.as_str());
         seen.dedup();
         assert_eq!(seen.len(), PRIORITY.len());
-        assert_eq!(PRIORITY.len(), 12);
+        assert_eq!(PRIORITY.len(), 13);
     }
 
     #[test]
