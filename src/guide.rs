@@ -172,6 +172,21 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          was made in: the project anchor, or a fork's own
                          head recorded with the fork as its scope.
   arc resume <change>    One change's brief, live state, and journal context.
+  arc explain <change> [--at <event>]
+                         What one change knew and what it was accepted on:
+                         contract, supplied context, declared facts,
+                         observed reads, rejected alternatives, evaluation,
+                         coverage at acceptance, and later knowledge. Every
+                         row carries a standing: `recorded` (an event records
+                         it), `declared` (somebody stated it and arc did not
+                         check it), `inferred` (arc derived it; no event
+                         states it), `absent` (nothing records it), or
+                         `unavailable` (its source cannot be read now), with
+                         a reason for all but `recorded`. Contract,
+                         evaluation, and coverage stay on the integration's
+                         basis; `--at` hides every other record made after
+                         the event, or replays a change not integrated. It
+                         writes nothing.
   arc inbox              Lead-facing queue across open changes, unowned
                          branches and worktrees, and the journal backlog.
   arc workspace backlog  The same question asked of every registered project.
@@ -1246,6 +1261,7 @@ SCHEMAS
     `arc-catchup/11`                 arc catchup --json
     `arc-journal-catchup/8`          arc journal catchup --json
     `arc-resume/7`                   arc resume --json
+    `arc-explain/1`                  arc explain --json
     `arc-brief/1`                    arc brief --json
     `arc-journal-artifact/2`         arc journal show --json
     `arc-journal-inventory/5`        arc journal inventory --json
