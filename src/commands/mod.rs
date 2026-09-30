@@ -123,9 +123,11 @@ pub struct Ctx {
     /// run. Model resolution at event creation is a separate observation.
     pub session_resolution: Option<SessionResolution>,
     /// Declared model slug with optional `#effort`. An absent declaration
-    /// leaves each event to resolve its model from the acting session store.
+    /// leaves the invocation to resolve its model from the acting session store.
     pub model: Option<String>,
     pub model_source: Option<ModelSource>,
+    /// Attribution shared by every event and checkout view of this invocation.
+    pub model_attribution: std::rc::Rc<std::cell::OnceCell<ModelAttribution>>,
     /// Subject a lead runs delegated ceremony for (`--on-behalf-of`). The
     /// effective author of any event is `on_behalf_of.unwrap_or(actor)`.
     pub on_behalf_of: Option<String>,
@@ -266,12 +268,16 @@ impl Ctx {
     }
 
     pub(crate) fn resolve_model(&self) -> ModelAttribution {
-        crate::context::resolve_model(
-            self.model.as_deref(),
-            self.model_source,
-            self.harness.as_deref(),
-            self.session.as_deref(),
-        )
+        self.model_attribution
+            .get_or_init(|| {
+                crate::context::resolve_model(
+                    self.model.as_deref(),
+                    self.model_source,
+                    self.harness.as_deref(),
+                    self.session.as_deref(),
+                )
+            })
+            .clone()
     }
 
     /// The same invocation pointed at another checkout.
@@ -294,6 +300,7 @@ impl Ctx {
             session_resolution: self.session_resolution,
             model: self.model.clone(),
             model_source: self.model_source,
+            model_attribution: self.model_attribution.clone(),
             on_behalf_of: self.on_behalf_of.clone(),
         }
     }

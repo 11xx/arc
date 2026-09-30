@@ -428,3 +428,74 @@ fn env_leaves_model_resolution_to_writes_after_shell_evaluation() {
         .assert()
         .success();
 }
+
+#[test]
+fn snapshot_and_verification_share_one_invocations_model_observation() {
+    for declaration in [None, Some("m#medium")] {
+        let repo = Repo::new();
+        let initial = [
+            prompt("u1", "2026-01-01T10:00:00Z"),
+            assistant("a1", "2026-01-01T10:00:01Z", "low"),
+        ];
+        let path = recording(&repo, &initial);
+        let change = begin(&repo);
+        let next = repo.home.join("next-recording.jsonl");
+        let updated = [
+            initial[0].clone(),
+            assistant("a2", "2026-01-01T10:00:02Z", "high"),
+        ];
+        fs::write(
+            &next,
+            updated
+                .iter()
+                .map(|row| format!("{row}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        repo.declare_gates_locally(
+            "[gates.switch]\ncommand = 'cat \"$MODEL_NEXT\" > \"$MODEL_PATH\"'\n",
+        );
+        let mut cmd = acting(&repo);
+        cmd.env("MODEL_NEXT", &next)
+            .env("MODEL_PATH", &path)
+            .args(["snapshot", &change, "--verify", "--all"]);
+        if let Some(model) = declaration {
+            cmd.env("ARC_MODEL", model);
+        }
+        cmd.assert().success();
+        let events: Vec<Value> = stdout(acting(&repo).args(["events", "--change", &change]))
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let snapshot = events
+            .iter()
+            .find(|event| event["event_type"] == "patchset-added")
+            .unwrap();
+        let verified = events
+            .iter()
+            .find(|event| event["event_type"] == "verification-recorded")
+            .unwrap();
+        assert_eq!(snapshot["model_observation"]["native_id"], "a1");
+        assert_eq!(verified["model_observation"], snapshot["model_observation"]);
+        assert_eq!(verified["model"], snapshot["model"]);
+        if let Some(model) = declaration {
+            assert_eq!(snapshot["model"], model);
+            assert_eq!(
+                verified["model_disagreement"],
+                json!({"declared":model, "observed":"m#low"})
+            );
+        }
+        acting(&repo)
+            .args(["comment", &change, "--body", "next invocation"])
+            .assert()
+            .success();
+        let events: Vec<Value> = stdout(acting(&repo).args(["events", "--change", &change]))
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            events.last().unwrap()["model_observation"]["native_id"],
+            "a2"
+        );
+    }
+}

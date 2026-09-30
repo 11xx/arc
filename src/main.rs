@@ -70,8 +70,9 @@ struct Cli {
     #[arg(long, global = true, env = "ARC_SESSION_LINK")]
     session_link: Option<String>,
     /// Declare a model slug with optional #effort. Without this flag or
-    /// ARC_MODEL, each write resolves the acting session store. A disagreement
-    /// records both declared and observed models, with the observation coordinate
+    /// ARC_MODEL, each invocation resolves the acting session store once when
+    /// it writes. Declarations retain any observed disagreement and its
+    /// coordinate
     #[arg(long, global = true)]
     model: Option<String>,
     /// Subject a lead runs delegated ceremony for; recorded beside the invoker
@@ -2357,9 +2358,11 @@ fn run(cli: Cli) -> Result<i32> {
         (None, Some(model)) => (Some(model), Some(model::ModelSource::Env)),
         _ => (None, None),
     };
-    if config::load()
-        .map(|config| config.identity_detect)
-        .unwrap_or(false)
+    let model_attribution = std::rc::Rc::new(std::cell::OnceCell::new());
+    if (harness.is_none() || session.is_none())
+        && config::load()
+            .map(|config| config.identity_detect)
+            .unwrap_or(false)
     {
         // A process carrying several harnesses' session variables and no
         // ancestry that names the owner records no identity at all: picking
@@ -2370,7 +2373,7 @@ fn run(cli: Cli) -> Result<i32> {
                 .as_deref()
                 .is_none_or(|explicit| explicit == detected.harness)
             {
-                harness.get_or_insert(detected.harness);
+                harness.get_or_insert(detected.harness.clone());
                 // A harness recognized without its cooperation carries no
                 // session id; recording the harness alone is the honest half
                 // of the detection, not a partial failure.
@@ -2381,6 +2384,13 @@ fn run(cli: Cli) -> Result<i32> {
                         // asked about, so it carries no report.
                         session_resolution = Some(detected_session.resolution);
                         session = Some(detected_session.id.clone());
+                    }
+                    if session.as_deref() == Some(detected_session.id.as_str()) {
+                        let _ = model_attribution.set(context::model_attribution(
+                            model.as_deref(),
+                            model_source,
+                            Some(detected),
+                        ));
                     }
                 }
             }
@@ -2409,6 +2419,7 @@ fn run(cli: Cli) -> Result<i32> {
         session_resolution,
         model,
         model_source,
+        model_attribution,
         // An empty --on-behalf-of is the same as absent: today's behavior.
         on_behalf_of: cli.on_behalf_of.filter(|value| !value.trim().is_empty()),
     };
