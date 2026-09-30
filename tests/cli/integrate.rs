@@ -851,3 +851,137 @@ fn cleanup_after_a_take_over_keeps_the_checkout_and_drops_the_branch() {
     assert!(git_out(&repo.root, &["branch", "--list", "arc/stranded-cleanup"]).is_empty());
     assert!(repo.root.join("stranded-cleanup.txt").exists());
 }
+
+/// The plan the dry run prints is the one the merge carries out: the basis
+/// the integration event records, at the target revision the plan names.
+#[test]
+fn dry_run_json_prints_the_integration_plan() {
+    let repo = repo_with_gates();
+    let (change_id, worktree) = approved_change(&repo, "plan-json", "plan.txt", "plan\n");
+    let target = repo.head(&repo.root);
+    let head = repo.head(&worktree);
+
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["integrate", "plan-json", "--dry-run", "--json"]),
+    );
+    let plan: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(plan["schema"], "arc-integration-plan/1", "{plan}");
+    assert_eq!(plan["change_id"], change_id.as_str());
+    assert_eq!(plan["records"], "change-integrated");
+    assert_eq!(plan["target"], "master");
+    assert_eq!(plan["target_revision"], target.as_str());
+    assert_eq!(plan["approved_head"], head.as_str());
+    assert_eq!(plan["merge_commit"], true);
+    assert!(plan["evaluated_tree"].is_string(), "{plan}");
+    assert!(plan["authorization"]["gate_evidence"]["smoke"].is_string());
+    assert_eq!(repo.head(&repo.root), target, "a dry run merges nothing");
+
+    // A queue has no single plan to print.
+    repo.arc(&repo.root)
+        .args(["integrate", "plan-json", "plan-json", "--dry-run", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "only valid when integrating one change",
+        ));
+
+    stdout(repo.arc(&repo.root).args(["integrate", "plan-json"]));
+    let event = events(&repo, &change_id)
+        .into_iter()
+        .find(|event| event["event_type"] == "change-integrated")
+        .expect("the change integrates");
+    assert_eq!(event["authorization"], plan["authorization"]);
+    assert_eq!(event["target_before"], plan["target_revision"]);
+    assert_eq!(event["source_head"], plan["approved_head"]);
+    assert_eq!(event["source_patchset_id"], plan["approved_patchset_id"]);
+}
+
+/// A target moved after the dry run is named beside the fresh decision and
+/// never changes it: a change it leaves ready still lands, with a warning,
+/// and one it makes unready is refused by its ordinary blocker.
+#[test]
+fn expected_basis_names_what_moved() {
+    let repo = repo_with_gates();
+    approved_change(&repo, "moves-steady", "steady.txt", "steady\n");
+    let dry_run = |slug: &str| {
+        let path = repo.root.join(format!("../{slug}-plan.json"));
+        fs::write(
+            &path,
+            stdout(
+                repo.arc(&repo.root)
+                    .args(["integrate", slug, "--dry-run", "--json"]),
+            ),
+        )
+        .unwrap();
+        path
+    };
+
+    // An unchanged basis adds nothing.
+    let steady_plan = dry_run("moves-steady");
+    let steady = repo
+        .arc(&repo.root)
+        .args(["integrate", "moves-steady", "--expect-basis"])
+        .arg(&steady_plan)
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&steady.get_output().stderr).to_string();
+    assert!(!stderr.contains("you checked"), "{stderr}");
+
+    approved_change(&repo, "moves-ready", "ready.txt", "ready\n");
+    approved_change(&repo, "moves-unready", "unready.txt", "unready\n");
+    let ready_plan = dry_run("moves-ready");
+    let unready_plan = dry_run("moves-unready");
+    let checked = repo.head(&repo.root);
+
+    // An empty commit moves the target without moving the tree any merge
+    // would ship, so the ready change stays ready.
+    git(
+        &repo.root,
+        &["commit", "--allow-empty", "-m", "chore: move the target"],
+    );
+    let moved = repo.head(&repo.root);
+    let landed = repo
+        .arc(&repo.root)
+        .args(["integrate", "moves-ready", "--expect-basis"])
+        .arg(&ready_plan)
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&landed.get_output().stderr).to_string();
+    assert!(
+        stderr.contains(&format!(
+            "warning: the target you checked moved from {checked} to {moved}"
+        )),
+        "{stderr}"
+    );
+    assert!(output_of(&landed).contains("integrated: "));
+
+    // The merge moved the target again, onto a tree the other change's gates
+    // never ran against: the fresh decision refuses, and the refusal names
+    // the move beside its blocker.
+    let now = repo.head(&repo.root);
+    let refused = repo
+        .arc(&repo.root)
+        .args(["integrate", "moves-unready", "--expect-basis"])
+        .arg(&unready_plan)
+        .assert()
+        .code(14);
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr).to_string();
+    assert!(stderr.contains("merged tree"), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "the target you checked moved from {checked} to {now}"
+        )),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("warning:"), "{stderr}");
+    assert_eq!(repo.head(&repo.root), now, "nothing merged");
+
+    // A plan for another change is refused rather than compared.
+    repo.arc(&repo.root)
+        .args(["integrate", "moves-unready", "--expect-basis"])
+        .arg(&ready_plan)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("the expected basis describes"));
+}
