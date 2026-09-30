@@ -650,6 +650,9 @@ pub enum Payload {
         plan_slice: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_source: Option<PlanSource>,
+        /// Reads the contract requires of whoever answers it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        must_read: Vec<ReadRequirement>,
     },
     ChangelogRecorded {
         #[serde(alias = "section")]
@@ -690,6 +693,10 @@ pub enum Payload {
         /// Arc stores the pair and never resolves or fetches it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thread: Option<ExternalThreadRef>,
+        /// The candidate a promotion recorded this patchset from, and the
+        /// selection that permitted it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate: Option<PatchsetCandidate>,
     },
     /// An explicit contributor declaration for one patchset. The patchset's
     /// contributor set may change only before its first verdict.
@@ -1296,6 +1303,76 @@ pub enum Payload {
     CandidateRetired {
         candidate_id: String,
     },
+    /// A required gate run against a candidate's tree in a scratch checkout.
+    /// Repository-scoped, keyed by the tree, and carrying the declaration it
+    /// ran under as consumed, so a later reader compares coordinates rather
+    /// than trusting a name.
+    CandidateVerified {
+        candidate_id: String,
+        tree: String,
+        gate: String,
+        /// The gate's command as declared when it ran.
+        command: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
+        /// The gate's environment probe as declared when it ran.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment_probe: Option<String>,
+        /// What that probe yielded in the checkout. Absent when the gate
+        /// declares no probe or the probe yielded no identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        environment: Option<EnvironmentEvidence>,
+        result: VerifyResult,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_tail: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        timed_out: bool,
+        hostname: String,
+    },
+    /// A named choice validated against every ground and permitted: the
+    /// basis a promotion rests on. It records no effect; a promotion is its
+    /// own event.
+    CandidateSelected {
+        /// The chosen registration.
+        candidate_id: String,
+        /// The destination change, whose brief the registration answers.
+        destination: String,
+        /// The destination's branch head the selection was validated at.
+        head: String,
+        target_branch: String,
+        /// The target head the selection was validated at.
+        target: String,
+        /// The shipped tree: the chosen registration's.
+        tree: String,
+        /// The evaluation answering each required gate.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        evaluations: Vec<SelectedEvaluation>,
+        /// The read meeting each requirement of the brief version.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        reads: Vec<SelectedRead>,
+        reuse: crate::policy::EvaluationReuse,
+        /// The producers along the chosen registration's parent chain.
+        contributors: Vec<String>,
+        selector: String,
+        rationale: String,
+        /// An earlier selection for the same destination, never promoted,
+        /// that this one stands in place of.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supersedes: Option<String>,
+    },
+    /// A selection's effect, observed: the destination branch moved to
+    /// `revision` and the patchset recorded there.
+    CandidatePromoted {
+        selection: String,
+        candidate_id: String,
+        destination: String,
+        patchset_id: String,
+        revision: String,
+    },
     /// A tool's record of a read that succeeded: which bytes it returned for
     /// which path and range, within one episode of work on a subject. The
     /// read's version is the digest of the returned bytes.
@@ -1360,6 +1437,83 @@ pub struct CandidateBriefRef {
     pub brief_event_id: String,
     /// `sha256:` over the brief body.
     pub digest: String,
+}
+
+/// A read a brief requires: a journal artifact at one body digest, or a
+/// file's blob at a revision, whole or a line range.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ReadRequirement {
+    Artifact {
+        /// The file name in this project's journal, or
+        /// `<journal-dir>::<file>` in another project's.
+        file: String,
+        /// `sha256:` over the artifact body.
+        digest: String,
+    },
+    File {
+        revision: String,
+        path: String,
+        blob: String,
+        extent: RequiredExtent,
+    },
+}
+
+impl std::fmt::Display for ReadRequirement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Artifact { file, digest } => write!(f, "{file}@{digest}"),
+            Self::File {
+                revision,
+                path,
+                extent: RequiredExtent::Whole,
+                ..
+            } => write!(f, "{revision}:{path}"),
+            Self::File {
+                revision,
+                path,
+                extent: RequiredExtent::Lines { from, to },
+                ..
+            } => write!(f, "{revision}:{path}:{from}-{to}"),
+        }
+    }
+}
+
+/// How much of a required file must have been read.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RequiredExtent {
+    Whole,
+    /// One-based, inclusive.
+    Lines {
+        from: u64,
+        to: u64,
+    },
+}
+
+/// The evaluation a selection counted for one required gate, and the
+/// registration it was recorded on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelectedEvaluation {
+    pub gate: String,
+    pub event_id: String,
+    pub candidate_id: String,
+}
+
+/// The read a selection counted for one read requirement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelectedRead {
+    pub requirement: ReadRequirement,
+    pub candidate_id: String,
+    pub record: String,
+    pub event_id: String,
+}
+
+/// A patchset's link to the candidate promoted into it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PatchsetCandidate {
+    pub candidate_id: String,
+    pub selection: String,
 }
 
 /// What a relation attaches to: a change, or a registered candidate.
@@ -1687,6 +1841,9 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::CandidateRegistered { .. }
         | Payload::CandidateJudged { .. }
         | Payload::CandidateRetired { .. }
+        | Payload::CandidateVerified { .. }
+        | Payload::CandidateSelected { .. }
+        | Payload::CandidatePromoted { .. }
         | Payload::ContextRead { .. }
         | Payload::ContextDeclared { .. }
         | Payload::ContextCaptureReported { .. } => AppendPermission::AnyPhaseFact,

@@ -28,6 +28,7 @@ mod rewrite;
 pub mod run;
 pub(crate) mod sandbox;
 pub(crate) mod scaffold;
+pub(crate) mod selection;
 mod squash;
 pub(crate) use scaffold::{
     available as scaffolds_available, default_for_kind as scaffold_default_for_kind,

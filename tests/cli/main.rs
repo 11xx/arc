@@ -46,6 +46,7 @@ mod roles;
 mod run;
 mod sandbox;
 mod schemas;
+mod selection;
 mod skip_green;
 mod stats;
 mod take;

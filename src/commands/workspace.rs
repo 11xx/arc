@@ -1941,8 +1941,11 @@ fn report_ledger_facts(
         let anchor = project.anchor.clone();
         let states = Store::open_at(root)
             .and_then(|store| store.context("ledger is missing"))
-            .and_then(|store| repo_states(&store));
-        let states = match states {
+            .and_then(|store| {
+                let candidates = super::candidate::load_ledger(&store)?;
+                Ok((repo_states(&store)?, candidates))
+            });
+        let (states, candidates) = match states {
             Ok(states) => states,
             Err(error) => {
                 failures.push(CollectionFailure {
@@ -1954,7 +1957,10 @@ fn report_ledger_facts(
                 continue;
             }
         };
-        let mut ledger = report::LedgerFacts::default();
+        let mut ledger = report::LedgerFacts {
+            unjudged_siblings: unjudged_siblings(&candidates),
+            ..Default::default()
+        };
         for (change_id, state) in states {
             match &state.closure {
                 None => {
@@ -1990,6 +1996,44 @@ fn report_ledger_facts(
         facts.insert(label, ledger);
     }
     Ok((facts, failures))
+}
+
+/// For each promoted candidate, the registrations answering the same brief
+/// version that nobody has judged, as (change, promoted, unjudged).
+fn unjudged_siblings(ledger: &super::candidate::Ledger) -> Vec<(String, String, Vec<String>)> {
+    let mut facts: Vec<(String, String, Vec<String>)> = Vec::new();
+    for selection in ledger.selections() {
+        if ledger.promotion_of(&selection.event_id).is_none() {
+            continue;
+        }
+        let Some(promoted) = ledger.registration(&selection.candidate_id) else {
+            continue;
+        };
+        let unjudged: Vec<String> = ledger
+            .siblings(promoted)
+            .into_iter()
+            .filter(|sibling| ledger.judgements_of(&sibling.candidate_id).is_empty())
+            .filter(|sibling| {
+                // A sibling that was itself promoted was judged by selection.
+                !ledger.selections().any(|other| {
+                    other.candidate_id == sibling.candidate_id
+                        && ledger.promotion_of(&other.event_id).is_some()
+                })
+            })
+            .map(|sibling| sibling.candidate_id.clone())
+            .collect();
+        let known = facts.iter().any(|(change, candidate, _)| {
+            change == &selection.change_id && candidate == &promoted.candidate_id
+        });
+        if !unjudged.is_empty() && !known {
+            facts.push((
+                selection.change_id.clone(),
+                promoted.candidate_id.clone(),
+                unjudged,
+            ));
+        }
+    }
+    facts
 }
 
 /// The workspace backlog classified by `workspace_report`'s rules, with
@@ -2380,6 +2424,9 @@ mod report {
         /// Registered journals whose temporary or scratch anchors are gone,
         /// folded into one fact
         UnreachableScratch,
+        /// A promoted candidate whose sibling registrations, answering the
+        /// same brief version, nobody has judged
+        CandidatesUnjudged,
     }
 
     impl Rule {
@@ -2435,6 +2482,9 @@ mod report {
         /// (change id, worktree path) for each closed change whose recorded
         /// worktree still exists.
         pub closed_worktrees: Vec<(String, String)>,
+        /// (destination change, promoted candidate, unjudged siblings) for
+        /// each promoted candidate with a sibling nobody has judged.
+        pub unjudged_siblings: Vec<(String, String, Vec<String>)>,
     }
 
     /// What identifies the brief a change answers: its plan file and slice
@@ -3022,6 +3072,18 @@ mod report {
                 sections.in_flight.push(change);
             }
             attention.extend(shared_briefs(&name, &ledger.open_briefs));
+            for (change_id, promoted, unjudged) in &ledger.unjudged_siblings {
+                attention.push(Attention {
+                    rule: Rule::CandidatesUnjudged,
+                    project: name.clone(),
+                    subject: change_id.clone(),
+                    evidence: format!(
+                        "candidate {promoted} was promoted; its sibling(s) {} {} unjudged",
+                        unjudged.join(", "),
+                        if unjudged.len() == 1 { "is" } else { "are" }
+                    ),
+                });
+            }
             for (change_id, path) in &ledger.closed_worktrees {
                 attention.push(Attention {
                     rule: Rule::WorktreeOutlivesChange,
@@ -3568,6 +3630,27 @@ mod report {
                 .find(|entry| entry.rule == "unreachable-scratch")
                 .unwrap();
             assert_eq!(scratch.subject, "2 journals");
+        }
+
+        #[test]
+        fn a_promoted_candidate_with_unjudged_siblings_is_flagged() {
+            let data = backlog(vec![], vec![]);
+            let mut facts = LedgerFacts::default();
+            facts.unjudged_siblings.push((
+                "answer-1".into(),
+                "alice".into(),
+                vec!["bob".into(), "carol".into()],
+            ));
+            let mut ledgers = BTreeMap::new();
+            ledgers.insert("demo".to_string(), facts);
+            let report = build(&data, None, &BTreeMap::new(), &ledgers);
+            let flagged = report
+                .attention
+                .iter()
+                .find(|entry| entry.rule == "candidates-unjudged")
+                .expect("the rule fires");
+            assert_eq!(flagged.subject, "answer-1");
+            assert!(flagged.evidence.contains("bob, carol are unjudged"));
         }
 
         #[test]

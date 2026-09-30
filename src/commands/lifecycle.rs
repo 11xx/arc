@@ -374,6 +374,7 @@ pub fn begin(
                         plan_ref: None,
                         plan_slice: None,
                         plan_source: None,
+                        must_read: Vec::new(),
                     },
                 );
                 if let Err(error) = store.append_event(&event) {
@@ -669,6 +670,8 @@ fn resolve_brief_causes(
     Ok(causes)
 }
 
+pub const BRIEF_SCHEMA: &str = "arc-brief/2";
+
 // The brief verb is a wide CLI surface: body, title, base, version, scaffold,
 // plan link, probes, and causes are all independent options on one command.
 #[allow(clippy::too_many_arguments)]
@@ -686,6 +689,7 @@ pub fn brief(
     probes_json: Option<String>,
     caused_by: Vec<String>,
     cause_note: Option<String>,
+    must_read: Vec<String>,
     json: bool,
 ) -> Result<i32> {
     if plan_ref.is_some() != plan_slice.is_some() {
@@ -737,6 +741,7 @@ pub fn brief(
             &ctx.cwd,
             base.as_deref().unwrap_or("HEAD"),
         )?);
+        let must_read = super::selection::read_requirements(ctx, &must_read)?;
         let store = ctx.store()?;
         let (change_id, _transition, state) = locked_state(&store, reference)?;
         warn_on_gate_shaped_probes(ctx, &state, &acceptance_probes)?;
@@ -754,6 +759,7 @@ pub fn brief(
             plan_ref,
             plan_slice,
             plan_source: plan_source.clone(),
+            must_read: must_read.clone(),
         };
         ensure_append_allowed(&state, &payload)?;
         // A first brief has nothing to be caused by. Every later version is a
@@ -785,18 +791,22 @@ pub fn brief(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "schema": "arc-brief/1",
+                    "schema": BRIEF_SCHEMA,
                     "brief": {
                         "version": next_version,
                         "event_id": event_id,
                         "plan_ref": output_plan_ref,
                         "plan_slice": output_plan_slice,
                         "plan_source": event_plan_source,
+                        "must_read": must_read,
                     }
                 }))?
             );
         } else {
             println!("brief: v{next_version}");
+            for requirement in &must_read {
+                println!("must-read: {requirement}");
+            }
             println!("event: {}", event.event_id);
         }
         return Ok(0);
@@ -813,6 +823,9 @@ pub fn brief(
     }
     if !caused_by.is_empty() || cause_note.is_some() {
         bail!("--caused-by and --cause-note require --body-file or --scaffold");
+    }
+    if !must_read.is_empty() {
+        bail!("--must-read requires --body-file or --scaffold");
     }
     let store = ctx.store()?;
     let (_, state) = ctx.load_state(&store, reference)?;
@@ -835,7 +848,7 @@ pub fn brief(
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema": "arc-brief/1",
+                "schema": BRIEF_SCHEMA,
                 "brief": selected,
             }))?
         );
@@ -869,7 +882,10 @@ pub fn brief(
     for probe in &selected.acceptance_probes {
         println!("acceptance-probe: {} = {}", probe.name, probe.command);
     }
-    if !selected.acceptance_probes.is_empty() {
+    for requirement in &selected.must_read {
+        println!("must-read: {requirement}");
+    }
+    if !selected.acceptance_probes.is_empty() || !selected.must_read.is_empty() {
         println!();
     }
     print!("{}", selected.body);

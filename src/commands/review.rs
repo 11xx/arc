@@ -356,26 +356,10 @@ pub fn snapshot(
         .map(|thread| parse_thread_reference(&thread))
         .transpose()?;
     let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
-    let merge_base = gitio::branch_head(&ctx.cwd, &st.target_branch)
-        .ok()
-        .and_then(|target_head| gitio::merge_base(&ctx.cwd, &target_head, &head).ok());
+    let (default_base, merge_base) = patchset_base(ctx, &st, &head)?;
     let base_rev = match base {
         Some(b) => gitio::rev_parse(&ctx.cwd, &b)?,
-        None => match merge_base.as_ref() {
-            Some(merge_base) => {
-                // A stacked change's opening base is a floor: use it only while it lies
-                // between the target merge base and the branch head.
-                let opening_base_is_floor = merge_base != &st.base
-                    && gitio::is_ancestor(&ctx.cwd, merge_base, &st.base)?
-                    && gitio::is_ancestor(&ctx.cwd, &st.base, &head)?;
-                if opening_base_is_floor {
-                    st.base.clone()
-                } else {
-                    merge_base.clone()
-                }
-            }
-            None => st.base.clone(),
-        },
+        None => default_base,
     };
     let brief = match brief_version {
         Some(0) => bail!("brief version 0 not found"),
@@ -453,6 +437,7 @@ pub fn snapshot(
         claim_actor: snapshot_claim.map(|claim| claim.owner.actor.clone()),
         journal_refs,
         thread,
+        candidate: None,
     };
     ensure_append_allowed(&st, &payload)?;
     if let Some(patchset_id) = unchanged_patchset {
@@ -489,6 +474,34 @@ pub fn snapshot(
     Ok(())
 }
 
+/// The base a patchset at `head` is recorded against when none is named,
+/// and the merge base with the target it was read from.
+pub(super) fn patchset_base(
+    ctx: &Ctx,
+    st: &ChangeState,
+    head: &str,
+) -> Result<(String, Option<String>)> {
+    let merge_base = gitio::branch_head(&ctx.cwd, &st.target_branch)
+        .ok()
+        .and_then(|target_head| gitio::merge_base(&ctx.cwd, &target_head, head).ok());
+    let base = match merge_base.as_ref() {
+        Some(merge_base) => {
+            // A stacked change's opening base is a floor: use it only while it lies
+            // between the target merge base and the branch head.
+            let opening_base_is_floor = merge_base != &st.base
+                && gitio::is_ancestor(&ctx.cwd, merge_base, &st.base)?
+                && gitio::is_ancestor(&ctx.cwd, &st.base, head)?;
+            if opening_base_is_floor {
+                st.base.clone()
+            } else {
+                merge_base.clone()
+            }
+        }
+        None => st.base.clone(),
+    };
+    Ok((base, merge_base))
+}
+
 /// Turn `--journal-ref` filenames into the references a patchset records,
 /// reading each body for the digest.
 ///
@@ -519,7 +532,7 @@ fn resolve_journal_refs(ctx: &Ctx, files: &[String]) -> Result<Vec<JournalArtifa
 /// A file named by both is the change's opening framing, so it is recorded
 /// once as `begin`. A default that no longer resolves is not recorded; the
 /// second value holds one warning line per such file, naming its source.
-fn default_journal_refs(
+pub(super) fn default_journal_refs(
     ctx: &Ctx,
     opened_from: Option<&str>,
     brief: Option<&state::Brief>,
