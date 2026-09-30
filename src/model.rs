@@ -1038,6 +1038,9 @@ pub enum Payload {
         run_id: String,
         gate: String,
         revision: String,
+        /// The tree this reuse answers for. Absent events bind to revision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tree: Option<String>,
         evidence_event_id: String,
     },
     HoldSet {

@@ -1149,7 +1149,9 @@ enum Cmd {
         parallel: bool,
         /// Record reuse of passing evidence instead of rerunning the gate that
         /// produced it: with --all, evidence green at the current head; with
-        /// --against, evidence green at the merged tree
+        /// --against, evidence green at the merged tree. Reuse records that
+        /// tree and requires evidence carrying the same content key; evidence
+        /// with neither tree nor tested_tree is rerun
         #[arg(long = "skip-green")]
         skip_green: bool,
         /// Gate name from .arc/gates.toml
