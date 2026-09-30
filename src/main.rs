@@ -1208,9 +1208,9 @@ enum Cmd {
     /// answer for the exact canonical session id is reported with the exports:
     /// an id the store does not hold is uncorroborated; an ambiguous or
     /// unreadable lookup is unresolved. Events carry that verdict. Every
-    /// field the detection establishes is exported
-    /// and every field it does not is explicitly unset, so evaluating the
-    /// output never leaves a stale value beside a fresh one. Pi re-sets
+    /// established harness, session, and session link is exported; absent
+    /// fields are explicitly unset. The resolved model is a comment and
+    /// ARC_MODEL is always unset, so each write resolves its own model. Pi re-sets
     /// `PI_SESSION_FILE`, `PI_MODEL`, and `PI_REASONING_LEVEL` for every tool
     /// call, so those answer in preference to the recording while
     /// `PI_SESSION_ID` is the acting session, and a Claude subagent shares
@@ -1232,8 +1232,9 @@ enum Cmd {
     /// The model comment includes the newest selection's timestamp and native
     /// id, and whether it is inside or before the recording's newest operator
     /// turn. An earlier observation may predate an effort change. Leave
-    /// ARC_MODEL unset for write-time resolution, or re-evaluate before each
-    /// write. Missing boundaries and incomplete head coverage are reported.
+    /// ARC_MODEL is always unset for write-time resolution; declare a model
+    /// by hand with ARC_MODEL or --model. Missing boundaries and incomplete
+    /// head coverage are reported.
     Env,
     /// Print a shell completion script to stdout
     Completions {

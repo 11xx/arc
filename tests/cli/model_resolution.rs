@@ -396,3 +396,35 @@ fn explain_is_an_unknown_command() {
             "unrecognized subcommand 'explain'",
         ));
 }
+
+#[test]
+fn env_leaves_model_resolution_to_writes_after_shell_evaluation() {
+    let repo = Repo::new();
+    recording(
+        &repo,
+        &[
+            prompt("u1", "2026-01-01T10:00:00Z"),
+            assistant("a1", "2026-01-01T10:00:01Z", "high"),
+        ],
+    );
+    let env = stdout(acting(&repo).env("ARC_MODEL", "stale-model").arg("env"));
+    assert!(env.contains("# model: m#high\n# observed:"), "{env}");
+    assert!(
+        !env.lines()
+            .any(|line| line.starts_with("export ") && line.contains("ARC_MODEL")),
+        "{env}"
+    );
+    AssertCommand::new("sh")
+        .args([
+            "-c",
+            "eval \"$1\"; test \"${ARC_MODEL+x}\" != x",
+            "fixture",
+            &env,
+        ])
+        .env("ARC_MODEL", "stale-model")
+        .env("GIT_CONFIG_GLOBAL", repo.home.join(".gitconfig"))
+        .env("XDG_CONFIG_HOME", repo.home.join(".config"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .assert()
+        .success();
+}

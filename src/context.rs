@@ -515,21 +515,14 @@ pub fn print_env() -> i32 {
         );
         return 0;
     };
-    match &identity.model {
-        Some(model) => println!(
-            "export ARC_HARNESS={} ARC_SESSION={} ARC_MODEL={}",
-            shell_quote(&identity.harness),
-            shell_quote(&session.id),
-            shell_quote(model)
-        ),
-        None => {
-            println!(
-                "export ARC_HARNESS={} ARC_SESSION={}",
-                shell_quote(&identity.harness),
-                shell_quote(&session.id)
-            );
-            println!("unset ARC_MODEL");
-        }
+    println!(
+        "export ARC_HARNESS={} ARC_SESSION={}",
+        shell_quote(&identity.harness),
+        shell_quote(&session.id)
+    );
+    println!("unset ARC_MODEL");
+    if let Some(model) = &identity.model {
+        println!("# model: {}", crate::render::one_line(model));
     }
     if let Some(observation) = &identity.model_observation {
         println!("# {}", crate::render::one_line(&observation.line()));
