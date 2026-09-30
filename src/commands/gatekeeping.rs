@@ -2510,35 +2510,25 @@ fn same_path(left: &Path, right: &Path) -> bool {
 /// tracked modifications. Writing beside uncommitted work leaves a tree
 /// nobody can name afterwards.
 pub(super) fn checkout_tracked_dirt(checkout: &Path) -> Result<()> {
-    if gitio::dirt(checkout)?.tracked {
-        return Err(Refusal::TrackedDirt {
-            checkout: checkout.to_path_buf(),
-        }
-        .into_error());
-    }
-    Ok(())
+    integration::guard_tracked_dirt(checkout, gitio::dirt(checkout)?.tracked)
+        .map_err(Refusal::into_error)
 }
 
-/// Refuse when the merge would write over a path the target checkout holds
-/// untracked or ignored, and report the paths it leaves untouched.
+/// Refuse when a merge or a promotion would write over a path the checkout
+/// holds untracked or ignored, and report the paths it leaves untouched.
 pub(super) fn checkout_writes(
     checkout: &TargetCheckout,
     target_head: &str,
     merged_tree: Option<&str>,
 ) -> Result<()> {
     let collisions = write_collisions(checkout, target_head, merged_tree)?;
-    if !collisions.is_empty() {
-        return Err(Refusal::WriteCollision {
-            checkout: checkout.path.clone(),
-            paths: collisions,
-        }
-        .into_error());
-    }
+    integration::guard_writes(&checkout.path, collisions).map_err(Refusal::into_error)?;
     report_untouched(checkout, &gitio::untracked_and_ignored(&checkout.path)?);
     Ok(())
 }
 
-/// The untracked or ignored paths of the target checkout a merge would write.
+/// The untracked or ignored paths of a checkout that a merge, or a promotion
+/// to `merged_tree`, would write.
 ///
 /// A merge computes its result from the tree it produces, so the paths it
 /// writes are exactly those added or changed between the target head and that
@@ -2576,7 +2566,7 @@ fn write_collisions(
     gitio::write_overlap(&checkout.path, &writes)
 }
 
-/// Say which untracked or ignored paths the merge leaves where they are.
+/// Say which untracked or ignored paths the update leaves where they are.
 fn report_untouched(checkout: &TargetCheckout, left: &[String]) {
     if !left.is_empty() {
         println!(
