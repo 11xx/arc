@@ -202,6 +202,10 @@ ORIENT INSIDE A PROJECT (start here, in this order)
     --rank-by blocking|availability|coverage
                          Order rows by one recorded fact; the report states
                          the basis it used.
+  arc stats --provenance How often each provenance record was written where it
+                         could have been — falsifications, journal links,
+                         rejected alternatives, plan-linked briefs, cited
+                         facts — each count beside what it counts in.
 
   Work waiting for this project lives in two places. The ledger holds changes
   already open; the journal holds everything not yet opened as one. An empty
@@ -1301,6 +1305,7 @@ SCHEMAS
     `arc-chain/4`                    arc chain --json
     `arc-stats/1`                    arc stats --json
     `arc-stats-by-model/1`           arc stats --by-model --json
+    `arc-stats-provenance/1`         arc stats --provenance --json
     `arc-changelog/1`                arc changelog --json
     `arc-changelog-render-request/1` stdin of a command changelog renderer
     `arc-forks/2`                    arc fork list --json
