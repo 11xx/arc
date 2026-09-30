@@ -195,18 +195,47 @@ fn a_bundle_from_a_newer_arc_is_refused_rather_than_partially_imported() {
         .failure();
 }
 
-/// A bundle one version back differs only by optional event fields its events
-/// leave absent, so it imports, and an unknown version is refused.
+/// Import reads the bundle version export writes and the one before it, and
+/// refuses any other; a kept fact's citations survive the round trip.
 #[test]
-fn a_bundle_one_version_back_still_imports() {
+fn import_reads_the_previous_bundle_version_and_refuses_older() {
     let repo = Repo::new();
-    change_with_patchset(&repo, "previous");
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "previous", "--no-worktree"]),
+    );
+    let earlier = stdout(repo.arc(&repo.root).args([
+        "keep",
+        "previous",
+        "--kind",
+        "constraint",
+        "--body",
+        "first",
+    ]));
+    let earlier = earlier.split_whitespace().last().unwrap().to_string();
+    repo.arc(&repo.root)
+        .args([
+            "keep", "previous", "--kind", "verified", "--body", "second", "--cites", &earlier,
+        ])
+        .assert()
+        .success();
     let bundle = repo.home.join("previous.json");
     repo.arc(&repo.root)
         .args(["export", "previous", "--output", bundle.to_str().unwrap()])
         .assert()
         .success();
     let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    assert_eq!(value["schema"], "arc-bundle/6", "{value}");
+
+    value["schema"] = serde_json::json!("arc-bundle/4");
+    fs::write(&bundle, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let older = Repo::new();
+    older
+        .arc(&older.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unsupported bundle schema"));
 
     value["schema"] = serde_json::json!("arc-bundle/5");
     fs::write(&bundle, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
@@ -216,16 +245,12 @@ fn a_bundle_one_version_back_still_imports() {
         .args(["import", bundle.to_str().unwrap()])
         .assert()
         .success();
-
-    value["schema"] = serde_json::json!("arc-bundle/4");
-    fs::write(&bundle, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-    let third = Repo::new();
-    third
-        .arc(&third.root)
-        .args(["import", bundle.to_str().unwrap()])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("unsupported bundle schema"));
+    let show = json_stdout(other.arc(&other.root).args(["show", "previous", "--json"]));
+    assert_eq!(
+        show["kept"][1]["cites"],
+        serde_json::json!([earlier]),
+        "{show}"
+    );
 }
 
 #[test]

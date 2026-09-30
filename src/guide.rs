@@ -599,6 +599,7 @@ KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)
   arc keep --kind verified   --body "<the premise checked>"
   arc keep --kind constraint --body "<what must be respected>"
   arc keep --kind hypothesis --body "<believed, not established>"
+  arc keep --kind verified   --body "<premise>" --cites <event> (repeatable)
 
   Compaction is lossy compression chosen by something that does not know what
   will be needed. The session doing the work does. A fact filed here is in the
@@ -609,6 +610,11 @@ KEEP WHAT THE WORK DISCOVERS (mid-change, before it is lost)
   approach is the highest-value kind and the least likely to be re-derived —
   a cold session will cheerfully try it again. Keep the kinds honest: a
   hypothesis recorded as verified is worse than not recording it.
+
+  `--cites` names a verification, verdict, finding, disposition, or earlier
+  kept fact on this change that the fact rests on. It is checked when the
+  fact is kept: an id naming nothing on this change, or another kind of
+  event, is refused. `--evidence` stays free text and a claim either way.
 
   Selectivity is the point. Filing everything rebuilds the transcript this
   exists to replace, at higher cost and in an append-only record.
@@ -1273,7 +1279,7 @@ SCHEMAS
     `arc-inbox/10`                   arc inbox --json
     `arc-catchup/11`                 arc catchup --json
     `arc-journal-catchup/8`          arc journal catchup --json
-    `arc-resume/7`                   arc resume --json
+    `arc-resume/8`                   arc resume --json
     `arc-explain/1`                  arc explain --json
     `arc-brief/1`                    arc brief --json
     `arc-journal-artifact/2`         arc journal show --json

@@ -505,6 +505,10 @@ pub struct KeptContext {
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
+    /// Events on this change the fact cites as its grounds. Additive in
+    /// `arc-state/3` and `arc-status/27`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cites: Vec<String>,
     pub actor: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -1822,11 +1826,13 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 kind,
                 body,
                 evidence,
+                cites,
             } => state.kept.push(KeptContext {
                 event_id: ev.event_id.clone(),
                 kind: *kind,
                 body: body.clone(),
                 evidence: evidence.clone(),
+                cites: cites.clone(),
                 actor: ev.actor.clone(),
                 created_at: ev.created_at,
             }),
