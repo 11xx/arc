@@ -3332,7 +3332,7 @@ fn workspace_report_classifies_and_explains_departures() {
     let mut first = repo.arc(&repo.root);
     first.args(["workspace", "report", "--json"]);
     let first = json_stdout(&mut first);
-    assert_eq!(first["schema"], "arc-workspace-report/2");
+    assert_eq!(first["schema"], "arc-workspace-report/3");
     assert!(first["previous"].is_null());
     let work = first["sections"]["work"].as_array().unwrap();
     let row = work
@@ -3419,7 +3419,7 @@ fn workspace_report_classifies_and_explains_departures() {
         .unwrap();
     assert!(!refused.status.success());
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("expected arc-workspace-report/2"),
+        String::from_utf8_lossy(&refused.stderr).contains("expected arc-workspace-report/3"),
         "{}",
         String::from_utf8_lossy(&refused.stderr)
     );
@@ -3600,4 +3600,105 @@ fn workspace_report_records_unreadable_departure_artifacts() {
     );
     assert!(failed["sections"]["work"][0]["new_since_previous"].is_null());
     assert!(failed["tallies"]["work"]["previous"].is_null());
+}
+
+fn brief(repo: &Repo, change: &str, body: &str, plan: Option<(&str, &str)>) {
+    let mut command = repo.arc(&repo.root);
+    command.args(["brief", change, "--body-file", "-"]);
+    if let Some((plan, slice)) = plan {
+        command.args(["--plan-ref", plan, "--plan-slice", slice]);
+    }
+    command.write_stdin(body).assert().success();
+}
+
+fn shared_facts(repo: &Repo) -> Vec<serde_json::Value> {
+    let report = json_stdout(repo.arc(&repo.root).args(["workspace", "report", "--json"]));
+    report["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["rule"] == "shared-plan-slice")
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn report_flags_open_changes_sharing_a_plan_slice() {
+    let repo = Repo::new();
+    let (_, plan) = journal_artifact(&repo, "shared-plan", "plan", "# Plan\n");
+    let first = begin_no_worktree(&repo, "first-answer", &[]);
+    let second = begin_no_worktree(&repo, "second-answer", &[]);
+    let other = begin_no_worktree(&repo, "other-slice", &[]);
+    brief(&repo, &first, "# First\n", Some((&plan, "slice-a")));
+    brief(&repo, &second, "# Second\n", Some((&plan, "slice-a")));
+    brief(&repo, &other, "# Other\n", Some((&plan, "slice-b")));
+    let facts = shared_facts(&repo);
+    assert_eq!(facts.len(), 1, "{facts:?}");
+    let evidence = facts[0]["evidence"].as_str().unwrap();
+    for named in [first.as_str(), second.as_str(), plan.as_str(), "slice-a"] {
+        assert!(evidence.contains(named), "{named} missing from {evidence}");
+    }
+    assert!(!evidence.contains(&other), "{evidence}");
+}
+
+#[test]
+fn report_flags_open_changes_sharing_a_brief_digest() {
+    let repo = Repo::new();
+    let first = begin_no_worktree(&repo, "first-copy", &[]);
+    let second = begin_no_worktree(&repo, "second-copy", &[]);
+    let distinct = begin_no_worktree(&repo, "distinct-body", &[]);
+    brief(&repo, &first, "# One contract\n", None);
+    brief(&repo, &second, "# One contract\n", None);
+    brief(&repo, &distinct, "# Another contract\n", None);
+    let facts = shared_facts(&repo);
+    assert_eq!(facts.len(), 1, "{facts:?}");
+    let evidence = facts[0]["evidence"].as_str().unwrap();
+    assert!(
+        evidence.contains(&first) && evidence.contains(&second),
+        "{evidence}"
+    );
+    assert!(evidence.contains("sha256:"), "{evidence}");
+    assert!(!evidence.contains(&distinct), "{evidence}");
+}
+
+#[test]
+fn report_ignores_a_closed_change_sharing_a_plan_slice() {
+    let repo = Repo::new();
+    let (_, plan) = journal_artifact(&repo, "closing-plan", "plan", "# Plan\n");
+    let kept = begin_no_worktree(&repo, "kept-answer", &[]);
+    let closed = begin_no_worktree(&repo, "closed-answer", &[]);
+    brief(&repo, &kept, "# Kept\n", Some((&plan, "slice")));
+    brief(&repo, &closed, "# Closed\n", Some((&plan, "slice")));
+    assert_eq!(shared_facts(&repo).len(), 1);
+    repo.arc(&repo.root)
+        .args(["close", &closed, "--abandoned"])
+        .assert()
+        .success();
+    let facts = shared_facts(&repo);
+    assert!(facts.is_empty(), "{facts:?}");
+}
+
+#[test]
+fn report_help_lists_every_attention_rule() {
+    let repo = Repo::new();
+    let help = stdout(repo.arc(&repo.root).args(["workspace", "report", "--help"]));
+    for rule in [
+        "delivered-unconsumed",
+        "stale-question",
+        "stale-handoff",
+        "stale-claim",
+        "stale-no-patchset",
+        "shared-plan-slice",
+        "worktree-outlives-change",
+        "debt-grew",
+        "collection-failed",
+        "unreachable-anchor",
+        "unreachable-scratch",
+    ] {
+        assert!(
+            help.lines()
+                .any(|line| line.split_whitespace().next() == Some(rule)),
+            "{rule} missing from:\n{help}"
+        );
+    }
 }

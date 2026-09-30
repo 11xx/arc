@@ -1959,6 +1959,13 @@ fn report_ledger_facts(
             match &state.closure {
                 None => {
                     let days = u64::try_from((observed - state.opened_at).num_days()).unwrap_or(0);
+                    if let Some(brief) = state.latest_brief() {
+                        let keys = report::BriefKeys {
+                            plan: brief.plan_ref.clone().zip(brief.plan_slice.clone()),
+                            digest: crate::journal_exchange::body_digest(&brief.body),
+                        };
+                        ledger.open_briefs.insert(change_id.clone(), keys);
+                    }
                     ledger.open.insert(change_id, (state.title.clone(), days));
                 }
                 Some(_) => {
@@ -2276,6 +2283,11 @@ fn days_between(from: chrono::DateTime<chrono::Utc>, to: chrono::DateTime<chrono
     (to - from).num_days().max(0) as u64
 }
 
+/// The attention rules `arc workspace report` can emit, one line each.
+pub fn report_rules_help() -> String {
+    report::rules_help()
+}
+
 /// Print the exact, safe rebase command for every open change that depended on
 /// a now-integrated change. arc never executes it: rewriting a branch is always
 /// the operator's explicit action.
@@ -2327,7 +2339,7 @@ mod report {
     use serde_json::Value;
     use std::collections::{BTreeMap, BTreeSet};
 
-    pub(crate) const SCHEMA: &str = "arc-workspace-report/2";
+    pub(crate) const SCHEMA: &str = "arc-workspace-report/3";
 
     /// A decision question open longer than this is flagged `stale-question`.
     pub(crate) const STALE_QUESTION_DAYS: u64 = 7;
@@ -2337,16 +2349,100 @@ mod report {
     /// `stale-no-patchset`.
     pub(crate) const STALE_NO_PATCHSET_DAYS: u64 = 7;
 
+    /// Every attention rule the report emits. Each variant's doc line is the
+    /// rule's entry in `arc workspace report --help`, and its kebab-case name
+    /// is the `rule` value in the report.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, clap::ValueEnum)]
+    #[serde(rename_all = "kebab-case")]
+    pub(crate) enum Rule {
+        /// A delivered artifact: every promotion closed, one integrated, and
+        /// nothing consumed it
+        DeliveredUnconsumed,
+        /// A decision question open longer than 7 days
+        StaleQuestion,
+        /// A handoff unresolved longer than 14 days
+        StaleHandoff,
+        /// A claim that lapsed and can be reclaimed
+        StaleClaim,
+        /// A change open longer than 7 days with no patchset
+        StaleNoPatchset,
+        /// Two or more open changes whose in-force briefs share a plan and
+        /// slice, or a body digest
+        SharedPlanSlice,
+        /// A closed change whose separate worktree is still on disk
+        WorktreeOutlivesChange,
+        /// Review owed in a project rose since the previous report
+        DebtGrew,
+        /// A component read failed; the collection is partial
+        CollectionFailed,
+        /// A registered project whose anchor is gone
+        UnreachableAnchor,
+        /// Registered journals whose temporary or scratch anchors are gone,
+        /// folded into one fact
+        UnreachableScratch,
+    }
+
+    impl Rule {
+        pub(crate) fn name(self) -> String {
+            clap::ValueEnum::to_possible_value(&self)
+                .map(|value| value.get_name().to_string())
+                .unwrap_or_default()
+        }
+    }
+
+    impl std::fmt::Display for Rule {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.name())
+        }
+    }
+
+    impl PartialEq<&str> for Rule {
+        fn eq(&self, other: &&str) -> bool {
+            self.name() == *other
+        }
+    }
+
+    /// The attention rules as `arc workspace report --help` lists them, one
+    /// line each.
+    pub(crate) fn rules_help() -> String {
+        let rules: Vec<_> = <Rule as clap::ValueEnum>::value_variants()
+            .iter()
+            .filter_map(clap::ValueEnum::to_possible_value)
+            .collect();
+        let width = rules
+            .iter()
+            .map(|rule| rule.get_name().len())
+            .max()
+            .unwrap_or(0);
+        let mut help = String::from("Attention rules:\n");
+        for rule in rules {
+            let line = rule.get_help().map(ToString::to_string).unwrap_or_default();
+            help.push_str(&format!("  {:width$}  {line}\n", rule.get_name()));
+        }
+        help
+    }
+
     /// What one project's ledger says that the backlog observation does not:
-    /// how long each open change has been open, and which closed changes
-    /// still have their worktree on disk.
+    /// how long each open change has been open, what its in-force brief
+    /// answers, and which closed changes still have their worktree on disk.
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub(crate) struct LedgerFacts {
         /// Open change id -> (title, whole days open at the observation).
         pub open: BTreeMap<String, (String, u64)>,
+        /// Open change id -> the keys of its in-force brief, for each open
+        /// change that has one.
+        pub open_briefs: BTreeMap<String, BriefKeys>,
         /// (change id, worktree path) for each closed change whose recorded
         /// worktree still exists.
         pub closed_worktrees: Vec<(String, String)>,
+    }
+
+    /// What identifies the brief a change answers: its plan file and slice
+    /// when both are recorded, and the `sha256:` digest of its body.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct BriefKeys {
+        pub plan: Option<(String, String)>,
+        pub digest: String,
     }
 
     /// Scaffold headings arc prepends to artifacts. A row titled by one of them
@@ -2415,7 +2511,7 @@ mod report {
         age_days: Option<u64>,
         status: &'static str,
         #[serde(skip_serializing_if = "Vec::is_empty")]
-        flags: Vec<&'static str>,
+        flags: Vec<Rule>,
         #[serde(skip_serializing_if = "Option::is_none")]
         claimed_by: Option<String>,
         new_since_previous: Option<bool>,
@@ -2484,7 +2580,7 @@ mod report {
 
     #[derive(Debug, Serialize, PartialEq)]
     pub(crate) struct Attention {
-        rule: &'static str,
+        rule: Rule,
         project: String,
         subject: String,
         evidence: String,
@@ -2501,6 +2597,41 @@ mod report {
         in_flight: u64,
         review_owed: u64,
         questions: u64,
+    }
+
+    /// One `shared-plan-slice` fact per group of two or more open changes
+    /// sharing a plan and slice, or a brief digest. A group that shares both
+    /// keys is one fact naming both.
+    fn shared_briefs(project: &str, briefs: &BTreeMap<String, BriefKeys>) -> Vec<Attention> {
+        let mut by_key: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+        for (change_id, keys) in briefs {
+            if let Some((plan, slice)) = &keys.plan {
+                by_key
+                    .entry(format!("plan `{plan}` slice `{slice}`"))
+                    .or_default()
+                    .insert(change_id);
+            }
+            by_key
+                .entry(format!("brief digest `{}`", keys.digest))
+                .or_default()
+                .insert(change_id);
+        }
+        let mut groups: BTreeMap<BTreeSet<&str>, Vec<String>> = BTreeMap::new();
+        for (key, members) in by_key.into_iter().filter(|(_, members)| members.len() > 1) {
+            groups.entry(members).or_default().push(key);
+        }
+        groups
+            .into_iter()
+            .map(|(members, keys)| {
+                let ids = members.into_iter().collect::<Vec<_>>().join(", ");
+                Attention {
+                    rule: Rule::SharedPlanSlice,
+                    project: project.to_string(),
+                    evidence: format!("open changes {ids} share {}", keys.join(" and ")),
+                    subject: ids,
+                }
+            })
+            .collect()
     }
 
     fn text(value: &Value, key: &str) -> String {
@@ -2711,16 +2842,16 @@ mod report {
                     let kind = text(item, "kind");
                     let mut flags = Vec::new();
                     if status == "delivered" {
-                        flags.push("delivered-unconsumed");
+                        flags.push(Rule::DeliveredUnconsumed);
                     }
                     if kind == "handoff"
                         && tier == "open"
                         && age.is_some_and(|days| days > STALE_HANDOFF_DAYS)
                     {
-                        flags.push("stale-handoff");
+                        flags.push(Rule::StaleHandoff);
                     }
                     if item.get("availability").and_then(Value::as_str) == Some("reclaimable") {
-                        flags.push("stale-claim");
+                        flags.push(Rule::StaleClaim);
                     }
                     let file = text(item, "file");
                     let row = Row {
@@ -2747,14 +2878,14 @@ mod report {
                     };
                     for flag in &flags {
                         attention.push(Attention {
-                            rule: flag,
+                            rule: *flag,
                             project: name.clone(),
                             subject: file.clone(),
-                            evidence: match *flag {
-                                "delivered-unconsumed" => {
+                            evidence: match flag {
+                                Rule::DeliveredUnconsumed => {
                                     "every promotion closed and one integrated; the artifact was never consumed".to_string()
                                 }
-                                "stale-handoff" => format!("handoff unresolved for {} days", age.unwrap_or(0)),
+                                Rule::StaleHandoff => format!("handoff unresolved for {} days", age.unwrap_or(0)),
                                 _ => "its claim lapsed and can be reclaimed".to_string(),
                             },
                         });
@@ -2795,7 +2926,7 @@ mod report {
                 };
                 if age.is_some_and(|days| days > STALE_QUESTION_DAYS) {
                     attention.push(Attention {
-                        rule: "stale-question",
+                        rule: Rule::StaleQuestion,
                         project: name.clone(),
                         subject: text(question, "question"),
                         evidence: format!(
@@ -2863,7 +2994,7 @@ mod report {
                 let opened = ledger.open.get(&id);
                 if let Some((_, days)) = opened.filter(|(_, days)| *days > STALE_NO_PATCHSET_DAYS) {
                     attention.push(Attention {
-                        rule: "stale-no-patchset",
+                        rule: Rule::StaleNoPatchset,
                         project: name.clone(),
                         subject: id.clone(),
                         evidence: format!("open for {days} days with no patchset recorded"),
@@ -2890,9 +3021,10 @@ mod report {
                 change.next_actors.dedup();
                 sections.in_flight.push(change);
             }
+            attention.extend(shared_briefs(&name, &ledger.open_briefs));
             for (change_id, path) in &ledger.closed_worktrees {
                 attention.push(Attention {
-                    rule: "worktree-outlives-change",
+                    rule: Rule::WorktreeOutlivesChange,
                     project: name.clone(),
                     subject: change_id.clone(),
                     evidence: format!("the change is closed and its worktree is still at {path}"),
@@ -2936,7 +3068,7 @@ mod report {
                     && !failed_now.contains(&name)
                 {
                     attention.push(Attention {
-                        rule: "debt-grew",
+                        rule: Rule::DebtGrew,
                         project: name.clone(),
                         subject: name.clone(),
                         evidence: format!(
@@ -2959,7 +3091,7 @@ mod report {
                 continue;
             }
             attention.push(Attention {
-                rule: "collection-failed",
+                rule: Rule::CollectionFailed,
                 project: text(failure, "project"),
                 subject: text(failure, "component"),
                 evidence: text(failure, "reason"),
@@ -2975,7 +3107,7 @@ mod report {
                 continue;
             }
             attention.push(Attention {
-                rule: "unreachable-anchor",
+                rule: Rule::UnreachableAnchor,
                 project: text(unreachable, "slug"),
                 subject: anchor,
                 evidence: text(unreachable, "reason"),
@@ -2983,7 +3115,7 @@ mod report {
         }
         if scratch > 0 {
             attention.push(Attention {
-                rule: "unreachable-scratch",
+                rule: Rule::UnreachableScratch,
                 project: String::new(),
                 subject: format!("{scratch} journals"),
                 evidence: "registered journals whose temporary or scratch anchors are gone; housekeeping, not lost work".to_string(),
@@ -3067,9 +3199,7 @@ mod report {
             (&a.project, &a.asked_at, &a.question).cmp(&(&b.project, &b.asked_at, &b.question))
         });
         projects.sort_by(|a, b| a.project.cmp(&b.project));
-        attention.sort_by(|a, b| {
-            (a.rule, &a.project, &a.subject).cmp(&(b.rule, &b.project, &b.subject))
-        });
+        attention.sort_by_cached_key(|a| (a.rule.name(), a.project.clone(), a.subject.clone()));
 
         let previous_tally = |key: &str| {
             previous
@@ -3418,14 +3548,20 @@ mod report {
             let rules: Vec<_> = report
                 .attention
                 .iter()
-                .map(|entry| (entry.rule, entry.project.as_str()))
+                .map(|entry| (entry.rule.name(), entry.project.as_str()))
                 .collect();
-            assert!(rules.contains(&("unreachable-anchor", "kept")), "{rules:?}");
             assert!(
-                !rules.contains(&("collection-failed", "kept")),
+                rules.contains(&("unreachable-anchor".into(), "kept")),
+                "{rules:?}"
+            );
+            assert!(
+                !rules.contains(&("collection-failed".into(), "kept")),
                 "one fact, one entry: {rules:?}"
             );
-            assert!(rules.contains(&("collection-failed", "demo")), "{rules:?}");
+            assert!(
+                rules.contains(&("collection-failed".into(), "demo")),
+                "{rules:?}"
+            );
             let scratch = report
                 .attention
                 .iter()
@@ -3452,18 +3588,18 @@ mod report {
             let rules: Vec<_> = report
                 .attention
                 .iter()
-                .map(|entry| (entry.rule, entry.subject.as_str()))
+                .map(|entry| (entry.rule.name(), entry.subject.as_str()))
                 .collect();
             assert!(
-                rules.contains(&("stale-no-patchset", "idle-1")),
+                rules.contains(&("stale-no-patchset".into(), "idle-1")),
                 "{rules:?}"
             );
             assert!(
-                !rules.contains(&("stale-no-patchset", "fresh-2")),
+                !rules.contains(&("stale-no-patchset".into(), "fresh-2")),
                 "{rules:?}"
             );
             assert!(
-                rules.contains(&("worktree-outlives-change", "done-3")),
+                rules.contains(&("worktree-outlives-change".into(), "done-3")),
                 "{rules:?}"
             );
             let idle = report
@@ -3527,9 +3663,108 @@ mod report {
             let report = build(&data, None, &BTreeMap::new(), &BTreeMap::new());
             assert_eq!(report.sections.needs_person.len(), 1);
             assert_eq!(report.sections.needs_person[0].age_days, Some(16));
-            let rules: Vec<_> = report.attention.iter().map(|entry| entry.rule).collect();
-            assert!(rules.contains(&"stale-question"), "{rules:?}");
-            assert!(rules.contains(&"stale-handoff"), "{rules:?}");
+            let rules: Vec<_> = report
+                .attention
+                .iter()
+                .map(|entry| entry.rule.name())
+                .collect();
+            assert!(rules.contains(&"stale-question".to_string()), "{rules:?}");
+            assert!(rules.contains(&"stale-handoff".to_string()), "{rules:?}");
+        }
+
+        fn keys(plan: Option<(&str, &str)>, digest: &str) -> BriefKeys {
+            BriefKeys {
+                plan: plan.map(|(plan, slice)| (plan.to_string(), slice.to_string())),
+                digest: digest.to_string(),
+            }
+        }
+
+        #[test]
+        fn open_changes_sharing_a_brief_are_one_fact_per_group() {
+            let mut briefs = BTreeMap::new();
+            briefs.insert("a-1".to_string(), keys(Some(("p.md", "s")), "sha256:x"));
+            briefs.insert("b-2".to_string(), keys(Some(("p.md", "s")), "sha256:x"));
+            briefs.insert("c-3".to_string(), keys(Some(("p.md", "t")), "sha256:y"));
+            briefs.insert("d-4".to_string(), keys(Some(("q.md", "u")), "sha256:y"));
+            briefs.insert("e-5".to_string(), keys(Some(("q.md", "v")), "sha256:z"));
+            let facts = shared_briefs("demo", &briefs);
+            let facts: Vec<_> = facts
+                .iter()
+                .map(|fact| (fact.subject.as_str(), fact.evidence.as_str()))
+                .collect();
+            assert_eq!(
+                facts,
+                vec![
+                    (
+                        "a-1, b-2",
+                        "open changes a-1, b-2 share brief digest `sha256:x` and plan `p.md` slice `s`"
+                    ),
+                    ("c-3, d-4", "open changes c-3, d-4 share brief digest `sha256:y`"),
+                ]
+            );
+        }
+
+        #[test]
+        fn a_plan_without_a_slice_shares_only_by_digest() {
+            let mut briefs = BTreeMap::new();
+            briefs.insert("a-1".to_string(), keys(None, "sha256:x"));
+            briefs.insert("b-2".to_string(), keys(None, "sha256:y"));
+            assert!(shared_briefs("demo", &briefs).is_empty());
+        }
+
+        #[test]
+        fn shared_briefs_reach_the_report_as_attention() {
+            let mut facts = LedgerFacts::default();
+            for id in ["a-1", "b-2"] {
+                facts.open.insert(id.into(), (id.into(), 1));
+                facts
+                    .open_briefs
+                    .insert(id.into(), keys(Some(("p.md", "s")), id));
+            }
+            let mut ledgers = BTreeMap::new();
+            ledgers.insert("demo".to_string(), facts);
+            let report = build(&backlog(vec![], vec![]), None, &BTreeMap::new(), &ledgers);
+            let shared: Vec<_> = report
+                .attention
+                .iter()
+                .filter(|entry| entry.rule == Rule::SharedPlanSlice)
+                .collect();
+            assert_eq!(shared.len(), 1, "{:?}", report.attention);
+            assert_eq!(shared[0].project, "demo");
+            assert_eq!(shared[0].subject, "a-1, b-2");
+        }
+
+        #[test]
+        fn the_help_lists_every_rule_the_report_emits() {
+            let help = rules_help();
+            for rule in <Rule as clap::ValueEnum>::value_variants() {
+                let name = rule.name();
+                let line = help
+                    .lines()
+                    .find(|line| line.split_whitespace().next() == Some(name.as_str()))
+                    .unwrap_or_else(|| panic!("{name} missing from:\n{help}"));
+                assert!(line.trim().len() > name.len(), "{name} has no description");
+                assert_eq!(
+                    serde_json::to_value(rule).unwrap(),
+                    Value::String(name.clone()),
+                    "the serialized rule and its help name agree"
+                );
+            }
+            assert_eq!(
+                help.lines().skip(1).count(),
+                <Rule as clap::ValueEnum>::value_variants().len()
+            );
+            for (line, days) in [
+                ("stale-question", STALE_QUESTION_DAYS),
+                ("stale-handoff", STALE_HANDOFF_DAYS),
+                ("stale-no-patchset", STALE_NO_PATCHSET_DAYS),
+            ] {
+                let line = help.lines().find(|l| l.contains(line)).unwrap();
+                assert!(
+                    line.contains(&format!("longer than {days} days")),
+                    "{line} states the threshold the rule applies"
+                );
+            }
         }
     }
 }
