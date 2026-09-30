@@ -63,7 +63,7 @@ pub use gatekeeping::{
     check_selection, close, done, hold, integrate, rebase, release_hold, snapshot_with_verify,
     verify, CloseArgs, DebtDeclaration, IntegrateArgs, VerifyArgs,
 };
-pub use history::{record_rewrite, resolve_rewritten};
+pub use history::{record_rewrite, resolve_rewritten, withdraw_rewrite};
 pub use hooks::{
     hook_run, install as hooks_install, query_commit, status as hooks_status,
     uninstall as hooks_uninstall,

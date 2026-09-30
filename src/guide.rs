@@ -917,13 +917,20 @@ CONTRIBUTION TRAILERS
                        malformed value.
 
 HISTORY REWRITES
-    arc rewrite sign [--key <id>] [--from <rev>] [--dry-run] [--retag]
+    arc rewrite sign [--key <id>] [--from <rev>] [--include-shared]
+                     [--dry-run] [--retag]
                        Recreate every commit from --from through the branch
                        head so one key signs them all, move the branch, arc's
                        refs and the local branches and tags that point into
-                       the range, and record the map. --from defaults to the
-                       oldest commit whose signature is missing or made by
-                       another key; --dry-run prints the map, the tags it
+                       the range, and record the map. --from is inclusive. On
+                       a tracked change branch its default is the oldest
+                       commit not signed by the key in target..head; outside
+                       a change it searches the whole history. Commits
+                       reachable from the target or another local branch are
+                       refused, naming the commit and ref, including in
+                       --dry-run. --include-shared permits them and searches
+                       the whole history by default, naming stranded refs.
+                       --dry-run prints the map, the tags it
                        would re-point or leave alone, and stops; --retag
                        recreates the annotated tags whose targets were
                        rewritten, signed like the commits. Run again to
@@ -942,6 +949,17 @@ HISTORY REWRITES
                        Record a rewrite performed elsewhere, from its commit
                        map.
     arc history resolve <rev>     Where a recorded revision ended up.
+    arc history withdraw <event-id> --reason <why>
+                       Withdraw one history-rewritten repository event. Its
+                       map does not participate in resolution or readiness;
+                       refs are not moved back. Output names recorded ref
+                       moves, or says when that information is absent.
+                       Other event types are refused. A withdrawal travels
+                       with the map in full and delta exports, and importing
+                       replicas honour it even when they already hold the
+                       map. A delta can carry repository events with an empty
+                       change suffix. A correct map can be recorded for the
+                       same revisions. Stored events remain intact.
 
   Only the signature and the commit ids change: tree, parents, author,
   committer, dates, encoding, message and any other header the commit carries

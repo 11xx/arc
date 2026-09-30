@@ -1952,6 +1952,13 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             "history-rewritten",
             format!("{} revisions: {reason}", mapping.len()),
         ),
+        Payload::HistoryRewriteWithdrawn {
+            rewrite_event_id,
+            reason,
+        } => (
+            "history-rewrite-withdrawn",
+            format!("{rewrite_event_id}: {}", one_line(reason)),
+        ),
         Payload::ReviewPassOpened {
             pass_id, members, ..
         } => (
