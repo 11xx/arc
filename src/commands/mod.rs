@@ -531,14 +531,21 @@ impl Ctx {
     }
 
     pub(crate) fn report(&self, store: &Store, state: &ChangeState) -> Result<StatusReport> {
+        self.report_with_states(state, &store.readable_states()?)
+    }
+
+    pub(crate) fn report_with_states(
+        &self,
+        state: &ChangeState,
+        states: &BTreeMap<String, ChangeState>,
+    ) -> Result<StatusReport> {
         let declarations = crate::declarations::for_change(&self.cwd, state)?;
-        let states = self.load_all_states(store)?;
         status::build(
             state,
             &self.cwd,
             &declarations,
-            dependency_status(state, &states),
-            changes_blocked_by(&state.change_id, &states),
+            dependency_status(state, states),
+            changes_blocked_by(&state.change_id, states),
             fork::fork_slug_for_branch(&self.cwd, &state.branch)?,
         )
     }
@@ -551,7 +558,7 @@ impl Ctx {
     pub(crate) fn report_as_of(&self, store: &Store, state: &ChangeState) -> Result<StatusReport> {
         let toplevel = gitio::toplevel(&self.cwd)?;
         let declarations = crate::declarations::for_change(&self.cwd, state)?;
-        let states = self.load_all_states(store)?;
+        let states = store.readable_states()?;
         let mut report = status::build_as_of(
             state,
             &declarations.gates,

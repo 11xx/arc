@@ -416,6 +416,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
         }
         let total = required.len();
         let head = gitio::head(&run_ctx.cwd)?;
+        let tree = gitio::commit_tree(&run_ctx.cwd, &head)?;
         let mode = if parallel {
             VerificationRunMode::Parallel
         } else {
@@ -441,7 +442,8 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             let reusable = skip_green
                 .then(|| {
                     st.gate_evidence_at_matching(name, &head, |evidence| {
-                        status::matches_declaration(evidence, gate)
+                        evidence.recorded_tree() == Some(tree.as_str())
+                            && status::matches_declaration(evidence, gate)
                             && status::matches_environment(
                                 evidence,
                                 gate,
@@ -461,7 +463,7 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
                 to_run.push((name, gate));
             }
         }
-        append_reuses(ctx, &store, &change_id, &run_id, &head, &reused)?;
+        append_reuses(ctx, &store, &change_id, &run_id, &head, &tree, &reused)?;
         if parallel {
             return verify_all_parallel(
                 run_ctx,
@@ -712,7 +714,8 @@ fn verify_against(
         skip_green
             .then(|| {
                 st.gate_evidence_at_tree_matching(name, &merged_tree, &resolve_tree, |evidence| {
-                    status::matches_declaration(evidence, gate)
+                    evidence.recorded_tree() == Some(merged_tree.as_str())
+                        && status::matches_declaration(evidence, gate)
                 })
             })
             .flatten()
@@ -747,7 +750,8 @@ fn verify_against(
         let reusable = skip_green
             .then(|| {
                 st.gate_evidence_at_tree_matching(name, &merged_tree, &resolve_tree, |evidence| {
-                    status::matches_declaration(evidence, gate)
+                    evidence.recorded_tree() == Some(merged_tree.as_str())
+                        && status::matches_declaration(evidence, gate)
                         && status::matches_environment(
                             evidence,
                             gate,
@@ -767,7 +771,15 @@ fn verify_against(
             to_run.push((name, gate));
         }
     }
-    append_reuses(ctx, store, change_id, &run_id, &synthesized, &reused)?;
+    append_reuses(
+        ctx,
+        store,
+        change_id,
+        &run_id,
+        &synthesized,
+        &merged_tree,
+        &reused,
+    )?;
 
     let mut passed = reused.len();
     if !to_run.is_empty() {
@@ -991,12 +1003,14 @@ fn start_verification_run(
     Ok(run_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_reuses(
     ctx: &Ctx,
     store: &Store,
     change_id: &str,
     run_id: &str,
     revision: &str,
+    tree: &str,
     reused: &[(String, String)],
 ) -> Result<()> {
     if reused.is_empty() {
@@ -1016,6 +1030,7 @@ fn append_reuses(
             run_id: run_id.to_owned(),
             gate: gate.clone(),
             revision: revision.to_owned(),
+            tree: Some(tree.to_owned()),
             evidence_event_id: evidence_event_id.clone(),
         };
         ensure_append_allowed(&state, &payload)?;
@@ -3346,7 +3361,7 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
     let (change_id, st) = ctx.load_state(&store, reference)?;
     let mut report = ctx.report(&store, &st)?;
     let code = status::check_exit_code(&report);
-    let states = ctx.load_all_states(&store)?;
+    let states = store.readable_states()?;
     let debts = super::messaging::collect_debts(ctx, &states)?;
     report.advisories.extend(debts.advisories_for(ctx, &st));
     // Capacity information for the review action: shown when review is the
@@ -3412,7 +3427,7 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
 
 fn check_tagged(ctx: &Ctx, tags: Vec<String>) -> Result<i32> {
     let store = ctx.store()?;
-    let states = ctx.load_all_states(&store)?;
+    let states = store.readable_states()?;
     let selected = states
         .values()
         .filter(|state| tags.iter().all(|tag| state.tags.contains(tag)))

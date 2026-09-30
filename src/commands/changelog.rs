@@ -194,7 +194,11 @@ pub fn changelog(
             .map(|tag| gitio::rev_parse(&ctx.cwd, &tag))
             .transpose()?,
     };
-    let states = ctx.load_all_states(&store)?;
+    let states = if write {
+        ctx.load_all_states(&store)?
+    } else {
+        store.readable_states()?
+    };
     let mut entries = states
         .values()
         .filter_map(|state| projected_entry(&ctx.cwd, state, boundary.as_deref()))

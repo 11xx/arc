@@ -274,6 +274,8 @@ enum Cmd {
         iterating: bool,
     },
     /// List changes
+    /// Unreadable changes are named with their errors on stderr; readable
+    /// changes remain in the output
     List {
         /// List only changes that are still open
         #[arg(long)]
@@ -285,6 +287,8 @@ enum Cmd {
         format: ListFormat,
     },
     /// Filter changes and print matching IDs (or JSON)
+    /// Unreadable changes are named with their errors on stderr; readable
+    /// changes remain in the output
     Query {
         /// open | closed | integrated | abandoned | superseded
         #[arg(long)]
@@ -321,6 +325,8 @@ enum Cmd {
         json: bool,
     },
     /// Render one change (Markdown, or full state with --json)
+    /// Aggregate reads name unreadable changes with their errors on stderr
+    /// and retain readable changes; a selected unreadable change fails
     Show {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -417,6 +423,8 @@ enum Cmd {
     },
     /// Derived ledger analytics: stage, review, and gate durations, and how
     /// often provenance is recorded
+    /// Aggregate reads name unreadable changes with their errors on stderr
+    /// and retain readable changes; a selected unreadable change fails
     Stats {
         /// Report a single change
         #[arg(long, id = "change_flag", conflicts_with_all = ["tag", "all"])]
@@ -574,6 +582,9 @@ enum Cmd {
     /// arc-changelog-render-request/1 document on stdin and answers on stdout;
     /// `renderer_timeout` bounds it (default 60s), and its process group is
     /// killed at the deadline. `--json` never runs it
+    /// Read-only projections name unreadable changes with their errors on
+    /// stderr and retain readable entries. --write requires every change to
+    /// be readable; an unreadable selected change fails
     Changelog {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -632,6 +643,8 @@ enum Cmd {
         severity: MessageSeverity,
     },
     /// Scan messages across open and closed changes (newest first)
+    /// Aggregate reads name unreadable changes with their errors on stderr
+    /// and retain readable changes; a selected unreadable change fails
     Messages {
         /// Only messages recorded against this change
         #[arg(long, id = "change_flag")]
@@ -648,6 +661,8 @@ enum Cmd {
         json: bool,
     },
     /// Lead-facing queue rollup: open changes, active claims, and outstanding debt (arc-inbox/8 schema)
+    /// Aggregate reads name unreadable changes with their errors on stderr
+    /// and retain readable changes; a selected unreadable change fails
     Inbox {
         /// Restrict to changes assigned to this harness
         #[arg(long = "assigned-to")]
@@ -657,6 +672,8 @@ enum Cmd {
         json: bool,
     },
     /// Show a tagged program in dependency order (arc-chain/4 schema)
+    /// Aggregate reads name unreadable changes with their errors on stderr
+    /// and retain readable changes; a selected unreadable change fails
     Chain {
         /// The tag naming the program to render
         tag: String,
@@ -713,7 +730,10 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/27 schema)
+    /// Machine-readable status report (the versioned arc-status/27 schema).
+    /// An unreadable selected change fails; unreadable neighboring changes
+    /// are named with their errors on stderr and omitted from the dependency
+    /// observation. An unreadable prerequisite cannot count as integrated
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -732,12 +752,16 @@ enum Cmd {
         at: Option<String>,
     },
     /// Report whether declared prerequisite changes have integrated
+    /// Aggregate reads name unreadable changes with their errors on stderr
+    /// and retain readable changes; a selected unreadable change fails
     BlockerStatus {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
     },
     /// Dependency probe: exit 0 ready, 1 blocked, 2 on lookup/ledger errors
+    /// Aggregate reads name unreadable changes with their errors on stderr
+    /// and retain readable changes; a selected unreadable change fails
     IsBlocked {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -770,6 +794,8 @@ enum Cmd {
         exec_command: Option<String>,
     },
     /// Wait for a change, or a tagged series, to reach a ledger-derived condition
+    /// Aggregate reads name unreadable changes with their errors on stderr
+    /// and retain readable changes; a selected unreadable change fails
     Watch {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -843,6 +869,9 @@ enum Cmd {
         cmd: ReplicaCmd,
     },
     /// Integration preflight; exit code identifies the first blocker
+    /// Unreadable neighboring changes are named with their errors on stderr;
+    /// an unreadable selected change fails and an unreadable prerequisite
+    /// cannot authorize integration
     Check {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1149,7 +1178,9 @@ enum Cmd {
         parallel: bool,
         /// Record reuse of passing evidence instead of rerunning the gate that
         /// produced it: with --all, evidence green at the current head; with
-        /// --against, evidence green at the merged tree
+        /// --against, evidence green at the merged tree. Reuse records that
+        /// tree and requires evidence carrying the same content key; evidence
+        /// with neither tree nor tested_tree is rerun
         #[arg(long = "skip-green")]
         skip_green: bool,
         /// Gate name from .arc/gates.toml
@@ -1591,6 +1622,8 @@ enum Cmd {
         cmd: WorkspaceCmd,
     },
     /// Advise (never execute) rebases for open dependents of a change
+    /// Aggregate reads name unreadable changes with their errors on stderr
+    /// and retain readable changes; a selected unreadable change fails
     Restack {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1609,6 +1642,8 @@ enum Cmd {
         args: Vec<String>,
     },
     /// Orient a session: the ledger queue, the journal backlog, and live lanes
+    /// Unreadable changes are named with their errors on stderr; readable
+    /// changes remain in the output
     Catchup {
         /// Cap the changes listed per ledger bucket; the journal queue is
         /// always rendered in full, since finding it is the point
@@ -1743,6 +1778,8 @@ enum ForkCmd {
         force: bool,
     },
     /// List every fork this repository knows about
+    /// Unreadable change promotions are named with their errors on stderr;
+    /// readable promotions remain in the output
     List {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
@@ -1813,12 +1850,16 @@ enum ExternalCmd {
 #[derive(Subcommand)]
 enum WorkspaceCmd {
     /// Per-repo open-change rows across the data_root
+    /// Unreadable changes are named with their errors on stderr; readable
+    /// changes remain in the output
     List {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
     },
     /// The inbox rollup for every registered project
+    /// Unreadable changes are named with their errors on stderr; readable
+    /// changes remain in the output
     Inbox {
         /// Report only projects whose canonical anchor is beneath this path
         #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]
@@ -1858,6 +1899,8 @@ enum WorkspaceCmd {
     /// Ledger and journal backlog across every project, ranked by what is
     /// blocked on a decision rather than on work. A partial collection keeps
     /// the projects it did read, names each failure, and exits 16
+    /// Change observations name unreadable changes with their errors on
+    /// stderr and retain readable changes
     Backlog {
         /// Count only journal items filed at or after this journal stamp
         /// (20260101T000000Z) or RFC 3339 timestamp, so the tiers read as
@@ -1900,6 +1943,8 @@ enum WorkspaceCmd {
     /// command exit 16. Attention facts, listed below by rule, never change
     /// the exit code. The report writes nothing.
     #[command(after_help = commands::report_rules_help())]
+    /// Change observations name unreadable changes with their errors on
+    /// stderr and retain readable changes
     Report {
         /// Report only projects whose canonical anchor is beneath this path
         #[arg(long, value_name = "PATH", conflicts_with_all = ["here", "global"])]

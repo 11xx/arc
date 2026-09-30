@@ -4,7 +4,7 @@ use crate::model::{ActorSource, Event, Payload};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -798,6 +798,28 @@ impl Store {
         let mut state = crate::state::reduce_following(&events, &self.rewrites()?)?;
         crate::replica::localize_change(&self.repository_id, &events, &mut state);
         Ok(state)
+    }
+
+    /// Readable changes for an aggregate view. A per-change failure is named
+    /// on stderr; failures reading the shared ledger or rewrite map refuse
+    /// the observation because they cannot be attributed to one change.
+    pub fn readable_states(&self) -> Result<BTreeMap<String, crate::state::ChangeState>> {
+        let rewrites = self.rewrites()?;
+        let mut states = BTreeMap::new();
+        for change_id in self.list_change_ids()? {
+            let result = self.load_events(&change_id).and_then(|events| {
+                let mut state = crate::state::reduce_following(&events, &rewrites)?;
+                crate::replica::localize_change(&self.repository_id, &events, &mut state);
+                Ok(state)
+            });
+            match result {
+                Ok(state) => {
+                    states.insert(change_id, state);
+                }
+                Err(error) => eprintln!("warning: unreadable change {change_id}: {error:#}"),
+            }
+        }
+        Ok(states)
     }
 
     /// Every history rewrite this repository recorded, flattened into one

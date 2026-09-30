@@ -209,13 +209,9 @@ pub(crate) fn infer_change(store: &Store, cwd: &Path) -> Result<Option<String>> 
 }
 
 fn open_changes(store: &Store) -> Result<Vec<ChangeState>> {
-    let states = store
-        .list_change_ids()?
-        .into_iter()
-        .map(|id| store.state(&id))
-        .collect::<Result<Vec<_>>>()?;
+    let states = store.readable_states()?;
     Ok(states
-        .into_iter()
+        .into_values()
         .filter(|state| !state.is_closed())
         .collect())
 }
@@ -837,7 +833,7 @@ fn cwd_is_in_recorded_worktree(state: &ChangeState, cwd: &Path) -> bool {
 /// turns off.
 pub(crate) fn unowned_surface(ctx: &Ctx) -> Result<crate::inbox::Unowned> {
     let store = ctx.store()?;
-    let states = ctx.load_all_states(&store)?;
+    let states = store.readable_states()?;
     let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
     let Ok(Some(target)) = gitio::primary_worktree_branch(&ctx.cwd) else {
         return Ok(crate::inbox::Unowned::default());

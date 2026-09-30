@@ -227,6 +227,14 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   the reason. A row there is a gap in the derivation rather than a resting
   place: it means arc failed to classify open work, and it is worth reporting.
 
+  Aggregate change observations retain readable changes and name each
+  unreadable change with its error on stderr, including with JSON output.
+  A read aimed at one change refuses if that change cannot be read. Status
+  keeps unreadable prerequisites unresolved, so they cannot authorize
+  integration. Operations that require the complete dependency graph refuse
+  an incomplete read. A changelog file write requires every change to be
+  readable so a failed reduction cannot silently remove an entry.
+
   Every command in the project orientation answers for the project you are
   standing in. Some
   questions are comparisons — which project to open next, what has waited
@@ -446,6 +454,12 @@ RUN A CHANGE
                                      A textual conflict refuses before any
                                      gate runs or evidence is recorded;
                                      rebase first.
+    --skip-green                    Reuse passing evidence with --all at the
+                                     head, or --against at the merged tree.
+                                     The reuse records its tree; evidence
+                                     with neither tree nor tested_tree is
+                                     rerun. Replays of reuse events without
+                                     a tree require matching revisions.
     --attest --environment <id>      Record a run arc did not perform, naming
                                      the environment it applies to.
     --falsified-by <id> --predicted <why>
