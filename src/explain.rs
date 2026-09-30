@@ -600,8 +600,8 @@ fn resolve_reference(ctx: &Ctx, file: &str) -> std::result::Result<String, (Reso
     match crate::journal::artifact_digest(ctx, file) {
         Ok(digest) => Ok(digest),
         Err(error) => {
-            let hot = match crate::journal::resolve_dir(&ctx.cwd) {
-                Ok(hot) => hot,
+            let location = match crate::journal::locate_artifact(ctx, file) {
+                Ok(location) => location,
                 Err(resolve) => {
                     return Err((
                         Resolution::Unavailable,
@@ -609,9 +609,10 @@ fn resolve_reference(ctx: &Ctx, file: &str) -> std::result::Result<String, (Reso
                     ))
                 }
             };
-            let cold = crate::journal::archive_dir(&hot);
+            let (hot, name) = (&location.hot, location.file.as_str());
+            let cold = crate::journal::archive_dir(hot);
             let exists = |path: std::path::PathBuf| path.try_exists().unwrap_or(true);
-            if !exists(hot.join(file)) && !exists(cold.join(file)) {
+            if !exists(hot.join(name)) && !exists(cold.join(name)) {
                 Err((
                     Resolution::Missing,
                     format!("{file} resolves to nothing in the journal or its cold archive"),

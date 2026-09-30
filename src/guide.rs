@@ -93,7 +93,7 @@ FROM A WORKSPACE ROOT (outside a project)
                        successor. It accepts the same
                        `--under`/`--here`/`--global` scope, reports the same
                        collection manifest, exits 16 on a partial collection,
-                       and is versioned `arc-workspace-inventory/1`.
+                       and is versioned `arc-workspace-inventory/2`.
   arc workspace report [--previous FILE] --json
                        The backlog classified by named rules: each artifact's
                        status (unresolved, delivered, claimed, ...), the
@@ -1082,6 +1082,22 @@ RULES THAT CHANGE WHAT YOU DO
     names the patchsets that cite an artifact. Arc records identifiers only,
     never transcript text: retaining a recording is not arc's promise, and a
     remote recording is read on the machine that holds it.
+  - A journal artifact named for promotion or framing (`begin
+    --from-journal`, `brief --plan-ref`, `snapshot --journal-ref`) is a
+    filename in this project's journal, or `<journal-dir>::<file>` for one
+    another project's journal holds, `<journal-dir>` being the absolute path
+    that project's `arc journal dir` prints; the file is read hot, then cold.
+    A directory that is not a journal, or a file it does not hold, is refused
+    naming both. The change records the reference as given, with digests read
+    from the owning journal. A cross-project `begin --from-journal` or `brief
+    --plan-ref` appends a `promoted` event to the owning journal naming this
+    repository id, change, and checkout, and a non-plan source is consumed
+    there as superseded by that change. The owning journal's `inventory`,
+    `open`, and workspace views list the promotion with its `repository_id`,
+    its status read from the promoting ledger: `unknown` when that ledger
+    cannot be read, which never counts as closed. Only the owning project
+    consumes, archives, unarchives, or transitions an artifact; a qualified
+    reference to one is refused naming the owning journal.
   - A gate may declare an environment probe: a command whose output
     identifies the environment the gate's evidence applies to. `verify` runs
     the probe beside the gate and records its identity on the evidence. The
@@ -1286,7 +1302,7 @@ SCHEMAS
     `arc-status/27`                  arc status
     `arc-check/3`                    arc check --json
     `arc-inbox/10`                   arc inbox --json
-    `arc-catchup/11`                 arc catchup --json
+    `arc-catchup/12`                 arc catchup --json
     `arc-journal-catchup/8`          arc journal catchup --json
     `arc-resume/8`                   arc resume --json
     `arc-explain/1`                  arc explain --json
@@ -1306,9 +1322,9 @@ SCHEMAS
     `arc-forks/2`                    arc fork list --json
     `arc-doctor/5`                   arc doctor --json
     `arc-workspace/1`                arc workspace list|inbox --json
-    `arc-workspace-backlog/18`       arc workspace backlog --json
+    `arc-workspace-backlog/19`       arc workspace backlog --json
     `arc-workspace-report/3`         arc workspace report --json
-    `arc-workspace-inventory/1`      arc workspace inventory --json
+    `arc-workspace-inventory/2`      arc workspace inventory --json
     `arc-writability/1`              arc config --check-writable --json
     `arc-sandbox-clone/1`            arc sandbox clone --json
     `arc-sandbox-diff/1`             arc sandbox diff --json
