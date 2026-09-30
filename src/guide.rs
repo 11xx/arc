@@ -24,7 +24,25 @@ waiting for a session.
 SAY WHO YOU ARE (before the first write)
   eval "$(arc env)"                    Detect harness, session, model, and session link.
   export ARC_ACTOR=<name> ARC_HARNESS=<claude|codex|opencode|pi> \
-         ARC_SESSION=<id> ARC_MODEL=<model[#effort]> ARC_SESSION_LINK=<url>
+         ARC_SESSION=<id> ARC_SESSION_LINK=<url>
+
+  Leave ARC_MODEL unset after bootstrap (`unset ARC_MODEL`) so each ledger,
+  replica, and journal write resolves the acting session's model and effort.
+  The acting harness and session are declared through flags or ARC_HARNESS
+  and ARC_SESSION, or supplied by `[identity] detect`. To declare a model
+  from `arc env`, re-evaluate it before each write in a turn.
+  `--model` and ARC_MODEL declarations keep their value; a store disagreement
+  records both `declared` and `observed`. Events carry `model_source` (flag,
+  env, or resolved) and `model_observation` with the selection endpoint's
+  timestamp, native id, head-read coverage, and operator-turn boundary.
+  `arc show --json` exposes this evidence in `model_attributions`, keyed by
+  event id; `arc explain` (an alias of `arc log`) renders it beside each fact.
+  `arc env` comments locate the observation inside or before the acting turn,
+  whose boundary is the recording's newest operator prompt. An earlier-turn
+  observation warns that effort may have changed since. A bounded read that
+  misses the boundary says so; one that misses the recording head may have
+  missed earlier selections. An absent selection behind that bound stays
+  unknown rather than borrowing one from a listing.
 
   Every event records who wrote it. Most writes accept an undeclared
   identity. In that case arc records an actor nobody claimed:
@@ -275,7 +293,9 @@ SETTLE A QUESTION (before it is work)
                          in place; other event kinds and delegated records
                          refuse by name. Repair and every event append share
                          an event-write lock, so an append cannot be lost when
-                         the repaired log is published.
+                         the repaired log is published. Model replacements are
+                         flag declarations compared with the retained observation;
+                         changing harness or session clears that observation.
   arc journal consume <file> --outcome done --decision <decision>
   arc journal transition <file> --to discussion [--dry-run]
     Change a live artifact's kind as one guarded operation: a typed successor
@@ -1136,8 +1156,8 @@ RULES THAT CHANGE WHAT YOU DO
     A deferral requires a `why` and gets a `def-<ulid>` when it names no id; a
     later round on the same subject discharges it with `--collects <id>`.
     `arc inbox` and `arc catchup` carry the ones still open.
-  - arc holds no routing opinion. It records the --actor, --harness, and --model
-    it is given; who to delegate to is the caller's policy, not arc's.
+  - arc holds no routing opinion. It records the --actor and --harness
+    it is given and resolves an undeclared model from the acting session; who to delegate to is the caller's policy, not arc's.
   - A delegated session binds its boundary with `ARC_ROLE` or `--role`. An
     implementer may not record a verdict, an external verdict, `resolve`,
     `hold`, `release-hold`, `audit`, `debt`, `close`, or `integrate`. A
@@ -1313,14 +1333,14 @@ SCHEMAS
 
   Commitments, files:
     `arc-bundle/6`                   arc export / arc import
-    `arc-replica-bundle/2`           arc replica export / import
-    `arc-replica-event/2`            one event inside an arc-replica-bundle
+    `arc-replica-bundle/3`           arc replica export / import
+    `arc-replica-event/3`            one event inside an arc-replica-bundle
     `arc-journal-bundle/1`           arc journal export / import
     `journal-events/1`               events.jsonl, streamed by arc journal events
     `arc-journal-spool/1`            .arc/outbox/<ts>-<kind>-<topic>.json
 
   Internal:
-    store format 6                   .git/arc/config.json and the change ledger
+    store format 7                   .git/arc/config.json and the change ledger
     `arc-replica-import/2`           receipt of an imported replica bundle
     `arc-journal-exchange-import/1`  receipt of an imported journal bundle
     `arc-sandbox/2`                  .arc-sandbox.json
@@ -1361,7 +1381,7 @@ WHAT ARC WILL NOT DO
       repository does not hold.
 
   Judgements arc does not make:
-    arc records the actor, harness, and model it is given, and holds no
+    arc records declared identities and observed models, and holds no
       routing opinion.
     arc records the displaced owner and the reason a claim was taken over.
     arc never scores the coordinates a debt records, joins them against a

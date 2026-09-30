@@ -8,7 +8,10 @@
 use crate::commands::{self, Ctx, StatusOutput};
 use crate::gitio;
 use crate::journal;
-use crate::model::SessionResolution;
+use crate::model::{
+    ModelAttribution, ModelDisagreement, ModelObservation, ModelProvenance, ModelSource,
+    SessionResolution,
+};
 use crate::session_store;
 use crate::state::ChangeState;
 use crate::status::BriefBaseDrift;
@@ -250,6 +253,7 @@ pub struct DetectedIdentity {
     /// record.
     pub session: Option<DetectedSession>,
     pub model: Option<String>,
+    pub model_observation: Option<ModelObservation>,
     /// Why no model is named, where the store answered without one. `None`
     /// beside an absent model means the model was never asked for.
     pub model_unavailable: Option<&'static str>,
@@ -301,7 +305,7 @@ pub fn detect_identity() -> Detection {
     let claims = session_claims();
     match claims.as_slice() {
         [] => opencode_witness(),
-        [claim] => Detection::Resolved(resolved(claim)),
+        [claim] => Detection::Resolved(resolved(claim.harness, &claim.session)),
         _ => {
             let origins = claims
                 .iter()
@@ -327,7 +331,7 @@ pub fn detect_identity() -> Detection {
             if winners.next().is_some() {
                 return Detection::Ambiguous(claims);
             }
-            Detection::Resolved(resolved(claim))
+            Detection::Resolved(resolved(claim.harness, &claim.session))
         }
     }
 }
@@ -341,40 +345,88 @@ fn opencode_witness() -> Detection {
             harness: "opencode".to_string(),
             session: None,
             model: None,
+            model_observation: None,
             model_unavailable: None,
         });
     }
     Detection::None
 }
 
-fn resolved(claim: &SessionClaim) -> DetectedIdentity {
-    let identity = session_store::session_identity(claim.harness, &claim.session);
+fn resolved(harness: &str, session: &str) -> DetectedIdentity {
+    let identity = session_store::session_identity(harness, session);
     let resolution = match identity {
         session_store::SessionIdentity::NoRecording => SessionResolution::Uncorroborated,
         session_store::SessionIdentity::Unresolved => SessionResolution::Unresolved,
         _ => SessionResolution::Corroborated,
     };
-    let (mut model, mut model_unavailable) = match identity {
-        session_store::SessionIdentity::Named(model) => (Some(model), None),
-        session_store::SessionIdentity::Unnamed(reason) => (None, Some(reason.line())),
-        session_store::SessionIdentity::NoRecording => (None, None),
+    let (mut model, model_observation, mut model_unavailable) = match identity {
+        session_store::SessionIdentity::Named { model, observation } => {
+            (Some(model), observation, None)
+        }
+        session_store::SessionIdentity::Unnamed(reason) => (None, None, Some(reason.line())),
+        session_store::SessionIdentity::NoRecording => (None, None, None),
         session_store::SessionIdentity::Unresolved => (
+            None,
             None,
             Some("the session store could not resolve or read this id"),
         ),
     };
-    if let Some(live) = live_pi_model(claim) {
+    if let Some(live) = live_pi_model(harness, session) {
         model = Some(live);
         model_unavailable = None;
     }
     DetectedIdentity {
-        harness: claim.harness.to_string(),
+        harness: harness.to_string(),
         session: Some(DetectedSession {
-            id: claim.session.clone(),
+            id: session.to_string(),
             resolution,
         }),
         model,
+        model_observation,
         model_unavailable,
+    }
+}
+
+/// Resolve one write's declaration and compare it with the acting store.
+pub fn resolve_model(
+    declared: Option<&str>,
+    source: Option<ModelSource>,
+    harness: Option<&str>,
+    session: Option<&str>,
+) -> ModelAttribution {
+    let detected = match (harness, session) {
+        (Some(harness), Some(session)) => Some(resolved(harness, session)),
+        _ => None,
+    };
+    let observed = detected
+        .as_ref()
+        .and_then(|identity| identity.model.clone());
+    let store_model = detected
+        .as_ref()
+        .and_then(|identity| identity.model_observation.as_ref())
+        .map(|observation| observation.observed.as_str())
+        .or(observed.as_deref());
+    let disagreement = match (declared, store_model) {
+        (Some(declared), Some(observed)) if declared != observed => Some(ModelDisagreement {
+            declared: declared.to_string(),
+            observed: observed.to_string(),
+        }),
+        _ => None,
+    };
+    ModelAttribution {
+        model: declared.map(str::to_string).or(observed),
+        provenance: ModelProvenance {
+            model_source: if declared.is_some() {
+                source
+            } else {
+                detected
+                    .as_ref()
+                    .and_then(|identity| identity.model.as_ref())
+                    .map(|_| ModelSource::Resolved)
+            },
+            model_observation: detected.and_then(|identity| identity.model_observation),
+            model_disagreement: disagreement,
+        },
     }
 }
 
@@ -383,13 +435,13 @@ fn resolved(claim: &SessionClaim) -> DetectedIdentity {
 /// for every tool call, so they describe the turn in flight; the recording is
 /// the fallback. A reasoning level without a live model says nothing about
 /// which model it belongs to, so the recording answers both then.
-fn live_pi_model(claim: &SessionClaim) -> Option<String> {
-    if claim.harness != "pi" {
+fn live_pi_model(harness: &str, session: &str) -> Option<String> {
+    if harness != "pi" {
         return None;
     }
     let acting = std::env::var("PI_SESSION_ID")
         .ok()
-        .is_some_and(|id| id == claim.session);
+        .is_some_and(|id| id == session);
     if !acting {
         return None;
     }
@@ -478,6 +530,9 @@ pub fn print_env() -> i32 {
             );
             println!("unset ARC_MODEL");
         }
+    }
+    if let Some(observation) = &identity.model_observation {
+        println!("# {}", crate::render::one_line(&observation.line()));
     }
     if let Some(reason) = identity.model_unavailable {
         println!("# export ARC_MODEL=<model[#effort]>  # unavailable: {reason}");

@@ -104,10 +104,10 @@ fn env_detects_codex_thread_and_prints_exports() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='codex' ARC_SESSION='thread-123'\nunset ARC_MODEL\n{}",
             uncorroborated("codex")
-        ));
+        )));
 }
 
 #[test]
@@ -381,10 +381,10 @@ fn env_detects_claude_model_from_transcript() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n{}",
             corroborated("claude")
-        ));
+        )));
 }
 
 #[test]
@@ -415,10 +415,10 @@ fn env_detects_claude_effort_and_skips_synthetic_entries() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5#high'\n{}",
             corroborated("claude")
-        ));
+        )));
 }
 
 #[test]
@@ -448,10 +448,10 @@ fn env_falls_back_to_the_claude_session_effort() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5#low'\n{}",
             corroborated("claude")
-        ));
+        )));
 }
 
 #[test]
@@ -483,10 +483,10 @@ fn env_resolves_the_claude_store_under_its_config_dir_override() {
         .env("CLAUDE_CONFIG_DIR", &relocated)
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n{}",
             corroborated("claude")
-        ));
+        )));
 }
 
 #[test]
@@ -524,10 +524,10 @@ fn env_takes_the_newest_claude_recording_across_project_directories() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-live'\n{}",
             corroborated("claude")
-        ));
+        )));
 }
 
 fn set_modified(path: &Path, seconds: u64) {
@@ -560,10 +560,10 @@ fn env_detects_claude_code_session_variable() {
         .env("CLAUDE_CODE_SESSION_ID", session)
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n{}",
             corroborated("claude")
-        ));
+        )));
 }
 
 #[test]
@@ -575,10 +575,10 @@ fn env_prefers_hand_set_claude_session_over_ambient() {
         .env("CLAUDE_CODE_SESSION_ID", "ambient")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='claude' ARC_SESSION='hand-set'\nunset ARC_MODEL\n{}",
             uncorroborated("claude")
-        ));
+        )));
 }
 
 #[test]
@@ -610,10 +610,10 @@ fn env_detects_codex_model_and_effort_from_rollout() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='codex' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-sol#high'\n{}",
             corroborated("codex")
-        ));
+        )));
 }
 
 #[test]
@@ -641,10 +641,10 @@ fn env_requires_exact_codex_identity_not_year_substring() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='codex' ARC_SESSION='2026'\nunset ARC_MODEL\n{}",
             uncorroborated("codex")
-        ));
+        )));
 }
 
 #[test]
@@ -710,7 +710,7 @@ fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
     let event = opened_event(&repo, &opened_change_id(&opened));
     assert_eq!(event["session_resolution"], "unresolved", "{event}");
     assert!(event.get("model").is_none(), "{event}");
-    assert_eq!(event["schema_version"], 6, "{event}");
+    assert_eq!(event["schema_version"], 7, "{event}");
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
     assert_eq!(config["schema_version"], 5, "{config}");
@@ -726,7 +726,7 @@ fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
         .success();
     let exported: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
     assert_eq!(exported["schema"], "arc-bundle/6", "{exported}");
-    assert_eq!(exported["store_format"], 6, "{exported}");
+    assert_eq!(exported["store_format"], 7, "{exported}");
 
     let recipient = Repo::new();
     recipient
@@ -803,10 +803,10 @@ fn env_does_not_use_an_opencode_listing_model_when_the_read_fails() {
         .env("PATH", path)
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='opencode' ARC_SESSION='{session}'\nunset ARC_MODEL\n# export ARC_MODEL=<model[#effort]>  # unavailable: the session store could not resolve or read this id\n{}",
             unresolved("opencode")
-        ));
+        )));
 }
 
 #[test]
@@ -842,10 +842,10 @@ fn env_detects_pi_model_and_thinking_level_from_session_store() {
         .env("PI_CODING_AGENT_SESSION_DIR", repo.home.join("pi-sessions"))
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-sol#medium'\n{}",
             corroborated("pi")
-        ));
+        )));
 }
 
 #[test]
@@ -1055,7 +1055,7 @@ fn nested_detection_prefers_the_owner_over_a_corroborated_outer_session() {
     let output = output_past_busy_text(&mut command);
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
+        without_observation(&String::from_utf8_lossy(&output.stdout)),
         format!(
             "export ARC_HARNESS='pi' ARC_SESSION='{inner_session}' ARC_MODEL='gpt-5.6-sol#medium'\n{}",
             corroborated("pi")
@@ -1254,10 +1254,10 @@ fn env_reports_the_live_pi_values_for_the_acting_session() {
         .env_remove("OPENCODE_SESSION")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-live#high'\n{}",
             corroborated("pi")
-        ));
+        )));
 
     repo.arc(&repo.root)
         .arg("env")
@@ -1269,10 +1269,10 @@ fn env_reports_the_live_pi_values_for_the_acting_session() {
         .env_remove("OPENCODE_SESSION")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-recorded#low'\n{}",
             corroborated("pi")
-        ));
+        )));
 }
 
 /// A session opened with `--session`/`--session-dir` lives outside the
@@ -1296,10 +1296,10 @@ fn env_corroborates_a_pi_session_recorded_at_the_live_file() {
         .env_remove("OPENCODE_SESSION")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-recorded#medium'\n{}",
             corroborated("pi")
-        ));
+        )));
 
     // Without the live file the recording is outside every configured root.
     repo.arc(&repo.root)
@@ -1311,10 +1311,10 @@ fn env_corroborates_a_pi_session_recorded_at_the_live_file() {
         .env_remove("OPENCODE_SESSION")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='pi' ARC_SESSION='{session}'\nunset ARC_MODEL\n{}",
             uncorroborated("pi")
-        ));
+        )));
 }
 
 /// A subagent's tool shell carries its parent's session id, and the store does
@@ -1336,7 +1336,7 @@ fn env_withholds_the_model_while_a_subagent_recording_is_live() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             concat!(
                 "export ARC_HARNESS='claude' ARC_SESSION='{session}'\n",
                 "unset ARC_MODEL\n",
@@ -1347,7 +1347,7 @@ fn env_withholds_the_model_while_a_subagent_recording_is_live() {
             ),
             corroborated("claude"),
             session = session
-        ));
+        )));
 
     // A subagent the session recorded as finished leaves the session's own
     // model in place.
@@ -1361,10 +1361,10 @@ fn env_withholds_the_model_while_a_subagent_recording_is_live() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-parent'\n{}",
             corroborated("claude")
-        ));
+        )));
 }
 
 /// Every identity field `arc env` cannot establish is unset, so evaluating
@@ -1497,10 +1497,10 @@ fn env_reports_the_active_pi_branch_s_model() {
         .env_remove("OPENCODE_SESSION")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='pi-model-a#low'\n{}",
             corroborated("pi")
-        ));
+        )));
 }
 
 /// A listed row without a readable transcript establishes neither a model nor
@@ -1542,7 +1542,7 @@ fn env_marks_an_unreadable_opencode_recording_unresolved() {
         .env("PATH", path)
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             concat!(
                 "export ARC_HARNESS='opencode' ARC_SESSION='{session}'\n",
                 "unset ARC_MODEL\n",
@@ -1552,7 +1552,7 @@ fn env_marks_an_unreadable_opencode_recording_unresolved() {
             ),
             unresolved("opencode"),
             session = session
-        ));
+        )));
 }
 
 /// An effort belongs to the turn that wrote it: a later `turn_context` that
@@ -1586,10 +1586,10 @@ fn env_does_not_carry_a_codex_effort_across_a_model_change() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='codex' ARC_SESSION='{session}' ARC_MODEL='gpt-5.5-b'\n{}",
             corroborated("codex")
-        ));
+        )));
 }
 
 /// The guide and help are the command contract: a stale command or a stale
@@ -1627,10 +1627,10 @@ fn env_omits_model_when_no_session_store_matches() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .success()
-        .stdout(format!(
+        .stdout(env_output(format!(
             "export ARC_HARNESS='codex' ARC_SESSION='no-such-thread'\nunset ARC_MODEL\n{}",
             uncorroborated("codex")
-        ));
+        )));
 
     // Nothing detected at all: the fallback comment names ARC_MODEL too.
     repo.arc(&repo.root)
@@ -1848,4 +1848,17 @@ fn inference_failure_with_nothing_open_points_at_the_backlog() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("arc catchup"));
+}
+
+/// Shell exports remain exact while observation comments have their own fixtures.
+fn env_output(expected: String) -> impl predicates::Predicate<str> {
+    predicates::function::function(move |actual: &str| without_observation(actual) == expected)
+}
+
+fn without_observation(actual: &str) -> String {
+    actual
+        .lines()
+        .filter(|line| !line.starts_with("# observed:"))
+        .map(|line| format!("{line}\n"))
+        .collect()
 }

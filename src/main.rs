@@ -69,8 +69,10 @@ struct Cli {
     /// Private web link for the acting session; recorded only in arc events
     #[arg(long, global = true, env = "ARC_SESSION_LINK")]
     session_link: Option<String>,
-    /// Model identity: a model slug with optional #effort, e.g. kimi-k3#high
-    #[arg(long, global = true, env = "ARC_MODEL")]
+    /// Declare a model slug with optional #effort. Without this flag or
+    /// ARC_MODEL, each write resolves the acting session store. A disagreement
+    /// records both declared and observed models, with the observation coordinate
+    #[arg(long, global = true)]
     model: Option<String>,
     /// Subject a lead runs delegated ceremony for; recorded beside the invoker
     #[arg(long = "on-behalf-of", global = true, env = "ARC_ON_BEHALF_OF")]
@@ -372,7 +374,9 @@ enum Cmd {
     },
     /// Print the change's recorded facts one line each, in ledger order. A
     /// review batch records several, so it renders as several lines. This is
-    /// the ledger, not Git history: for commits, use `git log`
+    /// the ledger, not Git history: for commits, use `git log`. Model sources,
+    /// observation coordinates, and declaration disagreements accompany each fact
+    #[command(visible_alias = "explain")]
     Log {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1224,7 +1228,13 @@ enum Cmd {
     /// every identity field, and
     /// exits non-zero, which is a report that identity must be
     /// set by hand rather than a failure. Every value it emits can be set
-    /// directly: explicit identity always wins over a detected one
+    /// directly: explicit identity always wins over a detected one.
+    ///
+    /// The model comment includes the newest selection's timestamp and native
+    /// id, and whether it is inside or before the recording's newest operator
+    /// turn. An earlier observation may predate an effort change. Leave
+    /// ARC_MODEL unset for write-time resolution, or re-evaluate before each
+    /// write. Missing boundaries and incomplete head coverage are reported.
     Env,
     /// Print a shell completion script to stdout
     Completions {
@@ -2336,7 +2346,15 @@ fn run(cli: Cli) -> Result<i32> {
     let mut session = cli.session;
     let mut session_resolution = None;
     // An empty --model is the same as absent.
-    let mut model = cli.model.filter(|value| !value.trim().is_empty());
+    let from_env = std::env::var("ARC_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let (model, model_source) = match (cli.model.filter(|value| !value.trim().is_empty()), from_env)
+    {
+        (Some(model), _) => (Some(model), Some(model::ModelSource::Flag)),
+        (None, Some(model)) => (Some(model), Some(model::ModelSource::Env)),
+        _ => (None, None),
+    };
     if config::load()
         .map(|config| config.identity_detect)
         .unwrap_or(false)
@@ -2354,24 +2372,14 @@ fn run(cli: Cli) -> Result<i32> {
                 // A harness recognized without its cooperation carries no
                 // session id; recording the harness alone is the honest half
                 // of the detection, not a partial failure.
-                let acting = match &detected.session {
-                    Some(detected_session) => {
-                        if session.is_none() {
-                            // The store's answer is about the session detection
-                            // supplied; a session the caller declared was never
-                            // asked about, so it carries no report.
-                            session_resolution = Some(detected_session.resolution);
-                            session = Some(detected_session.id.clone());
-                        }
-                        session.as_deref() == Some(detected_session.id.as_str())
+                if let Some(detected_session) = &detected.session {
+                    if session.is_none() {
+                        // The store's answer is about the session detection
+                        // supplied; a session the caller declared was never
+                        // asked about, so it carries no report.
+                        session_resolution = Some(detected_session.resolution);
+                        session = Some(detected_session.id.clone());
                     }
-                    None => false,
-                };
-                // The detected model belongs to the detected session: filling
-                // it beside a different acting session would record one
-                // session's identity with another's model.
-                if acting && model.is_none() {
-                    model = detected.model;
                 }
             }
         }
@@ -2398,6 +2406,7 @@ fn run(cli: Cli) -> Result<i32> {
         session_link: cli.session_link.filter(|value| !value.trim().is_empty()),
         session_resolution,
         model,
+        model_source,
         // An empty --on-behalf-of is the same as absent: today's behavior.
         on_behalf_of: cli.on_behalf_of.filter(|value| !value.trim().is_empty()),
     };
