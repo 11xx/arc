@@ -466,7 +466,7 @@ fn live_pi_model(harness: &str, session: &str) -> Option<String> {
 
 const EXPORT_TEMPLATE: &str = concat!(
     "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id>",
-    " ARC_MODEL=<model[#effort]> ARC_SESSION_LINK=<url>"
+    " ARC_SESSION_LINK=<url>"
 );
 
 /// Every identity value `arc env` establishes or clears.
