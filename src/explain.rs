@@ -9,8 +9,8 @@
 
 use crate::commands::{self, Ctx};
 use crate::model::{
-    AuthorizationBasis, BriefCause, DebtCoverage, DebtMissing, DebtProduction, Event, Payload,
-    PlannerIdentity,
+    AuthorizationBasis, BriefCause, DebtCoverage, DebtMissing, DebtProduction, Event,
+    JournalRefVia, Payload, PlannerIdentity,
 };
 use crate::state::{ChangeState, Patchset, VerificationEntry, VerificationRunTerminal};
 use crate::store::Store;
@@ -142,8 +142,10 @@ pub enum Resolution {
     Unavailable,
 }
 
-/// Falsification of a gate's counted pass. `inferred` belongs to this domain
-/// once a producer records it; nothing here derives one.
+/// Falsification of a gate's counted pass. A pass may carry a declared one,
+/// the failure arc inferred it follows, or both; each is its own entry, and
+/// `none` stands alone when neither was recorded. Nothing here derives an
+/// inference: `inferred` renders the one the verification event recorded.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "standing", rename_all = "kebab-case")]
 pub enum FalsificationRow {
@@ -151,6 +153,12 @@ pub enum FalsificationRow {
         event_id: String,
         revision: String,
         predicted_reason: String,
+    },
+    Inferred {
+        event_id: String,
+        revision: String,
+        /// The rule that derived the reference.
+        source: String,
     },
     None,
 }
@@ -206,6 +214,10 @@ pub enum Detail {
     },
     OpeningReference {
         file: String,
+        /// The body digest `ChangeOpened` recorded; absent on changes opened
+        /// before arc recorded one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recorded_digest: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         current_digest: Option<String>,
         resolution: Resolution,
@@ -217,6 +229,9 @@ pub enum Detail {
         #[serde(skip_serializing_if = "Option::is_none")]
         current_digest: Option<String>,
         resolution: Resolution,
+        /// The framing operation that supplied the link; `null` on links
+        /// recorded before arc named their source.
+        via: Option<JournalRefVia>,
     },
     Thread {
         patchset_id: String,
@@ -231,6 +246,10 @@ pub enum Detail {
         basis: &'static str,
         #[serde(skip_serializing_if = "Option::is_none")]
         evidence: Option<String>,
+        /// Events the fact cites. A citation names a record; it does not
+        /// make the fact recorded.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        cites: Vec<String>,
     },
     Gate {
         gate: String,
@@ -249,7 +268,7 @@ pub enum Detail {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         reused: Vec<Reuse>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        falsification: Option<FalsificationRow>,
+        falsification: Option<Vec<FalsificationRow>>,
     },
     Verdict {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -627,30 +646,49 @@ fn resolve_reference(ctx: &Ctx, file: &str) -> std::result::Result<String, (Reso
     }
 }
 
+/// A recorded digest compared with the body its name resolves to now.
+fn compare_reference(
+    ctx: &Ctx,
+    file: &str,
+    recorded: &str,
+) -> (Standing, Option<String>, Resolution) {
+    match resolve_reference(ctx, file) {
+        Ok(digest) if digest == recorded => (Standing::recorded(), Some(digest), Resolution::Same),
+        Ok(digest) => (Standing::recorded(), Some(digest), Resolution::Amended),
+        Err((Resolution::Missing, _)) => (Standing::recorded(), None, Resolution::Missing),
+        Err((resolution, why)) => (Standing::unavailable(why), None, resolution),
+    }
+}
+
 fn supplied_context(ctx: &Ctx, state: &ChangeState) -> Slot {
     let mut rows = Vec::new();
     if let Some(file) = &state.journal_ref {
-        let (standing, current_digest, resolution) = match resolve_reference(ctx, file) {
-            Ok(digest) => (
-                Standing::declared(
-                    "the change was opened from this artifact and no digest was recorded; the \
-                     digest shown is the body's now",
+        let (standing, current_digest, resolution) = match &state.journal_ref_digest {
+            Some(recorded) => compare_reference(ctx, file, recorded),
+            None => match resolve_reference(ctx, file) {
+                Ok(digest) => (
+                    Standing::declared(
+                        "the change was opened from this artifact and no digest was recorded; \
+                         the digest shown is the body's now",
+                    ),
+                    Some(digest),
+                    Resolution::Current,
                 ),
-                Some(digest),
-                Resolution::Current,
-            ),
-            Err((resolution, why)) => (
-                Standing::declared(format!(
-                    "the change was opened from this artifact and no digest was recorded; {why}"
-                )),
-                None,
-                resolution,
-            ),
+                Err((resolution, why)) => (
+                    Standing::declared(format!(
+                        "the change was opened from this artifact and no digest was recorded; \
+                         {why}"
+                    )),
+                    None,
+                    resolution,
+                ),
+            },
         };
         rows.push(row(
             standing,
             Detail::OpeningReference {
                 file: file.clone(),
+                recorded_digest: state.journal_ref_digest.clone(),
                 current_digest,
                 resolution,
             },
@@ -659,16 +697,7 @@ fn supplied_context(ctx: &Ctx, state: &ChangeState) -> Slot {
     for patchset in &state.patchsets {
         for reference in &patchset.journal_refs {
             let (standing, current_digest, resolution) =
-                match resolve_reference(ctx, &reference.file) {
-                    Ok(digest) if digest == reference.digest => {
-                        (Standing::recorded(), Some(digest), Resolution::Same)
-                    }
-                    Ok(digest) => (Standing::recorded(), Some(digest), Resolution::Amended),
-                    Err((Resolution::Missing, _)) => {
-                        (Standing::recorded(), None, Resolution::Missing)
-                    }
-                    Err((resolution, why)) => (Standing::unavailable(why), None, resolution),
-                };
+                compare_reference(ctx, &reference.file, &reference.digest);
             rows.push(row(
                 standing,
                 Detail::PatchsetReference {
@@ -677,6 +706,7 @@ fn supplied_context(ctx: &Ctx, state: &ChangeState) -> Slot {
                     recorded_digest: reference.digest.clone(),
                     current_digest,
                     resolution,
+                    via: reference.via,
                 },
             ));
         }
@@ -714,6 +744,7 @@ fn kept_row(kept: &crate::state::KeptContext) -> Row {
                 "claim"
             },
             evidence: kept.evidence.clone(),
+            cites: kept.cites.clone(),
         },
     )
 }
@@ -804,15 +835,30 @@ fn gate_detail(state: &ChangeState, gate: &str, entry: &VerificationEntry) -> De
             .map(|environment| environment.identity.clone()),
         timeout_seconds: entry.timeout_seconds,
         reused,
-        falsification: Some(match &entry.falsification {
-            Some(falsification) => FalsificationRow::Declared {
-                event_id: falsification.event_id.clone(),
-                revision: falsification.revision.clone(),
-                predicted_reason: falsification.predicted_reason.clone(),
-            },
-            None => FalsificationRow::None,
-        }),
+        falsification: Some(falsification_rows(entry)),
     }
+}
+
+fn falsification_rows(entry: &VerificationEntry) -> Vec<FalsificationRow> {
+    let mut rows = Vec::new();
+    if let Some(declared) = &entry.falsification {
+        rows.push(FalsificationRow::Declared {
+            event_id: declared.event_id.clone(),
+            revision: declared.revision.clone(),
+            predicted_reason: declared.predicted_reason.clone(),
+        });
+    }
+    if let Some(inferred) = &entry.falsification_inferred {
+        rows.push(FalsificationRow::Inferred {
+            event_id: inferred.event_id.clone(),
+            revision: inferred.revision.clone(),
+            source: kebab(&inferred.source),
+        });
+    }
+    if rows.is_empty() {
+        rows.push(FalsificationRow::None);
+    }
+    rows
 }
 
 fn integrated_evaluation(
@@ -1317,32 +1363,32 @@ fn describe(detail: &Detail) -> String {
         },
         Detail::OpeningReference {
             file,
+            recorded_digest,
             current_digest,
             resolution,
-        } => format!(
-            "opened from {file}: {}, current digest {}",
-            kebab(resolution),
-            opt(current_digest)
-        ),
+        } => match recorded_digest {
+            Some(recorded) => format!(
+                "opened from {file}: {}",
+                compared(recorded, current_digest, *resolution)
+            ),
+            None => format!(
+                "opened from {file}: {}, current digest {}",
+                kebab(resolution),
+                opt(current_digest)
+            ),
+        },
         Detail::PatchsetReference {
             patchset_id,
             file,
             recorded_digest,
             current_digest,
             resolution,
-        } => match resolution {
-            Resolution::Same => {
-                format!("{patchset_id} journal ref {file}: same, {recorded_digest}")
-            }
-            Resolution::Amended => format!(
-                "{patchset_id} journal ref {file}: amended, recorded {recorded_digest}, current {}",
-                opt(current_digest)
-            ),
-            other => format!(
-                "{patchset_id} journal ref {file}: {}, recorded {recorded_digest}",
-                kebab(other)
-            ),
-        },
+            via,
+        } => format!(
+            "{patchset_id} journal ref {file}: {}, via {}",
+            compared(recorded_digest, current_digest, *resolution),
+            via.map_or("unrecorded", JournalRefVia::as_str)
+        ),
         Detail::Thread {
             patchset_id,
             scheme,
@@ -1354,13 +1400,15 @@ fn describe(detail: &Detail) -> String {
             body,
             basis,
             evidence,
+            cites,
         } => {
             let first = body.lines().next().unwrap_or_default();
+            let cites = crate::render::kept_citations(cites);
             match evidence {
                 Some(evidence) => {
-                    format!("{kind} `{event_id}`: {first} (evidence: {evidence})")
+                    format!("{kind} `{event_id}`: {first} (evidence: {evidence}){cites}")
                 }
-                None => format!("{kind} `{event_id}`: {first} ({basis})"),
+                None => format!("{kind} `{event_id}`: {first} ({basis}){cites}"),
             }
         }
         Detail::Gate {
@@ -1396,16 +1444,34 @@ fn describe(detail: &Detail) -> String {
                     ),
                 );
             }
-            match falsification {
-                Some(FalsificationRow::Declared {
-                    event_id,
-                    predicted_reason,
-                    ..
-                }) => text.push_str(&format!(
-                    ", falsification declared: {predicted_reason} (failing `{event_id}`)"
-                )),
-                Some(FalsificationRow::None) => text.push_str(", falsification none"),
-                None => {}
+            let falsification = falsification.as_deref().unwrap_or_default();
+            for entry in falsification {
+                text.push_str(&match entry {
+                    FalsificationRow::Declared {
+                        event_id,
+                        predicted_reason,
+                        ..
+                    } => format!(
+                        ", falsification declared: {predicted_reason} (failing `{event_id}`)"
+                    ),
+                    FalsificationRow::Inferred {
+                        event_id,
+                        revision,
+                        source,
+                    } => format!(
+                        ", falsification inferred by {source}: failing `{event_id}` at {revision}"
+                    ),
+                    FalsificationRow::None => ", falsification none".to_string(),
+                });
+            }
+            let declared = falsification
+                .iter()
+                .any(|entry| matches!(entry, FalsificationRow::Declared { .. }));
+            let inferred = falsification
+                .iter()
+                .any(|entry| matches!(entry, FalsificationRow::Inferred { .. }));
+            if inferred && !declared {
+                text.push_str(", none declared");
             }
             text
         }
@@ -1540,6 +1606,15 @@ fn describe(detail: &Detail) -> String {
             "debt `{debt_event_id}` {outcome}: discharged by {verdict} `{by_event_id}` from \
              {reviewer}"
         ),
+    }
+}
+
+/// A recorded digest against the body its name resolves to now.
+fn compared(recorded: &str, current: &Option<String>, resolution: Resolution) -> String {
+    match resolution {
+        Resolution::Same => format!("same, {recorded}"),
+        Resolution::Amended => format!("amended, recorded {recorded}, current {}", opt(current)),
+        other => format!("{}, recorded {recorded}", kebab(&other)),
     }
 }
 

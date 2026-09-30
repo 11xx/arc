@@ -340,8 +340,9 @@ enum Cmd {
     /// Eight slots, always all printed: contract (the brief in force, its
     /// planner credit, plan, base revision, and causes), supplied context
     /// (the journal artifact the change was opened from, and every
-    /// patchset's journal references and thread), declared facts (every kept
-    /// fact), observed reads, rejected alternatives (kept facts of kind
+    /// patchset's journal references with the operation that supplied each,
+    /// `begin`, `brief`, `flag`, or `unrecorded`, and its thread), declared
+    /// facts (every kept fact, with the events it cites), observed reads, rejected alternatives (kept facts of kind
     /// `rejected`), evaluation (each counted gate's evidence event, tree,
     /// environment digest, timeout, reuse, and falsification), coverage at
     /// acceptance (the verdicts, waiver, and debt the integration event's
@@ -359,8 +360,16 @@ enum Cmd {
     /// A journal reference is resolved against the journal now, hot or
     /// cold: `same` when the body digest equals the recorded one, `amended`
     /// with both digests when not, `missing` when the name resolves to
-    /// nothing. The artifact a change was opened from has no recorded
-    /// digest, so it is `declared` and its digest is shown as `current`.
+    /// nothing. The artifact a change was opened from resolves the same way
+    /// against the digest its opening recorded, and is `recorded`; a change
+    /// opened before arc recorded that digest keeps it `declared`, with its
+    /// digest shown as `current`. A kept fact's citations name records; the
+    /// fact stays `declared`.
+    ///
+    /// A counted pass's falsification lists a declared one (with its
+    /// predicted reason) and the failure arc inferred it follows (standing
+    /// `inferred`, with the failing event, its revision, and the rule that
+    /// derived it) as separate entries, or `none` when neither was recorded.
     ///
     /// A discharge of a debt by a later review that is not an approval reads
     /// `fulfilled, not approved`. Coverage at acceptance never takes later
