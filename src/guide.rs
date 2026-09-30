@@ -995,6 +995,42 @@ HISTORY REWRITES
   naming different content. Whether a successor differs by signature alone is
   judged when the map is recorded or imported, never when a change is read.
 
+CANDIDATES
+    arc candidate register --tree <tree-or-commit> --brief <change>[@<event>]
+                           --producer <actor>... [--parent <id>]...
+                           [--adopts <id>]... [--episode <claim>]... [--id <id>]
+                       Record an alternative answer to one brief version and
+                       pin its tree at `refs/arc/candidate/<id>`.
+    arc candidate show <id> | list [--brief <change>] [--json]
+    arc candidate judge <id> (--rejected | --superseded-by <id>) --reason <why>
+    arc candidate retire <id>
+
+  A registration is immutable content with a contract: a tree, the brief
+  version it answers with a `sha256:` digest of that brief's body, the
+  producers, the parent registrations it continues, the registrations it
+  adopts, and the claims it ran under on the brief's change. Registering opens
+  no change and creates no patchset. Two registrations of one tree are two
+  candidates that share storage and nothing else. A parent answers the same
+  brief version; content carried into another contract is adopted instead,
+  and the adopter's producers include every producer along the adopted
+  registration's parent chain. Every refusal names its rule and writes
+  nothing.
+
+  A judgement — rejected, or superseded by another registration — is its
+  declarant's claim. It alters no registration and selects nothing.
+
+  Retirement deletes a candidate's pin and records that it did, and only when
+  no root reaches the candidate: a selection, a promotion, or a declared root,
+  reaching what its candidate's parents and adoptions carry. The registration
+  and its judgements stand. arc never retires a candidate on its own.
+
+  Candidate events are repository events, so every `arc export` carries them
+  and `arc import` judges them with the ledger they join before writing
+  anything. An imported registration whose tree this object store lacks stays
+  unpinned. `arc doctor` advises on a pin with no registration and on
+  undeclared `[candidates] evaluation_reuse`, and reports a registration a
+  root reaches whose pin is gone.
+
 RULES THAT CHANGE WHAT YOU DO
   - A verdict binds to the exact approved patchset head. Any new commit makes
     the approval stale until a fresh verdict on a new snapshot.
@@ -1207,6 +1243,8 @@ EXIT CODES
     `arc forge link` exits 10 when the observed tuple or the declared policy
       does not match, appending no event.
     `arc history resolve` exits 2 when nothing moved the revision.
+    `arc candidate retire` exits 1 and writes nothing while a root reaches
+      the candidate, naming the root.
     `arc restack --advise` exits 0 when the change has no dependents.
     `arc workspace backlog` exits 16 when any selected project's observation
       failed; the rows that were read still print.
@@ -1252,6 +1290,8 @@ FILES
     [danger] source_roots = ["<dir>/"]           every file inside is classified
     [review] checklist = ["<item>"]              printed by `arc show`
     [contribution] history = "squash" | "preserve"
+    [candidates] evaluation_reuse = "matching-coordinates" | "never"
+                                                 no default; `never` wins
 
   Gates are `[gates.<name>]` tables in `.arc/gates.toml` or the operator
   policy:
@@ -1265,7 +1305,8 @@ FILES
   Every reviewed head is pinned by `refs/arc/keep/<change>/<patchset>` so
   Git's garbage collection cannot take it. A pin is released only once its
   head is reachable from the integration commit; release any other with
-  `git update-ref -d`.
+  `git update-ref -d`. A registered candidate's tree is pinned by
+  `refs/arc/candidate/<id>` until `arc candidate retire` releases it.
 
 SCHEMAS
   Every structured surface carries a `schema` string `<name>/<n>`. A shape
@@ -1299,6 +1340,7 @@ SCHEMAS
     `arc-blocker-status/1`           arc blocker-status --json
     `arc-metadata/1`                 arc metadata --json
     `arc-chain/4`                    arc chain --json
+    `arc-candidate/1`                arc candidate show|list --json
     `arc-stats/1`                    arc stats --json
     `arc-stats-by-model/1`           arc stats --by-model --json
     `arc-changelog/1`                arc changelog --json
@@ -1334,7 +1376,7 @@ SCHEMAS
   Their absent model provenance stays absent.
 
   Internal:
-    store format 6                   .git/arc/config.json and the change ledger
+    store format 7                   .git/arc/config.json and the change ledger
     `arc-replica-import/2`           receipt of an imported replica bundle
     `arc-journal-exchange-import/1`  receipt of an imported journal bundle
     `arc-sandbox/2`                  .arc-sandbox.json

@@ -65,7 +65,7 @@ fn writes_resolve_the_newest_selection_each_time_and_render_its_coordinate() {
         .collect();
     assert_eq!(events[0]["model"], "m#low");
     let event = events.last().unwrap();
-    assert_eq!(event["schema_version"], 6);
+    assert_eq!(event["schema_version"], 7);
     assert_eq!(event["model"], "m#high");
     assert_eq!(event["model_source"], "resolved");
     assert_eq!(
