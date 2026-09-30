@@ -463,3 +463,386 @@ fn advisories(facts: &ApprovalFacts) -> Vec<Advisory> {
     }
     warnings
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{ActorSource, DangerRule};
+    use chrono::DateTime;
+
+    const HEAD: &str = "1111111111111111111111111111111111111111";
+    const OLD_HEAD: &str = "2222222222222222222222222222222222222222";
+
+    fn patchset() -> Patchset {
+        Patchset {
+            id: "ps-2".into(),
+            actor: "author".into(),
+            model: None,
+            harness: None,
+            session: None,
+            session_link: None,
+            actor_source: Some(ActorSource::Flag),
+            on_behalf_of: None,
+            base: OLD_HEAD.into(),
+            head: HEAD.into(),
+            approved_head: HEAD.into(),
+            merge_base: None,
+            brief_ref: None,
+            brief_version: None,
+            author: None,
+            committer: None,
+            contributors: vec!["author".into()],
+            claim_id: None,
+            claim_actor: None,
+            journal_refs: Vec::new(),
+            thread: None,
+            provenance_mismatch: None,
+            created_at: DateTime::UNIX_EPOCH,
+        }
+    }
+
+    fn verdict(verdict: Verdict, actor: &str) -> VerdictEntry {
+        VerdictEntry {
+            event_id: format!("verdict-{actor}"),
+            patchset_id: "ps-2".into(),
+            verdict,
+            causes: Vec::new(),
+            body: None,
+            model: None,
+            provisional: None,
+            route_version: None,
+            actor: actor.into(),
+            on_behalf_of: None,
+            actor_source: Some(ActorSource::Flag),
+            relation: None,
+            created_at: DateTime::UNIX_EPOCH,
+        }
+    }
+
+    fn external(event_id: &str, revision: &str, verdict: ExternalVerdict) -> ExternalVerdictEntry {
+        ExternalVerdictEntry {
+            source: "external",
+            event_id: event_id.into(),
+            revision: revision.into(),
+            verdict,
+            decided_by: "receiver".into(),
+            reference: "ref-1".into(),
+            findings: Vec::new(),
+            recorded_by: "lead".into(),
+            created_at: DateTime::UNIX_EPOCH,
+        }
+    }
+
+    fn dangerous() -> DangerScope {
+        DangerScope {
+            dangerous: true,
+            rule: DangerRule::DeclaredPath,
+            paths: vec!["src/approval.rs".into()],
+        }
+    }
+
+    fn untouched() -> DangerScope {
+        DangerScope {
+            dangerous: false,
+            rule: DangerRule::Untouched,
+            paths: Vec::new(),
+        }
+    }
+
+    /// A dangerous change under `forbid_self_approval`, at the newest
+    /// patchset's head, with no verdict, waiver, or external decision.
+    fn facts<'a>(patchset: &'a Patchset, danger: &'a DangerScope) -> ApprovalFacts<'a> {
+        ApprovalFacts {
+            latest_patchset: Some(patchset),
+            current_head: Some(HEAD),
+            head_matches: true,
+            approved_head_matches: true,
+            latest_verdict: None,
+            verdict_tips: 0,
+            external_verdicts: &[],
+            debt_waives_latest_patchset: false,
+            forbid_self_approval: true,
+            forbid_self_approval_sources: ".arc/policy.toml".into(),
+            danger,
+            review_map: &[],
+            provisional_approval_reason: None,
+            reviewed_only_by_brief_author: None,
+            debt_outstanding: false,
+        }
+    }
+
+    #[test]
+    fn independent_approval_of_the_head_is_valid() {
+        let (patchset, danger) = (patchset(), dangerous());
+        let approval = verdict(Verdict::Approved, "reviewer");
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&approval),
+            verdict_tips: 1,
+            ..facts(&patchset, &danger)
+        });
+        assert!(outcome.approval_valid);
+        assert!(outcome.verdict.unwrap().valid_for_current_head);
+        assert!(!outcome.approval_waived_by_debt);
+        assert!(!outcome.waiver_satisfies_approval);
+        assert_eq!(outcome.approval_rejection_reason, None);
+    }
+
+    #[test]
+    fn self_approval_is_rejected_with_the_contributor_named() {
+        let (patchset, danger) = (patchset(), dangerous());
+        let approval = verdict(Verdict::Approved, "author");
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&approval),
+            verdict_tips: 1,
+            ..facts(&patchset, &danger)
+        });
+        assert!(!outcome.approval_valid);
+        assert_eq!(
+            outcome.approval_rejection_reason.as_deref(),
+            Some(format!("{SELF_APPROVAL_REASON}: reviewer matches contributor author").as_str())
+        );
+
+        // Where independence is not required, the same verdict stands.
+        let untouched = untouched();
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&approval),
+            verdict_tips: 1,
+            ..facts(&patchset, &untouched)
+        });
+        assert!(outcome.approval_valid);
+        assert_eq!(outcome.approval_rejection_reason, None);
+    }
+
+    #[test]
+    fn an_assumed_reviewing_identity_is_rejected_as_undeclared() {
+        let (patchset, danger) = (patchset(), dangerous());
+        let approval = VerdictEntry {
+            actor_source: Some(ActorSource::GitFallback),
+            ..verdict(Verdict::Approved, "somebody")
+        };
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&approval),
+            verdict_tips: 1,
+            ..facts(&patchset, &danger)
+        });
+        assert!(!outcome.approval_valid);
+        assert_eq!(
+            outcome.approval_rejection_reason.as_deref(),
+            Some(UNDECLARED_APPROVAL_REASON)
+        );
+    }
+
+    #[test]
+    fn an_approval_left_behind_by_the_head_is_stale() {
+        let (patchset, danger) = (patchset(), dangerous());
+        let approval = verdict(Verdict::Approved, "reviewer");
+        // A rewrite that changed content moved the head off the approved one.
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&approval),
+            verdict_tips: 1,
+            approved_head_matches: false,
+            ..facts(&patchset, &danger)
+        });
+        assert!(!outcome.approval_valid);
+        assert!(!outcome.verdict.unwrap().valid_for_current_head);
+        assert_eq!(outcome.approval_rejection_reason, None);
+
+        // An approval of an earlier patchset covers nothing here.
+        let earlier = VerdictEntry {
+            patchset_id: "ps-1".into(),
+            ..verdict(Verdict::Approved, "reviewer")
+        };
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&earlier),
+            verdict_tips: 1,
+            ..facts(&patchset, &danger)
+        });
+        assert!(!outcome.approval_valid);
+        assert!(!outcome.local_verdict_refuses_this_head);
+    }
+
+    #[test]
+    fn a_waiver_authorizes_a_self_approval_and_stands_in_for_a_missing_one() {
+        let (patchset, danger) = (patchset(), dangerous());
+        let approval = verdict(Verdict::Approved, "author");
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&approval),
+            verdict_tips: 1,
+            debt_waives_latest_patchset: true,
+            ..facts(&patchset, &danger)
+        });
+        assert!(outcome.approval_valid);
+        assert!(outcome.approval_waived_by_debt);
+        assert!(outcome.waiver_satisfies_approval);
+        assert_eq!(outcome.approval_rejection_reason, None);
+
+        let outcome = decide(&ApprovalFacts {
+            debt_waives_latest_patchset: true,
+            ..facts(&patchset, &danger)
+        });
+        assert!(!outcome.approval_valid);
+        assert!(outcome.approval_waived_by_debt);
+        assert!(outcome.waiver_satisfies_approval);
+
+        // A waiver names a patchset, so a head that moved past it is unwaived.
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&approval),
+            verdict_tips: 1,
+            debt_waives_latest_patchset: true,
+            head_matches: false,
+            ..facts(&patchset, &danger)
+        });
+        assert!(!outcome.approval_waived_by_debt);
+        assert!(!outcome.waiver_satisfies_approval);
+    }
+
+    #[test]
+    fn a_local_refusal_of_this_patchset_is_not_waived() {
+        let (patchset, danger) = (patchset(), dangerous());
+        let refusal = verdict(Verdict::ChangesRequested, "reviewer");
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&refusal),
+            verdict_tips: 1,
+            debt_waives_latest_patchset: true,
+            ..facts(&patchset, &danger)
+        });
+        assert!(outcome.local_verdict_refuses_this_head);
+        assert!(!outcome.approval_valid);
+        assert!(!outcome.approval_waived_by_debt);
+        assert!(!outcome.waiver_satisfies_approval);
+    }
+
+    #[test]
+    fn an_external_verdict_refusing_the_head_overrides_a_local_approval() {
+        let (patchset, danger) = (patchset(), untouched());
+        let approval = verdict(Verdict::Approved, "reviewer");
+        let externals = [
+            external("ext-1", HEAD, ExternalVerdict::Approved),
+            external("ext-2", HEAD, ExternalVerdict::ChangesRequested),
+            external("ext-3", OLD_HEAD, ExternalVerdict::Approved),
+        ];
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&approval),
+            verdict_tips: 1,
+            external_verdicts: &externals,
+            debt_waives_latest_patchset: true,
+            ..facts(&patchset, &danger)
+        });
+        assert!(outcome.external_refuses_this_head);
+        assert_eq!(
+            outcome.current_external_verdict,
+            Some(ExternalVerdict::ChangesRequested)
+        );
+        assert!(!outcome.approval_valid);
+        assert!(!outcome.waiver_satisfies_approval);
+        assert_eq!(
+            outcome.approval_rejection_reason.as_deref(),
+            Some("external verdict requests changes: receiver at 11111111 (reference ref-1)")
+        );
+        // Newest first; only the newest decision on the head matches it.
+        let matching: Vec<(&str, bool)> = outcome
+            .external_verdicts
+            .iter()
+            .map(|status| (status.event_id.as_str(), status.matches_current_patchset))
+            .collect();
+        assert_eq!(
+            matching,
+            [("ext-3", false), ("ext-2", true), ("ext-1", false)]
+        );
+    }
+
+    #[test]
+    fn an_external_approval_cannot_satisfy_independent_review() {
+        let (patchset, danger) = (patchset(), dangerous());
+        let externals = [external("ext-1", HEAD, ExternalVerdict::Approved)];
+        let outcome = decide(&ApprovalFacts {
+            external_verdicts: &externals,
+            ..facts(&patchset, &danger)
+        });
+        assert!(!outcome.approval_valid);
+        assert!(!outcome.external_verdicts[0].gates_current_head);
+        let reason = outcome.approval_rejection_reason.unwrap();
+        assert!(
+            reason.contains("cannot satisfy the independent-review rule")
+                && reason.ends_with("(declared by .arc/policy.toml)"),
+            "{reason}"
+        );
+
+        // Outside the danger scope it is an approval like any other.
+        let untouched = untouched();
+        let outcome = decide(&ApprovalFacts {
+            external_verdicts: &externals,
+            ..facts(&patchset, &untouched)
+        });
+        assert!(outcome.approval_valid);
+        assert!(outcome.external_verdicts[0].gates_current_head);
+    }
+
+    #[test]
+    fn contested_verdicts_say_so_rather_than_reading_unreviewed() {
+        let (patchset, danger) = (patchset(), dangerous());
+        let outcome = decide(&ApprovalFacts {
+            verdict_tips: 2,
+            ..facts(&patchset, &danger)
+        });
+        assert!(outcome.verdict_contested);
+        assert!(outcome.verdict.is_none());
+        assert!(!outcome.approval_valid);
+        assert_eq!(
+            outcome.approval_rejection_reason,
+            Some(format!("2 {CONTESTED_VERDICT_REASON}"))
+        );
+    }
+
+    #[test]
+    fn advisories_follow_the_review_map_and_the_danger_scope() {
+        let patchset = patchset();
+        let self_review = [ReviewerCoverage {
+            reviewer: "author".into(),
+            last_patchset: "ps-2".into(),
+            verdicts: 1,
+            findings: 0,
+            covers_final: true,
+            is_author: true,
+            matched_contributor: Some("author".into()),
+            contributors_source: "declared",
+            attribution_unknown: false,
+        }];
+        let codes = |danger: &DangerScope| {
+            decide(&ApprovalFacts {
+                review_map: &self_review,
+                reviewed_only_by_brief_author: Some("author"),
+                debt_outstanding: true,
+                ..facts(&patchset, danger)
+            })
+            .advisories
+            .into_iter()
+            .map(|advisory| advisory.code)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            codes(&untouched()),
+            [
+                "self-verdict-permitted",
+                "brief-author-only-review",
+                "debt-outstanding"
+            ]
+        );
+        assert_eq!(
+            codes(&dangerous()),
+            [
+                "no-independent-reviewer",
+                "brief-author-only-review",
+                "debt-outstanding"
+            ]
+        );
+
+        let danger = dangerous();
+        let without_patchset = decide(&ApprovalFacts {
+            latest_patchset: None,
+            debt_outstanding: true,
+            ..facts(&patchset, &danger)
+        });
+        assert!(without_patchset.advisories.is_empty());
+    }
+}
