@@ -551,6 +551,12 @@ fn a_sandboxed_rebase_refuses_the_recorded_checkout_outside_the_prefix() {
     let repo = Repo::new();
     let boxed = cloned_with_an_open_change(&repo, "outside-replay");
     // Something to replay, in the copy's own target branch.
+    git(&boxed.clone, &["config", "user.name", "Tester"]);
+    git(
+        &boxed.clone,
+        &["config", "user.email", "tester@example.invalid"],
+    );
+    git(&boxed.clone, &["config", "commit.gpgsign", "false"]);
     repo.commit(&boxed.clone, "moved.txt", "moved\n", "feat: move target");
 
     let before = (snapshot(&repo.root), snapshot(&boxed.worktree));

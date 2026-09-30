@@ -177,18 +177,7 @@ pub(crate) const NO_EDITOR: [(&str, &str); 2] =
     [("GIT_EDITOR", "true"), ("GIT_SEQUENCE_EDITOR", "true")];
 
 pub(crate) fn git(cwd: &Path, args: &[&str]) {
-    let mut command = Command::new("git");
-    if args.first() == Some(&"commit") {
-        command.args([
-            "-c",
-            "user.name=Tester",
-            "-c",
-            "user.email=tester@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-        ]);
-    }
-    let st = command
+    let st = Command::new("git")
         .args(args)
         .current_dir(cwd)
         .envs(NO_EDITOR)
