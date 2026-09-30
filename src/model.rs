@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 /// store stamped newer than this, because the alternative is what silently
 /// went wrong before: an older binary skipping event types it does not know,
 /// concluding the change is still open, and closing it a second way.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {

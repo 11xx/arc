@@ -1333,7 +1333,7 @@ SCHEMAS
   Their absent model provenance stays absent.
 
   Internal:
-    store format 7                   .git/arc/config.json and the change ledger
+    store format 6                   .git/arc/config.json and the change ledger
     `arc-replica-import/2`           receipt of an imported replica bundle
     `arc-journal-exchange-import/1`  receipt of an imported journal bundle
     `arc-sandbox/2`                  .arc-sandbox.json

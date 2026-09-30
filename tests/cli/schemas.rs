@@ -100,5 +100,5 @@ fn model_provenance_versions_are_registered() {
     ] {
         assert!(guide.contains(&format!("`{schema}`")), "{schema}");
     }
-    assert!(guide.contains("store format 7"));
+    assert!(guide.contains("store format 6"));
 }
