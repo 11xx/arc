@@ -15,6 +15,7 @@ mod gitio;
 mod guide;
 mod ids;
 mod inbox;
+mod integration;
 mod journal;
 mod journal_exchange;
 mod model;
@@ -1459,6 +1460,23 @@ enum Cmd {
         /// Report what would happen without merging, closing, or writing
         #[arg(long)]
         dry_run: bool,
+        /// With --dry-run, print the plan as `arc-integration-plan/1` JSON:
+        /// the authorization basis the integration event would record, the
+        /// target revision it was decided at, the approved head, and the tree
+        /// the merge would ship. It is decided exactly as the merge is; a
+        /// refusal prints the blocker on stderr and nothing on stdout. One
+        /// change only
+        #[arg(long, requires = "dry_run")]
+        json: bool,
+        /// Compare the fresh decision with a plan an earlier
+        /// `--dry-run --json` printed. The fresh readiness evaluation alone
+        /// decides; the file never changes the decision. When the approved
+        /// head, the target revision, the gate or policy declarations, or the
+        /// approval moved since, a refusal adds one line naming what moved
+        /// and a permitted integration proceeds with a warning naming it. An
+        /// unchanged basis adds nothing. One change only
+        #[arg(long = "expect-basis", value_name = "FILE", conflicts_with = "dry_run")]
+        expect_basis: Option<PathBuf>,
         /// Integrate without an independent verdict, recording the review this
         /// change still owes. One change only: the reason binds to one
         /// patchset, so it has nothing to say about a queue. It stands in
@@ -3830,6 +3848,8 @@ fn run(cli: Cli) -> Result<i32> {
             message,
             cleanup,
             dry_run,
+            json,
+            expect_basis,
             debt,
             debt_kind,
         } => {
@@ -3857,6 +3877,8 @@ fn run(cli: Cli) -> Result<i32> {
                     message,
                     cleanup,
                     dry_run,
+                    json,
+                    expect_basis,
                     debt: debt.map(|reason| commands::DebtDeclaration {
                         reason,
                         kind: debt_kind,
