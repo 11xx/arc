@@ -1997,10 +1997,16 @@ enum RewriteCmd {
         /// The key to sign with; Git's configured signing key by default
         #[arg(long)]
         key: Option<String>,
-        /// Oldest commit to recreate; by default the oldest whose signature is
-        /// missing or made by another key
+        /// Oldest commit to recreate, inclusive. Defaults to the oldest not
+        /// signed by the key in target..head on a tracked change branch, or in
+        /// the whole history outside a change
         #[arg(long)]
         from: Option<String>,
+        /// Permit recreating commits reachable from the target or another
+        /// local branch, and default to the whole history. Without this flag
+        /// shared commits are refused before any moves, including --dry-run
+        #[arg(long)]
+        include_shared: bool,
         /// Print the map the rewrite would record and stop
         #[arg(long = "dry-run")]
         dry_run: bool,
@@ -3576,6 +3582,7 @@ fn run(cli: Cli) -> Result<i32> {
             RewriteCmd::Sign {
                 key,
                 from,
+                include_shared,
                 dry_run,
                 no_sign,
                 retag,
@@ -3584,6 +3591,7 @@ fn run(cli: Cli) -> Result<i32> {
                 commands::SignArgs {
                     key,
                     from,
+                    include_shared,
                     dry_run,
                     no_sign,
                     retag,
