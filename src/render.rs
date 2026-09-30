@@ -2053,6 +2053,32 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             )
         }
         Payload::CandidateRetired { candidate_id } => ("candidate-retired", candidate_id.clone()),
+        Payload::CandidateVerified {
+            candidate_id,
+            gate,
+            result,
+            ..
+        } => (
+            "candidate-verified",
+            format!("{candidate_id} gate {gate}: {result:?}"),
+        ),
+        Payload::CandidateSelected {
+            candidate_id,
+            destination: change_id,
+            ..
+        } => (
+            "candidate-selected",
+            format!("{candidate_id} into {change_id}"),
+        ),
+        Payload::CandidatePromoted {
+            candidate_id,
+            destination: change_id,
+            patchset_id,
+            ..
+        } => (
+            "candidate-promoted",
+            format!("{candidate_id} into {change_id} as {patchset_id}"),
+        ),
         Payload::ContextRead {
             subject,
             record,

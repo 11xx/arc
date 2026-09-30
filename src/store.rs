@@ -596,6 +596,9 @@ impl Store {
             Payload::CandidateRegistered { .. }
             | Payload::CandidateJudged { .. }
             | Payload::CandidateRetired { .. }
+            | Payload::CandidateVerified { .. }
+            | Payload::CandidateSelected { .. }
+            | Payload::CandidatePromoted { .. }
             | Payload::ContextRead { .. }
             | Payload::ContextDeclared { .. }
             | Payload::ContextCaptureReported { .. } => Some(7),

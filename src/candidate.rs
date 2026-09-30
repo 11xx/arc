@@ -7,9 +7,17 @@
 //! candidate events are judged by exactly the rules a local registration is;
 //! the checks that read the object store or a change's log live with the
 //! command that registers.
+//!
+//! Evaluations, selections, and promotions are candidate events too. A
+//! selection and a promotion are roots: each keeps the content its candidate
+//! carries wanted.
 
 use crate::ids;
-use crate::model::{CandidateBriefRef, CandidateJudgement, Event, Payload};
+use crate::model::{
+    CandidateBriefRef, CandidateJudgement, EnvironmentEvidence, Event, Payload, SelectedEvaluation,
+    SelectedRead, VerifyResult,
+};
+use crate::policy::EvaluationReuse;
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -20,6 +28,24 @@ pub fn candidate_ref(candidate_id: &str) -> String {
 }
 
 pub const CANDIDATE_REF_PREFIX: &str = "refs/arc/candidate/";
+
+/// Where a promotion's commit is kept from the moment it is written: before
+/// the destination branch moves, so an interrupted promotion leaves a ref
+/// `arc doctor` and `candidate promote` find. Beside the candidate pins
+/// rather than under them, since a pin is a ref and cannot also be a
+/// directory of refs.
+pub fn promotion_ref(candidate_id: &str, selection: &str) -> String {
+    format!("{PROMOTION_REF_PREFIX}{candidate_id}/{selection}")
+}
+
+pub const PROMOTION_REF_PREFIX: &str = "refs/arc/candidate-promotion/";
+
+/// The candidate and selection a promotion ref names, when it is one.
+pub fn parse_promotion_ref(reference: &str) -> Option<(&str, &str)> {
+    reference
+        .strip_prefix(PROMOTION_REF_PREFIX)?
+        .split_once('/')
+}
 
 #[derive(Debug, Clone)]
 pub struct Registration {
@@ -53,6 +79,51 @@ pub struct Judgement {
     pub recorded_at: DateTime<Utc>,
 }
 
+/// A required gate run against a candidate's tree.
+#[derive(Debug, Clone)]
+pub struct Evaluation {
+    pub event_id: String,
+    pub candidate_id: String,
+    pub tree: String,
+    pub gate: String,
+    pub command: String,
+    pub timeout_seconds: Option<u64>,
+    pub environment_probe: Option<String>,
+    pub environment: Option<EnvironmentEvidence>,
+    pub result: VerifyResult,
+    pub declarant: String,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// A permitted selection and the basis it rests on.
+#[derive(Debug, Clone)]
+pub struct Selection {
+    pub event_id: String,
+    pub candidate_id: String,
+    pub change_id: String,
+    pub head: String,
+    pub target_branch: String,
+    pub target: String,
+    pub tree: String,
+    pub evaluations: Vec<SelectedEvaluation>,
+    pub reads: Vec<SelectedRead>,
+    pub reuse: EvaluationReuse,
+    pub contributors: Vec<String>,
+    pub selector: String,
+    pub rationale: String,
+    pub supersedes: Option<String>,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// A selection's observed effect.
+#[derive(Debug, Clone)]
+pub struct Promotion {
+    pub event_id: String,
+    pub change_id: String,
+    pub patchset_id: String,
+    pub revision: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Retirement {
     pub event_id: String,
@@ -60,8 +131,8 @@ pub struct Retirement {
     pub recorded_at: DateTime<Utc>,
 }
 
-/// A record that keeps a candidate's content wanted: a selection, a
-/// promotion, or a declared root.
+/// A record that keeps a candidate's content wanted: a selection or a
+/// promotion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Root {
     pub kind: &'static str,
@@ -110,6 +181,15 @@ pub enum Refusal {
     },
     UnknownCandidate(String),
     SelfSupersession(String),
+    UnknownSelection(String),
+    DuplicatePromotion {
+        selection: String,
+        promotion: String,
+    },
+    SupersedesPromoted {
+        selection: String,
+        superseded: String,
+    },
 }
 
 impl Refusal {
@@ -124,6 +204,9 @@ impl Refusal {
             Refusal::AdoptionDropsProducer { .. } => "adoption-drops-producer",
             Refusal::UnknownCandidate(_) => "unknown-candidate",
             Refusal::SelfSupersession(_) => "self-supersession",
+            Refusal::UnknownSelection(_) => "unknown-selection",
+            Refusal::DuplicatePromotion { .. } => "duplicate-promotion",
+            Refusal::SupersedesPromoted { .. } => "supersedes-promoted",
         }
     }
 }
@@ -170,6 +253,21 @@ impl fmt::Display for Refusal {
             Refusal::SelfSupersession(id) => {
                 write!(f, "candidate {id} cannot be superseded by itself")
             }
+            Refusal::UnknownSelection(id) => write!(f, "no selection {id} is recorded"),
+            Refusal::DuplicatePromotion {
+                selection,
+                promotion,
+            } => write!(
+                f,
+                "selection {selection} is already promoted by {promotion}"
+            ),
+            Refusal::SupersedesPromoted {
+                selection,
+                superseded,
+            } => write!(
+                f,
+                "selection {selection} supersedes {superseded}, which is already promoted"
+            ),
         }
     }
 }
@@ -182,8 +280,11 @@ pub struct Ledger {
     registrations: BTreeMap<String, Registration>,
     judgements: Vec<Judgement>,
     retirements: BTreeMap<String, Retirement>,
-    /// Records that keep a candidate wanted. The events that declare them
-    /// are selections, promotions, and declared roots.
+    evaluations: BTreeMap<String, Evaluation>,
+    selections: BTreeMap<String, Selection>,
+    /// Selection event id to the promotion that completed it.
+    promotions: BTreeMap<String, Promotion>,
+    /// Records that keep a candidate wanted: selections and promotions.
     roots: Vec<Root>,
 }
 
@@ -254,6 +355,162 @@ impl Ledger {
                     declarant,
                     recorded_at: event.created_at,
                 });
+            }
+            Payload::CandidateVerified {
+                candidate_id,
+                tree,
+                gate,
+                command,
+                timeout_seconds,
+                environment_probe,
+                environment,
+                result,
+                ..
+            } => {
+                let registration = self.known(candidate_id)?;
+                if &registration.tree != tree {
+                    return Err(Refusal::Malformed {
+                        event_id: event.event_id.clone(),
+                        detail: format!(
+                            "an evaluation of {candidate_id} names tree {tree}, not its \
+                             registered tree {}",
+                            registration.tree
+                        ),
+                    });
+                }
+                self.evaluations.insert(
+                    event.event_id.clone(),
+                    Evaluation {
+                        event_id: event.event_id.clone(),
+                        candidate_id: candidate_id.clone(),
+                        tree: tree.clone(),
+                        gate: gate.clone(),
+                        command: command.clone(),
+                        timeout_seconds: *timeout_seconds,
+                        environment_probe: environment_probe.clone(),
+                        environment: environment.clone(),
+                        result: *result,
+                        declarant,
+                        recorded_at: event.created_at,
+                    },
+                );
+            }
+            Payload::CandidateSelected {
+                candidate_id,
+                destination: change_id,
+                head,
+                target_branch,
+                target,
+                tree,
+                evaluations,
+                reads,
+                reuse,
+                contributors,
+                selector,
+                rationale,
+                supersedes,
+            } => {
+                let registration = self.known(candidate_id)?;
+                let malformed = |detail: String| Refusal::Malformed {
+                    event_id: event.event_id.clone(),
+                    detail,
+                };
+                if &registration.tree != tree {
+                    return Err(malformed(format!(
+                        "a selection of {candidate_id} ships tree {tree}, not its registered \
+                         tree {}",
+                        registration.tree
+                    )));
+                }
+                if &registration.brief.change_id != change_id {
+                    return Err(malformed(format!(
+                        "a selection of {candidate_id} promotes into {change_id}, not its \
+                         contract's change {}",
+                        registration.brief.change_id
+                    )));
+                }
+                if contributors.is_empty() || rationale.trim().is_empty() {
+                    return Err(malformed(
+                        "a selection names its contributors and a rationale".to_string(),
+                    ));
+                }
+                if let Some(superseded) = supersedes {
+                    if !self.selections.contains_key(superseded) {
+                        return Err(Refusal::UnknownSelection(superseded.clone()));
+                    }
+                    if self.promotions.contains_key(superseded) {
+                        return Err(Refusal::SupersedesPromoted {
+                            selection: event.event_id.clone(),
+                            superseded: superseded.clone(),
+                        });
+                    }
+                }
+                self.roots.push(Root {
+                    kind: "selection",
+                    event_id: event.event_id.clone(),
+                    candidate_id: candidate_id.clone(),
+                });
+                self.selections.insert(
+                    event.event_id.clone(),
+                    Selection {
+                        event_id: event.event_id.clone(),
+                        candidate_id: candidate_id.clone(),
+                        change_id: change_id.clone(),
+                        head: head.clone(),
+                        target_branch: target_branch.clone(),
+                        target: target.clone(),
+                        tree: tree.clone(),
+                        evaluations: evaluations.clone(),
+                        reads: reads.clone(),
+                        reuse: *reuse,
+                        contributors: contributors.clone(),
+                        selector: selector.clone(),
+                        rationale: rationale.clone(),
+                        supersedes: supersedes.clone(),
+                        recorded_at: event.created_at,
+                    },
+                );
+            }
+            Payload::CandidatePromoted {
+                selection,
+                candidate_id,
+                destination: change_id,
+                patchset_id,
+                revision,
+            } => {
+                let Some(selected) = self.selections.get(selection) else {
+                    return Err(Refusal::UnknownSelection(selection.clone()));
+                };
+                if &selected.candidate_id != candidate_id || &selected.change_id != change_id {
+                    return Err(Refusal::Malformed {
+                        event_id: event.event_id.clone(),
+                        detail: format!(
+                            "a promotion of selection {selection} names {candidate_id} into \
+                             {change_id}; the selection chose {} into {}",
+                            selected.candidate_id, selected.change_id
+                        ),
+                    });
+                }
+                if let Some(earlier) = self.promotions.get(selection) {
+                    return Err(Refusal::DuplicatePromotion {
+                        selection: selection.clone(),
+                        promotion: earlier.event_id.clone(),
+                    });
+                }
+                self.roots.push(Root {
+                    kind: "promotion",
+                    event_id: event.event_id.clone(),
+                    candidate_id: candidate_id.clone(),
+                });
+                self.promotions.insert(
+                    selection.clone(),
+                    Promotion {
+                        event_id: event.event_id.clone(),
+                        change_id: change_id.clone(),
+                        patchset_id: patchset_id.clone(),
+                        revision: revision.clone(),
+                    },
+                );
             }
             Payload::CandidateRetired { candidate_id } => {
                 self.known(candidate_id)?;
@@ -369,6 +626,75 @@ impl Ledger {
 
     pub fn retirement(&self, candidate_id: &str) -> Option<&Retirement> {
         self.retirements.get(candidate_id)
+    }
+
+    pub fn evaluation(&self, event_id: &str) -> Option<&Evaluation> {
+        self.evaluations.get(event_id)
+    }
+
+    pub fn evaluations_of(&self, candidate_id: &str) -> Vec<&Evaluation> {
+        self.evaluations
+            .values()
+            .filter(|evaluation| evaluation.candidate_id == candidate_id)
+            .collect()
+    }
+
+    pub fn selection(&self, event_id: &str) -> Option<&Selection> {
+        self.selections.get(event_id)
+    }
+
+    pub fn selections(&self) -> impl Iterator<Item = &Selection> {
+        self.selections.values()
+    }
+
+    /// The promotion that completed a selection, when one did.
+    pub fn promotion_of(&self, selection: &str) -> Option<&Promotion> {
+        self.promotions.get(selection)
+    }
+
+    /// The later selection standing in place of this one, when one does.
+    pub fn superseded_by(&self, selection: &str) -> Option<&Selection> {
+        self.selections
+            .values()
+            .find(|later| later.supersedes.as_deref() == Some(selection))
+    }
+
+    /// The selection a new one for `change_id` stands in place of: the
+    /// latest for that destination, when it was never promoted and nothing
+    /// supersedes it yet.
+    pub fn standing_unpromoted(&self, change_id: &str) -> Option<&Selection> {
+        self.selections
+            .values()
+            .filter(|selection| selection.change_id == change_id)
+            .max_by(|a, b| a.event_id.cmp(&b.event_id))
+            .filter(|latest| {
+                !self.promotions.contains_key(&latest.event_id)
+                    && self.superseded_by(&latest.event_id).is_none()
+            })
+    }
+
+    /// Registrations answering the same contract as `registration`, other
+    /// than it: the alternatives a selection of it left standing.
+    pub fn siblings<'a>(&'a self, registration: &'a Registration) -> Vec<&'a Registration> {
+        self.registrations
+            .values()
+            .filter(|other| {
+                other.candidate_id != registration.candidate_id
+                    && other.contract() == registration.contract()
+            })
+            .collect()
+    }
+
+    /// The producers of a registration and of every registration along its
+    /// parent chain. An adopted registration's producers are contributors
+    /// only as producers of the registration that adopts it.
+    pub fn contributors_of(&self, registration: &Registration) -> Vec<String> {
+        self.lineage(registration)
+            .into_iter()
+            .flat_map(|ancestor| ancestor.producers.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// A registration and every registration along its parent chain, each
@@ -660,7 +986,7 @@ mod tests {
         // Unrooted content with no pin is nobody's loss.
         assert!(ledger.rooted_without_pin(&pinned).is_empty());
         ledger.roots.push(Root {
-            kind: "declared root",
+            kind: "promotion",
             event_id: "01ROOT".to_string(),
             candidate_id: "b".to_string(),
         });

@@ -186,7 +186,10 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          observed reads, rejected alternatives, evaluation,
                          coverage at acceptance, and later knowledge.
                          Observed reads are the change's read records, each
-                         with its inferred blob and capture state. Every
+                         with its inferred blob and capture state. A
+                         promoted patchset names its selection and promotion
+                         in the contract, and the promoted candidate's
+                         siblings are rejected alternatives. Every
                          row carries a standing: `recorded` (an event records
                          it), `declared` (somebody stated it and arc did not
                          check it), `inferred` (arc derived it; no event
@@ -1033,6 +1036,14 @@ CANDIDATES
     arc candidate show <id> | list [--brief <change>] [--json]
     arc candidate judge <id> (--rejected | --superseded-by <id>) --reason <why>
     arc candidate retire <id>
+    arc candidate verify <id> [--gate <gate>]
+                       Run the required gates against the candidate's tree.
+    arc candidate select --chosen <id> --into <change> --target <revision>
+                         [--evaluation <event>]... --rationale <text|@file>
+                       Validate a named choice and promote it.
+    arc candidate promote <selection>
+                       Promote a recorded selection, or finish or discard an
+                       interrupted promotion.
 
   A registration is immutable content with a contract: a tree, the brief
   version it answers with a `sha256:` digest of that brief's body, the
@@ -1049,11 +1060,64 @@ CANDIDATES
   declarant's claim. It alters no registration and selects nothing.
 
   Retirement deletes a candidate's pin and records that it did, and only when
-  no root reaches the candidate: a selection, a promotion, or a declared root,
-  reaching what its candidate's parents and adoptions carry. The registration
-  and its judgements stand. arc never retires a candidate on its own.
+  no root reaches the candidate: a selection or a promotion, reaching what its
+  candidate's parents and adoptions carry. The registration and its
+  judgements stand. arc never retires a candidate on its own.
 
-  Candidate events are repository events, so every `arc export` carries them
+  An evaluation runs the required gates of the brief's change, as its target
+  declares them, in a scratch checkout of the candidate's tree, removed
+  afterwards. It records `candidate-verified` keyed by the tree, with the
+  gate's command, timeout, and environment probe as consumed, the identity the
+  probe yielded there, and the result.
+
+  Selection is validation, never choice. The caller names the registration,
+  the destination (the change whose brief it answers), the target head it
+  decided against, and the evaluations it relies on; arc checks every ground
+  and reports every failing one by code, recording nothing unless all hold.
+  `[candidates] evaluation_reuse` must be declared, and the target must not
+  have moved. Each required gate needs a named, passing evaluation at the
+  shipped tree, the chosen registration's, under the declaration in force and
+  in the environment observed now at that tree; under `never` only the chosen
+  registration's evaluations count, under `matching-coordinates` any
+  registration's whose tree, declaration, and environment match. Each
+  `--must-read` of the registration's brief version needs a tool read on the
+  registration or one along its parent chain, by an episode one of them cites,
+  at the required version and covering the required extent. A declaration,
+  the contract's own plan or opening artifact, a partial read, and a read of
+  unknown coverage are each refused by name; reads through an adoption never
+  count. An artifact requirement is met by digest equality with the text a
+  tool returned, so a tool that decorates it, like a line-numbered `Read`,
+  cannot meet one until its recorder digests the content itself.
+
+  A permitted selection records `candidate-selected` with its basis: the
+  chosen registration, the destination head and target it was validated at,
+  the evaluation and read meeting each requirement, the reuse policy, the
+  contributors (the producers along the parent chain; an adopted
+  registration's producers only as the adopter's), the selector, and the
+  rationale. A repair is a child registration, so whoever repairs is a
+  contributor and never only the selector. No review belongs to a candidate:
+  the promoted patchset is reviewed, waived, and integrated as any other.
+
+  Permission is not effect. The promotion holds the destination's transition
+  lock and the repository-events lock, never the target's, and in order:
+  refuses `basis-moved`, recording nothing, when the destination head or the
+  target differs from the basis; refuses a checkout of the destination with
+  tracked modifications or untracked paths in the way; commits the shipped
+  tree onto the destination head with the selector as committer and keeps it
+  at `refs/arc/candidate-promotion/<candidate>/<selection>`; moves the branch
+  from the head it read, so a concurrent move stops it there; updates the
+  checkout; records a patchset carrying the selection's contributors and a
+  candidate link; and records `candidate-promoted`. A basis is never reused:
+  after a move, select again, and the new selection names the stranded one as
+  superseded. `arc doctor` and `candidate show` report a promotion ref no
+  `candidate-promoted` event records; `candidate promote` completes it when the
+  branch points at its commit and deletes it otherwise, and says which.
+  Siblings stay registered and unjudged until somebody judges them; `arc
+  workspace report` flags a promoted brief with unjudged siblings, and `arc
+  explain` lists them under rejected alternatives.
+
+  Candidate events, evaluations, selections, and promotions among them, are
+  repository events, so every `arc export` carries them
   and `arc import` judges them with the ledger they join before writing
   anything. An imported registration whose tree this object store lacks stays
   unpinned. `arc doctor` advises on a pin with no registration and on
@@ -1434,7 +1498,7 @@ SCHEMAS
     `arc-journal-catchup/8`          arc journal catchup --json
     `arc-resume/8`                   arc resume --json
     `arc-explain/1`                  arc explain --json
-    `arc-brief/1`                    arc brief --json
+    `arc-brief/2`                    arc brief --json
     `arc-journal-artifact/2`         arc journal show --json
     `arc-journal-inventory/6`        arc journal inventory --json
     `arc-rescue/5`                   arc rescue --json

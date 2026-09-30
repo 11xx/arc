@@ -39,6 +39,7 @@ pub fn squash(ctx: &Ctx, reference: &str, message: &str) -> Result<()> {
             claim_actor: None,
             journal_refs: Vec::new(),
             thread: None,
+            candidate: None,
         },
     )?;
     let worktree = gitio::worktree_for_branch(&ctx.cwd, &st.branch)?.with_context(|| {
