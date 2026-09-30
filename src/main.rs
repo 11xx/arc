@@ -348,12 +348,13 @@ enum Cmd {
         /// then from the worktree the command runs in
         change: Option<String>,
         /// Bound the view by this event ID on the change. For an integrated
-        /// change it limits later knowledge to what was recorded by the
-        /// event, and coverage at acceptance stays as of the integration
-        /// event; the integration event itself, or any earlier one, leaves
-        /// later knowledge empty. For a change not integrated it replays the
-        /// change as of the event, as `arc show --at` does. An event not on
-        /// the change is refused
+        /// change, supplied context, declared facts, rejected alternatives,
+        /// and later knowledge show only what was recorded by the event,
+        /// while contract, evaluation, and coverage at acceptance keep their
+        /// integration basis; the integration event itself, or any earlier
+        /// one, leaves later knowledge empty. For a change not integrated it
+        /// replays the change as of the event, as `arc show --at` does. An
+        /// event not on the change is refused
         #[arg(long)]
         at: Option<String>,
         /// Emit `arc-explain/1` JSON instead of text

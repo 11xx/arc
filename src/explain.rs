@@ -170,6 +170,8 @@ pub enum DebtUse {
     RecordedUnused,
 }
 
+/// What a row is about. A row flattens its standing beside this, so no field
+/// here may be named `item`, `standing`, or `reason`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "item", rename_all = "kebab-case")]
 pub enum Detail {
@@ -276,15 +278,13 @@ pub enum Detail {
         #[serde(skip_serializing_if = "Option::is_none")]
         used: Option<DebtUse>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
+        debt_reason: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         missing: Option<DebtMissing>,
         #[serde(skip_serializing_if = "Option::is_none")]
         coverage: Option<Vec<DebtCoverage>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         production: Option<Box<DebtProduction>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        discharged_by: Option<DebtCoverage>,
         /// The later-knowledge event that discharged this debt after the
         /// integration. The acceptance values above are unchanged by it.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -312,7 +312,7 @@ pub enum Detail {
     },
     DebtDeclared {
         event_id: String,
-        reason: String,
+        debt_reason: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         missing: Option<DebtMissing>,
     },
@@ -398,7 +398,10 @@ fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
                 Some(position) => Some(&events[integration_position + 1..=position]),
                 None => Some(&events[integration_position + 1..]),
             };
-            let discharge = later_discharge(&boundary_state, &events, integration_position);
+            let at_acceptance = discharge(&at_integration, &events).map(|(found, _)| found);
+            let discharge = discharge(&boundary_state, &events)
+                .filter(|(_, position)| *position > integration_position)
+                .map(|(found, _)| found);
             let authorization = full
                 .closure
                 .as_ref()
@@ -417,13 +420,14 @@ fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
                 Some(later_events) => later_knowledge(later_events, discharge.as_ref(), at),
             };
             (
-                full.clone(),
+                boundary_state.clone(),
                 contract_slot(&full, shipped),
                 integrated_evaluation(&full, authorization, integration_id),
                 coverage_slot(
                     &at_integration,
                     authorization,
                     integration_id,
+                    at_acceptance.as_ref(),
                     discharge.as_ref(),
                 ),
                 later,
@@ -902,7 +906,7 @@ fn no_basis(state: &ChangeState) -> String {
     }
 }
 
-/// A debt discharge arc derives from a review recorded after the integration.
+/// A debt discharge arc derives from a review. No event records one.
 struct Discharge {
     debt_event_id: String,
     by_event_id: String,
@@ -910,15 +914,11 @@ struct Discharge {
     reviewer: String,
 }
 
-/// Name the review behind `debt.discharged_by`, when it was recorded after the
-/// integration. The state already decided the discharge; this finds the event
-/// whose identity it copied, audits before verdicts, the order the discharge
-/// rule reads them in.
-fn later_discharge(
-    state: &ChangeState,
-    events: &[Event],
-    integration_position: usize,
-) -> Option<Discharge> {
+/// Name the review behind `debt.discharged_by`, with its position on the
+/// ledger. The state already decided the discharge; this finds the event whose
+/// identity it copied, audits before verdicts, the order the discharge rule
+/// reads them in.
+fn discharge(state: &ChangeState, events: &[Event]) -> Option<(Discharge, usize)> {
     let debt = state.debt.as_ref()?;
     let coverage = debt.discharged_by.as_ref()?;
     let (by_event_id, verdict) = state
@@ -944,19 +944,23 @@ fn later_discharge(
     let position = events
         .iter()
         .position(|event| event.event_id == by_event_id)?;
-    (position > integration_position).then(|| Discharge {
-        debt_event_id: debt.event_id.clone(),
-        by_event_id,
-        verdict,
-        reviewer: coverage.reviewer.clone(),
-    })
+    Some((
+        Discharge {
+            debt_event_id: debt.event_id.clone(),
+            by_event_id,
+            verdict,
+            reviewer: coverage.reviewer.clone(),
+        },
+        position,
+    ))
 }
 
 fn coverage_slot(
     at_integration: &ChangeState,
     authorization: Option<&AuthorizationBasis>,
     integration_id: &str,
-    discharge: Option<&Discharge>,
+    at_acceptance: Option<&Discharge>,
+    later: Option<&Discharge>,
 ) -> Slot {
     let Some(authorization) = authorization else {
         return Slot::empty(Standing::unavailable(no_basis(at_integration)));
@@ -1030,7 +1034,7 @@ fn coverage_slot(
     };
     match debt {
         Some((used, Some(debt))) => {
-            let discharged_later_by = discharge
+            let discharged_later_by = later
                 .filter(|discharge| discharge.debt_event_id == debt.event_id)
                 .map(|discharge| discharge.by_event_id.clone());
             rows.push(row(
@@ -1038,14 +1042,18 @@ fn coverage_slot(
                 Detail::Debt {
                     event_id: Some(debt.event_id.clone()),
                     used: Some(used),
-                    reason: Some(debt.reason.clone()),
+                    debt_reason: Some(debt.reason.clone()),
                     missing: debt.missing,
                     coverage: debt.coverage.clone(),
                     production: debt.production.clone().map(Box::new),
-                    discharged_by: debt.discharged_by.clone(),
                     discharged_later_by,
                 },
             ));
+            if let Some(discharge) =
+                at_acceptance.filter(|discharge| discharge.debt_event_id == debt.event_id)
+            {
+                rows.push(discharge_row(discharge));
+            }
         }
         Some((used, None)) => rows.push(row(
             Standing::unavailable(
@@ -1054,11 +1062,10 @@ fn coverage_slot(
             Detail::Debt {
                 event_id: authorization.audit_debt_event_id.clone(),
                 used: Some(used),
-                reason: None,
+                debt_reason: None,
                 missing: None,
                 coverage: None,
                 production: None,
-                discharged_by: None,
                 discharged_later_by: None,
             },
         )),
@@ -1067,11 +1074,10 @@ fn coverage_slot(
             Detail::Debt {
                 event_id: None,
                 used: None,
-                reason: None,
+                debt_reason: None,
                 missing: None,
                 coverage: None,
                 production: None,
-                discharged_by: None,
                 discharged_later_by: None,
             },
         )),
@@ -1154,7 +1160,7 @@ fn later_knowledge(events: &[Event], discharge: Option<&Discharge>, at: Option<&
                 Standing::recorded(),
                 Detail::DebtDeclared {
                     event_id: event.event_id.clone(),
-                    reason: reason.clone(),
+                    debt_reason: reason.clone(),
                     missing: Some(*missing),
                 },
             )),
@@ -1162,7 +1168,7 @@ fn later_knowledge(events: &[Event], discharge: Option<&Discharge>, at: Option<&
                 Standing::recorded(),
                 Detail::DebtDeclared {
                     event_id: event.event_id.clone(),
-                    reason: reason.clone(),
+                    debt_reason: reason.clone(),
                     missing: None,
                 },
             )),
@@ -1438,11 +1444,10 @@ fn describe(detail: &Detail) -> String {
         Detail::Debt {
             event_id,
             used,
-            reason,
+            debt_reason,
             missing,
             coverage,
             production,
-            discharged_by,
             discharged_later_by,
         } => {
             let Some(event_id) = event_id else {
@@ -1453,7 +1458,7 @@ fn describe(detail: &Detail) -> String {
                 Some(DebtUse::RecordedUnused) => "debt recorded, unused",
                 None => "debt",
             };
-            let mut text = format!("{used} `{event_id}`: {}", opt(reason));
+            let mut text = format!("{used} `{event_id}`: {}", opt(debt_reason));
             text.push_str(&format!(
                 "; missing {}",
                 missing
@@ -1479,16 +1484,10 @@ fn describe(detail: &Detail) -> String {
                     .map(|production| production_label(production))
                     .unwrap_or_else(|| "not recorded".to_string())
             ));
-            match (discharged_by, discharged_later_by) {
-                (Some(coverage), _) => text.push_str(&format!(
-                    "; discharged by integration by {}",
-                    coverage_label(coverage)
-                )),
-                (None, Some(later)) => text.push_str(&format!(
-                    "; undischarged at integration, discharged later by `{later}`, see later \
-                     knowledge"
-                )),
-                (None, None) => text.push_str("; undischarged at integration"),
+            if let Some(later) = discharged_later_by {
+                text.push_str(&format!(
+                    "; discharged later by `{later}`, see later knowledge"
+                ));
             }
             text
         }
@@ -1522,10 +1521,10 @@ fn describe(detail: &Detail) -> String {
         } => format!("audit disposition {status} on {finding_id} `{event_id}`"),
         Detail::DebtDeclared {
             event_id,
-            reason,
+            debt_reason,
             missing,
         } => format!(
-            "debt declared `{event_id}`: {reason}{}",
+            "debt declared `{event_id}`: {debt_reason}{}",
             missing
                 .map(|missing| format!(" (missing {})", missing.as_str()))
                 .unwrap_or_default()
