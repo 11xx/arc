@@ -21,7 +21,7 @@ reads.
   to.
 
 ## Releasing
-- PEP 440. A version is its publication date, `YYYY.M.D` with no leading zeros
+- CalVer. A version is its publication date, `YYYY.M.D` with no leading zeros
   and no fourth field, prerelease, or build metadata. One release per
   date. `arc --version`, the manifest, and the changelog's top release heading
   agree.
