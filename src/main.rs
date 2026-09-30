@@ -6,6 +6,7 @@ mod commands;
 mod config;
 mod context;
 mod declarations;
+mod explain;
 mod forge;
 mod gates;
 mod gitio;
@@ -309,6 +310,55 @@ enum Cmd {
         /// Replay state as of this event ID ("what did the actor see?")
         #[arg(long, conflicts_with = "tag")]
         at: Option<String>,
+    },
+    /// What one change knew and what it was accepted on, from the ledger and
+    /// the journal. Writes nothing: no event, no ref, no journal entry, no
+    /// lock.
+    ///
+    /// Eight slots, always all printed: contract (the brief in force, its
+    /// planner credit, plan, base revision, and causes), supplied context
+    /// (the journal artifact the change was opened from, and every
+    /// patchset's journal references and thread), declared facts (every kept
+    /// fact), observed reads, rejected alternatives (kept facts of kind
+    /// `rejected`), evaluation (each counted gate's evidence event, tree,
+    /// environment digest, timeout, reuse, and falsification), coverage at
+    /// acceptance (the verdicts, waiver, and debt the integration event's
+    /// authorization recorded), and later knowledge (audits, audit findings
+    /// and dispositions, debts, and debt discharges recorded after the
+    /// integration).
+    ///
+    /// Every row carries a standing: `recorded` (an event records it),
+    /// `declared` (somebody stated it and arc did not check it), `inferred`
+    /// (arc derived it from other records; no event states it), `absent`
+    /// (nothing records it), or `unavailable` (its source cannot be read
+    /// now). Every standing but `recorded` gives its reason, and an empty
+    /// slot prints its absence and why.
+    ///
+    /// A journal reference is resolved against the journal now, hot or
+    /// cold: `same` when the body digest equals the recorded one, `amended`
+    /// with both digests when not, `missing` when the name resolves to
+    /// nothing. The artifact a change was opened from has no recorded
+    /// digest, so it is `declared` and its digest is shown as `current`.
+    ///
+    /// A discharge of a debt by a later review that is not an approval reads
+    /// `fulfilled, not approved`. Coverage at acceptance never takes later
+    /// knowledge into its values; it only points at the discharge.
+    Explain {
+        /// Change to act on. Omitted, it is inferred from the current branch,
+        /// then from the worktree the command runs in
+        change: Option<String>,
+        /// Bound the view by this event ID on the change. For an integrated
+        /// change it limits later knowledge to what was recorded by the
+        /// event, and coverage at acceptance stays as of the integration
+        /// event; the integration event itself, or any earlier one, leaves
+        /// later knowledge empty. For a change not integrated it replays the
+        /// change as of the event, as `arc show --at` does. An event not on
+        /// the change is refused
+        #[arg(long)]
+        at: Option<String>,
+        /// Emit `arc-explain/1` JSON instead of text
+        #[arg(long)]
+        json: bool,
     },
     /// Print the change's recorded facts one line each, in ledger order. A
     /// review batch records several, so it renders as several lines. This is
@@ -2445,6 +2495,11 @@ fn run(cli: Cli) -> Result<i32> {
                 select(change)?
             };
             commands::show_selection(&ctx, role, change.as_deref(), tag, json, at.as_deref())?;
+            Ok(0)
+        }
+        Cmd::Explain { change, at, json } => {
+            let change = infer(change.as_deref())?;
+            explain::explain(&ctx, &change, at.as_deref(), json)?;
             Ok(0)
         }
         Cmd::Log {
