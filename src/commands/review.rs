@@ -684,9 +684,11 @@ pub fn keep(
     kind: crate::model::KeptKind,
     body: String,
     evidence: Option<String>,
+    cites: Vec<String>,
 ) -> Result<()> {
     let store = ctx.store()?;
     let (change_id, _st) = ctx.load_state(&store, reference)?;
+    let cites = validate_citations(&store, &change_id, cites)?;
     let ev = ctx.event(
         &store,
         &change_id,
@@ -694,11 +696,57 @@ pub fn keep(
             kind,
             body,
             evidence,
+            cites,
         },
     );
     store.append_event(&ev)?;
     println!("kept: {} {}", kind.as_str(), ev.event_id);
     Ok(())
+}
+
+/// The cited ids in order, each once. Every id must name an event on this
+/// change that a kept fact can rest on: a verification, a verdict (local,
+/// external, or audit), a finding, a disposition, or an earlier kept fact.
+fn validate_citations(store: &Store, change_id: &str, cites: Vec<String>) -> Result<Vec<String>> {
+    if cites.is_empty() {
+        return Ok(cites);
+    }
+    let events = store.load_events(change_id)?;
+    let mut recorded = Vec::new();
+    for requested in cites {
+        crate::ids::validate_id_component(&requested)?;
+        let event = events
+            .iter()
+            .find(|event| event.event_id == requested)
+            .with_context(|| {
+                format!(
+                    "no event {requested:?} on change {change_id:?}; --cites must name an event on this change"
+                )
+            })?;
+        if !matches!(
+            &event.payload,
+            Payload::VerificationRecorded { .. }
+                | Payload::VerificationReused { .. }
+                | Payload::VerdictRecorded { .. }
+                | Payload::ExternalVerdictRecorded { .. }
+                | Payload::AuditVerdictRecorded { .. }
+                | Payload::FindingAdded { .. }
+                | Payload::AuditFindingAdded { .. }
+                | Payload::DispositionRecorded { .. }
+                | Payload::AuditDispositionRecorded { .. }
+                | Payload::ContextKept { .. }
+        ) {
+            let actual = crate::render::event_kind_summary(&event.payload).0;
+            bail!(
+                "event {requested} is a {actual}, which a kept fact cannot cite; cite a \
+                 verification, verdict, finding, disposition, or kept fact"
+            );
+        }
+        if !recorded.contains(&requested) {
+            recorded.push(requested);
+        }
+    }
+    Ok(recorded)
 }
 
 pub fn comment(

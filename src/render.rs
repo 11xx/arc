@@ -1551,13 +1551,29 @@ pub(crate) fn one_line(text: &str) -> String {
         .join(" ")
 }
 
+/// The events a kept fact cites, as a suffix; empty when it cites none.
+pub(crate) fn kept_citations(cites: &[String]) -> String {
+    if cites.is_empty() {
+        String::new()
+    } else {
+        format!(" (cites {})", cites.join(", "))
+    }
+}
+
 /// Stable kebab event type plus a type-specific one-line summary.
 pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
     match payload {
         Payload::ChangeOpened { slug, title, .. } => ("change-opened", format!("{slug}: {title}")),
-        Payload::ContextKept { kind, body, .. } => (
+        Payload::ContextKept {
+            kind, body, cites, ..
+        } => (
             "context-kept",
-            format!("[{}] {}", kind.as_str(), one_line(body)),
+            format!(
+                "[{}] {}{}",
+                kind.as_str(),
+                one_line(body),
+                kept_citations(cites)
+            ),
         ),
         Payload::MetadataUpdated {
             add_blocked_by,
