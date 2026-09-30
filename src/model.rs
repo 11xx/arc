@@ -41,6 +41,31 @@ pub struct JournalArtifactRef {
     pub file: String,
     /// `sha256:` over the body read when the link was recorded.
     pub digest: String,
+    /// Which framing operation the link came from. Absent on links recorded
+    /// before arc named their source, which says nothing about how they were
+    /// supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<JournalRefVia>,
+}
+
+/// Where a patchset's journal link came from: the artifact the change was
+/// opened from, the plan its brief names, or an explicit `--journal-ref`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum JournalRefVia {
+    Begin,
+    Brief,
+    Flag,
+}
+
+impl JournalRefVia {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            JournalRefVia::Begin => "begin",
+            JournalRefVia::Brief => "brief",
+            JournalRefVia::Flag => "flag",
+        }
+    }
 }
 
 /// Where work was discussed, as identifiers arc stores and never resolves.
@@ -479,6 +504,10 @@ pub enum Payload {
         /// Additive: absent for changes not begun via `--from-journal`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         journal_ref: Option<String>,
+        /// `sha256:` over that artifact's body read when the change opened.
+        /// Absent on changes opened before arc recorded one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        journal_ref_digest: Option<String>,
         /// The fork `begin --from-fork` promoted work from. A recorded link
         /// and nothing more: it grants no review credit, creates no
         /// obligation on the fork or the change, and is not a lifecycle
