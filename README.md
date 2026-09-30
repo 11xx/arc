@@ -14,8 +14,9 @@ findings and verdicts, verification evidence, and guarded integration.
 A cold session reconstructs the state of work with `arc catchup`, from the
 journal and change ledger shared across worktrees and harnesses. Review
 verdicts bind to exact patchsets, and integration checks findings, holds, and
-required verification gates before merging. arc is a single local CLI: it
-makes no network call and runs no daemon.
+required verification gates before merging. arc is a single local CLI that
+runs no daemon and makes no network call: every transport it offers is a
+file the caller moves.
 
 ## Install
 
@@ -81,6 +82,22 @@ owed.
 [arc-model](https://github.com/11xx/arc-model) models these authorization
 rules independently and checks the `arc` binary against them on generated
 histories.
+
+## See what a change knew
+
+A merged diff says what changed, not what the work read, what it rejected, or
+what review it shipped on. `arc explain` answers that from the ledger and
+journal, and marks each row by how it is known — recorded, declared, inferred,
+absent, or unavailable — so nothing reads as stronger than its source:
+
+```sh
+arc explain radio-refill-fix           # contract, context, reads, alternatives, evaluation, coverage
+arc explain radio-refill-fix --json    # the same, as arc-explain/1
+```
+
+When several attempts answer one brief, `arc candidate register` records each
+without opening a change, and `arc candidate select` validates a named choice
+before promoting it into an ordinary patchset reviewed like any other.
 
 ## Where the rest is
 

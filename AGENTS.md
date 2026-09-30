@@ -19,6 +19,11 @@ reads.
   `--help` rather than from this source. Nothing here builds or gates on it.
   A change to what integration permits or refuses is one it must be re-pinned
   to.
+- A feature is built when its rules are stated in arc-model and its fixture
+  can be written before its code, not when an incident asks for it. Adoption
+  is then measured from the ledger (`arc stats --provenance`); a capture
+  nobody supplies is redesigned as an inferred or carried fact rather than
+  defended as a flag.
 
 ## Releasing
 - CalVer. A version is its publication date, `YYYY.M.D` with no leading zeros
