@@ -36,7 +36,7 @@ SAY WHO YOU ARE (before the first write)
   env, or resolved) and `model_observation` with the selection endpoint's
   timestamp, native id, head-read coverage, and operator-turn boundary.
   `arc show --json` exposes this evidence in `model_attributions`, keyed by
-  event id; `arc explain` (an alias of `arc log`) renders it beside each fact.
+  event id; `arc log` renders it beside each fact.
   `arc env` comments locate the observation inside or before the acting turn,
   whose boundary is the recording's newest operator prompt. An earlier-turn
   observation warns that effort may have changed since. A bounded read that
