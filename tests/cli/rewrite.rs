@@ -1997,10 +1997,16 @@ fn copy_objects(from: &Path, to: &Path) {
 }
 
 #[test]
-fn an_importing_replica_honours_a_withdrawal_of_a_map_it_already_holds() {
+fn an_importing_replica_honours_withdrawals_and_pins_candidates() {
     let sender = repo_with_gates();
     let key = signing_key(&sender).expect("bundle acceptance requires a sandbox signing key");
     let (_, worktree, old) = change_with_patchset(&sender, "portable");
+    sender
+        .arc(&worktree)
+        .args(["brief", "portable", "--body-file", "-"])
+        .write_stdin("Produce portable content.\n")
+        .assert()
+        .success();
     arc_signing(&sender, &key, &worktree)
         .args(["rewrite", "sign", "--key", &key.fingerprint])
         .assert()
@@ -2029,6 +2035,23 @@ fn an_importing_replica_honours_a_withdrawal_of_a_map_it_already_holds() {
         .args(["history", "resolve", &old])
         .assert()
         .success();
+    let tree = git_out(&worktree, &["rev-parse", "HEAD^{tree}"]);
+    sender
+        .arc(&worktree)
+        .args([
+            "candidate",
+            "register",
+            "--id",
+            "portable-candidate",
+            "--tree",
+            &tree,
+            "--brief",
+            "portable",
+            "--producer",
+            "fixture",
+        ])
+        .assert()
+        .success();
     sender
         .arc(&worktree)
         .args(["history", "withdraw", &event_id, "--reason", "wrong map"])
@@ -2054,6 +2077,12 @@ fn an_importing_replica_honours_a_withdrawal_of_a_map_it_already_holds() {
         .unwrap()
         .iter()
         .any(|event| event["event_type"] == "history-rewrite-withdrawn"));
+    assert!(delta["repository_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["event_type"] == "candidate-registered"));
+    assert_eq!(delta["event_count"], 0);
     let held_count = repository_events(&receiver).len();
     let mut malformed = delta.clone();
     let withdrawal = malformed["repository_events"]
@@ -2082,6 +2111,18 @@ fn an_importing_replica_honours_a_withdrawal_of_a_map_it_already_holds() {
         .args(["history", "resolve", &old])
         .assert()
         .success();
+    assert!(
+        git_out(
+            &receiver.root,
+            &[
+                "for-each-ref",
+                "--format=%(objectname)",
+                "refs/arc/candidate/portable-candidate",
+            ]
+        )
+        .is_empty(),
+        "dry-run must not pin the candidate"
+    );
     receiver
         .arc(&receiver.root)
         .args(["import", bundle.to_str().unwrap()])
@@ -2092,6 +2133,21 @@ fn an_importing_replica_honours_a_withdrawal_of_a_map_it_already_holds() {
         .args(["history", "resolve", &old])
         .assert()
         .code(2);
+    let candidate = json_stdout(receiver.arc(&receiver.root).args([
+        "candidate",
+        "show",
+        "portable-candidate",
+        "--json",
+    ]));
+    assert_eq!(candidate["candidates"][0]["tree"], tree);
+    assert_eq!(candidate["candidates"][0]["pin"]["present"], true);
+    assert_eq!(
+        git_out(
+            &receiver.root,
+            &["rev-parse", "refs/arc/candidate/portable-candidate",]
+        ),
+        tree
+    );
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(receiver.root.join(".git/arc/config.json")).unwrap())
             .unwrap();
@@ -2154,6 +2210,13 @@ fn an_importing_replica_honours_a_withdrawal_of_a_map_it_already_holds() {
         .assert()
         .success()
         .stdout(predicates::str::contains(correct));
+    assert_eq!(
+        git_out(
+            &fresh.root,
+            &["rev-parse", "refs/arc/candidate/portable-candidate",]
+        ),
+        tree
+    );
 }
 
 #[test]
