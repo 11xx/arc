@@ -36,6 +36,7 @@ mod policy;
 mod provenance;
 mod queue;
 mod rebase;
+mod relations;
 mod release;
 mod replicas;
 mod rescue;

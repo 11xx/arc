@@ -184,7 +184,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          What one change knew and what it was accepted on:
                          contract, supplied context, declared facts,
                          observed reads, rejected alternatives, evaluation,
-                         coverage at acceptance, and later knowledge. Every
+                         coverage at acceptance, and later knowledge.
+                         Observed reads are the change's read records, each
+                         with its inferred blob and capture state. Every
                          row carries a standing: `recorded` (an event records
                          it), `declared` (somebody stated it and arc did not
                          check it), `inferred` (arc derived it; no event
@@ -209,7 +211,8 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   arc stats --provenance How often each provenance record was written where it
                          could have been — falsifications, journal links,
                          rejected alternatives, plan-linked briefs, cited
-                         facts — each count beside what it counts in.
+                         facts, changes with read records — each count beside
+                         what it counts in.
 
   Work waiting for this project lives in two places. The ledger holds changes
   already open; the journal holds everything not yet opened as one. An empty
@@ -1056,6 +1059,64 @@ CANDIDATES
   unpinned. `arc doctor` advises on a pin with no registration and on
   undeclared `[candidates] evaluation_reuse`, and reports a registration a
   root reaches whose pin is gone.
+
+CONTEXT
+    arc context read --subject <change|candidate> --episode <claim>
+                     (--record <tool-record-id> --path <path> --digest <sha256:…>
+                      [--lines <from>-<to> | --whole] | --from-tapes <file.json>)
+                     [--at <revision>]
+    arc context declare --subject <change|candidate>
+                        (--cites | --relies-on | --considers)
+                        (--path <path> [--at <revision>] | --artifact <file>)
+                        [--citation <tool-record-id>]
+    arc context capture --record <tool-record-id> [--subject <…>]
+                        (--pinned | --unpinned)
+
+  A relation attaches context to a subject, a change or a candidate, and says
+  how it is established; nothing weaker reads as something stronger.
+
+  A read record is a tool's record that a call succeeded and returned bytes
+  for a path and range, within an episode: a claim on the subject's change,
+  or on a candidate's brief change. Its version is the `sha256:` of the
+  returned bytes, not a blob. Its coverage is the range the tool recorded:
+  whole, a line range, or unknown, and unknown never counts as whole. A
+  failed call is never a read, and a tool record id is one read per subject.
+  A read is a record of what a tool returned; it is not evidence the bytes
+  were a file's.
+
+  An inference is what arc derives, labelled with its source. With `--at`,
+  when the returned bytes equal the path's blob over the recorded range at
+  that revision, the blob is recorded as inferred, `content-matches-revision`;
+  otherwise no blob is recorded and the read stands on its digest. A read of a
+  file directly in a journal, hot or cold, also names that artifact with its
+  body digest at recording, compared with the read's and never assumed equal:
+  by file name in this project's journal, as `<journal-dir>::<file>` in
+  another project's.
+
+  `--from-tapes` takes the reads from a `tapes-events/9` document or the
+  `tapes-session/14` `.json` of a `tapes export` bundle, one per tool call
+  with a `read` member, skipping each call with no stable id, path, or digest,
+  each that failed, and each record already held, with one printed line.
+  arc reads only that file; it opens no harness store and runs no program.
+  tapes digests the text a tool returned, which arc records unnormalized, so
+  a tool that decorates what it returns, like a line-numbered `Read`, never
+  infers a blob.
+
+  A declaration is its declarant's claim that the subject cites, relies on,
+  or considers a path or a journal artifact. arc checks only that a
+  `--citation` names a read on the same subject. A declaration is never a
+  read and never satisfies one.
+
+  A capture report is what the provider (`tapes capture <session> --json`)
+  said about retaining a read's recording, attributed to its declarant; the
+  latest for a record stands. It is not the recording. `arc explain` reads a
+  read `at risk` unless its latest report is `pinned`.
+
+  A change's relations are events on its ledger; a candidate's are repository
+  events, so every bundle carries them, and `arc import` judges both with the
+  relations they join. `arc explain` shows a change's reads under observed
+  reads and its declarations under declared facts; `arc candidate show`
+  lists a candidate's.
 
 RULES THAT CHANGE WHAT YOU DO
   - A verdict binds to the exact approved patchset head. Any new commit makes

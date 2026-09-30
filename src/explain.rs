@@ -9,9 +9,11 @@
 
 use crate::commands::{self, Ctx};
 use crate::model::{
-    AuthorizationBasis, BriefCause, DebtCoverage, DebtMissing, DebtProduction, Event,
-    JournalRefVia, Payload, PlannerIdentity,
+    AuthorizationBasis, BriefCause, CaptureState, DebtCoverage, DebtMissing, DebtProduction,
+    DeclaredRelation, DeclaredTarget, Event, JournalRefVia, Payload, PlannerIdentity, ReadCoverage,
+    RelationSubject,
 };
+use crate::relations::Relations;
 use crate::state::{ChangeState, Patchset, VerificationEntry, VerificationRunTerminal};
 use crate::store::Store;
 use anyhow::{bail, Result};
@@ -335,6 +337,31 @@ pub enum Detail {
         #[serde(skip_serializing_if = "Option::is_none")]
         missing: Option<DebtMissing>,
     },
+    Read {
+        event_id: String,
+        record: String,
+        episode: String,
+        path: String,
+        digest: String,
+        coverage: ReadCoverage,
+        /// The revision the returned bytes were compared against.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        compared_at: Option<String>,
+        /// The blob the bytes equal at `compared_at`, standing `inferred`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        blob: Option<BlobRow>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifact: Option<ArtifactRow>,
+        capture: CaptureRow,
+    },
+    Declaration {
+        event_id: String,
+        relation: DeclaredRelation,
+        target: DeclaredTarget,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        citation: Option<String>,
+        declarant: String,
+    },
     DebtDischarge {
         debt_event_id: String,
         by_event_id: String,
@@ -344,6 +371,40 @@ pub enum Detail {
         /// review did not approve.
         outcome: &'static str,
     },
+}
+
+/// A blob inferred for a read, with the standing of that inference.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlobRow {
+    #[serde(flatten)]
+    pub standing: Standing,
+    pub revision: String,
+    pub path: String,
+    pub blob: String,
+}
+
+/// The journal artifact a read's path names, and how the read's digest
+/// compares with the artifact body's digest at recording.
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtifactRow {
+    pub file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_digest: Option<String>,
+    /// `body matches`, `body differs`, or `body unreadable when recorded`.
+    pub comparison: &'static str,
+}
+
+/// The standing capture report for a read's recording. `at_risk` holds
+/// unless the latest report is `pinned`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CaptureRow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture: Option<CaptureState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declarant: Option<String>,
+    pub at_risk: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -391,6 +452,14 @@ fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
         None => None,
     };
     let full = store.state(&change_id)?;
+    let in_view = match at_position {
+        Some(position) => &events[..=position],
+        None => &events[..],
+    };
+    let relations = commands::relations::change_relations(in_view)?;
+    let subject = RelationSubject::Change {
+        change_id: change_id.clone(),
+    };
     let integration = full
         .closure
         .as_ref()
@@ -483,8 +552,8 @@ fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
         at: at.map(str::to_string),
         contract,
         supplied_context: supplied_context(ctx, &subject_state),
-        declared_facts: declared_facts(&subject_state),
-        observed_reads: Slot::empty(Standing::absent("no tool record")),
+        declared_facts: declared_facts(&subject_state, &relations, &subject),
+        observed_reads: observed_reads(&relations, &subject),
         rejected_alternatives: rejected_alternatives(&subject_state),
         evaluation,
         coverage_at_acceptance: coverage,
@@ -749,12 +818,73 @@ fn kept_row(kept: &crate::state::KeptContext) -> Row {
     )
 }
 
-fn declared_facts(state: &ChangeState) -> Slot {
+fn declared_facts(state: &ChangeState, relations: &Relations, subject: &RelationSubject) -> Slot {
     let mut kept: Vec<_> = state.kept.iter().collect();
     kept.sort_by_key(|kept| kept.kind.as_str());
+    let mut rows: Vec<Row> = kept.into_iter().map(kept_row).collect();
+    rows.extend(relations.declarations_of(subject).map(|declaration| {
+        row(
+            Standing::declared(format!(
+                "declared by {}; a declaration is never a read",
+                declaration.declarant
+            )),
+            Detail::Declaration {
+                event_id: declaration.event_id.clone(),
+                relation: declaration.relation,
+                target: declaration.target.clone(),
+                citation: declaration.citation.clone(),
+                declarant: declaration.declarant.clone(),
+            },
+        )
+    }));
     Slot::of(
-        kept.into_iter().map(kept_row).collect(),
-        Standing::absent("no fact was kept on the change"),
+        rows,
+        Standing::absent("no fact was kept and no relation declared on the change"),
+    )
+}
+
+/// The change's read records, each with its inferred blob and the capture
+/// report standing for its recording.
+fn observed_reads(relations: &Relations, subject: &RelationSubject) -> Slot {
+    let rows = relations
+        .reads_of(subject)
+        .map(|read| {
+            let capture = relations.capture_of(read);
+            row(
+                Standing::recorded(),
+                Detail::Read {
+                    event_id: read.event_id.clone(),
+                    record: read.record.clone(),
+                    episode: read.episode.clone(),
+                    path: read.path.clone(),
+                    digest: read.digest.clone(),
+                    coverage: read.coverage,
+                    compared_at: read.compared_at.clone(),
+                    blob: read.blob.as_ref().map(|blob| BlobRow {
+                        standing: Standing::inferred(blob.inference.clone()),
+                        revision: blob.revision.clone(),
+                        path: blob.path.clone(),
+                        blob: blob.blob.clone(),
+                    }),
+                    artifact: read.artifact.as_ref().map(|artifact| ArtifactRow {
+                        file: artifact.file.clone(),
+                        body_digest: artifact.body_digest.clone(),
+                        comparison: commands::relations::artifact_match(&read.digest, artifact),
+                    }),
+                    capture: CaptureRow {
+                        capture: capture.map(|capture| capture.capture),
+                        event_id: capture.map(|capture| capture.event_id.clone()),
+                        declarant: capture.map(|capture| capture.declarant.clone()),
+                        at_risk: capture
+                            .is_none_or(|capture| capture.capture != CaptureState::Pinned),
+                    },
+                },
+            )
+        })
+        .collect();
+    Slot::of(
+        rows,
+        Standing::absent("no tool record of a read was recorded on the change"),
     )
 }
 
@@ -1594,6 +1724,64 @@ fn describe(detail: &Detail) -> String {
             "debt declared `{event_id}`: {debt_reason}{}",
             missing
                 .map(|missing| format!(" (missing {})", missing.as_str()))
+                .unwrap_or_default()
+        ),
+        Detail::Read {
+            event_id,
+            record,
+            episode,
+            path,
+            digest,
+            coverage,
+            compared_at,
+            blob,
+            artifact,
+            capture,
+        } => {
+            let mut text =
+                format!("read `{record}` of {path} ({coverage}), {digest}, episode {episode}");
+            match (blob, compared_at) {
+                (Some(blob), _) => text.push_str(&format!(
+                    "; blob {} at {} {}",
+                    blob.blob,
+                    blob.revision,
+                    standing_label(&blob.standing).trim_end()
+                )),
+                (None, Some(revision)) => text.push_str(&format!(
+                    "; no blob: the returned bytes do not match {revision}"
+                )),
+                (None, None) => {}
+            }
+            if let Some(artifact) = artifact {
+                text.push_str(&format!(
+                    "; artifact {} ({})",
+                    artifact.file, artifact.comparison
+                ));
+            }
+            text.push_str(&format!(" (event `{event_id}`)"));
+            match (&capture.capture, &capture.declarant) {
+                (Some(CaptureState::Pinned), Some(declarant)) => {
+                    text.push_str(&format!("; recording pinned, reported by {declarant}"))
+                }
+                (Some(CaptureState::Unpinned), Some(declarant)) => text.push_str(&format!(
+                    " — at risk: recording reported unpinned by {declarant}"
+                )),
+                _ => text.push_str(" — at risk: no capture report pins the recording"),
+            }
+            text
+        }
+        Detail::Declaration {
+            event_id,
+            relation,
+            target,
+            citation,
+            declarant: _,
+        } => format!(
+            "{} {target}{} (event `{event_id}`)",
+            relation.as_str(),
+            citation
+                .as_deref()
+                .map(|citation| format!(", citing read `{citation}`"))
                 .unwrap_or_default()
         ),
         Detail::DebtDischarge {
