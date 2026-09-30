@@ -1177,6 +1177,15 @@ pub enum Payload {
         /// it verify nothing.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         signature_only: Vec<String>,
+        /// Ref moves performed by the rewrite. External maps and records
+        /// without this field have no recorded ref-move information.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        refs: BTreeMap<String, crate::rewrite::RefMove>,
+    },
+    /// Withdraw one repository rewrite map without undoing any Git ref moves.
+    HistoryRewriteWithdrawn {
+        rewrite_event_id: String,
+        reason: String,
     },
     /// A caller-declared review pass over exact change and patchset members.
     /// The declaration records coverage only; it grants no authority to any
@@ -1495,6 +1504,7 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         // Repository-scoped: it is never appended to a change's log, so no
         // change-phase policy applies to it.
         Payload::HistoryRewritten { .. }
+        | Payload::HistoryRewriteWithdrawn { .. }
         | Payload::ReviewPassOpened { .. }
         | Payload::ReviewPassCompleted { .. }
         | Payload::ReviewPassAbandoned { .. } => AppendPermission::AnyPhaseFact,

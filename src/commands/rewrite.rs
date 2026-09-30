@@ -572,6 +572,7 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent) -> Result<String> {
             intent.mapping.clone(),
             intent.reason.clone(),
             intent.tool.clone(),
+            intent.refs.clone(),
         )?,
     };
     // The map is recorded and every ref names a commit it describes, so
@@ -592,16 +593,19 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent) -> Result<String> {
 /// recorded it. Recording it a second time would put two events on record
 /// claiming one rewrite.
 fn recorded_as(store: &Store, intent: &RewriteIntent) -> Result<Option<String>> {
-    Ok(store
-        .load_repository_events()?
-        .into_iter()
+    let events = store.load_repository_events()?;
+    let borrowed: Vec<_> = events.iter().collect();
+    let withdrawn = crate::rewrite::withdrawn_event_ids(&borrowed)?;
+    Ok(events
+        .iter()
+        .filter(|event| !withdrawn.contains(event.event_id.as_str()))
         .find(|event| {
             matches!(
                 &event.payload,
                 Payload::HistoryRewritten { mapping, .. } if mapping == &intent.mapping
             )
         })
-        .map(|event| event.event_id))
+        .map(|event| event.event_id.clone()))
 }
 
 /// A fault the test suite injects to stop a rewrite between two of its
