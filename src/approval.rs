@@ -496,6 +496,7 @@ mod tests {
             claim_actor: None,
             journal_refs: Vec::new(),
             thread: None,
+            candidate: None,
             provenance_mismatch: None,
             created_at: DateTime::UNIX_EPOCH,
         }

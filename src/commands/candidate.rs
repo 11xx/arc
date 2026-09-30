@@ -10,7 +10,7 @@ use crate::gitio;
 use crate::ids;
 use crate::model::{
     CandidateBriefRef, CandidateJudgement, CaptureState, DeclaredRelation, DeclaredTarget,
-    InferredBlob, Payload, ReadArtifact, ReadCoverage, RelationSubject,
+    InferredBlob, Payload, ReadArtifact, ReadCoverage, RelationSubject, VerifyResult,
 };
 use crate::relations::Relations;
 use crate::store::Store;
@@ -295,6 +295,55 @@ struct CandidateView {
     retired: Option<RetirementView>,
     pin: PinView,
     relations: RelationsView,
+    evaluations: Vec<EvaluationView>,
+    selections: Vec<SelectionView>,
+    /// Promotion refs of this candidate no `candidate-promoted` event
+    /// records.
+    interrupted_promotions: Vec<InterruptedView>,
+}
+
+#[derive(Serialize)]
+struct EvaluationView {
+    event_id: String,
+    gate: String,
+    command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    environment: Option<String>,
+    result: VerifyResult,
+    recorded_by: String,
+    recorded_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct SelectionView {
+    event_id: String,
+    destination: String,
+    /// `promoted`, `superseded`, or `unpromoted`.
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patchset_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    promotion_event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded_by: Option<String>,
+    /// The revision the promotion moved the destination to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
+    target: String,
+    reuse: crate::policy::EvaluationReuse,
+    evaluations: Vec<crate::model::SelectedEvaluation>,
+    reads: Vec<crate::model::SelectedRead>,
+    contributors: Vec<String>,
+    selector: String,
+    rationale: String,
+    recorded_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct InterruptedView {
+    reference: String,
+    selection: String,
+    commit: String,
 }
 
 /// A candidate's read records and declarations. A read carries its record,
@@ -427,9 +476,10 @@ fn emit(ctx: &Ctx, ledger: &Ledger, selected: Vec<&Registration>, json: bool) ->
             candidates: candidates.into_iter().map(str::to_string).collect(),
         })
         .collect::<Vec<_>>();
+    let interrupted = super::selection::interrupted_promotions(&ctx.cwd, ledger)?;
     let candidates = selected
         .into_iter()
-        .map(|registration| view(ledger, &relations, registration, &pins))
+        .map(|registration| view(ledger, &relations, registration, &pins, &interrupted))
         .collect::<Vec<_>>();
     let document = CandidateDocument {
         schema: CANDIDATE_SCHEMA,
@@ -449,8 +499,10 @@ fn view(
     relations: &Relations,
     registration: &Registration,
     pins: &BTreeMap<String, String>,
+    interrupted: &[super::selection::Interrupted],
 ) -> CandidateView {
     let value = pins.get(&registration.candidate_id).cloned();
+    let id = registration.candidate_id.as_str();
     CandidateView {
         candidate_id: registration.candidate_id.clone(),
         tree: registration.tree.clone(),
@@ -486,6 +538,62 @@ fn view(
             value,
         },
         relations: relations_view(relations, &registration.candidate_id),
+        evaluations: ledger
+            .evaluations_of(id)
+            .into_iter()
+            .map(|evaluation| EvaluationView {
+                event_id: evaluation.event_id.clone(),
+                gate: evaluation.gate.clone(),
+                command: evaluation.command.clone(),
+                environment: evaluation
+                    .environment
+                    .as_ref()
+                    .map(|environment| environment.identity.clone()),
+                result: evaluation.result,
+                recorded_by: evaluation.declarant.clone(),
+                recorded_at: evaluation.recorded_at,
+            })
+            .collect(),
+        selections: ledger
+            .selections()
+            .filter(|selection| selection.candidate_id == id)
+            .map(|selection| {
+                let promotion = ledger.promotion_of(&selection.event_id);
+                let superseded_by = ledger
+                    .superseded_by(&selection.event_id)
+                    .map(|later| later.event_id.clone());
+                SelectionView {
+                    event_id: selection.event_id.clone(),
+                    destination: selection.change_id.clone(),
+                    status: match (promotion, &superseded_by) {
+                        (Some(_), _) => "promoted",
+                        (None, Some(_)) => "superseded",
+                        (None, None) => "unpromoted",
+                    },
+                    patchset_id: promotion.map(|promotion| promotion.patchset_id.clone()),
+                    promotion_event_id: promotion.map(|promotion| promotion.event_id.clone()),
+                    superseded_by,
+                    revision: promotion.map(|promotion| promotion.revision.clone()),
+                    target: selection.target.clone(),
+                    reuse: selection.reuse,
+                    evaluations: selection.evaluations.clone(),
+                    reads: selection.reads.clone(),
+                    contributors: selection.contributors.clone(),
+                    selector: selection.selector.clone(),
+                    rationale: selection.rationale.clone(),
+                    recorded_at: selection.recorded_at,
+                }
+            })
+            .collect(),
+        interrupted_promotions: interrupted
+            .iter()
+            .filter(|interrupted| interrupted.candidate_id == id)
+            .map(|interrupted| InterruptedView {
+                reference: interrupted.reference.clone(),
+                selection: interrupted.selection.clone(),
+                commit: interrupted.commit.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -600,6 +708,39 @@ fn render(document: &CandidateDocument) {
             println!(
                 "  read [recorded]: `{}` of {} ({}), {}, episode {}{blob}; {capture}",
                 read.record, read.path, read.coverage, read.digest, read.episode
+            );
+        }
+        for evaluation in &candidate.evaluations {
+            let result = match evaluation.result {
+                VerifyResult::Pass => "pass",
+                _ => "fail",
+            };
+            let environment = evaluation
+                .environment
+                .as_deref()
+                .map(|identity| format!(" in {identity}"))
+                .unwrap_or_default();
+            println!(
+                "  evaluation {}: gate {} {result}{environment}",
+                evaluation.event_id, evaluation.gate
+            );
+        }
+        for selection in &candidate.selections {
+            let status = match (&selection.patchset_id, &selection.superseded_by) {
+                (Some(patchset), _) => format!("promoted as {patchset}"),
+                (None, Some(later)) => format!("superseded by {later}"),
+                (None, None) => "not promoted".to_string(),
+            };
+            println!(
+                "  selection {} into {} by {}: {status}",
+                selection.event_id, selection.destination, selection.selector
+            );
+        }
+        for interrupted in &candidate.interrupted_promotions {
+            println!(
+                "  interrupted promotion: {} holds {}; `arc candidate promote {}` completes or \
+                 discards it",
+                interrupted.reference, interrupted.commit, interrupted.selection
             );
         }
         for declaration in &candidate.relations.declarations {

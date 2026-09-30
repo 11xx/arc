@@ -26,6 +26,7 @@ mod relations;
 mod render;
 mod replica;
 mod rewrite;
+mod selection;
 mod session_store;
 mod state;
 mod status;
@@ -339,12 +340,17 @@ enum Cmd {
     /// lock.
     ///
     /// Eight slots, always all printed: contract (the brief in force, its
-    /// planner credit, plan, base revision, and causes), supplied context
-    /// (the journal artifact the change was opened from, and every
-    /// patchset's journal references with the operation that supplied each,
-    /// `begin`, `brief`, `flag`, or `unrecorded`, and its thread), declared
-    /// facts (every kept fact, with the events it cites), observed reads, rejected alternatives (kept facts of kind
-    /// `rejected`), evaluation (each counted gate's evidence event, tree,
+    /// planner credit, plan, base revision, and causes, and the selection
+    /// and promotion behind each patchset a candidate promotion recorded),
+    /// supplied context (the journal artifact the change was opened from,
+    /// and every patchset's journal references with the operation that
+    /// supplied each, `begin`, `brief`, `flag`, or `unrecorded`, and its
+    /// thread), declared facts (every kept fact, with the events it cites),
+    /// observed reads, rejected alternatives (kept facts of kind `rejected`,
+    /// and each registration answering the same brief version as a promoted
+    /// candidate, `declared` with its judgements or `inferred` while
+    /// unjudged; judgements are read as they stand now, whatever `--at`
+    /// names), evaluation (each counted gate's evidence event, tree,
     /// environment digest, timeout, reuse, and falsification), coverage at
     /// acceptance (the verdicts, waiver, and debt the integration event's
     /// authorization recorded), and later knowledge (audits, audit findings
@@ -543,6 +549,18 @@ enum Cmd {
         /// External cause, when no earlier ledger object represents the reason
         #[arg(long)]
         cause_note: Option<String>,
+        /// A read the contract requires of whoever answers it (repeatable):
+        /// a journal artifact, `<file>` or `<journal-dir>::<file>`, at
+        /// `@sha256:<hex>` or at the body digest read now; or a file at a
+        /// revision, `<revision>:<path>[:<from>-<to>]`, recorded as its blob
+        /// and the one-based inclusive line range, whole when none is given.
+        /// A locator that resolves to nothing is refused. `arc candidate
+        /// select` meets a requirement only with a tool read at that version
+        /// covering that extent. An artifact requirement is met by digest
+        /// equality with the text a tool returned, so a tool that decorates
+        /// what it returns, like a line-numbered `Read`, never meets one
+        #[arg(long = "must-read")]
+        must_read: Vec<String>,
         /// Emit the versioned structured brief projection.
         #[arg(long)]
         json: bool,
@@ -2182,7 +2200,9 @@ enum CandidateCmd {
         id: Option<String>,
     },
     /// Show one candidate: tree, contract, producers, parents, adoptions,
-    /// episodes, judgements, retirement, whether its pin holds the tree, and
+    /// episodes, judgements, retirement, whether its pin holds the tree,
+    /// evaluations, selections naming it (promoted, superseded, or not
+    /// promoted), promotion refs no `candidate-promoted` event records, and
     /// every registration sharing its tree. `--json` emits `arc-candidate/1`
     Show {
         /// Candidate id
@@ -2221,14 +2241,112 @@ enum CandidateCmd {
         reason: String,
     },
     /// Delete `refs/arc/candidate/<id>` and record `candidate-retired`, only
-    /// when no root reaches the candidate. Roots are selections, promotions,
-    /// and declared roots, and a root reaches what its candidate's parents
-    /// and adoptions carry; when one does, exit 1 naming it, writing nothing.
+    /// when no root reaches the candidate. Roots are selections and
+    /// promotions, and a root reaches what its candidate's parents and
+    /// adoptions carry; when one does, exit 1 naming it, writing nothing.
     /// The registration stands. Retiring a retired candidate says so and
     /// exits 0. arc never retires a candidate on its own
     Retire {
         /// Candidate id
         id: String,
+    },
+    /// Evaluate a candidate: run the required gates of its brief's change,
+    /// as that change's target declares them, against the candidate's tree.
+    ///
+    /// The tree is checked out in a scratch worktree, removed afterwards,
+    /// and each gate's environment probe runs there first. Each gate records
+    /// `candidate-verified` as a repository event keyed by the tree, with
+    /// the gate, its command, timeout, and environment probe as declared
+    /// when it ran, the environment identity the probe yielded, and the
+    /// result; `evaluation: <event>` names it for `select --evaluation`.
+    /// Exits 0 when every gate run passes and 1 otherwise. Refused:
+    /// `unknown-candidate`; `unknown-gate` for a --gate the change is not
+    /// required to pass; `target-unreadable` when the target cannot be read
+    Verify {
+        /// Candidate id
+        id: String,
+        /// Run only this required gate
+        #[arg(long)]
+        gate: Option<String>,
+    },
+    /// Validate a named selection and, when every ground holds, record it
+    /// and promote the chosen candidate into its brief's change.
+    ///
+    /// arc never chooses: the proposal names the registration, the
+    /// destination, the target head decided against, and the evaluations
+    /// relied on. Every failing ground is reported, one line each led by its
+    /// code, exit 1 and nothing written: `reuse-policy-undeclared` without
+    /// `[candidates] evaluation_reuse`; `unknown-candidate`, and
+    /// `candidate-retired` for a registration whose pin was released;
+    /// `destination-other-contract` when the registration answers another
+    /// change's brief; `destination-closed`;
+    /// `target-moved` when --target is not the target head now;
+    /// `environment-unobserved` for a gate whose probe yields no identity at
+    /// the shipped tree. Each required gate needs a named, passing evaluation
+    /// at the shipped tree (the chosen registration's), under the declaration
+    /// in force and in the environment observed now, from the chosen
+    /// registration or, under `matching-coordinates`, from any registration
+    /// whose tree, declaration, and environment match; otherwise, per named
+    /// evaluation, `unrecorded`, `other-registration` (under `never`),
+    /// `other-tree`, `other-declaration`, `environment-unrecorded`,
+    /// `environment-other`, or `failed`, and `no-evaluation` for a gate none
+    /// is named for. Each `--must-read` of the registration's brief version
+    /// needs a tool read (`arc context read`) on the registration or one
+    /// along its parent chain, by an episode one of them cites, at the
+    /// required version (an artifact's body digest; a file's blob, inferred
+    /// or by the digest of its bytes over the range read), covering the
+    /// required extent; otherwise `partial`, `unknown-coverage`,
+    /// `only-declared`, `only-supplied` (the contract's own plan or opening
+    /// artifact), or `not-read`. Reads through an adoption do not count.
+    ///
+    /// A permitted selection records `candidate-selected` with its basis:
+    /// the chosen registration, destination head, target, the evaluation
+    /// and read meeting each requirement, the reuse policy, the
+    /// contributors (the producers along the parent chain), the selector,
+    /// and the rationale. A selection replacing an unpromoted one for the
+    /// same destination names it as superseded. The promotion then runs as
+    /// `arc candidate promote` describes; its refusal leaves the selection
+    /// standing without one
+    Select {
+        /// The registration chosen
+        #[arg(long)]
+        chosen: String,
+        /// The destination change: the change whose brief it answers
+        #[arg(long)]
+        into: String,
+        /// The destination's target head the choice was made against
+        #[arg(long)]
+        target: String,
+        /// A `candidate-verified` event relied on for a required gate
+        /// (repeatable)
+        #[arg(long = "evaluation")]
+        evaluations: Vec<String>,
+        /// Why this candidate: text, or `@<file>`
+        #[arg(long)]
+        rationale: String,
+    },
+    /// Promote a recorded selection, or finish one an interrupted run left.
+    ///
+    /// The promotion holds the destination's transition lock and the
+    /// repository-events lock. It re-reads the destination head and target
+    /// and refuses `basis-moved` when either differs from the selection's
+    /// basis, recording nothing: a basis is never reused, so select again.
+    /// It refuses a checkout of the destination branch with tracked
+    /// modifications, or one holding untracked or ignored paths the update
+    /// would write. It commits the shipped tree onto the destination head
+    /// with the selector as committer, keeps it at
+    /// `refs/arc/candidate-promotion/<candidate>/<selection>`, moves the
+    /// branch from the head it read (a concurrent move stops the promotion
+    /// there), updates the checkout, records a patchset with the selection's
+    /// contributors and a candidate link, then `candidate-promoted`.
+    ///
+    /// Given a promotion ref with no `candidate-promoted` event, it records
+    /// the patchset and the promotion when the branch already points at the
+    /// ref's commit, and otherwise deletes the ref and says so. A promoted
+    /// selection is a no-op that says so; a superseded one is refused
+    Promote {
+        /// The `candidate-selected` event
+        selection: String,
     },
 }
 
@@ -2994,6 +3112,7 @@ fn run(cli: Cli) -> Result<i32> {
             probes_json,
             caused_by,
             cause_note,
+            must_read,
             json,
         } => {
             let change = infer(change.as_deref())?;
@@ -3011,6 +3130,7 @@ fn run(cli: Cli) -> Result<i32> {
                 probes_json,
                 caused_by,
                 cause_note,
+                must_read,
                 json,
             )
         }
@@ -3899,6 +4019,26 @@ fn run(cli: Cli) -> Result<i32> {
                 reason,
             } => commands::candidate::judge(&ctx, id, superseded_by, reason).map(|_| 0),
             CandidateCmd::Retire { id } => commands::candidate::retire(&ctx, id).map(|_| 0),
+            CandidateCmd::Verify { id, gate } => {
+                commands::selection::verify(&ctx, &id, gate.as_deref())
+            }
+            CandidateCmd::Select {
+                chosen,
+                into,
+                target,
+                evaluations,
+                rationale,
+            } => commands::selection::select(
+                &ctx,
+                commands::selection::SelectArgs {
+                    chosen,
+                    into,
+                    target,
+                    evaluations,
+                    rationale,
+                },
+            ),
+            CandidateCmd::Promote { selection } => commands::selection::promote(&ctx, &selection),
         },
         Cmd::Context { cmd } => match cmd {
             ContextCmd::Read {

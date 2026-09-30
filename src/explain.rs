@@ -240,6 +240,27 @@ pub enum Detail {
         scheme: String,
         id: String,
     },
+    /// The selection and promotion a patchset was recorded from.
+    Promotion {
+        patchset_id: String,
+        candidate_id: String,
+        selection: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        promotion_event_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        selector: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rationale: Option<String>,
+    },
+    /// A registration answering the same brief version as a promoted one.
+    Alternative {
+        candidate_id: String,
+        tree: String,
+        producers: Vec<String>,
+        /// The promoted registration it stood beside.
+        promoted: String,
+        judgements: Vec<String>,
+    },
     Kept {
         event_id: String,
         kind: String,
@@ -470,7 +491,8 @@ fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
         Some(closure) => kebab(&closure.outcome),
     };
 
-    let (subject_state, contract, evaluation, coverage, later) = match &integration {
+    let candidates = commands::candidate::load_ledger(&store)?;
+    let (subject_state, mut contract, evaluation, coverage, later) = match &integration {
         Some(integration_id) => {
             let integration_position = events
                 .iter()
@@ -542,6 +564,13 @@ fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
         }
     };
 
+    contract
+        .rows
+        .extend(promotion_rows(&subject_state, &candidates));
+    if !contract.rows.is_empty() {
+        contract.absence = None;
+    }
+
     Ok(Explanation {
         schema: EXPLAIN_SCHEMA,
         change_id: full.change_id.clone(),
@@ -554,7 +583,7 @@ fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
         supplied_context: supplied_context(ctx, &subject_state),
         declared_facts: declared_facts(&subject_state, &relations, &subject),
         observed_reads: observed_reads(&relations, &subject),
-        rejected_alternatives: rejected_alternatives(&subject_state),
+        rejected_alternatives: rejected_alternatives(&subject_state, &candidates),
         evaluation,
         coverage_at_acceptance: coverage,
         later_knowledge: later,
@@ -888,16 +917,108 @@ fn observed_reads(relations: &Relations, subject: &RelationSubject) -> Slot {
     )
 }
 
-fn rejected_alternatives(state: &ChangeState) -> Slot {
+/// Alternatives kept as facts on the change, then every registration
+/// answering the same brief version as a candidate promoted into it, with
+/// its judgements. A judgement is its declarant's claim; an unjudged
+/// sibling is an alternative only by inference.
+fn rejected_alternatives(state: &ChangeState, candidates: &crate::candidate::Ledger) -> Slot {
+    let mut rows: Vec<Row> = state
+        .kept
+        .iter()
+        .filter(|kept| kept.kind == crate::model::KeptKind::Rejected)
+        .map(kept_row)
+        .collect();
+    let mut shown = std::collections::BTreeSet::new();
+    for promoted in promoted_candidates(state) {
+        let Some(registration) = candidates.registration(promoted) else {
+            continue;
+        };
+        for sibling in candidates.siblings(registration) {
+            if !shown.insert(sibling.candidate_id.clone()) || sibling.candidate_id == promoted {
+                continue;
+            }
+            let judgements: Vec<String> = candidates
+                .judgements_of(&sibling.candidate_id)
+                .into_iter()
+                .map(|judgement| {
+                    let judged = match &judgement.judgement {
+                        crate::model::CandidateJudgement::Rejected => "rejected".to_string(),
+                        crate::model::CandidateJudgement::SupersededBy { candidate_id } => {
+                            format!("superseded by {candidate_id}")
+                        }
+                    };
+                    format!("{judged} by {}: {}", judgement.declarant, judgement.reason)
+                })
+                .collect();
+            let standing = if judgements.is_empty() {
+                Standing::inferred(format!(
+                    "a registration answering the same brief version as the promoted {promoted}; \
+                     nobody has judged it"
+                ))
+            } else {
+                Standing::declared("judged by its declarant; a judgement is a claim")
+            };
+            rows.push(row(
+                standing,
+                Detail::Alternative {
+                    candidate_id: sibling.candidate_id.clone(),
+                    tree: sibling.tree.clone(),
+                    producers: sibling.producers.clone(),
+                    promoted: promoted.to_string(),
+                    judgements,
+                },
+            ));
+        }
+    }
     Slot::of(
-        state
-            .kept
-            .iter()
-            .filter(|kept| kept.kind == crate::model::KeptKind::Rejected)
-            .map(kept_row)
-            .collect(),
+        rows,
         Standing::absent("no rejected alternative was kept on the change"),
     )
+}
+
+/// The candidates promoted into the change, in patchset order, each once.
+fn promoted_candidates(state: &ChangeState) -> Vec<&str> {
+    let mut seen = Vec::new();
+    for patchset in &state.patchsets {
+        if let Some(link) = &patchset.candidate {
+            if !seen.contains(&link.candidate_id.as_str()) {
+                seen.push(link.candidate_id.as_str());
+            }
+        }
+    }
+    seen
+}
+
+/// One row per patchset a promotion recorded, naming the selection that
+/// permitted it and the promotion event that observed it.
+fn promotion_rows(state: &ChangeState, candidates: &crate::candidate::Ledger) -> Vec<Row> {
+    state
+        .patchsets
+        .iter()
+        .filter_map(|patchset| {
+            let link = patchset.candidate.as_ref()?;
+            let selection = candidates.selection(&link.selection);
+            let promotion = candidates.promotion_of(&link.selection);
+            let standing = match promotion {
+                Some(_) => Standing::recorded(),
+                None => Standing::unavailable(format!(
+                    "no candidate-promoted event records selection {} in this repository",
+                    link.selection
+                )),
+            };
+            Some(row(
+                standing,
+                Detail::Promotion {
+                    patchset_id: patchset.id.clone(),
+                    candidate_id: link.candidate_id.clone(),
+                    selection: link.selection.clone(),
+                    promotion_event_id: promotion.map(|promotion| promotion.event_id.clone()),
+                    selector: selection.map(|selection| selection.selector.clone()),
+                    rationale: selection.map(|selection| selection.rationale.clone()),
+                },
+            ))
+        })
+        .collect()
 }
 
 fn gate_row(
@@ -1524,6 +1645,37 @@ fn describe(detail: &Detail) -> String {
             scheme,
             id,
         } => format!("{patchset_id} thread {scheme}:{id}"),
+        Detail::Promotion {
+            patchset_id,
+            candidate_id,
+            selection,
+            promotion_event_id,
+            selector,
+            ..
+        } => format!(
+            "{patchset_id} promoted from candidate {candidate_id} by selection `{selection}` \
+             (selector {}, promotion {})",
+            opt(selector),
+            promotion_event_id
+                .as_deref()
+                .map(|id| format!("`{id}`"))
+                .unwrap_or_else(|| "unrecorded".to_string())
+        ),
+        Detail::Alternative {
+            candidate_id,
+            producers,
+            promoted,
+            judgements,
+            ..
+        } => format!(
+            "candidate {candidate_id} by {} beside promoted {promoted}: {}",
+            producers.join(", "),
+            if judgements.is_empty() {
+                "unjudged".to_string()
+            } else {
+                judgements.join("; ")
+            }
+        ),
         Detail::Kept {
             event_id,
             kind,

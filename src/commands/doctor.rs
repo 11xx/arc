@@ -489,6 +489,8 @@ fn inspect_refs(
 /// A pin with no registration holds content nothing names, which is
 /// housekeeping. A registration a root reaches whose pin is gone is content
 /// someone still wants and Git may already have collected, which is a problem.
+/// So is a promotion ref no `candidate-promoted` event records: a promotion
+/// that stopped partway, which `arc candidate promote` finishes or discards.
 fn inspect_candidates(
     ctx: &Ctx,
     store: &Store,
@@ -519,6 +521,25 @@ fn inspect_candidates(
             });
         }
         pinned.insert(candidate_id);
+    }
+    for interrupted in commands::selection::interrupted_promotions(&ctx.cwd, &ledger)? {
+        let detail = if interrupted.selection_known {
+            format!(
+                "{} holds {} and no candidate-promoted event records it; run `arc candidate \
+                 promote {}` to complete or discard it",
+                interrupted.reference, interrupted.commit, interrupted.selection
+            )
+        } else {
+            format!(
+                "{} holds {} for selection {}, which is not recorded; delete it with `git \
+                 update-ref -d`",
+                interrupted.reference, interrupted.commit, interrupted.selection
+            )
+        };
+        problems.push(Finding {
+            code: "interrupted-promotion",
+            detail,
+        });
     }
     for (registration, roots) in ledger.rooted_without_pin(&pinned) {
         problems.push(Finding {

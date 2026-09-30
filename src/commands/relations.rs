@@ -11,7 +11,7 @@ use crate::model::{
     CaptureState, DeclaredRelation, DeclaredTarget, Event, InferredBlob, Payload, ReadArtifact,
     ReadCoverage, RelationSubject, CONTENT_MATCHES_REVISION,
 };
-use crate::relations::{self, Relations};
+use crate::relations::{self, line_range, Relations};
 use crate::store::{Store, TransitionLock};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -462,32 +462,10 @@ fn infer_blob(ctx: &Ctx, revision: &str, read: &ToolRead) -> Result<Option<Infer
     }))
 }
 
-/// Lines `from` through `to`, one-based and inclusive, each with its line
-/// terminator, clipped at the end of the blob. A range starting past the end
-/// covers nothing.
-fn line_range(bytes: &[u8], from: u64, to: u64) -> Option<&[u8]> {
-    let mut starts = vec![0usize];
-    starts.extend(
-        bytes
-            .iter()
-            .enumerate()
-            .filter(|(_, byte)| **byte == b'\n')
-            .map(|(index, _)| index + 1)
-            .filter(|index| *index < bytes.len()),
-    );
-    let first = usize::try_from(from.checked_sub(1)?).ok()?;
-    let start = *starts.get(first)?;
-    let end = usize::try_from(to)
-        .ok()
-        .and_then(|to| starts.get(to).copied())
-        .unwrap_or(bytes.len());
-    Some(&bytes[start..end])
-}
-
 /// A read path as a path inside the repository: relative paths are taken
 /// from the current directory, and an absolute path must lie inside one of
 /// the repository's worktrees. Anything else names no repository path.
-fn repository_path(cwd: &Path, raw: &str) -> Result<Option<String>> {
+pub(crate) fn repository_path(cwd: &Path, raw: &str) -> Result<Option<String>> {
     let path = Path::new(raw);
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -702,19 +680,5 @@ fn subject_holding(store: &Store, record: &str) -> Result<Subject> {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_line_range_keeps_its_terminators_and_clips_at_the_end() {
-        let bytes = b"one\ntwo\nthree\n";
-        assert_eq!(line_range(bytes, 2, 2), Some(&b"two\n"[..]));
-        assert_eq!(line_range(bytes, 2, 9), Some(&b"two\nthree\n"[..]));
-        assert_eq!(line_range(bytes, 4, 5), None);
-        assert_eq!(line_range(b"a\nb", 2, 2), Some(&b"b"[..]));
     }
 }

@@ -35,7 +35,7 @@ pub struct Candidates {
 
 /// Whether evaluation evidence recorded on one registration counts for
 /// another.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EvaluationReuse {
     /// Evidence counts where tree, declaration, and recorded environment are

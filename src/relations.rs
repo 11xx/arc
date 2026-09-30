@@ -276,6 +276,10 @@ impl Relations {
         self.reads.iter()
     }
 
+    pub fn declarations(&self) -> impl Iterator<Item = &Declaration> {
+        self.declarations.iter()
+    }
+
     pub fn declarations_of<'a>(
         &'a self,
         subject: &'a RelationSubject,
@@ -293,6 +297,28 @@ impl Relations {
             .rev()
             .find(|capture| capture.subject == read.subject && capture.record == read.record)
     }
+}
+
+/// Lines `from` through `to`, one-based and inclusive, each with its line
+/// terminator, clipped at the end of the blob. A range starting past the end
+/// covers nothing.
+pub fn line_range(bytes: &[u8], from: u64, to: u64) -> Option<&[u8]> {
+    let mut starts = vec![0usize];
+    starts.extend(
+        bytes
+            .iter()
+            .enumerate()
+            .filter(|(_, byte)| **byte == b'\n')
+            .map(|(index, _)| index + 1)
+            .filter(|index| *index < bytes.len()),
+    );
+    let first = usize::try_from(from.checked_sub(1)?).ok()?;
+    let start = *starts.get(first)?;
+    let end = usize::try_from(to)
+        .ok()
+        .and_then(|to| starts.get(to).copied())
+        .unwrap_or(bytes.len());
+    Some(&bytes[start..end])
 }
 
 pub fn is_digest(value: &str) -> bool {
@@ -427,5 +453,14 @@ mod tests {
             Relations::replay([&bad]).unwrap_err().code(),
             "malformed-relation-event"
         );
+    }
+
+    #[test]
+    fn a_line_range_keeps_its_terminators_and_clips_at_the_end() {
+        let bytes = b"one\ntwo\nthree\n";
+        assert_eq!(line_range(bytes, 2, 2), Some(&b"two\n"[..]));
+        assert_eq!(line_range(bytes, 2, 9), Some(&b"two\nthree\n"[..]));
+        assert_eq!(line_range(bytes, 4, 5), None);
+        assert_eq!(line_range(b"a\nb", 2, 2), Some(&b"b"[..]));
     }
 }
