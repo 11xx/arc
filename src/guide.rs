@@ -1339,6 +1339,9 @@ SCHEMAS
     `journal-events/1`               events.jsonl, streamed by arc journal events
     `arc-journal-spool/1`            .arc/outbox/<ts>-<kind>-<topic>.json
 
+  Imports accept `arc-bundle/5` and `arc-replica-bundle/2` alongside the
+  current export formats. Their absent model provenance stays absent.
+
   Internal:
     store format 7                   .git/arc/config.json and the change ledger
     `arc-replica-import/2`           receipt of an imported replica bundle
