@@ -82,7 +82,7 @@ fn writes_resolve_the_newest_selection_each_time_and_render_its_coordinate() {
         shown["model_attributions"][event["event_id"].as_str().unwrap()]["model_observation"],
         event["model_observation"]
     );
-    let explained = stdout(acting(&repo).args(["explain", &change]));
+    let explained = stdout(acting(&repo).args(["log", &change]));
     assert!(explained.contains("source: resolved"), "{explained}");
     assert!(
         explained.contains("id a2 (inside the acting turn)"),
@@ -164,7 +164,7 @@ fn declarations_keep_both_values_in_ledger_journal_and_replica_events() {
     assert_eq!(events.last().unwrap()["model_source"], "flag");
     assert_eq!(events.last().unwrap()["model"], "m#high");
     assert!(events.last().unwrap().get("model_disagreement").is_none());
-    let explained = stdout(acting(&repo).args(["explain", &change]));
+    let explained = stdout(acting(&repo).args(["log", &change]));
     assert!(
         explained.contains("declared: m#low, observed: m#high"),
         "{explained}"
@@ -383,4 +383,16 @@ fn reattribution_keeps_model_provenance_consistent_with_the_repaired_identity() 
         .unwrap();
     assert!(event.get("model_observation").is_none());
     assert!(event.get("model_disagreement").is_none());
+}
+
+#[test]
+fn explain_is_an_unknown_command() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .arg("explain")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "unrecognized subcommand 'explain'",
+        ));
 }

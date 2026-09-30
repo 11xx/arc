@@ -376,7 +376,6 @@ enum Cmd {
     /// review batch records several, so it renders as several lines. This is
     /// the ledger, not Git history: for commits, use `git log`. Model sources,
     /// observation coordinates, and declaration disagreements accompany each fact
-    #[command(visible_alias = "explain")]
     Log {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
