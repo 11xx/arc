@@ -597,8 +597,8 @@ fn contract_slot(state: &ChangeState, subject: Option<&Patchset>) -> Slot {
 /// The body digest a name resolves to now, compared the way `snapshot
 /// --journal-ref` computed the recorded one.
 fn resolve_reference(ctx: &Ctx, file: &str) -> std::result::Result<String, (Resolution, String)> {
-    match crate::journal::artifact_reference(ctx, file) {
-        Ok(reference) => Ok(reference.digest),
+    match crate::journal::artifact_digest(ctx, file) {
+        Ok(digest) => Ok(digest),
         Err(error) => {
             let hot = match crate::journal::resolve_dir(&ctx.cwd) {
                 Ok(hot) => hot,
