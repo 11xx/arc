@@ -77,7 +77,7 @@ fn writes_resolve_the_newest_selection_each_time_and_render_its_coordinate() {
     assert_eq!(event["model_observation"]["head_read"], true);
     let shown: Value =
         serde_json::from_str(&stdout(acting(&repo).args(["show", &change, "--json"]))).unwrap();
-    assert_eq!(shown["schema"], "arc-state/4");
+    assert_eq!(shown["schema"], "arc-state/3");
     assert_eq!(
         shown["model_attributions"][event["event_id"].as_str().unwrap()]["model_observation"],
         event["model_observation"]
@@ -386,15 +386,66 @@ fn reattribution_keeps_model_provenance_consistent_with_the_repaired_identity() 
 }
 
 #[test]
-fn explain_is_an_unknown_command() {
+fn model_provenance_leaves_the_explain_projection_unchanged() {
     let repo = Repo::new();
-    repo.arc(&repo.root)
-        .arg("explain")
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "unrecognized subcommand 'explain'",
-        ));
+    recording(
+        &repo,
+        &[
+            prompt("u1", "2026-01-01T10:00:00Z"),
+            assistant("a1", "2026-01-01T10:00:01Z", "high"),
+        ],
+    );
+    let change = begin(&repo);
+    acting(&repo).args(["snapshot", &change]).assert().success();
+    let project = |args: &[&str]| {
+        let output = acting(&repo).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let json = project(&["explain", &change, "--json"]);
+    let view: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(view["schema"], "arc-explain/1");
+    let markdown = project(&["explain", &change]);
+    let events = event_dir(&repo, &change);
+    let at = fs::read_dir(&events)
+        .unwrap()
+        .map(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .max()
+        .unwrap();
+    let historical_json = project(&["explain", &change, "--at", &at, "--json"]);
+    let historical_markdown = project(&["explain", &change, "--at", &at]);
+    for entry in fs::read_dir(events).unwrap() {
+        let path = entry.unwrap().path();
+        let mut event: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(event.get("model_source").is_some());
+        let object = event.as_object_mut().unwrap();
+        object.remove("model_source");
+        object.remove("model_observation");
+        object.remove("model_disagreement");
+        fs::write(path, serde_json::to_vec(&event).unwrap()).unwrap();
+    }
+    assert_eq!(project(&["explain", &change, "--json"]), json);
+    assert_eq!(project(&["explain", &change]), markdown);
+    assert_eq!(
+        project(&["explain", &change, "--at", &at, "--json"]),
+        historical_json
+    );
+    assert_eq!(
+        project(&["explain", &change, "--at", &at]),
+        historical_markdown
+    );
 }
 
 #[test]
