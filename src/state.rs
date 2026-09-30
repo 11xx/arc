@@ -5,7 +5,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CHANGE_STATE_SCHEMA: &str = "arc-state/3";
+pub const CHANGE_STATE_SCHEMA: &str = "arc-state/4";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Patchset {

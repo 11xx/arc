@@ -1281,7 +1281,7 @@ SCHEMAS
   required takes the next. `journal-events/1` is one.
 
   Commitments, derived views:
-    `arc-state/3`                    arc show --json
+    `arc-state/4`                    arc show --json
     `arc-status/27`                  arc status
     `arc-check/3`                    arc check --json
     `arc-inbox/10`                   arc inbox --json
@@ -1320,15 +1320,16 @@ SCHEMAS
     `arc-journal-scaffolds/1`        arc journal scaffolds --json
 
   Commitments, files:
-    `arc-bundle/6`                   arc export / arc import
+    `arc-bundle/7`                   arc export / arc import
     `arc-replica-bundle/3`           arc replica export / import
     `arc-replica-event/3`            one event inside an arc-replica-bundle
     `arc-journal-bundle/2`           arc journal export / import
     `journal-events/1`               events.jsonl, streamed by arc journal events
     `arc-journal-spool/1`            .arc/outbox/<ts>-<kind>-<topic>.json
 
-  Imports accept `arc-bundle/5` and `arc-replica-bundle/2` alongside the
-  current export formats, and journal imports accept `arc-journal-bundle/1`.
+  Imports accept `arc-bundle/6`, `arc-bundle/5`, and `arc-replica-bundle/2`
+  alongside current export formats. Journal imports accept
+  `arc-journal-bundle/1`.
   Their absent model provenance stays absent.
 
   Internal:
@@ -1359,8 +1360,8 @@ WHAT ARC WILL NOT DO
   Refusals worth knowing before they happen:
     arc refuses a bundle written by a newer arc rather than skipping
       lifecycle events it does not know.
-    `arc import` reads `arc-bundle/6` and `arc-bundle/5`, whose events lack
-      only optional fields, and refuses any older or newer bundle schema.
+    `arc import` reads `arc-bundle/7`, `arc-bundle/6`, and `arc-bundle/5`.
+      Absent optional fields stay absent; other bundle schemas are refused.
     arc refuses a gate run only when the change's recorded worktree is
       missing or its HEAD is not the branch head. A run started from another
       checkout of the repository is redirected to the recorded worktree and

@@ -77,7 +77,7 @@ fn writes_resolve_the_newest_selection_each_time_and_render_its_coordinate() {
     assert_eq!(event["model_observation"]["head_read"], true);
     let shown: Value =
         serde_json::from_str(&stdout(acting(&repo).args(["show", &change, "--json"]))).unwrap();
-    assert_eq!(shown["schema"], "arc-state/3");
+    assert_eq!(shown["schema"], "arc-state/4");
     assert_eq!(
         shown["model_attributions"][event["event_id"].as_str().unwrap()]["model_observation"],
         event["model_observation"]
