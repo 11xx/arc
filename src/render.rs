@@ -2053,6 +2053,33 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             )
         }
         Payload::CandidateRetired { candidate_id } => ("candidate-retired", candidate_id.clone()),
+        Payload::ContextRead {
+            subject,
+            record,
+            path,
+            coverage,
+            ..
+        } => (
+            "context-read",
+            format!("{} read {path} ({coverage}) as {record}", subject.label()),
+        ),
+        Payload::ContextDeclared {
+            subject,
+            relation,
+            target,
+            ..
+        } => (
+            "context-declared",
+            format!("{} {} {target}", subject.label(), relation.as_str()),
+        ),
+        Payload::ContextCaptureReported {
+            subject,
+            record,
+            capture,
+        } => (
+            "context-capture-reported",
+            format!("{record} on {}: {}", subject.label(), capture.as_str()),
+        ),
         Payload::ChangeClosed {
             outcome,
             integrated_commit,

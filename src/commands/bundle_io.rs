@@ -336,6 +336,11 @@ fn plan_repository_events(
             "the bundle's candidate events are refused: {refusal}; nothing was imported"
         )
     })?;
+    crate::relations::Relations::replay(&combined).map_err(|refusal| {
+        anyhow::anyhow!(
+            "the bundle's candidate relations are refused: {refusal}; nothing was imported"
+        )
+    })?;
     let borrowed: Vec<_> = combined.iter().collect();
     let withdrawn = crate::rewrite::withdrawn_event_ids(&borrowed)?;
     // Whether a successor differs from its old commit by signature alone is
@@ -425,6 +430,10 @@ fn validate_import_candidate(
     candidate.sort_by(|a, b| a.event_id.cmp(&b.event_id));
     state::reduce(&candidate)
         .context("combined local and bundled known events are not replayable")?;
+    // Relations on the change are judged by the rules a local write is.
+    crate::relations::Relations::replay(&candidate).map_err(|refusal| {
+        anyhow::anyhow!("the bundle's relations on the change are refused: {refusal}")
+    })?;
     // Replayability is not admissibility. A bundle legitimately carries the
     // lifecycle events a command would not append by hand, so the CLI's own
     // permission table is the wrong question here; what an import must still

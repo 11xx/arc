@@ -1296,6 +1296,55 @@ pub enum Payload {
     CandidateRetired {
         candidate_id: String,
     },
+    /// A tool's record of a read that succeeded: which bytes it returned for
+    /// which path and range, within one episode of work on a subject. The
+    /// read's version is the digest of the returned bytes.
+    ContextRead {
+        subject: RelationSubject,
+        /// The claim the read happened under, recorded on the subject's
+        /// change (a candidate's brief change).
+        episode: String,
+        /// The tool record's stable identifier. One per subject.
+        record: String,
+        /// The path as the tool recorded it.
+        path: String,
+        /// `sha256:` over the bytes the tool returned.
+        digest: String,
+        coverage: ReadCoverage,
+        /// The revision the returned bytes were compared against, when one
+        /// was named.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compared_at: Option<String>,
+        /// The blob the bytes equal at `compared_at`. An inference, present
+        /// only when the bytes matched.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blob: Option<InferredBlob>,
+        /// The journal artifact the path names, when it is inside the
+        /// journal, hot or cold.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifact: Option<ReadArtifact>,
+        /// The tool record document the read was taken from, when it came
+        /// from one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+    },
+    /// A declarant's claim that a subject cites, relies on, or considers a
+    /// piece of context. It is never a read.
+    ContextDeclared {
+        subject: RelationSubject,
+        relation: DeclaredRelation,
+        target: DeclaredTarget,
+        /// A read record on the same subject the claim points at.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        citation: Option<String>,
+    },
+    /// What the provider reported for the retention of a read record's
+    /// recording. A claim about retention, attributed to its declarant.
+    ContextCaptureReported {
+        subject: RelationSubject,
+        record: String,
+        capture: CaptureState,
+    },
     /// An event whose `event_type` this build does not recognize (e.g. one
     /// imported from a newer arc). Typed loading skips these entries; the
     /// underlying files and raw export preserve their original bytes intact.
@@ -1311,6 +1360,131 @@ pub struct CandidateBriefRef {
     pub brief_event_id: String,
     /// `sha256:` over the brief body.
     pub digest: String,
+}
+
+/// What a relation attaches to: a change, or a registered candidate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RelationSubject {
+    Change { change_id: String },
+    Candidate { candidate_id: String },
+}
+
+impl RelationSubject {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Change { change_id } => format!("change {change_id}"),
+            Self::Candidate { candidate_id } => format!("candidate {candidate_id}"),
+        }
+    }
+}
+
+/// The extent a tool recorded for a read. `unknown` is never `whole`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ReadCoverage {
+    Whole,
+    /// One-based, inclusive.
+    Lines {
+        from: u64,
+        to: u64,
+    },
+    Unknown,
+}
+
+impl std::fmt::Display for ReadCoverage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Whole => write!(f, "whole"),
+            Self::Lines { from, to } => write!(f, "lines {from}-{to}"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+/// A blob arc inferred for a read: the returned bytes equal the blob's bytes
+/// for the read's path and range at `revision`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InferredBlob {
+    pub revision: String,
+    /// The repository-relative path at `revision`.
+    pub path: String,
+    pub blob: String,
+    /// What the inference rests on: `content-matches-revision`.
+    pub inference: String,
+}
+
+pub const CONTENT_MATCHES_REVISION: &str = "content-matches-revision";
+
+/// The journal artifact a read's path names, with the artifact body's digest
+/// as it stood when the read was recorded. The read's own digest is compared
+/// with it, never assumed equal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadArtifact {
+    /// The file name in this project's journal, or `<journal-dir>::<file>`
+    /// in another project's.
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeclaredRelation {
+    Cites,
+    ReliesOn,
+    Considers,
+}
+
+impl DeclaredRelation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cites => "cites",
+            Self::ReliesOn => "relies-on",
+            Self::Considers => "considers",
+        }
+    }
+}
+
+/// What a declaration points at: a path, optionally at a revision, or a
+/// journal artifact by its file name or qualified `<journal-dir>::<file>`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum DeclaredTarget {
+    Path {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<String>,
+    },
+    Artifact {
+        file: String,
+    },
+}
+
+impl std::fmt::Display for DeclaredTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Path { path, at: Some(at) } => write!(f, "{path} at {at}"),
+            Self::Path { path, at: None } => write!(f, "{path}"),
+            Self::Artifact { file } => write!(f, "artifact {file}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureState {
+    Pinned,
+    Unpinned,
+}
+
+impl CaptureState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pinned => "pinned",
+            Self::Unpinned => "unpinned",
+        }
+    }
 }
 
 /// What a declarant concluded about a candidate.
@@ -1512,7 +1686,10 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::RunEnded { .. }
         | Payload::CandidateRegistered { .. }
         | Payload::CandidateJudged { .. }
-        | Payload::CandidateRetired { .. } => AppendPermission::AnyPhaseFact,
+        | Payload::CandidateRetired { .. }
+        | Payload::ContextRead { .. }
+        | Payload::ContextDeclared { .. }
+        | Payload::ContextCaptureReported { .. } => AppendPermission::AnyPhaseFact,
         Payload::Unknown => AppendPermission::OpaqueImported,
     }
 }

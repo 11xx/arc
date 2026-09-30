@@ -78,6 +78,11 @@ paths = [
   "src/candidate.rs",
   # `candidate register` pins a tree and `candidate retire` deletes the pin.
   "src/commands/candidate.rs",
+  # The relation ledger: the rules a local or imported relation must pass.
+  "src/relations.rs",
+  # `context read|declare|capture` write relation events to a change's or
+  # the repository's ledger.
+  "src/commands/relations.rs",
   "src/commands/replica.rs",
   # Change and event identity: a collision merges two histories silently.
   "src/ids.rs",
