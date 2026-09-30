@@ -182,10 +182,11 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          check it), `inferred` (arc derived it; no event
                          states it), `absent` (nothing records it), or
                          `unavailable` (its source cannot be read now), with
-                         a reason for all but `recorded`. Coverage stays as
-                         of the integration event; `--at` bounds only what
-                         later knowledge shows, or replays a change not
-                         integrated. It writes nothing.
+                         a reason for all but `recorded`. Contract,
+                         evaluation, and coverage stay on the integration's
+                         basis; `--at` hides every other record made after
+                         the event, or replays a change not integrated. It
+                         writes nothing.
   arc inbox              Lead-facing queue across open changes, unowned
                          branches and worktrees, and the journal backlog.
   arc workspace backlog  The same question asked of every registered project.

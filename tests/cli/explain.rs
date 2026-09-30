@@ -258,6 +258,13 @@ fn integrated_change_renders_every_slot() {
             explanation[slot]["rows"].is_array(),
             "slot {slot} is missing: {explanation}"
         );
+        // A `reason` belongs to a standing, so only a weaker one carries it.
+        for row in rows(&explanation, slot) {
+            match row["standing"].as_str().unwrap() {
+                "recorded" => assert!(row.get("reason").is_none(), "{slot}: {row}"),
+                _ => assert!(row["reason"].as_str().is_some(), "{slot}: {row}"),
+            }
+        }
     }
 
     // Contract: the brief in force, with its body digest.
@@ -356,6 +363,7 @@ fn integrated_change_renders_every_slot() {
     assert_eq!(waiver.len(), 1, "{coverage}");
     assert_eq!(waiver[0]["event_id"], debt.as_str());
     assert_eq!(waiver[0]["used"], "waiver-used");
+    assert_eq!(waiver[0]["debt_reason"], "no second reviewer reachable");
     assert!(waiver[0]["missing"].as_str().is_some(), "{coverage}");
     assert!(waiver[0]["production"].is_object(), "{coverage}");
     assert!(
@@ -486,7 +494,25 @@ fn at_bounds_later_knowledge() {
     let first = audit_changes_requested(repo, "first audit");
     let second = audit_changes_requested(repo, "second audit");
     let integration = event_ids(repo, "change-integrated").pop().unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "keep",
+            WORK,
+            "--kind",
+            "rejected",
+            "--body",
+            "learned after the audits",
+        ])
+        .assert()
+        .success();
     let full = explain_json(repo, &[]);
+    let kept_late = |explanation: &serde_json::Value, slot: &str| {
+        rows(explanation, slot)
+            .iter()
+            .any(|row| row["body"] == "learned after the audits")
+    };
+    assert!(kept_late(&full, "declared_facts"), "{full}");
+    assert!(kept_late(&full, "rejected_alternatives"), "{full}");
 
     // At the integration event nothing later is in view, and the slot says
     // why; coverage at acceptance does not move.
@@ -519,6 +545,14 @@ fn at_bounds_later_knowledge() {
         .map(|row| row["event_id"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(audits, vec![first.clone()], "{at_first}");
+    // Nothing kept after the bound is in view either.
+    assert!(!kept_late(&at_first, "declared_facts"), "{at_first}");
+    assert!(!kept_late(&at_first, "rejected_alternatives"), "{at_first}");
+    assert_eq!(
+        rows(&at_first, "declared_facts").len(),
+        2,
+        "the facts kept before the bound stay: {at_first}"
+    );
     let full_audits = items(&full, "later_knowledge", "audit-verdict");
     assert_eq!(full_audits.len(), 2);
     assert!(full_audits
@@ -532,6 +566,85 @@ fn at_bounds_later_knowledge() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(change_id));
+}
+
+/// A debt an independent review discharged before the merge: the debt row
+/// keeps what the declaration and the authorization record, and the
+/// discharge, which no event records, stands beside it as inferred.
+#[test]
+fn a_discharge_in_force_at_integration_is_inferred() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", "."]);
+    git(&repo.root, &["commit", "-m", "policy"]);
+    stdout(repo.arc(&repo.root).args(["begin", WORK]));
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{WORK}"));
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    stdout(
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "Solo")
+            .args(["snapshot", WORK]),
+    );
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Solo")
+        .args(["review", WORK, "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["debt", WORK, "--reason", "reviewer may not arrive"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["review", WORK, "--verdict", "approved"])
+        .assert()
+        .success();
+    let independent = event_ids(&repo, "verdict-recorded").pop().unwrap();
+    let debt = event_ids(&repo, "debt-declared").pop().unwrap();
+    repo.arc(&repo.root)
+        .args(["integrate", WORK])
+        .assert()
+        .success();
+
+    let explanation = explain_json(&repo, &[]);
+    let coverage = &explanation["coverage_at_acceptance"];
+    let debt_row = items(&explanation, "coverage_at_acceptance", "debt");
+    assert_eq!(debt_row.len(), 1, "{coverage}");
+    assert_eq!(debt_row[0]["standing"], "recorded");
+    assert_eq!(debt_row[0]["event_id"], debt.as_str());
+    assert!(debt_row[0].get("reason").is_none(), "{coverage}");
+    assert!(debt_row[0].get("discharged_by").is_none(), "{coverage}");
+    assert!(
+        debt_row[0].get("discharged_later_by").is_none(),
+        "{coverage}"
+    );
+    let discharge = items(&explanation, "coverage_at_acceptance", "debt-discharge");
+    assert_eq!(discharge.len(), 1, "{coverage}");
+    assert_eq!(discharge[0]["standing"], "inferred");
+    assert_eq!(discharge[0]["by_event_id"], independent.as_str());
+    assert_eq!(discharge[0]["debt_event_id"], debt.as_str());
+    assert_eq!(discharge[0]["reviewer"], "Reviewer");
+    assert_eq!(discharge[0]["outcome"], "approved");
+    assert!(
+        items(&explanation, "later_knowledge", "debt-discharge").is_empty(),
+        "{explanation}"
+    );
+
+    let text = explain_text(&repo, &[]);
+    let coverage_text = &text
+        [text.find("## Coverage at acceptance").unwrap()..text.find("## Later knowledge").unwrap()];
+    assert!(
+        coverage_text.contains(&format!(
+            "[inferred: no event records a discharge; arc's discharge rule reads one from \
+             {independent}]"
+        )),
+        "{text}"
+    );
 }
 
 #[test]
