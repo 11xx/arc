@@ -8,7 +8,11 @@ pub use crate::candidate::Ledger;
 use crate::candidate::{self, contract_label, Registration};
 use crate::gitio;
 use crate::ids;
-use crate::model::{CandidateBriefRef, CandidateJudgement, Payload};
+use crate::model::{
+    CandidateBriefRef, CandidateJudgement, CaptureState, DeclaredRelation, DeclaredTarget,
+    InferredBlob, Payload, ReadArtifact, ReadCoverage, RelationSubject,
+};
+use crate::relations::Relations;
 use crate::store::Store;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -164,7 +168,7 @@ fn resolve_brief(ctx: &Ctx, store: &Store, raw: &str) -> Result<(CandidateBriefR
 }
 
 /// Every claim recorded on a change: the episodes its work ran under.
-fn claims_on(store: &Store, change_id: &str) -> Result<BTreeSet<String>> {
+pub(crate) fn claims_on(store: &Store, change_id: &str) -> Result<BTreeSet<String>> {
     Ok(store
         .load_events(change_id)?
         .into_iter()
@@ -290,6 +294,52 @@ struct CandidateView {
     judgements: Vec<JudgementView>,
     retired: Option<RetirementView>,
     pin: PinView,
+    relations: RelationsView,
+}
+
+/// A candidate's read records and declarations. A read carries its record,
+/// a declaration its declarant's claim; neither stands in for the other.
+#[derive(Serialize)]
+struct RelationsView {
+    reads: Vec<ReadView>,
+    declarations: Vec<DeclarationView>,
+}
+
+#[derive(Serialize)]
+struct ReadView {
+    record: String,
+    episode: String,
+    path: String,
+    digest: String,
+    coverage: ReadCoverage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compared_at: Option<String>,
+    /// Inferred: the returned bytes equal this blob's at `compared_at`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blob: Option<InferredBlob>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact: Option<ReadArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    /// The standing capture report for the recording, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capture: Option<CaptureState>,
+    /// Unless the latest capture report is `pinned`.
+    at_risk: bool,
+    recorded_by: String,
+    event_id: String,
+    recorded_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct DeclarationView {
+    relation: DeclaredRelation,
+    target: DeclaredTarget,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    citation: Option<String>,
+    declarant: String,
+    event_id: String,
+    recorded_at: DateTime<Utc>,
 }
 
 #[derive(Serialize)]
@@ -355,6 +405,7 @@ pub fn list(ctx: &Ctx, brief: Option<&str>, json: bool) -> Result<()> {
 }
 
 fn emit(ctx: &Ctx, ledger: &Ledger, selected: Vec<&Registration>, json: bool) -> Result<()> {
+    let relations = super::relations::repository_relations(&ctx.store()?)?;
     let pins: BTreeMap<String, String> =
         gitio::list_refs(&ctx.cwd, candidate::CANDIDATE_REF_PREFIX)?
             .into_iter()
@@ -378,7 +429,7 @@ fn emit(ctx: &Ctx, ledger: &Ledger, selected: Vec<&Registration>, json: bool) ->
         .collect::<Vec<_>>();
     let candidates = selected
         .into_iter()
-        .map(|registration| view(ledger, registration, &pins))
+        .map(|registration| view(ledger, &relations, registration, &pins))
         .collect::<Vec<_>>();
     let document = CandidateDocument {
         schema: CANDIDATE_SCHEMA,
@@ -395,6 +446,7 @@ fn emit(ctx: &Ctx, ledger: &Ledger, selected: Vec<&Registration>, json: bool) ->
 
 fn view(
     ledger: &Ledger,
+    relations: &Relations,
     registration: &Registration,
     pins: &BTreeMap<String, String>,
 ) -> CandidateView {
@@ -433,6 +485,48 @@ fn view(
             present: value.as_deref() == Some(registration.tree.as_str()),
             value,
         },
+        relations: relations_view(relations, &registration.candidate_id),
+    }
+}
+
+fn relations_view(relations: &Relations, candidate_id: &str) -> RelationsView {
+    let subject = RelationSubject::Candidate {
+        candidate_id: candidate_id.to_string(),
+    };
+    RelationsView {
+        reads: relations
+            .reads_of(&subject)
+            .map(|read| {
+                let capture = relations.capture_of(read).map(|capture| capture.capture);
+                ReadView {
+                    record: read.record.clone(),
+                    episode: read.episode.clone(),
+                    path: read.path.clone(),
+                    digest: read.digest.clone(),
+                    coverage: read.coverage,
+                    compared_at: read.compared_at.clone(),
+                    blob: read.blob.clone(),
+                    artifact: read.artifact.clone(),
+                    source: read.source.clone(),
+                    capture,
+                    at_risk: capture != Some(CaptureState::Pinned),
+                    recorded_by: read.declarant.clone(),
+                    event_id: read.event_id.clone(),
+                    recorded_at: read.recorded_at,
+                }
+            })
+            .collect(),
+        declarations: relations
+            .declarations_of(&subject)
+            .map(|declaration| DeclarationView {
+                relation: declaration.relation,
+                target: declaration.target.clone(),
+                citation: declaration.citation.clone(),
+                declarant: declaration.declarant.clone(),
+                event_id: declaration.event_id.clone(),
+                recorded_at: declaration.recorded_at,
+            })
+            .collect(),
     }
 }
 
@@ -489,6 +583,38 @@ fn render(document: &CandidateDocument) {
             (None, false) => "absent".to_string(),
         };
         println!("  pin: {} {pin}", candidate.pin.reference);
+        for read in &candidate.relations.reads {
+            let blob = match (&read.blob, &read.compared_at) {
+                (Some(blob), _) => format!(
+                    "; blob {} at {} (inferred: {})",
+                    blob.blob, blob.revision, blob.inference
+                ),
+                (None, Some(revision)) => format!("; no blob: bytes differ from {revision}"),
+                (None, None) => String::new(),
+            };
+            let capture = match read.capture {
+                Some(CaptureState::Pinned) => "recording pinned",
+                Some(CaptureState::Unpinned) => "at risk: recording reported unpinned",
+                None => "at risk: no capture report pins the recording",
+            };
+            println!(
+                "  read [recorded]: `{}` of {} ({}), {}, episode {}{blob}; {capture}",
+                read.record, read.path, read.coverage, read.digest, read.episode
+            );
+        }
+        for declaration in &candidate.relations.declarations {
+            println!(
+                "  {} [declared by {}]: {}{}",
+                declaration.relation.as_str(),
+                declaration.declarant,
+                declaration.target,
+                declaration
+                    .citation
+                    .as_deref()
+                    .map(|citation| format!(", citing read `{citation}`"))
+                    .unwrap_or_default()
+            );
+        }
     }
     for shared in &document.shared_trees {
         println!(

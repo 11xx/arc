@@ -2536,7 +2536,10 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             | Payload::RunEnded { .. }
             | Payload::CandidateRegistered { .. }
             | Payload::CandidateJudged { .. }
-            | Payload::CandidateRetired { .. } => {}
+            | Payload::CandidateRetired { .. }
+            | Payload::ContextRead { .. }
+            | Payload::ContextDeclared { .. }
+            | Payload::ContextCaptureReported { .. } => {}
             // An event this build does not recognize. Typed loading skips
             // unknown events before replay, so this arm is defensive: keep the
             // raw history intact without mutating the derived view.

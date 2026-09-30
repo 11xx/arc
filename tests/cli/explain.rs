@@ -324,7 +324,7 @@ fn integrated_change_renders_every_slot() {
     );
     assert_eq!(
         explanation["observed_reads"]["absence"]["reason"],
-        "no tool record"
+        "no tool record of a read was recorded on the change"
     );
 
     let alternatives = rows(&explanation, "rejected_alternatives");
@@ -405,7 +405,10 @@ fn integrated_change_renders_every_slot() {
             .unwrap_or_else(|| panic!("{heading} missing or out of order:\n{text}"));
         from += at + heading.len();
     }
-    assert!(text.contains("[absent: no tool record]"), "{text}");
+    assert!(
+        text.contains("[absent: no tool record of a read was recorded on the change]"),
+        "{text}"
+    );
     assert!(text.contains("waiver used"), "{text}");
     assert!(text.contains("see later knowledge"), "{text}");
     assert!(text.contains("fulfilled, not approved"), "{text}");
