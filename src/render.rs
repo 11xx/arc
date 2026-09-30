@@ -304,6 +304,14 @@ pub fn markdown(
     if let Some(wt) = &state.worktree {
         let _ = writeln!(w, "- Worktree: `{wt}`");
     }
+    if let Some(file) = &state.journal_ref {
+        let digest = state
+            .journal_ref_digest
+            .as_deref()
+            .map(|digest| format!(" ({digest})"))
+            .unwrap_or_default();
+        let _ = writeln!(w, "- Opened from: `{file}`{digest}");
+    }
     for hold in state.holds.values() {
         let _ = writeln!(
             w,
@@ -502,7 +510,11 @@ pub fn markdown(
                 );
             }
             for link in &p.journal_refs {
-                let _ = writeln!(w, "  - framed by: `{}` ({})", link.file, link.digest);
+                let via = link
+                    .via
+                    .map(|via| format!(", via {}", via.as_str()))
+                    .unwrap_or_default();
+                let _ = writeln!(w, "  - framed by: `{}` ({}){via}", link.file, link.digest);
             }
             if let Some(thread) = &p.thread {
                 let _ = writeln!(w, "  - thread: {}:{}", thread.scheme, thread.id);
@@ -1612,6 +1624,13 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             let mut summary = format!("{patchset_id} {}", short_sha(head));
             if !journal_refs.is_empty() {
                 summary.push_str(&format!("; {} journal link(s)", journal_refs.len()));
+                let vias = journal_refs
+                    .iter()
+                    .filter_map(|link| link.via.map(|via| via.as_str()))
+                    .collect::<Vec<_>>();
+                if !vias.is_empty() {
+                    summary.push_str(&format!(" via {}", vias.join(", ")));
+                }
             }
             if let Some(thread) = thread {
                 summary.push_str(&format!("; thread {}:{}", thread.scheme, thread.id));

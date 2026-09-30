@@ -17,7 +17,8 @@ use crate::commands::Ctx;
 use crate::config;
 use crate::gitio;
 use crate::model::{
-    BlockerRef, ClaimStage, DisplacedClaim, JournalArtifactRef, PlanSource, PlannerIdentity,
+    BlockerRef, ClaimStage, DisplacedClaim, JournalArtifactRef, JournalRefVia, PlanSource,
+    PlannerIdentity,
 };
 use crate::replica::ReplicaIdentity;
 use crate::state::{self, ChangeState, ClaimIdentity, ClaimState, StageProgress};
@@ -9169,6 +9170,10 @@ pub(crate) struct PatchsetCitation {
     /// artifact whose body changed since is a fact about the artifact, not
     /// about who cited it.
     pub(crate) digest: String,
+    /// Which framing operation the link came from; absent on links recorded
+    /// before arc named their source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) via: Option<JournalRefVia>,
 }
 
 fn inventory_citations(changes: &[ChangeState], filename: &str) -> Vec<PatchsetCitation> {
@@ -9182,6 +9187,7 @@ fn inventory_citations(changes: &[ChangeState], filename: &str) -> Vec<PatchsetC
                         patchset_id: patchset.id.clone(),
                         head: patchset.head.clone(),
                         digest: link.digest.clone(),
+                        via: link.via,
                     });
                 }
             }
@@ -10612,7 +10618,7 @@ fn project_inventory(
         });
     }
     Ok(JournalInventory {
-        schema: "arc-journal-inventory/5",
+        schema: "arc-journal-inventory/6",
         journal_dir: hot.display().to_string(),
         anchor: project.is_dir().then(|| project.display().to_string()),
         observed_at: observed.to_rfc3339_opts(SecondsFormat::AutoSi, true),
@@ -10725,8 +10731,14 @@ fn inventory(
                 .flatten()
             {
                 println!(
-                    "  cited by {} {} ({})",
-                    citation.change_id, citation.patchset_id, citation.digest
+                    "  cited by {} {} ({}){}",
+                    citation.change_id,
+                    citation.patchset_id,
+                    citation.digest,
+                    citation
+                        .via
+                        .map(|via| format!(", via {}", via.as_str()))
+                        .unwrap_or_default()
                 );
             }
         }
@@ -11217,21 +11229,37 @@ pub fn read_artifact_body(ctx: &Ctx, filename: &str) -> Result<String> {
 }
 
 /// Resolve a journal artifact filename into the reference a patchset records:
-/// the filename, and `sha256:` over the body read now.
+/// the filename, `sha256:` over the body read now, and where the link came
+/// from.
 ///
 /// The name must be an artifact filename and must resolve in the hot journal
 /// or its cold archive, so a recorded link always names something that
 /// existed when it was recorded. Retention is a separate question; arc
 /// records the identifier and never promises the file survives.
-pub fn artifact_reference(ctx: &Ctx, filename: &str) -> Result<JournalArtifactRef> {
+pub fn artifact_reference(
+    ctx: &Ctx,
+    filename: &str,
+    via: JournalRefVia,
+) -> Result<JournalArtifactRef> {
+    Ok(JournalArtifactRef {
+        file: filename.to_string(),
+        digest: artifact_digest(ctx, filename)?,
+        via: Some(via),
+    })
+}
+
+/// `sha256:` over a journal artifact's body read now, from the hot journal or
+/// its cold archive. A name that is not an artifact filename, or resolves to
+/// nothing, is refused.
+pub fn artifact_digest(ctx: &Ctx, filename: &str) -> Result<String> {
     if parse_artifact_name(filename).is_none() {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     }
     let body = read_artifact_body(ctx, filename)?;
-    Ok(JournalArtifactRef {
-        file: filename.to_string(),
-        digest: format!("sha256:{}", hex::encode(Sha256::digest(body.as_bytes()))),
-    })
+    Ok(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(body.as_bytes()))
+    ))
 }
 
 /// Validate that a filename identifies an existing plan in the hot journal or

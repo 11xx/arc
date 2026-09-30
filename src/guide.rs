@@ -1047,15 +1047,25 @@ RULES THAT CHANGE WHAT YOU DO
     evaluated, and undoes it otherwise. A queue runs the ones with no answer
     at that tree, because it moves the target itself and every member behind
     the one it just landed is now evaluating a different merge.
-  - A snapshot may record the context that framed the work: `--journal-ref
-    <file>` links a journal artifact by filename with the body digest read at
-    record time, refusing a name that resolves to no artifact, and `--thread
-    <scheme:id>` records an opaque external thread reference. `arc show`,
-    `arc log`, and `arc status --json` render them, bundles carry them, and
-    `arc journal inventory` names the patchsets that cite an artifact. Arc
-    records identifiers only, never transcript text: retaining a recording is
-    not arc's promise, and a remote recording is read on the machine that
-    holds it.
+  - A snapshot records the context that framed the work. Each journal link
+    names an artifact by filename with the body digest read at record time,
+    and a `via` saying where it came from. With no `--journal-ref`, a
+    snapshot (`snapshot`, `done`, and the ones `squash` and `review
+    --snapshot` take) links the artifact the change was opened from (`via: begin`,
+    whose digest `begin --from-journal` also records on the change) and the
+    plan its brief names (`via: brief`), one link per file; a file named by
+    both is linked once as `begin`. A default that no longer resolves in the
+    journal or its cold archive is left out with one stderr line naming the
+    file and its source, and the snapshot still succeeds. Any `--journal-ref`
+    replaces the defaults: only the flagged artifacts are linked, `via:
+    flag`, and a name that resolves to no artifact refuses the snapshot.
+    `--thread <scheme:id>` records an opaque external thread reference. A
+    rerun at an unchanged head that supplies neither flag keeps the
+    patchset's existing links. `arc show`, `arc log`, and `arc status
+    --json` render them, bundles carry them, and `arc journal inventory`
+    names the patchsets that cite an artifact. Arc records identifiers only,
+    never transcript text: retaining a recording is not arc's promise, and a
+    remote recording is read on the machine that holds it.
   - A gate may declare an environment probe: a command whose output
     identifies the environment the gate's evidence applies to. `verify` runs
     the probe beside the gate and records its identity on the evidence. The
@@ -1264,7 +1274,7 @@ SCHEMAS
     `arc-explain/1`                  arc explain --json
     `arc-brief/1`                    arc brief --json
     `arc-journal-artifact/2`         arc journal show --json
-    `arc-journal-inventory/5`        arc journal inventory --json
+    `arc-journal-inventory/6`        arc journal inventory --json
     `arc-rescue/5`                   arc rescue --json
     `arc-review/4`                   arc review --json
     `arc-findings/2`                 arc findings --format json

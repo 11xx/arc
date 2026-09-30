@@ -980,6 +980,7 @@ mod tests {
                     blocked_by: Vec::new(),
                     tags: Vec::new(),
                     journal_ref: None,
+                    journal_ref_digest: None,
                     from_fork: None,
                 },
             ),

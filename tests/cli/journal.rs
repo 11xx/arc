@@ -1871,7 +1871,7 @@ fn journal_inventory_shares_storage_and_terminal_facts() {
         repo.arc(&repo.root)
             .args(["journal", "inventory", "--json"]),
     );
-    assert_eq!(hot["schema"], "arc-journal-inventory/5");
+    assert_eq!(hot["schema"], "arc-journal-inventory/6");
     assert_eq!(hot["items"][0]["storage"], "hot");
     repo.arc(&repo.root)
         .args(["journal", "consume", &file])
