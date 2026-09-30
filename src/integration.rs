@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
@@ -328,6 +328,30 @@ pub fn approval(st: &ChangeState, report: &StatusReport, approved_patchset_id: &
     }
 }
 
+/// Refuse a write into a checkout carrying tracked modifications, staged or
+/// unstaged. A merge or a promotion beside uncommitted work writes into a
+/// tree nobody can name afterwards.
+pub fn guard_tracked_dirt(checkout: &Path, tracked_dirt: bool) -> Result<(), Refusal> {
+    if tracked_dirt {
+        return Err(Refusal::TrackedDirt {
+            checkout: checkout.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+/// Refuse a write over paths the checkout holds untracked or ignored, given
+/// the collisions between those paths and what the write would produce.
+pub fn guard_writes(checkout: &Path, collisions: Vec<String>) -> Result<(), Refusal> {
+    if !collisions.is_empty() {
+        return Err(Refusal::WriteCollision {
+            checkout: checkout.to_path_buf(),
+            paths: collisions,
+        });
+    }
+    Ok(())
+}
+
 pub fn decide(facts: IntegrationFacts, prior: Option<&IntegrationPlan>) -> IntegrationOutcome {
     let moved = prior.map(|prior| moved(prior, &facts)).unwrap_or_default();
     IntegrationOutcome {
@@ -373,21 +397,13 @@ fn decision(facts: IntegrationFacts) -> Decision {
     }
 
     let checkout = observed!(facts.checkout);
-    // A merge beside uncommitted work writes into a tree nobody can name
-    // afterwards.
-    if observed!(facts.tracked_dirt) {
-        return Decision::Refused(Refusal::TrackedDirt {
-            checkout: checkout.path,
-        });
+    if let Err(refusal) = guard_tracked_dirt(&checkout.path, observed!(facts.tracked_dirt)) {
+        return Decision::Refused(refusal);
     }
     let old_target = observed!(facts.target_revision);
     let evaluated_tree = observed!(facts.evaluated_tree);
-    let collisions = observed!(facts.write_collisions);
-    if !collisions.is_empty() {
-        return Decision::Refused(Refusal::WriteCollision {
-            checkout: checkout.path,
-            paths: collisions,
-        });
+    if let Err(refusal) = guard_writes(&checkout.path, observed!(facts.write_collisions)) {
+        return Decision::Refused(refusal);
     }
     let untouched = observed!(facts.untouched);
     let already_contained = observed!(facts.already_contained);
@@ -720,6 +736,24 @@ mod tests {
         assert!(refused
             .to_string()
             .ends_with("untracked or ignored: notes.txt"));
+    }
+
+    #[test]
+    fn the_checkout_guards_word_a_refusal_the_same_for_every_caller() {
+        let checkout = Path::new("/repo");
+        assert!(guard_tracked_dirt(checkout, false).is_ok());
+        assert_eq!(
+            guard_tracked_dirt(checkout, true).unwrap_err().to_string(),
+            "worktree /repo carries tracked modifications, staged or unstaged; commit or stash \
+             them first"
+        );
+        assert!(guard_writes(checkout, Vec::new()).is_ok());
+        let collisions = vec!["notes.txt".to_string(), "out/".to_string()];
+        assert_eq!(
+            guard_writes(checkout, collisions).unwrap_err().to_string(),
+            "the update would write over paths the worktree /repo holds untracked or ignored: \
+             notes.txt, out/"
+        );
     }
 
     #[test]
