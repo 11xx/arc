@@ -35,8 +35,8 @@ reads.
 Before tagging a release:
 
 1. The release head and its tag are signed by the operator's key. Work done on
-   another machine other than ak stays unsigned and enters only through a merge
-   signed on the integrating machine.
+   a machine without that key stays unsigned and enters only through a merge
+   signed on the machine that holds it.
 2. `arc catchup` shows no outstanding review debt, or each remaining one is
    waived with a recorded reason.
 3. The guide, `--help`, and SCHEMAS agree with the behaviour being released.
