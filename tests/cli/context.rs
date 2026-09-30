@@ -1128,7 +1128,7 @@ fn env_reports_ambiguity_when_no_ancestor_names_the_owner() {
         .code(1)
         .stdout(concat!(
             "# export ARC_HARNESS=<claude|codex|opencode|pi> ARC_SESSION=<session-id> ",
-            "ARC_MODEL=<model[#effort]> ARC_SESSION_LINK=<url>\n",
+            "ARC_SESSION_LINK=<url>\n",
             "# ambiguous: CLAUDE_CODE_SESSION_ID (claude) and PI_SESSION_ID (pi); ",
             "set ARC_HARNESS and ARC_SESSION by hand\n",
             "unset ARC_HARNESS ARC_SESSION ARC_MODEL ARC_SESSION_LINK\n"
@@ -1632,7 +1632,8 @@ fn env_omits_model_when_no_session_store_matches() {
             uncorroborated("codex")
         )));
 
-    // Nothing detected at all: the fallback comment names ARC_MODEL too.
+    // Nothing detected at all: the fallback comment names the variables to set
+    // by hand, and ARC_MODEL is not one of them, since each write resolves it.
     repo.arc(&repo.root)
         .arg("env")
         .env_remove("CLAUDE_SESSION_ID")
@@ -1641,7 +1642,8 @@ fn env_omits_model_when_no_session_store_matches() {
         .env_remove("PI_SESSION_ID")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("ARC_MODEL=<model[#effort]>"));
+        .stdout(predicate::str::contains("ARC_SESSION=<session-id>"))
+        .stdout(predicate::str::contains("ARC_MODEL=<").not());
 }
 
 #[test]
