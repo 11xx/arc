@@ -1041,6 +1041,52 @@ HISTORY REWRITES
   naming different content. Whether a successor differs by signature alone is
   judged when the map is recorded or imported, never when a change is read.
 
+THE HISTORY MODEL
+  Git is the accepted history and the object store; arc records what the
+  work behind that history knew, tried, and was accepted on. Five things
+  carry it, each defined as much by what it is not.
+
+  A registration is content with a contract: a tree, the brief version it
+  answers, its producers, and the registrations it continues or adopts. It
+  opens no change and creates no patchset, and two registrations of one tree
+  are two candidates that share storage and nothing else. See CANDIDATES.
+
+  A selection is validation of a named choice, never a choice. The caller
+  names the candidate, the destination, the target, and the evaluations it
+  relies on; arc checks each ground and records the basis the choice rested
+  on, or refuses and records nothing. Permission is not effect: promotion is
+  a separate, recoverable transaction whose product is an ordinary patchset,
+  reviewed, waived, and integrated as any other. No review belongs to a
+  candidate.
+
+  A relation is typed by how it was established. A record is written by a
+  tool or by arc as the fact happens: a read, a gate run, a verdict. A claim
+  is somebody's declaration, attributed and unchecked beyond the citations it
+  names; a declaration is never a read. An inference is what arc derives
+  from other records, labelled with the rule and source it came from. `arc
+  explain` gives every row one standing — `recorded`, `declared`,
+  `inferred`, `absent` (nothing records it), or `unavailable` (its source
+  cannot be read now) — and nothing reads stronger than its source: a
+  declaration never renders as recorded, an inference never as declared, and
+  an absence is shown, never omitted. See CONTEXT.
+
+  A retention root is a selection or a promotion. It reaches its candidate
+  and what that candidate's parents and adoptions carry. arc never collects
+  on its own: `arc candidate retire` deletes a pin only when no root reaches
+  it, on the operator's command, and retirement deletes a pin, never an
+  event.
+
+  A debt is a record of review that did not happen, carried with the
+  coverage the work did have, its coordinates, and who produced it. A later
+  independent verdict on the shipped revision discharges it; a discharge is
+  fulfilment, never approval, and never rewrites the basis the integration
+  was accepted on. See WHEN NO INDEPENDENT REVIEWER IS REACHABLE.
+
+  `arc explain <change>` reads a change's history through these, `arc
+  candidate` and `arc context` write them, and `arc stats --provenance`
+  counts how often each provenance record was written where it could have
+  been.
+
 CANDIDATES
     arc candidate register --tree <tree-or-commit> --brief <change>[@<event>]
                            --producer <actor>... [--parent <id>]...
@@ -1577,7 +1623,13 @@ WHAT ARC WILL NOT DO
       creates to evaluate a merge.
     arc never runs `git rebase --abort`.
     arc never installs a Git hook silently.
-    arc never makes a network call.
+    arc never makes a network call. Every transport it offers is a file the
+      caller moves: change and replica bundles, journal bundles, and the
+      tapes records `arc context read --from-tapes` is handed. On its own
+      behalf arc runs `git`, the signing program Git is configured with,
+      and local probes (`df`, `du`, `findmnt`, the installed `arc
+      --version`); a declared gate, renderer, or hook command is the
+      project's or its caller's.
     arc never refuses to create a worktree over disk space.
     arc records no configuration history, only the inputs to one
       irreversible decision.
