@@ -22,6 +22,7 @@ mod policy;
 mod process_group;
 mod project;
 mod registry;
+mod relations;
 mod render;
 mod replica;
 mod rewrite;
@@ -448,6 +449,7 @@ enum Cmd {
         ///
         /// Cited kept facts: kept facts citing at least one event, of all kept
         /// facts.
+
         #[arg(long)]
         provenance: bool,
         /// Emit the machine-readable JSON view instead of text
@@ -1502,6 +1504,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: CandidateCmd,
     },
+    /// Record what a change or a candidate read, declared, and captured:
+    /// read records from a tool's record, attributed declarations, and
+    /// capture reports
+    Context {
+        #[command(subcommand)]
+        cmd: ContextCmd,
+    },
     /// Record and list caller-declared review passes
     Pass {
         #[command(subcommand)]
@@ -2219,6 +2228,165 @@ enum CandidateCmd {
         /// Candidate id
         id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ContextCmd {
+    /// Record a read record: a tool's record that a call succeeded and
+    /// returned bytes for a path and range, within one episode of work on a
+    /// subject.
+    ///
+    /// The read's version is the `sha256:` of the bytes the tool returned.
+    /// Coverage is the range the tool recorded: `--lines`, `--whole`, or,
+    /// with neither, `unknown`, which never counts as whole. A failed call is
+    /// never a read. With `--at`, the returned bytes are compared with the
+    /// path's blob at that revision over the same range (lines with their
+    /// terminators; the whole blob for `whole` or `unknown`): when they are
+    /// equal, the blob is recorded as an inferred locator labelled
+    /// `content-matches-revision`; when they differ, as under uncommitted
+    /// edits or a tool that decorates what it returns, or when the revision
+    /// holds no such path, no blob is recorded and the read stands on its
+    /// digest alone. A path directly inside a journal directory or its cold
+    /// archive is also recorded as that journal artifact, with the artifact
+    /// body's digest at recording, which is compared with the read's and
+    /// never assumed equal: by file name in this project's journal, and as
+    /// the qualified `<journal-dir>::<file>` in another project's.
+    ///
+    /// `--from-tapes <file>` reads a tool record document instead:
+    /// `tapes-events/9` (`tapes events <session> --json`) or
+    /// `tapes-session/14` (the `.json` of a `tapes export` bundle, which
+    /// carries the same events). Every tool call with a `read` member becomes
+    /// a read record: its `event_id` is the record id, `read.path` the path,
+    /// `read.lines` a line range or `read.whole` whole coverage (neither is
+    /// `unknown`), and `read.sha256` the digest. A call with no stable event
+    /// id, no path, or no digest, one that failed (`read.succeeded` false, or
+    /// its own or its paired result's `status` `error` or `failed`), and a
+    /// record id already recorded on the subject are each skipped with one
+    /// printed line naming the event and the reason. arc reads only the file
+    /// it is handed; it opens no harness store and runs no program.
+    /// `read.sha256` is the digest of the text the tool returned, recorded as
+    /// tapes reports it and never normalized: a tool that returns decorated
+    /// text, such as Claude Code's line-numbered `Read`, has a digest that
+    /// equals no file's bytes, so `content-matches-revision` does not fire
+    /// for it.
+    ///
+    /// A change subject's reads are events on that change; a candidate's are
+    /// repository events, so every bundle carries them. Refused, writing
+    /// nothing: `unknown-subject`; `unknown-episode` for a claim not recorded
+    /// on the subject's change (a candidate's brief change);
+    /// `duplicate-record` for a record id already recorded on the subject;
+    /// `malformed-digest`; `unknown-revision` for an `--at` naming no
+    /// commit.
+    #[command(group(clap::ArgGroup::new("source").required(true).args(["record", "from_tapes"])))]
+    Read {
+        /// The change or candidate id the read belongs to
+        #[arg(long)]
+        subject: String,
+        /// The claim id the read happened under
+        #[arg(long)]
+        episode: String,
+        /// The tool record's stable identifier
+        #[arg(long, requires = "path", requires = "digest")]
+        record: Option<String>,
+        /// The path the tool recorded
+        #[arg(long, conflicts_with = "from_tapes")]
+        path: Option<String>,
+        /// `sha256:` over the bytes the tool returned
+        #[arg(long, conflicts_with = "from_tapes")]
+        digest: Option<String>,
+        /// The line range the tool recorded, `<from>-<to>`, one-based and
+        /// inclusive
+        #[arg(long, value_parser = parse_line_range, conflicts_with_all = ["whole", "from_tapes"])]
+        lines: Option<(u64, u64)>,
+        /// The tool recorded the whole file
+        #[arg(long, conflicts_with = "from_tapes")]
+        whole: bool,
+        /// Compare the returned bytes with the path's blob at this revision
+        #[arg(long)]
+        at: Option<String>,
+        /// A `tapes-events/9` or `tapes-session/14` document to take the
+        /// reads from
+        #[arg(long = "from-tapes", value_name = "FILE")]
+        from_tapes: Option<std::path::PathBuf>,
+    },
+    /// Record a declaration: the declarant's claim that a subject cites,
+    /// relies on, or considers a path (optionally at a revision) or a
+    /// journal artifact.
+    ///
+    /// A declaration is attributed to its declarant, never checked against
+    /// what was read, and never becomes a read. `--citation` points it at a
+    /// read record on the same subject; one that resolves to no recorded
+    /// read is refused as `unknown-citation`, writing nothing.
+    #[command(group(clap::ArgGroup::new("relation").required(true).args(["cites", "relies_on", "considers"])))]
+    #[command(group(clap::ArgGroup::new("target").required(true).args(["path", "artifact"])))]
+    Declare {
+        /// The change or candidate id the declaration is about
+        #[arg(long)]
+        subject: String,
+        /// The subject cites the target
+        #[arg(long)]
+        cites: bool,
+        /// The subject relies on the target
+        #[arg(long = "relies-on")]
+        relies_on: bool,
+        /// The subject considered the target
+        #[arg(long)]
+        considers: bool,
+        /// A path
+        #[arg(long)]
+        path: Option<String>,
+        /// The revision the path is meant at
+        #[arg(long, requires = "path")]
+        at: Option<String>,
+        /// A journal artifact: a file name in this project's journal, or
+        /// `<journal-dir>::<file>` in another project's
+        #[arg(long)]
+        artifact: Option<String>,
+        /// A tool record id recorded as a read on the same subject
+        #[arg(long)]
+        citation: Option<String>,
+    },
+    /// Record what the provider reported for the retention of a read
+    /// record's recording (`tapes capture <session> --json` is that report).
+    ///
+    /// A capture report is a claim about retention, attributed to its
+    /// declarant; the latest report for a record stands. `arc explain`
+    /// reads a read whose recording has no standing `pinned` report as `at
+    /// risk`. The report joins the ledger of the one subject holding the
+    /// record; `--subject` names it when several do. Refused, writing
+    /// nothing: `unknown-record` for a record not recorded as a read;
+    /// `ambiguous-record` when several subjects hold it and none is named.
+    #[command(group(clap::ArgGroup::new("state").required(true).args(["pinned", "unpinned"])))]
+    Capture {
+        /// The tool record id of a recorded read
+        #[arg(long)]
+        record: String,
+        /// The subject holding the read, when more than one does
+        #[arg(long)]
+        subject: Option<String>,
+        /// The provider reported the recording pinned
+        #[arg(long)]
+        pinned: bool,
+        /// The provider reported the recording not pinned
+        #[arg(long)]
+        unpinned: bool,
+    },
+}
+
+fn parse_line_range(raw: &str) -> Result<(u64, u64), String> {
+    let (from, to) = raw
+        .split_once('-')
+        .ok_or_else(|| format!("{raw:?} is not <from>-<to>"))?;
+    let from: u64 = from
+        .parse()
+        .map_err(|_| format!("{from:?} is not a line number"))?;
+    let to: u64 = to
+        .parse()
+        .map_err(|_| format!("{to:?} is not a line number"))?;
+    if from == 0 || to < from {
+        return Err(format!("{raw:?} is not a one-based, ascending range"));
+    }
+    Ok((from, to))
 }
 
 #[derive(Subcommand)]
@@ -3729,6 +3897,92 @@ fn run(cli: Cli) -> Result<i32> {
                 reason,
             } => commands::candidate::judge(&ctx, id, superseded_by, reason).map(|_| 0),
             CandidateCmd::Retire { id } => commands::candidate::retire(&ctx, id).map(|_| 0),
+        },
+        Cmd::Context { cmd } => match cmd {
+            ContextCmd::Read {
+                subject,
+                episode,
+                record,
+                path,
+                digest,
+                lines,
+                whole,
+                at,
+                from_tapes,
+            } => match (from_tapes, record, path, digest) {
+                (Some(file), _, _, _) => commands::relations::read_from_tapes(
+                    &ctx,
+                    commands::relations::TapesArgs {
+                        subject,
+                        episode,
+                        file,
+                        at,
+                    },
+                ),
+                (None, Some(record), Some(path), Some(digest)) => commands::relations::read(
+                    &ctx,
+                    commands::relations::ReadArgs {
+                        subject,
+                        episode,
+                        record,
+                        path,
+                        digest,
+                        coverage: match (lines, whole) {
+                            (Some((from, to)), _) => model::ReadCoverage::Lines { from, to },
+                            (None, true) => model::ReadCoverage::Whole,
+                            (None, false) => model::ReadCoverage::Unknown,
+                        },
+                        at,
+                    },
+                ),
+                _ => Err(anyhow::anyhow!(
+                    "--record needs --path and --digest; or read from --from-tapes"
+                )),
+            }
+            .map(|_| 0),
+            ContextCmd::Declare {
+                subject,
+                cites: _,
+                relies_on,
+                considers,
+                path,
+                at,
+                artifact,
+                citation,
+            } => commands::relations::declare(
+                &ctx,
+                commands::relations::DeclareArgs {
+                    subject,
+                    relation: if relies_on {
+                        model::DeclaredRelation::ReliesOn
+                    } else if considers {
+                        model::DeclaredRelation::Considers
+                    } else {
+                        model::DeclaredRelation::Cites
+                    },
+                    path,
+                    at,
+                    artifact,
+                    citation,
+                },
+            )
+            .map(|_| 0),
+            ContextCmd::Capture {
+                record,
+                subject,
+                pinned,
+                unpinned: _,
+            } => commands::relations::capture(
+                &ctx,
+                record,
+                subject,
+                if pinned {
+                    model::CaptureState::Pinned
+                } else {
+                    model::CaptureState::Unpinned
+                },
+            )
+            .map(|_| 0),
         },
         Cmd::Pass { cmd } => match cmd {
             PassCmd::Open { member, note } => {

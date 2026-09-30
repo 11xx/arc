@@ -1023,6 +1023,11 @@ pub fn file_at(cwd: &Path, rev: &str, path: &str) -> Result<Option<String>> {
         .with_context(|| format!("{object} is not UTF-8"))
 }
 
+/// A blob's bytes, exactly as the object store holds them.
+pub fn blob_bytes(cwd: &Path, blob: &str) -> Result<Vec<u8>> {
+    git_bytes(cwd, &["cat-file", "blob", blob])
+}
+
 /// Git's raw output, for the callers that read objects rather than text.
 fn git_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let mut command = git_command();

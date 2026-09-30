@@ -591,10 +591,14 @@ impl Store {
             // ones that changed content included.
             Payload::HistoryRewritten { .. } => Some(6),
             // An older reader skips the candidate ledger and would report a
-            // registered candidate's pin as unregistered.
+            // registered candidate's pin as unregistered, and skips relations
+            // and would explain a change with recorded reads as having none.
             Payload::CandidateRegistered { .. }
             | Payload::CandidateJudged { .. }
-            | Payload::CandidateRetired { .. } => Some(7),
+            | Payload::CandidateRetired { .. }
+            | Payload::ContextRead { .. }
+            | Payload::ContextDeclared { .. }
+            | Payload::ContextCaptureReported { .. } => Some(7),
             Payload::HistoryRewriteWithdrawn { .. } => Some(7),
             Payload::ChangeIntegrated { .. } | Payload::IntegrationAsserted { .. } => Some(2),
             _ => None,
@@ -618,9 +622,12 @@ impl Store {
         {
             Some("external-verdict-recorded") | Some("ready-to-send") => Some(4),
             Some("history-rewritten") => Some(6),
-            Some("candidate-registered") | Some("candidate-judged") | Some("candidate-retired") => {
-                Some(7)
-            }
+            Some("candidate-registered")
+            | Some("candidate-judged")
+            | Some("candidate-retired")
+            | Some("context-read")
+            | Some("context-declared")
+            | Some("context-capture-reported") => Some(7),
             Some("history-rewrite-withdrawn") => Some(7),
             Some("integration-asserted")
                 if value

@@ -20,6 +20,7 @@ pub(crate) mod messaging;
 mod observe;
 mod pass;
 mod policy_cmd;
+pub(crate) mod relations;
 mod replica;
 mod rescue;
 pub(crate) mod review;
