@@ -496,3 +496,344 @@ fn approval_label(
         parts.join(" with ")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OLD_TARGET: &str = "1111111111111111111111111111111111111111";
+    const NEW_TARGET: &str = "2222222222222222222222222222222222222222";
+    const HEAD: &str = "3333333333333333333333333333333333333333";
+    const TREE: &str = "4444444444444444444444444444444444444444";
+
+    fn policy() -> NormalizedPolicy {
+        NormalizedPolicy {
+            forbid_self_approval: false,
+            require_declared_actor: false,
+            provenance_git_identity: "shared".to_string(),
+            declared_by: BTreeMap::new(),
+        }
+    }
+
+    fn gates() -> BTreeMap<String, NormalizedGate> {
+        BTreeMap::from([(
+            "build".to_string(),
+            NormalizedGate {
+                command: "make build".to_string(),
+                profiles: Vec::new(),
+                timeout: None,
+                declared_by: vec!["project".to_string()],
+            },
+        )])
+    }
+
+    fn basis() -> AuthorizationBasis {
+        AuthorizationBasis {
+            verdict_event_id: Some("verdict-1".to_string()),
+            external_verdict: None,
+            gate_evidence: BTreeMap::from([("build".to_string(), "evidence-1".to_string())]),
+            prerequisites: Vec::new(),
+            blocking_findings: Vec::new(),
+            holds: Vec::new(),
+            gates: gates(),
+            policy: policy(),
+            danger: None,
+            audit_debt_event_id: None,
+            verdict_provisional: None,
+        }
+    }
+
+    fn checkout() -> TargetCheckout {
+        TargetCheckout {
+            path: PathBuf::from("/checkout"),
+            switch_from: None,
+        }
+    }
+
+    /// Facts that authorize a clean merge of `HEAD` into `main` at
+    /// `OLD_TARGET`.
+    fn ready() -> IntegrationFacts {
+        IntegrationFacts {
+            target: "main".to_string(),
+            approved: Some(Approved {
+                patchset_id: "ps-1".to_string(),
+                head: HEAD.to_string(),
+            }),
+            ready: true,
+            approval: Approval {
+                verdict_event_id: Some("verdict-1".to_string()),
+                ..Approval::default()
+            },
+            declarations: Some(Declarations {
+                gates: gates(),
+                policy: policy(),
+            }),
+            basis: Ok(basis()),
+            confirmation: Ok(Confirmation {
+                ready: true,
+                basis: Ok(basis()),
+            }),
+            contribution: Ok(None),
+            checkout: Ok(checkout()),
+            tracked_dirt: Ok(false),
+            target_revision: Ok(OLD_TARGET.to_string()),
+            evaluated_tree: Ok(Some(TREE.to_string())),
+            write_collisions: Ok(Vec::new()),
+            untouched: Ok(Vec::new()),
+            already_contained: Ok(false),
+        }
+    }
+
+    /// The plan a dry run over [`ready`] prints.
+    fn prior() -> IntegrationPlan {
+        let Decision::Merge(plan) = decide(ready(), None).decision else {
+            panic!("ready facts must plan a merge");
+        };
+        IntegrationPlan::of_merge("change-1", &plan)
+    }
+
+    fn refusal(facts: IntegrationFacts) -> Refusal {
+        match decide(facts, None).decision {
+            Decision::Refused(refusal) => refusal,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ready_facts_plan_a_merge_of_the_approved_head_at_the_observed_target() {
+        let outcome = decide(ready(), None);
+        let Decision::Merge(plan) = outcome.decision else {
+            panic!("expected a merge plan");
+        };
+        assert_eq!(plan.target, "main");
+        assert_eq!(plan.old_target, OLD_TARGET);
+        assert_eq!(plan.approved.head, HEAD);
+        assert_eq!(plan.evaluated_tree.as_deref(), Some(TREE));
+        assert!(plan.merge_commit);
+        assert_eq!(plan.authorization, basis());
+        assert!(outcome.moved.is_empty());
+    }
+
+    #[test]
+    fn an_already_contained_head_plans_no_merge_commit() {
+        let facts = IntegrationFacts {
+            already_contained: Ok(true),
+            ..ready()
+        };
+        let Decision::Merge(plan) = decide(facts, None).decision else {
+            panic!("expected a merge plan");
+        };
+        assert!(!plan.merge_commit);
+        assert_eq!(plan.old_target, OLD_TARGET);
+    }
+
+    #[test]
+    fn a_contributed_change_plans_ready_to_send_before_any_checkout_fact() {
+        let facts = IntegrationFacts {
+            contribution: Ok(Some(Contribution::default())),
+            checkout: Err(anyhow!("no worktree has \"main\" checked out")),
+            ..ready()
+        };
+        let Decision::ReadyToSend(send) = decide(facts, None).decision else {
+            panic!("expected ready to send");
+        };
+        assert_eq!(send.approved.head, HEAD);
+        assert_eq!(send.target_revision, OLD_TARGET);
+    }
+
+    #[test]
+    fn readiness_refuses_before_any_later_fact_is_consulted() {
+        let facts = IntegrationFacts {
+            ready: false,
+            basis: Err(anyhow!("nothing authorizes the merged patchset")),
+            checkout: Err(anyhow!("no worktree")),
+            ..ready()
+        };
+        assert!(matches!(refusal(facts), Refusal::NotReady));
+    }
+
+    #[test]
+    fn a_basis_the_second_reading_disagrees_with_refuses() {
+        let mut moved_basis = basis();
+        moved_basis.policy.forbid_self_approval = true;
+        let differs = IntegrationFacts {
+            confirmation: Ok(Confirmation {
+                ready: true,
+                basis: Ok(moved_basis),
+            }),
+            ..ready()
+        };
+        assert!(matches!(refusal(differs), Refusal::ConfigurationMoved));
+        let unready = IntegrationFacts {
+            confirmation: Ok(Confirmation {
+                ready: false,
+                basis: Ok(basis()),
+            }),
+            ..ready()
+        };
+        let refused = refusal(unready);
+        assert!(matches!(refused, Refusal::ConfigurationMoved));
+        assert!(refused.to_string().contains("nothing was written"));
+    }
+
+    #[test]
+    fn an_unobservable_fact_refuses_with_its_own_error() {
+        let facts = IntegrationFacts {
+            checkout: Err(anyhow!(
+                "no worktree has \"main\" checked out; check it out first"
+            )),
+            ..ready()
+        };
+        let refused = refusal(facts);
+        assert!(matches!(refused, Refusal::Failed(_)));
+        assert!(refused.to_string().contains("check it out first"));
+        let unapproved = IntegrationFacts {
+            basis: Err(anyhow!("nothing authorizes the merged patchset")),
+            ..ready()
+        };
+        assert!(refusal(unapproved)
+            .to_string()
+            .contains("nothing authorizes"));
+    }
+
+    #[test]
+    fn tracked_dirt_in_the_target_checkout_refuses_by_its_own_reason() {
+        let facts = IntegrationFacts {
+            tracked_dirt: Ok(true),
+            ..ready()
+        };
+        let refused = refusal(facts);
+        assert!(matches!(refused, Refusal::TrackedDirt { .. }));
+        assert!(refused
+            .to_string()
+            .contains("carries tracked modifications"));
+    }
+
+    #[test]
+    fn a_write_over_an_untracked_path_refuses_naming_it() {
+        let facts = IntegrationFacts {
+            write_collisions: Ok(vec!["notes.txt".to_string()]),
+            ..ready()
+        };
+        let refused = refusal(facts);
+        assert!(matches!(refused, Refusal::WriteCollision { .. }));
+        assert!(refused
+            .to_string()
+            .ends_with("untracked or ignored: notes.txt"));
+    }
+
+    #[test]
+    fn an_unchanged_prior_basis_moves_nothing() {
+        let outcome = decide(ready(), Some(&prior()));
+        assert!(outcome.moved.is_empty());
+        assert_eq!(describe_moved(&outcome.moved), None);
+    }
+
+    #[test]
+    fn a_moved_target_is_named_without_changing_a_permitting_decision() {
+        let facts = IntegrationFacts {
+            target_revision: Ok(NEW_TARGET.to_string()),
+            ..ready()
+        };
+        let outcome = decide(facts, Some(&prior()));
+        assert!(matches!(outcome.decision, Decision::Merge(_)));
+        assert_eq!(
+            outcome.moved,
+            vec![Moved::Target {
+                from: OLD_TARGET.to_string(),
+                to: NEW_TARGET.to_string(),
+            }]
+        );
+        assert_eq!(
+            describe_moved(&outcome.moved).unwrap(),
+            format!("the target you checked moved from {OLD_TARGET} to {NEW_TARGET}")
+        );
+    }
+
+    #[test]
+    fn a_moved_target_is_named_beside_a_refusal_it_does_not_cause() {
+        let facts = IntegrationFacts {
+            ready: false,
+            target_revision: Ok(NEW_TARGET.to_string()),
+            ..ready()
+        };
+        let outcome = decide(facts, Some(&prior()));
+        assert!(matches!(
+            outcome.decision,
+            Decision::Refused(Refusal::NotReady)
+        ));
+        assert!(matches!(outcome.moved.as_slice(), [Moved::Target { .. }]));
+    }
+
+    #[test]
+    fn moved_gate_and_policy_declarations_are_named() {
+        let mut changed_gates = gates();
+        changed_gates.get_mut("build").unwrap().command = "make release".to_string();
+        changed_gates.insert(
+            "lint".to_string(),
+            NormalizedGate {
+                command: "make lint".to_string(),
+                profiles: Vec::new(),
+                timeout: None,
+                declared_by: Vec::new(),
+            },
+        );
+        let mut changed_policy = policy();
+        changed_policy.forbid_self_approval = true;
+        let facts = IntegrationFacts {
+            declarations: Some(Declarations {
+                gates: changed_gates,
+                policy: changed_policy,
+            }),
+            ..ready()
+        };
+        let outcome = decide(facts, Some(&prior()));
+        assert!(matches!(outcome.decision, Decision::Merge(_)));
+        assert_eq!(
+            outcome.moved,
+            vec![
+                Moved::Gates {
+                    changed: vec!["build".to_string(), "lint".to_string()],
+                },
+                Moved::Policy,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_moved_head_and_a_withdrawn_approval_are_named() {
+        let facts = IntegrationFacts {
+            ready: false,
+            approved: Some(Approved {
+                patchset_id: "ps-2".to_string(),
+                head: NEW_TARGET.to_string(),
+            }),
+            approval: Approval::default(),
+            ..ready()
+        };
+        let outcome = decide(facts, Some(&prior()));
+        assert_eq!(
+            outcome.moved,
+            vec![
+                Moved::ApprovedHead {
+                    from: format!("ps-1 ({HEAD})"),
+                    to: format!("ps-2 ({NEW_TARGET})"),
+                },
+                Moved::Approval {
+                    from: "verdict verdict-1".to_string(),
+                    to: "nothing".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unobserved_coordinate_is_not_reported_as_moved() {
+        let facts = IntegrationFacts {
+            target_revision: Err(anyhow!("target branch unreadable")),
+            declarations: None,
+            ..ready()
+        };
+        assert!(decide(facts, Some(&prior())).moved.is_empty());
+    }
+}
