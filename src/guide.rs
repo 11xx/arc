@@ -1323,12 +1323,13 @@ SCHEMAS
     `arc-bundle/6`                   arc export / arc import
     `arc-replica-bundle/3`           arc replica export / import
     `arc-replica-event/3`            one event inside an arc-replica-bundle
-    `arc-journal-bundle/1`           arc journal export / import
+    `arc-journal-bundle/2`           arc journal export / import
     `journal-events/1`               events.jsonl, streamed by arc journal events
     `arc-journal-spool/1`            .arc/outbox/<ts>-<kind>-<topic>.json
 
   Imports accept `arc-bundle/5` and `arc-replica-bundle/2` alongside the
-  current export formats. Their absent model provenance stays absent.
+  current export formats, and journal imports accept `arc-journal-bundle/1`.
+  Their absent model provenance stays absent.
 
   Internal:
     store format 7                   .git/arc/config.json and the change ledger
