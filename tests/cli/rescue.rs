@@ -187,7 +187,7 @@ fn rescue_json_uses_versioned_schema() {
     let output = stdout(repo.arc(&worktree).args(["rescue", "--json"]));
     let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 
-    assert_eq!(value["schema"], "arc-rescue/4");
+    assert_eq!(value["schema"], "arc-rescue/5");
     assert!(value.get("transcript").is_none());
 }
 

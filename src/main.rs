@@ -576,7 +576,7 @@ enum Cmd {
         #[arg(long)]
         off: bool,
     },
-    /// Machine-readable status report (the versioned arc-status/26 schema)
+    /// Machine-readable status report (the versioned arc-status/27 schema)
     Status {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1062,6 +1062,13 @@ enum Cmd {
         /// command on this change; its revision comes from the event itself.
         /// Requires --predicted, and is advisory: it changes no gate result,
         /// readiness decision, or exit code.
+        ///
+        /// Only this declaration makes a gate `discriminating`. Separately, a
+        /// pass that follows a failure of the same gate (or command, when
+        /// unnamed) on this change records the newest such failure as
+        /// `falsification_inferred`, whether or not this flag is given; that
+        /// inference decides nothing. Acceptance-probe evidence neither
+        /// records one nor serves as the failure one names.
         #[arg(long = "falsified-by", value_name = "EVENT_ID")]
         falsified_by: Option<String>,
         /// Why the check was expected to fail, stated before it ran.

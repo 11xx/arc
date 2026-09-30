@@ -962,7 +962,7 @@ fn declared_probe_blocks_until_discriminating_evidence_matches_patchset() {
         .code(12);
 
     let status = json_stdout(repo.arc(&worktree).args(["status", "probe-readiness"]));
-    assert_eq!(status["schema"], "arc-status/26");
+    assert_eq!(status["schema"], "arc-status/27");
     assert_eq!(status["probes"][0]["name"], "marker-exists");
     assert_eq!(status["probes"][0]["brief_version"], 2);
     assert_eq!(status["probes"][0]["discriminating_at_head"], false);
@@ -3008,4 +3008,297 @@ fn verifying_from_another_checkout_refuses_when_the_worktree_is_gone() {
             ),
         );
     assert!(change_id.starts_with("gone"), "{change_id}");
+}
+
+/// Every `verification-recorded` event on the change, oldest first.
+fn verification_events(repo: &Repo, slug: &str) -> Vec<serde_json::Value> {
+    stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        slug,
+        "--type",
+        "verification-recorded",
+    ]))
+    .lines()
+    .map(|line| serde_json::from_str(line).unwrap())
+    .collect()
+}
+
+fn event_revision(repo: &Repo, slug: &str, event_id: &str) -> String {
+    verification_events(repo, slug)
+        .into_iter()
+        .find(|event| event["event_id"] == event_id)
+        .expect("the event")["revision"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn pass_after_failure_infers_falsification() {
+    let repo = Repo::new();
+    let (_, failing) = change_with_a_fixed_gate(&repo, "inferred");
+    repo.arc(&repo.root)
+        .args(["verify", "inferred", "--gate", "fixable"])
+        .assert()
+        .success();
+
+    let recorded = verification_events(&repo, "inferred").pop().unwrap();
+    assert_eq!(recorded["result"], "pass");
+    assert!(recorded.get("falsification").is_none(), "{recorded}");
+    let inferred = &recorded["falsification_inferred"];
+    assert_eq!(inferred["event_id"], failing.as_str());
+    assert_eq!(
+        inferred["revision"],
+        event_revision(&repo, "inferred", &failing).as_str()
+    );
+    assert_eq!(inferred["source"], "prior-failure-same-change");
+
+    // Structured views carry it under its own name, apart from the declared
+    // field.
+    let row = gate_row(&repo, "inferred", "fixable");
+    assert_eq!(row["falsification_inferred"]["event_id"], failing.as_str());
+    assert!(row["falsification"].is_null());
+    let shown: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["show", "inferred", "--json"]),
+    ))
+    .unwrap();
+    let entry = shown["verifications"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        entry["falsification_inferred"]["source"],
+        "prior-failure-same-change"
+    );
+    assert!(entry.get("falsification").is_none(), "{entry}");
+}
+
+#[test]
+fn pass_without_prior_failure_infers_nothing() {
+    let repo = Repo::new();
+    change_with_a_fixed_gate(&repo, "uninferred");
+    // `plain` never failed; the failure on `fixable` is another check's.
+    repo.arc(&repo.root)
+        .args(["verify", "uninferred", "--gate", "plain"])
+        .assert()
+        .success();
+
+    let events = verification_events(&repo, "uninferred");
+    let recorded = events.last().unwrap();
+    assert_eq!(recorded["gate"], "plain");
+    assert!(
+        recorded.get("falsification_inferred").is_none(),
+        "{recorded}"
+    );
+    // A failure infers nothing either.
+    let failed = events
+        .iter()
+        .find(|event| event["result"] == "fail")
+        .unwrap();
+    assert!(failed.get("falsification_inferred").is_none(), "{failed}");
+    assert!(gate_row(&repo, "uninferred", "plain")["falsification_inferred"].is_null());
+}
+
+#[test]
+fn pass_of_an_unnamed_command_infers_from_the_same_command() {
+    let repo = Repo::new();
+    change_with_a_fixed_gate(&repo, "by-command");
+    repo.arc(&repo.root)
+        .args(["verify", "by-command", "--command", "test -f absent"])
+        .assert()
+        .code(1);
+    let failing = last_verification_event_id(&repo, "by-command", "fail");
+    fs::write(repo.root.join("absent"), "").unwrap();
+    repo.arc(&repo.root)
+        .args(["verify", "by-command", "--command", "true"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["verify", "by-command", "--command", "test -f absent"])
+        .assert()
+        .success();
+
+    let events = verification_events(&repo, "by-command");
+    let other = &events[events.len() - 2];
+    assert!(other.get("falsification_inferred").is_none(), "{other}");
+    let answered = events.last().unwrap();
+    assert_eq!(
+        answered["falsification_inferred"]["event_id"],
+        failing.as_str()
+    );
+}
+
+#[test]
+fn declared_and_inferred_falsification_name_same_failure() {
+    let repo = Repo::new();
+    let (_, older) = change_with_a_fixed_gate(&repo, "both-named");
+    fs::remove_file(repo.root.join("marker")).unwrap();
+    repo.arc(&repo.root)
+        .args(["verify", "both-named", "--gate", "fixable"])
+        .assert()
+        .code(1);
+    let newest = last_verification_event_id(&repo, "both-named", "fail");
+    assert_ne!(older, newest);
+    git(&repo.root, &["checkout", "--", "marker"]);
+
+    let pass_declaring = |failure: &str| {
+        repo.arc(&repo.root)
+            .args([
+                "verify",
+                "both-named",
+                "--gate",
+                "fixable",
+                "--falsified-by",
+                failure,
+                "--predicted",
+                "marker absent",
+            ])
+            .assert()
+            .success();
+        verification_events(&repo, "both-named").pop().unwrap()
+    };
+
+    let recorded = pass_declaring(&newest);
+    assert_eq!(recorded["falsification"]["event_id"], newest.as_str());
+    assert_eq!(
+        recorded["falsification_inferred"]["event_id"],
+        newest.as_str()
+    );
+
+    let recorded = pass_declaring(&older);
+    assert_eq!(recorded["falsification"]["event_id"], older.as_str());
+    assert_eq!(
+        recorded["falsification_inferred"]["event_id"],
+        newest.as_str()
+    );
+}
+
+#[test]
+fn inferred_falsification_leaves_gate_undiscriminated() {
+    let repo = Repo::new();
+    change_with_a_fixed_gate(&repo, "inferred-only");
+    for gate in ["fixable", "plain"] {
+        repo.arc(&repo.root)
+            .args(["verify", "inferred-only", "--gate", gate])
+            .assert()
+            .success();
+    }
+    let fixable = gate_row(&repo, "inferred-only", "fixable");
+    assert!(fixable["falsification_inferred"].is_object(), "{fixable}");
+    assert_eq!(fixable["discrimination"], "undiscriminated");
+    assert!(fixable["falsification"].is_null());
+
+    // A change whose gates only ever passed stands exactly where this one does.
+    let control = Repo::new();
+    fs::create_dir_all(control.root.join(".arc")).unwrap();
+    fs::write(
+        control.root.join(".arc/gates.toml"),
+        "[gates.fixable]\ncommand = \"test -f marker\"\n[gates.plain]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    control.commit(&control.root, "marker", "", "gates and marker");
+    control
+        .arc(&control.root)
+        .args([
+            "begin",
+            "passed-only",
+            "--no-worktree",
+            "--target",
+            "master",
+        ])
+        .assert()
+        .success();
+    for gate in ["fixable", "plain"] {
+        control
+            .arc(&control.root)
+            .args(["verify", "passed-only", "--gate", gate])
+            .assert()
+            .success();
+    }
+    let control_row = gate_row(&control, "passed-only", "fixable");
+    assert_eq!(control_row["discrimination"], "undiscriminated");
+    assert_eq!(control_row["green_at_head"], fixable["green_at_head"]);
+
+    let check = |repo: &Repo, slug: &str| {
+        repo.arc(&repo.root)
+            .args(["check", slug])
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+    assert_eq!(
+        check(&repo, "inferred-only"),
+        check(&control, "passed-only")
+    );
+}
+
+/// Probes answer to their own baseline and final contract: a probe's failure
+/// is no source for an inference, and a probe's pass records none.
+#[test]
+fn probe_evidence_neither_infers_nor_is_inferred_from() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "probe-inference"]));
+    let worktree = repo.home.join(".worktrees/repo-probe-inference");
+    let probes = repo.root.join("probes.json");
+    fs::write(
+        &probes,
+        r#"[{"name":"marker","command":"test -f probe-marker"}]"#,
+    )
+    .unwrap();
+    repo.arc(&worktree)
+        .args([
+            "brief",
+            "probe-inference",
+            "--body-file",
+            "-",
+            "--probes-json",
+            probes.to_str().unwrap(),
+        ])
+        .write_stdin("contract\n")
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "probe-inference",
+            "--probe",
+            "marker",
+            "--probe-phase",
+            "baseline",
+        ])
+        .assert()
+        .success();
+    repo.commit(&worktree, "probe-marker", "", "feat: add marker");
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "probe-inference",
+            "--probe",
+            "marker",
+            "--probe-phase",
+            "final",
+        ])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "probe-inference",
+            "--command",
+            "test -f probe-marker",
+        ])
+        .assert()
+        .success();
+
+    let events = verification_events(&repo, "probe-inference");
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0]["result"], "fail");
+    for event in &events[1..] {
+        assert_eq!(event["result"], "pass");
+        assert!(event.get("falsification_inferred").is_none(), "{event}");
+    }
 }
