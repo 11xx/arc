@@ -125,6 +125,9 @@ acknowledged_safe = [
   "src/commands/timeline.rs",
   "src/commands/workspace.rs",
   "src/context.rs",
+  # `arc explain` projects one change's ledger and journal references; it
+  # appends nothing and nothing reads its output to decide a merge.
+  "src/explain.rs",
   "src/guide.rs",
   # The journal and the liveness signals over it are advisory by construction:
   # claims, lanes, and messages never gate, and the ledger stays authoritative.
