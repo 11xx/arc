@@ -26,11 +26,11 @@ SAY WHO YOU ARE (before the first write)
   export ARC_ACTOR=<name> ARC_HARNESS=<claude|codex|opencode|pi> \
          ARC_SESSION=<id> ARC_SESSION_LINK=<url>
 
-  Leave ARC_MODEL unset after bootstrap (`unset ARC_MODEL`) so each ledger,
+  `arc env` reports the model as a comment and unsets ARC_MODEL so each ledger,
   replica, and journal write resolves the acting session's model and effort.
   The acting harness and session are declared through flags or ARC_HARNESS
   and ARC_SESSION, or supplied by `[identity] detect`. To declare a model
-  from `arc env`, re-evaluate it before each write in a turn.
+  by hand, export ARC_MODEL or pass `--model`.
   `--model` and ARC_MODEL declarations keep their value; a store disagreement
   records both `declared` and `observed`. Events carry `model_source` (flag,
   env, or resolved) and `model_observation` with the selection endpoint's
@@ -74,9 +74,9 @@ SAY WHO YOU ARE (before the first write)
   `PI_CODING_AGENT_DIR` — before the default under `$HOME`, and reports
   whether the store corroborates the exact canonical session id. An
   ambiguous or unreadable lookup remains unresolved rather than absent.
-  Events record that verdict beside the session they carry. It prints an export for every field it
-  establishes and an explicit `unset` for each it does not, so evaluating it
-  never leaves a stale session or model beside a fresh harness. Pi re-sets its
+  Events record that verdict beside the session they carry. It exports the
+  harness, session, and session link it establishes and explicitly unsets
+  each it does not; the model is a comment and ARC_MODEL is always unset. Pi re-sets its
   live recording file, model, and reasoning level for each tool call, so those
   answer while `PI_SESSION_ID` is the acting session, and a Claude subagent
   shares its parent's session id, so while the session has an unfinished

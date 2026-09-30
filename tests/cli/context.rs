@@ -382,7 +382,7 @@ fn env_detects_claude_model_from_transcript() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n{}",
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: claude-fable-5\n{}",
             corroborated("claude")
         )));
 }
@@ -416,7 +416,7 @@ fn env_detects_claude_effort_and_skips_synthetic_entries() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5#high'\n{}",
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: claude-fable-5#high\n{}",
             corroborated("claude")
         )));
 }
@@ -449,7 +449,7 @@ fn env_falls_back_to_the_claude_session_effort() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5#low'\n{}",
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: claude-fable-5#low\n{}",
             corroborated("claude")
         )));
 }
@@ -484,7 +484,7 @@ fn env_resolves_the_claude_store_under_its_config_dir_override() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n{}",
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: claude-fable-5\n{}",
             corroborated("claude")
         )));
 }
@@ -525,7 +525,7 @@ fn env_takes_the_newest_claude_recording_across_project_directories() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-live'\n{}",
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: claude-live\n{}",
             corroborated("claude")
         )));
 }
@@ -561,7 +561,7 @@ fn env_detects_claude_code_session_variable() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-fable-5'\n{}",
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: claude-fable-5\n{}",
             corroborated("claude")
         )));
 }
@@ -611,7 +611,7 @@ fn env_detects_codex_model_and_effort_from_rollout() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='codex' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-sol#high'\n{}",
+            "export ARC_HARNESS='codex' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: gpt-5.6-sol#high\n{}",
             corroborated("codex")
         )));
 }
@@ -661,7 +661,7 @@ fn env_requires_the_canonical_codex_id_before_using_its_model() {
             .env("CODEX_HOME", &codex_home)
             .env("CODEX_THREAD_ID", full),
     );
-    assert!(exact.contains("ARC_MODEL='gpt-fixture#high'"), "{exact}");
+    assert!(exact.contains("# model: gpt-fixture#high"), "{exact}");
     assert!(exact.contains("session corroborated"), "{exact}");
 
     let partial = stdout(
@@ -843,7 +843,7 @@ fn env_detects_pi_model_and_thinking_level_from_session_store() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-sol#medium'\n{}",
+            "export ARC_HARNESS='pi' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: gpt-5.6-sol#medium\n{}",
             corroborated("pi")
         )));
 }
@@ -1057,7 +1057,7 @@ fn nested_detection_prefers_the_owner_over_a_corroborated_outer_session() {
     assert_eq!(
         without_observation(&String::from_utf8_lossy(&output.stdout)),
         format!(
-            "export ARC_HARNESS='pi' ARC_SESSION='{inner_session}' ARC_MODEL='gpt-5.6-sol#medium'\n{}",
+            "export ARC_HARNESS='pi' ARC_SESSION='{inner_session}'\nunset ARC_MODEL\n# model: gpt-5.6-sol#medium\n{}",
             corroborated("pi")
         )
     );
@@ -1255,7 +1255,7 @@ fn env_reports_the_live_pi_values_for_the_acting_session() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-live#high'\n{}",
+            "export ARC_HARNESS='pi' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: gpt-5.6-live#high\n{}",
             corroborated("pi")
         )));
 
@@ -1270,7 +1270,7 @@ fn env_reports_the_live_pi_values_for_the_acting_session() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-recorded#low'\n{}",
+            "export ARC_HARNESS='pi' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: gpt-5.6-recorded#low\n{}",
             corroborated("pi")
         )));
 }
@@ -1297,7 +1297,7 @@ fn env_corroborates_a_pi_session_recorded_at_the_live_file() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='gpt-5.6-recorded#medium'\n{}",
+            "export ARC_HARNESS='pi' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: gpt-5.6-recorded#medium\n{}",
             corroborated("pi")
         )));
 
@@ -1362,7 +1362,7 @@ fn env_withholds_the_model_while_a_subagent_recording_is_live() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='claude' ARC_SESSION='{session}' ARC_MODEL='claude-parent'\n{}",
+            "export ARC_HARNESS='claude' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: claude-parent\n{}",
             corroborated("claude")
         )));
 }
@@ -1498,7 +1498,7 @@ fn env_reports_the_active_pi_branch_s_model() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='pi' ARC_SESSION='{session}' ARC_MODEL='pi-model-a#low'\n{}",
+            "export ARC_HARNESS='pi' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: pi-model-a#low\n{}",
             corroborated("pi")
         )));
 }
@@ -1587,7 +1587,7 @@ fn env_does_not_carry_a_codex_effort_across_a_model_change() {
         .assert()
         .success()
         .stdout(env_output(format!(
-            "export ARC_HARNESS='codex' ARC_SESSION='{session}' ARC_MODEL='gpt-5.5-b'\n{}",
+            "export ARC_HARNESS='codex' ARC_SESSION='{session}'\nunset ARC_MODEL\n# model: gpt-5.5-b\n{}",
             corroborated("codex")
         )));
 }
