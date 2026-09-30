@@ -1,5 +1,6 @@
 mod blockers;
 mod bundle;
+mod candidate;
 mod chain;
 mod changelog_render;
 mod commands;
@@ -1442,6 +1443,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RewriteCmd,
     },
+    /// Register, show, list, judge, and retire candidates: alternative
+    /// answers to a brief, recorded without opening a change
+    Candidate {
+        #[command(subcommand)]
+        cmd: CandidateCmd,
+    },
     /// Record and list caller-declared review passes
     Pass {
         #[command(subcommand)]
@@ -2040,6 +2047,105 @@ enum RewriteCmd {
         /// leaves it unsigned
         #[arg(long)]
         retag: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CandidateCmd {
+    /// Register a candidate: a tree answering one version of a change's
+    /// brief, with who produced it and where it came from.
+    ///
+    /// Records `candidate-registered` as a repository event and pins the tree
+    /// at `refs/arc/candidate/<id>`. Registering opens no change and creates
+    /// no patchset. Prints `candidate: <id>`. Two registrations of one tree
+    /// are two candidates that share storage and nothing else.
+    ///
+    /// Refused, naming the rule and writing nothing: `duplicate-candidate`
+    /// for an id already registered; `no-producers` with no --producer;
+    /// `unknown-tree` for a tree or commit the object store does not hold;
+    /// `unknown-brief` for a reference that resolves to no recorded brief;
+    /// `unknown-parent` or `unknown-adopted` for an id not registered;
+    /// `parent-other-contract` for a parent answering another change or
+    /// brief version; `adoption-drops-producer`, naming them, when the
+    /// producers omit anyone along the adopted registration's parent chain;
+    /// `unknown-episode` for a claim not recorded on the brief's change.
+    Register {
+        /// The content: a tree, or a commit, which is recorded as its tree
+        #[arg(long)]
+        tree: String,
+        /// The contract answered, `<change>[@<brief-event>]`; the latest
+        /// brief version when no event is named. Recorded with a `sha256:`
+        /// digest of the brief body
+        #[arg(long)]
+        brief: String,
+        /// Who produced the content, repeated for each; at least one
+        #[arg(long = "producer")]
+        producers: Vec<String>,
+        /// A registration this one continues, such as the candidate a repair
+        /// repairs; it must answer the same brief version. Repeatable
+        #[arg(long = "parent")]
+        parents: Vec<String>,
+        /// A registration whose content this one carries into its own
+        /// contract; the producers must include every producer along its
+        /// parent chain. Repeatable
+        #[arg(long = "adopts")]
+        adopts: Vec<String>,
+        /// A claim id recorded on the brief's change that the work ran
+        /// under. Repeatable
+        #[arg(long = "episode")]
+        episodes: Vec<String>,
+        /// The candidate id; generated from the change's slug when omitted
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Show one candidate: tree, contract, producers, parents, adoptions,
+    /// episodes, judgements, retirement, whether its pin holds the tree, and
+    /// every registration sharing its tree. `--json` emits `arc-candidate/1`
+    Show {
+        /// Candidate id
+        id: String,
+        /// Emit `arc-candidate/1` instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// List registrations as `show` renders them, grouping every tree more
+    /// than one registration names under `shared_trees`. `--json` emits
+    /// `arc-candidate/1`
+    List {
+        /// Only candidates answering this change's brief
+        #[arg(long)]
+        brief: Option<String>,
+        /// Emit `arc-candidate/1` instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record a judgement of a candidate by its declarant: rejected, or
+    /// superseded by another registration. A judgement changes no
+    /// registration and selects nothing; `unknown-candidate` refuses an id
+    /// not registered
+    #[command(group(clap::ArgGroup::new("judgement").required(true).args(["rejected", "superseded_by"])))]
+    Judge {
+        /// Candidate id
+        id: String,
+        /// A considered alternative not taken
+        #[arg(long)]
+        rejected: bool,
+        /// The registration that answers in this one's place
+        #[arg(long = "superseded-by")]
+        superseded_by: Option<String>,
+        /// Why
+        #[arg(long, required = true)]
+        reason: String,
+    },
+    /// Delete `refs/arc/candidate/<id>` and record `candidate-retired`, only
+    /// when no root reaches the candidate. Roots are selections, promotions,
+    /// and declared roots, and a root reaches what its candidate's parents
+    /// and adoptions carry; when one does, exit 1 naming it, writing nothing.
+    /// The registration stands. Retiring a retired candidate says so and
+    /// exits 0. arc never retires a candidate on its own
+    Retire {
+        /// Candidate id
+        id: String,
     },
 }
 
@@ -3503,6 +3609,42 @@ fn run(cli: Cli) -> Result<i32> {
                     retag,
                 },
             ),
+        },
+        Cmd::Candidate { cmd } => match cmd {
+            CandidateCmd::Register {
+                tree,
+                brief,
+                producers,
+                parents,
+                adopts,
+                episodes,
+                id,
+            } => commands::candidate::register(
+                &ctx,
+                commands::candidate::RegisterArgs {
+                    tree,
+                    brief,
+                    producers,
+                    parents,
+                    adopts,
+                    episodes,
+                    id,
+                },
+            )
+            .map(|_| 0),
+            CandidateCmd::Show { id, json } => {
+                commands::candidate::show(&ctx, &id, json).map(|_| 0)
+            }
+            CandidateCmd::List { brief, json } => {
+                commands::candidate::list(&ctx, brief.as_deref(), json).map(|_| 0)
+            }
+            CandidateCmd::Judge {
+                id,
+                rejected: _,
+                superseded_by,
+                reason,
+            } => commands::candidate::judge(&ctx, id, superseded_by, reason).map(|_| 0),
+            CandidateCmd::Retire { id } => commands::candidate::retire(&ctx, id).map(|_| 0),
         },
         Cmd::Pass { cmd } => match cmd {
             PassCmd::Open { member, note } => {

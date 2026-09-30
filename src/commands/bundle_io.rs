@@ -172,6 +172,14 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
     if rewrites > 0 {
         println!("repository events: {rewrites} imported");
     }
+    let (pinned, unpinned) =
+        super::candidate::pin_imported(&ctx.cwd, &store, &incoming.keys().cloned().collect())?;
+    for candidate_id in pinned {
+        println!("candidate {candidate_id}: pinned");
+    }
+    for candidate_id in unpinned {
+        println!("candidate {candidate_id}: tree not held here; pin absent");
+    }
     drop(transition);
     for (name, head) in pins {
         gitio::update_ref(&ctx.cwd, &name, &head)?;
@@ -319,6 +327,15 @@ fn plan_repository_events(
     combined.sort_by(|a, b| a.event_id.cmp(&b.event_id));
     let rewrites = crate::rewrite::RewriteMap::from_events(combined.iter())
         .context("the bundle's rewrites contradict this repository's; nothing was imported")?;
+    // Candidate events are judged with the ledger they join, by every rule
+    // that needs no local object: a parent or an adoption may arrive in the
+    // same bundle or already be here, and a tree this object store lacks is
+    // not a refusal.
+    super::candidate::Ledger::replay(&combined).map_err(|refusal| {
+        anyhow::anyhow!(
+            "the bundle's candidate events are refused: {refusal}; nothing was imported"
+        )
+    })?;
     // Whether a successor differs from its old commit by signature alone is
     // this repository's judgement to make, against the objects it holds. What
     // the sender recorded is a claim about the sender's objects, and taking it
