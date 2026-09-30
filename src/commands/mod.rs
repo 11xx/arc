@@ -962,6 +962,7 @@ mod tests {
             opened_session: Some("session".into()),
             opened_session_link: None,
             journal_ref: None,
+            journal_ref_digest: None,
             from_fork: None,
             blocked_by: blocked_by.iter().map(|id| (*id).into()).collect(),
             tags: Vec::new(),

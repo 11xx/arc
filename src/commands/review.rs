@@ -350,7 +350,8 @@ pub fn snapshot(
     }
     // Links are resolved before anything is written, so a name that does not
     // resolve refuses the snapshot instead of recording a dead reference.
-    let journal_refs = resolve_journal_refs(ctx, &journal_refs)?;
+    let links_supplied = !journal_refs.is_empty() || thread.is_some();
+    let flagged_refs = resolve_journal_refs(ctx, &journal_refs)?;
     let thread = thread
         .map(|thread| parse_thread_reference(&thread))
         .transpose()?;
@@ -376,7 +377,7 @@ pub fn snapshot(
             None => st.base.clone(),
         },
     };
-    let brief_ref = match brief_version {
+    let brief = match brief_version {
         Some(0) => bail!("brief version 0 not found"),
         Some(version) => Some(
             st.briefs
@@ -384,10 +385,15 @@ pub fn snapshot(
                 .with_context(|| format!("brief version {version} not found"))?,
         ),
         None => st.latest_brief(),
-    }
-    .map(|brief| BriefRef {
+    };
+    let brief_ref = brief.map(|brief| BriefRef {
         event_id: brief.event_id.clone(),
     });
+    let (journal_refs, skipped_defaults) = if flagged_refs.is_empty() {
+        default_journal_refs(ctx, st.journal_ref.as_deref(), brief)
+    } else {
+        (flagged_refs, Vec::new())
+    };
     let unchanged_patchset = st
         .latest_patchset()
         .filter(|p| {
@@ -397,9 +403,11 @@ pub fn snapshot(
                 // Links supplied now are part of what the patchset records: a
                 // rerun that adds or changes them is a new patchset. A rerun
                 // that supplies none leaves an existing patchset's links in
-                // place, which is what makes a bare snapshot idempotent.
-                && ((journal_refs.is_empty() && thread.is_none())
-                    || (p.journal_refs == journal_refs && p.thread == thread))
+                // place, defaulted ones included, which is what makes a bare
+                // snapshot idempotent.
+                && (!links_supplied
+                    || (same_journal_refs(&p.journal_refs, &journal_refs)
+                        && p.thread == thread))
         })
         .map(|p| p.id.clone());
     let identity = gitio::commit_identity(&ctx.cwd, &head)?;
@@ -451,6 +459,9 @@ pub fn snapshot(
         println!("patchset: {patchset_id} (unchanged)");
         return Ok(());
     }
+    for skipped in &skipped_defaults {
+        eprintln!("{skipped}");
+    }
     let mut ev = ctx.event_at(&store, &change_id, now, payload);
     ev.event_id = event_id_after(
         &events
@@ -492,9 +503,59 @@ fn resolve_journal_refs(ctx: &Ctx, files: &[String]) -> Result<Vec<JournalArtifa
         if !seen.insert(file.as_str()) {
             bail!("--journal-ref {file:?} was given more than once");
         }
-        refs.push(crate::journal::artifact_reference(ctx, file)?);
+        refs.push(crate::journal::artifact_reference(
+            ctx,
+            file,
+            JournalRefVia::Flag,
+        )?);
     }
     Ok(refs)
+}
+
+/// The journal links a snapshot records when none is flagged: the artifact
+/// the change was opened from, then the plan the brief names, one link per
+/// file and each with the digest read now.
+///
+/// A file named by both is the change's opening framing, so it is recorded
+/// once as `begin`. A default that no longer resolves is not recorded; the
+/// second value holds one warning line per such file, naming its source.
+fn default_journal_refs(
+    ctx: &Ctx,
+    opened_from: Option<&str>,
+    brief: Option<&state::Brief>,
+) -> (Vec<JournalArtifactRef>, Vec<String>) {
+    let candidates = [
+        (opened_from, JournalRefVia::Begin, "begin --from-journal"),
+        (
+            brief.and_then(|brief| brief.plan_ref.as_deref()),
+            JournalRefVia::Brief,
+            "the brief's plan reference",
+        ),
+    ];
+    let mut refs: Vec<JournalArtifactRef> = Vec::new();
+    let mut skipped = Vec::new();
+    for (file, via, source) in candidates {
+        let Some(file) = file else { continue };
+        if refs.iter().any(|link| link.file == file) {
+            continue;
+        }
+        match crate::journal::artifact_reference(ctx, file, via) {
+            Ok(link) => refs.push(link),
+            Err(err) => skipped.push(format!(
+                "warning: journal link {file} from {source} not recorded: {err:#}"
+            )),
+        }
+    }
+    (refs, skipped)
+}
+
+/// Whether two link sets name the same artifacts at the same digests. Where a
+/// link came from is not part of what it names.
+fn same_journal_refs(a: &[JournalArtifactRef], b: &[JournalArtifactRef]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(a, b)| a.file == b.file && a.digest == b.digest)
 }
 
 /// Parse `SCHEME:ID` into the identifiers a patchset records.

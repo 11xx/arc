@@ -167,7 +167,13 @@ struct BodyOpts {
 struct LinkOpts {
     /// Journal artifact this patchset was framed by, as a filename in the
     /// journal dir (repeatable). Its body digest is read when the patchset is
-    /// recorded, and a name that resolves to no artifact is refused
+    /// recorded, and a name that resolves to no artifact is refused. Given
+    /// once or more, only the flagged artifacts are linked, `via: flag`.
+    /// Omitted, the patchset links the artifact the change was opened from
+    /// (`via: begin`) and the plan its brief names (`via: brief`), one link
+    /// per file, a file named by both linked once as `begin`; a default that
+    /// no longer resolves is left out with a warning on stderr. A rerun at an
+    /// unchanged head with neither this nor --thread keeps existing links
     #[arg(long = "journal-ref", value_name = "FILE")]
     journal_ref: Vec<String>,
     /// External thread this work belongs to, as SCHEME:ID. Arc stores the
@@ -233,7 +239,10 @@ enum Cmd {
         /// Batch/query tag (repeatable)
         #[arg(long)]
         tag: Vec<String>,
-        /// Open from an actionable journal artifact, consuming it
+        /// Open from an actionable journal artifact, consuming it. The
+        /// change records the artifact's filename and the digest of its body
+        /// read now, and each later snapshot links it `via: begin` unless
+        /// given --journal-ref
         #[arg(long = "from-journal")]
         from_journal: Option<String>,
         /// Open by promoting a fork's work onto a new branch, recording the
