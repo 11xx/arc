@@ -770,6 +770,7 @@ mod tests {
             operator: None,
             on_behalf_of: None,
             model: None,
+            model_provenance: Default::default(),
             harness: Some("test".into()),
             session: Some("s".into()),
             session_link: None,

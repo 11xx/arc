@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 /// store stamped newer than this, because the alternative is what silently
 /// went wrong before: an older binary skipping event types it does not know,
 /// concluding the change is still open, and closing it a second way.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {
@@ -202,11 +202,10 @@ pub struct Event {
     /// serialized only when set, so old events and bundles round-trip intact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_behalf_of: Option<String>,
-    /// Model identity declared for the invocation. Missing on events written
-    /// before model identity was recorded, which remains unrecorded rather
-    /// than becoming an inferred value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(flatten)]
+    pub model_provenance: ModelProvenance,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -216,15 +215,101 @@ pub struct Event {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_link: Option<String>,
     /// What the harness's own store said about `session` when the event was
-    /// written. A detected session id arrives from the environment and can
+    /// detected. A detected session id arrives from the environment and can
     /// name no session the harness ever wrote; this is the record that the
-    /// store backed it, or did not. Absent when detection did not run, which
-    /// is the absence of a lookup rather than a claim about the store.
+    /// store backed it, or did not. Absent when detection did not establish
+    /// the session, which says nothing about write-time model resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_resolution: Option<SessionResolution>,
     pub created_at: DateTime<Utc>,
     #[serde(flatten)]
     pub payload: Payload,
+}
+
+/// Model identity and the evidence observed when an event was written.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelAttribution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(flatten)]
+    pub provenance: ModelProvenance,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelProvenance {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_source: Option<ModelSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<ModelObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_disagreement: Option<ModelDisagreement>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelSource {
+    Flag,
+    Env,
+    Resolved,
+}
+
+impl ModelSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Flag => "flag",
+            Self::Env => "env",
+            Self::Resolved => "resolved",
+        }
+    }
+}
+
+/// A selection endpoint from the recording, with its bounded-read coverage.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelObservation {
+    pub observed: String,
+    pub timestamp: Option<String>,
+    pub native_id: Option<String>,
+    pub head_read: bool,
+    pub turn_start: Option<String>,
+    pub turn_native_id: Option<String>,
+    pub turn_relation: ModelTurnRelation,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelTurnRelation {
+    Inside,
+    Before,
+    Unknown,
+}
+
+impl ModelObservation {
+    pub fn line(&self) -> String {
+        let relation = match self.turn_relation {
+            ModelTurnRelation::Inside => "inside the acting turn",
+            ModelTurnRelation::Before => "from an earlier turn; effort may have changed since",
+            ModelTurnRelation::Unknown => {
+                "observation timestamp or acting turn boundary unavailable in the bounded read"
+            }
+        };
+        let coverage = if self.head_read {
+            ""
+        } else {
+            "; recording head not read; earlier selections may be outside the read"
+        };
+        format!(
+            "observed: {} at {} id {} ({relation}{coverage})",
+            self.observed,
+            self.timestamp.as_deref().unwrap_or("unknown timestamp"),
+            self.native_id.as_deref().unwrap_or("unknown native id"),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelDisagreement {
+    pub declared: String,
+    pub observed: String,
 }
 
 /// What a harness's own session store said about a session id.

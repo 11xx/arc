@@ -6,8 +6,9 @@
 //! on the machine. What arc keeps is its own projection of a recording: the
 //! exchange turns and the operator's view of them.
 
+use crate::model::{ModelObservation, ModelTurnRelation};
 use agent_tapes_core::backend::{self, Backend};
-use agent_tapes_core::model::{Role, SourceBound};
+use agent_tapes_core::model::{Role, SourceBound, TurnKind};
 use agent_tapes_core::ResolveError;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -161,7 +162,10 @@ pub fn read_session(harness: &str, session: &str) -> SessionAnswer {
 pub enum SessionIdentity {
     /// The store holds a recording naming this model, as `model#effort` when
     /// the recording carries an effort.
-    Named(String),
+    Named {
+        model: String,
+        observation: Option<ModelObservation>,
+    },
     /// The store holds a recording whose model arc will not report, with the
     /// reason.
     Unnamed(ModelUnavailable),
@@ -180,12 +184,14 @@ pub enum ModelUnavailable {
     /// the store does not say which subagent a shell belongs to, so the
     /// parent's model need not be the acting one.
     SubagentActivity,
+    OutsideRead,
 }
 
 impl ModelUnavailable {
     /// What an operator reads: why no model is named.
     pub fn line(self) -> &'static str {
         match self {
+            ModelUnavailable::OutsideRead => "recording head not read; an earlier model selection may be outside the read",
             ModelUnavailable::NotRecorded => "the recording names no model for this session",
             ModelUnavailable::SubagentActivity => {
                 "a subagent recording is newer than the session's last turn, so the session's model need not be the acting one"
@@ -194,9 +200,7 @@ impl ModelUnavailable {
     }
 }
 
-/// What a harness's store holds for one session. A successful bounded read
-/// decides the model; its listing may fill a model the read omitted, but a
-/// failed read cannot corroborate that listing or its model.
+/// Read the newest selection and operator boundary within tapes' source bound.
 pub fn session_identity(harness: &str, session: &str) -> SessionIdentity {
     let backends = harness_backends(harness);
     let resolved = match resolve_exact(&backends, session) {
@@ -207,20 +211,72 @@ pub fn session_identity(harness: &str, session: &str) -> SessionIdentity {
         }
     };
     let backend = &backends[resolved.backend_index];
-    let transcript = match backend.transcript(&resolved.session, 1) {
+    // Keep every turn in the file reader's 4 MiB window, so a presentation
+    // limit cannot hide its newest operator. Paged stores have a turn cap.
+    let turns = if matches!(harness, "claude" | "codex" | "pi") {
+        usize::MAX
+    } else {
+        4096
+    };
+    let transcript = match backend.transcript(&resolved.session, turns) {
         Ok(transcript) => transcript,
         Err(_) => return SessionIdentity::Unresolved,
     };
     if harness == "claude" && subagent_may_be_acting(backend.as_ref(), &resolved.session) {
         return SessionIdentity::Unnamed(ModelUnavailable::SubagentActivity);
     }
-    let model = transcript.session.model.or(resolved.session.model);
-    match model {
-        Some(model) => SessionIdentity::Named(match model.variant {
-            Some(variant) => format!("{}#{variant}", model.id),
-            None => model.id,
-        }),
+    let head_read = transcript
+        .session
+        .model_observation
+        .as_ref()
+        .is_some_and(|status| status.head_read);
+    if let Some(selection) = transcript.session.newest_model_selection() {
+        let model = model_name(&selection.model);
+        let operator = transcript
+            .turns
+            .iter()
+            .rev()
+            .find(|turn| turn.kind == TurnKind::Operator);
+        let turn_start = operator.and_then(|turn| turn.ts);
+        let turn_relation = match (selection.last.timestamp, turn_start) {
+            (Some(record), Some(boundary)) if record >= boundary => ModelTurnRelation::Inside,
+            (Some(_), Some(_)) => ModelTurnRelation::Before,
+            _ => ModelTurnRelation::Unknown,
+        };
+        return SessionIdentity::Named {
+            model: model.clone(),
+            observation: Some(ModelObservation {
+                observed: model,
+                timestamp: selection.last.timestamp.map(|ts| ts.to_rfc3339()),
+                native_id: selection.last.native_id.clone(),
+                head_read,
+                turn_start: turn_start.map(|ts| ts.to_rfc3339()),
+                turn_native_id: operator.and_then(|turn| turn.native_id.clone()),
+                turn_relation,
+            }),
+        };
+    }
+    if transcript
+        .session
+        .model_observation
+        .as_ref()
+        .is_some_and(|status| !status.head_read)
+    {
+        return SessionIdentity::Unnamed(ModelUnavailable::OutsideRead);
+    }
+    match transcript.session.model.as_ref() {
+        Some(model) => SessionIdentity::Named {
+            model: model_name(model),
+            observation: None,
+        },
         None => SessionIdentity::Unnamed(ModelUnavailable::NotRecorded),
+    }
+}
+
+fn model_name(model: &agent_tapes_core::model::Model) -> String {
+    match &model.variant {
+        Some(variant) => format!("{}#{variant}", model.id),
+        None => model.id.clone(),
     }
 }
 

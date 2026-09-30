@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const EVENT_SCHEMA: &str = "arc-replica-event/2";
-const BUNDLE_SCHEMA: &str = "arc-replica-bundle/2";
+const EVENT_SCHEMA: &str = "arc-replica-event/3";
+const BUNDLE_SCHEMA: &str = "arc-replica-bundle/3";
 const IMPORT_SCHEMA: &str = "arc-replica-import/2";
 const STATE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const STATE_LOCK_RETRY: Duration = Duration::from_millis(10);
@@ -48,6 +48,8 @@ pub struct ReplicaEvent {
     pub session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(flatten)]
+    pub model_provenance: crate::model::ModelProvenance,
     pub created_at: DateTime<Utc>,
     pub payload: ReplicaPayload,
 }
@@ -872,6 +874,7 @@ fn make_event_with_id(
     event_id: String,
     payload: ReplicaPayload,
 ) -> ReplicaEvent {
+    let attribution = ctx.resolve_model();
     ReplicaEvent {
         schema: EVENT_SCHEMA.to_string(),
         event_id,
@@ -881,7 +884,8 @@ fn make_event_with_id(
         recorded_by: ctx.actor.clone(),
         harness: ctx.harness.clone(),
         session: ctx.session.clone(),
-        model: ctx.model.clone(),
+        model: attribution.model,
+        model_provenance: attribution.provenance,
         created_at: Utc::now(),
         payload,
     }
@@ -1285,7 +1289,10 @@ fn authority_state(
 }
 
 fn validate_event(event: &ReplicaEvent) -> Result<()> {
-    if event.schema != EVENT_SCHEMA && event.schema != "arc-replica-event/1" {
+    if event.schema != EVENT_SCHEMA
+        && event.schema != "arc-replica-event/1"
+        && event.schema != "arc-replica-event/2"
+    {
         bail!("unsupported replica event schema {:?}", event.schema);
     }
     if matches!(&event.payload, ReplicaPayload::AuthorityReclaimed { .. }) {
@@ -1530,6 +1537,7 @@ mod authority_tests {
             harness: None,
             session: None,
             model: None,
+            model_provenance: Default::default(),
             created_at: Utc::now(),
             payload,
         }

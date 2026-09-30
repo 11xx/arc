@@ -888,6 +888,8 @@ pub enum IntegrationKind {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChangeState {
     pub schema: &'static str,
+    /// Write-time model evidence, keyed by the ledger event that carries it.
+    pub model_attributions: BTreeMap<String, ModelAttribution>,
     pub change_id: String,
     pub slug: String,
     pub title: String,
@@ -1383,6 +1385,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             } => (
                 ChangeState {
                     schema: CHANGE_STATE_SCHEMA,
+                    model_attributions: BTreeMap::new(),
                     dangerous: *dangerous,
                     dirty_tree_waiver: None,
                     iterating: false,
@@ -1440,6 +1443,19 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
         None => bail!("empty event ledger"),
     };
     let _ = first_event;
+    state.model_attributions = events
+        .iter()
+        .filter(|event| event.model_provenance.model_source.is_some())
+        .map(|event| {
+            (
+                event.event_id.clone(),
+                ModelAttribution {
+                    model: event.model.clone(),
+                    provenance: event.model_provenance.clone(),
+                },
+            )
+        })
+        .collect();
 
     for ev in iter {
         match &ev.payload {
@@ -2959,6 +2975,7 @@ mod tests {
             operator: None,
             on_behalf_of: None,
             model: None,
+            model_provenance: Default::default(),
             harness: None,
             session: None,
             session_link: None,
