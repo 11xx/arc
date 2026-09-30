@@ -2016,6 +2016,36 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             }
             ("run-ended", summary)
         }
+        Payload::CandidateRegistered {
+            candidate_id,
+            tree,
+            brief,
+            ..
+        } => (
+            "candidate-registered",
+            format!(
+                "{candidate_id}: {} for {}",
+                short_sha(tree),
+                brief.change_id
+            ),
+        ),
+        Payload::CandidateJudged {
+            candidate_id,
+            judgement,
+            reason,
+        } => {
+            let judged = match judgement {
+                crate::model::CandidateJudgement::Rejected => "rejected".to_string(),
+                crate::model::CandidateJudgement::SupersededBy { candidate_id } => {
+                    format!("superseded by {candidate_id}")
+                }
+            };
+            (
+                "candidate-judged",
+                format!("{candidate_id} {judged}: {}", one_line(reason)),
+            )
+        }
+        Payload::CandidateRetired { candidate_id } => ("candidate-retired", candidate_id.clone()),
         Payload::ChangeClosed {
             outcome,
             integrated_commit,
