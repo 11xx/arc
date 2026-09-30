@@ -565,6 +565,7 @@ mod tests {
             operator: None,
             on_behalf_of: None,
             model: None,
+            model_provenance: Default::default(),
             harness: None,
             session: None,
             session_link: None,
