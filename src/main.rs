@@ -449,7 +449,9 @@ enum Cmd {
         ///
         /// Cited kept facts: kept facts citing at least one event, of all kept
         /// facts.
-
+        ///
+        /// Read records: changes with at least one `context-read` on their
+        /// ledger, of the selected changes.
         #[arg(long)]
         provenance: bool,
         /// Emit the machine-readable JSON view instead of text

@@ -276,6 +276,8 @@ struct ProvenanceOutput {
     briefs: BriefProvenance,
     /// Of kept facts: cites at least one event.
     cited_kept_facts: Ratio,
+    /// Of selected changes: at least one read record on the change's ledger.
+    changes_with_reads: Ratio,
 }
 
 const VIA_UNRECORDED: &str = "unrecorded";
@@ -300,6 +302,7 @@ fn provenance(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
     let mut rejected_alternatives = Ratio::default();
     let mut briefs = BriefProvenance::default();
     let mut cited_kept_facts = Ratio::default();
+    let mut changes_with_reads = Ratio::default();
 
     let mut passes = 0;
     let mut none_after_failure = 0;
@@ -368,6 +371,12 @@ fn provenance(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
         for fact in &state.kept {
             cited_kept_facts.tally(!fact.cites.is_empty());
         }
+
+        changes_with_reads.tally(
+            events
+                .iter()
+                .any(|event| matches!(event.payload, Payload::ContextRead { .. })),
+        );
     }
 
     for ratio in [
@@ -403,6 +412,7 @@ fn provenance(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
         rejected_alternatives,
         briefs,
         cited_kept_facts,
+        changes_with_reads,
     };
     if json {
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -433,6 +443,7 @@ fn provenance(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
         output.briefs.versions_with_plan_ref, output.briefs.changes_with_plan_ref
     );
     println!("cited kept facts: {}", output.cited_kept_facts);
+    println!("changes with read records: {}", output.changes_with_reads);
     Ok(())
 }
 

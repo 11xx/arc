@@ -515,12 +515,40 @@ fn provenance_counts_every_class_on_one_fixture() {
     integrate(&repo, "beta");
 
     // gamma: open, briefless, holding a rejected fact that no integration
-    // counts.
+    // counts, and the one read record.
+    let gamma_id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "gamma"])));
+    keep(&repo, "gamma", "rejected", &[]);
     repo.arc(&repo.root)
-        .args(["begin", "gamma"])
+        .args(["claim", "gamma"])
         .assert()
         .success();
-    keep(&repo, "gamma", "rejected", &[]);
+    let claim = fs::read_dir(event_dir(&repo, &gamma_id))
+        .unwrap()
+        .map(|entry| {
+            serde_json::from_slice::<serde_json::Value>(&fs::read(entry.unwrap().path()).unwrap())
+                .unwrap()
+        })
+        .find(|event| event["event_type"] == "claim-set")
+        .map(|event| event["claim_id"].as_str().unwrap().to_string())
+        .expect("the claim is recorded");
+    let digest = format!("sha256:{}", "0".repeat(64));
+    repo.arc(&repo.root)
+        .args([
+            "context",
+            "read",
+            "--subject",
+            "gamma",
+            "--episode",
+            &claim,
+            "--record",
+            "tool-1",
+            "--path",
+            "README.md",
+            "--digest",
+            &digest,
+        ])
+        .assert()
+        .success();
 
     let report = json_stdout(
         repo.arc(&repo.root)
@@ -555,21 +583,24 @@ fn provenance_counts_every_class_on_one_fixture() {
         "{report}"
     );
     assert_eq!(report["cited_kept_facts"], ratio(1, 4), "{report}");
+    assert_eq!(report["changes_with_reads"], ratio(1, 3), "{report}");
 
     // Text is one line per class.
     let text = stdout(repo.arc(&repo.root).args(["stats", "--provenance"]));
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 5, "{text}");
+    assert_eq!(lines.len(), 6, "{text}");
     for (line, class) in lines.iter().zip([
         "falsification:",
         "journal refs:",
         "rejected alternatives:",
         "plan-linked briefs:",
         "cited kept facts:",
+        "changes with read records:",
     ]) {
         assert!(line.starts_with(class), "{text}");
     }
     assert!(lines[4].contains("1 of 4"), "{text}");
+    assert!(lines[5].contains("1 of 3"), "{text}");
 }
 
 #[test]
