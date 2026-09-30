@@ -232,7 +232,8 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   A read aimed at one change refuses if that change cannot be read. Status
   keeps unreadable prerequisites unresolved, so they cannot authorize
   integration. Operations that require the complete dependency graph refuse
-  an incomplete read.
+  an incomplete read. A changelog file write requires every change to be
+  readable so a failed reduction cannot silently remove an entry.
 
   Every command in the project orientation answers for the project you are
   standing in. Some

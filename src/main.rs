@@ -423,6 +423,8 @@ enum Cmd {
     },
     /// Derived ledger analytics: stage, review, and gate durations, and how
     /// often provenance is recorded
+    /// Aggregate reads name unreadable changes with their errors on stderr
+    /// and retain readable changes; a selected unreadable change fails
     Stats {
         /// Report a single change
         #[arg(long, id = "change_flag", conflicts_with_all = ["tag", "all"])]
@@ -580,6 +582,9 @@ enum Cmd {
     /// arc-changelog-render-request/1 document on stdin and answers on stdout;
     /// `renderer_timeout` bounds it (default 60s), and its process group is
     /// killed at the deadline. `--json` never runs it
+    /// Read-only projections name unreadable changes with their errors on
+    /// stderr and retain readable entries. --write requires every change to
+    /// be readable; an unreadable selected change fails
     Changelog {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
