@@ -190,7 +190,11 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          check it), `inferred` (arc derived it; no event
                          states it), `absent` (nothing records it), or
                          `unavailable` (its source cannot be read now), with
-                         a reason for all but `recorded`. Contract,
+                         a reason for all but `recorded`. The opening
+                         artifact is `recorded` when its digest was captured
+                         at open, `declared` when not; a pass's inferred
+                         falsification reads `inferred`, beside any declared
+                         one. Contract,
                          evaluation, and coverage stay on the integration's
                          basis; `--at` hides every other record made after
                          the event, or replays a change not integrated. It
