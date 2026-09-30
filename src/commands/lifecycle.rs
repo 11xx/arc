@@ -31,8 +31,8 @@ pub fn begin(
     // superseding consume event. Holding the same guard across the Git and
     // ledger work prevents two callers from both passing the advisory source.
     let journal_transition = from_journal
-        .as_ref()
-        .map(|_| crate::journal::lock_transition(ctx))
+        .as_deref()
+        .map(|reference| crate::journal::lock_reference_transition(ctx, reference))
         .transpose()?;
     // Validate the journal source before writing anything: a bad
     // --from-journal must fail cleanly with no branch, worktree, or event.
@@ -326,9 +326,17 @@ pub fn begin(
         store.append_event(&event)?;
     }
 
-    // Advisory bridge to the journal, both best-effort: mark the source item
-    // consumed, and narrate the opening if auto-log is enabled. Neither can
-    // fail the authoritative change that already exists.
+    // Advisory bridge to the journal, all best-effort: record a promotion in
+    // another project's journal that holds the source, mark the source item
+    // consumed, and narrate the opening if auto-log is enabled. None can fail
+    // the authoritative change that already exists.
+    let promotion = from_journal.as_deref().map(|reference| {
+        let promotion = crate::journal::promotion_from(ctx, &store, &change_id, "journal_ref");
+        if let Err(error) = crate::journal::record_foreign_promotion(ctx, reference, &promotion) {
+            eprintln!("warning: could not record the promotion of {reference}: {error:#}");
+        }
+        promotion
+    });
     if let Some(filename) = from_journal
         .as_ref()
         .filter(|_| journal_kind.as_deref() != Some("plan"))
@@ -337,6 +345,7 @@ pub fn begin(
             ctx,
             filename,
             &change_id,
+            promotion.as_ref(),
             journal_transition
                 .as_ref()
                 .expect("from-journal promotion holds the journal transition"),
@@ -696,8 +705,11 @@ pub fn brief(
         if version.is_some() {
             bail!("--version cannot be used when recording a brief");
         }
+        let journal_lock = plan_ref
+            .as_deref()
+            .map(|reference| crate::journal::lock_reference_transition(ctx, reference))
+            .transpose()?;
         let plan_source = if let (Some(plan_ref), Some(plan_slice)) = (&plan_ref, &plan_slice) {
-            let _journal_lock = crate::journal::lock_transition(ctx)?;
             Some(crate::journal::plan_source(ctx, plan_ref, plan_slice)?)
         } else {
             None
@@ -756,6 +768,19 @@ pub fn brief(
         let event_id = event.event_id.clone();
         let event_plan_source = plan_source.clone();
         store.append_event(&event)?;
+        // A plan in another project's journal learns of the brief framed by
+        // it there; the brief already exists, so a failure only warns.
+        if let Some(reference) = output_plan_ref.as_deref() {
+            let mut promotion =
+                crate::journal::promotion_from(ctx, &store, &change_id, "brief.plan_ref");
+            promotion.slice = output_plan_slice.clone();
+            promotion.brief_event_id = Some(event_id.clone());
+            if let Err(error) = crate::journal::record_foreign_promotion(ctx, reference, &promotion)
+            {
+                eprintln!("warning: could not record the promotion of {reference}: {error:#}");
+            }
+        }
+        drop(journal_lock);
         if json {
             println!(
                 "{}",

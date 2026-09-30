@@ -13149,3 +13149,397 @@ fn config_reports_journal_dir_for_cwd_across_resolver_sources() {
         "config created a journal"
     );
 }
+
+/// A second project beside `repo`'s, sharing its home, so each has its own
+/// ledger and journal and a cross-project reference is a real one.
+fn sibling_project(repo: &Repo, name: &str) -> PathBuf {
+    let root = repo.root.parent().unwrap().join(name);
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-b", "master"]);
+    git(&root, &["config", "user.name", "Tester"]);
+    git(&root, &["config", "user.email", "tester@example.invalid"]);
+    git(&root, &["config", "commit.gpgsign", "false"]);
+    fs::write(root.join("README.md"), "other\n").unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "init"]);
+    fs::canonicalize(root).unwrap()
+}
+
+fn filed_artifact(repo: &Repo, kind: &str, topic: &str, body: &str) -> String {
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", kind, topic, "--body-file", "-"])
+            .write_stdin(body.to_string()),
+    );
+    Path::new(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string()
+}
+
+fn repository_id(repo: &Repo, cwd: &Path) -> String {
+    let id = json_stdout(repo.arc(cwd).args(["replica", "id", "--json"]));
+    id["repository_id"].as_str().unwrap().to_string()
+}
+
+fn inventory_item(repo: &Repo, file: &str) -> serde_json::Value {
+    let inventory = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "inventory", "--json"]),
+    );
+    inventory["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["file"] == file)
+        .unwrap_or_else(|| panic!("{file} not in {inventory}"))
+        .clone()
+}
+
+#[test]
+fn cross_project_begin_records_the_promotion_in_the_owning_journal() {
+    let owner = Repo::new();
+    let plan = filed_artifact(&owner, "plan", "shared-plan", "# Shared plan\n\nslices\n");
+    let owner_journal = journal_dir(&owner);
+    let promoter = sibling_project(&owner, "promoter");
+    let reference = format!("{}::{plan}", owner_journal.display());
+
+    owner
+        .arc(&promoter)
+        .args([
+            "begin",
+            "slice-a",
+            "--no-worktree",
+            "--from-journal",
+            &reference,
+        ])
+        .assert()
+        .success();
+
+    // The change opens in the promoting project, recording the reference as
+    // given and the digest read from the owning journal.
+    let show = json_stdout(owner.arc(&promoter).args(["show", "slice-a", "--json"]));
+    assert_eq!(show["journal_ref"], reference, "{show}");
+    assert!(
+        show["journal_ref_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")),
+        "{show}"
+    );
+    let change_id = show["change_id"].as_str().unwrap().to_string();
+    let promoting_repository = repository_id(&owner, &promoter);
+
+    // The owning journal records the promotion, naming the promoting
+    // repository, change, and checkout, without binding itself to them.
+    let events = journal_events(&owner_journal);
+    let promoted = events
+        .iter()
+        .find(|event| event["event"] == "promoted")
+        .unwrap_or_else(|| panic!("no promotion in {events:?}"));
+    assert_eq!(promoted["file"], plan);
+    assert_eq!(promoted["promotion"]["change_id"], change_id);
+    assert_eq!(promoted["promotion"]["repository_id"], promoting_repository);
+    assert_eq!(
+        promoted["promotion"]["anchor"],
+        promoter.display().to_string()
+    );
+    assert_eq!(promoted["promotion"]["basis"], "journal_ref");
+    assert_eq!(promoted["actor"], "tester");
+    let bindings = fs::read_to_string(owner_journal.join("bindings.jsonl")).unwrap();
+    assert!(
+        !bindings.contains(&promoter.display().to_string()),
+        "{bindings}"
+    );
+
+    // The owning inventory shows the promotion with its foreign repository,
+    // read open from the promoting ledger, and the plan stays in the queue.
+    let item = inventory_item(&owner, &plan);
+    let promotions = item["promotions"].as_array().unwrap();
+    assert_eq!(promotions.len(), 1, "{item}");
+    assert_eq!(promotions[0]["change_id"], change_id);
+    assert_eq!(promotions[0]["repository_id"], promoting_repository);
+    assert_eq!(promotions[0]["status"], "open");
+    assert!(
+        item.get("promotion_state")
+            .is_none_or(|state| state.is_null()),
+        "{item}"
+    );
+    let open = stdout(owner.arc(&owner.root).args(["journal", "open"]));
+    assert!(open.contains("shared-plan"), "{open}");
+    assert!(
+        open.contains(&format!("promotion: {change_id}"))
+            && open.contains(&format!("in repository {promoting_repository}")),
+        "{open}"
+    );
+
+    // Once the foreign change closes, the plan's promotion state counts it,
+    // and the workspace report classifies the plan by it.
+    owner
+        .arc(&promoter)
+        .args(["close", "slice-a", "--abandoned"])
+        .assert()
+        .success();
+    let item = inventory_item(&owner, &plan);
+    assert_eq!(item["promotions"][0]["status"], "closed", "{item}");
+    assert_eq!(item["promotion_state"], "closed", "{item}");
+    let report =
+        json_stdout(
+            owner
+                .arc(&owner.root)
+                .args(["workspace", "report", "--json", "--global"]),
+        );
+    let row = report["sections"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(|rows| rows.as_array())
+        .flatten()
+        .find(|row| row["file"] == plan)
+        .unwrap_or_else(|| panic!("{plan} not in {report}"));
+    assert_eq!(row["status"], "abandoned-promotion", "{row}");
+}
+
+#[test]
+fn cross_project_begin_consumes_a_foreign_todo_in_its_own_journal() {
+    let owner = Repo::new();
+    let todo = filed_artifact(&owner, "todo", "shared-todo", "do the thing\n");
+    let owner_journal = journal_dir(&owner);
+    let promoter = sibling_project(&owner, "promoter");
+    let reference = format!("{}::{todo}", owner_journal.display());
+
+    owner
+        .arc(&promoter)
+        .args([
+            "begin",
+            "thing",
+            "--no-worktree",
+            "--from-journal",
+            &reference,
+        ])
+        .assert()
+        .success();
+    let show = json_stdout(owner.arc(&promoter).args(["show", "thing", "--json"]));
+    let change_id = show["change_id"].as_str().unwrap().to_string();
+    owner
+        .arc(&promoter)
+        .args(["brief", "thing"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("do the thing"));
+
+    let events = journal_events(&owner_journal);
+    let consumed = events
+        .iter()
+        .find(|event| event["event"] == "consumed")
+        .unwrap_or_else(|| panic!("no consumption in {events:?}"));
+    assert_eq!(consumed["file"], todo);
+    assert_eq!(consumed["outcome"], "superseded");
+    assert_eq!(consumed["promotion"]["change_id"], change_id);
+    let open = stdout(owner.arc(&owner.root).args(["journal", "open"]));
+    assert!(!open.contains("shared-todo"), "{open}");
+    // The promoting project's own journal holds nothing of it.
+    let promoter_journal =
+        PathBuf::from(stdout(owner.arc(&promoter).args(["journal", "dir"])).trim());
+    assert!(
+        !promoter_journal.join("events.jsonl").is_file()
+            || !fs::read_to_string(promoter_journal.join("events.jsonl"))
+                .unwrap()
+                .contains(&todo),
+    );
+}
+
+#[test]
+fn cross_project_plan_ref_briefs_from_the_owning_journal() {
+    let owner = Repo::new();
+    let plan = filed_artifact(
+        &owner,
+        "plan",
+        "framing-plan",
+        "# Framing plan\n\n## slice-b\n",
+    );
+    let owner_journal = journal_dir(&owner);
+    let promoter = sibling_project(&owner, "promoter");
+    let reference = format!("{}::{plan}", owner_journal.display());
+    owner
+        .arc(&promoter)
+        .args(["begin", "slice-b", "--no-worktree"])
+        .assert()
+        .success();
+    let brief = json_stdout(
+        owner
+            .arc(&promoter)
+            .env("ARC_ROLE", "lead")
+            .args([
+                "brief",
+                "slice-b",
+                "--body-file",
+                "-",
+                "--plan-ref",
+                &reference,
+                "--plan-slice",
+                "slice-b",
+                "--json",
+            ])
+            .write_stdin("build slice b\n"),
+    );
+    assert_eq!(brief["brief"]["plan_ref"], reference, "{brief}");
+    assert_eq!(brief["brief"]["plan_slice"], "slice-b", "{brief}");
+    let source = &brief["brief"]["plan_source"];
+    assert_eq!(source["journal_dir"], owner_journal.display().to_string());
+    assert_eq!(source["filename"], plan);
+    assert_eq!(
+        source["anchor"],
+        fs::canonicalize(&owner.root).unwrap().display().to_string(),
+        "{source}"
+    );
+    let body = fs::read(owner_journal.join(&plan)).unwrap();
+    assert_eq!(source["sha256"], hex_sha256(&body));
+
+    // The owning journal counts the brief as a promotion of the plan.
+    let item = inventory_item(&owner, &plan);
+    let promotion = &item["promotions"][0];
+    assert_eq!(promotion["basis"], "brief.plan_ref", "{item}");
+    assert_eq!(promotion["slice"], "slice-b", "{item}");
+    assert_eq!(promotion["repository_id"], repository_id(&owner, &promoter));
+
+    // A later snapshot defaults its journal link to the qualified name.
+    fs::write(promoter.join("slice.txt"), "b\n").unwrap();
+    git(&promoter, &["add", "."]);
+    git(&promoter, &["commit", "-m", "slice b"]);
+    owner
+        .arc(&promoter)
+        .args(["snapshot", "slice-b"])
+        .assert()
+        .success();
+    let show = json_stdout(owner.arc(&promoter).args(["show", "slice-b", "--json"]));
+    let links = show["patchsets"][0]["journal_refs"].as_array().unwrap();
+    assert_eq!(links.len(), 1, "{show}");
+    assert_eq!(links[0]["file"], reference);
+    assert_eq!(links[0]["via"], "brief");
+    assert_eq!(
+        links[0]["digest"],
+        format!("sha256:{}", hex_sha256(&body)),
+        "{show}"
+    );
+}
+
+#[test]
+fn consume_from_a_non_owning_project_is_refused() {
+    let owner = Repo::new();
+    let todo = filed_artifact(&owner, "todo", "owned-todo", "owned\n");
+    let owner_journal = journal_dir(&owner);
+    let promoter = sibling_project(&owner, "promoter");
+    let reference = format!("{}::{todo}", owner_journal.display());
+    let before = fs::read_to_string(owner_journal.join("events.jsonl")).unwrap_or_default();
+    for args in [
+        vec!["journal", "consume", &reference, "--outcome", "done"],
+        vec!["journal", "archive", &reference],
+        vec!["journal", "transition", &reference, "--to", "later"],
+    ] {
+        owner
+            .arc(&promoter)
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(format!(
+                "belongs to the journal at {}",
+                owner_journal.display()
+            )));
+    }
+    let after = fs::read_to_string(owner_journal.join("events.jsonl")).unwrap_or_default();
+    assert_eq!(before, after);
+    assert!(owner_journal.join(&todo).is_file());
+}
+
+#[test]
+fn cross_project_reference_to_a_missing_artifact_is_refused() {
+    let owner = Repo::new();
+    let owner_journal = journal_dir(&owner);
+    filed_artifact(&owner, "todo", "present-todo", "here\n");
+    let promoter = sibling_project(&owner, "promoter");
+    let missing = "20260101T000000Z-absent-plan.md";
+
+    // A file the journal does not hold is refused naming both.
+    let reference = format!("{}::{missing}", owner_journal.display());
+    owner
+        .arc(&promoter)
+        .args([
+            "begin",
+            "absent",
+            "--no-worktree",
+            "--from-journal",
+            &reference,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(missing))
+        .stderr(predicates::str::contains(
+            owner_journal.display().to_string(),
+        ));
+    // A directory that is not a journal is refused naming both.
+    let not_a_journal = promoter.join("src");
+    fs::create_dir_all(&not_a_journal).unwrap();
+    let reference = format!("{}::{missing}", not_a_journal.display());
+    owner
+        .arc(&promoter)
+        .args([
+            "begin",
+            "absent",
+            "--no-worktree",
+            "--from-journal",
+            &reference,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is not a journal directory"))
+        .stderr(predicates::str::contains(
+            not_a_journal.display().to_string(),
+        ))
+        .stderr(predicates::str::contains(missing));
+    // Nothing opened.
+    let list = stdout(owner.arc(&promoter).args(["list"]));
+    assert!(!list.contains("absent"), "{list}");
+
+    // The brief and snapshot surfaces refuse the same way.
+    owner
+        .arc(&promoter)
+        .args(["begin", "present", "--no-worktree"])
+        .assert()
+        .success();
+    let reference = format!("{}::{missing}", owner_journal.display());
+    owner
+        .arc(&promoter)
+        .env("ARC_ROLE", "lead")
+        .args([
+            "brief",
+            "present",
+            "--body-file",
+            "-",
+            "--plan-ref",
+            &reference,
+            "--plan-slice",
+            "s",
+        ])
+        .write_stdin("b\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(missing))
+        .stderr(predicates::str::contains(
+            owner_journal.display().to_string(),
+        ));
+    owner
+        .arc(&promoter)
+        .args(["snapshot", "present", "--journal-ref", &reference])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(missing))
+        .stderr(predicates::str::contains(
+            owner_journal.display().to_string(),
+        ));
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
+}

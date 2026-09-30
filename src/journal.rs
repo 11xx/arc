@@ -106,8 +106,13 @@ fn lock_journal_file(dir: &Path, name: &str, purpose: &str) -> Result<JournalTra
     }
 }
 
-pub(crate) fn lock_transition(ctx: &Ctx) -> Result<JournalTransitionLock> {
-    lock_journal_transition(&resolve_dir(&ctx.cwd)?)
+/// The transition lock of the journal a reference names, which is another
+/// project's journal for a `<journal-dir>::<file>` reference.
+pub(crate) fn lock_reference_transition(
+    ctx: &Ctx,
+    reference: &str,
+) -> Result<JournalTransitionLock> {
+    lock_journal_transition(&locate_artifact(ctx, reference)?.hot)
 }
 
 /// Closed set of artifact kinds. Malformed kinds are rejected by clap at
@@ -4773,6 +4778,7 @@ fn position(
 /// nothing and touches nothing: a caller who mistyped a name learns so before
 /// a body is read from stdin.
 fn check_artifact_name(filename: &str) -> Result<(String, String)> {
+    refuse_foreign_write(filename)?;
     if filename.contains(['/', '\\']) {
         bail!("journal takes an artifact filename inside the journal dir, not a path");
     }
@@ -6482,7 +6488,43 @@ pub(crate) struct JournalEvent {
     /// a block that still says what it said from one rewritten underneath.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     digest: Option<String>,
+    /// The change in another project that took up the artifact named by
+    /// `file`. Carried by the `promoted` event a promotion from another
+    /// project appends here, and by the `consumed` event that records the
+    /// artifact's supersession by that change, because the owning ledger
+    /// holds no record of a change opened elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    promotion: Option<ForeignPromotion>,
 }
+
+/// A change opened in one project from an artifact another project's journal
+/// holds, as the owning journal records it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ForeignPromotion {
+    /// The promoting ledger's repository id.
+    pub(crate) repository_id: String,
+    pub(crate) change_id: String,
+    /// The promoting project's checkout, where its ledger is read from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) anchor: Option<String>,
+    /// `journal_ref` for `begin --from-journal`, `brief.plan_ref` for a
+    /// brief's plan reference: the same bases a local promotion carries.
+    pub(crate) basis: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) slice: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) brief_event_id: Option<String>,
+}
+
+impl ForeignPromotion {
+    fn well_formed(&self) -> bool {
+        !self.repository_id.trim().is_empty()
+            && !self.change_id.trim().is_empty()
+            && PROMOTION_BASES.contains(&self.basis.as_str())
+    }
+}
+
+const PROMOTION_BASES: [&str; 2] = ["journal_ref", "brief.plan_ref"];
 
 /// Every field a correction may name, over all targets. Which of them a given
 /// target actually carries is `AmendTarget::correctable_fields`.
@@ -6695,6 +6737,7 @@ impl JournalEvent {
             supersedes_checkpoint: None,
             supersedes_checkpoints: None,
             digest: None,
+            promotion: None,
         }
     }
 
@@ -6726,6 +6769,13 @@ impl JournalEvent {
             .promoted_by
             .as_deref()
             .is_some_and(|actor| actor.trim().is_empty())
+        {
+            return false;
+        }
+        if self
+            .promotion
+            .as_ref()
+            .is_some_and(|promotion| !promotion.well_formed())
         {
             return false;
         }
@@ -6769,6 +6819,7 @@ impl JournalEvent {
             }
             "archived" => self.file.is_some(),
             "unarchived" => self.artifact_file(),
+            "promoted" => self.artifact_file() && self.promotion.is_some(),
             "storage-intent" | "storage-completed" => {
                 self.artifact_file()
                     && self
@@ -7554,6 +7605,16 @@ fn event_message(event: &JournalEvent) -> String {
             event.file.as_deref().unwrap_or_default()
         ),
         "unarchived" => format!("unarchived {}", event.file.as_deref().unwrap_or_default()),
+        "promoted" => {
+            let promotion = event.promotion.as_ref();
+            format!(
+                "promoted {} to change {} in repository {} ({})",
+                event.file.as_deref().unwrap_or_default(),
+                promotion.map_or("", |p| p.change_id.as_str()),
+                promotion.map_or("", |p| p.repository_id.as_str()),
+                promotion.map_or("", |p| p.basis.as_str()),
+            )
+        }
         "lane-opened" => format!(
             "lane opened [{}]{}{}",
             format_age(event.ttl_seconds.unwrap_or(DEFAULT_LANE_TTL)),
@@ -9220,6 +9281,14 @@ pub(crate) struct InventoryPromotion {
     pub(crate) plan_source: Option<PlanSource>,
     pub(crate) stage: String,
     pub(crate) closure: Option<crate::state::ClosureState>,
+    /// The repository id of the ledger that holds the change, present when
+    /// it is another project's: a promotion that project's `begin
+    /// --from-journal` or `brief --plan-ref` recorded in this journal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) repository_id: Option<String>,
+    /// The promoting project's checkout, beside `repository_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) anchor: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -10384,6 +10453,11 @@ fn promotion_state_of(
 /// every one of them has closed. The closure advice reads this; it consumes
 /// nothing and writes nothing.
 pub(crate) fn last_promotion_closed(store: &Store, filename: &str) -> Result<bool> {
+    // Another project's journal counts promotions this ledger cannot see, and
+    // only that project may consume the plan.
+    if split_qualified(filename).is_some() {
+        return Ok(false);
+    }
     if parse_artifact_name(filename).is_none_or(|(_, _, kind)| kind != JournalKind::Plan.as_str()) {
         return Ok(false);
     }
@@ -10414,6 +10488,8 @@ fn inventory_promotions(changes: &[ChangeState], filename: &str) -> Vec<Inventor
                 plan_source: None,
                 stage: stage_label(change),
                 closure: change.closure.clone(),
+                repository_id: None,
+                anchor: None,
             });
         }
         for (version, brief) in change.briefs.iter().enumerate() {
@@ -10434,12 +10510,81 @@ fn inventory_promotions(changes: &[ChangeState], filename: &str) -> Vec<Inventor
                 plan_source: brief.plan_source.clone(),
                 stage: stage_label(change),
                 closure: change.closure.clone(),
+                repository_id: None,
+                anchor: None,
             });
         }
     }
     promotions
         .sort_by(|a, b| (&a.change_id, a.brief_version).cmp(&(&b.change_id, b.brief_version)));
     promotions
+}
+
+/// The changes other projects opened from `filename`, as this journal's
+/// `promoted` events record them. Each one's status is read from the
+/// promoting ledger at its recorded anchor; a ledger that cannot be read, or
+/// that is not the recorded repository, leaves the status `unknown`, which no
+/// promotion state treats as closed.
+fn foreign_promotions(
+    events: &[JournalEvent],
+    filename: &str,
+    ledgers: &mut ForeignLedgers,
+) -> Vec<InventoryPromotion> {
+    events
+        .iter()
+        .filter(|event| {
+            event.event == "promoted" && event.file.as_deref() == Some(filename) && event.known()
+        })
+        .filter_map(|event| event.promotion.as_ref())
+        .map(|promotion| {
+            let change = ledgers.change(promotion);
+            InventoryPromotion {
+                change_id: promotion.change_id.clone(),
+                status: match &change {
+                    Some(change) if change.is_closed() => "closed",
+                    Some(_) => "open",
+                    None => "unknown",
+                }
+                .to_string(),
+                basis: promotion.basis.clone(),
+                brief_event_id: promotion.brief_event_id.clone(),
+                brief_version: None,
+                slice: promotion.slice.clone(),
+                source_digest: None,
+                plan_source: None,
+                stage: change
+                    .as_ref()
+                    .map_or_else(|| "unknown".to_string(), stage_label),
+                closure: change.and_then(|change| change.closure),
+                repository_id: Some(promotion.repository_id.clone()),
+                anchor: promotion.anchor.clone(),
+            }
+        })
+        .collect()
+}
+
+/// Promoting ledgers read once per anchor for one observation.
+#[derive(Default)]
+struct ForeignLedgers {
+    stores: HashMap<String, Option<Store>>,
+}
+
+impl ForeignLedgers {
+    fn change(&mut self, promotion: &ForeignPromotion) -> Option<ChangeState> {
+        let anchor = promotion.anchor.as_deref()?;
+        let store = self
+            .stores
+            .entry(anchor.to_string())
+            .or_insert_with(|| {
+                Store::resolve_root(Path::new(anchor))
+                    .ok()
+                    .and_then(|root| Store::open_at(&root).ok().flatten())
+            })
+            .as_ref()
+            .filter(|store| store.repository_id == promotion.repository_id)?;
+        let rewrites = store.rewrites().ok()?;
+        state::reduce_following(&store.load_events(&promotion.change_id).ok()?, &rewrites).ok()
+    }
 }
 
 fn project_inventory(
@@ -10540,6 +10685,7 @@ fn project_inventory(
     };
     let mut items = Vec::new();
     let mut patchset_citations: BTreeMap<String, Vec<PatchsetCitation>> = BTreeMap::new();
+    let mut foreign_ledgers = ForeignLedgers::default();
     for name in names {
         ensure_storage_settled(&hot, &events, &name)?;
         let Some((ts, topic, file_kind)) = parse_artifact_name(&name) else {
@@ -10576,8 +10722,11 @@ fn project_inventory(
             }
         }
         let amendments = Amendments::collect(&events, &name);
-        let promotions =
-            (ledger.state != "unreadable").then(|| inventory_promotions(&changes, &name));
+        let promotions = (ledger.state != "unreadable").then(|| {
+            let mut promotions = inventory_promotions(&changes, &name);
+            promotions.extend(foreign_promotions(&events, &name, &mut foreign_ledgers));
+            promotions
+        });
         let citations = if ledger.state != "unreadable" {
             inventory_citations(&changes, &name)
         } else {
@@ -10825,8 +10974,22 @@ pub(crate) fn render_open_entry(f: &ArtifactEntry) {
             Some(promotions) => {
                 for promotion in promotions {
                     println!(
-                        "    promotion: {} ({}, {})",
-                        promotion.change_id, promotion.basis, promotion.stage
+                        "    promotion: {} ({}, {}){}",
+                        promotion.change_id,
+                        promotion.basis,
+                        promotion.stage,
+                        promotion
+                            .repository_id
+                            .as_deref()
+                            .map(|repository| format!(
+                                " in repository {repository}{}",
+                                promotion
+                                    .anchor
+                                    .as_deref()
+                                    .map(|anchor| format!(" at {anchor}"))
+                                    .unwrap_or_default()
+                            ))
+                            .unwrap_or_default()
                     );
                 }
             }
@@ -11238,17 +11401,106 @@ fn latest(ctx: &Ctx, topic: &str, kind: Option<&str>, json: bool) -> Result<i32>
     }
 }
 
+/// Separates a journal directory from an artifact filename in a qualified
+/// artifact reference.
+pub(crate) const REFERENCE_SEPARATOR: &str = "::";
+
+/// Where a journal artifact reference resolves.
+///
+/// A reference is a bare filename, resolved in the current project's journal,
+/// or `<journal-dir>::<file>`, resolved in the journal at the absolute
+/// directory `<journal-dir>` — the path `arc journal dir` prints in the
+/// project that owns it. Every surface that names an artifact for promotion or
+/// framing resolves through here, and records the reference as it was given,
+/// so every later reader resolves it the same way.
+pub(crate) struct ArtifactLocation {
+    /// The hot directory of the journal the reference names.
+    pub(crate) hot: PathBuf,
+    /// The artifact's filename inside that journal.
+    pub(crate) file: String,
+    /// Whether `hot` is another project's journal. A foreign journal is read
+    /// and recorded against, never bound to this project.
+    pub(crate) foreign: bool,
+}
+
+/// The journal directory and filename of a qualified reference, or `None`
+/// for a bare filename. Only an absolute directory qualifies, so the
+/// `<project>::<file>` form `--decision` takes is never read as one.
+pub(crate) fn split_qualified(reference: &str) -> Option<(&str, &str)> {
+    let (dir, file) = reference.rsplit_once(REFERENCE_SEPARATOR)?;
+    Path::new(dir).is_absolute().then_some((dir, file))
+}
+
+/// Resolve a reference to the journal that holds it. A qualified reference
+/// must name a directory that is a journal and a filename that is an artifact
+/// name; whether the file exists is each caller's question, since some accept
+/// the cold archive and some do not.
+pub(crate) fn locate_artifact(ctx: &Ctx, reference: &str) -> Result<ArtifactLocation> {
+    let Some((dir, file)) = split_qualified(reference) else {
+        return Ok(ArtifactLocation {
+            hot: resolve_dir(&ctx.cwd)?,
+            file: reference.to_string(),
+            foreign: false,
+        });
+    };
+    if file.contains(['/', '\\']) || parse_artifact_name(file).is_none() {
+        bail!(
+            "{file:?} in {reference} is not a journal artifact name \
+             (<timestamp>-<topic>-<kind>.md)"
+        );
+    }
+    let hot = PathBuf::from(dir);
+    if !hot.is_dir() || !looks_like_a_journal(&hot).unwrap_or(false) {
+        bail!(
+            "{} is not a journal directory (named by {reference}); name the path \
+             `arc journal dir` prints in the project that owns {file}",
+            hot.display()
+        );
+    }
+    let canonical = |path: &Path| std::fs::canonicalize(path).ok();
+    let own = resolve_dir(&ctx.cwd).ok();
+    let foreign = own.as_deref().and_then(canonical) != canonical(&hot);
+    Ok(ArtifactLocation {
+        hot,
+        file: file.to_string(),
+        foreign,
+    })
+}
+
+/// Refuse a journal write that would change the disposition of an artifact
+/// another project's journal holds. Only the owning project consumes,
+/// archives, or transitions what its journal holds.
+fn refuse_foreign_write(reference: &str) -> Result<()> {
+    let Some((dir, file)) = split_qualified(reference) else {
+        return Ok(());
+    };
+    let owner = recorded_anchor(Path::new(dir))
+        .ok()
+        .flatten()
+        .map(|anchor| format!(" (project {anchor})"))
+        .unwrap_or_default();
+    bail!(
+        "{file} belongs to the journal at {dir}{owner}; a journal write that changes an \
+         artifact's disposition runs from the project that owns it, with the bare filename"
+    )
+}
+
 /// Read one artifact's raw body from the hot journal dir, then the cold
 /// archive. For callers that thread an artifact's content elsewhere — `show`
 /// prints it, `begin --from-journal` seeds a brief from it. Rejects path
-/// separators so the argument stays a filename inside the journal dir.
-pub fn read_artifact_body(ctx: &Ctx, filename: &str) -> Result<String> {
+/// separators so the argument stays a filename inside the journal dir, or a
+/// `<journal-dir>::<file>` reference.
+pub fn read_artifact_body(ctx: &Ctx, reference: &str) -> Result<String> {
+    read_located_body(&locate_artifact(ctx, reference)?)
+}
+
+fn read_located_body(location: &ArtifactLocation) -> Result<String> {
+    let (hot, filename) = (&location.hot, location.file.as_str());
     if filename.contains(['/', '\\']) {
         bail!("artifact reference must be a filename inside the journal dir, not a path");
     }
-    let hot = resolve_dir(&ctx.cwd)?;
-    ensure_storage_settled(&hot, &read_events(&hot)?, filename)?;
-    for dir in [hot.clone(), archive_dir(&hot)] {
+    ensure_storage_settled(hot, &read_events(hot)?, filename)?;
+    for dir in [hot.clone(), archive_dir(hot)] {
         let path = dir.join(filename);
         if path.is_file() {
             return std::fs::read_to_string(&path)
@@ -11261,9 +11513,9 @@ pub fn read_artifact_body(ctx: &Ctx, filename: &str) -> Result<String> {
     )
 }
 
-/// Resolve a journal artifact filename into the reference a patchset records:
-/// the filename, `sha256:` over the body read now, and where the link came
-/// from.
+/// Resolve a journal artifact reference into the reference a patchset
+/// records: the reference as given, `sha256:` over the body read now, and
+/// where the link came from.
 ///
 /// The name must be an artifact filename and must resolve in the hot journal
 /// or its cold archive, so a recorded link always names something that
@@ -11271,34 +11523,38 @@ pub fn read_artifact_body(ctx: &Ctx, filename: &str) -> Result<String> {
 /// records the identifier and never promises the file survives.
 pub fn artifact_reference(
     ctx: &Ctx,
-    filename: &str,
+    reference: &str,
     via: JournalRefVia,
 ) -> Result<JournalArtifactRef> {
     Ok(JournalArtifactRef {
-        file: filename.to_string(),
-        digest: artifact_digest(ctx, filename)?,
+        file: reference.to_string(),
+        digest: artifact_digest(ctx, reference)?,
         via: Some(via),
     })
 }
 
 /// `sha256:` over a journal artifact's body read now, from the hot journal or
-/// its cold archive. A name that is not an artifact filename, or resolves to
-/// nothing, is refused.
-pub fn artifact_digest(ctx: &Ctx, filename: &str) -> Result<String> {
+/// its cold archive of the journal the reference names. A name that is not an
+/// artifact filename, or resolves to nothing, is refused.
+pub fn artifact_digest(ctx: &Ctx, reference: &str) -> Result<String> {
+    let location = locate_artifact(ctx, reference)?;
+    let filename = location.file.as_str();
     if parse_artifact_name(filename).is_none() {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     }
-    let body = read_artifact_body(ctx, filename)?;
+    let body = read_located_body(&location)?;
     Ok(format!(
         "sha256:{}",
         hex::encode(Sha256::digest(body.as_bytes()))
     ))
 }
 
-/// Validate that a filename identifies an existing plan in the hot journal or
-/// its cold archive.
+/// Validate that a reference identifies an existing plan in the hot journal
+/// or its cold archive.
 #[allow(dead_code)]
-pub fn validate_plan_artifact(ctx: &Ctx, filename: &str) -> Result<()> {
+pub fn validate_plan_artifact(ctx: &Ctx, reference: &str) -> Result<()> {
+    let location = locate_artifact(ctx, reference)?;
+    let filename = location.file.as_str();
     if filename.contains(['/', '\\']) {
         bail!("plan reference must be a journal artifact filename, not a path");
     }
@@ -11308,14 +11564,18 @@ pub fn validate_plan_artifact(ctx: &Ctx, filename: &str) -> Result<()> {
     if kind != "plan" {
         bail!("{filename:?} is a {kind} artifact, not a plan");
     }
-    read_artifact_body(ctx, filename)?;
+    read_located_body(&location)?;
     Ok(())
 }
 
 /// Read a plan once and capture the exact bytes and planner coordinates used
 /// by a brief. The snapshot is immutable state on the brief event, so later
-/// edits or corrections to the plan do not rewrite an existing brief.
-pub fn plan_source(ctx: &Ctx, filename: &str, slice: &str) -> Result<PlanSource> {
+/// edits or corrections to the plan do not rewrite an existing brief. A plan
+/// in another project's journal records that journal and the anchor it is
+/// bound to.
+pub fn plan_source(ctx: &Ctx, reference: &str, slice: &str) -> Result<PlanSource> {
+    let location = locate_artifact(ctx, reference)?;
+    let filename = location.file.as_str();
     if filename.contains(['/', '\\']) {
         bail!("plan reference must be a journal artifact filename, not a path");
     }
@@ -11326,8 +11586,14 @@ pub fn plan_source(ctx: &Ctx, filename: &str, slice: &str) -> Result<PlanSource>
     if kind != "plan" {
         bail!("{filename:?} is a {kind} artifact, not a plan");
     }
-    let resolution = resolve(&ctx.cwd)?;
-    let hot = resolution.directory;
+    let (hot, anchor) = if location.foreign {
+        let anchor = recorded_anchor(&location.hot)?;
+        (location.hot, anchor)
+    } else {
+        let resolution = resolve(&ctx.cwd)?;
+        let anchor = resolution.anchor.map(|path| path.display().to_string());
+        (resolution.directory, anchor)
+    };
     let (path, storage) = if hot.join(filename).is_file() {
         (hot.join(filename), "hot")
     } else if archive_dir(&hot).join(filename).is_file() {
@@ -11350,7 +11616,7 @@ pub fn plan_source(ctx: &Ctx, filename: &str, slice: &str) -> Result<PlanSource>
         );
     }
     Ok(PlanSource {
-        anchor: resolution.anchor.map(|path| path.display().to_string()),
+        anchor,
         journal_dir: hot.display().to_string(),
         filename: filename.to_string(),
         slice: slice.to_string(),
@@ -12770,9 +13036,14 @@ fn journal_tail(dir: &Path, limit: usize) -> Result<Vec<String>> {
 
 /// Verify a journal artifact exists and is an open, unconsumed actionable
 /// item suitable to open a change from. Errors otherwise.
-pub fn require_open_actionable(ctx: &Ctx, filename: &str) -> Result<String> {
+pub fn require_open_actionable(ctx: &Ctx, reference: &str) -> Result<String> {
+    let location = locate_artifact(ctx, reference)?;
+    let filename = location.file.as_str();
     if filename.contains(['/', '\\']) {
-        bail!("--from-journal takes an artifact filename inside the journal dir, not a path");
+        bail!(
+            "--from-journal takes an artifact filename inside the journal dir, or \
+             <journal-dir>::<file>, not a path"
+        );
     }
     let Some((_, _, kind)) = parse_artifact_name(filename) else {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
@@ -12784,7 +13055,7 @@ pub fn require_open_actionable(ctx: &Ctx, filename: &str) -> Result<String> {
             LATER_KIND
         );
     }
-    let dir = resolve_dir(&ctx.cwd)?;
+    let dir = location.hot;
     ensure_storage_settled(&dir, &read_events(&dir)?, filename)?;
     if !dir.join(filename).is_file() {
         bail!("no such artifact {} in {}", filename, dir.display());
@@ -12922,6 +13193,7 @@ fn transition(
             to.as_str()
         );
     }
+    refuse_foreign_write(filename)?;
     if filename.contains(['/', '\\']) {
         bail!("transition takes an artifact filename inside the journal dir, not a path");
     }
@@ -13114,18 +13386,23 @@ fn transition(
 }
 
 /// Append a journal `consumed` event marking an artifact superseded by the
-/// change opened from it. The artifact file itself is never edited.
+/// change opened from it, in the journal that holds the artifact. The artifact
+/// file itself is never edited. For an artifact another project's journal
+/// holds, `promotion` names the change, and the event carries it.
 pub fn consume_superseded_by_change(
     ctx: &Ctx,
-    filename: &str,
+    reference: &str,
     change_id: &str,
+    promotion: Option<&ForeignPromotion>,
     _transition: &JournalTransitionLock,
 ) -> Result<()> {
+    let location = locate_artifact(ctx, reference)?;
+    let filename = location.file.as_str();
     let Some((_, topic, _)) = parse_artifact_name(filename) else {
         bail!("{filename:?} is not a journal artifact name");
     };
-    let dir = resolve_dir(&ctx.cwd)?;
-    let events = read_events(&dir)?;
+    let dir = &location.hot;
+    let events = read_events(dir)?;
     if is_consumed(&events, filename) {
         bail!("{filename} is already consumed (see the journal)");
     }
@@ -13146,10 +13423,86 @@ pub fn consume_superseded_by_change(
         event.claim_id = Some(mine.state.claim_id.clone());
         event.outcome = Some("promoted".to_string());
         event.note = Some(format!("change {change_id}"));
-        append_event(ctx, &dir, &event)?;
+        append_located_event(ctx, &location, &event)?;
     }
-    let message = format!("consumed {filename} [superseded]: change {change_id}");
-    append_journal(&dir, ctx, now, &topic, &message, None)
+    let Some(promotion) = promotion.filter(|_| location.foreign) else {
+        let message = format!("consumed {filename} [superseded]: change {change_id}");
+        return append_journal(dir, ctx, now, &topic, &message, None);
+    };
+    let mut event = JournalEvent::base(ctx, now, &topic, "consumed");
+    event.file = Some(filename.to_string());
+    event.outcome = Some("superseded".to_string());
+    event.note = Some(format!(
+        "change {change_id} in repository {}",
+        promotion.repository_id
+    ));
+    event.promotion = Some(promotion.clone());
+    append_located_event(ctx, &location, &event)
+}
+
+/// Record in the journal that holds an artifact that a change in another
+/// project took it up. The owning journal's ledger has no record of that
+/// change, so this event is how its inventory, open queue, and workspace
+/// report learn of the promotion. The event names the invoking identity like
+/// any other; the promoting project is named by `promotion`, and the owning
+/// journal's binding is left as it is.
+pub(crate) fn record_foreign_promotion(
+    ctx: &Ctx,
+    reference: &str,
+    promotion: &ForeignPromotion,
+) -> Result<()> {
+    let location = locate_artifact(ctx, reference)?;
+    if !location.foreign {
+        return Ok(());
+    }
+    let Some((_, topic, _)) = parse_artifact_name(&location.file) else {
+        bail!("{:?} is not a journal artifact name", location.file);
+    };
+    let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "promoted");
+    event.file = Some(location.file.clone());
+    event.promotion = Some(promotion.clone());
+    append_located_event(ctx, &location, &event)
+}
+
+/// The promoting side of a cross-project promotion: this project's ledger
+/// and checkout, naming `change_id`.
+pub(crate) fn promotion_from(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    basis: &str,
+) -> ForeignPromotion {
+    let anchor = resolve(&ctx.cwd)
+        .ok()
+        .and_then(|resolution| resolution.anchor)
+        .or_else(|| {
+            std::fs::canonicalize(&ctx.cwd)
+                .ok()
+                .and_then(|cwd| repo_root(&cwd).ok())
+        });
+    ForeignPromotion {
+        repository_id: store.repository_id.clone(),
+        change_id: change_id.to_string(),
+        anchor: anchor.map(|path| path.display().to_string()),
+        basis: basis.to_string(),
+        slice: None,
+        brief_event_id: None,
+    }
+}
+
+/// Append to the journal a location names. The caller's own journal records
+/// its project binding on first write; another project's journal is never
+/// bound to the caller.
+fn append_located_event(
+    ctx: &Ctx,
+    location: &ArtifactLocation,
+    event: &JournalEvent,
+) -> Result<()> {
+    if location.foreign {
+        write_event(&location.hot, event)
+    } else {
+        append_event(ctx, &location.hot, event)
+    }
 }
 
 /// Best-effort lifecycle narration into the advisory journal. Does nothing
