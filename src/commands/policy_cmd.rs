@@ -80,6 +80,21 @@ pub fn show(ctx: &Ctx) -> Result<i32> {
         &format!("provenance.git_identity={provenance}"),
         &policy.sources,
     );
+    match policy.candidates.evaluation_reuse {
+        Some(reuse) => {
+            let reuse = reuse.as_str();
+            print_rule(
+                "candidates.evaluation_reuse",
+                reuse,
+                &format!("candidates.evaluation_reuse={reuse}"),
+                &policy.sources,
+            );
+        }
+        None => println!(
+            "  candidates.evaluation_reuse = none (undeclared; no default, and candidate \
+             selection requires one)"
+        ),
+    }
     for item in &policy.review.checklist {
         print_rule(
             &format!("review.checklist[{item:?}]"),
@@ -121,8 +136,15 @@ pub fn show(ctx: &Ctx) -> Result<i32> {
         format!("provenance.git_identity={provenance}"),
     ];
     for (rule, sources) in policy.sources.as_map() {
-        if (rule.starts_with("policy.") || rule.starts_with("provenance."))
+        let effective_reuse = policy
+            .candidates
+            .evaluation_reuse
+            .map(|reuse| format!("candidates.evaluation_reuse={}", reuse.as_str()));
+        if (rule.starts_with("policy.")
+            || rule.starts_with("provenance.")
+            || rule.starts_with("candidates."))
             && !effective_scalars.contains(&rule)
+            && effective_reuse.as_ref() != Some(&rule)
         {
             println!("declaration {rule}: declared by {}", sources.join(", "));
         }

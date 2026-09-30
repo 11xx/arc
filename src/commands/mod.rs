@@ -1,6 +1,7 @@
 use crate::bundle::{Bundle, ValidatedBundle};
 mod audit;
 mod bundle_io;
+pub(crate) mod candidate;
 mod chain;
 mod changelog;
 mod claims;

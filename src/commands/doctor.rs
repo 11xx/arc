@@ -125,6 +125,7 @@ pub fn run(ctx: &Ctx, json: bool, verbose: bool) -> Result<i32> {
     inspect_repository_events(&store, &mut problems);
     inspect_dangling_revisions(&ctx.cwd, &store, &states, &mut problems, &mut advice)?;
     inspect_refs(ctx, &states, &known_patchsets, &mut advice)?;
+    inspect_candidates(ctx, &store, &mut problems, &mut advice)?;
     // Doctor diagnoses the invoking checkout, including uncommitted
     // declarations and tracked files. A change's target would hide local
     // mistakes until they reached that branch.
@@ -477,6 +478,74 @@ fn inspect_refs(
             advice.push(Finding {
                 code: "orphaned-retention-ref",
                 detail: reference,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The candidate ledger against the pins that hold its content.
+///
+/// A pin with no registration holds content nothing names, which is
+/// housekeeping. A registration a root reaches whose pin is gone is content
+/// someone still wants and Git may already have collected, which is a problem.
+fn inspect_candidates(
+    ctx: &Ctx,
+    store: &Store,
+    problems: &mut Vec<Finding>,
+    advice: &mut Vec<Finding>,
+) -> Result<()> {
+    let ledger = match commands::candidate::load_ledger(store) {
+        Ok(ledger) => ledger,
+        Err(error) => {
+            problems.push(Finding {
+                code: "invalid-candidate-ledger",
+                detail: format!("{error:#}"),
+            });
+            return Ok(());
+        }
+    };
+    let prefix = crate::candidate::CANDIDATE_REF_PREFIX;
+    let mut pinned = BTreeSet::new();
+    for (reference, _) in gitio::list_refs(&ctx.cwd, prefix)? {
+        let candidate_id = reference.trim_start_matches(prefix).to_string();
+        if ledger.registration(&candidate_id).is_none() {
+            advice.push(Finding {
+                code: "unregistered-candidate-ref",
+                detail: format!(
+                    "{reference} has no registration; delete it with `git update-ref -d` \
+                     or register the content it holds"
+                ),
+            });
+        }
+        pinned.insert(candidate_id);
+    }
+    for (registration, roots) in ledger.rooted_without_pin(&pinned) {
+        problems.push(Finding {
+            code: "rooted-candidate-unpinned",
+            detail: format!(
+                "{} is reached by {} but {} is gone",
+                registration.candidate_id,
+                roots
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                crate::candidate::candidate_ref(&registration.candidate_id)
+            ),
+        });
+    }
+    if !ledger.is_empty() {
+        let declared = gitio::toplevel(&ctx.cwd)
+            .ok()
+            .and_then(|top| crate::policy::load(&top).ok())
+            .is_some_and(|policy| policy.candidates.evaluation_reuse.is_some());
+        if !declared {
+            advice.push(Finding {
+                code: "candidate-evaluation-reuse-undeclared",
+                detail: "candidates are registered and [candidates] evaluation_reuse is not \
+                         declared; selection requires \"matching-coordinates\" or \"never\""
+                    .to_string(),
             });
         }
     }

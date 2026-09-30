@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 /// store stamped newer than this, because the alternative is what silently
 /// went wrong before: an older binary skipping event types it does not know,
 /// concluding the change is still open, and closing it a second way.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DisplacedClaim {
@@ -1251,11 +1251,67 @@ pub enum Payload {
         #[serde(skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
+    /// A registered alternative answer to a brief: content, the contract it
+    /// answers, who produced it, and where it came from. Repository-scoped.
+    /// It opens no change and creates no patchset, and no later event alters
+    /// it.
+    CandidateRegistered {
+        candidate_id: String,
+        /// The registered content. A commit given at registration is
+        /// recorded as its tree.
+        tree: String,
+        brief: CandidateBriefRef,
+        /// Who produced the content. Never empty.
+        producers: Vec<String>,
+        /// Registrations this one continues. Each names the same brief
+        /// version.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        parents: Vec<String>,
+        /// Registrations whose content this one carries into its own
+        /// contract. The producers include every producer along each
+        /// adopted registration's parent chain.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        adopts: Vec<String>,
+        /// Claims recorded on the brief's change that the work ran under.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        episodes: Vec<String>,
+    },
+    /// A declarant's judgement of a candidate. It changes no registration.
+    CandidateJudged {
+        candidate_id: String,
+        judgement: CandidateJudgement,
+        reason: String,
+    },
+    /// A candidate's pin was deleted on the operator's command while no root
+    /// reached it. The registration stands.
+    CandidateRetired {
+        candidate_id: String,
+    },
     /// An event whose `event_type` this build does not recognize (e.g. one
     /// imported from a newer arc). Typed loading skips these entries; the
     /// underlying files and raw export preserve their original bytes intact.
     #[serde(other)]
     Unknown,
+}
+
+/// The contract a candidate answers: one version of one change's brief, and
+/// the digest of that version's body.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CandidateBriefRef {
+    pub change_id: String,
+    pub brief_event_id: String,
+    /// `sha256:` over the brief body.
+    pub digest: String,
+}
+
+/// What a declarant concluded about a candidate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CandidateJudgement {
+    /// A considered alternative not taken.
+    Rejected,
+    /// Another registration answers in this one's place.
+    SupersededBy { candidate_id: String },
 }
 
 /// The inputs to one guarded merge, recorded on the event that performed it.
@@ -1443,7 +1499,10 @@ pub fn append_permission(payload: &Payload) -> AppendPermission {
         | Payload::ReviewPassCompleted { .. }
         | Payload::ReviewPassAbandoned { .. } => AppendPermission::AnyPhaseFact,
         | Payload::RunDispatched { .. }
-        | Payload::RunEnded { .. } => AppendPermission::AnyPhaseFact,
+        | Payload::RunEnded { .. }
+        | Payload::CandidateRegistered { .. }
+        | Payload::CandidateJudged { .. }
+        | Payload::CandidateRetired { .. } => AppendPermission::AnyPhaseFact,
         Payload::Unknown => AppendPermission::OpaqueImported,
     }
 }

@@ -710,7 +710,7 @@ fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
     let event = opened_event(&repo, &opened_change_id(&opened));
     assert_eq!(event["session_resolution"], "unresolved", "{event}");
     assert!(event.get("model").is_none(), "{event}");
-    assert_eq!(event["schema_version"], 6, "{event}");
+    assert_eq!(event["schema_version"], 7, "{event}");
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
     assert_eq!(config["schema_version"], 5, "{config}");
@@ -726,7 +726,7 @@ fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
         .success();
     let exported: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
     assert_eq!(exported["schema"], "arc-bundle/6", "{exported}");
-    assert_eq!(exported["store_format"], 6, "{exported}");
+    assert_eq!(exported["store_format"], 7, "{exported}");
 
     let recipient = Repo::new();
     recipient

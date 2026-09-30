@@ -1,6 +1,7 @@
 mod audit;
 mod briefs;
 mod bundle;
+mod candidate;
 mod chain;
 mod changelog;
 mod claims;
