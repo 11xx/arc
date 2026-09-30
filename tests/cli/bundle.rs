@@ -237,7 +237,7 @@ fn import_reads_the_previous_bundle_version_and_refuses_older() {
         .failure()
         .stderr(predicates::str::contains("unsupported bundle schema"));
 
-    value["schema"] = serde_json::json!("arc-bundle/6");
+    value["schema"] = serde_json::json!("arc-bundle/5");
     fs::write(&bundle, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     let other = Repo::new();
     other
@@ -1265,7 +1265,7 @@ fn a_delta_bundle_extends_a_verified_prefix() {
         "{reported}"
     );
     let value: serde_json::Value = serde_json::from_slice(&fs::read(&delta).unwrap()).unwrap();
-    assert_eq!(value["schema"], "arc-bundle/7", "{value}");
+    assert_eq!(value["schema"], "arc-bundle/6", "{value}");
     assert_eq!(value["since"]["sha256"], token.as_str(), "{value}");
     assert_eq!(
         value["since"]["event_count"].as_u64(),
@@ -1486,7 +1486,7 @@ fn importing_previous_bundles_preserves_absent_model_provenance() {
                 .arc(&recipient.root)
                 .args(["export", &change, "--output", "-"]),
         );
-        assert_eq!(exported["schema"], "arc-bundle/7");
+        assert_eq!(exported["schema"], "arc-bundle/6");
         assert_eq!(exported["events"], fixture["events"]);
     }
 }
