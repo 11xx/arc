@@ -903,6 +903,9 @@ pub struct ChangeState {
     pub opened_session_link: Option<String>,
     /// Journal artifact this change was opened from, if any.
     pub journal_ref: Option<String>,
+    /// `sha256:` over that artifact's body read when the change opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_ref_digest: Option<String>,
     /// The fork `begin --from-fork` promoted work from, when one did. A
     /// recorded link: no review credit, obligation, or lifecycle state
     /// crosses it, and the fork survives the promotion untouched.
@@ -1370,6 +1373,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 blocked_by,
                 tags,
                 journal_ref,
+                journal_ref_digest,
                 from_fork,
                 dangerous,
             } => (
@@ -1393,6 +1397,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     opened_session: ev.session.clone(),
                     opened_session_link: ev.session_link.clone(),
                     journal_ref: journal_ref.clone(),
+                    journal_ref_digest: journal_ref_digest.clone(),
                     from_fork: from_fork.clone(),
                     blocked_by: blocked_by.clone(),
                     tags: tags.clone(),
@@ -2972,6 +2977,7 @@ mod tests {
                 blocked_by: Vec::new(),
                 tags: Vec::new(),
                 journal_ref: None,
+                journal_ref_digest: None,
                 from_fork: None,
             },
         )

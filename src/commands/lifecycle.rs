@@ -40,6 +40,10 @@ pub fn begin(
         .as_deref()
         .map(|filename| crate::journal::require_open_actionable(ctx, filename))
         .transpose()?;
+    let journal_ref_digest = from_journal
+        .as_deref()
+        .map(|filename| crate::journal::artifact_digest(ctx, filename))
+        .transpose()?;
     let store = ctx.store()?;
     ctx.ensure_declared_actor(&store)?;
     let blocked_by = blocked_by
@@ -306,6 +310,7 @@ pub fn begin(
             blocked_by,
             tags,
             journal_ref: from_journal.clone(),
+            journal_ref_digest,
             from_fork: fork_provenance.clone(),
             dangerous,
         },
