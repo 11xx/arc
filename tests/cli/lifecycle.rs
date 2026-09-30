@@ -2969,6 +2969,186 @@ fn unused_kept_context_is_absent_from_show_json() {
     assert!(show.get("kept").is_none(), "{show}");
 }
 
+fn printed_field(output: &str, prefix: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(prefix))
+        .unwrap_or_else(|| panic!("no {prefix:?} line in {output}"))
+        .trim()
+        .to_string()
+}
+
+fn kept_event_id(output: &str) -> String {
+    printed_field(output, "kept: ")
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .to_string()
+}
+
+/// A citation is checked when the fact is kept. An id that names nothing on
+/// this change, including a real event on another change, is refused naming
+/// the change, and the ledger is left as it was rather than recording an
+/// unknown reference.
+#[test]
+fn keep_refuses_a_citation_not_on_the_change() {
+    let repo = Repo::new();
+    begin_change(&repo, "cite-elsewhere", None);
+    let citing = begin_change(&repo, "cite-here", None);
+    let elsewhere = kept_event_id(&stdout(repo.arc(&repo.root).args([
+        "keep",
+        "cite-elsewhere",
+        "--kind",
+        "verified",
+        "--body",
+        "recorded on the other change",
+    ])));
+    let before = event_count(&repo, &citing);
+
+    for cited in [elsewhere.as_str(), "01ZZZZZZZZZZZZZZZZZZZZZZZZ"] {
+        let out = repo
+            .arc(&repo.root)
+            .args([
+                "keep",
+                "cite-here",
+                "--kind",
+                "verified",
+                "--body",
+                "rests on a record this change does not hold",
+                "--cites",
+                cited,
+            ])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{cited} was accepted");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(cited), "{stderr}");
+        assert!(stderr.contains(&citing), "the change is named: {stderr}");
+        assert_eq!(event_count(&repo, &citing), before, "nothing is kept");
+    }
+}
+
+/// A fact may rest on a verification and on an earlier kept fact; both ids are
+/// recorded and handed back by `show --json`, `status --json`, and `resume`.
+/// Citing does not change the fact's kind.
+#[test]
+fn keep_records_citations_of_records_on_the_change() {
+    let repo = Repo::new();
+    commit_composed_gates(&repo);
+    stdout(repo.arc(&repo.root).args(["begin", "cite-records"]));
+    let wt = repo.home.join(".worktrees/repo-cite-records");
+    repo.commit(&wt, "change.txt", "change\n", "feat: cite");
+    stdout(repo.arc(&wt).args(["snapshot", "cite-records"]));
+    repo.arc(&wt)
+        .args(["verify", "cite-records", "--gate", "alpha"])
+        .assert()
+        .success();
+    let show = json_stdout(
+        repo.arc(&repo.root)
+            .args(["show", "cite-records", "--json"]),
+    );
+    let verification = show["verifications"][0]["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let earlier = kept_event_id(&stdout(repo.arc(&repo.root).args([
+        "keep",
+        "cite-records",
+        "--kind",
+        "constraint",
+        "--body",
+        "alpha must stay green",
+    ])));
+
+    let cited = kept_event_id(&stdout(repo.arc(&repo.root).args([
+        "keep",
+        "cite-records",
+        "--kind",
+        "hypothesis",
+        "--body",
+        "alpha covers the change",
+        "--cites",
+        &verification,
+        "--cites",
+        &earlier,
+    ])));
+
+    let show = json_stdout(
+        repo.arc(&repo.root)
+            .args(["show", "cite-records", "--json"]),
+    );
+    assert_eq!(show["schema"], "arc-state/3");
+    let kept = show["kept"].as_array().unwrap();
+    assert_eq!(kept.len(), 2, "{show}");
+    assert!(kept[0].get("cites").is_none(), "{show}");
+    assert_eq!(kept[1]["event_id"], cited.as_str());
+    assert_eq!(kept[1]["kind"], "hypothesis", "citing does not verify");
+    assert_eq!(
+        kept[1]["cites"],
+        serde_json::json!([verification, earlier]),
+        "{show}"
+    );
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "cite-records", "--json"]),
+    );
+    assert_eq!(status["kept"][1]["cites"], kept[1]["cites"]);
+    let resume = stdout(repo.arc(&repo.root).args(["resume", "cite-records"]));
+    assert!(
+        resume.contains(&format!("(cites {verification}, {earlier})")),
+        "{resume}"
+    );
+}
+
+/// Only records a fact can rest on are citable. A claim or a brief is on the
+/// change but is refused by kind, and nothing is kept.
+#[test]
+fn keep_refuses_citing_an_event_of_another_kind() {
+    let repo = Repo::new();
+    let change_id = begin_change(&repo, "cite-kind", None);
+    let claim = printed_field(
+        &stdout(repo.arc(&repo.root).args(["claim", "cite-kind"])),
+        "event: ",
+    );
+    let brief = printed_field(
+        &stdout(
+            repo.arc(&repo.root)
+                .args(["brief", "cite-kind", "--body-file", "-"])
+                .write_stdin("the contract\n"),
+        ),
+        "event: ",
+    );
+    let before = event_count(&repo, &change_id);
+
+    for (cited, kind) in [
+        (claim.as_str(), "claim-set"),
+        (brief.as_str(), "brief-recorded"),
+    ] {
+        let out = repo
+            .arc(&repo.root)
+            .args([
+                "keep",
+                "cite-kind",
+                "--kind",
+                "verified",
+                "--body",
+                "rests on the wrong kind of record",
+                "--cites",
+                cited,
+            ])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{kind} {cited} was accepted");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(cited) && stderr.contains(kind),
+            "refused by kind: {stderr}"
+        );
+        assert_eq!(event_count(&repo, &change_id), before, "nothing is kept");
+    }
+}
+
 /// A worktree floor is a warning, never a refusal: with free space below the
 /// declared floor, `begin` still succeeds and says what the disk holds.
 #[test]

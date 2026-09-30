@@ -644,6 +644,11 @@ pub enum Payload {
         /// itself worth seeing: a fact with no evidence reads as a claim.
         #[serde(skip_serializing_if = "Option::is_none")]
         evidence: Option<String>,
+        /// Events on the same change the fact rests on, each checked to exist
+        /// and to be of a citable kind when the fact was kept. A citation
+        /// names a record; it does not upgrade the fact's kind.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        cites: Vec<String>,
     },
     CommentAdded {
         body: String,

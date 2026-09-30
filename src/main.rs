@@ -918,6 +918,16 @@ enum Cmd {
         /// What established it. A fact with no evidence reads as a claim
         #[arg(long)]
         evidence: Option<String>,
+        /// An event on this change the fact rests on (repeatable, exact id):
+        /// a verification or reused verification, a verdict, external
+        /// verdict, or audit verdict, a finding or audit finding, a
+        /// disposition or audit disposition, or an earlier kept fact. An id
+        /// that names no event on this change, or an event of any other kind,
+        /// is refused and nothing is kept. A citation names the record the
+        /// fact rests on; it does not make the fact verified, and `--kind`
+        /// means what it means without one
+        #[arg(long = "cites", value_name = "EVENT")]
+        cites: Vec<String>,
     },
     /// Add a discussion comment
     Comment {
@@ -2980,10 +2990,11 @@ fn run(cli: Cli) -> Result<i32> {
             change,
             body,
             evidence,
+            cites,
         } => {
             let change = infer(change.as_deref())?;
             let text = commands::read_body(body.body, body.body_file)?;
-            commands::keep(&ctx, &change, kind.into(), text, evidence)?;
+            commands::keep(&ctx, &change, kind.into(), text, evidence, cites)?;
             Ok(0)
         }
         Cmd::Comment {
