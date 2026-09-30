@@ -1,3 +1,4 @@
+mod approval;
 mod blockers;
 mod bundle;
 mod candidate;
