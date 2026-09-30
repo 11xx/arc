@@ -354,3 +354,268 @@ fn stats_by_model_attributes_patchsets_and_rework_to_the_subject() {
         .failure()
         .stderr(predicates::str::contains("cannot be combined"));
 }
+
+/// Write one journal artifact of `kind` and return the filename it got.
+fn journal_artifact(repo: &Repo, topic: &str, kind: &str) -> String {
+    let out = stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "note", topic, "--kind", kind, "--body-file", "-"])
+            .write_stdin(format!("# {topic}\n")),
+    );
+    Path::new(out.trim())
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string()
+}
+
+fn keep(repo: &Repo, slug: &str, kind: &str, cites: &[&str]) -> String {
+    let mut command = repo.arc(&repo.root);
+    command.args(["keep", slug, "--kind", kind, "--body", "fixture fact"]);
+    for cited in cites {
+        command.args(["--cites", cited]);
+    }
+    let output = command.assert().success().get_output().stdout.clone();
+    String::from_utf8(output)
+        .unwrap()
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .to_string()
+}
+
+fn verify_command(repo: &Repo, slug: &str, command: &str, extra: &[&str]) -> bool {
+    repo.arc(&repo.root)
+        .args(["verify", slug, "--command", command])
+        .args(extra)
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+fn newest_failure(repo: &Repo, slug: &str) -> String {
+    stdout(repo.arc(&repo.root).args([
+        "events",
+        "--change",
+        slug,
+        "--type",
+        "verification-recorded",
+    ]))
+    .lines()
+    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+    .rfind(|event| event["result"] == "fail")
+    .unwrap()["event_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn integrate(repo: &Repo, slug: &str) {
+    repo.arc(&repo.root)
+        .args(["review", slug, "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", slug])
+        .assert()
+        .success();
+}
+
+fn ratio(count: u64, of: u64) -> serde_json::Value {
+    serde_json::json!({ "count": count, "of": of })
+}
+
+#[test]
+fn provenance_counts_every_class_on_one_fixture() {
+    let repo = Repo::new();
+    let opening = journal_artifact(&repo, "opening", "todo");
+    let plan = journal_artifact(&repo, "slicing", "plan");
+
+    // alpha: opened from a journal artifact, its brief revised to name a
+    // plan; an inferred pass, a pass with no prior failure, a patchset linked
+    // by default, and a rejected fact that a later fact cites.
+    repo.arc(&repo.root)
+        .args(["begin", "alpha", "--from-journal", &opening])
+        .assert()
+        .success();
+    let alpha = repo.home.join(".worktrees/repo-alpha");
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "alpha",
+            "--cause-note",
+            "fixture revision",
+            "--plan-ref",
+            &plan,
+            "--plan-slice",
+            "slice",
+            "--body-file",
+            "-",
+        ])
+        .write_stdin("# Contract\n")
+        .assert()
+        .success();
+    assert!(!verify_command(&repo, "alpha", "test -f marker", &[]));
+    repo.commit(&alpha, "marker", "", "test: add marker");
+    assert!(verify_command(&repo, "alpha", "test -f marker", &[]));
+    assert!(verify_command(&repo, "alpha", "true", &[]));
+    stdout(repo.arc(&alpha).args(["snapshot", "alpha"]));
+    let rejected = keep(&repo, "alpha", "rejected", &[]);
+    keep(&repo, "alpha", "verified", &[&rejected]);
+    integrate(&repo, "alpha");
+
+    // beta: opened bare, with a brief naming no plan; a declared pass, a pass
+    // recorded before arc derived the inference, an unlinked patchset, and a
+    // flagged one whose second link predates `via`.
+    let beta_id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "beta"])));
+    let beta = repo.home.join(".worktrees/repo-beta");
+    repo.arc(&repo.root)
+        .args(["brief", "beta", "--body-file", "-"])
+        .write_stdin("# Contract\n")
+        .assert()
+        .success();
+    repo.commit(&beta, "beta.txt", "beta\n", "test: beta");
+    stdout(repo.arc(&beta).args(["snapshot", "beta"]));
+    assert!(!verify_command(&repo, "beta", "test -f declared", &[]));
+    let failure = newest_failure(&repo, "beta");
+    repo.commit(&beta, "declared", "", "test: add declared");
+    assert!(verify_command(
+        &repo,
+        "beta",
+        "test -f declared",
+        &["--falsified-by", &failure, "--predicted", "file absent"],
+    ));
+    assert!(!verify_command(&repo, "beta", "test -f legacy", &[]));
+    repo.commit(&beta, "legacy", "", "test: add legacy");
+    assert!(verify_command(&repo, "beta", "test -f legacy", &[]));
+    rewrite_event(&repo, &beta_id, "verification-recorded", |event| {
+        assert!(event["falsification_inferred"].is_object(), "{event}");
+        event
+            .as_object_mut()
+            .unwrap()
+            .remove("falsification_inferred");
+    });
+    stdout(repo.arc(&beta).args([
+        "snapshot",
+        "beta",
+        "--journal-ref",
+        &opening,
+        "--journal-ref",
+        &plan,
+    ]));
+    rewrite_event(&repo, &beta_id, "patchset-added", |event| {
+        assert_eq!(event["journal_refs"][1]["via"], "flag", "{event}");
+        event["journal_refs"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("via");
+    });
+    keep(&repo, "beta", "constraint", &[]);
+    integrate(&repo, "beta");
+
+    // gamma: open, briefless, holding a rejected fact that no integration
+    // counts.
+    repo.arc(&repo.root)
+        .args(["begin", "gamma"])
+        .assert()
+        .success();
+    keep(&repo, "gamma", "rejected", &[]);
+
+    let report = json_stdout(
+        repo.arc(&repo.root)
+            .args(["stats", "--provenance", "--json"]),
+    );
+    assert_eq!(report["schema"], "arc-stats-provenance/1", "{report}");
+    assert_eq!(report["changes"], 3, "{report}");
+
+    let falsification = &report["falsification"];
+    assert_eq!(falsification["declared"], ratio(1, 4), "{report}");
+    assert_eq!(falsification["inferred"], ratio(1, 4), "{report}");
+    assert_eq!(falsification["none"], ratio(2, 4), "{report}");
+    assert_eq!(falsification["none_after_failure"], ratio(1, 2), "{report}");
+
+    let refs = &report["journal_refs"];
+    assert_eq!(refs["patchsets_with_refs"], ratio(2, 3), "{report}");
+    assert_eq!(refs["opened_from_journal"], ratio(1, 1), "{report}");
+    assert_eq!(refs["opened_without_journal"], ratio(1, 2), "{report}");
+    for via in ["begin", "brief", "flag", "unrecorded"] {
+        assert_eq!(refs["via"][via], ratio(1, 4), "{via}: {report}");
+    }
+
+    assert_eq!(report["rejected_alternatives"], ratio(1, 2), "{report}");
+    assert_eq!(
+        report["briefs"]["versions_with_plan_ref"],
+        ratio(1, 3),
+        "{report}"
+    );
+    assert_eq!(
+        report["briefs"]["changes_with_plan_ref"],
+        ratio(1, 3),
+        "{report}"
+    );
+    assert_eq!(report["cited_kept_facts"], ratio(1, 4), "{report}");
+
+    // Text is one line per class.
+    let text = stdout(repo.arc(&repo.root).args(["stats", "--provenance"]));
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 5, "{text}");
+    for (line, class) in lines.iter().zip([
+        "falsification:",
+        "journal refs:",
+        "rejected alternatives:",
+        "plan-linked briefs:",
+        "cited kept facts:",
+    ]) {
+        assert!(line.starts_with(class), "{text}");
+    }
+    assert!(lines[4].contains("1 of 4"), "{text}");
+}
+
+#[test]
+fn provenance_respects_change_and_tag_selection() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["begin", "cited"])
+        .assert()
+        .success();
+    let grounds = keep(&repo, "cited", "constraint", &[]);
+    keep(&repo, "cited", "verified", &[&grounds]);
+    repo.arc(&repo.root)
+        .args(["begin", "tagged", "--tag", "lane-h"])
+        .assert()
+        .success();
+    keep(&repo, "tagged", "hypothesis", &[]);
+
+    let facts = |selection: &[&str]| {
+        let report = json_stdout(
+            repo.arc(&repo.root)
+                .args(["stats", "--provenance", "--json"])
+                .args(selection),
+        );
+        (
+            report["changes"].clone(),
+            report["cited_kept_facts"].clone(),
+        )
+    };
+    assert_eq!(facts(&[]), (2.into(), ratio(1, 3)));
+    assert_eq!(facts(&["--all"]), (2.into(), ratio(1, 3)));
+    assert_eq!(facts(&["--change", "cited"]), (1.into(), ratio(1, 2)));
+    assert_eq!(facts(&["--tag", "lane-h"]), (1.into(), ratio(0, 1)));
+    assert_eq!(facts(&["--tag", "absent"]), (0.into(), ratio(0, 0)));
+}
+
+#[test]
+fn provenance_and_by_model_are_exclusive() {
+    let repo = Repo::new();
+    repo.arc(&repo.root)
+        .args(["stats", "--provenance", "--by-model"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with"));
+    repo.arc(&repo.root)
+        .args(["stats", "--provenance", "--by-model", "--json"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::is_empty());
+}
