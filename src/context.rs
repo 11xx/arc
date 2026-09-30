@@ -559,7 +559,7 @@ pub fn resume(
     if json || get.is_some() || fields.is_some() {
         commands::print_projected(
             serde_json::to_value(ResumeOutput {
-                schema: "arc-resume/7",
+                schema: "arc-resume/8",
                 status,
                 journal,
             })?,
@@ -651,13 +651,14 @@ pub fn resume(
             // Flattened: a stored newline must not break the bullet list or
             // inject a heading into the section that follows.
             println!(
-                "- **{}** — {}{}",
+                "- **{}** — {}{}{}",
                 kept.kind.as_str(),
                 crate::render::one_line(&kept.body),
                 kept.evidence
                     .as_deref()
                     .map(|evidence| format!(" _(evidence: {})_", crate::render::one_line(evidence)))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                crate::render::kept_citations(&kept.cites)
             );
         }
     }
