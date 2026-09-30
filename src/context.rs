@@ -398,6 +398,15 @@ pub fn resolve_model(
         (Some(harness), Some(session)) => Some(resolved(harness, session)),
         _ => None,
     };
+    model_attribution(declared, source, detected)
+}
+
+/// Attach one observed identity to a declaration without reading the store.
+pub fn model_attribution(
+    declared: Option<&str>,
+    source: Option<ModelSource>,
+    detected: Option<DetectedIdentity>,
+) -> ModelAttribution {
     let observed = detected
         .as_ref()
         .and_then(|identity| identity.model.clone());
