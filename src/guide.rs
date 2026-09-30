@@ -227,6 +227,13 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   the reason. A row there is a gap in the derivation rather than a resting
   place: it means arc failed to classify open work, and it is worth reporting.
 
+  Aggregate change observations retain readable changes and name each
+  unreadable change with its error on stderr, including with JSON output.
+  A read aimed at one change refuses if that change cannot be read. Status
+  keeps unreadable prerequisites unresolved, so they cannot authorize
+  integration. Operations that require the complete dependency graph refuse
+  an incomplete read.
+
   Every command in the project orientation answers for the project you are
   standing in. Some
   questions are comparisons — which project to open next, what has waited

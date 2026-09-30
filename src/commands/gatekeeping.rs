@@ -3361,7 +3361,7 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
     let (change_id, st) = ctx.load_state(&store, reference)?;
     let mut report = ctx.report(&store, &st)?;
     let code = status::check_exit_code(&report);
-    let states = ctx.load_all_states(&store)?;
+    let states = store.readable_states()?;
     let debts = super::messaging::collect_debts(ctx, &states)?;
     report.advisories.extend(debts.advisories_for(ctx, &st));
     // Capacity information for the review action: shown when review is the
@@ -3427,7 +3427,7 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
 
 fn check_tagged(ctx: &Ctx, tags: Vec<String>) -> Result<i32> {
     let store = ctx.store()?;
-    let states = ctx.load_all_states(&store)?;
+    let states = store.readable_states()?;
     let selected = states
         .values()
         .filter(|state| tags.iter().all(|tag| state.tags.contains(tag)))

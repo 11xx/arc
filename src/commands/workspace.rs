@@ -328,18 +328,6 @@ impl BacklogSelection {
     }
 }
 
-fn repo_states(store: &Store) -> Result<BTreeMap<String, ChangeState>> {
-    let mut states = BTreeMap::new();
-    let rewrites = store.rewrites()?;
-    for change_id in store.list_change_ids()? {
-        let events = store.load_events(&change_id)?;
-        let mut state = state::reduce_following(&events, &rewrites)?;
-        crate::replica::localize_change(&store.repository_id, &events, &mut state);
-        states.insert(change_id, state);
-    }
-    Ok(states)
-}
-
 pub fn workspace(ctx: &Ctx, view: WorkspaceView, json: bool) -> Result<i32> {
     match view {
         WorkspaceView::List => workspace_list(&workspace_stores()?, json).map(|()| 0),
@@ -395,7 +383,7 @@ fn nothing_found() -> String {
 fn workspace_list(stores: &[(String, Store)], json: bool) -> Result<()> {
     let mut repos = Vec::new();
     for (repo, store) in stores {
-        let states = match repo_states(store) {
+        let states = match store.readable_states() {
             Ok(states) => states,
             Err(error) => {
                 eprintln!("warning: skipping {repo}: {error:#}");
@@ -1943,7 +1931,7 @@ fn report_ledger_facts(
             .and_then(|store| store.context("ledger is missing"))
             .and_then(|store| {
                 let candidates = super::candidate::load_ledger(&store)?;
-                Ok((repo_states(&store)?, candidates))
+                Ok((store.readable_states()?, candidates))
             });
         let (states, candidates) = match states {
             Ok(states) => states,
@@ -2193,7 +2181,7 @@ fn ledger_queues(root: &Path) -> Result<LedgerQueues> {
     let Some(store) = Store::open_at(root)? else {
         return Ok(LedgerQueues::default());
     };
-    let states = repo_states(&store)?;
+    let states = store.readable_states()?;
     let now = chrono::Utc::now();
     let mut needs_review = Vec::new();
     let mut no_patchset = Vec::new();
@@ -2341,7 +2329,7 @@ pub fn restack(ctx: &Ctx, reference: &str, advise: bool) -> Result<()> {
     }
     let store = ctx.store()?;
     let (change_id, state) = ctx.load_state(&store, reference)?;
-    let states = ctx.load_all_states(&store)?;
+    let states = store.readable_states()?;
     let dependents: Vec<&ChangeState> = states
         .values()
         .filter(|candidate| !candidate.is_closed() && candidate.blocked_by.contains(&change_id))

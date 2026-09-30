@@ -505,7 +505,10 @@ pub fn messages(
         })
         .transpose()?;
 
-    let states = ctx.load_all_states(&store)?;
+    let states = match change_filter.as_deref() {
+        Some(change_id) => BTreeMap::from([(change_id.to_owned(), store.state(change_id)?)]),
+        None => store.readable_states()?,
+    };
     let mut views: Vec<MessageView> = Vec::new();
     for state in states.values() {
         if change_filter
@@ -573,7 +576,7 @@ pub(crate) fn collect_inbox(
     store: &crate::store::Store,
     assigned_to: Option<&str>,
 ) -> Result<crate::inbox::Inbox> {
-    let states = ctx.load_all_states(store)?;
+    let states = store.readable_states()?;
     let filter = assigned_to.map(str::trim).filter(|f| !f.is_empty());
     let mut inbox = crate::inbox::Inbox::new(filter.map(str::to_string));
     for state in states.values() {
@@ -587,7 +590,7 @@ pub(crate) fn collect_inbox(
         if state.is_closed() {
             continue;
         }
-        let report = ctx.report(store, state)?;
+        let report = ctx.report_with_states(state, &states)?;
         inbox.absorb(state, &report);
     }
     inbox.sort_by_priority();
@@ -991,7 +994,7 @@ pub fn catchup(ctx: &Ctx, limit: usize, json: bool) -> Result<i32> {
     }
     let journal = crate::journal::orientation(ctx);
     let forks = crate::commands::fork::list_entries(ctx).unwrap_or_default();
-    let states = ctx.load_all_states(&store)?;
+    let states = store.readable_states()?;
     let worktrees = crate::worktree_usage::measure(
         &ctx.cwd,
         &states,
