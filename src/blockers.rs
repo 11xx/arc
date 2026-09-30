@@ -338,6 +338,37 @@ mod tests {
         assert_eq!(derive(&at_head), Vec::<Blocker>::new());
     }
 
+    /// Closed, BranchMissing and TargetUnreadable share 6: each means the
+    /// change is not in a workable state, and a caller acts identically on
+    /// them. Every other blocker a caller can branch on by code alone.
+    #[test]
+    fn every_blocker_in_priority_has_a_distinct_exit_code() {
+        const UNWORKABLE: [Blocker; 3] = [
+            Blocker::Closed,
+            Blocker::BranchMissing,
+            Blocker::TargetUnreadable,
+        ];
+        let mut seen: Vec<(i32, Blocker)> = Vec::new();
+        for blocker in PRIORITY {
+            let code = blocker.exit_code();
+            if UNWORKABLE.contains(&blocker) {
+                assert_eq!(code, 6, "{} left the shared code", blocker.as_str());
+                continue;
+            }
+            assert_ne!(code, 6, "{} took the shared code", blocker.as_str());
+            assert_ne!(code, 0, "{} took the ready code", blocker.as_str());
+            if let Some((_, other)) = seen.iter().find(|(seen, _)| *seen == code) {
+                panic!(
+                    "exit {code} is shared by {} and {}",
+                    other.as_str(),
+                    blocker.as_str()
+                );
+            }
+            seen.push((code, blocker));
+        }
+        assert_eq!(seen.len() + UNWORKABLE.len(), PRIORITY.len());
+    }
+
     #[test]
     fn exit_code_is_the_first_blocker_in_priority_order() {
         let facts = BlockerFacts {
