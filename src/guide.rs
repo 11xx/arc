@@ -26,23 +26,10 @@ SAY WHO YOU ARE (before the first write)
   export ARC_ACTOR=<name> ARC_HARNESS=<claude|codex|opencode|pi> \
          ARC_SESSION=<id> ARC_SESSION_LINK=<url>
 
-  `arc env` reports the model as a comment and unsets ARC_MODEL so each ledger,
-  replica, and journal write resolves the acting session's model and effort.
-  The acting harness and session are declared through flags or ARC_HARNESS
-  and ARC_SESSION, or supplied by `[identity] detect`. To declare a model
-  by hand, export ARC_MODEL or pass `--model`.
-  `--model` and ARC_MODEL declarations keep their value; a store disagreement
-  records both `declared` and `observed`. Events carry `model_source` (flag,
-  env, or resolved) and `model_observation` with the selection endpoint's
-  timestamp, native id, head-read coverage, and operator-turn boundary.
-  `arc show --json` exposes this evidence in `model_attributions`, keyed by
-  event id; `arc log` renders it beside each fact.
-  `arc env` comments locate the observation inside or before the acting turn,
-  whose boundary is the recording's newest operator prompt. An earlier-turn
-  observation warns that effort may have changed since. A bounded read that
-  misses the boundary says so; one that misses the recording head may have
-  missed earlier selections. An absent selection behind that bound stays
-  unknown rather than borrowing one from a listing.
+  `arc env` leaves ARC_MODEL unset. Each write resolves the acting session's
+  model. Declare one with `--model` or export ARC_MODEL; the declaration is
+  recorded with any observed disagreement. `arc show --json` and `arc log`
+  show the model evidence.
 
   Every event records who wrote it. Most writes accept an undeclared
   identity. In that case arc records an actor nobody claimed:
@@ -1157,7 +1144,8 @@ RULES THAT CHANGE WHAT YOU DO
     later round on the same subject discharges it with `--collects <id>`.
     `arc inbox` and `arc catchup` carry the ones still open.
   - arc holds no routing opinion. It records the --actor and --harness
-    it is given and resolves an undeclared model from the acting session; who to delegate to is the caller's policy, not arc's.
+    it is given and resolves an undeclared model from the acting session.
+    Who to delegate to is the caller's policy, not arc's.
   - A delegated session binds its boundary with `ARC_ROLE` or `--role`. An
     implementer may not record a verdict, an external verdict, `resolve`,
     `hold`, `release-hold`, `audit`, `debt`, `close`, or `integrate`. A
