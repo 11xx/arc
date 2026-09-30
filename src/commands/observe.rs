@@ -320,7 +320,7 @@ impl WatchSelection {
 
 fn resolve_tagged(ctx: &Ctx, tags: &[String]) -> Result<Vec<String>> {
     let store = ctx.store()?;
-    let states = ctx.load_all_states(&store)?;
+    let states = store.readable_states()?;
     let selected = states
         .values()
         .filter(|state| tags.iter().all(|tag| state.tags.contains(tag)))

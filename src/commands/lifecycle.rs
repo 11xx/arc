@@ -466,7 +466,7 @@ pub fn iterating(ctx: &Ctx, reference: &str, off: bool) -> Result<()> {
 
 pub fn list(ctx: &Ctx, open_only: bool, json: bool, format: ListFormat) -> Result<()> {
     let store = ctx.store()?;
-    let states = ctx.load_all_states(&store)?;
+    let states = store.readable_states()?;
     let selected = states
         .values()
         .filter(|state| !open_only || !state.is_closed())
@@ -532,7 +532,7 @@ pub fn query(ctx: &Ctx, args: QueryArgs) -> Result<()> {
         }
     }
     let store = ctx.store()?;
-    let states = ctx.load_all_states(&store)?;
+    let states = store.readable_states()?;
     let tags = normalize_tags(args.tags)?;
     let selected = states
         .values()
@@ -1120,20 +1120,19 @@ pub(crate) fn print_projected(
 }
 
 pub(crate) fn status_output(ctx: &Ctx, store: &Store, state: &ChangeState) -> Result<StatusOutput> {
-    status_output_with(ctx, store, state, ctx.report(store, state)?)
+    status_output_with(store, state, ctx.report(store, state)?)
 }
 
 fn status_output_as_of(ctx: &Ctx, store: &Store, state: &ChangeState) -> Result<StatusOutput> {
-    status_output_with(ctx, store, state, ctx.report_as_of(store, state)?)
+    status_output_with(store, state, ctx.report_as_of(store, state)?)
 }
 
 fn status_output_with(
-    ctx: &Ctx,
     store: &Store,
     state: &ChangeState,
     report: StatusReport,
 ) -> Result<StatusOutput> {
-    let states = ctx.load_all_states(store)?;
+    let states = store.readable_states()?;
     let suggested_alternatives = if report.blocker_status.blocked {
         find_unblocked_changes(&state.change_id, &states)
     } else {
@@ -1148,7 +1147,7 @@ fn status_output_with(
 pub fn blocker_status_cmd(ctx: &Ctx, reference: &str) -> Result<()> {
     let store = ctx.store()?;
     let (_, state) = ctx.load_state(&store, reference)?;
-    let states = ctx.load_all_states(&store)?;
+    let states = store.readable_states()?;
     println!(
         "{}",
         serde_json::to_string_pretty(&dependency_status(&state, &states))?
@@ -1159,7 +1158,7 @@ pub fn blocker_status_cmd(ctx: &Ctx, reference: &str) -> Result<()> {
 pub fn is_blocked(ctx: &Ctx, reference: &str) -> Result<i32> {
     let store = ctx.store()?;
     let (_, state) = ctx.load_state(&store, reference)?;
-    let states = ctx.load_all_states(&store)?;
+    let states = store.readable_states()?;
     let blocker_status = dependency_status(&state, &states);
     if blocker_status.blocked {
         for blocker in blocker_status
@@ -1280,7 +1279,7 @@ fn show(
     if json {
         println!("{}", serde_json::to_string_pretty(&st)?);
     } else {
-        let states = ctx.load_all_states(&store)?;
+        let states = store.readable_states()?;
         let report = match at {
             Some(_) => ctx.report_as_of(&store, &st)?,
             None => ctx.report(&store, &st)?,
@@ -1317,7 +1316,7 @@ fn show(
 
 fn show_tagged(ctx: &Ctx, tags: Vec<String>, json: bool) -> Result<()> {
     let store = ctx.store()?;
-    let states = ctx.load_all_states(&store)?;
+    let states = store.readable_states()?;
     let selected = states
         .values()
         .filter(|state| tags.iter().all(|tag| state.tags.contains(tag)))
