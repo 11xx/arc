@@ -195,6 +195,39 @@ fn a_bundle_from_a_newer_arc_is_refused_rather_than_partially_imported() {
         .failure();
 }
 
+/// A bundle one version back differs only by optional event fields its events
+/// leave absent, so it imports, and an unknown version is refused.
+#[test]
+fn a_bundle_one_version_back_still_imports() {
+    let repo = Repo::new();
+    change_with_patchset(&repo, "previous");
+    let bundle = repo.home.join("previous.json");
+    repo.arc(&repo.root)
+        .args(["export", "previous", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+
+    value["schema"] = serde_json::json!("arc-bundle/5");
+    fs::write(&bundle, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let other = Repo::new();
+    other
+        .arc(&other.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    value["schema"] = serde_json::json!("arc-bundle/4");
+    fs::write(&bundle, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let third = Repo::new();
+    third
+        .arc(&third.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unsupported bundle schema"));
+}
+
 #[test]
 fn export_is_deterministic() {
     let repo = Repo::new();
@@ -1207,7 +1240,7 @@ fn a_delta_bundle_extends_a_verified_prefix() {
         "{reported}"
     );
     let value: serde_json::Value = serde_json::from_slice(&fs::read(&delta).unwrap()).unwrap();
-    assert_eq!(value["schema"], "arc-bundle/5", "{value}");
+    assert_eq!(value["schema"], "arc-bundle/6", "{value}");
     assert_eq!(value["since"]["sha256"], token.as_str(), "{value}");
     assert_eq!(
         value["since"]["event_count"].as_u64(),

@@ -4,7 +4,7 @@ use crate::state::{Brief, ClaimIdentity};
 use crate::status::{self, BriefBaseDrift, FindingSummary, GateStatus};
 use std::path::PathBuf;
 
-const RESCUE_SCHEMA: &str = "arc-rescue/4";
+const RESCUE_SCHEMA: &str = "arc-rescue/5";
 
 #[derive(Serialize)]
 struct RescueOutput<'a> {

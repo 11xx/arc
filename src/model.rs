@@ -859,6 +859,12 @@ pub enum Payload {
         /// is unknown rather than a claim the check cannot discriminate.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         falsification: Option<Falsification>,
+        /// The failure arc derived this pass follows, recorded whether or not
+        /// one was declared. Absent on a failure, on probe evidence, on a pass
+        /// no earlier failure of the same check precedes, and on evidence
+        /// written before arc derived it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        falsification_inferred: Option<InferredFalsification>,
         /// The tree arc actually ran against, written into the object database
         /// and pinned by a ref, so a recorded tree is one that is still there.
         /// A revision alone describes a tree no checkout reproduces whenever
@@ -1789,6 +1795,30 @@ pub struct Falsification {
     pub revision: String,
     /// Why the check was expected to fail, stated before it ran.
     pub predicted_reason: String,
+}
+
+/// The failure a pass follows, derived by arc rather than declared.
+///
+/// It is provenance, never a claim: it decides no gate result, readiness,
+/// discrimination, or exit code, and it never stands in for a declared
+/// [`Falsification`], which alone carries a predicted reason.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InferredFalsification {
+    /// The newest failing `VerificationRecorded` event on the same change,
+    /// before this one, of the same gate, or of the same command when the
+    /// evidence names no gate.
+    pub event_id: String,
+    /// The revision that event was recorded at.
+    pub revision: String,
+    /// The rule that derived the reference.
+    pub source: InferenceSource,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum InferenceSource {
+    /// The newest earlier failure of the same check on the same change.
+    PriorFailureSameChange,
 }
 
 #[cfg(test)]
