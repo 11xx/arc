@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const EVENT_SCHEMA: &str = "arc-replica-event/2";
-const BUNDLE_SCHEMA: &str = "arc-replica-bundle/2";
+const EVENT_SCHEMA: &str = "arc-replica-event/3";
+const BUNDLE_SCHEMA: &str = "arc-replica-bundle/3";
 const IMPORT_SCHEMA: &str = "arc-replica-import/2";
 const STATE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const STATE_LOCK_RETRY: Duration = Duration::from_millis(10);
@@ -48,6 +48,8 @@ pub struct ReplicaEvent {
     pub session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(flatten)]
+    pub model_provenance: crate::model::ModelProvenance,
     pub created_at: DateTime<Utc>,
     pub payload: ReplicaPayload,
 }
@@ -872,6 +874,7 @@ fn make_event_with_id(
     event_id: String,
     payload: ReplicaPayload,
 ) -> ReplicaEvent {
+    let attribution = ctx.resolve_model();
     ReplicaEvent {
         schema: EVENT_SCHEMA.to_string(),
         event_id,
@@ -881,7 +884,8 @@ fn make_event_with_id(
         recorded_by: ctx.actor.clone(),
         harness: ctx.harness.clone(),
         session: ctx.session.clone(),
-        model: ctx.model.clone(),
+        model: attribution.model,
+        model_provenance: attribution.provenance,
         created_at: Utc::now(),
         payload,
     }
@@ -1285,7 +1289,10 @@ fn authority_state(
 }
 
 fn validate_event(event: &ReplicaEvent) -> Result<()> {
-    if event.schema != EVENT_SCHEMA && event.schema != "arc-replica-event/1" {
+    if event.schema != EVENT_SCHEMA
+        && event.schema != "arc-replica-event/1"
+        && event.schema != "arc-replica-event/2"
+    {
         bail!("unsupported replica event schema {:?}", event.schema);
     }
     if matches!(&event.payload, ReplicaPayload::AuthorityReclaimed { .. }) {
@@ -1353,7 +1360,7 @@ pub(crate) fn validate_identity(identity: &ReplicaIdentity) -> Result<()> {
 fn parse_bundle(bytes: &[u8]) -> Result<ReplicaBundle> {
     let bundle: ReplicaBundle =
         serde_json::from_slice(bytes).context("malformed replica bundle")?;
-    if bundle.schema != BUNDLE_SCHEMA {
+    if bundle.schema != BUNDLE_SCHEMA && bundle.schema != "arc-replica-bundle/2" {
         bail!("unsupported replica bundle schema {:?}", bundle.schema);
     }
     ids::validate_id_component(&bundle.project_id)?;
@@ -1530,9 +1537,35 @@ mod authority_tests {
             harness: None,
             session: None,
             model: None,
+            model_provenance: Default::default(),
             created_at: Utc::now(),
             payload,
         }
+    }
+
+    #[test]
+    fn previous_replica_bundle_reads_without_inventing_model_provenance() {
+        let origin = ReplicaIdentity {
+            name: "origin".into(),
+            repository_id: "origin-id".into(),
+        };
+        let mut legacy = event("initial", &origin, ReplicaPayload::Initialized);
+        legacy.schema = "arc-replica-event/2".into();
+        legacy.model = Some("legacy-model#low".into());
+        let events = vec![legacy];
+        let bundle = ReplicaBundle {
+            schema: "arc-replica-bundle/2".into(),
+            project_id: "project".into(),
+            source_replica_id: origin.repository_id,
+            events_sha256: events_digest(&events).unwrap(),
+            events,
+        };
+        let bytes = serde_json::to_vec(&bundle).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("model_source"));
+        let parsed = parse_bundle(&bytes).unwrap();
+        assert_eq!(parsed.events[0].model.as_deref(), Some("legacy-model#low"));
+        assert_eq!(parsed.events[0].model_provenance, Default::default());
+        assert_eq!(BUNDLE_SCHEMA, "arc-replica-bundle/3");
     }
 
     #[test]

@@ -60,8 +60,8 @@ pub struct JournalBehavior {
 /// The `[identity]` table: opt-in ambient identity resolution.
 #[derive(Debug, Default, Deserialize)]
 pub struct IdentityBehavior {
-    /// When true, a command with no explicit harness/session/model falls
-    /// back to detecting them from the running harness's own session store.
+    /// When true, an undeclared harness and session are detected from the
+    /// running harness. Each write resolves an undeclared model independently.
     #[serde(default)]
     pub detect: bool,
 }

@@ -897,7 +897,8 @@ pub enum JournalCmd {
     /// Repair the recorded authorship of one artifact's creation event, in
     /// place. A maintenance operation the operator selects: ordinary journal
     /// mutation stays append-only and no correction block is appended. Only
-    /// the named fields of the one creation (`note`) event change; every
+    /// the named fields and dependent model evidence of the one creation
+    /// (`note`) event change; every
     /// other record keeps its bytes, and the previous log is kept as
     /// `events.jsonl.bak`. Repair and every event append share an event-write
     /// lock across the read and replacement. Other event kinds are refused because
@@ -905,7 +906,9 @@ pub enum JournalCmd {
     /// provenance repair must not rewrite, and so is a creation event
     /// recording an on-behalf-of subject. `--dry-run` names the exact record
     /// and every other record carrying the replaced identity, and writes
-    /// nothing
+    /// nothing. A model replacement is a flag declaration compared with the
+    /// retained observation; changing harness or session clears that
+    /// observation because it belongs to the replaced session.
     Reattribute {
         /// Artifact filename inside the journal dir (a name, not a path)
         filename: String,
@@ -1134,7 +1137,7 @@ pub enum JournalCmd {
     /// Export selected journal artifacts as a versioned bundle for another
     /// replica. The bundle carries each artifact body, the events recorded
     /// about it, its body digest, the exporting replica, and every artifact
-    /// the selection references by filename
+    /// the selection references by filename. Exports arc-journal-bundle/2
     Export {
         /// Artifact filenames inside the journal dir (names, not paths); the
         /// dependency closure of what they reference travels with them
@@ -1144,7 +1147,8 @@ pub enum JournalCmd {
         #[arg(long)]
         output: String,
     },
-    /// Import a journal bundle exported by another paired replica
+    /// Import arc-journal-bundle/2 or /1 from another paired replica.
+    /// Events without model provenance retain that absence
     Import {
         /// Input file ('-' for stdin)
         input: String,
@@ -3602,7 +3606,12 @@ fn declared_actor(ctx: &Ctx) -> Option<String> {
 /// is a person acting directly and is named as such; with neither, only the
 /// harness is known.
 fn attribution(ctx: &Ctx, harness: &str) -> String {
-    match ctx.model.as_deref().filter(|value| !value.is_empty()) {
+    match ctx
+        .resolve_model()
+        .model
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         Some(model) => format!("{model} via {harness}"),
         None => match declared_actor(ctx) {
             Some(actor) => actor,
@@ -4079,7 +4088,7 @@ fn planner_identity(ctx: &Ctx) -> Option<PlannerIdentity> {
         actor: declared_actor(ctx),
         harness: ctx.harness.clone().filter(|v| !v.trim().is_empty()),
         session: ctx.session.clone().filter(|v| !v.trim().is_empty()),
-        model: ctx.model.clone().filter(|v| !v.trim().is_empty()),
+        model: ctx.resolve_model().model,
     };
     (planner.actor.is_some()
         || planner.harness.is_some()
@@ -6235,6 +6244,8 @@ pub(crate) struct JournalEvent {
     pub(crate) on_behalf_of: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
+    #[serde(flatten)]
+    model_provenance: crate::model::ModelProvenance,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session_link: Option<String>,
     /// Planner identities asserted for a plan artifact. Optional so older
@@ -6617,6 +6628,7 @@ fn append_binding(dir: &Path, binding: &JournalBinding) -> Result<()> {
 impl JournalEvent {
     fn base(ctx: &Ctx, now: DateTime<Utc>, topic: &str, event: &str) -> Self {
         let (harness, session) = identity(ctx);
+        let attribution = ctx.resolve_model();
         Self {
             schema: JOURNAL_SCHEMA.to_string(),
             ts: now.to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -6625,13 +6637,8 @@ impl JournalEvent {
             actor: declared_actor(ctx),
             on_behalf_of: ctx.on_behalf_of.clone(),
             session_link: ctx.session_link.clone(),
-            // Model identity is optional end to end: absent means absent,
-            // never "unknown".
-            model: ctx
-                .model
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
+            model: attribution.model,
+            model_provenance: attribution.provenance,
             planners: None,
             storage_at_write: None,
             storage_operation: None,
@@ -9903,6 +9910,32 @@ fn reattribute(
             "the {event_kind} event for {filename} already records the requested \
              identity; nothing to repair"
         );
+    }
+    let session_changed = changed
+        .iter()
+        .any(|(field, _)| matches!(*field, "harness" | "session"));
+    if session_changed {
+        object.remove("model_observation");
+        object.remove("model_disagreement");
+        object.remove("model_source");
+    }
+    if changed.iter().any(|(field, _)| *field == "model") {
+        object.insert("model_source".to_string(), serde_json::json!("flag"));
+        let observed = object
+            .get("model_observation")
+            .and_then(|observation| observation.get("observed"))
+            .and_then(serde_json::Value::as_str);
+        let declared = object.get("model").and_then(serde_json::Value::as_str);
+        let disagreement = match (declared, observed) {
+            (Some(declared), Some(observed)) if declared != observed => {
+                Some(serde_json::json!({"declared": declared, "observed": observed}))
+            }
+            _ => None,
+        };
+        object.remove("model_disagreement");
+        if let Some(disagreement) = disagreement {
+            object.insert("model_disagreement".to_string(), disagreement);
+        }
     }
     let repaired: JournalEvent = serde_json::from_value(value.clone())
         .context("the repaired record would not be a journal event")?;

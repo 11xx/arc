@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
-pub(crate) const BUNDLE_SCHEMA: &str = "arc-journal-bundle/1";
+pub(crate) const BUNDLE_SCHEMA: &str = "arc-journal-bundle/2";
 pub(crate) const IMPORT_RECEIPT_SCHEMA: &str = "arc-journal-exchange-import/1";
 pub(crate) const HOT_STORAGE: &str = "hot";
 pub(crate) const COLD_STORAGE: &str = "cold";
@@ -105,7 +105,7 @@ impl JournalBundle {
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
         let bundle: JournalBundle =
             serde_json::from_slice(bytes).context("malformed journal bundle")?;
-        if bundle.schema != BUNDLE_SCHEMA {
+        if bundle.schema != BUNDLE_SCHEMA && bundle.schema != "arc-journal-bundle/1" {
             bail!(
                 "unsupported journal bundle schema {:?}; expected {BUNDLE_SCHEMA:?}",
                 bundle.schema

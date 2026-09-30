@@ -69,8 +69,11 @@ struct Cli {
     /// Private web link for the acting session; recorded only in arc events
     #[arg(long, global = true, env = "ARC_SESSION_LINK")]
     session_link: Option<String>,
-    /// Model identity: a model slug with optional #effort, e.g. kimi-k3#high
-    #[arg(long, global = true, env = "ARC_MODEL")]
+    /// Declare a model slug with optional #effort. Without this flag or
+    /// ARC_MODEL, each invocation resolves the acting session store once when
+    /// it writes. Declarations retain any observed disagreement and its
+    /// coordinate
+    #[arg(long, global = true)]
     model: Option<String>,
     /// Subject a lead runs delegated ceremony for; recorded beside the invoker
     #[arg(long = "on-behalf-of", global = true, env = "ARC_ON_BEHALF_OF")]
@@ -372,7 +375,8 @@ enum Cmd {
     },
     /// Print the change's recorded facts one line each, in ledger order. A
     /// review batch records several, so it renders as several lines. This is
-    /// the ledger, not Git history: for commits, use `git log`
+    /// the ledger, not Git history: for commits, use `git log`. Model sources,
+    /// observation coordinates, and declaration disagreements accompany each fact
     Log {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -748,7 +752,8 @@ enum Cmd {
         #[arg(long, value_name = "SHA256")]
         since: Option<String>,
     },
-    /// Import a versioned JSON bundle into this repository's local store
+    /// Import arc-bundle/6 or /5 into this repository's local store.
+    /// Events without model provenance retain that absence
     Import {
         /// Input file ('-' for stdin)
         input: String,
@@ -1205,9 +1210,9 @@ enum Cmd {
     /// answer for the exact canonical session id is reported with the exports:
     /// an id the store does not hold is uncorroborated; an ambiguous or
     /// unreadable lookup is unresolved. Events carry that verdict. Every
-    /// field the detection establishes is exported
-    /// and every field it does not is explicitly unset, so evaluating the
-    /// output never leaves a stale value beside a fresh one. Pi re-sets
+    /// established harness, session, and session link is exported; absent
+    /// fields are explicitly unset. The resolved model is a comment and
+    /// ARC_MODEL is always unset, so each write resolves its own model. Pi re-sets
     /// `PI_SESSION_FILE`, `PI_MODEL`, and `PI_REASONING_LEVEL` for every tool
     /// call, so those answer in preference to the recording while
     /// `PI_SESSION_ID` is the acting session, and a Claude subagent shares
@@ -1224,7 +1229,14 @@ enum Cmd {
     /// every identity field, and
     /// exits non-zero, which is a report that identity must be
     /// set by hand rather than a failure. Every value it emits can be set
-    /// directly: explicit identity always wins over a detected one
+    /// directly: explicit identity always wins over a detected one.
+    ///
+    /// The model comment includes the newest selection's timestamp and native
+    /// id, and whether it is inside or before the recording's newest operator
+    /// turn. An earlier observation may predate an effort change. Leave
+    /// ARC_MODEL is always unset for write-time resolution; declare a model
+    /// by hand with ARC_MODEL or --model. Missing boundaries and incomplete
+    /// head coverage are reported.
     Env,
     /// Print a shell completion script to stdout
     Completions {
@@ -1562,7 +1574,8 @@ enum ReplicaCmd {
         #[arg(long)]
         output: String,
     },
-    /// Import a pairing record or authority exchange from another replica
+    /// Import a pairing record or authority exchange from another replica.
+    /// Accepts arc-replica-bundle/3 and /2; absent model provenance stays absent
     Import {
         /// Input file ('-' for stdin)
         input: String,
@@ -2336,10 +2349,20 @@ fn run(cli: Cli) -> Result<i32> {
     let mut session = cli.session;
     let mut session_resolution = None;
     // An empty --model is the same as absent.
-    let mut model = cli.model.filter(|value| !value.trim().is_empty());
-    if config::load()
-        .map(|config| config.identity_detect)
-        .unwrap_or(false)
+    let from_env = std::env::var("ARC_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let (model, model_source) = match (cli.model.filter(|value| !value.trim().is_empty()), from_env)
+    {
+        (Some(model), _) => (Some(model), Some(model::ModelSource::Flag)),
+        (None, Some(model)) => (Some(model), Some(model::ModelSource::Env)),
+        _ => (None, None),
+    };
+    let model_attribution = std::rc::Rc::new(std::cell::OnceCell::new());
+    if (harness.is_none() || session.is_none())
+        && config::load()
+            .map(|config| config.identity_detect)
+            .unwrap_or(false)
     {
         // A process carrying several harnesses' session variables and no
         // ancestry that names the owner records no identity at all: picking
@@ -2350,28 +2373,25 @@ fn run(cli: Cli) -> Result<i32> {
                 .as_deref()
                 .is_none_or(|explicit| explicit == detected.harness)
             {
-                harness.get_or_insert(detected.harness);
+                harness.get_or_insert(detected.harness.clone());
                 // A harness recognized without its cooperation carries no
                 // session id; recording the harness alone is the honest half
                 // of the detection, not a partial failure.
-                let acting = match &detected.session {
-                    Some(detected_session) => {
-                        if session.is_none() {
-                            // The store's answer is about the session detection
-                            // supplied; a session the caller declared was never
-                            // asked about, so it carries no report.
-                            session_resolution = Some(detected_session.resolution);
-                            session = Some(detected_session.id.clone());
-                        }
-                        session.as_deref() == Some(detected_session.id.as_str())
+                if let Some(detected_session) = &detected.session {
+                    if session.is_none() {
+                        // The store's answer is about the session detection
+                        // supplied; a session the caller declared was never
+                        // asked about, so it carries no report.
+                        session_resolution = Some(detected_session.resolution);
+                        session = Some(detected_session.id.clone());
                     }
-                    None => false,
-                };
-                // The detected model belongs to the detected session: filling
-                // it beside a different acting session would record one
-                // session's identity with another's model.
-                if acting && model.is_none() {
-                    model = detected.model;
+                    if session.as_deref() == Some(detected_session.id.as_str()) {
+                        let _ = model_attribution.set(context::model_attribution(
+                            model.as_deref(),
+                            model_source,
+                            Some(detected),
+                        ));
+                    }
                 }
             }
         }
@@ -2398,6 +2418,8 @@ fn run(cli: Cli) -> Result<i32> {
         session_link: cli.session_link.filter(|value| !value.trim().is_empty()),
         session_resolution,
         model,
+        model_source,
+        model_attribution,
         // An empty --on-behalf-of is the same as absent: today's behavior.
         on_behalf_of: cli.on_behalf_of.filter(|value| !value.trim().is_empty()),
     };

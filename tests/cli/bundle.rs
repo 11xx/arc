@@ -1438,3 +1438,55 @@ fn a_suffix_over_an_unheld_prefix_is_refused() {
         .stderr(predicates::str::contains("does not cover prefix"));
     assert_eq!(event_files(&holder, &change_id), before);
 }
+
+#[test]
+fn importing_previous_bundles_preserves_absent_model_provenance() {
+    let source = Repo::new();
+    let opened = stdout(
+        source
+            .arc(&source.root)
+            .env("ARC_MODEL", "legacy-model#low")
+            .args(["begin", "legacy-model", "--no-worktree"]),
+    );
+    let change = opened_change_id(&opened);
+    let mut fixture = json_stdout(
+        source
+            .arc(&source.root)
+            .args(["export", &change, "--output", "-"]),
+    );
+    fixture["store_format"] = serde_json::json!(6);
+    for event in fixture["events"].as_array_mut().unwrap() {
+        event["schema_version"] = serde_json::json!(6);
+        let object = event.as_object_mut().unwrap();
+        object.remove("model_source");
+        object.remove("model_observation");
+        object.remove("model_disagreement");
+    }
+    fixture["events_sha256"] =
+        serde_json::json!(bundle_checksum(fixture["events"].as_array().unwrap()));
+    for schema in ["arc-bundle/6", "arc-bundle/5"] {
+        let recipient = Repo::new();
+        fixture["schema"] = serde_json::json!(schema);
+        let path = source.home.join("legacy-bundle.json");
+        fs::write(&path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        recipient
+            .arc(&recipient.root)
+            .args(["import", path.to_str().unwrap()])
+            .assert()
+            .success();
+        let state = json_stdout(
+            recipient
+                .arc(&recipient.root)
+                .args(["show", &change, "--json"]),
+        );
+        assert_eq!(state["opened_model"], "legacy-model#low");
+        assert_eq!(state["model_attributions"], serde_json::json!({}));
+        let exported = json_stdout(
+            recipient
+                .arc(&recipient.root)
+                .args(["export", &change, "--output", "-"]),
+        );
+        assert_eq!(exported["schema"], "arc-bundle/6");
+        assert_eq!(exported["events"], fixture["events"]);
+    }
+}

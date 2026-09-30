@@ -636,6 +636,7 @@ mod tests {
             session_resolution: None,
             on_behalf_of: None,
             model: None,
+            model_provenance: Default::default(),
             created_at: chrono::Utc::now(),
             payload: Payload::HistoryRewritten {
                 mapping: BTreeMap::from([(old.to_string(), Some(new.to_string()))]),
