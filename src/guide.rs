@@ -1064,10 +1064,11 @@ RULES THAT CHANGE WHAT YOU DO
     --predicted "<why it should fail>"`; the gate line then reads
     `discriminating` instead of `undiscriminated`. Advisory: it changes no
     result and no exit code, and only the declaration makes a row
-    `discriminating`. Separately, every pass records as
-    `falsification_inferred` the newest earlier failure of the same gate (or
-    command, when unnamed) on the change, declared or not: an inference,
-    labelled as one, that decides nothing.
+    `discriminating`. Separately, a pass that follows a failure of the same
+    gate (or command, when unnamed) on the change records the newest such
+    failure as `falsification_inferred`, declared or not: an inference,
+    labelled as one, that decides nothing. Acceptance-probe evidence neither
+    records one nor serves as the failure one names.
     A passing gate row is `discriminating` when any passing evidence for that
     gate at the counted tree (or revision when the tree is unresolved) names
     a falsification. A later pass without one does not retract it.
@@ -1311,6 +1312,8 @@ WHAT ARC WILL NOT DO
   Refusals worth knowing before they happen:
     arc refuses a bundle written by a newer arc rather than skipping
       lifecycle events it does not know.
+    `arc import` reads `arc-bundle/6` and `arc-bundle/5`, whose events lack
+      only optional fields, and refuses any older or newer bundle schema.
     arc refuses a gate run only when the change's recorded worktree is
       missing or its HEAD is not the branch head. A run started from another
       checkout of the repository is redirected to the recorded worktree and
