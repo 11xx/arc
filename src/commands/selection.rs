@@ -12,12 +12,13 @@
 use super::candidate::load_ledger;
 use super::gatekeeping::{
     checkout_tracked_dirt, checkout_writes, declared_environment, gate_environments, run_gate,
-    ScratchWorktree, TargetCheckout,
+    ScratchWorktree,
 };
 use super::relations::repository_relations;
 use super::Ctx;
 use crate::candidate::{self, Ledger, Selection};
 use crate::gitio;
+use crate::integration::TargetCheckout;
 use crate::model::{
     EnvironmentEvidence, PatchsetCandidate, Payload, ReadRequirement, RequiredExtent, VerifyResult,
 };

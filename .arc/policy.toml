@@ -58,6 +58,8 @@ paths = [
   "src/gitio.rs",
   "src/chain.rs",
   "src/commands/gatekeeping.rs",
+  # Decides whether a merge is authorized and what it must ship.
+  "src/integration.rs",
   "src/commands/chain.rs",
   # Output schemas, and this file, which decides all of the above.
   "src/render.rs",

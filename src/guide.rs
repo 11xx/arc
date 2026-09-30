@@ -576,6 +576,16 @@ RUN A CHANGE
   the basis it would record. Before merging, readiness is recomputed and the
   basis rebuilt; if readiness fails or the basis differs, nothing is written.
 
+  The decision is one function of facts observed under the target and change
+  locks: a plan naming the target revision, the approved head, the tree the
+  merge must ship, and the basis to record, or a refusal. The merge runs from
+  the plan and is confirmed against it. `integrate --dry-run --json` prints
+  that plan, decided the same way, as `arc-integration-plan/1`. Handing it
+  back with `integrate --expect-basis <file>` never changes the decision; it
+  names what moved since — the approved head, the target revision, the gate
+  or policy declarations, or the approval — in one line beside a refusal, or
+  as a warning when the integration still proceeds.
+
   When no checkout holds the target, `integrate` takes over the change's own
   checkout if it still holds the change branch, checks the target out there,
   merges, and leaves the checkout on the target. The dry run says it would.
@@ -1558,6 +1568,7 @@ SCHEMAS
     `arc-journal-catchup/8`          arc journal catchup --json
     `arc-resume/8`                   arc resume --json
     `arc-explain/1`                  arc explain --json
+    `arc-integration-plan/1`         arc integrate --dry-run --json
     `arc-brief/2`                    arc brief --json
     `arc-journal-artifact/2`         arc journal show --json
     `arc-journal-inventory/6`        arc journal inventory --json
