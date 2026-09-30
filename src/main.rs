@@ -340,12 +340,17 @@ enum Cmd {
     /// lock.
     ///
     /// Eight slots, always all printed: contract (the brief in force, its
-    /// planner credit, plan, base revision, and causes), supplied context
-    /// (the journal artifact the change was opened from, and every
-    /// patchset's journal references with the operation that supplied each,
-    /// `begin`, `brief`, `flag`, or `unrecorded`, and its thread), declared
-    /// facts (every kept fact, with the events it cites), observed reads, rejected alternatives (kept facts of kind
-    /// `rejected`), evaluation (each counted gate's evidence event, tree,
+    /// planner credit, plan, base revision, and causes, and the selection
+    /// and promotion behind each patchset a candidate promotion recorded),
+    /// supplied context (the journal artifact the change was opened from,
+    /// and every patchset's journal references with the operation that
+    /// supplied each, `begin`, `brief`, `flag`, or `unrecorded`, and its
+    /// thread), declared facts (every kept fact, with the events it cites),
+    /// observed reads, rejected alternatives (kept facts of kind `rejected`,
+    /// and each registration answering the same brief version as a promoted
+    /// candidate, `declared` with its judgements or `inferred` while
+    /// unjudged; judgements are read as they stand now, whatever `--at`
+    /// names), evaluation (each counted gate's evidence event, tree,
     /// environment digest, timeout, reuse, and falsification), coverage at
     /// acceptance (the verdicts, waiver, and debt the integration event's
     /// authorization recorded), and later knowledge (audits, audit findings
@@ -2195,7 +2200,9 @@ enum CandidateCmd {
         id: Option<String>,
     },
     /// Show one candidate: tree, contract, producers, parents, adoptions,
-    /// episodes, judgements, retirement, whether its pin holds the tree, and
+    /// episodes, judgements, retirement, whether its pin holds the tree,
+    /// evaluations, selections naming it (promoted, superseded, or not
+    /// promoted), promotion refs no `candidate-promoted` event records, and
     /// every registration sharing its tree. `--json` emits `arc-candidate/1`
     Show {
         /// Candidate id
