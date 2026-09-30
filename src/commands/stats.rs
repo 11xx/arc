@@ -3,7 +3,10 @@
 //! derivation — no writes, no new events.
 
 use super::*;
-use crate::model::{BlockerRef, ClaimStage, Event, Payload, ReviewCause, Severity};
+use crate::model::{
+    BlockerRef, ClaimStage, Closure, Event, JournalRefVia, KeptKind, Payload, ReviewCause,
+    Severity, VerifyResult,
+};
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 
@@ -12,6 +15,16 @@ pub enum StatsSelection {
     All,
     Change(String),
     Tag(String),
+}
+
+/// What `arc stats` reports over the selection.
+pub enum StatsView {
+    /// One row per change, with aggregate percentiles.
+    Changes,
+    /// One row per delegated identity.
+    ByModel,
+    /// How often each provenance record was written where it could have been.
+    Provenance,
 }
 
 #[derive(Serialize)]
@@ -193,7 +206,237 @@ fn by_model(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, by_model_view: bool) -> Result<()> {
+/// A count and the population it was counted in, so a reader sees a rate and
+/// what it is a rate of.
+#[derive(Serialize, Default, Clone, Copy)]
+struct Ratio {
+    count: usize,
+    of: usize,
+}
+
+impl Ratio {
+    fn tally(&mut self, hit: bool) {
+        self.of += 1;
+        self.count += usize::from(hit);
+    }
+}
+
+impl std::fmt::Display for Ratio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} of {}", self.count, self.of)
+    }
+}
+
+/// Passing non-probe gate evidence, by where its falsification came from.
+#[derive(Serialize, Default)]
+struct FalsificationProvenance {
+    /// Of passes: carries a declared `falsification`.
+    declared: Ratio,
+    /// Of passes: carries `falsification_inferred` and no declaration.
+    inferred: Ratio,
+    /// Of passes: carries neither.
+    none: Ratio,
+    /// Of `none`: an earlier failure of the same check on the same change
+    /// precedes it, so the inference rule would name one. These passes were
+    /// recorded before arc derived the inference.
+    none_after_failure: Ratio,
+}
+
+/// Patchset journal links, split by whether the change was opened from a
+/// journal artifact.
+#[derive(Serialize, Default)]
+struct JournalRefProvenance {
+    /// Of all patchsets: carries at least one `journal_refs` entry.
+    patchsets_with_refs: Ratio,
+    /// Of patchsets on changes opened from a journal artifact.
+    opened_from_journal: Ratio,
+    /// Of patchsets on changes opened without one.
+    opened_without_journal: Ratio,
+    /// Of all references on those patchsets, by the recorded `via`;
+    /// `unrecorded` for links written before arc named their source.
+    via: BTreeMap<&'static str, Ratio>,
+}
+
+#[derive(Serialize, Default)]
+struct BriefProvenance {
+    /// Of all brief versions: carries a `plan_ref`.
+    versions_with_plan_ref: Ratio,
+    /// Of selected changes: the in-force brief carries a `plan_ref`.
+    changes_with_plan_ref: Ratio,
+}
+
+#[derive(Serialize)]
+struct ProvenanceOutput {
+    schema: &'static str,
+    changes: usize,
+    falsification: FalsificationProvenance,
+    journal_refs: JournalRefProvenance,
+    /// Of integrated changes: at least one kept fact of kind `rejected`.
+    rejected_alternatives: Ratio,
+    briefs: BriefProvenance,
+    /// Of kept facts: cites at least one event.
+    cited_kept_facts: Ratio,
+}
+
+const VIA_UNRECORDED: &str = "unrecorded";
+
+fn via_name(via: Option<JournalRefVia>) -> &'static str {
+    via.map_or(VIA_UNRECORDED, JournalRefVia::as_str)
+}
+
+fn provenance(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
+    let rewrites = store.rewrites()?;
+    let mut falsification = FalsificationProvenance::default();
+    let mut journal_refs = JournalRefProvenance::default();
+    let mut via_counts: BTreeMap<&'static str, usize> = [
+        JournalRefVia::Begin,
+        JournalRefVia::Brief,
+        JournalRefVia::Flag,
+    ]
+    .into_iter()
+    .map(|via| (via.as_str(), 0))
+    .chain([(VIA_UNRECORDED, 0)])
+    .collect();
+    let mut rejected_alternatives = Ratio::default();
+    let mut briefs = BriefProvenance::default();
+    let mut cited_kept_facts = Ratio::default();
+
+    let mut passes = 0;
+    let mut none_after_failure = 0;
+    for change_id in change_ids {
+        let events = store.load_events(change_id)?;
+        let state = state::reduce_following(&events, &rewrites)?;
+
+        for (index, entry) in state.verifications.iter().enumerate() {
+            if entry.result != VerifyResult::Pass || entry.probe.is_some() {
+                continue;
+            }
+            passes += 1;
+            if entry.falsification.is_some() {
+                falsification.declared.count += 1;
+            } else if entry.falsification_inferred.is_some() {
+                falsification.inferred.count += 1;
+            } else {
+                falsification.none.count += 1;
+                let prior = &state.verifications[..index];
+                if state::infer_falsification(prior, entry.gate.as_deref(), &entry.command)
+                    .is_some()
+                {
+                    none_after_failure += 1;
+                }
+            }
+        }
+
+        let from_journal = state.journal_ref.is_some();
+        for patchset in &state.patchsets {
+            let linked = !patchset.journal_refs.is_empty();
+            journal_refs.patchsets_with_refs.tally(linked);
+            if from_journal {
+                journal_refs.opened_from_journal.tally(linked);
+            } else {
+                journal_refs.opened_without_journal.tally(linked);
+            }
+            for reference in &patchset.journal_refs {
+                *via_counts.entry(via_name(reference.via)).or_default() += 1;
+            }
+        }
+
+        let integrated = state
+            .closure
+            .as_ref()
+            .is_some_and(|closure| closure.outcome == Closure::Integrated);
+        if integrated {
+            rejected_alternatives.tally(
+                state
+                    .kept
+                    .iter()
+                    .any(|fact| fact.kind == KeptKind::Rejected),
+            );
+        }
+
+        for brief in &state.briefs {
+            briefs
+                .versions_with_plan_ref
+                .tally(brief.plan_ref.is_some());
+        }
+        briefs.changes_with_plan_ref.tally(
+            state
+                .latest_brief()
+                .is_some_and(|brief| brief.plan_ref.is_some()),
+        );
+
+        for fact in &state.kept {
+            cited_kept_facts.tally(!fact.cites.is_empty());
+        }
+    }
+
+    for ratio in [
+        &mut falsification.declared,
+        &mut falsification.inferred,
+        &mut falsification.none,
+    ] {
+        ratio.of = passes;
+    }
+    falsification.none_after_failure = Ratio {
+        count: none_after_failure,
+        of: falsification.none.count,
+    };
+    let references: usize = via_counts.values().sum();
+    journal_refs.via = via_counts
+        .into_iter()
+        .map(|(via, count)| {
+            (
+                via,
+                Ratio {
+                    count,
+                    of: references,
+                },
+            )
+        })
+        .collect();
+
+    let output = ProvenanceOutput {
+        schema: "arc-stats-provenance/1",
+        changes: change_ids.len(),
+        falsification,
+        journal_refs,
+        rejected_alternatives,
+        briefs,
+        cited_kept_facts,
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+    let f = &output.falsification;
+    println!(
+        "falsification: {} passes; declared {}, inferred {}, none {} ({} after an earlier failure)",
+        passes, f.declared.count, f.inferred.count, f.none.count, f.none_after_failure.count
+    );
+    let j = &output.journal_refs;
+    let via = j
+        .via
+        .iter()
+        .map(|(via, ratio)| format!("{via} {}", ratio.count))
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!(
+        "journal refs: {} patchsets carry one; opened from journal {}, opened without {}; {} references: {}",
+        j.patchsets_with_refs, j.opened_from_journal, j.opened_without_journal, references, via
+    );
+    println!(
+        "rejected alternatives: {} integrated changes",
+        output.rejected_alternatives
+    );
+    println!(
+        "plan-linked briefs: {} versions, {} changes in force",
+        output.briefs.versions_with_plan_ref, output.briefs.changes_with_plan_ref
+    );
+    println!("cited kept facts: {}", output.cited_kept_facts);
+    Ok(())
+}
+
+pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, view: StatsView) -> Result<()> {
     let store = ctx.store()?;
     let change_ids = match &selection {
         StatsSelection::Change(reference) => vec![store.resolve_change(reference)?],
@@ -211,8 +454,10 @@ pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, by_model_view: bo
         }
     };
 
-    if by_model_view {
-        return by_model(&store, &change_ids, json);
+    match view {
+        StatsView::ByModel => return by_model(&store, &change_ids, json),
+        StatsView::Provenance => return provenance(&store, &change_ids, json),
+        StatsView::Changes => {}
     }
 
     let mut changes = Vec::new();

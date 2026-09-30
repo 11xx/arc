@@ -389,7 +389,8 @@ enum Cmd {
         #[arg(long, hide = true)]
         oneline: bool,
     },
-    /// Derived ledger analytics: stage, review, and gate durations
+    /// Derived ledger analytics: stage, review, and gate durations, and how
+    /// often provenance is recorded
     Stats {
         /// Report a single change
         #[arg(long, id = "change_flag", conflicts_with_all = ["tag", "all"])]
@@ -402,8 +403,34 @@ enum Cmd {
         all: bool,
         /// One row per delegated identity instead of per change: patchsets
         /// contributed, rework rounds they opened, verdicts issued
-        #[arg(long = "by-model")]
+        #[arg(long = "by-model", conflicts_with = "provenance")]
         by_model: bool,
+        /// How often each provenance record was written, one line per class,
+        /// each count beside the population it was counted in. With `--json`,
+        /// `arc-stats-provenance/1`.
+        ///
+        /// Falsification: passing non-probe `verification-recorded` events
+        /// carrying a declared `falsification`, only `falsification_inferred`,
+        /// or neither; and, of neither, those an earlier failure of the same
+        /// gate (or command, when unnamed) on the same change precedes, which
+        /// were recorded before arc derived the inference.
+        ///
+        /// Journal refs: patchsets carrying `journal_refs`, of all patchsets,
+        /// of those on changes opened from a journal artifact, and of those on
+        /// changes opened without one; and every reference by its `via`
+        /// (begin, brief, flag, or unrecorded).
+        ///
+        /// Rejected alternatives: integrated changes with at least one kept
+        /// fact of kind `rejected`, of integrated changes.
+        ///
+        /// Plan-linked briefs: brief versions carrying a `plan_ref`, of all
+        /// versions; and changes whose in-force brief carries one, of the
+        /// selected changes.
+        ///
+        /// Cited kept facts: kept facts citing at least one event, of all kept
+        /// facts.
+        #[arg(long)]
+        provenance: bool,
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
         json: bool,
@@ -2573,6 +2600,7 @@ fn run(cli: Cli) -> Result<i32> {
             tag,
             all,
             by_model,
+            provenance,
             json,
         } => {
             // clap rejects the pair on the subcommand, but a global `--change`
@@ -2588,7 +2616,12 @@ fn run(cli: Cli) -> Result<i32> {
                 // `--change` placed before it never reaches that check.
                 (Some(_), Some(_)) => bail!("--change and --tag are mutually exclusive"),
             };
-            commands::stats(&ctx, selection, json, by_model)?;
+            let view = match (by_model, provenance) {
+                (true, _) => commands::StatsView::ByModel,
+                (_, true) => commands::StatsView::Provenance,
+                _ => commands::StatsView::Changes,
+            };
+            commands::stats(&ctx, selection, json, view)?;
             Ok(0)
         }
         Cmd::Diff {
