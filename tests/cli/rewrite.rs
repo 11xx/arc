@@ -1792,6 +1792,7 @@ fn a_recorded_rewrite_without_a_judgement_does_not_carry_an_approval() {
 }
 
 fn change_on_signed_merge(repo: &Repo, key: &Key) -> (PathBuf, String, String) {
+    git(&repo.root, &["config", "user.signingkey", &key.fingerprint]);
     let base = repo.head(&repo.root);
     git(&repo.root, &["checkout", "-b", "side"]);
     repo.commit(&repo.root, "side.txt", "side\n", "test: side");
@@ -1864,7 +1865,7 @@ fn signing_a_change_excludes_target_history_and_refuses_shared_ranges() {
         );
     git(&worktree, &["branch", "-D", "shared-work"]);
     arc_signing(&repo, &key, &worktree)
-        .args(["rewrite", "sign", "--key", &key.fingerprint])
+        .args(["rewrite", "sign"])
         .assert()
         .success()
         .stdout(predicates::str::contains("2 commits rewritten"));
@@ -1898,4 +1899,294 @@ fn including_shared_history_explicitly_rewrites_the_target_merge() {
         .args(["history", "resolve", &merge])
         .assert()
         .success();
+}
+
+fn rewrite_event_id(repo: &Repo) -> String {
+    repository_events(repo)
+        .into_iter()
+        .find_map(|path| {
+            let event: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            (event["event_type"] == "history-rewritten")
+                .then(|| event["event_id"].as_str().unwrap().to_string())
+        })
+        .unwrap()
+}
+
+#[test]
+fn withdrawing_a_map_preserves_refs_and_removes_approval_translation() {
+    let repo = repo_with_gates();
+    let key = signing_key(&repo).expect("withdrawal acceptance requires a sandbox signing key");
+    let (worktree, old) = approved_change(&repo, "withdrawn");
+    arc_signing(&repo, &key, &worktree)
+        .args(["rewrite", "sign", "--key", &key.fingerprint])
+        .assert()
+        .success();
+    let rewritten = repo.head(&worktree);
+    let event_id = rewrite_event_id(&repo);
+    assert!(approval_valid(&repo, "withdrawn"));
+    repo.arc(&worktree)
+        .args(["history", "withdraw", &event_id, "--reason", "wrong range"])
+        .assert()
+        .success()
+        .stdout(
+            predicates::str::contains("refs/heads/arc/withdrawn")
+                .and(predicates::str::contains("No refs were moved back.")),
+        );
+    assert_eq!(repo.head(&worktree), rewritten);
+    repo.arc(&worktree)
+        .args(["history", "resolve", &old])
+        .assert()
+        .code(2)
+        .stdout(predicates::str::contains("no recorded rewrite moved it"));
+    assert!(!approval_valid(&repo, "withdrawn"));
+    let count = repository_events(&repo).len();
+    repo.arc(&worktree)
+        .args(["history", "withdraw", &event_id, "--reason", "repeat"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("already withdrawn"));
+    assert_eq!(repository_events(&repo).len(), count);
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
+    assert_eq!(config["schema_version"], 7);
+    let tree = git_out(&worktree, &["rev-parse", "HEAD^{tree}"]);
+    let correct = git_out(
+        &worktree,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            "master",
+            "-m",
+            "test: correct successor",
+        ],
+    );
+    repo.arc(&worktree)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            "-",
+            "--reason",
+            "correct map",
+        ])
+        .write_stdin(format!("{old} {correct}\n"))
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["history", "resolve", &old])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(correct));
+}
+
+fn copy_objects(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let dest = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_objects(&entry.path(), &dest);
+        } else if dest.exists() {
+            assert_eq!(fs::read(entry.path()).unwrap(), fs::read(dest).unwrap());
+        } else {
+            fs::copy(entry.path(), dest).unwrap();
+        }
+    }
+}
+
+#[test]
+fn an_importing_replica_honours_a_withdrawal_of_a_map_it_already_holds() {
+    let sender = repo_with_gates();
+    let key = signing_key(&sender).expect("bundle acceptance requires a sandbox signing key");
+    let (_, worktree, old) = change_with_patchset(&sender, "portable");
+    arc_signing(&sender, &key, &worktree)
+        .args(["rewrite", "sign", "--key", &key.fingerprint])
+        .assert()
+        .success();
+    let event_id = rewrite_event_id(&sender);
+    let bundle = sender.home.join("map.json");
+    sender
+        .arc(&worktree)
+        .args(["export", "portable", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let initial: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    let prefix = initial["events_sha256"].as_str().unwrap();
+    let receiver = Repo::new();
+    copy_objects(
+        &sender.root.join(".git/objects"),
+        &receiver.root.join(".git/objects"),
+    );
+    receiver
+        .arc(&receiver.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    receiver
+        .arc(&receiver.root)
+        .args(["history", "resolve", &old])
+        .assert()
+        .success();
+    sender
+        .arc(&worktree)
+        .args(["history", "withdraw", &event_id, "--reason", "wrong map"])
+        .assert()
+        .success();
+    sender
+        .arc(&worktree)
+        .args([
+            "export",
+            "portable",
+            "--since",
+            prefix,
+            "--output",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let delta: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
+    assert_eq!(delta["schema"], "arc-bundle/6");
+    assert_eq!(delta["store_format"], 7);
+    assert!(delta["repository_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["event_type"] == "history-rewrite-withdrawn"));
+    let held_count = repository_events(&receiver).len();
+    let mut malformed = delta.clone();
+    let withdrawal = malformed["repository_events"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|event| event["event_type"] == "history-rewrite-withdrawn")
+        .unwrap();
+    withdrawal["rewrite_event_id"] = serde_json::json!("not-held");
+    fs::write(&bundle, json_file_bytes(&malformed)).unwrap();
+    receiver
+        .arc(&receiver.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not-held"));
+    assert_eq!(repository_events(&receiver).len(), held_count);
+    fs::write(&bundle, json_file_bytes(&delta)).unwrap();
+    receiver
+        .arc(&receiver.root)
+        .args(["import", bundle.to_str().unwrap(), "--dry-run"])
+        .assert()
+        .success();
+    receiver
+        .arc(&receiver.root)
+        .args(["history", "resolve", &old])
+        .assert()
+        .success();
+    receiver
+        .arc(&receiver.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    receiver
+        .arc(&receiver.root)
+        .args(["history", "resolve", &old])
+        .assert()
+        .code(2);
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(receiver.root.join(".git/arc/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(config["schema_version"], 7);
+    let correct = sender.head(&sender.root);
+    sender
+        .arc(&worktree)
+        .args([
+            "history",
+            "rewrite",
+            "--map",
+            "-",
+            "--reason",
+            "correct map",
+        ])
+        .write_stdin(format!("{old} {correct}\n"))
+        .assert()
+        .success();
+    sender
+        .arc(&worktree)
+        .args([
+            "export",
+            "portable",
+            "--since",
+            prefix,
+            "--output",
+            bundle.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    receiver
+        .arc(&receiver.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    receiver
+        .arc(&receiver.root)
+        .args(["history", "resolve", &old])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&correct));
+    sender
+        .arc(&worktree)
+        .args(["export", "portable", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let fresh = Repo::new();
+    copy_objects(
+        &sender.root.join(".git/objects"),
+        &fresh.root.join(".git/objects"),
+    );
+    fresh
+        .arc(&fresh.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    fresh
+        .arc(&fresh.root)
+        .args(["history", "resolve", &old])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(correct));
+}
+
+#[test]
+fn withdrawals_refuse_other_event_types_and_empty_reasons() {
+    let repo = Repo::new();
+    let change = begin_change(&repo, "other", None);
+    let events = json_stdout(repo.arc(&repo.root).args(["show", &change, "--json"]));
+    let opened = fs::read_dir(
+        repo.root
+            .join(".git/arc/changes")
+            .join(&change)
+            .join("events"),
+    )
+    .unwrap()
+    .next()
+    .unwrap()
+    .unwrap()
+    .path();
+    let event: serde_json::Value = serde_json::from_slice(&fs::read(opened).unwrap()).unwrap();
+    let opened_id = event["event_id"].as_str().unwrap();
+    repo.arc(&repo.root)
+        .args(["history", "withdraw", opened_id, "--reason", "wrong type"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not a history-rewritten"));
+    repo.arc(&repo.root)
+        .args(["history", "withdraw", "missing", "--reason", "missing map"])
+        .assert()
+        .failure();
+    repo.arc(&repo.root)
+        .args(["history", "withdraw", "missing", "--reason", "   "])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("non-empty reason"));
+    assert!(repository_events(&repo).is_empty(), "{events}");
 }

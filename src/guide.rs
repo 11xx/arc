@@ -945,6 +945,17 @@ HISTORY REWRITES
                        Record a rewrite performed elsewhere, from its commit
                        map.
     arc history resolve <rev>     Where a recorded revision ended up.
+    arc history withdraw <event-id> --reason <why>
+                       Withdraw one history-rewritten repository event. Its
+                       map does not participate in resolution or readiness;
+                       refs are not moved back. Output names recorded ref
+                       moves, or says when that information is absent.
+                       Other event types are refused. A withdrawal travels
+                       with the map in full and delta exports, and importing
+                       replicas honour it even when they already hold the
+                       map. A delta can carry repository events with an empty
+                       change suffix. A correct map can be recorded for the
+                       same revisions. Stored events remain intact.
 
   Only the signature and the commit ids change: tree, parents, author,
   committer, dates, encoding, message and any other header the commit carries

@@ -2528,6 +2528,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             // Repository-scoped, so none is ever in a change's log; if one
             // arrives by import it says nothing about this change.
             Payload::HistoryRewritten { .. }
+            | Payload::HistoryRewriteWithdrawn { .. }
             | Payload::ReviewPassOpened { .. }
             | Payload::ReviewPassCompleted { .. }
             | Payload::ReviewPassAbandoned { .. }

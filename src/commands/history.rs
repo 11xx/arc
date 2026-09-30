@@ -14,7 +14,7 @@ pub fn record_rewrite(ctx: &Ctx, map: &str, reason: String, tool: Option<String>
         std::fs::read_to_string(map).with_context(|| format!("cannot read commit map {map}"))?
     };
     let mapping = parse_commit_map(&text)?;
-    let event_id = record_mapping(ctx, mapping, reason, tool)?;
+    let event_id = record_mapping(ctx, mapping, reason, tool, BTreeMap::new())?;
     println!("event: {event_id}");
     println!("Recorded revisions still say what they said; readers follow them forward.");
     Ok(())
@@ -33,6 +33,7 @@ pub fn record_mapping(
     mapping: std::collections::BTreeMap<String, Option<String>>,
     reason: String,
     tool: Option<String>,
+    refs: BTreeMap<String, crate::rewrite::RefMove>,
 ) -> Result<String> {
     let store = ctx.store()?;
     // The same lock the import path takes: a rewrite recorded here and one
@@ -77,6 +78,7 @@ pub fn record_mapping(
             reason,
             tool,
             signature_only: Vec::new(),
+            refs,
         },
     );
     combined.push(event.clone());
@@ -96,6 +98,57 @@ pub fn record_mapping(
     store.append_repository_event(&event)?;
     println!("history rewrite recorded: {count} revisions");
     Ok(event.event_id)
+}
+
+/// Withdraw a map as a repository fact, preserving its record and its Git
+/// effects. Existing ref-move details remain available for manual recovery.
+pub fn withdraw_rewrite(ctx: &Ctx, event_id: &str, reason: String) -> Result<()> {
+    crate::ids::validate_id_component(event_id)?;
+    if reason.trim().is_empty() {
+        bail!("a withdrawal needs a non-empty reason");
+    }
+    let store = ctx.store()?;
+    let _repository_events = store.lock_repository_events()?;
+    let events = store.load_repository_events()?;
+    let target = events
+        .iter()
+        .find(|event| event.event_id == event_id)
+        .with_context(|| format!("{event_id} is not a history-rewritten repository event"))?;
+    let Payload::HistoryRewritten { refs, .. } = &target.payload else {
+        bail!("{event_id} is not a history-rewritten repository event");
+    };
+    if target.change_id != Store::REPOSITORY_SCOPE {
+        bail!("{event_id} is not a history-rewritten repository event");
+    }
+    if let Some(existing) = events.iter().find(|event| {
+        matches!(
+            &event.payload, Payload::HistoryRewriteWithdrawn { rewrite_event_id, .. }
+                if rewrite_event_id == event_id
+        )
+    }) {
+        println!("{event_id} was already withdrawn by {}", existing.event_id);
+    } else {
+        let event = ctx.event(
+            &store,
+            Store::REPOSITORY_SCOPE,
+            Payload::HistoryRewriteWithdrawn {
+                rewrite_event_id: event_id.to_string(),
+                reason,
+            },
+        );
+        store.append_repository_event(&event)?;
+        println!("withdrawn: {event_id}");
+        println!("event: {}", event.event_id);
+    }
+    println!("No refs were moved back.");
+    if refs.is_empty() {
+        println!("Ref moves were not recorded for this map.");
+    } else {
+        for (name, moved) in refs {
+            println!("withdrawn map moved: {name} {} → {}", moved.old, moved.new);
+        }
+    }
+    Ok(())
 }
 
 /// Where a recorded revision ended up. Exit 2 when nothing rewrote it, so a

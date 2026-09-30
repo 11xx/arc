@@ -102,10 +102,22 @@ impl Bundle {
         // plus the suffix, which is what doubles as the next `--since` token
         // and what the receiver verifies the suffix against.
         let history_sha256 = checksum(&all)?;
+        // Repository facts travel even when the change's ledger has not
+        // advanced: a withdrawal cannot depend on another change event.
+        let repository_events: Vec<Value> = store
+            .raw_repository_events_unseen(&std::collections::BTreeSet::new())?
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect();
         let (events, since) = match since {
             None => (all, None),
             Some(prefix_sha256) => {
-                let (prefix_event_count, suffix) = split_at_prefix(&all, prefix_sha256)?;
+                let (prefix_event_count, suffix) =
+                    if prefix_sha256 == history_sha256 && !repository_events.is_empty() {
+                        (all.len(), Vec::new())
+                    } else {
+                        split_at_prefix(&all, prefix_sha256)?
+                    };
                 (
                     suffix,
                     Some(BundlePrefix {
@@ -120,11 +132,6 @@ impl Bundle {
         // The checksum covers the change's events, which is what the receiver
         // replays. Repository events travel beside them: they are context for
         // resolving recorded revisions, not part of this change's history.
-        let repository_events = store
-            .raw_repository_events_unseen(&std::collections::BTreeSet::new())?
-            .into_iter()
-            .map(|(_, value)| value)
-            .collect();
         Ok(Bundle {
             schema: BUNDLE_SCHEMA.to_string(),
             store_format: crate::model::SCHEMA_VERSION,
@@ -236,7 +243,7 @@ impl Bundle {
                 // A delta bundle's checksum covers the prefix and the suffix
                 // together, so it is verified against the receiving store's
                 // prefix rather than against the suffix alone.
-                if bundle.events.is_empty() {
+                if bundle.events.is_empty() && bundle.repository_events.is_empty() {
                     bail!("a delta bundle must carry the events after its prefix");
                 }
             }
