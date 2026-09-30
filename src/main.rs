@@ -168,9 +168,12 @@ struct BodyOpts {
 /// Cross-links a patchset records to where its work was framed.
 #[derive(clap::Args)]
 struct LinkOpts {
-    /// Journal artifact this patchset was framed by, as a filename in the
-    /// journal dir (repeatable). Its body digest is read when the patchset is
-    /// recorded, and a name that resolves to no artifact is refused. Given
+    /// Journal artifact this patchset was framed by (repeatable): a filename
+    /// in this project's journal, or `<journal-dir>::<file>` for one in the
+    /// journal at the absolute `<journal-dir>` another project's `arc journal
+    /// dir` prints. The link records the reference as given. Its body digest
+    /// is read from the owning journal when the patchset is recorded, and a
+    /// name that resolves to no artifact is refused. Given
     /// once or more, only the flagged artifacts are linked, `via: flag`.
     /// Omitted, the patchset links the artifact the change was opened from
     /// (`via: begin`) and the plan its brief names (`via: brief`), one link
@@ -242,8 +245,13 @@ enum Cmd {
         /// Batch/query tag (repeatable)
         #[arg(long)]
         tag: Vec<String>,
-        /// Open from an actionable journal artifact, consuming it. The
-        /// change records the artifact's filename and the digest of its body
+        /// Open from an actionable journal artifact, consuming it. A bare
+        /// filename resolves in this project's journal; `<journal-dir>::<file>`
+        /// resolves `<file>` in the journal at the absolute `<journal-dir>`
+        /// that project's `arc journal dir` prints, and records the promotion
+        /// in that journal, naming this repository and change. A journal that
+        /// is not one, or a file it does not hold, is refused naming both. The
+        /// change records the reference as given and the digest of its body
         /// read now, and each later snapshot links it `via: begin` unless
         /// given --journal-ref
         #[arg(long = "from-journal")]
@@ -471,7 +479,12 @@ enum Cmd {
         /// (sol-low, sol-high, reviewer, discussion)
         #[arg(long)]
         scaffold: Option<String>,
-        /// Journal plan artifact implemented by this brief
+        /// Journal plan artifact implemented by this brief: a filename in
+        /// this project's journal, or `<journal-dir>::<file>` for a plan in the
+        /// journal at the absolute `<journal-dir>` another project's `arc
+        /// journal dir` prints. The brief records the reference as given;
+        /// a plan in another journal is read there, and that journal records
+        /// the brief as a promotion naming this repository and change
         #[arg(long)]
         plan_ref: Option<String>,
         /// Opaque plan slice slug implemented by this brief
@@ -1748,7 +1761,7 @@ enum WorkspaceCmd {
     /// it is: present, terminal, archived, or superseded. It accepts the same
     /// `--under`/`--here`/`--global` scope, reports the same collection
     /// manifest, exits 16 on a partial collection, and is versioned
-    /// `arc-workspace-inventory/1`.
+    /// `arc-workspace-inventory/2`.
     Inventory {
         /// Read the hot journal directory, the cold archive, or both
         #[arg(long, value_enum, default_value_t = commands::StorageSelection::Hot)]

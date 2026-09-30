@@ -156,7 +156,7 @@ fn authority_moves_only_through_an_imported_offer() {
     );
 
     let catchup = json_stdout(recipient.arc(&recipient.root).args(["catchup", "--json"]));
-    assert_eq!(catchup["schema"], "arc-catchup/11", "{catchup}");
+    assert_eq!(catchup["schema"], "arc-catchup/12", "{catchup}");
     assert_eq!(catchup["replica"]["local"]["name"], "peer", "{catchup}");
     assert!(
         catchup["replica"]["peers"]

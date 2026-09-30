@@ -1184,7 +1184,7 @@ fn workspace_inventory(
         println!(
             "{}",
             serde_json::to_string_pretty(&WorkspaceInventory {
-                schema: "arc-workspace-inventory/1",
+                schema: "arc-workspace-inventory/2",
                 scope: scope.view(),
                 storage: storage.as_str(),
                 observation: Observation {
@@ -1620,7 +1620,7 @@ fn collect_backlog(
     let partial = collection.failed > 0;
 
     let backlog = Backlog {
-        schema: "arc-workspace-backlog/18",
+        schema: "arc-workspace-backlog/19",
         scope: scope.view(),
         observation: Observation {
             started_at: observed_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -3331,7 +3331,7 @@ mod report {
 
         fn backlog(open: Vec<Value>, feature_requests: Vec<Value>) -> Value {
             json!({
-                "schema": "arc-workspace-backlog/18",
+                "schema": "arc-workspace-backlog/19",
                 "observation": {"started_at": "2026-09-26T00:00:00Z", "finished_at": "2026-09-26T00:00:01Z"},
                 "scope": {"mode": "global"},
                 "collection": {"failures": []},
