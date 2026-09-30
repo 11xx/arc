@@ -6,7 +6,7 @@
 //! same rejection reason, and the same advisories, and a reader is told the
 //! reason the gate acted on rather than a second reading of the ledger.
 
-use crate::model::{ExternalVerdict, Verdict};
+use crate::model::{DangerRule, ExternalVerdict, Verdict};
 use crate::state::{ExternalVerdictEntry, Patchset, VerdictEntry};
 use crate::status::{
     Advisory, DangerScope, ExternalVerdictStatus, ReviewerCoverage, VerdictStatus,
@@ -131,6 +131,13 @@ fn short_revision(revision: &str) -> &str {
 
 pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
     let requires_independent_review = facts.forbid_self_approval && facts.danger.dangerous;
+    // An external approval is a record of someone else's decision that arc
+    // cannot verify, so on a dangerous path it only stands beside a local
+    // approval and never supplies one, whatever policy says of self-approval.
+    // A repository that declares no danger paths has none; its uniform gate
+    // refuses an external approval alone only where independence is owed.
+    let external_approval_needs_local = requires_independent_review
+        || (facts.danger.dangerous && facts.danger.rule != DangerRule::NotDeclared);
     let debt_waives_current_head = facts.head_matches && facts.debt_waives_latest_patchset;
     let names_latest_patchset = |patchset_id: &str| {
         facts
@@ -221,7 +228,7 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
                 gates_current_head: matches_current_patchset
                     && external.verdict == ExternalVerdict::Approved
                     && !local_verdict_refuses_this_head
-                    && !requires_independent_review,
+                    && !external_approval_needs_local,
                 findings: external.findings.clone(),
             }
         })
@@ -238,22 +245,20 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
     let external_approval_valid = current_external_verdict.is_some_and(|external| {
         external.verdict == ExternalVerdict::Approved
             && !local_verdict_refuses_this_head
-            && !requires_independent_review
+            && !external_approval_needs_local
     });
-    let approval_valid = if external_refuses_this_head || local_verdict_refuses_this_head {
-        false
-    } else if current_external_verdict.is_some() {
-        external_approval_valid || (requires_independent_review && local_approval_valid)
-    } else {
-        local_approval_valid
-    };
+    let approval_valid = !external_refuses_this_head
+        && !local_verdict_refuses_this_head
+        && (external_approval_valid || local_approval_valid);
 
     // True whenever the waiver is load-bearing: it rescued a self-approval, or
     // it stood in for a verdict that was never recorded. Reporting it only in
     // the first case would let the second merge look independently approved.
+    // An approval that stands without the waiver leaves it authorizing
+    // nothing.
     let approval_waived_by_debt = waiver_authorized_approval
         || (debt_waives_current_head
-            && !local_approval_valid
+            && !approval_valid
             && !local_verdict_refuses_this_head
             && !external_refuses_this_head);
     // A waiver stands in for a verdict nobody recorded. It does not stand over
@@ -294,23 +299,29 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
                 external.reference
             )),
             ExternalVerdict::Approved
-                if requires_independent_review
-                    && !local_approval_valid
-                    && !debt_waives_current_head =>
+                if !external_approval_needs_local
+                    || local_approval_valid
+                    || debt_waives_current_head =>
             {
-                Some(format!(
-                    "external approval by {} at {} (reference {}) cannot satisfy the independent-review rule on this dangerous patchset; Arc cannot verify the external identity (declared by {})",
-                    external.decided_by,
-                    short_revision(&external.revision),
-                    external.reference,
-                    if facts.forbid_self_approval_sources.is_empty() {
-                        "source unavailable"
-                    } else {
-                        facts.forbid_self_approval_sources.as_str()
-                    }
-                ))
+                None
             }
-            ExternalVerdict::Approved => None,
+            ExternalVerdict::Approved if requires_independent_review => Some(format!(
+                "external approval by {} at {} (reference {}) cannot satisfy the independent-review rule on this dangerous patchset; Arc cannot verify the external identity (declared by {})",
+                external.decided_by,
+                short_revision(&external.revision),
+                external.reference,
+                if facts.forbid_self_approval_sources.is_empty() {
+                    "source unavailable"
+                } else {
+                    facts.forbid_self_approval_sources.as_str()
+                }
+            )),
+            ExternalVerdict::Approved => Some(format!(
+                "external approval by {} at {} (reference {}) cannot approve this dangerous patchset alone; Arc cannot verify the external identity, so a local approval must stand beside it",
+                external.decided_by,
+                short_revision(&external.revision),
+                external.reference
+            )),
         });
     // A contested verdict graph has no single authority, so no latest verdict
     // is reported and the change reads as unreviewed. Without this the
@@ -467,7 +478,7 @@ fn advisories(facts: &ApprovalFacts) -> Vec<Advisory> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ActorSource, DangerRule};
+    use crate::model::ActorSource;
     use chrono::DateTime;
 
     const HEAD: &str = "1111111111111111111111111111111111111111";
@@ -777,6 +788,91 @@ mod tests {
         });
         assert!(outcome.approval_valid);
         assert!(outcome.external_verdicts[0].gates_current_head);
+    }
+
+    #[test]
+    fn an_external_approval_never_counts_alone_on_a_dangerous_path() {
+        let (patchset, danger) = (patchset(), dangerous());
+        let externals = [external("ext-1", HEAD, ExternalVerdict::Approved)];
+        let permissive = || ApprovalFacts {
+            external_verdicts: &externals,
+            forbid_self_approval: false,
+            forbid_self_approval_sources: String::new(),
+            ..facts(&patchset, &danger)
+        };
+        let outcome = decide(&permissive());
+        assert!(!outcome.approval_valid);
+        assert!(!outcome.external_verdicts[0].gates_current_head);
+        let reason = outcome.approval_rejection_reason.unwrap();
+        assert!(
+            reason.contains("cannot approve this dangerous patchset alone")
+                && !reason.contains("independent-review"),
+            "{reason}"
+        );
+
+        // Beside a local approval it stands, and the local verdict gates.
+        let approval = verdict(Verdict::Approved, "author");
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&approval),
+            verdict_tips: 1,
+            ..permissive()
+        });
+        assert!(outcome.approval_valid);
+        assert!(outcome.verdict.unwrap().valid_for_current_head);
+        assert!(!outcome.external_verdicts[0].gates_current_head);
+        assert_eq!(outcome.approval_rejection_reason, None);
+
+        // A non-approving external verdict still refuses beside it.
+        let refusals = [external("ext-2", HEAD, ExternalVerdict::ChangesRequested)];
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&approval),
+            verdict_tips: 1,
+            external_verdicts: &refusals,
+            ..permissive()
+        });
+        assert!(outcome.external_refuses_this_head);
+        assert!(!outcome.approval_valid);
+
+        // A repository that declares no danger paths has none to guard.
+        let undeclared = DangerScope {
+            dangerous: true,
+            rule: DangerRule::NotDeclared,
+            paths: Vec::new(),
+        };
+        let outcome = decide(&ApprovalFacts {
+            danger: &undeclared,
+            ..permissive()
+        });
+        assert!(outcome.approval_valid);
+        assert!(outcome.external_verdicts[0].gates_current_head);
+    }
+
+    #[test]
+    fn a_waiver_beside_an_approval_that_stands_without_it_authorizes_nothing() {
+        let (patchset, danger) = (patchset(), untouched());
+        let externals = [external("ext-1", HEAD, ExternalVerdict::Approved)];
+        let outcome = decide(&ApprovalFacts {
+            external_verdicts: &externals,
+            debt_waives_latest_patchset: true,
+            ..facts(&patchset, &danger)
+        });
+        assert!(outcome.approval_valid);
+        assert!(!outcome.approval_waived_by_debt);
+        assert_eq!(outcome.approval_rejection_reason, None);
+
+        // On a dangerous path the same external approval stands on nothing,
+        // so the waiver is what the change rests on.
+        let danger = dangerous();
+        let outcome = decide(&ApprovalFacts {
+            external_verdicts: &externals,
+            debt_waives_latest_patchset: true,
+            forbid_self_approval: false,
+            ..facts(&patchset, &danger)
+        });
+        assert!(!outcome.approval_valid);
+        assert!(outcome.approval_waived_by_debt);
+        assert!(outcome.waiver_satisfies_approval);
+        assert_eq!(outcome.approval_rejection_reason, None);
     }
 
     #[test]
