@@ -97,7 +97,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 pub use timeline::log;
 pub use workspace::{
-    restack, workspace, RankBasis, StorageSelection, WorkspaceScope, WorkspaceView,
+    report_rules_help, restack, workspace, RankBasis, StorageSelection, WorkspaceScope,
+    WorkspaceView,
 };
 
 pub struct Ctx {

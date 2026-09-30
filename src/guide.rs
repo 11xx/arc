@@ -98,8 +98,11 @@ FROM A WORKSPACE ROOT (outside a project)
                        require observed facts; departures keep their recorded
                        reasons and do not imply resolution. Each change is
                        counted once with all its inbox predicates; questions
-                       retain who may settle them. Versioned
-                       `arc-workspace-report/2`.
+                       retain who may settle them. Two or more open changes
+                       whose in-force briefs share a plan and slice, or a body
+                       digest, are one `shared-plan-slice` fact. `--help`
+                       lists every attention rule. Versioned
+                       `arc-workspace-report/3`.
   cd <anchor>          Enter one project named by the report, then orient there.
 
 ORIENT INSIDE A PROJECT (start here, in this order)
@@ -1258,7 +1261,7 @@ SCHEMAS
     `arc-doctor/5`                   arc doctor --json
     `arc-workspace/1`                arc workspace list|inbox --json
     `arc-workspace-backlog/18`       arc workspace backlog --json
-    `arc-workspace-report/2`         arc workspace report --json
+    `arc-workspace-report/3`         arc workspace report --json
     `arc-workspace-inventory/1`      arc workspace inventory --json
     `arc-writability/1`              arc config --check-writable --json
     `arc-sandbox-clone/1`            arc sandbox clone --json
