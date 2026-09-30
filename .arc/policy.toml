@@ -78,6 +78,13 @@ paths = [
   "src/candidate.rs",
   # `candidate register` pins a tree and `candidate retire` deletes the pin.
   "src/commands/candidate.rs",
+  # Selection decides whether a candidate may ship: every ground a named
+  # choice must pass, and the basis recorded when it does.
+  "src/selection.rs",
+  # `candidate select` and `candidate promote` move a destination branch,
+  # update its checkout, and record the patchset; `candidate verify` runs
+  # gate commands and records the evidence selection counts.
+  "src/commands/selection.rs",
   # The relation ledger: the rules a local or imported relation must pass.
   "src/relations.rs",
   # `context read|declare|capture` write relation events to a change's or

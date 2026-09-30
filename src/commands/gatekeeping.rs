@@ -594,13 +594,13 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
 /// Removal happens however the run ends, including a gate that fails or
 /// errors: the checkout holds content nothing else refers to, and one left
 /// behind makes the next evaluation refuse.
-struct ScratchWorktree {
+pub(super) struct ScratchWorktree {
     repo: PathBuf,
-    path: PathBuf,
+    pub(super) path: PathBuf,
 }
 
 impl ScratchWorktree {
-    fn create(repo: &Path, path: PathBuf, revision: &str) -> Result<Self> {
+    pub(super) fn create(repo: &Path, path: PathBuf, revision: &str) -> Result<Self> {
         let display = path.display().to_string();
         // A checkout an interrupted run left behind is stale by construction:
         // it holds one revision and this run is asking for another.
@@ -1547,9 +1547,9 @@ fn resolve_falsification(
 /// The environment identity a gate's declared probe yields, when it declares
 /// one and the probe answered. A cached `None` is a probe that could not
 /// answer; it is not rerun for every gate that shares it.
-type DeclaredEnvironments = BTreeMap<(String, Option<u64>), Option<String>>;
+pub(super) type DeclaredEnvironments = BTreeMap<(String, Option<u64>), Option<String>>;
 
-fn declared_environment<'a>(
+pub(super) fn declared_environment<'a>(
     identities: &'a DeclaredEnvironments,
     gate: &gates::Gate,
 ) -> Option<&'a str> {
@@ -1566,7 +1566,7 @@ fn declared_environment<'a>(
 /// the identities are read before any gate runs, so a probe that cannot answer
 /// is reported before the batch records anything, and its gates then record
 /// evidence that names no environment.
-fn gate_environments<'a>(
+pub(super) fn gate_environments<'a>(
     cwd: &Path,
     gates: impl Iterator<Item = (&'a str, &'a gates::Gate)>,
 ) -> Result<DeclaredEnvironments> {
@@ -1863,13 +1863,13 @@ fn nonempty_attestation_value(value: Option<String>, flag: &str) -> Result<Strin
     Ok(value.to_owned())
 }
 
-struct GateRun {
-    status: ExitStatus,
-    output_tail: Option<String>,
-    timed_out: bool,
+pub(super) struct GateRun {
+    pub(super) status: ExitStatus,
+    pub(super) output_tail: Option<String>,
+    pub(super) timed_out: bool,
 }
 
-fn run_gate(cmd: &str, cwd: &Path, timeout_seconds: Option<u64>) -> Result<GateRun> {
+pub(super) fn run_gate(cmd: &str, cwd: &Path, timeout_seconds: Option<u64>) -> Result<GateRun> {
     let started = Instant::now();
     let deadline = timeout_seconds
         .map(|seconds| {
@@ -2394,12 +2394,12 @@ enum ClosedBehavior {
     SkipTagged,
 }
 
-/// The checkout a merge into a target runs in.
-struct TargetCheckout {
-    path: PathBuf,
+/// The checkout a merge into a target runs in, or a promotion moves.
+pub(super) struct TargetCheckout {
+    pub(super) path: PathBuf,
     /// The branch the checkout holds when it does not hold the target and
     /// must be moved onto it before the merge.
-    switch_from: Option<String>,
+    pub(super) switch_from: Option<String>,
 }
 
 /// Resolve the checkout the merge into `target` runs in.
@@ -2444,13 +2444,14 @@ fn same_path(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// Refuse when the target checkout carries tracked modifications. A merge
-/// beside uncommitted work writes into a tree nobody can name afterwards.
-fn checkout_tracked_dirt(checkout: &Path) -> Result<()> {
+/// Refuse when the checkout a merge or a promotion writes into carries
+/// tracked modifications. Writing beside uncommitted work leaves a tree
+/// nobody can name afterwards.
+pub(super) fn checkout_tracked_dirt(checkout: &Path) -> Result<()> {
     if gitio::dirt(checkout)?.tracked {
         bail!(
-            "target worktree {} carries tracked modifications, staged or unstaged; commit or stash \
-             them before integrating",
+            "worktree {} carries tracked modifications, staged or unstaged; commit or stash \
+             them first",
             checkout.display()
         );
     }
@@ -2470,7 +2471,7 @@ fn checkout_tracked_dirt(checkout: &Path) -> Result<()> {
 /// against the checkout itself, which covers ignored paths Git would overwrite
 /// without saying so and bounds the work by the size of the change rather than
 /// the size of the checkout.
-fn checkout_writes(
+pub(super) fn checkout_writes(
     checkout: &TargetCheckout,
     target_head: &str,
     merged_tree: Option<&str>,
@@ -2496,8 +2497,7 @@ fn checkout_writes(
     let collisions = gitio::write_overlap(&checkout.path, &writes)?;
     if !collisions.is_empty() {
         bail!(
-            "the merge would write over paths the target worktree {} holds untracked or ignored: \
-             {}",
+            "the update would write over paths the worktree {} holds untracked or ignored: {}",
             checkout.path.display(),
             collisions.join(", ")
         );
@@ -2505,7 +2505,7 @@ fn checkout_writes(
     let left = gitio::untracked_and_ignored(&checkout.path)?;
     if !left.is_empty() {
         println!(
-            "target worktree {}: leaving {} untracked or ignored {} the merge does not write: {}",
+            "worktree {}: leaving {} untracked or ignored {} the update does not write: {}",
             checkout.path.display(),
             left.len(),
             if left.len() == 1 { "path" } else { "paths" },

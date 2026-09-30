@@ -407,6 +407,32 @@ pub fn commit_tree_with_parents(
     git(cwd, &args)
 }
 
+/// Write a commit holding `tree` onto `parent`, naming `committer` as its
+/// committer, touching no ref. The committer's email, and the author, are
+/// Git's configured identity.
+pub fn commit_tree_committed_by(
+    cwd: &Path,
+    tree: &str,
+    parent: &str,
+    message: &str,
+    committer: &str,
+) -> Result<String> {
+    let mut command = git_command();
+    command
+        .args(["commit-tree", tree, "-p", parent, "-m", message])
+        .current_dir(cwd)
+        .env("GIT_COMMITTER_NAME", committer);
+    let out = command_output(&mut command)
+        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+    if !out.status.success() {
+        bail!(
+            "git commit-tree failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// Who did something to a commit, and when, exactly as the commit object
 /// spells it.
 ///

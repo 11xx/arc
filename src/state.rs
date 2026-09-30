@@ -50,6 +50,10 @@ pub struct Patchset {
     /// `None` when none was recorded; arc never infers one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<crate::model::ExternalThreadRef>,
+    /// The candidate a promotion recorded this patchset from, with the
+    /// selection that permitted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<crate::model::PatchsetCandidate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance_mismatch: Option<bool>,
     pub created_at: DateTime<Utc>,
@@ -120,6 +124,9 @@ pub struct Brief {
     pub plan_slice: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_source: Option<PlanSource>,
+    /// Reads the contract requires of whoever answers it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub must_read: Vec<crate::model::ReadRequirement>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1530,6 +1537,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 plan_ref,
                 plan_slice,
                 plan_source,
+                must_read,
             } => state.briefs.push(Brief {
                 event_id: ev.event_id.clone(),
                 ts: ev.created_at,
@@ -1547,6 +1555,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 plan_ref: plan_ref.clone(),
                 plan_slice: plan_slice.clone(),
                 plan_source: plan_source.clone(),
+                must_read: must_read.clone(),
             }),
             Payload::ChangelogRecorded {
                 category,
@@ -1581,6 +1590,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 claim_actor,
                 journal_refs,
                 thread,
+                candidate,
             } => {
                 if let Some(claim_id) = claim_id {
                     crate::ids::validate_id_component(claim_id)?;
@@ -1644,6 +1654,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     claim_actor: claim_actor.clone(),
                     journal_refs: journal_refs.clone(),
                     thread: thread.clone(),
+                    candidate: candidate.clone(),
                     provenance_mismatch,
                     created_at: ev.created_at,
                 });
@@ -2537,6 +2548,9 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
             | Payload::CandidateRegistered { .. }
             | Payload::CandidateJudged { .. }
             | Payload::CandidateRetired { .. }
+            | Payload::CandidateVerified { .. }
+            | Payload::CandidateSelected { .. }
+            | Payload::CandidatePromoted { .. }
             | Payload::ContextRead { .. }
             | Payload::ContextDeclared { .. }
             | Payload::ContextCaptureReported { .. } => {}

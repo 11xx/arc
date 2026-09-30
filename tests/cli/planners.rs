@@ -103,7 +103,7 @@ fn selected_plan_captures_author_instead_of_brief_recorder() {
         .assert()
         .success();
     let view = json_stdout(repo.arc(&repo.root).args(["brief", "selected", "--json"]));
-    assert_eq!(view["schema"], "arc-brief/1");
+    assert_eq!(view["schema"], "arc-brief/2");
     let source = &view["brief"]["plan_source"];
     assert_eq!(source["sha256"], hex::encode(Sha256::digest(&bytes)));
     assert_eq!(source["planners"][0]["actor"], "planner-a");
