@@ -297,7 +297,7 @@ fn resume_json_uses_arc_resume_schema() {
     let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(value["schema"], "arc-resume/7");
-    assert_eq!(value["status"]["schema"], "arc-status/26");
+    assert_eq!(value["status"]["schema"], "arc-status/27");
     assert!(value["status"]["policy_sources"].is_object());
     assert_eq!(value["status"]["change_id"], change_id);
 }
@@ -725,7 +725,7 @@ fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
         .assert()
         .success();
     let exported: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
-    assert_eq!(exported["schema"], "arc-bundle/5", "{exported}");
+    assert_eq!(exported["schema"], "arc-bundle/6", "{exported}");
     assert_eq!(exported["store_format"], 6, "{exported}");
 
     let recipient = Repo::new();

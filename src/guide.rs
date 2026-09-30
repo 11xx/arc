@@ -1063,7 +1063,11 @@ RULES THAT CHANGE WHAT YOU DO
     fail first, then record the pass with `--falsified-by <failing-event>
     --predicted "<why it should fail>"`; the gate line then reads
     `discriminating` instead of `undiscriminated`. Advisory: it changes no
-    result and no exit code, and arc infers it from nothing.
+    result and no exit code, and only the declaration makes a row
+    `discriminating`. Separately, every pass records as
+    `falsification_inferred` the newest earlier failure of the same gate (or
+    command, when unnamed) on the change, declared or not: an inference,
+    labelled as one, that decides nothing.
     A passing gate row is `discriminating` when any passing evidence for that
     gate at the counted tree (or revision when the tree is unresolved) names
     a falsification. A later pass without one does not retract it.
@@ -1234,8 +1238,8 @@ SCHEMAS
   required takes the next. `journal-events/1` is one.
 
   Commitments, derived views:
-    `arc-state/2`                    arc show --json
-    `arc-status/26`                  arc status
+    `arc-state/3`                    arc show --json
+    `arc-status/27`                  arc status
     `arc-check/3`                    arc check --json
     `arc-inbox/10`                   arc inbox --json
     `arc-catchup/11`                 arc catchup --json
@@ -1244,7 +1248,7 @@ SCHEMAS
     `arc-brief/1`                    arc brief --json
     `arc-journal-artifact/2`         arc journal show --json
     `arc-journal-inventory/5`        arc journal inventory --json
-    `arc-rescue/4`                   arc rescue --json
+    `arc-rescue/5`                   arc rescue --json
     `arc-review/4`                   arc review --json
     `arc-findings/2`                 arc findings --format json
     `arc-blocker-status/1`           arc blocker-status --json
@@ -1272,7 +1276,7 @@ SCHEMAS
     `arc-journal-scaffolds/1`        arc journal scaffolds --json
 
   Commitments, files:
-    `arc-bundle/5`                   arc export / arc import
+    `arc-bundle/6`                   arc export / arc import
     `arc-replica-bundle/2`           arc replica export / import
     `arc-replica-event/2`            one event inside an arc-replica-bundle
     `arc-journal-bundle/1`           arc journal export / import
