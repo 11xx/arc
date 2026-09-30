@@ -724,6 +724,11 @@ impl VerificationEntry {
             && (self.attested || (self.tested_tree.is_some() && dirt_excused))
     }
 
+    /// The content key available to replay without consulting Git.
+    pub fn recorded_tree(&self) -> Option<&str> {
+        self.tree.as_deref().or(self.tested_tree.as_deref())
+    }
+
     /// Whether this evidence is about the given tree.
     ///
     /// Evidence recorded before arc kept the tree beside the revision still
@@ -2330,6 +2335,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 run_id,
                 gate,
                 revision,
+                tree,
                 evidence_event_id,
             } => {
                 let evidence = state
@@ -2344,7 +2350,10 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                         )
                     })?;
                 if evidence.gate.as_deref() != Some(gate)
-                    || evidence.revision != *revision
+                    || match tree {
+                        Some(tree) => evidence.recorded_tree() != Some(tree.as_str()),
+                        None => evidence.revision != *revision,
+                    }
                     || evidence.result != VerifyResult::Pass
                 {
                     bail!(
@@ -3413,12 +3422,71 @@ mod tests {
                 run_id: reuse_run_id,
                 gate: "unit".into(),
                 revision: "head".into(),
+                tree: None,
                 evidence_event_id,
             },
         ));
 
         let state = reduce(&events).unwrap();
         assert!(state.verification_runs.last().unwrap().complete);
+
+        let mut tree_keyed = events.clone();
+        if let Payload::VerificationRecorded {
+            tree, tested_tree, ..
+        } = &mut tree_keyed[2].payload
+        {
+            *tree = Some("content".into());
+            *tested_tree = Some("dirty-content".into());
+        }
+        if let Payload::VerificationRunStarted { revision, .. } = &mut tree_keyed[3].payload {
+            *revision = "merge".into();
+        }
+        if let Payload::VerificationReused { revision, tree, .. } = &mut tree_keyed[4].payload {
+            *revision = "merge".into();
+            *tree = Some("content".into());
+        }
+        assert!(
+            reduce(&tree_keyed)
+                .unwrap()
+                .verification_runs
+                .last()
+                .unwrap()
+                .complete
+        );
+        for mismatch in ["tree", "gate", "result"] {
+            let mut invalid = tree_keyed.clone();
+            match mismatch {
+                "tree" => {
+                    if let Payload::VerificationReused { tree, .. } = &mut invalid[4].payload {
+                        *tree = Some("other".into());
+                    }
+                }
+                "gate" => {
+                    if let Payload::VerificationReused { gate, .. } = &mut invalid[4].payload {
+                        *gate = "other".into();
+                    }
+                }
+                "result" => {
+                    if let Payload::VerificationRecorded { result, .. } = &mut invalid[2].payload {
+                        *result = VerifyResult::Fail;
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let error = reduce(&invalid).unwrap_err().to_string();
+            assert!(
+                error.contains("does not match passing"),
+                "{mismatch}: {error}"
+            );
+        }
+        if let Payload::VerificationRecorded {
+            tree, tested_tree, ..
+        } = &mut tree_keyed[2].payload
+        {
+            *tree = None;
+            *tested_tree = Some("content".into());
+        }
+        assert!(reduce(&tree_keyed).is_ok());
     }
 
     #[test]

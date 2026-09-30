@@ -243,3 +243,109 @@ fn skip_green_requires_all() {
         .failure()
         .stderr(predicates::str::contains("--skip-green requires --all"));
 }
+
+#[test]
+fn reuse_at_target_tip_replays_at_the_synthesized_revision() {
+    let repo = repo_with_trivial_gates();
+    let begun = stdout(repo.arc(&repo.root).args(["begin", "target-tip"]));
+    let id = opened_change_id(&begun);
+    let wt = repo.home.join(".worktrees/repo-target-tip");
+    let head = repo.head(&wt);
+    assert_eq!(head, repo.head(&repo.root));
+    repo.arc(&wt).args(["snapshot"]).assert().success();
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    repo.arc(&wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&wt)
+        .args(["verify", "--against", "master", "--skip-green"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("gates: 2/2 pass"))
+        .stdout(predicates::str::contains("green at the merged tree"));
+    let events = stdout(repo.arc(&wt).args(["events", "--change", &id]));
+    let events: Vec<serde_json::Value> = events
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+    let reused: Vec<_> = events
+        .iter()
+        .filter(|event| event["event_type"] == "verification-reused")
+        .collect();
+    assert_eq!(reused.len(), 2);
+    for reuse in reused {
+        assert_ne!(reuse["revision"], head);
+        assert_eq!(reuse["tree"], tree);
+        let evidence = events
+            .iter()
+            .find(|event| event["event_id"] == reuse["evidence_event_id"])
+            .unwrap();
+        assert_eq!(evidence["revision"], head);
+    }
+    for args in [
+        vec!["check"],
+        vec!["query"],
+        vec!["status"],
+        vec!["catchup", "--json"],
+    ] {
+        repo.arc(&wt).args(args).assert().success();
+    }
+}
+
+#[test]
+fn old_shape_reuse_keeps_revision_validation() {
+    let repo = repo_with_trivial_gates();
+    let (id, wt, _) = change_with_patchset(&repo, "old-reuse");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    repo.arc(&wt)
+        .args(["verify", "--all", "--skip-green"])
+        .assert()
+        .success();
+    rewrite_event(&repo, &id, "verification-reused", |event| {
+        event.as_object_mut().unwrap().remove("tree");
+    });
+    repo.arc(&wt).args(["show", "--json"]).assert().success();
+    rewrite_event(&repo, &id, "verification-reused", |event| {
+        event["revision"] = "another-revision".into();
+    });
+    repo.arc(&wt)
+        .args(["show", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("does not match passing"));
+}
+
+#[test]
+fn skip_green_reruns_evidence_without_a_replayable_tree_key() {
+    let repo = repo_with_trivial_gates();
+    let (id, wt, head) = change_with_patchset(&repo, "missing-tree");
+    repo.arc(&wt)
+        .args([
+            "verify",
+            "--gate",
+            "build",
+            "--attest",
+            "--result",
+            "pass",
+            "--tested-revision",
+            &head,
+            "--execution-host",
+            "fixture",
+            "--runner",
+            "fixture",
+        ])
+        .assert()
+        .success();
+    rewrite_event(&repo, &id, "verification-recorded", |event| {
+        event.as_object_mut().unwrap().remove("tree");
+        event.as_object_mut().unwrap().remove("tested_tree");
+    });
+    repo.arc(&wt)
+        .args(["verify", "--all", "--skip-green"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("build: skipped").not());
+    repo.arc(&wt).args(["show", "--json"]).assert().success();
+}

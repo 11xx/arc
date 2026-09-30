@@ -446,6 +446,12 @@ RUN A CHANGE
                                      A textual conflict refuses before any
                                      gate runs or evidence is recorded;
                                      rebase first.
+    --skip-green                    Reuse passing evidence with --all at the
+                                     head, or --against at the merged tree.
+                                     The reuse records its tree; evidence
+                                     with neither tree nor tested_tree is
+                                     rerun. Replays of reuse events without
+                                     a tree require matching revisions.
     --attest --environment <id>      Record a run arc did not perform, naming
                                      the environment it applies to.
     --falsified-by <id> --predicted <why>
