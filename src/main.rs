@@ -751,7 +751,8 @@ enum Cmd {
         #[arg(long, value_name = "SHA256")]
         since: Option<String>,
     },
-    /// Import a versioned JSON bundle into this repository's local store
+    /// Import arc-bundle/6 or arc-bundle/5 into this repository's local store.
+    /// Events without model provenance retain that absence
     Import {
         /// Input file ('-' for stdin)
         input: String,
@@ -1572,7 +1573,8 @@ enum ReplicaCmd {
         #[arg(long)]
         output: String,
     },
-    /// Import a pairing record or authority exchange from another replica
+    /// Import a pairing record or authority exchange from another replica.
+    /// Accepts arc-replica-bundle/3 and /2; absent model provenance stays absent
     Import {
         /// Input file ('-' for stdin)
         input: String,

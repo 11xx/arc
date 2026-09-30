@@ -1360,7 +1360,7 @@ pub(crate) fn validate_identity(identity: &ReplicaIdentity) -> Result<()> {
 fn parse_bundle(bytes: &[u8]) -> Result<ReplicaBundle> {
     let bundle: ReplicaBundle =
         serde_json::from_slice(bytes).context("malformed replica bundle")?;
-    if bundle.schema != BUNDLE_SCHEMA {
+    if bundle.schema != BUNDLE_SCHEMA && bundle.schema != "arc-replica-bundle/2" {
         bail!("unsupported replica bundle schema {:?}", bundle.schema);
     }
     ids::validate_id_component(&bundle.project_id)?;
@@ -1541,6 +1541,31 @@ mod authority_tests {
             created_at: Utc::now(),
             payload,
         }
+    }
+
+    #[test]
+    fn previous_replica_bundle_reads_without_inventing_model_provenance() {
+        let origin = ReplicaIdentity {
+            name: "origin".into(),
+            repository_id: "origin-id".into(),
+        };
+        let mut legacy = event("initial", &origin, ReplicaPayload::Initialized);
+        legacy.schema = "arc-replica-event/2".into();
+        legacy.model = Some("legacy-model#low".into());
+        let events = vec![legacy];
+        let bundle = ReplicaBundle {
+            schema: "arc-replica-bundle/2".into(),
+            project_id: "project".into(),
+            source_replica_id: origin.repository_id,
+            events_sha256: events_digest(&events).unwrap(),
+            events,
+        };
+        let bytes = serde_json::to_vec(&bundle).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("model_source"));
+        let parsed = parse_bundle(&bytes).unwrap();
+        assert_eq!(parsed.events[0].model.as_deref(), Some("legacy-model#low"));
+        assert_eq!(parsed.events[0].model_provenance, Default::default());
+        assert_eq!(BUNDLE_SCHEMA, "arc-replica-bundle/3");
     }
 
     #[test]
