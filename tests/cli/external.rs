@@ -170,6 +170,77 @@ fn an_external_approval_alone_never_satisfies_a_dangerous_path() {
         .failure();
 }
 
+/// Whether self-approval is forbidden does not matter: arc cannot verify the
+/// external identity, so on a dangerous path a local approval must stand
+/// beside the external one.
+#[test]
+fn an_external_approval_alone_never_satisfies_a_dangerous_path_whatever_self_approval_policy_says()
+{
+    let repo = repo_with_gates(Some(
+        "[policy]\nforbid_self_approval = false\n\n[danger]\npaths = [\"danger.txt\"]\n",
+    ));
+    let (_, worktree, head) = gated_change(&repo, "ext-danger", "danger.txt");
+    record(&repo, &worktree, "ext-danger", "approved", &head);
+
+    let status = json_stdout(repo.arc(&worktree).args(["status", "ext-danger", "--json"]));
+    assert_eq!(status["external_verdicts"][0]["gates_current_head"], false);
+    assert_eq!(status["has_valid_approval"], false, "{status}");
+    let reason = status["approval_rejection_reason"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        reason.contains("cannot approve this dangerous patchset alone"),
+        "{status}"
+    );
+    repo.arc(&worktree)
+        .args(["check", "ext-danger"])
+        .assert()
+        .failure();
+
+    repo.arc(&worktree)
+        .args(["review", "ext-danger", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["check", "ext-danger"])
+        .assert()
+        .success();
+}
+
+/// A waiver authorizes nothing beside an approval that stands without it, so
+/// the basis leaves the debt out while the obligation stays owed.
+#[test]
+fn a_debt_beside_an_external_approval_stays_out_of_the_basis() {
+    let repo = repo_with_gates(None);
+    let (_, worktree, head) = gated_change(&repo, "ext-debt", "debt.txt");
+    record(&repo, &worktree, "ext-debt", "approved", &head);
+    repo.arc(&worktree)
+        .args(["debt", "ext-debt", "--reason", "no local reviewer"])
+        .assert()
+        .success();
+
+    let status = json_stdout(repo.arc(&worktree).args(["status", "ext-debt", "--json"]));
+    assert_eq!(status["has_valid_approval"], true, "{status}");
+    assert_ne!(status["approval_waived_by_debt"], true, "{status}");
+    let plan =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["integrate", "ext-debt", "--dry-run", "--json"]),
+        );
+    let basis = &plan["authorization"];
+    assert!(basis["audit_debt_event_id"].is_null(), "{plan}");
+    assert!(basis["external_verdict"].is_object(), "{plan}");
+
+    repo.arc(&repo.root)
+        .args(["integrate", "ext-debt"])
+        .assert()
+        .success();
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "ext-debt", "--json"]));
+    assert_eq!(status["closure"]["authorization"], *basis, "{status}");
+    let owed = stdout(repo.arc(&repo.root).args(["query", "--debt"]));
+    assert!(owed.contains("ext-debt"), "{owed}");
+}
+
 #[test]
 fn an_external_change_request_carries_findings_and_refuses() {
     let repo = repo_with_gates(None);
