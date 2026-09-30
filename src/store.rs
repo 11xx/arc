@@ -595,6 +595,7 @@ impl Store {
             Payload::CandidateRegistered { .. }
             | Payload::CandidateJudged { .. }
             | Payload::CandidateRetired { .. } => Some(7),
+            Payload::HistoryRewriteWithdrawn { .. } => Some(7),
             Payload::ChangeIntegrated { .. } | Payload::IntegrationAsserted { .. } => Some(2),
             _ => None,
         };
@@ -620,6 +621,7 @@ impl Store {
             Some("candidate-registered") | Some("candidate-judged") | Some("candidate-retired") => {
                 Some(7)
             }
+            Some("history-rewrite-withdrawn") => Some(7),
             Some("integration-asserted")
                 if value
                     .and_then(|value| value.get("external_reference"))

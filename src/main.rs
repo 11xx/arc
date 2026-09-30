@@ -776,12 +776,15 @@ enum Cmd {
         #[arg(long)]
         output: String,
         /// Export only the events after this history checksum, which the
-        /// receiving store must already hold
+        /// receiving store must already hold. Repository events travel in
+        /// every bundle, even when the change suffix is empty
         #[arg(long, value_name = "SHA256")]
         since: Option<String>,
     },
     /// Import arc-bundle/6 or /5 into this repository's local store.
-    /// Events without model provenance retain that absence
+    /// Events without model provenance retain that absence. Repository map
+    /// withdrawals apply even to maps already held; invalid withdrawal
+    /// targets are refused before anything is written
     Import {
         /// Input file ('-' for stdin)
         input: String,
@@ -1459,7 +1462,7 @@ enum Cmd {
         #[arg(long = "external-reference")]
         external_reference: Option<String>,
     },
-    /// Record a Git history rewrite that happened to this repository
+    /// Record or withdraw rewrite maps, and resolve recorded revisions
     History {
         #[command(subcommand)]
         cmd: HistoryCmd,
@@ -1996,7 +1999,19 @@ enum ForgeCmd {
 
 #[derive(Subcommand)]
 enum HistoryCmd {
-    /// Record a rewrite performed elsewhere, with its commit map
+    /// Withdraw a recorded history-rewritten map by event ID; other event
+    /// types are refused. Ref moves are not undone; output names recorded
+    /// moves, or says when the map has no ref-move information. Withdrawals
+    /// travel with maps in bundles and are honoured by importing replicas
+    Withdraw {
+        /// Exact repository event ID of the history-rewritten map
+        event_id: String,
+        /// Why this map must not participate in revision resolution
+        #[arg(long)]
+        reason: String,
+    },
+    /// Record a rewrite performed elsewhere, with its commit map. Active
+    /// maps must agree; a withdrawn map does not constrain its replacement
     Rewrite {
         /// Commit map (`<old> <new>` per line, as git filter-repo writes), or
         /// '-' for stdin
@@ -2009,7 +2024,8 @@ enum HistoryCmd {
         #[arg(long)]
         tool: Option<String>,
     },
-    /// Show where a recorded revision ended up
+    /// Show where a recorded revision ended up through active maps.
+    /// Withdrawn maps are ignored; exits 2 when no recorded rewrite moved it
     Resolve {
         /// A revision a rewrite may have moved; the surviving one is printed
         revision: String,
@@ -2024,10 +2040,16 @@ enum RewriteCmd {
         /// The key to sign with; Git's configured signing key by default
         #[arg(long)]
         key: Option<String>,
-        /// Oldest commit to recreate; by default the oldest whose signature is
-        /// missing or made by another key
+        /// Oldest commit to recreate, inclusive. Defaults to the oldest not
+        /// signed by the key in target..head on a tracked change branch, or in
+        /// the whole history outside a change
         #[arg(long)]
         from: Option<String>,
+        /// Permit recreating commits reachable from the target or another
+        /// local branch, and default to the whole history. Without this flag
+        /// shared commits are refused before any moves, including --dry-run
+        #[arg(long)]
+        include_shared: bool,
         /// Print the map the rewrite would record and stop
         #[arg(long = "dry-run")]
         dry_run: bool,
@@ -3599,6 +3621,10 @@ fn run(cli: Cli) -> Result<i32> {
             }
         },
         Cmd::History { cmd } => match cmd {
+            HistoryCmd::Withdraw { event_id, reason } => {
+                commands::withdraw_rewrite(&ctx, &event_id, reason)?;
+                Ok(0)
+            }
             HistoryCmd::Rewrite { map, reason, tool } => {
                 commands::record_rewrite(&ctx, &map, reason, tool)?;
                 Ok(0)
@@ -3609,6 +3635,7 @@ fn run(cli: Cli) -> Result<i32> {
             RewriteCmd::Sign {
                 key,
                 from,
+                include_shared,
                 dry_run,
                 no_sign,
                 retag,
@@ -3617,6 +3644,7 @@ fn run(cli: Cli) -> Result<i32> {
                 commands::SignArgs {
                     key,
                     from,
+                    include_shared,
                     dry_run,
                     no_sign,
                     retag,

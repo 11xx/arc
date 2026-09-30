@@ -52,7 +52,7 @@ const ABBREVIATION_FLOOR: usize = 7;
 
 /// One ref move a rewrite has planned: the value the ref held when the
 /// rewrite read it, and the value it is to hold instead.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RefMove {
     pub old: String,
     pub new: String,
@@ -88,7 +88,37 @@ pub struct RewriteIntent {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Every recorded rewrite, flattened into one old-to-fate mapping.
+/// Validate withdrawals and identify the maps that do not participate in
+/// revision resolution. IDs, rather than event order, bind the withdrawal.
+pub fn withdrawn_event_ids<'a>(events: &[&'a crate::model::Event]) -> Result<BTreeSet<&'a str>> {
+    let mut withdrawn = BTreeSet::new();
+    for event in events {
+        if let Payload::HistoryRewriteWithdrawn {
+            rewrite_event_id,
+            reason,
+        } = &event.payload
+        {
+            if reason.trim().is_empty() {
+                anyhow::bail!("withdrawal {} has an empty reason", event.event_id);
+            }
+            if !events.iter().any(|target| {
+                target.event_id == *rewrite_event_id
+                    && target.change_id == Store::REPOSITORY_SCOPE
+                    && matches!(target.payload, Payload::HistoryRewritten { .. })
+            }) {
+                anyhow::bail!(
+                    "withdrawal {} names {rewrite_event_id}, which is not a held \
+                               history-rewritten repository event",
+                    event.event_id
+                );
+            }
+            withdrawn.insert(rewrite_event_id.as_str());
+        }
+    }
+    Ok(withdrawn)
+}
+
+/// Active recorded rewrites, flattened into one old-to-fate mapping.
 #[derive(Debug, Default, Clone)]
 pub struct RewriteMap {
     steps: BTreeMap<String, Option<String>>,
@@ -107,9 +137,14 @@ impl RewriteMap {
     /// here — two events with different IDs can still disagree about one
     /// revision, which no per-event check can see.
     pub fn from_events<'a>(events: impl Iterator<Item = &'a crate::model::Event>) -> Result<Self> {
+        let events: Vec<_> = events.collect();
+        let withdrawn = withdrawn_event_ids(&events)?;
         let mut steps: BTreeMap<String, Option<String>> = BTreeMap::new();
         let mut signature_only: BTreeSet<String> = BTreeSet::new();
         for event in events {
+            if withdrawn.contains(event.event_id.as_str()) {
+                continue;
+            }
             if let Payload::HistoryRewritten {
                 mapping,
                 signature_only: judged,
@@ -643,6 +678,7 @@ mod tests {
                 reason: "test".into(),
                 tool: None,
                 signature_only: judged.iter().map(|old| old.to_string()).collect(),
+                refs: BTreeMap::new(),
             },
         }
     }
@@ -699,6 +735,23 @@ mod tests {
             event("01B", "aaaaaaaaaa", "cccccccccc"),
         ];
         assert!(RewriteMap::from_events(disagreeing.iter()).is_err());
+    }
+
+    #[test]
+    fn a_withdrawal_removes_only_its_map_regardless_of_event_order() {
+        let wrong = rewrite_event("wrong", "aaaaaaaaaa", "bbbbbbbbbb", &["aaaaaaaaaa"]);
+        let correct = rewrite_event("correct", "aaaaaaaaaa", "cccccccccc", &[]);
+        let mut withdrawal = wrong.clone();
+        withdrawal.event_id = "withdrawal".into();
+        withdrawal.payload = Payload::HistoryRewriteWithdrawn {
+            rewrite_event_id: "wrong".into(),
+            reason: "wrong map".into(),
+        };
+        let events = [withdrawal.clone(), correct, wrong];
+        let map = RewriteMap::from_events(events.iter()).unwrap();
+        assert_eq!(map.current("aaaaaaaaaa").unwrap(), "cccccccccc");
+        assert_eq!(map.approved_successor("aaaaaaaaaa").unwrap(), "aaaaaaaaaa");
+        assert!(RewriteMap::from_events([withdrawal].iter()).is_err());
     }
 
     /// The recording path spells a dropped commit as no successor. A payload

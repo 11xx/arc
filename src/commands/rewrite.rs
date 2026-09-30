@@ -18,9 +18,12 @@ pub struct SignArgs {
     /// The key to sign with. Absent signs with the key Git is configured to
     /// use.
     pub key: Option<String>,
-    /// The oldest commit to recreate. Absent starts at the oldest commit whose
-    /// signature is missing or made by another key.
+    /// The oldest commit to recreate, inclusive. Absent searches target..head
+    /// on a tracked branch, or the whole history outside a change.
     pub from: Option<String>,
+    /// Permit recreating commits reachable from another branch, using the
+    /// whole history for the default range.
+    pub include_shared: bool,
     /// Compute and print the map, then stop.
     pub dry_run: bool,
     /// Recreate the commits without signing them.
@@ -44,7 +47,24 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
         Opened::Branch(branch) => branch,
     };
     let head = gitio::branch_head(&cwd, &branch)?;
-    let survey = gitio::signature_survey(&cwd, &head)?;
+    let states = ctx.load_all_states(&store)?;
+    let targets: BTreeSet<String> = states
+        .values()
+        .filter(|state| state.branch == branch)
+        .map(|state| state.target_branch.clone())
+        .collect();
+    let mut survey = gitio::signature_survey(&cwd, &head)?;
+    let mut own = BTreeSet::new();
+    if !targets.is_empty() && !args.include_shared {
+        let mut revisions = vec![head.clone()];
+        for target in &targets {
+            revisions.push(format!("^{}", gitio::branch_head(&cwd, target)?));
+        }
+        let mut command = vec!["rev-list", "--topo-order", "--reverse"];
+        command.extend(revisions.iter().map(String::as_str));
+        own.extend(gitio::git(&cwd, &command)?.lines().map(str::to_string));
+        survey.retain(|(commit, _, _)| own.contains(commit));
+    }
     let from = match &args.from {
         Some(from) => gitio::rev_parse(&cwd, from)?,
         None => match oldest_unsigned(&survey, args.key.as_deref()) {
@@ -55,9 +75,41 @@ pub fn sign(ctx: &Ctx, args: SignArgs) -> Result<i32> {
             }
         },
     };
-    let range = gitio::commits_from(&cwd, &from, &head)?;
+    if !gitio::is_ancestor(&cwd, &from, &head)? {
+        bail!("{from} is not an ancestor of {branch}");
+    }
+    let mut range = gitio::commits_from(&cwd, &from, &head)?;
+    if args.from.is_none() && !targets.is_empty() && !args.include_shared {
+        range.retain(|commit| own.contains(commit));
+    }
     if range.is_empty() {
         bail!("{from} is not an ancestor of {branch}");
+    }
+    if !args.include_shared {
+        let mut protected: BTreeMap<String, String> = gitio::local_refs(&cwd)?
+            .into_iter()
+            .filter(|reference| {
+                reference.name.starts_with("refs/heads/")
+                    && reference.name != format!("refs/heads/{branch}")
+            })
+            .map(|reference| (reference.name, reference.commit))
+            .collect();
+        for target in &targets {
+            protected.insert(
+                format!("refs/heads/{target}"),
+                gitio::branch_head(&cwd, target)?,
+            );
+        }
+        for commit in &range {
+            for (reference, tip) in &protected {
+                if gitio::is_ancestor(&cwd, commit, tip)? {
+                    bail!(
+                        "refusing to recreate {commit}: reachable from {reference}; \
+                           use --include-shared for a deliberate shared-history rewrite"
+                    );
+                }
+            }
+        }
     }
 
     let sign = (!args.no_sign).then_some(args.key.as_deref());
@@ -346,6 +398,9 @@ fn complete(
         for name in &moves.left {
             println!("would leave alone: {name}");
         }
+        for name in &moves.stranded {
+            println!("would strand: {name} sits on the replaced line");
+        }
         return Ok(0);
     }
 
@@ -517,6 +572,7 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent) -> Result<String> {
             intent.mapping.clone(),
             intent.reason.clone(),
             intent.tool.clone(),
+            intent.refs.clone(),
         )?,
     };
     // The map is recorded and every ref names a commit it describes, so
@@ -537,16 +593,19 @@ fn apply(ctx: &Ctx, store: &Store, intent: &RewriteIntent) -> Result<String> {
 /// recorded it. Recording it a second time would put two events on record
 /// claiming one rewrite.
 fn recorded_as(store: &Store, intent: &RewriteIntent) -> Result<Option<String>> {
-    Ok(store
-        .load_repository_events()?
-        .into_iter()
+    let events = store.load_repository_events()?;
+    let borrowed: Vec<_> = events.iter().collect();
+    let withdrawn = crate::rewrite::withdrawn_event_ids(&borrowed)?;
+    Ok(events
+        .iter()
+        .filter(|event| !withdrawn.contains(event.event_id.as_str()))
         .find(|event| {
             matches!(
                 &event.payload,
                 Payload::HistoryRewritten { mapping, .. } if mapping == &intent.mapping
             )
         })
-        .map(|event| event.event_id))
+        .map(|event| event.event_id.clone()))
 }
 
 /// A fault the test suite injects to stop a rewrite between two of its

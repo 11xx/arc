@@ -336,6 +336,8 @@ fn plan_repository_events(
             "the bundle's candidate events are refused: {refusal}; nothing was imported"
         )
     })?;
+    let borrowed: Vec<_> = combined.iter().collect();
+    let withdrawn = crate::rewrite::withdrawn_event_ids(&borrowed)?;
     // Whether a successor differs from its old commit by signature alone is
     // this repository's judgement to make, against the objects it holds. What
     // the sender recorded is a claim about the sender's objects, and taking it
@@ -347,7 +349,7 @@ fn plan_repository_events(
         let Payload::HistoryRewritten { mapping, .. } = &event.payload else {
             continue;
         };
-        if held.contains(&event.event_id) {
+        if held.contains(&event.event_id) || withdrawn.contains(event.event_id.as_str()) {
             continue;
         }
         let judged = crate::rewrite::signature_only_successors(cwd, mapping, &rewrites);
