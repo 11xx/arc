@@ -5,6 +5,9 @@
 //! evidence is appended afterward in deterministic gate-name order.
 
 use super::*;
+use crate::integration::{
+    self, Decision, IntegrationFacts, IntegrationPlan, Refusal, TargetCheckout,
+};
 use std::collections::BTreeMap;
 use std::io;
 use std::os::unix::process::CommandExt;
@@ -2084,6 +2087,10 @@ pub struct IntegrateArgs {
     pub message: Option<String>,
     pub cleanup: bool,
     pub dry_run: bool,
+    /// Print the dry run's plan as `arc-integration-plan` JSON.
+    pub json: bool,
+    /// A plan an earlier dry run printed, to compare the fresh decision with.
+    pub expect_basis: Option<PathBuf>,
     pub debt: Option<DebtDeclaration>,
 }
 
@@ -2094,6 +2101,8 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
         message,
         cleanup,
         dry_run,
+        json,
+        expect_basis,
         debt,
     } = args;
     if references.is_empty() && tags.is_empty() {
@@ -2116,7 +2125,19 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
                  already carry their verdict"
             );
         }
+        if json {
+            bail!("--json is only valid when integrating one change: a plan describes one merge");
+        }
+        if expect_basis.is_some() {
+            bail!(
+                "--expect-basis is only valid when integrating one change: a basis describes \
+                 one change's merge"
+            );
+        }
     }
+    let expect_basis = expect_basis
+        .map(|path| read_expected_basis(&path))
+        .transpose()?;
     let authority_store = ctx.store()?;
     let _authority_lock = crate::replica::lock(&authority_store)?;
     if let Some(refusal) = crate::replica::integration_refusal(&authority_store)? {
@@ -2147,7 +2168,11 @@ pub fn integrate(ctx: &Ctx, references: &[String], args: IntegrateArgs) -> Resul
                 message,
                 cleanup,
                 ClosedBehavior::Refuse,
-                dry_run,
+                SingleOptions {
+                    dry_run,
+                    json,
+                    expect_basis,
+                },
             )
         }
         (many, tags_empty) => {
@@ -2356,7 +2381,7 @@ fn queue_step(ctx: &Ctx, store: &Store, change_id: &str, cleanup: bool) -> Resul
         None,
         cleanup,
         ClosedBehavior::SkipTagged,
-        false,
+        SingleOptions::default(),
     )?;
     if code != 0 {
         return Ok(QueueStep::Stopped {
@@ -2403,18 +2428,40 @@ fn queue_dry_run(ctx: &Ctx, store: &Store, change_id: &str) -> Result<QueueStep>
     Ok(QueueStep::Planned(st.target_branch))
 }
 
+/// What one integration was asked for beyond the merge itself.
+#[derive(Default)]
+struct SingleOptions {
+    dry_run: bool,
+    json: bool,
+    /// The plan an earlier dry run printed. It never changes the decision;
+    /// what moved since is named beside it.
+    expect_basis: Option<IntegrationPlan>,
+}
+
+/// Read a plan `arc integrate --dry-run --json` printed.
+fn read_expected_basis(path: &Path) -> Result<IntegrationPlan> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read expected basis {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("expected basis {} is not JSON", path.display()))?;
+    let schema = value.get("schema").and_then(|schema| schema.as_str());
+    if schema != Some(integration::PLAN_SCHEMA) {
+        bail!(
+            "expected basis {} has schema {}, not {}; produce it with \
+             `arc integrate <change> --dry-run --json`",
+            path.display(),
+            schema.unwrap_or("(none)"),
+            integration::PLAN_SCHEMA
+        );
+    }
+    serde_json::from_value(value)
+        .with_context(|| format!("expected basis {} is malformed", path.display()))
+}
+
 #[derive(Clone, Copy)]
 enum ClosedBehavior {
     Refuse,
     SkipTagged,
-}
-
-/// The checkout a merge into a target runs in, or a promotion moves.
-pub(super) struct TargetCheckout {
-    pub(super) path: PathBuf,
-    /// The branch the checkout holds when it does not hold the target and
-    /// must be moved onto it before the merge.
-    pub(super) switch_from: Option<String>,
 }
 
 /// Resolve the checkout the merge into `target` runs in.
@@ -2464,17 +2511,34 @@ fn same_path(left: &Path, right: &Path) -> bool {
 /// nobody can name afterwards.
 pub(super) fn checkout_tracked_dirt(checkout: &Path) -> Result<()> {
     if gitio::dirt(checkout)?.tracked {
-        bail!(
-            "worktree {} carries tracked modifications, staged or unstaged; commit or stash \
-             them first",
-            checkout.display()
-        );
+        return Err(Refusal::TrackedDirt {
+            checkout: checkout.to_path_buf(),
+        }
+        .into_error());
     }
     Ok(())
 }
 
 /// Refuse when the merge would write over a path the target checkout holds
 /// untracked or ignored, and report the paths it leaves untouched.
+pub(super) fn checkout_writes(
+    checkout: &TargetCheckout,
+    target_head: &str,
+    merged_tree: Option<&str>,
+) -> Result<()> {
+    let collisions = write_collisions(checkout, target_head, merged_tree)?;
+    if !collisions.is_empty() {
+        return Err(Refusal::WriteCollision {
+            checkout: checkout.path.clone(),
+            paths: collisions,
+        }
+        .into_error());
+    }
+    report_untouched(checkout, &gitio::untracked_and_ignored(&checkout.path)?);
+    Ok(())
+}
+
+/// The untracked or ignored paths of the target checkout a merge would write.
 ///
 /// A merge computes its result from the tree it produces, so the paths it
 /// writes are exactly those added or changed between the target head and that
@@ -2486,11 +2550,11 @@ pub(super) fn checkout_tracked_dirt(checkout: &Path) -> Result<()> {
 /// against the checkout itself, which covers ignored paths Git would overwrite
 /// without saying so and bounds the work by the size of the change rather than
 /// the size of the checkout.
-pub(super) fn checkout_writes(
+fn write_collisions(
     checkout: &TargetCheckout,
     target_head: &str,
     merged_tree: Option<&str>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let mut files = Vec::new();
     let mut parents = Vec::new();
     let mut collect = |writes: gitio::WriteSet| {
@@ -2509,25 +2573,20 @@ pub(super) fn checkout_writes(
     parents.sort();
     parents.dedup();
     let writes = gitio::WriteSet { files, parents };
-    let collisions = gitio::write_overlap(&checkout.path, &writes)?;
-    if !collisions.is_empty() {
-        bail!(
-            "the update would write over paths the worktree {} holds untracked or ignored: {}",
-            checkout.path.display(),
-            collisions.join(", ")
-        );
-    }
-    let left = gitio::untracked_and_ignored(&checkout.path)?;
+    gitio::write_overlap(&checkout.path, &writes)
+}
+
+/// Say which untracked or ignored paths the merge leaves where they are.
+fn report_untouched(checkout: &TargetCheckout, left: &[String]) {
     if !left.is_empty() {
         println!(
             "worktree {}: leaving {} untracked or ignored {} the update does not write: {}",
             checkout.path.display(),
             left.len(),
             if left.len() == 1 { "path" } else { "paths" },
-            name_first_few(&left, 3)
+            name_first_few(left, 3)
         );
     }
-    Ok(())
 }
 
 /// Name up to `limit` paths and count the rest, so a report stays one line
@@ -2556,10 +2615,23 @@ fn integrate_one(
     message: Option<String>,
     cleanup: bool,
     closed_behavior: ClosedBehavior,
-    dry_run: bool,
+    options: SingleOptions,
 ) -> Result<i32> {
+    let SingleOptions {
+        dry_run,
+        json,
+        expect_basis,
+    } = options;
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
+    if let Some(expected) = &expect_basis {
+        if expected.change_id != change_id {
+            bail!(
+                "the expected basis describes {}, not {change_id}",
+                expected.change_id
+            );
+        }
+    }
     let initial = store.state(&change_id)?;
     if initial.iterating {
         eprintln!(
@@ -2572,6 +2644,9 @@ fn integrate_one(
     if dry_run {
         // A dry run promises to write nothing, so there is no record for the
         // policy to be about.
+        if json {
+            return integrate_dry_run_json(ctx, &store, &initial, &target);
+        }
         return integrate_dry_run(ctx, &store, &initial, &target, message.as_deref());
     }
     // The same store the merge's closure event will be appended to, so the
@@ -2613,55 +2688,57 @@ fn integrate_one(
             );
         }
     }
-    if !report.integrate_ready {
-        eprint!("{}", render::blocker_explanation(&st, &report));
-        return Ok(status::check_exit_code(&report));
-    }
+    let facts = integration_facts(ctx, &store, &st, &report, &target);
+    let outcome = integration::decide(facts, expect_basis.as_ref());
+    let moved = integration::describe_moved(&outcome.moved);
+    let plan = match outcome.decision {
+        Decision::Refused(refusal) => {
+            let code = match refusal {
+                Refusal::NotReady => {
+                    eprint!("{}", render::blocker_explanation(&st, &report));
+                    Ok(status::check_exit_code(&report))
+                }
+                refusal => Err(refusal.into_error()),
+            };
+            if let Some(moved) = &moved {
+                eprintln!("{moved}");
+            }
+            return code;
+        }
+        Decision::ReadyToSend(send) => {
+            warn_moved(moved.as_deref());
+            return record_ready_to_send(
+                ctx,
+                &store,
+                &st,
+                &target,
+                send.contribution,
+                &send.approved.patchset_id,
+                &send.approved.head,
+                send.authorization,
+            );
+        }
+        Decision::Merge(plan) => {
+            warn_moved(moved.as_deref());
+            plan
+        }
+    };
+    let integration::MergePlan {
+        old_target,
+        approved,
+        evaluated_tree,
+        merge_commit,
+        authorization,
+        checkout,
+        untouched,
+        ..
+    } = plan;
+    let integration::Approved {
+        patchset_id: approved_patchset_id,
+        head: approved_head,
+    } = approved;
 
-    // The approved head, merged by exact SHA so a branch moved after
-    // approval can never smuggle unreviewed commits into the merge.
-    let approved_patchset = st.latest_patchset().context("no patchset recorded")?;
-    let approved_patchset_id = approved_patchset.id.clone();
-    let approved_head = approved_patchset.head.clone();
-
-    // Read before the merge, from the same worktree state the readiness
-    // decision was made against: this is what the merge is authorized on, and
-    // a later read would be a different question.
-    let authorization = authorization_basis(ctx, &store, &st, &report, &approved_patchset_id)?;
-    // Configuration files are not under any lock arc holds, so readiness and
-    // the basis are two reads of something that can move between them.
-    // Recomputing readiness against the basis's own gate set is what keeps the
-    // merge from proceeding under one configuration and recording another.
-    let confirmation = ctx.report(&store, &st)?;
-    let confirmed_basis =
-        authorization_basis(ctx, &store, &st, &confirmation, &approved_patchset_id)?;
-    if confirmed_basis != authorization || !confirmation.integrate_ready {
-        bail!(
-            "gate or policy configuration changed while preparing the merge; nothing was \
-             written — re-run once the worktree has settled"
-        );
-    }
-
-    if let Some(contribution) = contribution_policy(ctx, &st)? {
-        return record_ready_to_send(
-            ctx,
-            &store,
-            &st,
-            &target,
-            contribution,
-            &approved_patchset_id,
-            &approved_head,
-            authorization,
-        );
-    }
-
-    let checkout = target_checkout(ctx, &st, &target)?;
-    checkout_tracked_dirt(&checkout.path)?;
-    let old_target = gitio::branch_head(&ctx.cwd, &target)?;
-    // The content readiness was decided against, read under the target lock so
-    // the merge is checked against the same tree the authorization covers.
-    let evaluated_tree = gitio::merge_outcome(&ctx.cwd, &old_target, &approved_head)?.tree;
-    checkout_writes(&checkout, &old_target, evaluated_tree.as_deref())?;
+    report_untouched(&checkout, &untouched);
     if checkout.switch_from.is_some() {
         gitio::checkout(&checkout.path, &target).with_context(|| {
             format!(
@@ -2679,7 +2756,7 @@ fn integrate_one(
     // merge result: the target revision that holds the head is the
     // integration, and no fresh merge exists for the parent check to
     // describe.
-    let already_contained = gitio::is_ancestor(&ctx.cwd, &approved_head, &old_target)?;
+    let already_contained = !merge_commit;
     let merged = if already_contained {
         old_target.clone()
     } else {
@@ -2807,33 +2884,11 @@ fn authorization_basis(
     // the review nobody performed. One of the two must hold: a merge with
     // neither has nothing authorizing it, and this record exists to say what
     // did.
-    let verdict_authorized_locally = report
-        .verdict
-        .as_ref()
-        .is_some_and(|verdict| verdict.valid_for_current_head || report.approval_waived_by_debt);
-    let verdict = verdict_authorized_locally
-        .then(|| {
-            st.verdicts.iter().rev().find(|verdict| {
-                verdict.patchset_id == approved_patchset_id
-                    && verdict.verdict == crate::model::Verdict::Approved
-            })
-        })
-        .flatten();
-    let external_verdict = report
-        .external_verdicts
-        .iter()
-        .find(|external| {
-            external.gates_current_head
-                && external.verdict == crate::model::ExternalVerdict::Approved
-        })
-        .map(|external| crate::model::ExternalVerdictBasis {
-            event_id: external.event_id.clone(),
-            revision: external.revision.clone(),
-            verdict: external.verdict,
-            decided_by: external.decided_by.clone(),
-            reference: external.reference.clone(),
-        });
-    if verdict.is_none() && external_verdict.is_none() && !st.debt_waives_latest_patchset() {
+    let approval = integration::approval(st, report, approved_patchset_id);
+    if approval.verdict_event_id.is_none()
+        && approval.external_verdict.is_none()
+        && !st.debt_waives_latest_patchset()
+    {
         anyhow::bail!("integration is ready but nothing authorizes the merged patchset: no approving verdict and no declared debt");
     }
 
@@ -2889,9 +2944,36 @@ fn authorization_basis(
         }
     }
 
+    let declarations = consumed_declarations(ctx, st)?;
+
+    Ok(crate::model::AuthorizationBasis {
+        verdict_event_id: approval.verdict_event_id,
+        external_verdict: approval.external_verdict,
+        verdict_provisional: approval.verdict_provisional,
+        gate_evidence,
+        prerequisites,
+        // Empty by construction: `integrate_ready` is false while either is
+        // non-empty, so the event cannot be written otherwise. Recording them
+        // says the guard checked, rather than leaving an auditor to infer it.
+        blocking_findings: report.open_blocking_findings.clone(),
+        holds: report
+            .holds
+            .iter()
+            .map(|hold| hold.hold_event_id.clone())
+            .collect(),
+        gates: declarations.gates,
+        policy: declarations.policy,
+        danger: Some(report.danger.clone()),
+        audit_debt_event_id: approval.audit_debt_event_id,
+    })
+}
+
+/// The gate and policy declarations in force for the change, normalized as
+/// an authorization basis records them.
+fn consumed_declarations(ctx: &Ctx, st: &ChangeState) -> Result<integration::Declarations> {
     let declarations = ctx.declarations(st)?;
     let (gates, policy) = (declarations.gates, declarations.policy);
-    let normalized_gates = gates
+    let gates = gates
         .required_for(&st.profile)
         .into_iter()
         .map(|(name, gate)| {
@@ -2906,38 +2988,14 @@ fn authorization_basis(
             )
         })
         .collect();
-
-    Ok(crate::model::AuthorizationBasis {
-        verdict_event_id: verdict.map(|verdict| verdict.event_id.clone()),
-        external_verdict,
-        verdict_provisional: verdict.and_then(|verdict| verdict.provisional.clone()),
-        gate_evidence,
-        prerequisites,
-        // Empty by construction: `integrate_ready` is false while either is
-        // non-empty, so the event cannot be written otherwise. Recording them
-        // says the guard checked, rather than leaving an auditor to infer it.
-        blocking_findings: report.open_blocking_findings.clone(),
-        holds: report
-            .holds
-            .iter()
-            .map(|hold| hold.hold_event_id.clone())
-            .collect(),
-        gates: normalized_gates,
+    Ok(integration::Declarations {
+        gates,
         policy: crate::model::NormalizedPolicy {
             forbid_self_approval: policy.policy.forbid_self_approval,
             require_declared_actor: policy.policy.require_declared_actor,
             provenance_git_identity: policy.provenance.git_identity.as_str().to_string(),
             declared_by: policy.sources.as_map(),
         },
-        danger: Some(report.danger.clone()),
-        // Only when the waiver is what let the approval stand. A debt declared
-        // beside an approval that needed no waiver authorized nothing, and
-        // recording it would claim the merge rested on something it did not.
-        audit_debt_event_id: st
-            .debt
-            .as_ref()
-            .filter(|_| report.approval_waived_by_debt)
-            .map(|debt| debt.event_id.clone()),
     })
 }
 
@@ -3021,6 +3079,130 @@ fn record_ready_to_send(
         st.branch
     );
     println!("event: {}", event.event_id);
+    Ok(0)
+}
+
+/// Print that a prior basis moved while the fresh decision still permits.
+fn warn_moved(moved: Option<&str>) {
+    if let Some(moved) = moved {
+        eprintln!("warning: {moved}; proceeding on the fresh decision");
+    }
+}
+
+/// Observe everything the integration decision follows from, reading the
+/// change and its target once each. Nothing is written.
+fn integration_facts(
+    ctx: &Ctx,
+    store: &Store,
+    st: &ChangeState,
+    report: &crate::status::StatusReport,
+    target: &str,
+) -> IntegrationFacts {
+    let approved = st.latest_patchset().map(|patchset| integration::Approved {
+        patchset_id: patchset.id.clone(),
+        head: patchset.head.clone(),
+    });
+    let patchset_id = approved
+        .as_ref()
+        .map(|approved| approved.patchset_id.clone())
+        .unwrap_or_default();
+    let basis = approved
+        .as_ref()
+        .context("no patchset recorded")
+        .and_then(|_| authorization_basis(ctx, store, st, report, &patchset_id));
+    // Read after the first basis: agreement between the two is the evidence
+    // that the configuration held still across the decision.
+    let confirmation = ctx
+        .report(store, st)
+        .map(|confirmation| integration::Confirmation {
+            ready: confirmation.integrate_ready,
+            basis: authorization_basis(ctx, store, st, &confirmation, &patchset_id),
+        });
+    let checkout = target_checkout(ctx, st, target);
+    let unobserved = || anyhow::anyhow!("the target checkout could not be resolved");
+    let tracked_dirt = match &checkout {
+        Ok(checkout) => gitio::dirt(&checkout.path).map(|dirt| dirt.tracked),
+        Err(_) => Err(unobserved()),
+    };
+    // Read under the target lock, so the merge is checked against the same
+    // tree the authorization covers.
+    let target_revision = gitio::branch_head(&ctx.cwd, target);
+    let merge_inputs = match (&target_revision, &approved) {
+        (Ok(revision), Some(approved)) => Some((revision.as_str(), approved.head.as_str())),
+        _ => None,
+    };
+    let unmerged = || anyhow::anyhow!("the target revision or the approved head is unknown");
+    let evaluated_tree = match merge_inputs {
+        Some((revision, head)) => {
+            gitio::merge_outcome(&ctx.cwd, revision, head).map(|outcome| outcome.tree)
+        }
+        None => Err(unmerged()),
+    };
+    let write_collisions = match (&checkout, &target_revision, &evaluated_tree) {
+        (Ok(checkout), Ok(revision), Ok(tree)) => {
+            write_collisions(checkout, revision, tree.as_deref())
+        }
+        _ => Err(unobserved()),
+    };
+    let untouched = match &checkout {
+        Ok(checkout) => gitio::untracked_and_ignored(&checkout.path),
+        Err(_) => Err(unobserved()),
+    };
+    let already_contained = match merge_inputs {
+        Some((revision, head)) => gitio::is_ancestor(&ctx.cwd, head, revision),
+        None => Err(unmerged()),
+    };
+    IntegrationFacts {
+        target: target.to_string(),
+        approval: integration::approval(st, report, &patchset_id),
+        declarations: consumed_declarations(ctx, st).ok(),
+        approved,
+        ready: report.integrate_ready,
+        basis,
+        confirmation,
+        contribution: contribution_policy(ctx, st),
+        checkout,
+        tracked_dirt,
+        target_revision,
+        evaluated_tree,
+        write_collisions,
+        untouched,
+        already_contained,
+    }
+}
+
+/// The plan `integrate` would carry out, decided from the same facts and by
+/// the same function as the merge, printed as JSON. Nothing is locked or
+/// written.
+fn integrate_dry_run_json(ctx: &Ctx, store: &Store, st: &ChangeState, target: &str) -> Result<i32> {
+    ctx.ensure_declared_actor(store)?;
+    ctx.ensure_target_declares_actor(st)?;
+    let report = ctx.report(store, st)?;
+    let facts = integration_facts(ctx, store, st, &report, target);
+    let plan = match integration::decide(facts, None).decision {
+        Decision::Refused(Refusal::NotReady) => {
+            eprint!("{}", render::blocker_explanation(st, &report));
+            return Ok(status::check_exit_code(&report));
+        }
+        Decision::Refused(refusal) => return Err(refusal.into_error()),
+        Decision::ReadyToSend(send) => {
+            contribution_shape(ctx, target, &send.approved.head, send.contribution.history)?;
+            IntegrationPlan::of_send(&st.change_id, &send)
+        }
+        Decision::Merge(plan) => {
+            // A conflicting merge records nothing, so there is no basis it
+            // would record to print.
+            if plan.merge_commit && plan.evaluated_tree.is_none() {
+                eprintln!(
+                    "dry-run: merging {} into {target} conflicts — rebase required",
+                    st.change_id
+                );
+                return Ok(status::Blocker::NeedsRebase.exit_code());
+            }
+            IntegrationPlan::of_merge(&st.change_id, &plan)
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&plan)?);
     Ok(0)
 }
 
