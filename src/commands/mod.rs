@@ -90,7 +90,7 @@ pub use rewrite::{
 pub use run::{dispatch_run, end_run, list_runs, DispatchInput, EndingInput};
 use serde::Serialize;
 pub use squash::squash;
-pub use stats::{stats, StatsSelection};
+pub use stats::{stats, StatsSelection, StatsView};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
