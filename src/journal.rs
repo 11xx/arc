@@ -1137,7 +1137,7 @@ pub enum JournalCmd {
     /// Export selected journal artifacts as a versioned bundle for another
     /// replica. The bundle carries each artifact body, the events recorded
     /// about it, its body digest, the exporting replica, and every artifact
-    /// the selection references by filename
+    /// the selection references by filename. Exports arc-journal-bundle/2
     Export {
         /// Artifact filenames inside the journal dir (names, not paths); the
         /// dependency closure of what they reference travels with them
@@ -1147,7 +1147,8 @@ pub enum JournalCmd {
         #[arg(long)]
         output: String,
     },
-    /// Import a journal bundle exported by another paired replica
+    /// Import arc-journal-bundle/2 or /1 from another paired replica.
+    /// Events without model provenance retain that absence
     Import {
         /// Input file ('-' for stdin)
         input: String,

@@ -96,6 +96,7 @@ fn model_provenance_versions_are_registered() {
         "arc-replica-event/3",
         "arc-replica-bundle/3",
         "journal-events/1",
+        "arc-journal-bundle/2",
     ] {
         assert!(guide.contains(&format!("`{schema}`")), "{schema}");
     }
