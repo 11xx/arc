@@ -62,6 +62,10 @@ impl Repo {
         cmd.current_dir(cwd)
             .env("HOME", &self.home)
             .env("ARC_SANDBOX", &self.home)
+            .env("GIT_CONFIG_GLOBAL", self.home.join(".gitconfig"))
+            .env("XDG_CONFIG_HOME", self.home.join(".config"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CEILING_DIRECTORIES", self._tmp.path())
             .env("ARC_ACTOR", "tester")
             .env("ARC_HARNESS", "test")
             .env("ARC_SESSION", "session-a")
@@ -173,10 +177,24 @@ pub(crate) const NO_EDITOR: [(&str, &str); 2] =
     [("GIT_EDITOR", "true"), ("GIT_SEQUENCE_EDITOR", "true")];
 
 pub(crate) fn git(cwd: &Path, args: &[&str]) {
-    let st = Command::new("git")
+    let mut command = Command::new("git");
+    if args.first() == Some(&"commit") {
+        command.args([
+            "-c",
+            "user.name=Tester",
+            "-c",
+            "user.email=tester@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ]);
+    }
+    let st = command
         .args(args)
         .current_dir(cwd)
         .envs(NO_EDITOR)
+        .env("GIT_CONFIG_GLOBAL", cwd.join(".git/fixture-global-config"))
+        .env("XDG_CONFIG_HOME", cwd.join(".git/fixture-config-home"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(
@@ -191,6 +209,9 @@ pub(crate) fn git_out(cwd: &Path, args: &[&str]) -> String {
         .args(args)
         .current_dir(cwd)
         .envs(NO_EDITOR)
+        .env("GIT_CONFIG_GLOBAL", cwd.join(".git/fixture-global-config"))
+        .env("XDG_CONFIG_HOME", cwd.join(".git/fixture-config-home"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(out.status.success());
