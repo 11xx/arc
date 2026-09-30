@@ -85,3 +85,20 @@ fn collect_sources(at: &Path, sources: &mut Vec<PathBuf>) {
         }
     }
 }
+
+#[test]
+fn model_provenance_versions_are_registered() {
+    let output = Command::new(env!("CARGO_BIN_EXE_arc")).output().unwrap();
+    let guide = String::from_utf8_lossy(&output.stdout);
+    for schema in [
+        "arc-state/3",
+        "arc-bundle/6",
+        "arc-replica-event/3",
+        "arc-replica-bundle/3",
+        "journal-events/1",
+        "arc-journal-bundle/2",
+    ] {
+        assert!(guide.contains(&format!("`{schema}`")), "{schema}");
+    }
+    assert!(guide.contains("store format 6"));
+}

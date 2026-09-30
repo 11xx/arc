@@ -25,6 +25,7 @@ mod journal_exchange;
 mod lifecycle;
 mod messaging;
 mod metadata;
+mod model_resolution;
 mod observe;
 mod orchestrate;
 mod pass;

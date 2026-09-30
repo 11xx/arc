@@ -1464,8 +1464,31 @@ fn event_prefix(event: &Event) -> String {
         .as_deref()
         .map(|model| format!(" ({model})"))
         .unwrap_or_default();
+    let source = event
+        .model_provenance
+        .model_source
+        .map(|source| format!(" source: {}", source.as_str()))
+        .unwrap_or_default();
+    let observation = event
+        .model_provenance
+        .model_observation
+        .as_ref()
+        .map(|obs| format!("; {}", obs.line()))
+        .unwrap_or_default();
+    let disagreement = event
+        .model_provenance
+        .model_disagreement
+        .as_ref()
+        .map(|mismatch| {
+            format!(
+                "; declared: {}, observed: {}",
+                mismatch.declared, mismatch.observed
+            )
+        })
+        .unwrap_or_default();
+    let provenance = one_line(&format!("{source}{observation}{disagreement}"));
     format!(
-        "{ts}  {actor}@{}{model}",
+        "{ts}  {actor}@{}{model}{provenance}",
         event.harness.as_deref().unwrap_or("-")
     )
 }

@@ -177,7 +177,7 @@ fn a_discussion_round_trips_with_its_bodies_events_and_provenance() {
         "{reported}"
     );
     let value: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
-    assert_eq!(value["schema"], "arc-journal-bundle/1", "{value}");
+    assert_eq!(value["schema"], "arc-journal-bundle/2", "{value}");
     assert_eq!(value["source_replica"]["name"], "workstation");
     assert_eq!(value["artifacts"].as_array().unwrap().len(), 1);
     let artifact = &value["artifacts"][0];
@@ -587,4 +587,34 @@ fn exchange_takes_artifact_names_not_paths() {
         .args(["journal", "import", bundle.to_str().unwrap()])
         .assert()
         .success();
+}
+
+#[test]
+fn previous_journal_bundles_import_without_model_provenance() {
+    let source = Repo::new();
+    let recipient = Repo::new();
+    pair(&source, &recipient, "origin", "peer");
+    let file = write_artifact(&source, "legacy-journal", "note", "# Legacy journal\n");
+    let path = bundle_file(&source, "legacy-journal");
+    export(&source, &[&file], &path);
+    let mut bundle: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    bundle["schema"] = serde_json::json!("arc-journal-bundle/1");
+    assert!(bundle["artifacts"][0]["events"][0]
+        .get("model_source")
+        .is_none());
+    fs::write(&path, serde_json::to_vec(&bundle).unwrap()).unwrap();
+    let result = import(&recipient, &path, false);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let events = events_for(&journal_dir(&recipient), &file);
+    assert!(events
+        .iter()
+        .all(|event| event.get("model_source").is_none()));
+    let current = bundle_file(&recipient, "current-journal");
+    export(&recipient, &[&file], &current);
+    let bundle: serde_json::Value = serde_json::from_slice(&fs::read(current).unwrap()).unwrap();
+    assert_eq!(bundle["schema"], "arc-journal-bundle/2");
 }

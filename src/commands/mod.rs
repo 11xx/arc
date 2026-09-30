@@ -120,13 +120,14 @@ pub struct Ctx {
     pub session_link: Option<String>,
     /// What the harness's own store said about `session` when detection
     /// resolved it. `None` when the session was declared or detection did not
-    /// run, which is the absence of a lookup rather than a claim about the
-    /// store.
+    /// run. Model resolution at event creation is a separate observation.
     pub session_resolution: Option<SessionResolution>,
-    /// Model identity (`--model`/`ARC_MODEL`): a model slug with optional
-    /// `#effort`, e.g. `kimi-k3#high`. Optional everywhere it is recorded;
-    /// absent means absent and is never rendered as "unknown".
+    /// Declared model slug with optional `#effort`. An absent declaration
+    /// leaves the invocation to resolve its model from the acting session store.
     pub model: Option<String>,
+    pub model_source: Option<ModelSource>,
+    /// Attribution shared by every event and checkout view of this invocation.
+    pub model_attribution: std::rc::Rc<std::cell::OnceCell<ModelAttribution>>,
     /// Subject a lead runs delegated ceremony for (`--on-behalf-of`). The
     /// effective author of any event is `on_behalf_of.unwrap_or(actor)`.
     pub on_behalf_of: Option<String>,
@@ -266,6 +267,19 @@ impl Ctx {
         Store::discover(&self.cwd)
     }
 
+    pub(crate) fn resolve_model(&self) -> ModelAttribution {
+        self.model_attribution
+            .get_or_init(|| {
+                crate::context::resolve_model(
+                    self.model.as_deref(),
+                    self.model_source,
+                    self.harness.as_deref(),
+                    self.session.as_deref(),
+                )
+            })
+            .clone()
+    }
+
     /// The same invocation pointed at another checkout.
     ///
     /// Identity travels with the command, not with the directory, so a run
@@ -285,6 +299,8 @@ impl Ctx {
             session_link: self.session_link.clone(),
             session_resolution: self.session_resolution,
             model: self.model.clone(),
+            model_source: self.model_source,
+            model_attribution: self.model_attribution.clone(),
             on_behalf_of: self.on_behalf_of.clone(),
         }
     }
@@ -446,6 +462,7 @@ impl Ctx {
         payload: Payload,
     ) -> Event {
         self.announce_assumed_identity();
+        let attribution = self.resolve_model();
         Event {
             schema_version: SCHEMA_VERSION,
             event_id: ids::new_event_id(),
@@ -455,7 +472,8 @@ impl Ctx {
             actor_source: Some(self.actor_source),
             operator: self.operator.clone(),
             on_behalf_of: self.on_behalf_of.clone(),
-            model: self.model.clone(),
+            model: attribution.model,
+            model_provenance: attribution.provenance,
             harness: self.harness.clone(),
             session: self.session.clone(),
             session_link: self.session_link.clone(),
@@ -944,6 +962,7 @@ mod tests {
     fn change(id: &str, blocked_by: &[&str], closure: Option<Closure>) -> ChangeState {
         ChangeState {
             schema: crate::state::CHANGE_STATE_SCHEMA,
+            model_attributions: BTreeMap::new(),
             dirty_tree_waiver: None,
             dangerous: false,
             kept: Vec::new(),

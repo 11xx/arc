@@ -24,7 +24,12 @@ waiting for a session.
 SAY WHO YOU ARE (before the first write)
   eval "$(arc env)"                    Detect harness, session, model, and session link.
   export ARC_ACTOR=<name> ARC_HARNESS=<claude|codex|opencode|pi> \
-         ARC_SESSION=<id> ARC_MODEL=<model[#effort]> ARC_SESSION_LINK=<url>
+         ARC_SESSION=<id> ARC_SESSION_LINK=<url>
+
+  `arc env` leaves ARC_MODEL unset. Each write resolves the acting session's
+  model. Declare one with `--model` or export ARC_MODEL; the declaration is
+  recorded with any observed disagreement. `arc show --json` and `arc log`
+  show the model evidence.
 
   Every event records who wrote it. Most writes accept an undeclared
   identity. In that case arc records an actor nobody claimed:
@@ -56,9 +61,9 @@ SAY WHO YOU ARE (before the first write)
   `PI_CODING_AGENT_DIR` — before the default under `$HOME`, and reports
   whether the store corroborates the exact canonical session id. An
   ambiguous or unreadable lookup remains unresolved rather than absent.
-  Events record that verdict beside the session they carry. It prints an export for every field it
-  establishes and an explicit `unset` for each it does not, so evaluating it
-  never leaves a stale session or model beside a fresh harness. Pi re-sets its
+  Events record that verdict beside the session they carry. It exports the
+  harness, session, and session link it establishes and explicitly unsets
+  each it does not; the model is a comment and ARC_MODEL is always unset. Pi re-sets its
   live recording file, model, and reasoning level for each tool call, so those
   answer while `PI_SESSION_ID` is the acting session, and a Claude subagent
   shares its parent's session id, so while the session has an unfinished
@@ -275,7 +280,9 @@ SETTLE A QUESTION (before it is work)
                          in place; other event kinds and delegated records
                          refuse by name. Repair and every event append share
                          an event-write lock, so an append cannot be lost when
-                         the repaired log is published.
+                         the repaired log is published. Model replacements are
+                         flag declarations compared with the retained observation;
+                         changing harness or session clears that observation.
   arc journal consume <file> --outcome done --decision <decision>
   arc journal transition <file> --to discussion [--dry-run]
     Change a live artifact's kind as one guarded operation: a typed successor
@@ -1136,8 +1143,9 @@ RULES THAT CHANGE WHAT YOU DO
     A deferral requires a `why` and gets a `def-<ulid>` when it names no id; a
     later round on the same subject discharges it with `--collects <id>`.
     `arc inbox` and `arc catchup` carry the ones still open.
-  - arc holds no routing opinion. It records the --actor, --harness, and --model
-    it is given; who to delegate to is the caller's policy, not arc's.
+  - arc holds no routing opinion. It records the --actor and --harness
+    it is given and resolves an undeclared model from the acting session.
+    Who to delegate to is the caller's policy, not arc's.
   - A delegated session binds its boundary with `ARC_ROLE` or `--role`. An
     implementer may not record a verdict, an external verdict, `resolve`,
     `hold`, `release-hold`, `audit`, `debt`, `close`, or `integrate`. A
@@ -1260,12 +1268,13 @@ FILES
   `git update-ref -d`.
 
 SCHEMAS
-  Every structured surface carries a `schema` string `<name>/<n>`, and any
-  change to what a surface emits takes the next version: adding a field as
-  much as removing, renaming, or redefining one. A commitment is a shape
-  callers outside arc read, and its version is a promise. An internal shape
-  is arc's own on-disk bookkeeping; parsing one means tracking arc's
-  implementation.
+  Every structured surface carries a `schema` string `<name>/<n>`. A shape
+  change takes one new version per release, counted from the last release:
+  adding a field as much as removing, renaming, or redefining one. A surface
+  already bumped for the unreleased version keeps that number for further
+  shape changes. A commitment is a shape callers outside arc read, and its
+  version is a promise. An internal shape is arc's own on-disk bookkeeping;
+  parsing one means tracking arc's implementation.
 
   A stored input format is versioned from the reader's side: its version
   marks what a reader must accept, so a new optional field that leaves every
@@ -1313,11 +1322,16 @@ SCHEMAS
 
   Commitments, files:
     `arc-bundle/6`                   arc export / arc import
-    `arc-replica-bundle/2`           arc replica export / import
-    `arc-replica-event/2`            one event inside an arc-replica-bundle
-    `arc-journal-bundle/1`           arc journal export / import
+    `arc-replica-bundle/3`           arc replica export / import
+    `arc-replica-event/3`            one event inside an arc-replica-bundle
+    `arc-journal-bundle/2`           arc journal export / import
     `journal-events/1`               events.jsonl, streamed by arc journal events
     `arc-journal-spool/1`            .arc/outbox/<ts>-<kind>-<topic>.json
+
+  Imports accept `arc-bundle/5` and `arc-replica-bundle/2` alongside
+  current export formats. Journal imports accept
+  `arc-journal-bundle/1`.
+  Their absent model provenance stays absent.
 
   Internal:
     store format 6                   .git/arc/config.json and the change ledger
@@ -1347,8 +1361,8 @@ WHAT ARC WILL NOT DO
   Refusals worth knowing before they happen:
     arc refuses a bundle written by a newer arc rather than skipping
       lifecycle events it does not know.
-    `arc import` reads `arc-bundle/6` and `arc-bundle/5`, whose events lack
-      only optional fields, and refuses any older or newer bundle schema.
+    `arc import` reads `arc-bundle/6` and `arc-bundle/5`.
+      Absent optional fields stay absent; other bundle schemas are refused.
     arc refuses a gate run only when the change's recorded worktree is
       missing or its HEAD is not the branch head. A run started from another
       checkout of the repository is redirected to the recorded worktree and
@@ -1361,7 +1375,7 @@ WHAT ARC WILL NOT DO
       repository does not hold.
 
   Judgements arc does not make:
-    arc records the actor, harness, and model it is given, and holds no
+    arc records declared identities and observed models, and holds no
       routing opinion.
     arc records the displaced owner and the reason a claim was taken over.
     arc never scores the coordinates a debt records, joins them against a
