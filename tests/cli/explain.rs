@@ -282,14 +282,13 @@ fn integrated_change_renders_every_slot() {
     let base = items(&explanation, "contract", "base-revision");
     assert_eq!(base[0]["standing"], "recorded", "{explanation}");
 
-    // Supplied context: the opening artifact is declared and shown as
-    // current; the patchset reference is recorded and unchanged.
+    // Supplied context: the opening artifact and the patchset reference are
+    // both recorded and unchanged.
     let opening = items(&explanation, "supplied_context", "opening-reference");
     assert_eq!(opening.len(), 1, "{explanation}");
     assert_eq!(opening[0]["file"], fixture.opening.as_str());
-    assert_eq!(opening[0]["standing"], "declared");
-    assert!(opening[0]["reason"].as_str().unwrap().contains("no digest"));
-    assert_eq!(opening[0]["resolution"], "current");
+    assert_eq!(opening[0]["standing"], "recorded");
+    assert_eq!(opening[0]["resolution"], "same");
     let references = reference_rows(&explanation);
     assert_eq!(references.len(), 2, "one per patchset: {explanation}");
     for reference in &references {
@@ -332,8 +331,8 @@ fn integrated_change_renders_every_slot() {
     assert_eq!(alternatives.len(), 1, "{explanation}");
     assert_eq!(alternatives[0]["body"], "a gate that always passes");
 
-    // Evaluation: the counted gate, its tree, timeout, and declared
-    // falsification.
+    // Evaluation: the counted gate, its tree, timeout, and its declared
+    // falsification beside the one arc inferred.
     let gates = items(&explanation, "evaluation", "gate");
     assert_eq!(gates.len(), 1, "{explanation}");
     let gate = gates[0];
@@ -342,8 +341,11 @@ fn integrated_change_renders_every_slot() {
     assert_eq!(gate["result"], "pass");
     assert!(gate["tree"].as_str().is_some(), "{gate}");
     assert_eq!(gate["timeout_seconds"], 60);
-    assert_eq!(gate["falsification"]["standing"], "declared");
-    assert_eq!(gate["falsification"]["predicted_reason"], "marker absent");
+    let falsification = gate["falsification"].as_array().unwrap();
+    assert_eq!(falsification.len(), 2, "{gate}");
+    assert_eq!(falsification[0]["standing"], "declared");
+    assert_eq!(falsification[0]["predicted_reason"], "marker absent");
+    assert_eq!(falsification[1]["standing"], "inferred");
 
     // Coverage at acceptance: the waiver the integration used, with the
     // debt's values as of integration, pointing at the later discharge.
@@ -689,4 +691,261 @@ fn an_open_change_replays_as_of_an_event() {
     let brief = items(&then, "contract", "brief");
     assert_eq!(brief[0]["version"], 1, "{then}");
     assert_eq!(brief[0]["event_id"], first_brief.as_str());
+}
+
+/// A change opened with `--no-worktree` from an artifact with `body`, and
+/// the artifact's path.
+fn opened_from_artifact(repo: &Repo, body: &str) -> (String, PathBuf) {
+    let opening = artifact(repo, "todo", "framing", body);
+    let change_id = begin_no_worktree(repo, WORK, &["--from-journal", &file_name(&opening)]);
+    (change_id, opening)
+}
+
+#[test]
+fn opening_reference_with_a_recorded_digest_is_recorded() {
+    let repo = Repo::new();
+    let body = "# Framing\n\nopen this\n";
+    let (_, opening) = opened_from_artifact(&repo, body);
+    let recorded = digest(body.as_bytes());
+
+    let explanation = explain_json(&repo, &[]);
+    let row = items(&explanation, "supplied_context", "opening-reference");
+    assert_eq!(row.len(), 1, "{explanation}");
+    assert_eq!(row[0]["standing"], "recorded", "{explanation}");
+    assert!(row[0].get("reason").is_none(), "{explanation}");
+    assert_eq!(row[0]["resolution"], "same");
+    assert_eq!(row[0]["recorded_digest"], recorded.as_str());
+    assert_eq!(row[0]["current_digest"], recorded.as_str());
+    let text = explain_text(&repo, &[]);
+    assert!(
+        text.contains(&format!(
+            "[recorded] opened from {}: same, {recorded}",
+            file_name(&opening)
+        )),
+        "{text}"
+    );
+
+    let edited = "# Framing\n\nrewritten after the change opened\n";
+    fs::write(&opening, edited).unwrap();
+    let explanation = explain_json(&repo, &[]);
+    let row = items(&explanation, "supplied_context", "opening-reference");
+    assert_eq!(row[0]["standing"], "recorded", "{explanation}");
+    assert_eq!(row[0]["resolution"], "amended");
+    assert_eq!(row[0]["recorded_digest"], recorded.as_str());
+    assert_eq!(row[0]["current_digest"], digest(edited.as_bytes()).as_str());
+    let text = explain_text(&repo, &[]);
+    assert!(
+        text.contains(&format!(
+            "opened from {}: amended, recorded {recorded}, current {}",
+            file_name(&opening),
+            digest(edited.as_bytes())
+        )),
+        "{text}"
+    );
+
+    fs::remove_file(&opening).unwrap();
+    let explanation = explain_json(&repo, &[]);
+    let row = items(&explanation, "supplied_context", "opening-reference");
+    assert_eq!(row[0]["standing"], "recorded", "{explanation}");
+    assert_eq!(row[0]["resolution"], "missing");
+    assert_eq!(row[0]["recorded_digest"], recorded.as_str());
+    assert!(row[0].get("current_digest").is_none(), "{explanation}");
+}
+
+/// A change opened before `ChangeOpened` recorded the artifact's digest.
+#[test]
+fn opening_reference_without_a_digest_stays_declared() {
+    let repo = Repo::new();
+    let body = "# Framing\n\nopen this\n";
+    let (change_id, opening) = opened_from_artifact(&repo, body);
+    rewrite_event(&repo, &change_id, "change-opened", |event| {
+        assert!(event["journal_ref_digest"].is_string(), "{event}");
+        event.as_object_mut().unwrap().remove("journal_ref_digest");
+    });
+
+    let explanation = explain_json(&repo, &[]);
+    let row = items(&explanation, "supplied_context", "opening-reference");
+    assert_eq!(row.len(), 1, "{explanation}");
+    assert_eq!(row[0]["standing"], "declared", "{explanation}");
+    assert!(row[0]["reason"].as_str().unwrap().contains("no digest"));
+    assert_eq!(row[0]["resolution"], "current");
+    assert!(row[0].get("recorded_digest").is_none(), "{explanation}");
+    assert_eq!(row[0]["current_digest"], digest(body.as_bytes()).as_str());
+    let text = explain_text(&repo, &[]);
+    assert!(
+        text.contains(&format!(
+            "opened from {}: current, current digest {}",
+            file_name(&opening),
+            digest(body.as_bytes())
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_inferred_falsification_reads_as_inferred() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.fixable]\ncommand = \"test -f marker\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", "."]);
+    git(&repo.root, &["commit", "-m", "gates"]);
+    stdout(repo.arc(&repo.root).args(["begin", WORK]));
+    let worktree = repo.home.join(".worktrees").join(format!("repo-{WORK}"));
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    stdout(repo.arc(&worktree).args(["snapshot", WORK]));
+    repo.arc(&worktree)
+        .args(["verify", WORK, "--gate", "fixable"])
+        .assert()
+        .code(1);
+    let failing = event_ids(&repo, "verification-recorded").pop().unwrap();
+    let failing_revision = repo.head(&worktree);
+    repo.commit(&worktree, "marker", "", "fix: add marker");
+    stdout(repo.arc(&worktree).args(["snapshot", WORK]));
+    repo.arc(&worktree)
+        .args(["verify", WORK, "--gate", "fixable"])
+        .assert()
+        .success();
+
+    // Only the inference: it reads as inferred, and nothing reads as declared.
+    let explanation = explain_json(&repo, &[]);
+    let gates = items(&explanation, "evaluation", "gate");
+    assert_eq!(gates.len(), 1, "{explanation}");
+    let falsification = gates[0]["falsification"].as_array().unwrap();
+    assert_eq!(falsification.len(), 1, "{explanation}");
+    assert_eq!(falsification[0]["standing"], "inferred");
+    assert_eq!(falsification[0]["event_id"], failing.as_str());
+    assert_eq!(falsification[0]["revision"], failing_revision.as_str());
+    assert_eq!(falsification[0]["source"], "prior-failure-same-change");
+    assert!(falsification[0].get("predicted_reason").is_none());
+    let text = explain_text(&repo, &[]);
+    assert!(
+        text.contains(&format!(
+            "falsification inferred by prior-failure-same-change: failing `{failing}` at \
+             {failing_revision}, none declared"
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("falsification declared"), "{text}");
+
+    // A declared falsification stands beside the inference, each under its
+    // own standing.
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            WORK,
+            "--gate",
+            "fixable",
+            "--falsified-by",
+            &failing,
+            "--predicted",
+            "marker absent",
+        ])
+        .assert()
+        .success();
+    let explanation = explain_json(&repo, &[]);
+    let gates = items(&explanation, "evaluation", "gate");
+    let falsification = gates[0]["falsification"].as_array().unwrap();
+    let standings: Vec<_> = falsification
+        .iter()
+        .map(|entry| entry["standing"].as_str().unwrap())
+        .collect();
+    assert_eq!(standings, ["declared", "inferred"], "{explanation}");
+    assert_eq!(falsification[0]["predicted_reason"], "marker absent");
+    assert!(falsification[0].get("source").is_none(), "{explanation}");
+    assert_eq!(falsification[1]["event_id"], failing.as_str());
+    assert!(falsification[1].get("predicted_reason").is_none());
+    let text = explain_text(&repo, &[]);
+    assert!(
+        text.contains(&format!(
+            "falsification declared: marker absent (failing `{failing}`), falsification \
+             inferred by prior-failure-same-change: failing `{failing}` at {failing_revision}"
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("none declared"), "{text}");
+}
+
+#[test]
+fn supplied_links_show_via_and_facts_show_citations() {
+    let fixture = integrated_under_waiver();
+    let repo = &fixture.repo;
+    let change_id = explain_json(repo, &[])["change_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let verification = event_ids(repo, "verification-recorded").pop().unwrap();
+    repo.arc(&repo.root)
+        .args([
+            "keep",
+            WORK,
+            "--kind",
+            "constraint",
+            "--body",
+            "the marker gate is the acceptance",
+            "--cites",
+            &verification,
+        ])
+        .assert()
+        .success();
+    // The newest link reads as recorded before arc named its source.
+    rewrite_event(repo, &change_id, "patchset-added", |event| {
+        for link in event["journal_refs"].as_array_mut().unwrap() {
+            assert!(link["via"].is_string(), "{event}");
+            link.as_object_mut().unwrap().remove("via");
+        }
+    });
+
+    let explanation = explain_json(repo, &[]);
+    let references = reference_rows(&explanation);
+    let vias: Vec<_> = references.iter().map(|row| row["via"].clone()).collect();
+    assert!(
+        vias.contains(&serde_json::Value::from("flag")),
+        "{explanation}"
+    );
+    assert!(vias.contains(&serde_json::Value::Null), "{explanation}");
+    let text = explain_text(repo, &[]);
+    let reference = file_name(&fixture.reference);
+    assert!(
+        text.contains(&format!(
+            "journal ref {reference}: same, {}, via flag",
+            fixture.reference_digest
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "journal ref {reference}: same, {}, via unrecorded",
+            fixture.reference_digest
+        )),
+        "{text}"
+    );
+
+    let facts = rows(&explanation, "declared_facts");
+    let cited = facts
+        .iter()
+        .find(|fact| fact["kind"] == "constraint")
+        .unwrap();
+    assert_eq!(cited["standing"], "declared", "{cited}");
+    assert_eq!(cited["cites"], serde_json::json!([verification]), "{cited}");
+    let uncited = facts
+        .iter()
+        .find(|fact| fact["kind"] == "verified")
+        .unwrap();
+    assert!(uncited.get("cites").is_none(), "{uncited}");
+    assert!(
+        text.contains(
+            "[declared: kept by a session as a claim, with no evidence named] constraint"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "the marker gate is the acceptance (claim) (cites {verification})"
+        )),
+        "{text}"
+    );
 }
