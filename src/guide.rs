@@ -1268,12 +1268,13 @@ FILES
   `git update-ref -d`.
 
 SCHEMAS
-  Every structured surface carries a `schema` string `<name>/<n>`, and any
-  change to what a surface emits takes the next version: adding a field as
-  much as removing, renaming, or redefining one. A commitment is a shape
-  callers outside arc read, and its version is a promise. An internal shape
-  is arc's own on-disk bookkeeping; parsing one means tracking arc's
-  implementation.
+  Every structured surface carries a `schema` string `<name>/<n>`. A shape
+  change takes one new version per release, counted from the last release:
+  adding a field as much as removing, renaming, or redefining one. A surface
+  already bumped for the unreleased version keeps that number for further
+  shape changes. A commitment is a shape callers outside arc read, and its
+  version is a promise. An internal shape is arc's own on-disk bookkeeping;
+  parsing one means tracking arc's implementation.
 
   A stored input format is versioned from the reader's side: its version
   marks what a reader must accept, so a new optional field that leaves every
@@ -1281,7 +1282,7 @@ SCHEMAS
   required takes the next. `journal-events/1` is one.
 
   Commitments, derived views:
-    `arc-state/4`                    arc show --json
+    `arc-state/3`                    arc show --json
     `arc-status/27`                  arc status
     `arc-check/3`                    arc check --json
     `arc-inbox/10`                   arc inbox --json
@@ -1320,15 +1321,15 @@ SCHEMAS
     `arc-journal-scaffolds/1`        arc journal scaffolds --json
 
   Commitments, files:
-    `arc-bundle/7`                   arc export / arc import
+    `arc-bundle/6`                   arc export / arc import
     `arc-replica-bundle/3`           arc replica export / import
     `arc-replica-event/3`            one event inside an arc-replica-bundle
     `arc-journal-bundle/2`           arc journal export / import
     `journal-events/1`               events.jsonl, streamed by arc journal events
     `arc-journal-spool/1`            .arc/outbox/<ts>-<kind>-<topic>.json
 
-  Imports accept `arc-bundle/6`, `arc-bundle/5`, and `arc-replica-bundle/2`
-  alongside current export formats. Journal imports accept
+  Imports accept `arc-bundle/5` and `arc-replica-bundle/2` alongside
+  current export formats. Journal imports accept
   `arc-journal-bundle/1`.
   Their absent model provenance stays absent.
 
@@ -1360,7 +1361,7 @@ WHAT ARC WILL NOT DO
   Refusals worth knowing before they happen:
     arc refuses a bundle written by a newer arc rather than skipping
       lifecycle events it does not know.
-    `arc import` reads `arc-bundle/7`, `arc-bundle/6`, and `arc-bundle/5`.
+    `arc import` reads `arc-bundle/6` and `arc-bundle/5`.
       Absent optional fields stay absent; other bundle schemas are refused.
     arc refuses a gate run only when the change's recorded worktree is
       missing or its HEAD is not the branch head. A run started from another
