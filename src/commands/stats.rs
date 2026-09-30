@@ -924,6 +924,7 @@ mod tests {
                 environment: None,
                 note: None,
                 falsification: None,
+                falsification_inferred: None,
             },
         );
         let attested = event(
@@ -954,6 +955,7 @@ mod tests {
                 environment: None,
                 note: None,
                 falsification: None,
+                falsification_inferred: None,
             },
         );
         let runs = observed_gate_runs(&[timed, attested]);

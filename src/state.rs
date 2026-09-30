@@ -5,7 +5,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CHANGE_STATE_SCHEMA: &str = "arc-state/2";
+pub const CHANGE_STATE_SCHEMA: &str = "arc-state/3";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Patchset {
@@ -590,6 +590,10 @@ pub struct VerificationEntry {
     /// never seen to fail before it passed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub falsification: Option<Falsification>,
+    /// The failure arc derived this pass follows, kept apart from the declared
+    /// `falsification` because it decides nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub falsification_inferred: Option<InferredFalsification>,
     /// The environment this evidence was produced in, when the gate declared
     /// an environment probe. `None` on evidence written before arc recorded
     /// environments, which satisfies only probe-less gates.
@@ -649,6 +653,30 @@ pub fn falsification_mismatch(
         ));
     }
     None
+}
+
+/// The failure a pass of this check follows, derived from `prior`: the newest
+/// failing gate evidence of the same gate, or of the same command when the
+/// check is unnamed. Probe evidence answers to its own baseline and final
+/// contract, so it is never a source.
+pub fn infer_falsification(
+    prior: &[VerificationEntry],
+    gate: Option<&str>,
+    command: &str,
+) -> Option<InferredFalsification> {
+    prior
+        .iter()
+        .rev()
+        .filter(|entry| entry.result == VerifyResult::Fail && entry.probe.is_none())
+        .find(|entry| match gate {
+            Some(gate) => entry.gate.as_deref() == Some(gate),
+            None => entry.command == command,
+        })
+        .map(|entry| InferredFalsification {
+            event_id: entry.event_id.clone(),
+            revision: entry.revision.clone(),
+            source: InferenceSource::PriorFailureSameChange,
+        })
 }
 
 fn check_label(gate: Option<&str>, command: &str) -> String {
@@ -978,6 +1006,9 @@ impl ChangeState {
             if let Some(falsification) = &verification.falsification {
                 note(&falsification.revision, "falsification".to_string());
             }
+            if let Some(inferred) = &verification.falsification_inferred {
+                note(&inferred.revision, "inferred falsification".to_string());
+            }
         }
         for run in &self.verification_runs {
             note(&run.revision, "verification run".to_string());
@@ -1089,6 +1120,9 @@ impl ChangeState {
             rewrites.advance_opt(&mut verification.against_target)?;
             if let Some(falsification) = &mut verification.falsification {
                 rewrites.advance(&mut falsification.revision)?;
+            }
+            if let Some(inferred) = &mut verification.falsification_inferred {
+                rewrites.advance(&mut inferred.revision)?;
             }
         }
         for run in &mut self.verification_runs {
@@ -2156,6 +2190,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 tree,
                 against_target,
                 falsification,
+                falsification_inferred,
                 ..
             } => {
                 if let Some(falsification) = falsification {
@@ -2249,6 +2284,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     runner: runner.clone(),
                     environment: environment.clone(),
                     falsification: falsification.clone(),
+                    falsification_inferred: falsification_inferred.clone(),
                     created_at: ev.created_at,
                 });
             }
@@ -3296,6 +3332,7 @@ mod tests {
                 environment: None,
                 note: None,
                 falsification: None,
+                falsification_inferred: None,
                 tested_tree: Some("dirty-tree".into()),
                 worktree_dirty: Some(true),
                 worktree_dirty_tracked: None,

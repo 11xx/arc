@@ -15,7 +15,7 @@ use std::path::Path;
 
 pub use crate::blockers::Blocker;
 
-pub const STATUS_SCHEMA: &str = "arc-status/26";
+pub const STATUS_SCHEMA: &str = "arc-status/27";
 pub const BLOCKER_STATUS_SCHEMA: &str = "arc-blocker-status/1";
 pub const SELF_APPROVAL_REASON: &str = "approval rejected by policy: self-approval";
 /// A verdict graph with several tips has no authority to report, so the
@@ -152,6 +152,10 @@ pub struct GateStatus {
     /// discriminating; the two ids then say which run proved what.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discrimination_event_id: Option<String>,
+    /// The failure arc derived the counted pass follows. It never sets
+    /// `discrimination`, which only a declared falsification does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub falsification_inferred: Option<crate::model::InferredFalsification>,
 }
 
 /// Whether a gate's evidence describes the environment being evaluated.
@@ -1488,6 +1492,7 @@ fn build_report(
             discrimination_event_id: discriminating
                 .map(|e| e.event_id.clone())
                 .filter(|id| Some(id.as_str()) != counted_pass.map(|e| e.event_id.as_str())),
+            falsification_inferred: counted_pass.and_then(|e| e.falsification_inferred.clone()),
         });
     }
     let probe_statuses = latest_patchset

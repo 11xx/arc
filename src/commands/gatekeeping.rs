@@ -1751,6 +1751,11 @@ fn append_verifications(
         previous_id = event_id_after(&previous_id)?;
         let event_id = previous_id.clone();
         let captured_tree = item.tested_tree.clone();
+        let falsification_inferred = (item.result == VerifyResult::Pass && item.probe.is_none())
+            .then(|| {
+                state::infer_falsification(&st.verifications, item.gate.as_deref(), &item.command)
+            })
+            .flatten();
         let mut payload = Payload::VerificationRecorded {
             run_id: item.run_id,
             probe: item.probe,
@@ -1774,6 +1779,7 @@ fn append_verifications(
                 }),
             note: item.note,
             falsification: item.falsification,
+            falsification_inferred,
             // The content the gate holds for, written beside the revision
             // carrying it so the record still says what was evaluated once
             // that commit is unreachable. Unknown rather than guessed where

@@ -8,7 +8,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
-pub const BUNDLE_SCHEMA: &str = "arc-bundle/5";
+pub const BUNDLE_SCHEMA: &str = "arc-bundle/6";
+
+/// Bundle versions this build still imports: each differs from the current one
+/// only by optional event fields its events leave absent.
+const READABLE_BUNDLE_SCHEMAS: &[&str] = &[BUNDLE_SCHEMA, "arc-bundle/5"];
 
 /// The prefix a delta bundle extends: the checksum of the exported history
 /// before its suffix, and how many events that prefix covers. A bundle's
@@ -151,7 +155,7 @@ impl Bundle {
                 crate::model::SCHEMA_VERSION
             );
         }
-        if bundle.schema != BUNDLE_SCHEMA {
+        if !READABLE_BUNDLE_SCHEMAS.contains(&bundle.schema.as_str()) {
             bail!(
                 "unsupported bundle schema {:?}; expected {BUNDLE_SCHEMA:?}",
                 bundle.schema
