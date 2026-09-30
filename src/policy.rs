@@ -22,7 +22,36 @@ pub struct PolicyFile {
     /// merges: its history shape is the receiver's, and `integrate` records a
     /// change as ready to send instead of merging it.
     pub contribution: Option<Contribution>,
+    pub candidates: Candidates,
     pub sources: PolicySources,
+}
+
+/// How candidate selection treats evidence recorded on another registration.
+#[derive(Debug, Default)]
+pub struct Candidates {
+    /// No default: selection requires the project to have declared one.
+    pub evaluation_reuse: Option<EvaluationReuse>,
+}
+
+/// Whether evaluation evidence recorded on one registration counts for
+/// another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EvaluationReuse {
+    /// Evidence counts where tree, declaration, and recorded environment are
+    /// equal; an unrecorded environment matches nothing.
+    MatchingCoordinates,
+    /// Every registration is evaluated on its own.
+    Never,
+}
+
+impl EvaluationReuse {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EvaluationReuse::MatchingCoordinates => "matching-coordinates",
+            EvaluationReuse::Never => "never",
+        }
+    }
 }
 
 /// How a contributed change's history must look when it is sent.
@@ -190,6 +219,12 @@ struct PolicyLayer {
     provenance: Option<ProvenanceLayer>,
     danger: Option<DangerLayer>,
     contribution: Option<ContributionLayer>,
+    candidates: Option<CandidatesLayer>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CandidatesLayer {
+    evaluation_reuse: Option<EvaluationReuse>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -293,6 +328,7 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
     let mut source_roots = Vec::new();
     let mut source_roots_seen = BTreeSet::new();
     let mut contribution: Option<Contribution> = None;
+    let mut candidates = Candidates::default();
 
     for (source, layer) in layers {
         if let Some(raw) = layer.policy {
@@ -349,6 +385,18 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
             let current = contribution.get_or_insert_with(Contribution::default);
             if history == History::Squash {
                 current.history = History::Squash;
+            }
+        }
+        if let Some(raw) = layer.candidates {
+            if let Some(reuse) = raw.evaluation_reuse {
+                sources.record(
+                    format!("candidates.evaluation_reuse={}", reuse.as_str()),
+                    &source,
+                );
+                // Never reusing is the stricter reading, and it wins.
+                if candidates.evaluation_reuse != Some(EvaluationReuse::Never) {
+                    candidates.evaluation_reuse = Some(reuse);
+                }
             }
         }
         if let Some(raw) = layer.danger {
@@ -414,6 +462,7 @@ fn layered(repo: &Path, project: Option<(String, String)>) -> Result<PolicyFile>
         provenance: ProvenanceBehavior { git_identity },
         danger,
         contribution,
+        candidates,
         sources,
     })
 }

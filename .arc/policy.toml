@@ -72,6 +72,10 @@ paths = [
   "src/process_group.rs",
   # Bundle import writes foreign events into the append-only store.
   "src/commands/bundle_io.rs",
+  # The candidate ledger: the rules a local or imported registration must pass.
+  "src/candidate.rs",
+  # `candidate register` pins a tree and `candidate retire` deletes the pin.
+  "src/commands/candidate.rs",
   "src/commands/replica.rs",
   # Change and event identity: a collision merges two histories silently.
   "src/ids.rs",

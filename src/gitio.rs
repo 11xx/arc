@@ -1801,6 +1801,15 @@ pub fn commit_identity(cwd: &Path, rev: &str) -> Result<CommitIdentity> {
     Ok(identity)
 }
 
+/// The tree a revision names, or nothing when the object store holds no such
+/// tree. A commit answers with its tree.
+pub fn resolve_tree(cwd: &Path, rev: &str) -> Result<Option<String>> {
+    if rev.is_empty() || rev.starts_with('-') {
+        return Ok(None);
+    }
+    ref_value(cwd, &format!("{rev}^{{tree}}"))
+}
+
 pub fn commit_exists(cwd: &Path, oid: &str) -> Result<bool> {
     let object = format!("{oid}^{{commit}}");
     let out = git_command()
