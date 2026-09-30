@@ -9,7 +9,7 @@ pub fn chain(ctx: &Ctx, tag: String, json: bool, review: bool) -> Result<()> {
         .clone();
     let store = ctx.store()?;
     let _graph = store.lock_graph()?;
-    let states = ctx.load_all_states(&store)?;
+    let states = store.readable_states()?;
     let selected = states
         .iter()
         .filter(|(_, state)| state.tags.contains(&tag))

@@ -1293,3 +1293,151 @@ fn query_filters_on_typed_flags_not_the_exported_identity() {
     let opened_harnesses = json_stdout(repo.arc(&repo.root).args(["show", &theirs, "--json"]));
     assert_eq!(opened_harnesses["opened_harness"], "codex");
 }
+
+#[test]
+fn aggregate_views_keep_healthy_changes_when_one_reduction_fails() {
+    let repo = Repo::new();
+    repo.declare_gates_locally("[gates.unit]\ncommand = 'true'\n");
+    let (bad, bad_wt, _) = change_with_patchset(&repo, "unreducible");
+    let (good, good_wt, _) = change_with_patchset(&repo, "readable");
+    repo.arc(&good_wt)
+        .args(["metadata", &good, "--blocked-by", &bad])
+        .assert()
+        .success();
+    repo.arc(&good_wt)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    repo.arc(&good_wt)
+        .args(["review", "--verdict", "approved"])
+        .assert()
+        .success();
+    repo.arc(&bad_wt)
+        .args(["verify", "--all"])
+        .assert()
+        .success();
+    repo.arc(&bad_wt)
+        .args(["verify", "--all", "--skip-green"])
+        .assert()
+        .success();
+    rewrite_event(&repo, &bad, "verification-reused", |event| {
+        event["evidence_event_id"] = "absent-evidence".into();
+    });
+    for args in [
+        vec!["query"],
+        vec!["query", "--json"],
+        vec!["list", "--json"],
+        vec!["stats", "--json"],
+        vec!["catchup", "--json"],
+        vec!["workspace", "list", "--json"],
+        vec!["workspace", "inbox", "--json"],
+        vec!["workspace", "backlog", "--items", "--json"],
+        vec!["workspace", "report", "--json"],
+    ] {
+        repo.arc(&repo.root)
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(&good))
+            .stderr(predicates::str::contains(format!(
+                "unreadable change {bad}"
+            )))
+            .stderr(predicates::str::contains(
+                "unknown or later evidence absent-evidence",
+            ));
+    }
+    let query = json_stdout(repo.arc(&repo.root).args(["query", "--json"]));
+    assert_eq!(query.as_array().unwrap().len(), 1);
+    assert_eq!(query[0]["change_id"], good);
+    let output = repo
+        .arc(&good_wt)
+        .args(["status"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(format!(
+            "unreadable change {bad}"
+        )))
+        .get_output()
+        .stdout
+        .clone();
+    let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(status["change_id"], good);
+    repo.arc(&good_wt).args(["is-blocked"]).assert().code(1);
+    repo.arc(&good_wt).args(["check"]).assert().code(7);
+    for args in [
+        vec!["show", &bad, "--json"],
+        vec!["status", &bad],
+        vec!["check", &bad],
+        vec!["messages", "--change", &bad, "--json"],
+        vec!["stats", "--change", &bad, "--by-model", "--json"],
+    ] {
+        repo.arc(&repo.root)
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(
+                "unknown or later evidence absent-evidence",
+            ));
+    }
+    for args in [
+        vec!["stats", "--tag", "unselected", "--json"],
+        vec!["stats", "--provenance", "--json"],
+        vec!["stats", "--by-model", "--json"],
+        vec!["changelog", "--json"],
+    ] {
+        repo.arc(&repo.root)
+            .args(args)
+            .assert()
+            .success()
+            .stderr(predicates::str::contains(format!(
+                "unreadable change {bad}"
+            )));
+    }
+    let changelog = "# Changelog\n\n## [Unreleased]\n";
+    fs::write(repo.root.join("CHANGELOG.md"), changelog).unwrap();
+    repo.arc(&repo.root)
+        .args(["changelog", "--write"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "unknown or later evidence absent-evidence",
+        ));
+    assert_eq!(
+        fs::read_to_string(repo.root.join("CHANGELOG.md")).unwrap(),
+        changelog
+    );
+    // A graph mutation cannot infer the absence of a cycle from partial state.
+    repo.arc(&good_wt)
+        .args(["metadata", &good, "--blocked-by", &bad])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "unknown or later evidence absent-evidence",
+        ));
+}
+
+#[test]
+fn aggregate_views_report_a_malformed_event_and_keep_other_rows() {
+    let repo = Repo::new();
+    let bad = begin_change(&repo, "malformed", None);
+    let good = begin_change(&repo, "readable", None);
+    let event = fs::read_dir(event_dir(&repo, &bad))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(event, b"invalid json\n").unwrap();
+    repo.arc(&repo.root)
+        .args(["query", "--json"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&good))
+        .stderr(predicates::str::contains(format!(
+            "unreadable change {bad}"
+        )));
+    repo.arc(&repo.root)
+        .args(["show", &bad, "--json"])
+        .assert()
+        .failure();
+}
