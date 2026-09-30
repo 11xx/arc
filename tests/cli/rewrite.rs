@@ -295,6 +295,7 @@ fn resigning_the_history_leaves_every_recorded_revision_resolvable() {
     let rewritten = stdout(arc_signing(&repo, &key, &repo.root).args([
         "rewrite",
         "sign",
+        "--include-shared",
         "--key",
         &key.fingerprint,
     ]));
@@ -612,6 +613,7 @@ fn a_commit_carrying_another_header_keeps_it() {
     let out = stdout(arc_signing(&repo, &key, &repo.root).args([
         "rewrite",
         "sign",
+        "--include-shared",
         "--key",
         &key.fingerprint,
     ]));
@@ -1787,4 +1789,113 @@ fn a_recorded_rewrite_without_a_judgement_does_not_carry_an_approval() {
         fs::write(&path, serde_json::to_vec_pretty(&event).unwrap()).unwrap();
     }
     assert!(!approval_valid(&repo, "alpha"));
+}
+
+fn change_on_signed_merge(repo: &Repo, key: &Key) -> (PathBuf, String, String) {
+    let base = repo.head(&repo.root);
+    git(&repo.root, &["checkout", "-b", "side"]);
+    repo.commit(&repo.root, "side.txt", "side\n", "test: side");
+    let side = repo.head(&repo.root);
+    git(&repo.root, &["checkout", "master"]);
+    repo.commit(&repo.root, "main.txt", "main\n", "test: main");
+    let main = repo.head(&repo.root);
+    let tree = git_out(&repo.root, &["rev-parse", "HEAD^{tree}"]);
+    let merge = git_signing(
+        &repo.root,
+        key,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            &main,
+            "-p",
+            &side,
+            &format!("-S{}", key.fingerprint),
+            "-m",
+            "test: signed merge",
+        ],
+    );
+    git(&repo.root, &["reset", "--hard", &merge]);
+    git(&repo.root, &["branch", "-D", "side"]);
+    let (_, worktree, _) = change_with_patchset(repo, "scoped");
+    repo.commit(&worktree, "second.txt", "second\n", "test: second");
+    (worktree, merge, base)
+}
+
+#[test]
+fn signing_a_change_excludes_target_history_and_refuses_shared_ranges() {
+    let repo = repo_with_gates();
+    let key = signing_key(&repo).expect("scope acceptance requires a sandbox signing key");
+    let (worktree, merge, _) = change_on_signed_merge(&repo, &key);
+    let own: Vec<String> = git_out(&worktree, &["rev-list", &format!("{merge}..HEAD")])
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(own.len(), 2);
+    let before = repo.head(&worktree);
+    for dry in [false, true] {
+        let mut command = arc_signing(&repo, &key, &worktree);
+        command.args([
+            "rewrite",
+            "sign",
+            "--from",
+            &merge,
+            "--key",
+            &key.fingerprint,
+        ]);
+        if dry {
+            command.arg("--dry-run");
+        }
+        command.assert().failure().stderr(
+            predicates::str::contains(&merge).and(predicates::str::contains("refs/heads/master")),
+        );
+        assert_eq!(repo.head(&worktree), before);
+        assert!(repository_events(&repo).is_empty());
+        assert!(!intent_path(&repo).exists());
+    }
+    git(&worktree, &["branch", "shared-work", &own[1]]);
+    arc_signing(&repo, &key, &worktree)
+        .args(["rewrite", "sign", "--key", &key.fingerprint, "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(
+            predicates::str::contains(&own[1])
+                .and(predicates::str::contains("refs/heads/shared-work")),
+        );
+    git(&worktree, &["branch", "-D", "shared-work"]);
+    arc_signing(&repo, &key, &worktree)
+        .args(["rewrite", "sign", "--key", &key.fingerprint])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("2 commits rewritten"));
+    assert_eq!(repo.head(&repo.root), merge);
+    assert_eq!(recorded_map(&repo, &own).len(), 2);
+    repo.arc(&repo.root)
+        .args(["history", "resolve", &merge])
+        .assert()
+        .code(2)
+        .stdout(predicates::str::contains("no recorded rewrite moved it"));
+}
+
+#[test]
+fn including_shared_history_explicitly_rewrites_the_target_merge() {
+    let repo = repo_with_gates();
+    let key = signing_key(&repo).expect("escape acceptance requires a sandbox signing key");
+    let (worktree, merge, _) = change_on_signed_merge(&repo, &key);
+    repo.arc(&worktree)
+        .args([
+            "rewrite",
+            "sign",
+            "--from",
+            &merge,
+            "--include-shared",
+            "--no-sign",
+        ])
+        .assert()
+        .success();
+    assert_ne!(repo.head(&repo.root), merge);
+    repo.arc(&repo.root)
+        .args(["history", "resolve", &merge])
+        .assert()
+        .success();
 }

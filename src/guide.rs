@@ -913,13 +913,20 @@ CONTRIBUTION TRAILERS
                        malformed value.
 
 HISTORY REWRITES
-    arc rewrite sign [--key <id>] [--from <rev>] [--dry-run] [--retag]
+    arc rewrite sign [--key <id>] [--from <rev>] [--include-shared]
+                     [--dry-run] [--retag]
                        Recreate every commit from --from through the branch
                        head so one key signs them all, move the branch, arc's
                        refs and the local branches and tags that point into
-                       the range, and record the map. --from defaults to the
-                       oldest commit whose signature is missing or made by
-                       another key; --dry-run prints the map, the tags it
+                       the range, and record the map. --from is inclusive. On
+                       a tracked change branch its default is the oldest
+                       commit not signed by the key in target..head; outside
+                       a change it searches the whole history. Commits
+                       reachable from the target or another local branch are
+                       refused, naming the commit and ref, including in
+                       --dry-run. --include-shared permits them and searches
+                       the whole history by default, naming stranded refs.
+                       --dry-run prints the map, the tags it
                        would re-point or leave alone, and stops; --retag
                        recreates the annotated tags whose targets were
                        rewritten, signed like the commits. Run again to
