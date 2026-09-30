@@ -1327,6 +1327,7 @@ fn aggregate_views_keep_healthy_changes_when_one_reduction_fails() {
         vec!["query"],
         vec!["query", "--json"],
         vec!["list", "--json"],
+        vec!["stats", "--json"],
         vec!["catchup", "--json"],
         vec!["workspace", "list", "--json"],
         vec!["workspace", "inbox", "--json"],
@@ -1368,6 +1369,7 @@ fn aggregate_views_keep_healthy_changes_when_one_reduction_fails() {
         vec!["status", &bad],
         vec!["check", &bad],
         vec!["messages", "--change", &bad, "--json"],
+        vec!["stats", "--change", &bad, "--by-model", "--json"],
     ] {
         repo.arc(&repo.root)
             .args(args)
@@ -1377,6 +1379,33 @@ fn aggregate_views_keep_healthy_changes_when_one_reduction_fails() {
                 "unknown or later evidence absent-evidence",
             ));
     }
+    for args in [
+        vec!["stats", "--tag", "unselected", "--json"],
+        vec!["stats", "--provenance", "--json"],
+        vec!["stats", "--by-model", "--json"],
+        vec!["changelog", "--json"],
+    ] {
+        repo.arc(&repo.root)
+            .args(args)
+            .assert()
+            .success()
+            .stderr(predicates::str::contains(format!(
+                "unreadable change {bad}"
+            )));
+    }
+    let changelog = "# Changelog\n\n## [Unreleased]\n";
+    fs::write(repo.root.join("CHANGELOG.md"), changelog).unwrap();
+    repo.arc(&repo.root)
+        .args(["changelog", "--write"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "unknown or later evidence absent-evidence",
+        ));
+    assert_eq!(
+        fs::read_to_string(repo.root.join("CHANGELOG.md")).unwrap(),
+        changelog
+    );
     // A graph mutation cannot infer the absence of a cycle from partial state.
     repo.arc(&good_wt)
         .args(["metadata", &good, "--blocked-by", &bad])

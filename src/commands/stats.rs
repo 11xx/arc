@@ -450,18 +450,16 @@ fn provenance(store: &Store, change_ids: &[String], json: bool) -> Result<()> {
 pub fn stats(ctx: &Ctx, selection: StatsSelection, json: bool, view: StatsView) -> Result<()> {
     let store = ctx.store()?;
     let change_ids = match &selection {
-        StatsSelection::Change(reference) => vec![store.resolve_change(reference)?],
-        StatsSelection::All => store.list_change_ids()?,
+        StatsSelection::Change(reference) => vec![ctx.load_state(&store, reference)?.0],
+        StatsSelection::All => store.readable_states()?.into_keys().collect(),
         StatsSelection::Tag(tag) => {
             let tag = tag.trim().to_string();
-            let mut selected = Vec::new();
-            for change_id in store.list_change_ids()? {
-                let state = store.state(&change_id)?;
-                if state.tags.contains(&tag) {
-                    selected.push(change_id);
-                }
-            }
-            selected
+            store
+                .readable_states()?
+                .into_values()
+                .filter(|state| state.tags.contains(&tag))
+                .map(|state| state.change_id)
+                .collect()
         }
     };
 
