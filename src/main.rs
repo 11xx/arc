@@ -752,7 +752,7 @@ enum Cmd {
         #[arg(long, value_name = "SHA256")]
         since: Option<String>,
     },
-    /// Import arc-bundle/6 or arc-bundle/5 into this repository's local store.
+    /// Import arc-bundle/7, /6, or /5 into this repository's local store.
     /// Events without model provenance retain that absence
     Import {
         /// Input file ('-' for stdin)

@@ -8,11 +8,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
-pub const BUNDLE_SCHEMA: &str = "arc-bundle/6";
+pub const BUNDLE_SCHEMA: &str = "arc-bundle/7";
 
 /// The bundle versions import accepts: the one export writes and the one
 /// before it, whose every bundle is also a valid bundle of the current shape.
-pub const READABLE_BUNDLE_SCHEMAS: &[&str] = &[BUNDLE_SCHEMA, "arc-bundle/5"];
+pub const READABLE_BUNDLE_SCHEMAS: &[&str] = &[BUNDLE_SCHEMA, "arc-bundle/6", "arc-bundle/5"];
 
 /// The prefix a delta bundle extends: the checksum of the exported history
 /// before its suffix, and how many events that prefix covers. A bundle's

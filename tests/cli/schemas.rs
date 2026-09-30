@@ -91,8 +91,8 @@ fn model_provenance_versions_are_registered() {
     let output = Command::new(env!("CARGO_BIN_EXE_arc")).output().unwrap();
     let guide = String::from_utf8_lossy(&output.stdout);
     for schema in [
-        "arc-state/3",
-        "arc-bundle/6",
+        "arc-state/4",
+        "arc-bundle/7",
         "arc-replica-event/3",
         "arc-replica-bundle/3",
         "journal-events/1",

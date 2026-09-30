@@ -725,7 +725,7 @@ fn ambiguous_codex_prefix_keeps_session_resolution_unknown() {
         .assert()
         .success();
     let exported: serde_json::Value = serde_json::from_slice(&fs::read(&bundle).unwrap()).unwrap();
-    assert_eq!(exported["schema"], "arc-bundle/6", "{exported}");
+    assert_eq!(exported["schema"], "arc-bundle/7", "{exported}");
     assert_eq!(exported["store_format"], 7, "{exported}");
 
     let recipient = Repo::new();
