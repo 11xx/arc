@@ -209,7 +209,8 @@ ORIENT INSIDE A PROJECT (start here, in this order)
   arc stats --provenance How often each provenance record was written where it
                          could have been — falsifications, journal links,
                          rejected alternatives, plan-linked briefs, cited
-                         facts — each count beside what it counts in.
+                         facts, changes with read records — each count beside
+                         what it counts in.
 
   Work waiting for this project lives in two places. The ledger holds changes
   already open; the journal holds everything not yet opened as one. An empty
