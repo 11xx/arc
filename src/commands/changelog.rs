@@ -414,17 +414,49 @@ fn wrap_words(line: &str, width: usize) -> Vec<String> {
     wrapped
 }
 
-/// The marker a line already carries: its indent plus a `-`, `*`, or `+`
-/// bullet. An author who wrote their own list chose the markers and the
-/// nesting; they did not choose the column the file wraps at, so the prefix
-/// survives and the text after it is still wrapped.
+/// The marker a line begins with: its indent, then a `-`, `*`, or `+`
+/// bullet, or a number of one to nine digits closed by `.` or `)`, then a
+/// space. An author who wrote their own list chose the markers, the numbers,
+/// and the nesting; they did not choose the column the file wraps at, so the
+/// prefix survives and the text after it is still wrapped.
 fn line_marker(line: &str) -> Option<&str> {
     let indent = line.len() - line.trim_start().len();
     let rest = &line[indent..];
-    ["- ", "* ", "+ "]
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let token = if ["- ", "* ", "+ "]
         .iter()
-        .any(|marker| rest.starts_with(marker))
-        .then(|| &line[..indent + 2])
+        .any(|bullet| rest.starts_with(bullet))
+    {
+        1
+    } else if (1..=9).contains(&digits)
+        && [". ", ") "]
+            .iter()
+            .any(|close| rest[digits..].starts_with(close))
+    {
+        digits + 1
+    } else {
+        return None;
+    };
+    Some(&line[..indent + token + 1])
+}
+
+/// Whether a line beginning with `marker` opens an item instead of joining
+/// the paragraph or item above it, whose own marker is `above`. A bullet
+/// always opens one. A number opens one only when it is 1 or the unit above
+/// is a numbered item; elsewhere, as CommonMark reads it, the line is a
+/// wrapped sentence that happens to begin with a number.
+fn interrupts(marker: &str, above: Option<&str>) -> bool {
+    match ordinal(marker) {
+        None => true,
+        Some(number) => number.trim_start_matches('0') == "1" || above.and_then(ordinal).is_some(),
+    }
+}
+
+/// The number of a numbered marker; a bullet has none.
+fn ordinal(marker: &str) -> Option<&str> {
+    let token = marker.trim();
+    let number = &token[..token.len() - 1];
+    (!number.is_empty()).then_some(number)
 }
 
 /// Recorded bodies are free text and predate any convention about list
@@ -581,7 +613,10 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
             blocks.push(Block::Fenced(vec![line]));
             continue;
         }
-        let marker = line_marker(line);
+        let marker = line_marker(line).filter(|marker| match blocks.last() {
+            Some(Block::Prose { marker: above, .. }) => interrupts(marker, *above),
+            _ => true,
+        });
         if marker.is_none() {
             if let Some(Block::Prose { words, .. }) = blocks.last_mut() {
                 words.extend(trimmed.split_whitespace());
@@ -892,10 +927,10 @@ impl Paragraph {
     }
 }
 
-/// Split prose into paragraphs. A blank line ends one; a heading or a bullet
-/// marker starts one, so an author's own list stays as many units as it has
-/// items. The unrecorded marker carries no prose and delimits rather than
-/// joins.
+/// Split prose into paragraphs. A blank line ends one; a heading, or a list
+/// marker that opens an item where the renderer would open one, starts one,
+/// so an author's own list stays as many units as it has items. The
+/// unrecorded marker carries no prose and delimits rather than joins.
 fn paragraphs(text: &str) -> Vec<Paragraph> {
     let mut paragraphs = Vec::new();
     let mut lines: Vec<String> = Vec::new();
@@ -915,7 +950,12 @@ fn paragraphs(text: &str) -> Vec<Paragraph> {
             flush(&mut lines);
             continue;
         }
-        if trimmed.starts_with('#') || line_marker(line).is_some() {
+        let opens_item = line_marker(line).is_some_and(|marker| {
+            lines
+                .first()
+                .is_none_or(|first| interrupts(marker, line_marker(first)))
+        });
+        if trimmed.starts_with('#') || opens_item {
             flush(&mut lines);
         }
         lines.push(line.to_owned());
@@ -1045,7 +1085,7 @@ fn write_changelog(
 
 #[cfg(test)]
 mod tests {
-    use super::{as_list_item, render_category, ProjectedEntry, RecordedProvenance};
+    use super::{as_list_item, paragraphs, render_category, ProjectedEntry, RecordedProvenance};
 
     #[test]
     fn bare_bodies_become_list_items_and_authored_markers_survive() {
@@ -1158,6 +1198,62 @@ mod tests {
         assert_eq!(
             as_list_item("Diff:\n```\nkeep  \n\n   \nthis\t\n```"),
             "- Diff:\n  ```\n  keep  \n\n     \n  this\t\n  ```"
+        );
+    }
+
+    #[test]
+    fn ordered_items_refill_one_per_number() {
+        assert_eq!(
+            as_list_item("Steps:\n1. First\n   continued\n2. Second"),
+            "- Steps:\n  1. First continued\n  2. Second"
+        );
+        // An authored ordered list keeps its numbers and gains no bullet.
+        assert_eq!(
+            as_list_item("1. First\n2. Second\n\n3) Third\n10) Tenth"),
+            "1. First\n2. Second\n\n3) Third\n10) Tenth"
+        );
+        let rendered = as_list_item(concat!(
+            "10. An ordered item whose text is long enough that the renderer ",
+            "has to wrap it somewhere."
+        ));
+        assert_eq!(
+            rendered,
+            concat!(
+                "10. An ordered item whose text is long enough that the renderer has to wrap\n",
+                "    it somewhere."
+            )
+        );
+        assert!(rendered.lines().all(|line| line.chars().count() <= 75));
+    }
+
+    #[test]
+    fn a_wrapped_line_that_begins_with_a_number_stays_in_its_paragraph() {
+        assert_eq!(
+            as_list_item("Shipped in\n2024. Then more.\nAnd 1.5 too."),
+            "- Shipped in 2024. Then more. And 1.5 too."
+        );
+        assert_eq!(
+            as_list_item("- an item\n  14. still the item"),
+            "- an item 14. still the item"
+        );
+    }
+
+    #[test]
+    fn paragraphs_split_where_the_renderer_opens_items() {
+        let prose = |text: &str| {
+            paragraphs(text)
+                .into_iter()
+                .map(|paragraph| paragraph.prose)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(prose("1. First\n2. Second"), ["First", "Second"]);
+        assert_eq!(
+            prose("- Steps:\n  1. First\n  2. Second"),
+            ["Steps:", "First", "Second"]
+        );
+        assert_eq!(
+            prose("- Shipped in\n  2024. Then more."),
+            ["Shipped in 2024. Then more."]
         );
     }
 
