@@ -82,8 +82,8 @@ pub struct ApprovalOutcome {
     /// The declared debt stands in for a verdict nobody recorded, or one only
     /// the self-approval rule rejects.
     pub waiver_satisfies_approval: bool,
-    /// The waiver is load-bearing: it rescued a self-approval or stood in for
-    /// a verdict that was never recorded.
+    /// The waiver is load-bearing: it satisfies the gate, and it rescued a
+    /// self-approval or stood in for a verdict that was never recorded.
     pub approval_waived_by_debt: bool,
     /// Why no approval counts, when a verdict or the verdict graph says why.
     pub approval_rejection_reason: Option<String>,
@@ -251,16 +251,6 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
         && !local_verdict_refuses_this_head
         && (external_approval_valid || local_approval_valid);
 
-    // True whenever the waiver is load-bearing: it rescued a self-approval, or
-    // it stood in for a verdict that was never recorded. Reporting it only in
-    // the first case would let the second merge look independently approved.
-    // An approval that stands without the waiver leaves it authorizing
-    // nothing.
-    let approval_waived_by_debt = waiver_authorized_approval
-        || (debt_waives_current_head
-            && !approval_valid
-            && !local_verdict_refuses_this_head
-            && !external_refuses_this_head);
     // A waiver stands in for a verdict nobody recorded. It does not stand over
     // one that refused: a reviewer who read this patchset and asked for changes
     // has said something a waiver has no business overriding, and letting the
@@ -273,6 +263,14 @@ pub fn decide(facts: &ApprovalFacts) -> ApprovalOutcome {
     // `arc query --debt` finds it.
     let waiver_satisfies_approval =
         debt_waives_current_head && !local_verdict_refuses_this_head && !external_refuses_this_head;
+    // True whenever the waiver is load-bearing: it rescued a self-approval, or
+    // it stood in for a verdict that was never recorded. Reporting it only in
+    // the first case would let the second merge look independently approved.
+    // An approval that stands without the waiver leaves it authorizing
+    // nothing, and a refusal at the head leaves nothing standing for it to
+    // have rescued.
+    let approval_waived_by_debt =
+        waiver_satisfies_approval && (waiver_authorized_approval || !approval_valid);
 
     let local_approval_rejection_reason = verdict.as_ref().and_then(|verdict| {
         if verdict.valid_for_current_head
@@ -722,6 +720,28 @@ mod tests {
         assert!(!outcome.approval_valid);
         assert!(!outcome.approval_waived_by_debt);
         assert!(!outcome.waiver_satisfies_approval);
+    }
+
+    #[test]
+    fn an_external_refusal_leaves_a_waived_self_approval_nothing_to_rescue() {
+        let (patchset, danger) = (patchset(), dangerous());
+        let approval = verdict(Verdict::Approved, "author");
+        let refusals = [external("ext-1", HEAD, ExternalVerdict::ChangesRequested)];
+        let outcome = decide(&ApprovalFacts {
+            latest_verdict: Some(&approval),
+            verdict_tips: 1,
+            external_verdicts: &refusals,
+            debt_waives_latest_patchset: true,
+            ..facts(&patchset, &danger)
+        });
+        assert!(outcome.external_refuses_this_head);
+        assert!(!outcome.approval_valid);
+        assert!(!outcome.approval_waived_by_debt);
+        assert!(!outcome.waiver_satisfies_approval);
+        assert_eq!(
+            outcome.approval_rejection_reason.as_deref(),
+            Some("external verdict requests changes: receiver at 11111111 (reference ref-1)")
+        );
     }
 
     #[test]
