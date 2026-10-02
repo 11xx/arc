@@ -170,6 +170,24 @@ struct BodyOpts {
     body_file: Option<String>,
 }
 
+/// Who a patchset's work belongs to, declared as it is recorded.
+#[derive(clap::Args)]
+struct AttributionOpts {
+    /// Explicitly set the contributors for this patchset. Recording a
+    /// patchset while another actor holds a live claim on the change requires
+    /// this or --solo
+    #[arg(
+        long = "contributors",
+        value_name = "ACTOR[,ACTOR...]",
+        value_delimiter = ',',
+        conflicts_with = "solo"
+    )]
+    contributors: Option<Vec<String>>,
+    /// Record the invoking actor as the sole contributor
+    #[arg(long, conflicts_with = "contributors")]
+    solo: bool,
+}
+
 /// Cross-links a patchset records to where its work was framed.
 #[derive(clap::Args)]
 struct LinkOpts {
@@ -986,17 +1004,8 @@ enum Cmd {
         /// Run every gate declared for the change profile
         #[arg(long)]
         all: bool,
-        /// Explicitly set the contributors for this patchset
-        #[arg(
-            long = "contributors",
-            value_name = "ACTOR[,ACTOR...]",
-            value_delimiter = ',',
-            conflicts_with = "solo"
-        )]
-        contributors: Option<Vec<String>>,
-        /// Record the invoking actor as the sole contributor
-        #[arg(long, conflicts_with = "contributors")]
-        solo: bool,
+        #[command(flatten)]
+        attribution: AttributionOpts,
         /// Amend one patchset's contributors before any verdict exists
         #[arg(
             long,
@@ -1288,6 +1297,8 @@ enum Cmd {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
+        #[command(flatten)]
+        attribution: AttributionOpts,
         #[command(flatten)]
         links: LinkOpts,
     },
@@ -3520,8 +3531,7 @@ fn run(cli: Cli) -> Result<i32> {
             verify,
             gate,
             all,
-            contributors,
-            solo,
+            attribution: AttributionOpts { contributors, solo },
             amend,
             links,
         } => {
@@ -3744,9 +3754,20 @@ fn run(cli: Cli) -> Result<i32> {
                 },
             )
         }
-        Cmd::Done { change, links } => {
+        Cmd::Done {
+            change,
+            attribution,
+            links,
+        } => {
             let change = infer(change.as_deref())?;
-            commands::done(&ctx, &change, links.journal_ref, links.thread)
+            commands::done(
+                &ctx,
+                &change,
+                attribution.contributors,
+                attribution.solo,
+                links.journal_ref,
+                links.thread,
+            )
         }
         Cmd::Rebase { change, verify } => {
             let change = infer(change.as_deref())?;

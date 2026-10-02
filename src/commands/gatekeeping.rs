@@ -1208,6 +1208,8 @@ pub fn snapshot_with_verify(
 pub fn done(
     ctx: &Ctx,
     reference: &str,
+    contributors: Option<Vec<String>>,
+    solo: bool,
     journal_refs: Vec<String>,
     thread: Option<String>,
 ) -> Result<i32> {
@@ -1222,8 +1224,8 @@ pub fn done(
         reference,
         None,
         None,
-        None,
-        false,
+        contributors,
+        solo,
         journal_refs,
         thread,
     )?;
