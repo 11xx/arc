@@ -2365,7 +2365,7 @@ fn queue_step(ctx: &Ctx, store: &Store, change_id: &str, cleanup: bool) -> Resul
     // Only where nothing has answered for the content that would ship: a
     // fully green change owes no run, and recording one would be evidence
     // about a question already settled.
-    if report.blockers.iter().any(|blocker| {
+    if report.blockers().iter().any(|blocker| {
         matches!(
             blocker,
             status::Blocker::GatesNotGreen | status::Blocker::MergedTreeUnevaluated
@@ -2392,7 +2392,7 @@ fn queue_step(ctx: &Ctx, store: &Store, change_id: &str, cleanup: bool) -> Resul
     }
 
     let st = store.state(change_id)?;
-    if !report.integrate_ready {
+    if !report.integrate_ready() {
         eprint!("{}", render::blocker_explanation(&st, &report));
         return Ok(QueueStep::Stopped {
             code: status::check_exit_code(&report),
@@ -3124,7 +3124,7 @@ fn integration_facts(
     let confirmation = ctx
         .report(store, st)
         .map(|confirmation| integration::Confirmation {
-            ready: confirmation.integrate_ready,
+            ready: confirmation.integrate_ready(),
             basis: authorization_basis(ctx, store, st, &confirmation, &patchset_id),
         });
     let checkout = target_checkout(ctx, st, target);
@@ -3166,7 +3166,7 @@ fn integration_facts(
         approval: integration::approval(st, report, &patchset_id),
         declarations: consumed_declarations(ctx, st).ok(),
         approved,
-        ready: report.integrate_ready,
+        ready: report.integrate_ready(),
         basis,
         confirmation,
         contribution: contribution_policy(ctx, st),
@@ -3229,7 +3229,7 @@ fn integrate_dry_run(
     ctx.ensure_target_declares_actor(st)?;
     if let Some(contribution) = contribution_policy(ctx, st)? {
         let report = ctx.report(store, st)?;
-        if !report.integrate_ready {
+        if !report.integrate_ready() {
             eprint!("{}", render::blocker_explanation(st, &report));
             println!(
                 "dry-run: would not record {} ready to send ({})",
@@ -3254,7 +3254,7 @@ fn integrate_dry_run(
     let checkout = target_checkout(ctx, st, target)?;
     checkout_tracked_dirt(&checkout.path)?;
     let report = ctx.report(store, st)?;
-    if !report.integrate_ready {
+    if !report.integrate_ready() {
         eprint!("{}", render::blocker_explanation(st, &report));
         println!(
             "dry-run: would not integrate {} ({})",
@@ -3578,10 +3578,10 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
         let output = CheckOutput {
             schema: "arc-check/3",
             change_id: &change_id,
-            ready: report.integrate_ready,
+            ready: report.integrate_ready(),
             exit_code: code,
             blockers: report
-                .blockers
+                .blockers()
                 .iter()
                 .map(|blocker| CheckBlocker {
                     blocker: blocker.as_str(),
@@ -3595,7 +3595,7 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
     }
     if explain {
         print!("{}", render::check_explanation(&st, &report));
-    } else if report.integrate_ready {
+    } else if report.integrate_ready() {
         // A profile with no declared gate is ready, but "all integration
         // gates pass" would claim an evaluation nobody performed.
         if report.gates.is_empty() {

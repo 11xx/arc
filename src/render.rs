@@ -1066,10 +1066,10 @@ pub fn markdown(
     }
 
     let _ = writeln!(w, "\n## Integration\n");
-    if report.integrate_ready {
+    if report.integrate_ready() {
         let _ = writeln!(w, "- ready to integrate");
     } else {
-        for b in &report.blockers {
+        for b in report.blockers() {
             let _ = writeln!(w, "- blocker: {b:?}");
         }
     }
@@ -1119,7 +1119,7 @@ pub fn advisories(report: &StatusReport) {
 pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String {
     let mut out = String::new();
     let titles = report
-        .blockers
+        .blockers()
         .iter()
         .map(|blocker| blocker_title(*blocker))
         .collect::<Vec<_>>();
@@ -1135,7 +1135,7 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
     }
     let _ = writeln!(out);
 
-    for (index, blocker) in report.blockers.iter().enumerate() {
+    for (index, blocker) in report.blockers().iter().enumerate() {
         let _ = writeln!(out, "Blocker {}: {}", index + 1, blocker_title(*blocker));
         match blocker {
             Blocker::Closed => {
@@ -2181,7 +2181,7 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
     }
     let _ = writeln!(out);
 
-    let blocked = |blocker: Blocker| report.blockers.contains(&blocker);
+    let blocked = |blocker: Blocker| report.blockers().contains(&blocker);
     let condition = |out: &mut String, blocker: Blocker, label: &str, detail: String| {
         if blocked(blocker) {
             let _ = writeln!(out, "  [ ] {label}");
@@ -2368,12 +2368,12 @@ pub fn check_explanation(state: &ChangeState, report: &StatusReport) -> String {
         out.push_str(&notes);
     }
     let _ = writeln!(out);
-    if report.integrate_ready {
+    if report.integrate_ready() {
         let _ = writeln!(out, "Ready to integrate (exit 0)");
     } else {
         let code = crate::status::check_exit_code(report);
         let first = report
-            .blockers
+            .blockers()
             .first()
             .map(|blocker| blocker.as_str())
             .unwrap_or("blocked");
