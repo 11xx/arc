@@ -1427,6 +1427,27 @@ pub fn divergence(cwd: &Path, target: &str, branch: &str) -> Result<(usize, usiz
     Ok((behind, ahead))
 }
 
+/// The upstream a local branch is configured to track (`branch.<name>.remote`
+/// and `branch.<name>.merge`), as `(short name, full ref name)`. None when it
+/// tracks nothing. Configuration only: the named ref need not exist.
+pub fn branch_upstream(cwd: &Path, branch: &str) -> Result<Option<(String, String)>> {
+    let out = git(
+        cwd,
+        &[
+            "for-each-ref",
+            "--format=%(upstream:short)%00%(upstream)",
+            &format!("refs/heads/{branch}"),
+        ],
+    )?;
+    let mut fields = out.lines().next().unwrap_or_default().split('\0');
+    Ok(match (fields.next(), fields.next()) {
+        (Some(short), Some(full)) if !full.is_empty() => {
+            Some((short.to_string(), full.to_string()))
+        }
+        _ => None,
+    })
+}
+
 /// Modified tracked files and untracked files in a worktree, by count.
 /// `ls-files` reads the index's stat data and lists untracked paths; it does
 /// not hash file contents, so a worktree holding a large dirty file costs
