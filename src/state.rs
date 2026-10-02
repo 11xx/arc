@@ -291,7 +291,13 @@ pub struct FindingState {
     /// kept the provenance, which is unknown rather than declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_source: Option<ActorSource>,
+    /// Dispositions recorded while the change is open. On an integrated
+    /// change they are the finding state it shipped with.
     pub dispositions: Vec<DispositionEntry>,
+    /// Dispositions recorded after integration, for a finding open when the
+    /// change shipped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after_integration: Vec<DispositionEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replies: Vec<ReplyEntry>,
 }
@@ -328,6 +334,21 @@ impl FindingState {
             Some(tips[0].status)
         } else {
             None
+        }
+    }
+
+    /// The tips among the dispositions recorded after integration.
+    pub fn after_integration_tips(&self) -> Vec<&DispositionEntry> {
+        observed_tips(&self.after_integration)
+    }
+
+    /// How the finding stands after integration, as readers print it: the
+    /// single tip's status, `contested` for several, `None` for none.
+    pub fn after_integration_status(&self) -> Option<String> {
+        match self.after_integration_tips().as_slice() {
+            [] => None,
+            [tip] => Some(format!("{:?}", tip.status).to_lowercase()),
+            _ => Some("contested".into()),
         }
     }
 
@@ -1952,6 +1973,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                         on_behalf_of: ev.on_behalf_of.clone(),
                         actor_source: ev.actor_source,
                         dispositions: Vec::new(),
+                        after_integration: Vec::new(),
                         replies: Vec::new(),
                     },
                 );
@@ -2010,6 +2032,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                             on_behalf_of: ev.on_behalf_of.clone(),
                             actor_source: ev.actor_source,
                             dispositions: Vec::new(),
+                            after_integration: Vec::new(),
                             replies: Vec::new(),
                         },
                     );
@@ -2163,6 +2186,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                             on_behalf_of: ev.on_behalf_of.clone(),
                             actor_source: ev.actor_source,
                             dispositions: Vec::new(),
+                            after_integration: Vec::new(),
                             replies: Vec::new(),
                         },
                     );
@@ -2203,6 +2227,7 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                         on_behalf_of: ev.on_behalf_of.clone(),
                         actor_source: ev.actor_source,
                         dispositions: Vec::new(),
+                        after_integration: Vec::new(),
                         replies: Vec::new(),
                     },
                 );
@@ -2222,6 +2247,30 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                     );
                 };
                 finding.dispositions.push(DispositionEntry {
+                    event_id: ev.event_id.clone(),
+                    status: *status,
+                    commit: commit.clone(),
+                    evidence: evidence.clone(),
+                    evidence_event_id: evidence_event_id.clone(),
+                    actor: ev.actor.clone(),
+                    supersedes: supersedes.clone(),
+                });
+            }
+            Payload::PostIntegrationDispositionRecorded {
+                finding_id,
+                status,
+                commit,
+                evidence,
+                evidence_event_id,
+                supersedes,
+            } => {
+                let Some(finding) = state.findings.get_mut(finding_id) else {
+                    bail!(
+                        "post-integration disposition {} references unknown finding {finding_id:?}",
+                        ev.event_id
+                    );
+                };
+                finding.after_integration.push(DispositionEntry {
                     event_id: ev.event_id.clone(),
                     status: *status,
                     commit: commit.clone(),

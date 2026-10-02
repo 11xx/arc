@@ -1166,7 +1166,15 @@ enum Cmd {
         #[command(flatten)]
         body: BodyOpts,
     },
-    /// Record a shipped or audit finding disposition (supersedes current tips automatically)
+    /// Record a finding disposition (supersedes current tips automatically)
+    ///
+    /// A review finding takes its disposition while the change is open. On an
+    /// integrated change, a review finding left open when the change shipped
+    /// takes a post-integration disposition, recorded beside the finding
+    /// state the change shipped with, which stays as it shipped; readers show
+    /// both. A finding resolved, accepted-risk, or obsolete at integration
+    /// takes none. An audit finding takes its disposition after integration.
+    /// A disposition is not a verdict and discharges no review debt.
     #[command(allow_missing_positional = true)]
     Resolve {
         /// Change to act on. Omitted, it is inferred from the current branch,
@@ -1174,9 +1182,12 @@ enum Cmd {
         change: Option<String>,
         /// The finding being disposed of
         finding: String,
+        /// How the finding stands. resolved, accepted-risk, and obsolete
+        /// release a blocking finding
         #[arg(long, value_enum)]
         status: DispositionStatus,
-        /// Fixing commit, when one exists
+        /// Fixing commit, when one exists. After integration it may be a
+        /// commit another change landed
         #[arg(long)]
         commit: Option<String>,
         /// What supports the disposition: a probe, a command, or the reasoning

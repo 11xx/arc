@@ -859,7 +859,7 @@ fn ordinary_refusing_verdicts_keep_their_action_out_of_debt_guidance() {
             "{status}"
         );
         let review = json_stdout(repo.arc(&repo.root).args(["review", slug, "--json"]));
-        assert_eq!(review["schema"], "arc-review/4");
+        assert_eq!(review["schema"], "arc-review/5");
         assert!(review.get("review_options").is_none(), "{review}");
         repo.arc(&repo.root).args(["check", slug]).assert().code(3);
     }
@@ -1160,12 +1160,128 @@ fn audit_findings_are_listed_separately_and_pointed_at() {
 }
 
 #[test]
-fn audit_dispositions_do_not_reopen_shipped_findings_after_integration() {
+fn a_finding_left_open_at_ship_takes_a_disposition_after_integration() {
     let repo = repo_forbidding_self_approval();
-    let worktree = self_approved_change(&repo, "shipped-finding");
+    let finding_id = finding_left_open_at_ship(&repo, "shipped-finding");
+
+    repo.arc(&repo.root)
+        .args([
+            "resolve",
+            "shipped-finding",
+            &finding_id,
+            "--status",
+            "resolved",
+            "--commit",
+            "HEAD",
+        ])
+        .assert()
+        .success();
+
+    // What shipped stays as it shipped; the later disposition sits beside it.
+    let json =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["findings", "shipped-finding", "--format", "json"]),
+        );
+    assert_eq!(json["schema"], "arc-findings/3");
+    let finding = &json["findings"][0];
+    assert_eq!(finding["dispositions"].as_array().unwrap().len(), 0);
+    assert_eq!(finding["after_integration"][0]["status"], "resolved");
+    assert!(finding["after_integration"][0]["commit"].is_string());
+
+    let text = stdout(repo.arc(&repo.root).args(["findings", "shipped-finding"]));
+    assert!(
+        text.contains("open at ship; resolved after integration"),
+        "{text}"
+    );
+    let review = stdout(repo.arc(&repo.root).args(["review", "shipped-finding"]));
+    assert!(
+        review.contains("open at ship; resolved after integration"),
+        "{review}"
+    );
+    let log = stdout(repo.arc(&repo.root).args(["log", "shipped-finding"]));
+    assert!(
+        log.contains("post-integration-disposition-recorded"),
+        "{log}"
+    );
+}
+
+#[test]
+fn a_post_integration_disposition_discharges_no_debt() {
+    let repo = repo_forbidding_self_approval();
+    let finding_id = finding_left_open_at_ship(&repo, "debt-stays");
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["resolve", "debt-stays", &finding_id, "--status", "obsolete"])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "debt-stays", "--json"]),
+    );
+    assert_eq!(status["debt_outstanding"], true);
+}
+
+#[test]
+fn open_only_events_still_refuse_after_integration() {
+    let repo = repo_forbidding_self_approval();
+    finding_left_open_at_ship(&repo, "frozen");
+
+    repo.arc(&repo.root)
+        .args(["finding", "frozen", "--summary", "raised too late"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("event is open-only"));
+}
+
+#[test]
+fn a_finding_released_at_ship_takes_no_disposition_after_integration() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "released");
     let output = stdout(repo.arc(&worktree).args([
         "finding",
-        "shipped-finding",
+        "released",
+        "--summary",
+        "accepted before integration",
+        "--severity",
+        "minor",
+    ]));
+    let finding_id = output
+        .lines()
+        .find_map(|line| line.strip_prefix("finding: "))
+        .unwrap()
+        .to_string();
+    repo.arc(&repo.root)
+        .args([
+            "resolve",
+            "released",
+            &finding_id,
+            "--status",
+            "accepted-risk",
+        ])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["integrate", "released", "--debt", "quota"])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .args(["resolve", "released", &finding_id, "--status", "resolved"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("was accepted-risk when change"));
+}
+
+/// A minor finding raised before integration and still open when the change
+/// shipped on a declared debt.
+fn finding_left_open_at_ship(repo: &Repo, slug: &str) -> String {
+    let worktree = self_approved_change(repo, slug);
+    let output = stdout(repo.arc(&worktree).args([
+        "finding",
+        slug,
         "--summary",
         "known before integration",
         "--severity",
@@ -1174,23 +1290,13 @@ fn audit_dispositions_do_not_reopen_shipped_findings_after_integration() {
     let finding_id = output
         .lines()
         .find_map(|line| line.strip_prefix("finding: "))
-        .unwrap();
+        .unwrap()
+        .to_string();
     repo.arc(&repo.root)
-        .args(["integrate", "shipped-finding", "--debt", "quota"])
+        .args(["integrate", slug, "--debt", "quota"])
         .assert()
         .success();
-
-    repo.arc(&repo.root)
-        .args([
-            "resolve",
-            "shipped-finding",
-            finding_id,
-            "--status",
-            "resolved",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("event is open-only"));
+    finding_id
 }
 
 /// Without this the mechanism is decorative: a change ships on a
@@ -3687,7 +3793,7 @@ fn review_options_route_the_lead_without_writing() {
         "{status}"
     );
     let review = json_stdout(repo.arc(&repo.root).args(["review", "ordinary", "--json"]));
-    assert_eq!(review["schema"], "arc-review/4");
+    assert_eq!(review["schema"], "arc-review/5");
     assert_eq!(
         review["review_options"], status["review_options"],
         "{review}"

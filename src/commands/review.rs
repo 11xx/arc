@@ -68,7 +68,7 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
     let (_, state) = ctx.load_state(&store, reference)?;
     let report = ctx.report(&store, &state)?;
     let view = ReviewView {
-        schema: "arc-review/4",
+        schema: "arc-review/5",
         change_id: &state.change_id,
         verdicts: state
             .verdicts
@@ -192,8 +192,14 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
         println!("No open findings.");
     } else {
         for finding in &view.open_findings {
+            let after = state
+                .findings
+                .get(&finding.id)
+                .and_then(FindingState::after_integration_status)
+                .map(|after| format!(" — open at ship; {after} after integration"))
+                .unwrap_or_default();
             println!(
-                "- `{}` [{}{:?}] {}",
+                "- `{}` [{}{:?}] {}{after}",
                 finding.id,
                 if finding.blocking { "blocking/" } else { "" },
                 finding.severity,
@@ -763,6 +769,7 @@ fn validate_citations(store: &Store, change_id: &str, cites: Vec<String>) -> Res
                 | Payload::AuditFindingAdded { .. }
                 | Payload::DispositionRecorded { .. }
                 | Payload::AuditDispositionRecorded { .. }
+                | Payload::PostIntegrationDispositionRecorded { .. }
                 | Payload::ContextKept { .. }
         ) {
             let actual = crate::render::event_kind_summary(&event.payload).0;
@@ -922,9 +929,40 @@ pub fn resolve(
     } else {
         &st.findings[&finding_id]
     };
-    let supersedes: Vec<String> = selected.tips().iter().map(|t| t.event_id.clone()).collect();
+    let integrated = st
+        .closure
+        .as_ref()
+        .is_some_and(|closure| closure.outcome == Closure::Integrated);
+    let shipped_finding = integrated && !audit;
+    if let Some(status) = selected
+        .effective_status()
+        .filter(|status| shipped_finding && status.releases_block())
+    {
+        let status = status
+            .to_possible_value()
+            .expect("every disposition status is a CLI value");
+        bail!(
+            "finding {finding_id} was {} when change {change_id} shipped; only a finding left open at integration takes a disposition after it",
+            status.get_name()
+        );
+    }
+    let tips = if shipped_finding {
+        selected.after_integration_tips()
+    } else {
+        selected.tips()
+    };
+    let supersedes: Vec<String> = tips.iter().map(|t| t.event_id.clone()).collect();
     let payload = if audit {
         Payload::AuditDispositionRecorded {
+            finding_id: finding_id.clone(),
+            status: disposition,
+            commit,
+            evidence,
+            evidence_event_id,
+            supersedes,
+        }
+    } else if shipped_finding {
+        Payload::PostIntegrationDispositionRecorded {
             finding_id: finding_id.clone(),
             status: disposition,
             commit,

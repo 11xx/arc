@@ -603,6 +603,9 @@ impl Store {
             | Payload::ContextDeclared { .. }
             | Payload::ContextCaptureReported { .. } => Some(7),
             Payload::HistoryRewriteWithdrawn { .. } => Some(7),
+            // An older reader skips a post-integration disposition and reports
+            // the finding with no disposition after it shipped.
+            Payload::PostIntegrationDispositionRecorded { .. } => Some(7),
             // An older reader projects a record that a change needs no entry
             // as an entry with an empty category and body.
             Payload::ChangelogRecorded {
@@ -638,6 +641,7 @@ impl Store {
             | Some("context-declared")
             | Some("context-capture-reported") => Some(7),
             Some("history-rewrite-withdrawn") => Some(7),
+            Some("post-integration-disposition-recorded") => Some(7),
             Some("changelog-recorded")
                 if value
                     .and_then(|value| value.get("no_entry_reason"))

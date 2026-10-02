@@ -29,10 +29,14 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool)
     match format {
         FindingsFormat::Text => {
             for finding in selected.values() {
-                let disposition = finding
+                let shipped = finding
                     .effective_status()
                     .map(|status| format!("{status:?}").to_lowercase())
                     .unwrap_or_else(|| "open".into());
+                let disposition = match finding.after_integration_status() {
+                    Some(after) => format!("{shipped} at ship; {after} after integration"),
+                    None => shipped,
+                };
                 println!(
                     "{} [{}{:?}] {} — {disposition}",
                     finding.id,
@@ -45,6 +49,17 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool)
                 }
                 if let Some(anchor) = &finding.anchor {
                     println!("  at: {}", anchor_location(anchor));
+                }
+                for tip in finding.after_integration_tips() {
+                    println!(
+                        "  after integration: {} by {}{}",
+                        format!("{:?}", tip.status).to_lowercase(),
+                        tip.actor,
+                        tip.commit
+                            .as_deref()
+                            .map(|commit| format!(" (commit {commit})"))
+                            .unwrap_or_default()
+                    );
                 }
                 // The body is what a reader needs to act; without it the only
                 // way to learn what a finding says is to parse raw events. Its
@@ -93,7 +108,7 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool)
             println!(
                 "{}",
                 serde_json::to_string_pretty(&FindingsJson {
-                    schema: "arc-findings/2",
+                    schema: "arc-findings/3",
                     change_id: &state.change_id,
                     audit,
                     findings: selected.values().collect(),
@@ -104,7 +119,10 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool)
         FindingsFormat::Sarif => {
             let mut results = selected
                 .values()
-                .filter(|finding| finding.effective_status().is_none())
+                .filter(|finding| {
+                    finding.effective_status().is_none()
+                        && finding.after_integration_status().is_none()
+                })
                 .map(|finding| {
                     // SARIF exists to carry file, line, and message. The
                     // summary is a label; the body is the message.
