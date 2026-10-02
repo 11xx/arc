@@ -1207,6 +1207,45 @@ fn a_finding_left_open_at_ship_takes_a_disposition_after_integration() {
 }
 
 #[test]
+fn sarif_hides_a_shipped_finding_only_once_a_later_disposition_releases_it() {
+    let repo = repo_forbidding_self_approval();
+    let finding_id = finding_left_open_at_ship(&repo, "sarif-later");
+    let reported = |repo: &Repo| -> bool {
+        let sarif = json_stdout(repo.arc(&repo.root).args([
+            "findings",
+            "sarif-later",
+            "--format",
+            "sarif",
+        ]));
+        sarif["runs"][0]["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|result| result["ruleId"] == finding_id.as_str())
+    };
+    assert!(reported(&repo));
+
+    for status in ["still-open", "disputed"] {
+        repo.arc(&repo.root)
+            .args(["resolve", "sarif-later", &finding_id, "--status", status])
+            .assert()
+            .success();
+        assert!(reported(&repo), "a later {status} still leaves it open");
+    }
+    repo.arc(&repo.root)
+        .args([
+            "resolve",
+            "sarif-later",
+            &finding_id,
+            "--status",
+            "resolved",
+        ])
+        .assert()
+        .success();
+    assert!(!reported(&repo));
+}
+
+#[test]
 fn a_post_integration_disposition_discharges_no_debt() {
     let repo = repo_forbidding_self_approval();
     let finding_id = finding_left_open_at_ship(&repo, "debt-stays");
