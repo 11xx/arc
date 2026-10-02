@@ -1329,14 +1329,22 @@ RULES THAT CHANGE WHAT YOU DO
     reason, so a live claim always means live work.
   - An executor that hangs never reaches its own release. Before leaving a
     delegated run unattended, arm `arc watch <change> --until stalled`; silence
-    is unknown, not healthy. `arc rescue <change> --take` recovers it, and
-    `arc rescue <change> --transcript` reads the exact claimed session's latest
-    operator turns through the linked tapes library, taking the newest 4 MiB of
-    a recording file as its window. It names the reader and the read bound, or
-    the cause and reason when lookup or reading cannot finish.
-  - `arc watch <file.md> --until stalled` arms the same wait over an artifact
-    claim, and `arc rescue <file.md> [--take]` reports where the work stopped
-    and takes it over. An artifact answers only `stalled`; the rest of the
+    is unknown, not healthy. `stalled` is a stage clock, not an activity
+    check: it holds once a live claim has sat in one stage longer than that
+    stage's budget, counted from its last `arc stage`, or from the claim while
+    it is still at `launch`. Only `arc stage`, re-reporting the current stage
+    included, or a snapshot under the claim restarts the clock; output, logs,
+    and claim renewals do not, so an executor that works without reporting a
+    stage reads as stalled exactly like a hung one. The reached line names the
+    stage, its age, and its budget. `arc rescue <change> --take` recovers it,
+    and `arc rescue <change> --transcript` reads the exact claimed session's
+    latest operator turns through the linked tapes library, taking the newest
+    4 MiB of a recording file as its window. It names the reader and the read
+    bound, or the cause and reason when lookup or reading cannot finish.
+  - `arc watch <file.md> --until stalled` arms the wait over an artifact
+    claim, which has no stages and stalls when its lease runs out, and
+    `arc rescue <file.md> [--take]` reports where the work stopped and takes
+    it over. An artifact answers only `stalled`; the rest of the
     vocabulary asks about patchsets and verdicts.
   - `arc watch <change> --until` accepts `snapshot`, `stalled`, `reviewed`,
     `approved`, `gates-green`, `ready`, `blocked`, `brief-recorded`,
