@@ -553,7 +553,11 @@ fn stale_claims_are_time_derived_and_watch_until_stalled_reaches() {
         ],
     );
     assert!(wait_for_exit(&mut watcher).success());
-    assert_eq!(child_stdout(&mut watcher), "reached: stalled\n");
+    let reached = child_stdout(&mut watcher);
+    assert!(
+        reached.starts_with("reached: stalled (stage launch for "),
+        "{reached:?}"
+    );
     assert!(
         started.elapsed() >= Duration::from_secs(1),
         "a fresh claim must become stalled through wall-clock passage"
@@ -584,7 +588,11 @@ fn stale_claims_are_time_derived_and_watch_until_stalled_reaches() {
         ])
         .assert()
         .success()
-        .stdout("reached: stalled\n");
+        .stdout(
+            predicates::str::starts_with("reached: stalled (stage launch for ").and(
+                predicates::str::ends_with(", budget 1s; reset by arc stage or arc snapshot)\n"),
+            ),
+        );
     repo.arc(&repo.root)
         .env("ARC_SESSION", "lead-recovery")
         .args(["release-claim", "stale-launch"])
