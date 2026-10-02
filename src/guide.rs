@@ -664,11 +664,12 @@ RUN A CHANGE
 
   Release copy is recorded per change and rendered at release; arc imposes
   no file convention. While an open change has no changelog record, `arc
-  status`, `arc check`, and `arc integrate` advise one under the code
-  `no-changelog-entry`, never as a blocker. Recording `--none --reason` that
-  the change needs no entry answers the advice and projects nothing; the
-  latest record wins. The built-in renderer replaces the `## [Unreleased]`
-  block of the target `.arc/changelog.toml` names, `CHANGELOG.md` by default.
+  status` and `arc check` advise one under the code `no-changelog-entry`,
+  never as a blocker, and `arc integrate` prints that advice once it has
+  merged such a change. Recording `--none --reason` that the change needs
+  no entry answers the advice and projects nothing; the latest record wins.
+  The built-in renderer replaces the `## [Unreleased]` block of the target
+  `.arc/changelog.toml` names, `CHANGELOG.md` by default.
   A project whose file follows another convention selects `renderer =
   "command"` with a `renderer_command` argv. That command runs from the
   repository root without a shell, with the authority of whoever runs `arc
