@@ -13708,6 +13708,120 @@ fn a_write_naming_another_journals_filename_names_the_owning_journal() {
     assert!(!stderr.contains("another project's journal"), "{stderr}");
 }
 
+/// Storage moves and cold appends naming a bare filename that only another
+/// project's journal holds, in its hot directory or its cold archive, name
+/// that journal and its project; a filename no journal holds keeps the plain
+/// refusal.
+#[test]
+fn storage_writes_naming_another_journals_filename_name_the_owning_journal() {
+    let owner = Repo::new();
+    let hot_note = filed_artifact(&owner, "note", "hot-note", "hot\n");
+    let cold_note = filed_artifact(&owner, "note", "cold-note", "cold\n");
+    let cold_talk = discussion_fixture(&owner, "cold-talk");
+    owner
+        .arc(&owner.root)
+        .args(["journal", "archive", &cold_note])
+        .assert()
+        .success();
+    owner
+        .arc(&owner.root)
+        .args([
+            "journal",
+            "archive",
+            &cold_talk,
+            "--unresolved",
+            "--note",
+            "shelved",
+        ])
+        .assert()
+        .success();
+    let owner_journal = fs::canonicalize(journal_dir(&owner)).unwrap();
+    let owner_cold = PathBuf::from(format!("{}-archive", owner_journal.display()));
+    assert!(owner_journal.join(&hot_note).is_file());
+    assert!(owner_cold.join(&cold_note).is_file());
+    assert!(owner_cold.join(&cold_talk).is_file());
+    let owner_root = fs::canonicalize(&owner.root).unwrap();
+    let promoter = sibling_project(&owner, "promoter");
+    owner
+        .arc(&promoter)
+        .args(["journal", "note", "own-note", "--body-file", "-"])
+        .write_stdin("own\n")
+        .assert()
+        .success();
+    let before = fs::read_to_string(owner_journal.join("events.jsonl")).unwrap();
+    let cases: [(&str, Vec<&str>); 6] = [
+        (&hot_note, vec!["journal", "archive", &hot_note]),
+        (&hot_note, vec!["journal", "unarchive", &hot_note]),
+        (&cold_note, vec!["journal", "archive", &cold_note]),
+        (&cold_note, vec!["journal", "unarchive", &cold_note]),
+        (
+            &cold_talk,
+            vec![
+                "journal",
+                "position",
+                &cold_talk,
+                "--archived",
+                "--body-file",
+                "-",
+            ],
+        ),
+        (
+            &hot_note,
+            vec![
+                "journal",
+                "reattribute",
+                &hot_note,
+                "--set-actor",
+                "someone",
+            ],
+        ),
+    ];
+    for (file, args) in cases {
+        let refusal = owner
+            .arc(&promoter)
+            .args(&args)
+            .write_stdin("Position: for\nArgument\n")
+            .assert()
+            .failure();
+        let stderr = String::from_utf8_lossy(&refusal.get_output().stderr).to_string();
+        assert!(
+            stderr.contains(&format!("no such artifact {file} in ")),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!(
+                "another project's journal holds it: {} (project {}); a journal write runs from the project that owns it, with the bare filename",
+                owner_journal.display(),
+                owner_root.display()
+            )),
+            "{args:?}: {stderr}"
+        );
+    }
+    let after = fs::read_to_string(owner_journal.join("events.jsonl")).unwrap();
+    assert_eq!(before, after);
+    assert!(owner_journal.join(&hot_note).is_file());
+    assert!(owner_cold.join(&cold_note).is_file());
+    assert!(owner_cold.join(&cold_talk).is_file());
+
+    let nowhere = "20990101T000000Z-nowhere-note.md";
+    for verb in ["archive", "unarchive"] {
+        let refusal = owner
+            .arc(&promoter)
+            .args(["journal", verb, nowhere])
+            .assert()
+            .failure();
+        let stderr = String::from_utf8_lossy(&refusal.get_output().stderr).to_string();
+        assert!(
+            stderr.contains(&format!("no such artifact {nowhere} in ")),
+            "{verb}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("another project's journal"),
+            "{verb}: {stderr}"
+        );
+    }
+}
+
 #[test]
 fn cross_project_reference_to_a_missing_artifact_is_refused() {
     let owner = Repo::new();
