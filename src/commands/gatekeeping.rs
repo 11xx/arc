@@ -435,27 +435,23 @@ pub fn verify(ctx: &Ctx, reference: &str, args: VerifyArgs) -> Result<i32> {
             &run_ctx.cwd,
             required.iter().map(|(name, gate)| (name.as_str(), *gate)),
         )?;
+        let legacy_trees = status::legacy_evidence_trees(&st, &run_ctx.cwd);
+        let resolve_tree = |revision: &str| legacy_trees.get(revision).cloned();
         let mut reused = Vec::new();
         let mut to_run = Vec::new();
         for (name, gate) in required {
-            // Reuse is reuse of a *run*, so the recorded command must be the
-            // one declared now. Skipping on a name match would report a gate
-            // as satisfied by a run of something else. Evidence from another
-            // environment is not reuse either: it ran, but not here.
             let reusable = skip_green
                 .then(|| {
-                    st.gate_evidence_at_matching(name, &head, |evidence| {
-                        evidence.recorded_tree() == Some(tree.as_str())
-                            && status::matches_declaration(evidence, gate)
-                            && status::matches_environment(
-                                evidence,
-                                gate,
-                                declared_environment(&environments, gate),
-                            )
-                    })
+                    reusable_evidence(
+                        &st,
+                        name,
+                        gate,
+                        &tree,
+                        &resolve_tree,
+                        declared_environment(&environments, gate),
+                    )
                 })
-                .flatten()
-                .filter(|evidence| evidence.green_at_head(st.dirty_tree_waiver.as_ref()));
+                .flatten();
             if let Some(evidence) = reusable {
                 println!(
                     "gate {name}: skipped (green at head; declared by {})",
@@ -648,9 +644,7 @@ impl Drop for ScratchWorktree {
 /// earlier one.
 ///
 /// `skip_green` reuses the evidence already recorded at that merged tree
-/// instead of rerunning the gate that produced it. Reuse is keyed by tree
-/// exactly as readiness is, so a gate this run skips is a gate status already
-/// counts as green, and the two never disagree about what is owed.
+/// instead of rerunning the gate that produced it.
 fn verify_against(
     ctx: &Ctx,
     store: &Store,
@@ -745,25 +739,18 @@ fn verify_against(
     let mut reused = Vec::new();
     let mut to_run = Vec::new();
     for (name, gate) in required {
-        // Reuse is reuse of a *run*, so the recorded command must be the one
-        // declared now. Skipping on a name match would report a gate as
-        // satisfied by a run of something else. Evidence from another
-        // environment is not reuse either: it ran, but not against this
-        // content.
         let reusable = skip_green
             .then(|| {
-                st.gate_evidence_at_tree_matching(name, &merged_tree, &resolve_tree, |evidence| {
-                    evidence.recorded_tree() == Some(merged_tree.as_str())
-                        && status::matches_declaration(evidence, gate)
-                        && status::matches_environment(
-                            evidence,
-                            gate,
-                            declared_environment(&environments, gate),
-                        )
-                })
+                reusable_evidence(
+                    st,
+                    name,
+                    gate,
+                    &merged_tree,
+                    &resolve_tree,
+                    declared_environment(&environments, gate),
+                )
             })
-            .flatten()
-            .filter(|evidence| evidence.green_at_head(st.dirty_tree_waiver.as_ref()));
+            .flatten();
         if let Some(evidence) = reusable {
             println!(
                 "gate {name}: skipped (green at the merged tree; declared by {})",
@@ -1004,6 +991,31 @@ fn start_verification_run(
     let run_id = event.event_id.clone();
     store.append_event(&event)?;
     Ok(run_id)
+}
+
+/// The passing evidence `--skip-green` reuses for `name` at `tree`, if any.
+///
+/// Reuse is keyed by tree exactly as readiness is, so a gate a run skips is a
+/// gate status already counts as green, whichever commit the run that answered
+/// was against. Reuse is reuse of a *run*: the recorded command must be the
+/// one declared now, and evidence from another environment ran, but not here.
+/// The reuse event names the tree, and replay checks it against the content
+/// key the evidence itself carries, so evidence keyed only by a revision is
+/// rerun.
+fn reusable_evidence<'a>(
+    st: &'a ChangeState,
+    name: &str,
+    gate: &gates::Gate,
+    tree: &str,
+    resolve_tree: &dyn Fn(&str) -> Option<String>,
+    environment: Option<&str>,
+) -> Option<&'a state::VerificationEntry> {
+    st.gate_evidence_at_tree_matching(name, tree, resolve_tree, |evidence| {
+        evidence.recorded_tree() == Some(tree)
+            && status::matches_declaration(evidence, gate)
+            && status::matches_environment(evidence, gate, environment)
+    })
+    .filter(|evidence| evidence.green_at_head(st.dirty_tree_waiver.as_ref()))
 }
 
 #[allow(clippy::too_many_arguments)]
