@@ -914,26 +914,6 @@ fn severity_name(severity: Severity) -> &'static str {
     }
 }
 
-fn format_duration(seconds: u64) -> String {
-    if seconds == 0 {
-        return "0s".into();
-    }
-    let hours = seconds / 3600;
-    let minutes = (seconds % 3600) / 60;
-    let secs = seconds % 60;
-    let mut out = String::new();
-    if hours > 0 {
-        out.push_str(&format!("{hours}h"));
-    }
-    if minutes > 0 {
-        out.push_str(&format!("{minutes}m"));
-    }
-    if secs > 0 && hours == 0 {
-        out.push_str(&format!("{secs}s"));
-    }
-    out
-}
-
 fn print_table(changes: &[ChangeStats], aggregate: &Aggregate) {
     println!(
         "{:<28} {:<10} {:>8} {:>8} {:>4} {:>4} {:>10} {:>8}",
