@@ -549,6 +549,10 @@ enum Cmd {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
+        /// Output form. SARIF reports every unresolved finding: one leaves
+        /// it only when its applicable history, the dispositions recorded
+        /// after integration when there are any and its own otherwise, has a
+        /// single resolved, accepted-risk, or obsolete tip
         #[arg(long, value_enum, default_value = "text")]
         format: commands::FindingsFormat,
     },
