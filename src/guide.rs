@@ -685,7 +685,7 @@ END A SESSION (what the next one reads)
   month and is not in the code — a memory, which every later `catchup` shows.
   Never label unfinished work a conclusion.
 
-  A session journals at four moments, and none of them is the end. A premise
+  A session journals at five moments, and none of them is the end. A premise
   checked or an approach abandoned is kept as it happens (`arc keep`), while
   the reasoning that produced it is still recoverable. A filed claim found
   wrong is corrected in the same breath as learning so (`journal correct`, or
@@ -695,7 +695,13 @@ END A SESSION (what the next one reads)
   --note`), since a deferral living only in a transcript was dropped rather
   than deferred. A session stopping midstream writes a handoff (`journal
   handoff --derive`), which is cheap enough to write at any interruption
-  because only what was learned has to be written by hand.
+  because only what was learned has to be written by hand. And anything worth
+  doing that is not this change's work — a gap in another tool, a proposal, a
+  field datum about a model — is filed in the owning project's journal when
+  it is noticed (`journal todo` or `journal feature-request`, with `--source`
+  naming this session and an `--item-key`), not saved up for the end, so a
+  later scan of the same recording finds it already filed. The end of a
+  session checks that nothing is left; it is not when filing happens.
 
 PROFILES (--profile, default local)
   direct   Bounded, reversible, one session and checkout. `--no-worktree` uses
