@@ -904,15 +904,22 @@ enum Cmd {
         /// Fail with exit 2 after this many seconds
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: Option<u64>,
-        /// Run `sh -c <cmd>` once when a condition is reached, with a JSON
-        /// diagnostic naming the winning condition on stdin and ARC_EVENT_TYPE
-        /// set to `watch-reached`. ARC_EVENT_ID and ARC_CHANGE_ID carry the
-        /// diagnostic's values, empty where it names none
+        /// Run `sh -c <cmd>` once when a condition is reached, with the
+        /// reached `arc-watch/1` document `--json` prints on stdin and
+        /// ARC_EVENT_TYPE set to `watch-reached`. ARC_EVENT_ID and
+        /// ARC_CHANGE_ID carry the document's values, empty where it names
+        /// none
         #[arg(long = "exec")]
         exec_command: Option<String>,
-        /// Emit the outcome as one JSON object, naming the change, the
-        /// condition, and the event that satisfied it; `stalled` adds
-        /// `stage`, `age_seconds`, and `budget_seconds`
+        /// Emit the outcome as one `arc-watch/1` JSON object: `schema`,
+        /// `event_type` (`watch-reached` or `watch-timeout`), and
+        /// `condition`, the one reached or, on a timeout and under `--all`,
+        /// every awaited one joined by commas. A reached change adds
+        /// `change_id`, `event_id` when an event satisfied the condition,
+        /// `provisional` on a provisional approval, and for `stalled`
+        /// `stage`, `age_seconds`, and `budget_seconds`. `--all` lists one
+        /// such member object per change under `changes`. A journal artifact
+        /// names `file` and `claim_id`
         #[arg(long)]
         json: bool,
     },

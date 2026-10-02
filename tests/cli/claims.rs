@@ -1620,4 +1620,17 @@ fn watch_reaches_stalled_on_an_expired_artifact_claim_and_refuses_other_conditio
         .assert()
         .success()
         .stdout(predicates::str::contains("reached: stalled"));
+    let reached = json_stdout(repo.arc(&repo.root).args([
+        "watch",
+        &file,
+        "--until",
+        "stalled",
+        "--timeout",
+        "10",
+        "--json",
+    ]));
+    assert_eq!(reached["schema"], "arc-watch/1", "{reached}");
+    assert_eq!(reached["event_type"], "watch-reached", "{reached}");
+    assert_eq!(reached["file"], file.as_str(), "{reached}");
+    assert!(reached["claim_id"].is_string(), "{reached}");
 }
