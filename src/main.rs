@@ -1214,7 +1214,9 @@ enum Cmd {
         #[command(flatten)]
         body: BodyOpts,
         /// Snapshot the clean change worktree before recording the verdict;
-        /// --contributors or --solo attribute that patchset
+        /// --contributors or --solo attribute that patchset. The findings
+        /// batch and the verdict are validated first, so a refused review
+        /// records no patchset
         #[arg(long)]
         snapshot: bool,
         #[command(flatten)]
