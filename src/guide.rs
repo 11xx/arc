@@ -843,7 +843,9 @@ REVIEW COVERAGE AND DEBT
   "squash"|"preserve"` declaration makes `integrate` record the change ready to
   send instead of merging it, refusing merge commits and, under squash, more
   than one commit; `arc squash <change> -m <message>` makes that one commit as
-  a new patchset with its own gates and verdict. A failed squash commit, a
+  a new patchset with its own gates and verdict, attributed by `--contributors`
+  or `--solo` as on `arc snapshot`. Over another actor's live claim an
+  unattributed squash refuses before the branch moves. A failed squash commit, a
   changed commit tree, or tracked edits left by a hook restore the original
   head, index, and tracked files. Untracked files created by hooks are retained
   for inspection. Paths obstructing restoration are moved under

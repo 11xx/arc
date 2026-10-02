@@ -306,7 +306,7 @@ pub(crate) fn ensure_attribution_over_claim(
     };
     if !declared {
         bail!(
-            "active claim {} is owned by {}; recording a patchset over it requires --contributors or --solo, which `arc snapshot`, `arc done`, and `arc review --snapshot` accept",
+            "active claim {} is owned by {}; recording a patchset over it requires --contributors or --solo, which `arc snapshot`, `arc done`, `arc review --snapshot`, and `arc squash` accept",
             claim.claim_id,
             claim.owner.actor
         );

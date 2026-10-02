@@ -1013,7 +1013,9 @@ enum Cmd {
     /// like any other patchset. A failed commit or hook-modified tree restores
     /// the original head, index, and tracked files; untracked files are retained.
     /// Obstructing paths are moved to a reported recovery directory under
-    /// <git-common-dir>/arc/squash-recovery/
+    /// <git-common-dir>/arc/squash-recovery/. Over another actor's live
+    /// claim, a squash without --contributors or --solo refuses before the
+    /// branch moves
     Squash {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1021,6 +1023,8 @@ enum Cmd {
         /// Message for the single commit
         #[arg(long, short = 'm')]
         message: String,
+        #[command(flatten)]
+        attribution: AttributionOpts,
     },
     /// Record the current branch head as a new patchset
     Snapshot {
@@ -3630,9 +3634,19 @@ fn run(cli: Cli) -> Result<i32> {
                 }
             }
         }
-        Cmd::Squash { change, message } => {
+        Cmd::Squash {
+            change,
+            message,
+            attribution,
+        } => {
             let change = infer(change.as_deref())?;
-            commands::squash(&ctx, &change, &message)?;
+            commands::squash(
+                &ctx,
+                &change,
+                &message,
+                attribution.contributors,
+                attribution.solo,
+            )?;
             Ok(0)
         }
         Cmd::Snapshot {
