@@ -1321,6 +1321,122 @@ fn check_names_a_probe_that_cannot_discharge() {
     );
 }
 
+/// The recovery `check` prints for an undischargeable probe is a command that
+/// works as printed once its placeholders are filled: it records a brief
+/// version a probe can fail at, carries the probes over (quoting included),
+/// and rebinds the patchset, after which the baseline phase is what is owed.
+#[test]
+fn undischargeable_probe_recovery_runs_as_printed() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "rebase-probe"]));
+    let worktree = repo.home.join(".worktrees/repo-rebase-probe");
+    let started_from = repo.head(&worktree);
+    repo.commit(&worktree, "marker.txt", "present\n", "feat: work");
+    let head = repo.head(&worktree);
+    repo.arc(&worktree)
+        .args([
+            "brief",
+            "rebase-probe",
+            "--body-file",
+            "-",
+            "--base",
+            &head,
+            "--probes-json",
+            r#"[{"name":"marker","command":"test -f 'marker.txt'"}]"#,
+        ])
+        .write_stdin("contract v1\n")
+        .assert()
+        .success();
+    repo.arc(&worktree)
+        .args(["snapshot", "rebase-probe"])
+        .assert()
+        .success();
+
+    let status = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "rebase-probe", "--json"]),
+    );
+    assert_eq!(status["next_action"], "run_probe:marker", "{status}");
+    let change = status["change_id"].as_str().unwrap().to_string();
+    let text = stdout_any_status(repo.arc(&worktree).args(["check", "rebase-probe"]));
+    let step = text
+        .lines()
+        .find_map(|line| line.strip_prefix("Next step: "))
+        .unwrap_or_else(|| panic!("no next step:\n{text}"));
+    let command = step
+        .strip_suffix(" (run_probe:marker)")
+        .and_then(|step| step.split_once(": arc "))
+        .map(|(_, rest)| format!("arc {rest}"))
+        .unwrap_or_else(|| panic!("no recovery command in {step:?}"));
+    assert!(
+        command.starts_with(&format!("arc brief {change} --body-file <file> --base ")),
+        "{command}"
+    );
+    assert!(
+        command.ends_with(&format!(" && arc snapshot {change}")),
+        "{command}"
+    );
+    let body = repo.home.join("contract-v2.md");
+    fs::write(&body, "contract v2\n").unwrap();
+    let filled = command
+        .replace("<file>", body.to_str().unwrap())
+        .replace("<revision the work started from>", &started_from)
+        .replace(
+            "<why v1 could not discharge its probes>",
+            "v1 was based on the head under review",
+        );
+    assert!(!filled.contains('<'), "unfilled placeholder in {filled}");
+    repo.arc_shell(&worktree, &filled).assert().success();
+
+    let status = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "rebase-probe", "--json"]),
+    );
+    let probe = &status["probes"][0];
+    assert_eq!(probe["brief_version"], 2, "{status}");
+    assert_eq!(probe["command"], "test -f 'marker.txt'", "{status}");
+    assert_eq!(
+        probe["baseline_revision"],
+        started_from.as_str(),
+        "{status}"
+    );
+    assert!(probe.get("undischargeable").is_none(), "{status}");
+    assert_eq!(status["next_action"], "run_probe:marker", "{status}");
+    let text = stdout_any_status(repo.arc(&worktree).args(["check", "rebase-probe"]));
+    assert!(
+        text.contains(&format!(
+            "arc verify {change} --probe marker --probe-phase baseline"
+        )),
+        "{text}"
+    );
+
+    git(&worktree, &["switch", "--detach", &started_from]);
+    repo.arc(&worktree)
+        .args([
+            "verify",
+            "rebase-probe",
+            "--probe",
+            "marker",
+            "--probe-phase",
+            "baseline",
+        ])
+        .assert()
+        .success();
+    git(&worktree, &["switch", "arc/rebase-probe"]);
+    repo.arc(&worktree)
+        .args(["verify", "rebase-probe", "--probe", "marker"])
+        .assert()
+        .success();
+    let status = json_stdout(
+        repo.arc(&worktree)
+            .args(["status", "rebase-probe", "--json"]),
+    );
+    assert_eq!(
+        status["probes"][0]["discriminating_at_head"], true,
+        "{status}"
+    );
+}
+
 /// A gate and a probe are different objects reached by adjacent flags, so a
 /// gate lookup that misses a name the brief declares names the right flag
 /// instead of only the file it searched.

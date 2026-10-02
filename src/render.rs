@@ -1401,9 +1401,13 @@ pub fn next_step(report: &StatusReport) -> String {
         ),
         ("verify_against", target) => format!("arc verify {change} --against {target}"),
         ("run_probe", name) => match report.probes.iter().find(|probe| probe.name == name) {
-            Some(probe) if probe.undischargeable => format!(
-                "record a brief based on the revision the work started from: arc brief {change} --body-file <file>"
-            ),
+            Some(probe) if probe.undischargeable => {
+                let version = probe.brief_version;
+                format!(
+                    "as lead, record a brief based on the revision the work started from, redeclaring v{version}'s probes, and snapshot to bind the patchset to it: arc brief {change} --body-file <file> --base <revision the work started from> --cause-note \"<why v{version} could not discharge its probes>\" --probes-json {} && arc snapshot {change}",
+                    redeclared_probes(report)
+                )
+            }
             Some(probe) if probe.baseline_result != "fail" => format!(
                 "with {} checked out in the change's worktree: arc verify {change} --probe {name} --probe-phase baseline",
                 probe.baseline_revision
@@ -1436,6 +1440,22 @@ pub fn next_step(report: &StatusReport) -> String {
         _ => return code.to_string(),
     };
     format!("{step} ({code})")
+}
+
+/// The patchset's brief's probes as a shell-quoted `--probes-json` argument.
+/// A brief version declares only the probes it is given, so a version that
+/// replaces an undischargeable one restates every probe or drops it.
+fn redeclared_probes(report: &StatusReport) -> String {
+    let probes: Vec<crate::model::AcceptanceProbe> = report
+        .probes
+        .iter()
+        .map(|probe| crate::model::AcceptanceProbe {
+            name: probe.name.clone(),
+            command: probe.command.clone(),
+        })
+        .collect();
+    let json = serde_json::to_string(&probes).unwrap_or_default();
+    crate::context::shell_quote(&json)
 }
 
 fn dependencies_with_status<'a>(
