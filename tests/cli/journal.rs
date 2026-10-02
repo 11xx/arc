@@ -3350,7 +3350,7 @@ fn discussion_kind_rides_the_open_queue_and_promotes() {
 }
 
 #[test]
-fn journal_note_scaffold_records_template_and_prepends() {
+fn journal_note_scaffold_records_template_and_places_the_body() {
     let repo = Repo::new();
 
     // Scaffold alone records the built-in template.
@@ -3365,7 +3365,11 @@ fn journal_note_scaffold_records_template_and_prepends() {
     ]));
     let path = PathBuf::from(out.trim());
     let body = fs::read_to_string(&path).unwrap();
-    assert!(body.contains("## Positions"), "{body}");
+    assert!(
+        body.ends_with("## The question\n\n## Positions\n"),
+        "{body}"
+    );
+    assert!(!body.contains("{{body}}"), "{body}");
     assert!(body.contains("### Position pos-<ulid> (<who>"), "{body}");
     assert!(body.contains("<model[#effort]> via <harness>"), "{body}");
     for command in [
@@ -3378,7 +3382,7 @@ fn journal_note_scaffold_records_template_and_prepends() {
         assert!(body.contains(command), "scaffold missing {command:?}:\n{body}");
     }
 
-    // With a body, the template is prepended ahead of it.
+    // With a body, the body is the question and the file ends on Positions.
     let src = repo.home.join("position.md");
     fs::write(&src, "my own opening take\n").unwrap();
     let out = stdout(repo.arc(&repo.root).args([
@@ -3393,9 +3397,10 @@ fn journal_note_scaffold_records_template_and_prepends() {
         src.to_str().unwrap(),
     ]));
     let body = fs::read_to_string(out.trim()).unwrap();
-    let template_at = body.find("## Positions").unwrap();
-    let take_at = body.find("my own opening take").unwrap();
-    assert!(template_at < take_at, "{body}");
+    assert!(
+        body.ends_with("## The question\n\nmy own opening take\n\n## Positions\n"),
+        "{body}"
+    );
 }
 
 #[test]
@@ -3494,9 +3499,9 @@ fn journal_note_discussion_carries_its_conventions_by_default() {
     ]));
     let body = fs::read_to_string(out.trim()).unwrap();
     assert!(body.contains("Position: for | against | amend"), "{body}");
-    let template_at = body.find("## Positions").unwrap();
     let take_at = body.find("my own opening take").unwrap();
-    assert!(template_at < take_at, "{body}");
+    assert!(body.find("## The question").unwrap() < take_at, "{body}");
+    assert!(take_at < body.find("## Positions").unwrap(), "{body}");
 
     // --no-scaffold drops the convention block; the body stands alone under
     // the heading its slug supplies.
@@ -3539,6 +3544,68 @@ fn journal_note_discussion_carries_its_conventions_by_default() {
     assert!(fs::read_to_string(out.trim())
         .unwrap()
         .contains("## Positions"));
+}
+
+/// The opening body is the question, not a position: it sits above
+/// `## Positions`, every appended position follows that heading, and the tally
+/// counts the appended positions alone.
+#[test]
+fn a_discussion_body_sits_above_the_positions_it_draws() {
+    let repo = Repo::new();
+    let src = repo.home.join("question.md");
+    fs::write(&src, "Should the cache be shared?\n").unwrap();
+    let path = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "note",
+        "shared-cache",
+        "--kind",
+        "discussion",
+        "--body-file",
+        src.to_str().unwrap(),
+    ]));
+    let path = PathBuf::from(path.trim());
+    let name = path.file_name().unwrap().to_string_lossy().to_string();
+    for stance in ["for", "against"] {
+        repo.arc(&repo.root)
+            .args([
+                "journal",
+                "position",
+                &name,
+                "--stance",
+                stance,
+                "--body-file",
+                "-",
+            ])
+            .write_stdin(format!("argued {stance}\n"))
+            .assert()
+            .success();
+    }
+
+    let body = fs::read_to_string(&path).unwrap();
+    let (opening, positions) = body.split_once("\n## Positions\n").unwrap();
+    assert!(
+        opening.ends_with("## The question\n\nShould the cache be shared?\n"),
+        "{body}"
+    );
+    assert!(!positions.contains("Should the cache be shared?"), "{body}");
+    assert_eq!(
+        positions.matches("\n### Position pos-").count(),
+        2,
+        "{body}"
+    );
+    assert!(positions.contains("Position: for\nargued for"), "{body}");
+    assert!(
+        positions.contains("Position: against\nargued against"),
+        "{body}"
+    );
+
+    let json = json_stdout(
+        repo.arc(&repo.root)
+            .args(["journal", "discussion", &name, "--json"]),
+    );
+    assert_eq!(json["stances"]["for"], 1, "{json}");
+    assert_eq!(json["stances"]["against"], 1, "{json}");
+    assert_eq!(json["stances"]["unstated"], 0, "{json}");
 }
 
 /// An undercounting tally is shaped like a settled one, so a position block
@@ -8493,7 +8560,8 @@ fn journal_scaffolds_lists_names_kind_defaults_and_prints_one() {
             .args(["journal", "scaffolds", "--show", "discussion"]),
     );
     assert!(body.contains("Position:"), "{body}");
-    // What `--show` prints is what a write would prepend, not a paraphrase.
+    // What `--show` prints is what a write would add, not a paraphrase: an
+    // empty body leaves the template with its slot line dropped.
     repo.arc(&repo.root)
         .args([
             "journal",
@@ -8515,9 +8583,9 @@ fn journal_scaffolds_lists_names_kind_defaults_and_prints_one() {
         .find(|name| name.contains("seeded"))
         .unwrap();
     let written = fs::read_to_string(dir.join(name)).unwrap();
-    assert!(
-        written.starts_with(&format!("# Seeded\n\n{}", body.trim_end_matches('\n'))),
-        "{written}"
+    assert_eq!(
+        written,
+        format!("# Seeded\n\n{}", body.replace("{{body}}\n\n", "")),
     );
 
     let value = json_stdout(

@@ -283,7 +283,7 @@ SETTLE A QUESTION (before it is work)
   arc journal questions                Every question waiting on a person.
   arc journal delivered <file> --question <id> --to person|anyone|delegate:<name>
     --handle <opaque>                  Record that you asked somebody.
-  arc journal scaffolds [--show <n>]   What a write prepends, before it does.
+  arc journal scaffolds [--show <n>]   What a write adds, before it does.
   arc journal answer <file> --question <id> --option <choice> --body-file -
     --other "<answer>"                 Settle it outside the options offered.
   arc journal discussion <file>        Read stances, branches, and open questions.
@@ -340,6 +340,12 @@ SETTLE A QUESTION (before it is work)
   argued and read far more often than created, so `position`, `question`,
   `answer` and the `discussion` summary are its surface, and `note --kind
   discussion` opens one.
+
+  A discussion opens on its conventions, then the opening body under
+  `## The question`, then `## Positions`. `position` appends at the end of
+  the file, so what follows `## Positions` is the argument and nothing else.
+  Any scaffold places the body at its `{{body}}` line, and a template without
+  one is followed by the body.
 
   Every artifact opens on a heading, because a queue row reads its description
   from there and a row that names nothing is a row nobody picks up. `--title`
