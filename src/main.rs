@@ -1198,7 +1198,9 @@ enum Cmd {
         /// whatever the reviewer actually read
         #[arg(long)]
         patchset: Option<String>,
-        /// Root cause of requested rework; repeat for a mixed round
+        /// Root cause of requested rework; repeat for a mixed round. Required
+        /// with `--verdict changes-requested` and refused with any other
+        /// verdict
         #[arg(long, value_enum)]
         cause: Vec<ReviewCause>,
         /// Findings batch: a path to a JSON array, or '-' for stdin. Each
