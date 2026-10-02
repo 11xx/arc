@@ -1228,7 +1228,9 @@ enum Cmd {
         /// Snapshot the clean change worktree before recording the verdict;
         /// --contributors or --solo attribute that patchset. The findings
         /// batch and the verdict are validated first, so a refused review
-        /// records no patchset
+        /// records no patchset. The change stays locked from the snapshot
+        /// until the verdict on that patchset is recorded, so a command
+        /// acting on the change in between reports the lock busy
         #[arg(long)]
         snapshot: bool,
         #[command(flatten)]
