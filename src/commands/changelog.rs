@@ -393,25 +393,51 @@ fn canonical_category(category: &str) -> Option<&'static str> {
         })
 }
 
+/// Fill `line`'s words into lines of at most `width` columns; a word wider
+/// than that sits alone. No line after the first begins with a word that
+/// would open a block there: the words before it move down with it, and a
+/// word with only one word above it stays on that word's line.
 fn wrap_words(line: &str, width: usize) -> Vec<String> {
-    let mut wrapped = Vec::new();
-    let mut current = String::new();
+    let mut lines = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
     for word in line.split_whitespace() {
-        let word_width = word.chars().count();
-        let candidate_width =
-            current.chars().count() + usize::from(!current.is_empty()) + word_width;
-        if !current.is_empty() && candidate_width > width {
-            wrapped.push(std::mem::take(&mut current));
+        let candidate_width = current
+            .iter()
+            .map(|placed| placed.chars().count() + 1)
+            .sum::<usize>()
+            + word.chars().count();
+        if current.is_empty() || candidate_width <= width {
+            current.push(word);
+            continue;
         }
-        if !current.is_empty() {
-            current.push(' ');
+        // The next line starts at `start`: the words from there on move down.
+        let leading = |start: usize| current.get(start).copied().unwrap_or(word);
+        let mut start = current.len();
+        while start > 1 && opens_block(leading(start)) {
+            start -= 1;
         }
-        current.push_str(word);
+        if !opens_block(leading(start)) {
+            let next = current.split_off(start);
+            lines.push(std::mem::replace(&mut current, next).join(" "));
+        }
+        current.push(word);
     }
     if !current.is_empty() {
-        wrapped.push(current);
+        lines.push(current.join(" "));
     }
-    wrapped
+    lines
+}
+
+/// Whether `word`, first on a line, could open a block Markdown reads in
+/// place of the paragraph that line continues: a list marker, a heading, a
+/// block quote, a code fence, an HTML block, or a rule or setext underline.
+fn opens_block(word: &str) -> bool {
+    line_marker(&format!("{word} ")).is_some()
+        || (word.len() <= 6 && word.chars().all(|c| c == '#'))
+        || word.starts_with(['>', '<'])
+        || word.starts_with("```")
+        || word.starts_with("~~~")
+        || word.chars().all(|c| matches!(c, '-' | '=' | '*' | '_'))
 }
 
 /// The marker a line begins with: its indent, then a `-`, `*`, or `+`
@@ -420,7 +446,7 @@ fn wrap_words(line: &str, width: usize) -> Vec<String> {
 /// and the nesting; they did not choose the column the file wraps at, so the
 /// prefix survives and the text after it is still wrapped.
 fn line_marker(line: &str) -> Option<&str> {
-    let indent = line.len() - line.trim_start().len();
+    let indent = indent_of(line);
     let rest = &line[indent..];
     let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
     let token = if ["- ", "* ", "+ "]
@@ -471,7 +497,7 @@ fn ordinal(marker: &str) -> Option<&str> {
 /// block keeps its lines exactly, trailing whitespace included; the only
 /// change is the item's indentation in front of each non-empty line.
 fn as_list_item(body: &str) -> String {
-    let blocks = body_blocks(body.trim_end());
+    let blocks = body_blocks(body);
     let Some(first) = blocks.first() else {
         return String::new();
     };
@@ -539,33 +565,69 @@ enum Block<'a> {
 }
 
 /// An open code fence, as CommonMark delimits one: the character its run is
-/// drawn with, the run's length, and the run's indentation.
+/// drawn with, the run's length, and the column the text of the block holding
+/// it starts at, the body's own left edge or a list item's text.
 struct Fence {
     mark: char,
     run: usize,
-    indent: usize,
+    container: usize,
 }
 
 impl Fence {
-    /// The fence `line` opens: a run of three or more backticks or tildes
-    /// after its indentation. A backtick run followed by another backtick on
-    /// the line is inline code and opens nothing.
-    fn opened_by(line: &str) -> Option<Self> {
+    /// The fence `line` opens in a block whose text starts at `container`: a
+    /// run of three or more backticks or tildes indented at most three
+    /// columns past it. A backtick run followed by another backtick on the
+    /// line is inline code and opens nothing.
+    fn opened_by(line: &str, container: usize) -> Option<Self> {
         let (indent, mark, run, after) = fence_run(line)?;
-        (run >= 3 && !(mark == '`' && after.contains('`'))).then_some(Self { mark, run, indent })
+        (run >= 3
+            && (container..container + 4).contains(&indent)
+            && !(mark == '`' && after.contains('`')))
+        .then_some(Self {
+            mark,
+            run,
+            container,
+        })
     }
 
     /// Whether `line` closes this fence: a run of the same character at
-    /// least as long, nothing after it but whitespace, and indented less than
-    /// four columns past the opener; deeper, the line is content.
+    /// least as long, nothing after it but whitespace, and indented at most
+    /// three columns past the container; deeper, the line is content.
     fn closed_by(&self, line: &str) -> bool {
         fence_run(line).is_some_and(|(indent, mark, run, after)| {
             mark == self.mark
                 && run >= self.run
                 && after.trim().is_empty()
-                && indent < self.indent + 4
+                && (self.container..self.container + 4).contains(&indent)
         })
     }
+
+    /// Whether `line` stays in the block holding this fence: it is blank or
+    /// indented to the container. A line left of it ends that block, and the
+    /// fence with it.
+    fn holds(&self, line: &str) -> bool {
+        line.trim().is_empty() || indent_of(line) >= self.container
+    }
+}
+
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// The column the text of the list item `line` opens with `marker` starts
+/// at: past the marker and the one to four spaces after it. An empty item,
+/// or one whose text sits five or more spaces out, starts one column past.
+fn text_column(line: &str, marker: &str) -> usize {
+    let token_end = marker.len() - 1;
+    let rest = &line[token_end..];
+    let text = rest.trim_start_matches(' ');
+    let spaces = rest.len() - text.len();
+    let gap = if spaces <= 4 && !text.is_empty() {
+        spaces
+    } else {
+        1
+    };
+    token_end + gap
 }
 
 /// A line's indentation, the backtick or tilde that begins its text, the
@@ -577,22 +639,25 @@ fn fence_run(line: &str) -> Option<(usize, char, usize, &str)> {
         .next()
         .filter(|mark| matches!(mark, '`' | '~'))?;
     let after = text.trim_start_matches(mark);
-    Some((
-        line.len() - text.len(),
-        mark,
-        text.len() - after.len(),
-        after,
-    ))
+    Some((indent_of(line), mark, text.len() - after.len(), after))
 }
 
 /// Split a body into paragraphs, list items, and fenced blocks. A line joins
 /// the paragraph or item above it unless a blank line, a fence, or a list
-/// marker of its own separates them.
+/// marker of its own separates them. A fence left open runs to the end of
+/// the block holding it, every line its content; blank lines after the last
+/// block are dropped.
 fn body_blocks(body: &str) -> Vec<Block<'_>> {
     let mut blocks: Vec<Block<'_>> = Vec::new();
     let mut fence: Option<Fence> = None;
+    // The text column of each list item still open, outermost first.
+    let mut items: Vec<usize> = Vec::new();
     for line in body.lines() {
         let trimmed = line.trim();
+        let indent = indent_of(line);
+        if fence.as_ref().is_some_and(|open| !open.holds(line)) {
+            fence = None;
+        }
         if let Some(open) = &fence {
             if let Some(Block::Fenced(fenced)) = blocks.last_mut() {
                 fenced.push(line);
@@ -608,7 +673,14 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
             }
             continue;
         }
-        if let Some(open) = Fence::opened_by(line) {
+        let container = items
+            .iter()
+            .rev()
+            .find(|&&column| column <= indent)
+            .copied()
+            .unwrap_or(0);
+        if let Some(open) = Fence::opened_by(line, container) {
+            items.retain(|&column| column <= indent);
             fence = Some(open);
             blocks.push(Block::Fenced(vec![line]));
             continue;
@@ -623,12 +695,19 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
                 continue;
             }
         }
+        items.retain(|&column| column <= indent);
+        if let Some(marker) = marker {
+            items.push(text_column(line, marker));
+        }
         let text = marker.map_or(trimmed, |marker| &line[marker.len()..]);
         blocks.push(Block::Prose {
             marker,
-            indent: &line[..line.len() - line.trim_start().len()],
+            indent: &line[..indent],
             words: text.split_whitespace().collect(),
         });
+    }
+    if matches!(blocks.last(), Some(Block::Blank)) {
+        blocks.pop();
     }
     blocks
 }
@@ -1180,7 +1259,7 @@ mod tests {
             as_list_item("~~~\n```\n~~\n~~~~ \nthen prose"),
             "- ~~~\n  ```\n  ~~\n  ~~~~ \n  then prose"
         );
-        // Text after the run, or an indent four columns past the opener,
+        // Text after the run, or an indent four columns into the body,
         // makes the line content rather than a closing fence.
         assert_eq!(
             as_list_item("```\n``` not a close\n    ```\n```\nthen prose"),
@@ -1194,11 +1273,67 @@ mod tests {
     }
 
     #[test]
+    fn fence_indents_count_from_the_block_that_holds_the_fence() {
+        // The body is the container: a run four columns into it is content,
+        // however far in the opener sits.
+        assert_eq!(
+            as_list_item("Example:\n ```\n    ```\nline one\nline two\n ```\nAfter."),
+            "- Example:\n   ```\n      ```\n  line one\n  line two\n   ```\n  After."
+        );
+        // Inside a list item, columns count from the item's text.
+        assert_eq!(
+            as_list_item("- a\n  - b\n    ```\n    code\n       ```\n  after\n  this"),
+            "- a\n  - b\n    ```\n    code\n       ```\n  after this"
+        );
+        // A line left of the item's text ends the item and its fence.
+        assert_eq!(
+            as_list_item("- a\n  ```\n  code\nafter\nthe item"),
+            "- a\n  ```\n  code\nafter the item"
+        );
+        // Four columns into its container, a run opens nothing.
+        assert_eq!(as_list_item("Text\n    ```\nmore"), "- Text ``` more");
+    }
+
+    #[test]
+    fn a_wrapped_line_never_begins_with_a_block_marker() {
+        // 72 columns: a further word of any width passes the 73 a bare
+        // body's item leaves for its text.
+        let lead = format!("{}ab", "word ".repeat(14));
+        for token in [
+            "-", "*", "+", "1.", "2)", "#", ">", ">=", "```", "~~~", "---", "===",
+        ] {
+            let rendered = as_list_item(&format!("{lead} {token} after"));
+            assert_eq!(
+                rendered,
+                format!("- {}\n  ab {token} after", "word ".repeat(14).trim_end()),
+                "{token}"
+            );
+            assert!(rendered.lines().all(|line| line.chars().count() <= 75));
+        }
+        // With one word above it, the marker stays on that word's line.
+        let token = "x".repeat(73);
+        assert_eq!(
+            as_list_item(&format!("{token} - after")),
+            format!("- {token} -\n  after")
+        );
+    }
+
+    #[test]
     fn fenced_lines_keep_their_trailing_whitespace() {
         assert_eq!(
             as_list_item("Diff:\n```\nkeep  \n\n   \nthis\t\n```"),
             "- Diff:\n  ```\n  keep  \n\n     \n  this\t\n  ```"
         );
+    }
+
+    #[test]
+    fn an_unclosed_fence_keeps_its_lines_to_the_end_of_the_body() {
+        assert_eq!(
+            as_list_item("Diff:\n```\nkeep \n   \n"),
+            "- Diff:\n  ```\n  keep \n     "
+        );
+        // Outside a fence, trailing whitespace and blank lines are dropped.
+        assert_eq!(as_list_item("Did a thing.  \n\n   \n"), "- Did a thing.");
     }
 
     #[test]
