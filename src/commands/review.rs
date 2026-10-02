@@ -258,7 +258,7 @@ fn review_verdict<'a>(
     }
 }
 
-fn contributor_declaration(
+pub(crate) fn contributor_declaration(
     ctx: &Ctx,
     contributors: Option<Vec<String>>,
     solo: bool,
@@ -288,6 +288,30 @@ fn contributor_declaration(
         bail!("--contributors must name at least one actor");
     }
     Ok(Some(normalized.into_iter().collect()))
+}
+
+/// Refuse a patchset recorded over another actor's live claim unless it
+/// declares its contributors: the head carries the claim holder's work, so
+/// whoever records it says whose work it is.
+pub(crate) fn ensure_attribution_over_claim(
+    ctx: &Ctx,
+    st: &ChangeState,
+    declared: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let Some(claim) = st.claim.as_ref().filter(|claim| {
+        state::claim_timing_at(claim, now).active && claim.owner.actor != ctx.actor.trim()
+    }) else {
+        return Ok(());
+    };
+    if !declared {
+        bail!(
+            "active claim {} is owned by {}; recording a patchset over it requires --contributors or --solo, which `arc snapshot`, `arc done`, and `arc review --snapshot` accept",
+            claim.claim_id,
+            claim.owner.actor
+        );
+    }
+    Ok(())
 }
 
 /// Say when the commits carry more distinct hands than the declaration does.
@@ -400,15 +424,7 @@ pub fn snapshot(
         .claim
         .as_ref()
         .filter(|claim| state::claim_timing_at(claim, now).active);
-    if let Some(claim) = snapshot_claim.filter(|claim| claim.owner.actor != ctx.actor.trim()) {
-        if requested_contributors.is_none() {
-            bail!(
-                "active claim {} is owned by {}; recording a patchset over it requires --contributors or --solo, which `arc snapshot` and `arc done` accept",
-                claim.claim_id,
-                claim.owner.actor
-            );
-        }
-    }
+    ensure_attribution_over_claim(ctx, &st, requested_contributors.is_some(), now)?;
     let contributors = requested_contributors.clone().unwrap_or_default();
     let patchset_id = format!("ps-{:02}", st.patchsets.len() + 1);
     let unchanged_patchset = unchanged_patchset.filter(|patchset_id| {
@@ -943,6 +959,9 @@ pub struct ReviewArgs {
     pub causes: Vec<ReviewCause>,
     pub findings_json: Option<String>,
     pub snapshot_first: bool,
+    /// Attribution of the patchset `snapshot_first` records.
+    pub contributors: Option<Vec<String>>,
+    pub solo: bool,
     /// The routing version that selected the reviewer, as the caller declared
     /// it. `None` records an unrouted review.
     pub route_version: Option<String>,
@@ -958,6 +977,8 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         mut causes,
         findings_json,
         snapshot_first,
+        contributors,
+        solo,
         route_version,
     } = args;
     causes.sort_unstable();
@@ -997,7 +1018,16 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         {
             bail!("review --snapshot requires the change branch checked out in a clean worktree");
         }
-        snapshot(ctx, reference, None, None, None, false, Vec::new(), None)?;
+        snapshot(
+            ctx,
+            reference,
+            None,
+            None,
+            contributors,
+            solo,
+            Vec::new(),
+            None,
+        )?;
     }
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;

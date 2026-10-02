@@ -485,6 +485,9 @@ RUN A CHANGE
   arc policy path                    Print the operator policy path for this repo.
   arc policy write --body-file FILE  Replace that local policy from TOML.
   arc review --verdict <v>           Record a verdict (+ --findings-json -).
+    --snapshot                       Snapshot the clean worktree first;
+      --contributors <a,b> | --solo  attribute that patchset, as on
+                                     `arc snapshot`.
     --provisional <why>              It gates, and owes a second judgment.
     --relation corroborates          Support the standing verdict, not replace it.
   arc resolve                        Dispose of a finding.
