@@ -1399,7 +1399,7 @@ pub fn rebase(
                     st.target_branch
                 ),
             );
-            super::review::snapshot_holding(
+            let patchset_id = super::review::snapshot_holding(
                 ctx,
                 &store,
                 &change_id,
@@ -1411,9 +1411,18 @@ pub fn rebase(
             // Verification takes the lock for each run it records.
             drop(transition);
             let code = verify_recorded(ctx, reference, verify_requested, Vec::new(), false)?;
-            let (_, replayed_state) = ctx.load_state(&store, reference)?;
-            let report = ctx.report(&store, &replayed_state)?;
-            print!("{}", render::gates_owed(&report));
+            // The gates the replayed head owes are advice about a rebase that
+            // already stands, so a failure to evaluate them is a warning and
+            // never the rebase's result.
+            match ctx
+                .load_state(&store, reference)
+                .and_then(|(_, replayed_state)| ctx.report(&store, &replayed_state))
+            {
+                Ok(report) => print!("{}", render::gates_owed(&report)),
+                Err(error) => eprintln!(
+                    "warning: {patchset_id} is recorded at {replayed}; the gates it owes could not be evaluated: {error:#}"
+                ),
+            }
             Ok(code)
         }
     }
