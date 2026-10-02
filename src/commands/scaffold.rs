@@ -104,10 +104,51 @@ pub(crate) fn available(ctx: &Ctx) -> Vec<(String, bool)> {
     names
 }
 
-/// Prepend a scaffold template to a body being recorded, mirroring the brief
-/// semantics: the template comes first (newline-terminated), a blank line
-/// separates it from the body, and a scaffold with no body records the
-/// template alone. An empty template yields the body verbatim.
+/// The line a scaffold template marks its body's place with.
+const BODY_SLOT: &str = "{{body}}";
+
+/// A body recorded through a scaffold template. The body takes the place of
+/// the template's first `{{body}}` line, so a template can keep sections below
+/// it; a template without one is [`prepended`]. A scaffold with no body
+/// records the template alone, its slot line and the blank line after it
+/// dropped.
+pub(crate) fn filled(template: &str, body: &str) -> String {
+    let Some((before, after)) = split_at_slot(template) else {
+        return prepended(template, body);
+    };
+    let mut out = before.to_string();
+    if body.is_empty() {
+        let after = match after.strip_prefix('\n') {
+            Some(rest) if before.ends_with("\n\n") => rest,
+            _ => after,
+        };
+        out.push_str(after);
+    } else {
+        out.push_str(body);
+        if !body.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(after);
+    }
+    out
+}
+
+/// The template on either side of its first slot line, that line excluded.
+fn split_at_slot(template: &str) -> Option<(&str, &str)> {
+    let mut start = 0;
+    for line in template.split_inclusive('\n') {
+        if line.trim() == BODY_SLOT {
+            return Some((&template[..start], &template[start + line.len()..]));
+        }
+        start += line.len();
+    }
+    None
+}
+
+/// Prepend a template to a body, mirroring the brief semantics: the template
+/// comes first (newline-terminated), a blank line separates it from the body,
+/// and an empty body records the template alone. An empty template yields the
+/// body verbatim.
 pub(crate) fn prepended(template: &str, body: &str) -> String {
     if template.is_empty() {
         return body.to_string();
@@ -121,4 +162,38 @@ pub(crate) fn prepended(template: &str, body: &str) -> String {
         out.push_str(body);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::filled;
+
+    const TEMPLATE: &str = "> rules\n\n## The question\n\n{{body}}\n\n## Positions\n";
+
+    #[test]
+    fn the_body_takes_the_place_of_the_slot_line() {
+        assert_eq!(
+            filled(TEMPLATE, "why?\n"),
+            "> rules\n\n## The question\n\nwhy?\n\n## Positions\n"
+        );
+        assert_eq!(
+            filled(TEMPLATE, "why?"),
+            "> rules\n\n## The question\n\nwhy?\n\n## Positions\n"
+        );
+    }
+
+    #[test]
+    fn an_empty_body_drops_the_slot_line_and_its_blank_line() {
+        assert_eq!(
+            filled(TEMPLATE, ""),
+            "> rules\n\n## The question\n\n## Positions\n"
+        );
+    }
+
+    #[test]
+    fn a_template_without_a_slot_comes_ahead_of_the_body() {
+        assert_eq!(filled("> rules", "why?\n"), "> rules\n\nwhy?\n");
+        assert_eq!(filled("> rules\n", ""), "> rules\n");
+        assert_eq!(filled("", "why?\n"), "why?\n");
+    }
 }
