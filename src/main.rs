@@ -927,9 +927,11 @@ enum Cmd {
         cmd: ReplicaCmd,
     },
     /// Integration preflight; exit code identifies the first blocker
+    ///
     /// Unreadable neighboring changes are named with their errors on stderr;
     /// an unreadable selected change fails and an unreadable prerequisite
     /// cannot authorize integration
+    #[command(after_help = blockers::exit_status_help())]
     Check {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
