@@ -1204,6 +1204,17 @@ fn a_finding_left_open_at_ship_takes_a_disposition_after_integration() {
         log.contains("post-integration-disposition-recorded"),
         "{log}"
     );
+    // A finding filed on its own belongs to no verdict, so the review view's
+    // open findings are where its later disposition has to show.
+    let review_json =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["review", "shipped-finding", "--json"]),
+        );
+    assert_eq!(review_json["schema"], "arc-review/5");
+    let open = &review_json["open_findings"][0];
+    assert_eq!(open["id"], finding_id.as_str());
+    assert_eq!(open["after_integration"][0]["status"], "resolved");
 }
 
 #[test]
