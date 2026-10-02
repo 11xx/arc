@@ -852,6 +852,49 @@ fn cleanup_after_a_take_over_keeps_the_checkout_and_drops_the_branch() {
     assert!(repo.root.join("stranded-cleanup.txt").exists());
 }
 
+/// A closed change answers for the head its closure recorded. Neither a
+/// branch deleted on integration nor a target that moved on afterwards
+/// changes what shipped or the evidence it shipped on.
+#[test]
+fn a_closed_change_reports_the_head_it_shipped_after_its_branch_is_deleted() {
+    let repo = repo_with_gates();
+    let (change_id, worktree) = approved_change(&repo, "shipped-head", "shipped.txt", "shipped\n");
+    let shipped = repo.head(&worktree);
+    repo.arc(&repo.root)
+        .args(["integrate", "shipped-head", "--cleanup"])
+        .assert()
+        .success();
+    assert!(git_out(&repo.root, &["branch", "--list", "arc/shipped-head"]).is_empty());
+    fs::write(repo.root.join("later.txt"), "later\n").unwrap();
+    git(&repo.root, &["add", "later.txt"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "feat: later work on the target"],
+    );
+
+    let show = stdout(repo.arc(&repo.root).args(["show", "shipped-head"]));
+    assert!(
+        show.contains("Worktree state: head matches newest approved/snapshotted head"),
+        "{show}"
+    );
+    assert!(show.contains("green at head"), "{show}");
+    assert!(!show.contains("NOT green at head"), "{show}");
+
+    let status: serde_json::Value = serde_json::from_str(&stdout(
+        repo.arc(&repo.root).args(["status", &change_id, "--json"]),
+    ))
+    .unwrap();
+    assert_eq!(status["state"], "closed", "{status}");
+    assert_eq!(status["current_head"], shipped.as_str(), "{status}");
+    assert_eq!(status["head_matches_latest_patchset"], true, "{status}");
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
+    assert_eq!(
+        status["blockers"],
+        serde_json::json!(["closed"]),
+        "{status}"
+    );
+}
+
 /// The plan the dry run prints is the one the merge carries out: the basis
 /// the integration event records, at the target revision the plan names.
 #[test]
