@@ -38,6 +38,23 @@ fn path_without_tapes(repo: &Repo) -> PathBuf {
     without_tapes
 }
 
+/// A rescue projection without the fields it derives from the claim's age at
+/// the moment of reading, so two reads of one claim compare equal however far
+/// apart they ran.
+fn without_claim_age(mut rescue: serde_json::Value) -> serde_json::Value {
+    let claim = rescue["claim"]
+        .as_object_mut()
+        .expect("rescue reports the claim");
+    claim.remove("age_seconds").expect("claim reports its age");
+    claim.remove("stale").expect("claim reports staleness");
+    rescue
+        .as_object_mut()
+        .unwrap()
+        .remove("abandoned")
+        .expect("rescue reports abandonment");
+    rescue
+}
+
 #[test]
 fn stale_foreign_claim_is_abandoned_and_reports_owner() {
     let repo = Repo::new();
@@ -228,7 +245,7 @@ fn transcript_reads_a_recording_through_the_linked_library() {
     assert_eq!(inherited["transcript"]["count"], 2);
     assert_eq!(inherited["transcript"]["turns"][0]["text"], "the question");
     assert_eq!(inherited["transcript"]["turns"][1]["text"], "the answer");
-    assert_eq!(inherited, restricted);
+    assert_eq!(without_claim_age(inherited), without_claim_age(restricted));
 
     repo.arc(&worktree)
         .env("PATH", &without_tapes)
@@ -544,8 +561,14 @@ fn transcript_projects_operator_turns_before_tail() {
         .map(|turn| turn["text"].as_str().unwrap())
         .collect();
     assert_eq!(tail_texts, ["q2", "q3", "a3"]);
-    assert_eq!(read(Some(&without_tapes), None), whole);
-    assert_eq!(read(Some(&without_tapes), Some("3")), tail);
+    assert_eq!(
+        without_claim_age(read(Some(&without_tapes), None)),
+        without_claim_age(whole)
+    );
+    assert_eq!(
+        without_claim_age(read(Some(&without_tapes), Some("3"))),
+        without_claim_age(tail)
+    );
 }
 
 /// A recording whose newest operator turn lies before the read window reports
