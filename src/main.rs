@@ -1217,6 +1217,10 @@ enum Cmd {
         evidence_event: Option<String>,
     },
     /// Read review state, or record a verdict with an optional findings batch
+    ///
+    /// Once a verdict is recorded, review says whether an approval gates. That
+    /// is advice about a verdict that already stands: a failure to evaluate it
+    /// is a warning naming the recorded verdict, and the review still succeeds.
     #[command(group(clap::ArgGroup::new("snapshot_attribution").args(["contributors", "solo"]).requires("snapshot")))]
     Review {
         /// Change to act on. Omitted, it is inferred from the current branch,
@@ -1434,7 +1438,9 @@ enum Cmd {
     /// Over another actor's live claim, a rebase without --contributors or
     /// --solo refuses before the branch moves. The change stays locked from
     /// that check until the replayed head is recorded, so a command acting on
-    /// the change during the replay reports the lock busy
+    /// the change during the replay reports the lock busy. The gates the
+    /// replayed head owes are named after it is recorded; a failure to
+    /// evaluate them is a warning, and the rebase still succeeds
     Rebase {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in

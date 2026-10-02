@@ -587,7 +587,9 @@ RUN A CHANGE
   `review --snapshot` validates the batch and the verdict before it records
   the patchset, and keeps the change locked from that patchset until the
   verdict on it is recorded: a refused review records no patchset, and a
-  command acting on the change in between reports the lock busy.
+  command acting on the change in between reports the lock busy. Whether an
+  approval gates is said once the verdict is recorded; a failure to evaluate
+  it is a warning naming the recorded verdict, and the review still succeeds.
 
   Each acceptance probe declared on the patchset's brief blocks readiness
   until baseline evidence fails at that brief's base and final evidence passes
@@ -610,7 +612,9 @@ RUN A CHANGE
   files and the commands that finish the replay. Resolve, `git rebase
   --continue`, then `arc snapshot --verify`. Over another actor's live claim
   an unattributed rebase refuses before the branch moves, and the change stays
-  locked from that check until the replayed head is recorded.
+  locked from that check until the replayed head is recorded. The gates the
+  replayed head owes are named after it is recorded; a failure to evaluate
+  them is a warning, and the rebase still succeeds.
 
   Several changes, or `--tag`, make `integrate` a queue: dependency order, and
   per member the two repairs that need no judgement — replaying a branch its
