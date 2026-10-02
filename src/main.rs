@@ -596,6 +596,13 @@ enum Cmd {
         /// Read a new entry body from a file ('-' for stdin)
         #[arg(long)]
         body_file: Option<String>,
+        /// Record that the change needs no changelog entry, replacing any
+        /// entry recorded before. Requires --reason
+        #[arg(long, requires = "reason", conflicts_with_all = ["category", "body_file"])]
+        none: bool,
+        /// Why the change needs no changelog entry; only with --none
+        #[arg(long, requires = "none")]
+        reason: Option<String>,
         /// Emit a read result as JSON
         #[arg(long)]
         json: bool,
@@ -3201,6 +3208,8 @@ fn run(cli: Cli) -> Result<i32> {
             change,
             category,
             body_file,
+            none: _,
+            reason,
             json,
             provenance,
             since,
@@ -3212,6 +3221,7 @@ fn run(cli: Cli) -> Result<i32> {
             select(change)?.as_deref(),
             category,
             body_file,
+            reason,
             json,
             provenance,
             since,
