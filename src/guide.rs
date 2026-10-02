@@ -542,6 +542,14 @@ RUN A CHANGE
   suppresses `no-valid-approval`; every other blocker still applies.
   `arc iterating <change> --off` restores the approval check.
 
+  A findings batch (`--findings-json` on `review`, `audit`, and `external
+  verdict`) is read for `blocking`, `severity`, `summary`, `body`, and
+  `anchor`. A field that looks like a misspelling of one its finding omits,
+  such as `blocker`, refuses the batch: the finding would record the omitted
+  field's default, and a non-blocking finding lets an approval through. Any
+  other unknown field is ignored with a warning naming it; `id` is ignored
+  silently, since arc assigns finding IDs.
+
   Each acceptance probe declared on the patchset's brief blocks readiness
   until baseline evidence fails at that brief's base and final evidence passes
   at the patchset's head. Both runs must name that brief and probe; the newest
