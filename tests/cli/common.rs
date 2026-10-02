@@ -58,6 +58,18 @@ impl Repo {
         self.fixture_env(sh, cwd)
     }
 
+    /// A shell command line in which `arc` is the binary under test, so a
+    /// test can run a command exactly as arc printed it, quoting included.
+    pub(crate) fn arc_shell(&self, cwd: &Path, line: &str) -> AssertCommand {
+        let mut sh = AssertCommand::new("sh");
+        sh.args([
+            "-c",
+            &format!("arc() {{ \"$ARC_UNDER_TEST\" \"$@\"; }}\n{line}"),
+        ])
+        .env("ARC_UNDER_TEST", env!("CARGO_BIN_EXE_arc"));
+        self.fixture_env(sh, cwd)
+    }
+
     fn fixture_env(&self, mut cmd: AssertCommand, cwd: &Path) -> AssertCommand {
         cmd.current_dir(cwd)
             .env("HOME", &self.home)

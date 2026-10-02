@@ -581,6 +581,12 @@ RUN A CHANGE
   or with a base equal to the patchset head, cannot discharge a probe. The pair
   proves discrimination, not relevance.
 
+  An undischargeable probe is recovered by a later brief version with
+  `--base` at the revision the work started from, a cause, and the probes
+  restated in `--probes-json`, since a version declares only the probes it is
+  given; `arc snapshot` then binds the patchset to that version. `check`
+  prints that command with the change and probes filled in.
+
   `arc rebase` is what `check` names when the target moved with conflicting
   changes. A conflict stops it and leaves the rebase in progress — the partial
   resolution is yours, and aborting would throw it away — with the conflicting
