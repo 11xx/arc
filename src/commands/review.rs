@@ -1045,6 +1045,15 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         }
         _ => {}
     }
+    // The batch and the verdict it rides on are settled before `--snapshot`
+    // records a patchset, so a review that refuses has written nothing.
+    let finding_inputs = match findings_json {
+        None => Vec::new(),
+        Some(src) => read_finding_inputs(&src)?,
+    };
+    if verdict == Verdict::Approved && finding_inputs.iter().any(|f| f.blocking) {
+        bail!("cannot approve while recording blocking findings in the same review");
+    }
     if snapshot_first {
         if patchset.is_some() {
             bail!("--snapshot cannot be combined with --patchset");
@@ -1082,38 +1091,31 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         .collect();
     let relation = (!observed.is_empty()).then(|| relation.with_observed(observed));
 
-    let inline: Vec<InlineFinding> = match findings_json {
-        None => Vec::new(),
-        Some(src) => read_finding_inputs(&src)?
-            .into_iter()
-            .map(|f| {
-                let anchor = f.anchor.map(|a| {
-                    let anchor_args = AnchorArgs {
-                        path: Some(a.path),
-                        side: a.side,
-                        line_start: a.line_start,
-                        line_end: a.line_end,
-                        context: a.context,
-                    };
-                    build_anchor(ctx, &st, Some(&patchset_id), &anchor_args)
-                        .ok()
-                        .flatten()
-                });
-                InlineFinding {
-                    finding_id: ids::new_finding_id(),
-                    blocking: f.blocking,
-                    severity: f.severity,
-                    summary: f.summary,
-                    body: f.body,
-                    anchor: anchor.flatten(),
-                }
-            })
-            .collect(),
-    };
-
-    if verdict == Verdict::Approved && inline.iter().any(|f| f.blocking) {
-        bail!("cannot approve while recording blocking findings in the same review");
-    }
+    let inline: Vec<InlineFinding> = finding_inputs
+        .into_iter()
+        .map(|f| {
+            let anchor = f.anchor.map(|a| {
+                let anchor_args = AnchorArgs {
+                    path: Some(a.path),
+                    side: a.side,
+                    line_start: a.line_start,
+                    line_end: a.line_end,
+                    context: a.context,
+                };
+                build_anchor(ctx, &st, Some(&patchset_id), &anchor_args)
+                    .ok()
+                    .flatten()
+            });
+            InlineFinding {
+                finding_id: ids::new_finding_id(),
+                blocking: f.blocking,
+                severity: f.severity,
+                summary: f.summary,
+                body: f.body,
+                anchor: anchor.flatten(),
+            }
+        })
+        .collect();
 
     let finding_ids: Vec<String> = inline.iter().map(|f| f.finding_id.clone()).collect();
     if let Some(relation) = relation.as_ref() {
