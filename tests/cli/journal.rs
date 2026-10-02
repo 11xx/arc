@@ -10318,6 +10318,36 @@ fn journal_handoff_derives_state_inside_a_change_worktree() {
     assert!(text.ends_with("learned x\n"), "{text}");
 }
 
+/// A handoff only reads the ledger for its change facts, so a checkout whose
+/// policy cannot be parsed still names its change, stage, and claim.
+#[test]
+fn journal_handoff_derives_change_facts_past_a_broken_policy() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "derived-broken");
+    fs::create_dir_all(worktree.join(".arc")).unwrap();
+    fs::write(worktree.join(".arc/policy.toml"), "[policy\n").unwrap();
+    let body = repo.home.join("body.md");
+    fs::write(&body, "learned x\n").unwrap();
+
+    let out = stdout(repo.arc(&worktree).args([
+        "journal",
+        "handoff",
+        "derived-broken-state",
+        "--derive",
+        "--body-file",
+        body.to_str().unwrap(),
+    ]));
+    let text = fs::read_to_string(out.trim()).unwrap();
+    assert!(text.contains(&format!("- change: {change_id}\n")), "{text}");
+    for label in ["- stage: ", "- claim: "] {
+        let value = text
+            .lines()
+            .find_map(|line| line.strip_prefix(label))
+            .unwrap_or_else(|| panic!("no {label:?} line in {text}"));
+        assert_ne!(value, "unknown", "{label} in {text}");
+    }
+}
+
 /// A handoff is written wherever a session stops, including outside every
 /// open change. The facts that depend on one say so instead of vanishing: an
 /// absent line cannot be told apart from a fact nobody recorded.
