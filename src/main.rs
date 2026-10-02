@@ -1438,7 +1438,9 @@ enum Cmd {
     /// Over another actor's live claim, a rebase without --contributors or
     /// --solo refuses before the branch moves. The change stays locked from
     /// that check until the replayed head is recorded, so a command acting on
-    /// the change during the replay reports the lock busy
+    /// the change during the replay reports the lock busy. The gates the
+    /// replayed head owes are named after it is recorded; a failure to
+    /// evaluate them is a warning, and the rebase still succeeds
     Rebase {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
