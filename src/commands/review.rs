@@ -1179,6 +1179,23 @@ fn resolve_patchset_id(st: &ChangeState, patchset: Option<String>) -> Result<Opt
     }
 }
 
+/// The fields `FindingInput` reads, in the order `--help` names them.
+const FINDING_FIELDS: [&str; 5] = ["blocking", "severity", "summary", "body", "anchor"];
+
+/// Folded field names taken for a finding field beyond a one-edit typo.
+const FINDING_FIELD_ALIASES: [(&str, &str); 10] = [
+    ("block", "blocking"),
+    ("blocked", "blocking"),
+    ("blocker", "blocking"),
+    ("blockers", "blocking"),
+    ("blocks", "blocking"),
+    ("isblocking", "blocking"),
+    ("severitylevel", "severity"),
+    ("title", "summary"),
+    ("file", "anchor"),
+    ("path", "anchor"),
+];
+
 /// Read a findings batch from a file or stdin.
 pub(crate) fn read_finding_inputs(src: &str) -> Result<Vec<FindingInput>> {
     let text = if src == "-" {
@@ -1188,7 +1205,88 @@ pub(crate) fn read_finding_inputs(src: &str) -> Result<Vec<FindingInput>> {
     } else {
         std::fs::read_to_string(src).with_context(|| format!("cannot read findings file {src}"))?
     };
+    for warning in unknown_finding_fields(&text)? {
+        eprintln!("warning: {warning}");
+    }
     serde_json::from_str(&text).context("malformed findings JSON")
+}
+
+/// Refuses a finding whose unknown field looks like a misspelling of a field
+/// it omits, because the omitted field would be recorded at its default — a
+/// misspelled `blocking` records a non-blocking finding. Returns a warning for
+/// each finding carrying any other unknown field. `id` is accepted silently:
+/// arc assigns finding IDs and ignores a supplied one.
+fn unknown_finding_fields(text: &str) -> Result<Vec<String>> {
+    let Ok(serde_json::Value::Array(findings)) = serde_json::from_str(text) else {
+        return Ok(Vec::new());
+    };
+    let accepted = FINDING_FIELDS.join(", ");
+    let mut warnings = Vec::new();
+    for (position, finding) in (1..).zip(&findings) {
+        let Some(finding) = finding.as_object() else {
+            continue;
+        };
+        let mut unknown = Vec::new();
+        for key in finding.keys() {
+            if key == "id" || FINDING_FIELDS.contains(&key.as_str()) {
+                continue;
+            }
+            if let Some(field) = misspelled_field(key).filter(|field| !finding.contains_key(*field))
+            {
+                bail!(
+                    "finding {position} has unknown field `{key}`, which looks like a misspelling of `{field}`; rename or remove it (a finding reads {accepted})"
+                );
+            }
+            unknown.push(format!("`{key}`"));
+        }
+        if !unknown.is_empty() {
+            let noun = if unknown.len() == 1 {
+                "field"
+            } else {
+                "fields"
+            };
+            warnings.push(format!(
+                "finding {position} has unknown {noun} {}, which arc ignores (a finding reads {accepted})",
+                unknown.join(", ")
+            ));
+        }
+    }
+    Ok(warnings)
+}
+
+/// The finding field `key` names once case, `_`, and `-` are disregarded,
+/// through an alias or within one edit.
+fn misspelled_field(key: &str) -> Option<&'static str> {
+    let folded: String = key
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    FINDING_FIELD_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == folded)
+        .map(|(_, field)| *field)
+        .or_else(|| {
+            FINDING_FIELDS
+                .into_iter()
+                .find(|field| within_one_edit(&folded, field))
+        })
+}
+
+/// Whether `a` becomes `b` by at most one insertion, deletion, substitution,
+/// or swap of adjacent characters.
+fn within_one_edit(a: &str, b: &str) -> bool {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let (a, b) = (&a[common..], &b[common..]);
+    let swapped =
+        a.len() >= 2 && a.len() == b.len() && a[0] == b[1] && a[1] == b[0] && a[2..] == b[2..];
+    a == b
+        || a.get(1..) == Some(b)
+        || b.get(1..) == Some(a)
+        || a.get(1..).is_some_and(|rest| b.get(1..) == Some(rest))
+        || swapped
 }
 
 /// The findings batch for an event that has no patchset to anchor against.
@@ -1214,4 +1312,31 @@ pub(crate) fn parse_inline_findings(src: Option<&str>) -> Result<Vec<InlineFindi
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::misspelled_field;
+
+    #[test]
+    fn a_misspelled_finding_field_is_named_and_an_unrelated_one_is_not() {
+        for (key, field) in [
+            ("blocker", "blocking"),
+            ("Blocking", "blocking"),
+            ("is_blocking", "blocking"),
+            ("bolcking", "blocking"),
+            ("severity_level", "severity"),
+            ("sevrity", "severity"),
+            ("title", "summary"),
+            ("summery", "summary"),
+            ("bdoy", "body"),
+            ("path", "anchor"),
+            ("anchors", "anchor"),
+        ] {
+            assert_eq!(misspelled_field(key), Some(field), "{key}");
+        }
+        for key in ["tool", "code", "author", "rule", "finding_id", "url"] {
+            assert_eq!(misspelled_field(key), None, "{key}");
+        }
+    }
 }

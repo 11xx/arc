@@ -3874,3 +3874,28 @@ fn review_options_route_the_lead_without_writing() {
         .success();
     assert_eq!(ledger_before, event_count(&repo, &change_id), "ledger grew");
 }
+
+/// The audit approval gate refuses blocking findings, so a misspelled
+/// `blocking` in an audit's batch is refused rather than read as absent.
+#[test]
+fn an_audit_refuses_a_finding_with_a_misspelled_blocking_field() {
+    let repo = repo_forbidding_self_approval();
+    self_approved_change(&repo, "misspelled");
+    repo.arc(&repo.root)
+        .args(["integrate", "misspelled", "--debt", "quota"])
+        .assert()
+        .success();
+
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["audit", "misspelled", "--verdict", "approved"])
+        .args(["--findings-json", "-"])
+        .write_stdin(r#"[{"severity": "major", "summary": "missed", "blocker": true}]"#)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "unknown field `blocker`, which looks like a misspelling of `blocking`",
+        ));
+    let log = stdout(repo.arc(&repo.root).args(["log", "misspelled"]));
+    assert!(!log.contains("audit-verdict-recorded"), "{log}");
+}
