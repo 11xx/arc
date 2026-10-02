@@ -365,9 +365,9 @@ fn resolve_tagged(ctx: &Ctx, tags: &[String]) -> Result<Vec<String>> {
     Ok(selected)
 }
 
-/// Single-change output stays byte-identical; only tagged watches name members.
 /// A timeout is an outcome a script has to branch on, so it is reported in
-/// whichever shape the caller asked for rather than only as prose.
+/// whichever shape the caller asked for rather than only as prose: a
+/// `timeout:` line, or an `arc-watch/1` document under `--json`.
 fn report_timeout(until: &[WatchUntil], json: bool) -> Result<()> {
     if json {
         println!(
