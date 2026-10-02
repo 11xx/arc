@@ -128,10 +128,18 @@ fn events_of(repo: &Repo, change_id: &str, event_type: &str) -> Vec<serde_json::
         .collect()
 }
 
+/// Published repository events. An event is written beside its final name
+/// and linked into place, so a read racing a write skips the partial file.
 fn repository_events(repo: &Repo, event_type: &str) -> Vec<serde_json::Value> {
     let dir = repo.root.join(".git/arc/repository/events");
     let mut paths: Vec<_> = match fs::read_dir(dir) {
-        Ok(entries) => entries.map(|entry| entry.unwrap().path()).collect(),
+        Ok(entries) => entries
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .collect(),
         Err(_) => Vec::new(),
     };
     paths.sort();
@@ -475,35 +483,27 @@ fn a_target_moved_before_the_effect_leaves_the_selection_unpromoted_until_resele
     let before = branch_head(repo, &f.change);
     let decided = target(repo);
 
-    // The promotion waits on the destination's lock; the target moves while
-    // it waits, after the selection was validated and recorded.
-    let lock = hold_transition_lock(repo, &f.change);
-    let mut child = spawn_arc(
-        repo,
-        &repo.root,
-        &[
-            "candidate",
-            "select",
-            "--chosen",
-            "alice",
-            "--into",
-            &f.change,
-            "--target",
-            &decided,
-            "--evaluation",
-            &evaluation,
-            "--rationale",
-            "alice answers",
-        ],
-    );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while repository_events(repo, "candidate-selected").is_empty() {
-        assert!(Instant::now() < deadline, "no selection was recorded");
-        thread::sleep(Duration::from_millis(10));
-    }
-    repo.commit(&repo.root, "later.txt", "later\n", "the target moves");
-    drop(lock);
-    assert!(!wait_for_exit(&mut child).success());
+    // The selection pauses once it is recorded; the target moves before the
+    // promotion re-reads the basis, and only then is the pause released.
+    let release = repo.home.join("release-promotion");
+    let out = thread::scope(|scope| {
+        scope.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while repository_events(repo, "candidate-selected").is_empty() {
+                assert!(Instant::now() < deadline, "no selection was recorded");
+                thread::sleep(Duration::from_millis(10));
+            }
+            repo.commit(&repo.root, "later.txt", "later\n", "the target moves");
+            fs::write(&release, "").unwrap();
+        });
+        select(repo, &f.change, "alice", &decided, &[&evaluation])
+            .env("ARC_SELECT_PAUSE", &release)
+            .output()
+            .unwrap()
+    });
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("basis-moved: "), "{stderr}");
 
     let first = repository_events(repo, "candidate-selected").pop().unwrap();
     let first_id = first["event_id"].as_str().unwrap().to_string();

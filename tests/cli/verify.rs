@@ -76,10 +76,28 @@ fn verify_all_continues_after_a_failure() {
     assert_eq!(events.lines().count(), 2);
 }
 
+/// A gate that marks its start, waits a bounded while for `other` to mark
+/// its own, and passes only once it has seen it, recording that it did. Two
+/// of them both pass only when they run at the same time.
+fn rendezvous_gate(markers: &Path, gate: &str, other: &str) -> String {
+    let markers = markers.display();
+    format!(
+        "touch '{markers}/{gate}'; n=0; until [ -e '{markers}/{other}' ]; do \
+         n=$((n+1)); [ $n -lt 1000 ] || exit 1; sleep 0.01; done; \
+         touch '{markers}/{gate}-saw-{other}'"
+    )
+}
+
 #[test]
-fn verify_all_parallel_completes_sleep_gates_and_appends_evidence_in_name_order() {
+fn verify_all_parallel_overlaps_gates_and_appends_evidence_in_name_order() {
     let repo = Repo::new();
-    write_two_gates(&repo, "sleep 1", "sleep 1");
+    let markers = repo.home.join("gate-markers");
+    fs::create_dir_all(&markers).unwrap();
+    write_two_gates(
+        &repo,
+        &rendezvous_gate(&markers, "alpha", "beta"),
+        &rendezvous_gate(&markers, "beta", "alpha"),
+    );
     git(&repo.root, &["add", ".arc/gates.toml"]);
     git(&repo.root, &["commit", "-m", "test: add parallel gates"]);
     stdout(
@@ -87,15 +105,18 @@ fn verify_all_parallel_completes_sleep_gates_and_appends_evidence_in_name_order(
             .args(["begin", "parallel-gates", "--no-worktree"]),
     );
 
-    let started = Instant::now();
     repo.arc(&repo.root)
         .args(["verify", "parallel-gates", "--all", "--parallel"])
         .assert()
         .success()
         .stdout(predicates::str::contains("gates: 2/2 pass"));
     assert!(
-        started.elapsed() < Duration::from_millis(1800),
-        "two one-second gates should overlap"
+        markers.join("alpha-saw-beta").exists(),
+        "alpha never saw beta start"
+    );
+    assert!(
+        markers.join("beta-saw-alpha").exists(),
+        "beta never saw alpha start"
     );
 
     let events = stdout(repo.arc(&repo.root).args([
