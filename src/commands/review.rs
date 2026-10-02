@@ -1238,7 +1238,8 @@ pub(crate) fn read_finding_inputs(src: &str) -> Result<Vec<FindingInput>> {
     for warning in unknown_finding_fields(&text)? {
         eprintln!("warning: {warning}");
     }
-    serde_json::from_str(&text).context("malformed findings JSON")
+    serde_json::from_str(&text)
+        .context("malformed findings JSON; `arc review --help` states the shape")
 }
 
 /// Refuses a finding whose unknown field looks like a misspelling of a field

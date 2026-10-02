@@ -489,6 +489,12 @@ RUN A CHANGE
     --snapshot                       Snapshot the clean worktree first;
       --contributors <a,b> | --solo  attribute that patchset, as on
                                      `arc snapshot`.
+    --cause <c>                      Required with changes-requested, refused
+                                     otherwise: brief, executor, or
+                                     integration-staleness.
+    --findings-json <file|->         A JSON array; each finding needs a
+                                     severity (critical, major, minor, note)
+                                     and a summary. `--help` has the rest.
     --provisional <why>              It gates, and owes a second judgment.
     --relation corroborates          Support the standing verdict, not replace it.
   arc resolve                        Dispose of a finding.
