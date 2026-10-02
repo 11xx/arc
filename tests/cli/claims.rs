@@ -1101,13 +1101,13 @@ fn concurrent_integrations_serialize_on_the_target_branch_lock() {
         .success();
 
     let target_lock = hold_target_lock(&repo, "master");
-    let mut first = spawn_arc_with_session(
+    let mut first = spawn_arc_keeping_stderr(
         &repo,
         &repo.root,
         &["integrate", "target-race-a"],
         "integrator-a",
     );
-    let mut second = spawn_arc_with_session(
+    let mut second = spawn_arc_keeping_stderr(
         &repo,
         &repo.root,
         &["integrate", "target-race-b"],
@@ -1116,8 +1116,17 @@ fn concurrent_integrations_serialize_on_the_target_branch_lock() {
     assert_waiting_on_transition_lock(&mut [&mut first, &mut second]);
     target_lock.unlock().unwrap();
 
-    assert!(wait_for_exit(&mut first).success());
-    assert!(wait_for_exit(&mut second).success());
+    for (slug, child) in [
+        ("target-race-a", &mut first),
+        ("target-race-b", &mut second),
+    ] {
+        let status = wait_for_exit(child);
+        assert!(
+            status.success(),
+            "integrate {slug} exited {status}: {}",
+            child_stderr(child)
+        );
+    }
     assert!(repo.root.join("target-race-a.txt").is_file());
     assert!(repo.root.join("target-race-b.txt").is_file());
     repo.arc(&repo.root)
