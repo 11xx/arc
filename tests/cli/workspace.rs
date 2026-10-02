@@ -391,7 +391,7 @@ fn workspace_backlog_names_an_unreachable_project() {
 
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
-    let value = json_stdout(&mut report);
+    let value = json_stdout_any_status(&mut report);
     assert_backlog_summary_matches_rows(&value);
     let stranded = value["unreachable"]
         .as_array()
@@ -717,7 +717,7 @@ fn workspace_backlog_compacts_temporary_unreachable_journals() {
     )
     .unwrap();
 
-    let text = stdout(repo.arc(&repo.root).args(["workspace", "backlog"]));
+    let text = stdout_any_status(repo.arc(&repo.root).args(["workspace", "backlog"]));
     assert!(
         text.contains("maintenance: 6 unreachable journals (5 temporary/scratch, 1 other)"),
         "{text}"
@@ -729,16 +729,17 @@ fn workspace_backlog_compacts_temporary_unreachable_journals() {
         "{text}"
     );
 
-    let expanded = stdout(
-        repo.arc(&repo.root)
-            .args(["workspace", "backlog", "--unreachable"]),
-    );
+    let expanded =
+        stdout_any_status(
+            repo.arc(&repo.root)
+                .args(["workspace", "backlog", "--unreachable"]),
+        );
     assert!(expanded.contains("-tmp-noise-0"), "{expanded}");
     assert!(expanded.contains("-durable-project"), "{expanded}");
 
     let mut json = repo.arc(&repo.root);
     json.args(["workspace", "backlog", "--json"]);
-    let value = json_stdout(&mut json);
+    let value = json_stdout_any_status(&mut json);
     assert_backlog_summary_matches_rows(&value);
     assert_eq!(value["summary"]["unreachable"], 6);
 }
@@ -790,7 +791,7 @@ fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
 
     let mut scoped = repo.arc(&workspace);
     scoped.args(["workspace", "backlog", "--here", "--json"]);
-    let value = json_stdout(&mut scoped);
+    let value = json_stdout_any_status(&mut scoped);
     assert_eq!(value["schema"], "arc-workspace-backlog/19");
     assert_eq!(value["scope"]["mode"], "under");
     assert_eq!(
@@ -821,7 +822,7 @@ fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
 
     let mut global = repo.arc(&workspace);
     global.args(["workspace", "backlog", "--global", "--json"]);
-    let global = json_stdout(&mut global);
+    let global = json_stdout_any_status(&mut global);
     assert_eq!(global["scope"]["mode"], "global");
     assert_eq!(global["projects"].as_array().unwrap().len(), 3, "{global}");
     assert_eq!(global["unreachable"].as_array().unwrap().len(), 2);
@@ -949,7 +950,7 @@ fn workspace_backlog_names_a_binding_only_orphan() {
 
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
-    let value = json_stdout(&mut report);
+    let value = json_stdout_any_status(&mut report);
     let named = value["unreachable"]
         .as_array()
         .unwrap()

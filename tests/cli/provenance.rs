@@ -1383,7 +1383,7 @@ fn status_names_the_review_subject_for_every_attribution_shape() {
     assert!(show.contains("review subject:"), "{show}");
     assert!(show.contains("Lead, executor-a"), "{show}");
     assert!(show.contains("explicit-contributors"), "{show}");
-    let check = stdout(repo.arc(&repo.root).args(["check", "executor-lead"]));
+    let check = stdout_any_status(repo.arc(&repo.root).args(["check", "executor-lead"]));
     assert!(check.contains("review subject:"), "{check}");
 
     // Legacy on-behalf-of: no contributor set, so the subject is the

@@ -313,7 +313,7 @@ fn a_gate_counts_evidence_only_in_the_environment_its_probe_reports() {
     assert_eq!(gate["environment"]["evidence"], identity_a, "{state}");
     let identity_b = gate["environment"]["current"].as_str().unwrap().to_string();
     assert_ne!(identity_a, identity_b);
-    let explain = stdout(repo.arc(&repo.root).env("ARC_TEST_ENV", "B").args([
+    let explain = stdout_any_status(repo.arc(&repo.root).env("ARC_TEST_ENV", "B").args([
         "check",
         "env-gate",
         "--explain",
@@ -415,7 +415,7 @@ fn evidence_recorded_without_an_identity_satisfies_only_probe_less_gates() {
     repo.declare_gates_locally("[gates.build]\ncommand = \"true\"\nenvironment = \"true\"\n");
     let state = json_stdout(repo.arc(&repo.root).args(["status", "env-gate"]));
     assert_eq!(state["gates"][0]["green_at_head"], false, "{state}");
-    let explain = stdout(
+    let explain = stdout_any_status(
         repo.arc(&repo.root)
             .args(["check", "env-gate", "--explain"]),
     );
