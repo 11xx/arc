@@ -238,14 +238,16 @@ impl From<KeptKindArg> for model::KeptKind {
 enum Cmd {
     /// Open a change: create (or adopt) its branch and worktree
     ///
-    /// Without --base, the change derives its base from the local target.
+    /// Without --base, the change derives its base from the local target:
+    /// its head, or under --adopt the adopted branch's merge base with it.
     /// When that target lacks commits its configured upstream holds, as the
     /// last fetch left the remote-tracking ref (arc reads local refs only,
     /// never the network), the change still opens and stderr warns, naming
-    /// both revisions and the fix: for a target strictly behind, the
-    /// fast-forward (`git merge --ff-only` in the checkout holding it, or
-    /// `git fetch . <upstream>:<target>` when none does); for a diverged one,
-    /// that no fast-forward exists; then `arc rebase` onto the moved target.
+    /// both revisions, the base the change took, and the fix: for a target
+    /// strictly behind, the fast-forward (`git merge --ff-only` in the
+    /// checkout holding it, or `git fetch . <upstream>:<target>` when none
+    /// does); for a diverged one, that no fast-forward exists; then `arc
+    /// rebase` onto the moved target.
     /// A target level with or ahead of its upstream, or tracking none, gets
     /// no warning.
     Begin {
@@ -260,7 +262,8 @@ enum Cmd {
         /// Integration target branch (defaults to the current branch)
         #[arg(long)]
         target: Option<String>,
-        /// Base revision (defaults to the target head). An explicit base
+        /// Base revision (defaults to the target head, or under --adopt to
+        /// the adopted branch's merge base with the target). An explicit base
         /// skips the comparison of the target with its upstream
         #[arg(long)]
         base: Option<String>,
