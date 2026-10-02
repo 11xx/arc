@@ -554,7 +554,9 @@ enum Cmd {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
         change: Option<String>,
-        /// Read a new brief body from a file ('-' for stdin)
+        /// Read a new brief body from a file ('-' for stdin). A write records
+        /// the next version: v1 on a change with no brief, otherwise one past
+        /// the latest
         #[arg(long)]
         body_file: Option<String>,
         /// Optional title for a newly recorded brief
@@ -590,11 +592,16 @@ enum Cmd {
         /// path to one, or '-' for stdin
         #[arg(long)]
         probes_json: Option<String>,
-        /// Earlier ledger fact that caused this version: finding:<id>,
-        /// verdict:<event>, or blocked-on:<event> (repeatable)
+        /// Earlier ledger fact that caused this version (repeatable):
+        /// finding:<id>, verdict:<event> naming a changes-requested verdict,
+        /// or blocked-on:<event>, each on this change. v1 refuses a cause;
+        /// every later version requires at least one, from this flag or
+        /// --cause-note
         #[arg(long)]
         caused_by: Vec<String>,
-        /// External cause, when no earlier ledger object represents the reason
+        /// External cause, when no earlier ledger object represents the
+        /// reason. It is a cause like --caused-by: refused on v1, and enough
+        /// alone for any later version
         #[arg(long)]
         cause_note: Option<String>,
         /// A read the contract requires of whoever answers it (repeatable):
@@ -636,8 +643,9 @@ enum Cmd {
     /// stderr and retain readable entries. --write requires every change to
     /// be readable; an unreadable selected change fails
     Changelog {
-        /// Change to act on. Omitted, it is inferred from the current branch,
-        /// then from the worktree the command runs in
+        /// Change whose entry is recorded or read. Omitted, recording infers
+        /// it from the current branch, then from the worktree the command
+        /// runs in, while a read projects every change's entry instead
         change: Option<String>,
         /// Free-form category for a newly recorded changelog entry
         #[arg(long)]
@@ -1198,7 +1206,9 @@ enum Cmd {
         /// whatever the reviewer actually read
         #[arg(long)]
         patchset: Option<String>,
-        /// Root cause of requested rework; repeat for a mixed round
+        /// Root cause of requested rework; repeat for a mixed round. Required
+        /// with `--verdict changes-requested` and refused with any other
+        /// verdict
         #[arg(long, value_enum)]
         cause: Vec<ReviewCause>,
         /// Findings batch: a path to a JSON array, or '-' for stdin. Each

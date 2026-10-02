@@ -63,6 +63,36 @@ fn recording_then_reading_round_trips_section_and_body() {
     assert_eq!(value["entries"][0]["body"], "- fixed it\n");
 }
 
+/// Recording an entry is something a change's implementer does from its
+/// worktree, so CHANGE is inferred there like every other change-scoped
+/// write; outside any change it refuses rather than guessing.
+#[test]
+fn recording_infers_the_change_from_its_worktree() {
+    let repo = Repo::new();
+    begin(&repo, "inferred");
+    let worktree = repo.home.join(".worktrees/repo-inferred");
+    repo.arc(&worktree)
+        .args(["changelog", "--category", "added", "--body-file", "-"])
+        .write_stdin("- inferred it\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("changelog: added"));
+    let value: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&worktree).args([
+        "changelog",
+        "inferred",
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(value["entries"][0]["body"], "- inferred it\n");
+
+    repo.arc(&repo.root)
+        .args(["changelog", "--category", "added", "--body-file", "-"])
+        .write_stdin("- nowhere\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot infer a change"));
+}
+
 #[test]
 fn rerecording_replaces_the_derived_entry_and_keeps_both_events() {
     let repo = Repo::new();
