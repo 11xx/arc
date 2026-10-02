@@ -342,13 +342,20 @@ impl FindingState {
         observed_tips(&self.after_integration)
     }
 
-    /// Whether the dispositions recorded after integration release the
-    /// finding: a single tip that is resolved, accepted-risk, or obsolete.
-    pub fn released_after_integration(&self) -> bool {
-        matches!(
-            self.after_integration_tips().as_slice(),
-            [tip] if tip.status.releases_block()
-        )
+    /// Whether the finding's own dispositions release it. For a review
+    /// finding on an integrated change they are the state it shipped with.
+    pub fn released(&self) -> bool {
+        history_releases(&self.dispositions)
+    }
+
+    /// Whether the finding's applicable history releases it: the dispositions
+    /// recorded after integration when there are any, otherwise its own.
+    pub fn currently_released(&self) -> bool {
+        if self.after_integration.is_empty() {
+            self.released()
+        } else {
+            history_releases(&self.after_integration)
+        }
     }
 
     /// How the finding stands after integration, as readers print it: the
@@ -445,6 +452,16 @@ trait TipEntry {
     fn counts_as_tip(&self) -> bool {
         true
     }
+}
+
+/// Whether a disposition history releases its finding: a single tip that is
+/// resolved, accepted-risk, or obsolete. Several tips are contested and
+/// release nothing.
+fn history_releases(entries: &[DispositionEntry]) -> bool {
+    matches!(
+        observed_tips(entries).as_slice(),
+        [tip] if tip.status.releases_block()
+    )
 }
 
 fn observed_tips<T: TipEntry>(entries: &[T]) -> Vec<&T> {
@@ -3134,21 +3151,22 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     #[test]
-    fn competing_later_dispositions_release_nothing() {
-        let later = |event_id: &str, status| DispositionEntry {
+    fn the_applicable_history_decides_whether_a_finding_is_released() {
+        use DispositionStatus::{AcceptedRisk, Disputed, Obsolete, Resolved, StillOpen};
+        let entry = |event_id: &str, status, supersedes: &[&str]| DispositionEntry {
             event_id: event_id.into(),
             status,
             commit: None,
             evidence: None,
             evidence_event_id: None,
             actor: "tester".into(),
-            supersedes: Vec::new(),
+            supersedes: supersedes.iter().map(|id| id.to_string()).collect(),
         };
-        let mut finding = FindingState {
+        let finding = |dispositions, after_integration| FindingState {
             id: "f1".into(),
             blocking: false,
             severity: Severity::Minor,
-            summary: "left open at ship".into(),
+            summary: "a finding".into(),
             body: None,
             patchset_id: None,
             anchor: None,
@@ -3156,15 +3174,54 @@ mod tests {
             reported_by: "tester".into(),
             on_behalf_of: None,
             actor_source: None,
-            dispositions: Vec::new(),
-            after_integration: vec![later("e1", DispositionStatus::Resolved)],
+            dispositions,
+            after_integration,
             replies: Vec::new(),
         };
-        assert!(finding.released_after_integration());
-        finding
-            .after_integration
-            .push(later("e2", DispositionStatus::Obsolete));
-        assert!(!finding.released_after_integration());
+        let contested = || vec![entry("e1", Resolved, &[]), entry("e2", Obsolete, &[])];
+        // (own dispositions, later history, released by its own, released now)
+        let cases = [
+            (vec![], vec![], false, false),
+            (vec![entry("e1", StillOpen, &[])], vec![], false, false),
+            (vec![entry("e1", Disputed, &[])], vec![], false, false),
+            (contested(), vec![], false, false),
+            (vec![entry("e1", AcceptedRisk, &[])], vec![], true, true),
+            (
+                vec![entry("e1", Resolved, &[]), entry("e2", StillOpen, &["e1"])],
+                vec![],
+                false,
+                false,
+            ),
+            (vec![], vec![entry("l1", StillOpen, &[])], false, false),
+            (
+                vec![entry("e1", Disputed, &[])],
+                vec![entry("l1", Disputed, &[])],
+                false,
+                false,
+            ),
+            (
+                vec![],
+                vec![entry("l1", Resolved, &[]), entry("l2", Obsolete, &[])],
+                false,
+                false,
+            ),
+            (
+                vec![entry("e1", StillOpen, &[])],
+                vec![entry("l1", Resolved, &[])],
+                false,
+                true,
+            ),
+            (contested(), vec![entry("l1", Obsolete, &[])], false, true),
+        ];
+        for (index, (own, later, released, currently_released)) in cases.into_iter().enumerate() {
+            let finding = finding(own, later);
+            assert_eq!(finding.released(), released, "case {index}");
+            assert_eq!(
+                finding.currently_released(),
+                currently_released,
+                "case {index}"
+            );
+        }
     }
 
     fn ev(change: &str, payload: Payload) -> Event {

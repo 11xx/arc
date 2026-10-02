@@ -32,8 +32,9 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// An open finding as the review view reports it: its status summary, and
-/// the dispositions recorded after the change shipped with it open.
+/// A finding its own dispositions leave unresolved, as the review view
+/// reports it: its status summary, which on an integrated change is how it
+/// shipped, and the dispositions recorded after integration.
 #[derive(Serialize)]
 struct ReviewOpenFinding<'a> {
     #[serde(flatten)]
@@ -92,14 +93,12 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
         open_findings: report
             .findings
             .iter()
-            .filter(|finding| finding.status == "open")
-            .map(|summary| ReviewOpenFinding {
-                summary,
-                after_integration: state
-                    .findings
-                    .get(&summary.id)
-                    .map(|finding| finding.after_integration.iter().collect())
-                    .unwrap_or_default(),
+            .filter_map(|summary| {
+                let finding = state.findings.get(&summary.id)?;
+                (!finding.released()).then(|| ReviewOpenFinding {
+                    summary,
+                    after_integration: finding.after_integration.iter().collect(),
+                })
             })
             .collect(),
         has_valid_approval: report.has_valid_approval,
@@ -217,11 +216,16 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
             let after = state
                 .findings
                 .get(&finding.id)
-                .and_then(FindingState::after_integration_status)
-                .map(|after| format!(" — open at ship; {after} after integration"))
-                .unwrap_or_default();
+                .and_then(FindingState::after_integration_status);
+            let standing = match (after, finding.status.as_str()) {
+                (Some(after), shipped) => {
+                    format!(" — {shipped} at ship; {after} after integration")
+                }
+                (None, "open") => String::new(),
+                (None, status) => format!(" — {status}"),
+            };
             println!(
-                "- `{}` [{}{:?}] {}{after}",
+                "- `{}` [{}{:?}] {}{standing}",
                 finding.id,
                 if finding.blocking { "blocking/" } else { "" },
                 finding.severity,
