@@ -24,6 +24,8 @@ struct ReviewView<'a> {
     #[serde(skip_serializing_if = "is_false")]
     verdict_contested: bool,
     next_action: &'a str,
+    #[serde(skip)]
+    next_step: String,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -86,6 +88,7 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
         review_options: report.review_options.clone(),
         verdict_contested: state.verdict_contested(),
         next_action: &report.next_action,
+        next_step: crate::render::next_step(&report),
     };
 
     if json {
@@ -220,7 +223,7 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
             view.review_options.join(", ")
         }
     );
-    println!("Next action: {}", view.next_action);
+    println!("Next step: {}", view.next_step);
     Ok(())
 }
 

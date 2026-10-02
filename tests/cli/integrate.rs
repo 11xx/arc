@@ -1114,3 +1114,111 @@ fn check_prints_its_blockers_before_its_advisories() {
         "{report}"
     );
 }
+
+/// What `check` and a refused `integrate` print as the next step for `change`,
+/// after asserting that `status --json` still carries the bare code.
+fn printed_next_step(repo: &Repo, change: &str, code: &str) -> (String, String) {
+    let status = json_stdout(repo.arc(&repo.root).args(["status", change]));
+    assert_eq!(status["next_action"], code, "{status}");
+    let next_step = |text: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix("Next step: "))
+            .unwrap_or_else(|| panic!("no next step in:\n{text}"))
+            .to_string()
+    };
+    let check = repo
+        .arc(&repo.root)
+        .args(["check", change])
+        .output()
+        .unwrap();
+    assert!(!check.status.success());
+    let integrate = repo
+        .arc(&repo.root)
+        .args(["integrate", change])
+        .output()
+        .unwrap();
+    assert!(!integrate.status.success());
+    (
+        next_step(&String::from_utf8_lossy(&check.stdout)),
+        next_step(&String::from_utf8_lossy(&integrate.stderr)),
+    )
+}
+
+/// `Next step:` is a command the reader can run with the change filled in,
+/// followed by the code it renders; `check` and a refused `integrate` print
+/// the same line.
+#[test]
+fn next_step_prints_a_command_the_reader_can_run() {
+    let repo = repo_with_gates();
+    let change = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "steps"])));
+    let worktree = repo.home.join(".worktrees").join("repo-steps");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    stdout(repo.arc(&worktree).args(["snapshot", "steps"]));
+
+    let (check, refusal) = printed_next_step(&repo, &change, "run_gate:smoke");
+    assert_eq!(
+        check,
+        format!("arc verify {change} --gate smoke (run_gate:smoke)")
+    );
+    assert_eq!(refusal, check);
+
+    repo.arc(&worktree)
+        .args(["verify", "steps", "--gate", "smoke"])
+        .assert()
+        .success();
+    let (check, refusal) = printed_next_step(&repo, &change, "declare_debt");
+    assert_eq!(
+        check,
+        format!(
+            "arc debt {change} --reason \"<what was read and what review is owed>\" (declare_debt)"
+        )
+    );
+    assert_eq!(refusal, check);
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["review", "steps", "--verdict", "comment-only"])
+        .assert()
+        .success();
+    let (check, refusal) = printed_next_step(&repo, &change, "comment-only");
+    assert_eq!(
+        check,
+        format!(
+            "address the comment-only verdict, record any new commits with arc snapshot {change}, then ask for a fresh verdict: arc review {change} --verdict <verdict> (comment-only)"
+        )
+    );
+    assert_eq!(refusal, check);
+}
+
+/// A change policy will not let its author approve names the review it owes
+/// and who must give it.
+#[test]
+fn next_step_names_the_review_a_required_review_owes() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    fs::write(
+        repo.root.join(".arc/policy.toml"),
+        "[policy]\nforbid_self_approval = true\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "policy"]);
+    let change = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "owed"])));
+    let worktree = repo.home.join(".worktrees").join("repo-owed");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    stdout(repo.arc(&worktree).args(["snapshot", "owed"]));
+
+    let (check, refusal) = printed_next_step(&repo, &change, "request_review");
+    assert_eq!(
+        check,
+        format!(
+            "ask a reviewer independent of the contributors to run: arc review {change} --verdict <verdict> (request_review)"
+        )
+    );
+    assert_eq!(refusal, check);
+    let status = stdout(repo.arc(&repo.root).args(["show", &change]));
+    assert!(
+        status.contains(&format!("- Next step: {check}")),
+        "{status}"
+    );
+}

@@ -16,6 +16,8 @@ struct RescueOutput<'a> {
     open_findings: Vec<&'a FindingSummary>,
     gates: &'a [GateStatus],
     next_action: &'a str,
+    #[serde(skip)]
+    next_step: String,
     worktree_dirty: Option<bool>,
     head_state: &'static str,
     claim: Option<RescueClaim<'a>>,
@@ -347,6 +349,7 @@ pub fn rescue(
         open_findings,
         gates: &report.gates,
         next_action: &report.next_action,
+        next_step: crate::render::next_step(&report),
         worktree_dirty: report.worktree_dirty,
         head_state,
         claim,
@@ -462,5 +465,5 @@ fn render(output: &RescueOutput<'_>) {
         "- Abandoned: {}",
         if output.abandoned { "yes" } else { "no" }
     );
-    println!("\nNext action: {}", output.next_action);
+    println!("\nNext step: {}", output.next_step);
 }

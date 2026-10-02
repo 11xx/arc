@@ -393,7 +393,13 @@ fn query_tags_batch_views_and_actionable_errors() {
         .assert()
         .code(7)
         .stdout(predicates::str::contains("Cannot integrate"))
-        .stdout(predicates::str::contains("Next step: wait_for:blockers"));
+        .stdout(predicates::str::contains("Next step: wait for "))
+        .stdout(predicates::str::contains(
+            "to integrate; arc blocker-status tagged-b-",
+        ))
+        .stdout(predicates::str::contains(
+            "reports them (wait_for:blockers)",
+        ));
     repo.arc(&repo.root)
         .args(["integrate", "tagged-b"])
         .assert()
