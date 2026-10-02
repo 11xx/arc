@@ -125,6 +125,7 @@ pub fn squash(
         Vec::new(),
         None,
     )
+    .map(drop)
 }
 
 fn restore_tracked_state(worktree: &std::path::Path, head: &str) -> Result<()> {

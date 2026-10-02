@@ -574,6 +574,11 @@ RUN A CHANGE
   approval through. Any other unknown field is ignored with a warning naming
   it; a finding's `id` is ignored silently, since arc assigns finding IDs.
 
+  `review --snapshot` validates the batch and the verdict before it records
+  the patchset, and keeps the change locked from that patchset until the
+  verdict on it is recorded: a refused review records no patchset, and a
+  command acting on the change in between reports the lock busy.
+
   Each acceptance probe declared on the patchset's brief blocks readiness
   until baseline evidence fails at that brief's base and final evidence passes
   at the patchset's head. Both runs must name that brief and probe; the newest

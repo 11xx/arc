@@ -401,11 +401,13 @@ pub fn snapshot(
         journal_refs,
         thread,
     )
+    .map(drop)
 }
 
 /// Record the change branch's head as a patchset under the change transition
-/// lock the caller holds. `requested_contributors` is a normalized
-/// declaration, as `contributor_declaration` returns it.
+/// lock the caller holds, and return the patchset that holds it: the one
+/// recorded, or the unchanged one already there. `requested_contributors` is
+/// a normalized declaration, as `contributor_declaration` returns it.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn snapshot_holding(
     ctx: &Ctx,
@@ -417,7 +419,7 @@ pub(super) fn snapshot_holding(
     requested_contributors: Option<Vec<String>>,
     journal_refs: Vec<String>,
     thread: Option<String>,
-) -> Result<()> {
+) -> Result<String> {
     let events = store.load_events(change_id)?;
     let mut st = state::reduce_following(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
@@ -514,7 +516,7 @@ pub(super) fn snapshot_holding(
     ensure_append_allowed(&st, &payload)?;
     if let Some(patchset_id) = unchanged_patchset {
         println!("patchset: {patchset_id} (unchanged)");
-        return Ok(());
+        return Ok(patchset_id);
     }
     for skipped in &skipped_defaults {
         eprintln!("{skipped}");
@@ -543,7 +545,7 @@ pub(super) fn snapshot_holding(
         );
     }
     println!("event: {}", ev.event_id);
-    Ok(())
+    Ok(patchset_id)
 }
 
 /// The base a patchset at `head` is recorded against when none is named,
@@ -1101,36 +1103,51 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
     if verdict == Verdict::Approved && finding_inputs.iter().any(|f| f.blocking) {
         bail!("cannot approve while recording blocking findings in the same review");
     }
-    if snapshot_first {
-        if patchset.is_some() {
-            bail!("--snapshot cannot be combined with --patchset");
-        }
-        let store = ctx.store()?;
-        let (_, st) = ctx.load_state(&store, reference)?;
+    if snapshot_first && patchset.is_some() {
+        bail!("--snapshot cannot be combined with --patchset");
+    }
+    let requested_contributors = if snapshot_first {
+        contributor_declaration(ctx, contributors, solo)?
+    } else {
+        None
+    };
+    let store = ctx.store()?;
+    let change_id = store.resolve_change(reference)?;
+    // One lock covers the patchset `--snapshot` records and the verdict on
+    // it, so nothing lands between them that would refuse the verdict after
+    // the patchset is written.
+    let transition = store.lock_transition(&change_id)?;
+    let snapshot_patchset = if snapshot_first {
+        let st = store.state(&change_id)?;
         if gitio::current_branch(&ctx.cwd)?.as_deref() != Some(st.branch.as_str())
             || !gitio::is_clean(&ctx.cwd)?
         {
             bail!("review --snapshot requires the change branch checked out in a clean worktree");
         }
-        snapshot(
+        Some(snapshot_holding(
             ctx,
-            reference,
+            &store,
+            &change_id,
+            &transition,
             None,
             None,
-            contributors,
-            solo,
+            requested_contributors,
             Vec::new(),
             None,
-        )?;
-    }
-    let store = ctx.store()?;
-    let change_id = store.resolve_change(reference)?;
-    let _transition = store.lock_transition(&change_id)?;
+        )?)
+    } else {
+        None
+    };
+    // The test suite holds the review here, between the snapshot and the verdict.
+    super::pause_until_released("ARC_REVIEW_PAUSE")?;
     let events = store.load_events(&change_id)?;
     let mut st = state::reduce_following(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
-    let patchset_id = resolve_patchset_id(&st, patchset)?
-        .context("no patchset to review; run `arc snapshot` first")?;
+    let patchset_id = match snapshot_patchset {
+        Some(patchset_id) => patchset_id,
+        None => resolve_patchset_id(&st, patchset)?
+            .context("no patchset to review; run `arc snapshot` first")?,
+    };
     let observed: Vec<String> = st
         .verdict_tips()
         .into_iter()

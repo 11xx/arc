@@ -507,18 +507,7 @@ pub fn select(ctx: &Ctx, args: SelectArgs) -> Result<i32> {
 /// it to exist. Unset, which is every run that is not a test, this does
 /// nothing.
 fn paused_before_promotion() -> Result<()> {
-    let Some(release) = std::env::var_os("ARC_SELECT_PAUSE") else {
-        return Ok(());
-    };
-    let release = Path::new(&release);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while !release.exists() {
-        if std::time::Instant::now() >= deadline {
-            bail!("ARC_SELECT_PAUSE: {} never appeared", release.display());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    Ok(())
+    super::pause_until_released("ARC_SELECT_PAUSE")
 }
 
 pub fn promote(ctx: &Ctx, selection_id: &str) -> Result<i32> {
