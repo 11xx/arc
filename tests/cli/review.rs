@@ -728,6 +728,80 @@ fn a_refused_review_snapshot_records_no_patchset() {
     }
 }
 
+/// A close attempted between the patchset `review --snapshot` records and the
+/// verdict it records cannot strand that patchset: either the close finds the
+/// change busy and the review records both, or the review refuses having
+/// recorded neither.
+#[test]
+fn a_close_attempted_while_review_snapshots_cannot_strand_a_patchset() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "raced-review");
+    repo.commit(&worktree, "more.txt", "more\n", "test: move the head");
+    let before = recorded(&repo, &change_id, "raced-review");
+    let release = repo.home.join("release-review");
+
+    let (out, closed) = thread::scope(|scope| {
+        let closer = scope.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while event_count(&repo, &change_id) == before.0 {
+                assert!(Instant::now() < deadline, "the review recorded no patchset");
+                thread::sleep(Duration::from_millis(10));
+            }
+            let closed = repo
+                .arc(&repo.root)
+                .env("ARC_ACTOR", "codex-luna")
+                .args(["close", "raced-review", "--abandoned"])
+                .output()
+                .unwrap();
+            fs::write(&release, "").unwrap();
+            closed
+        });
+        let out = repo
+            .arc(&worktree)
+            .env("ARC_ACTOR", "reviewer")
+            .env("ARC_REVIEW_PAUSE", &release)
+            .args([
+                "review",
+                "raced-review",
+                "--snapshot",
+                "--verdict",
+                "comment-only",
+            ])
+            .output()
+            .unwrap();
+        (out, closer.join().unwrap())
+    });
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let after = recorded(&repo, &change_id, "raced-review");
+    if out.status.success() {
+        assert!(
+            !closed.status.success(),
+            "the change closed between the snapshot and the verdict"
+        );
+        assert_eq!(
+            after.1["head"],
+            repo.head(&worktree).as_str(),
+            "{}",
+            after.1
+        );
+        let status = json_stdout(
+            repo.arc(&repo.root)
+                .args(["status", "raced-review", "--json"]),
+        );
+        assert_eq!(status["verdict"]["patchset_id"], after.1["id"], "{status}");
+    } else {
+        assert_eq!(
+            after.1, before.1,
+            "a refused review recorded a patchset: {stderr}"
+        );
+        assert_eq!(
+            after.3, before.3,
+            "a refused review left a retention ref: {stderr}"
+        );
+    }
+}
+
 /// A misspelled anchor field refuses the batch before `--snapshot` records the
 /// head that moved, whatever the verdict.
 #[test]

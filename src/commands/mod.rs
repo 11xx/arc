@@ -198,6 +198,25 @@ fn locked_state(store: &Store, reference: &str) -> Result<(String, TransitionLoc
     Ok((change_id, transition, state))
 }
 
+/// A pause the test suite injects into a command, so an act that lands
+/// mid-command is exercised on purpose. `var` names an environment variable
+/// holding a file path; the command waits for that file to exist. Unset,
+/// which is every run that is not a test, this does nothing.
+fn pause_until_released(var: &str) -> Result<()> {
+    let Some(release) = std::env::var_os(var) else {
+        return Ok(());
+    };
+    let release = Path::new(&release);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !release.exists() {
+        if Instant::now() >= deadline {
+            bail!("{var}: {} never appeared", release.display());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
 fn ensure_append_allowed(state: &ChangeState, payload: &Payload) -> Result<()> {
     let permission = append_permission(payload);
     let Some(closure) = &state.closure else {

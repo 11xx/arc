@@ -499,7 +499,8 @@ fn a_dirty_worktree_and_a_detached_head_are_refused() {
         .args(["rewrite", "sign", "--no-sign"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("uncommitted changes"));
+        .stderr(predicates::str::contains("uncommitted changes"))
+        .stderr(predicates::str::contains("stash").not());
     fs::remove_file(repo.root.join("dirt.txt")).unwrap();
 
     git(&repo.root, &["checkout", "--detach", "HEAD"]);
