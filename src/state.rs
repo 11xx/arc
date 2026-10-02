@@ -2273,12 +2273,34 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 evidence_event_id,
                 supersedes,
             } => {
+                if !state
+                    .closure
+                    .as_ref()
+                    .is_some_and(|closure| closure.outcome == Closure::Integrated)
+                {
+                    bail!(
+                        "post-integration disposition {} comes before change {} integrated",
+                        ev.event_id,
+                        state.change_id
+                    );
+                }
                 let Some(finding) = state.findings.get_mut(finding_id) else {
                     bail!(
                         "post-integration disposition {} references unknown finding {finding_id:?}",
                         ev.event_id
                     );
                 };
+                if let Some(shipped) = finding
+                    .effective_status()
+                    .filter(|status| status.releases_block())
+                {
+                    bail!(
+                        "post-integration disposition {} targets finding {finding_id}, which was {} when change {} shipped",
+                        ev.event_id,
+                        shipped.as_str(),
+                        state.change_id
+                    );
+                }
                 finding.after_integration.push(DispositionEntry {
                     event_id: ev.event_id.clone(),
                     status: *status,

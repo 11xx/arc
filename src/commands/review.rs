@@ -957,12 +957,9 @@ pub fn resolve(
         .effective_status()
         .filter(|status| shipped_finding && status.releases_block())
     {
-        let status = status
-            .to_possible_value()
-            .expect("every disposition status is a CLI value");
         bail!(
             "finding {finding_id} was {} when change {change_id} shipped; only a finding left open at integration takes a disposition after it",
-            status.get_name()
+            status.as_str()
         );
     }
     let tips = if shipped_finding {

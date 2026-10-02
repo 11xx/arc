@@ -2177,6 +2177,16 @@ pub enum DispositionStatus {
 }
 
 impl DispositionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DispositionStatus::Resolved => "resolved",
+            DispositionStatus::AcceptedRisk => "accepted-risk",
+            DispositionStatus::Obsolete => "obsolete",
+            DispositionStatus::StillOpen => "still-open",
+            DispositionStatus::Disputed => "disputed",
+        }
+    }
+
     /// Statuses that release a blocking finding.
     pub fn releases_block(self) -> bool {
         matches!(

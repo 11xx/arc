@@ -939,7 +939,11 @@ enum Cmd {
     /// Import arc-bundle/6 or /5 into this repository's local store.
     /// Events without model provenance retain that absence. Repository map
     /// withdrawals apply even to maps already held; invalid withdrawal
-    /// targets are refused before anything is written
+    /// targets are refused before anything is written. So is a change history
+    /// no command could have written: work after the change closed, an audit
+    /// or post-integration disposition before it integrated, or a
+    /// post-integration disposition on a finding that was resolved,
+    /// accepted-risk, or obsolete when the change shipped
     Import {
         /// Input file ('-' for stdin)
         input: String,
