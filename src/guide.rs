@@ -501,6 +501,8 @@ RUN A CHANGE
   arc close                          Terminal outcome arc did not merge itself.
   arc changelog <c> --category <k> --body-file <f>
                                      Record the change's release copy.
+  arc changelog <c> --none --reason <why>
+                                     Record that the change needs no entry.
   arc changelog [--json | --write]   Render unreleased copy, or write the target.
 
   A gate runs where its change lives. `verify`, `snapshot --verify`, `done`,

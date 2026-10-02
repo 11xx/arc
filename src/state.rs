@@ -129,13 +129,20 @@ pub struct Brief {
     pub must_read: Vec<crate::model::ReadRequirement>,
 }
 
+/// The change's latest changelog record: its release copy, or the record
+/// that it needs none.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChangelogEntry {
     pub event_id: String,
+    /// Empty when the record says the change needs no entry.
     pub category: String,
+    /// Empty when the record says the change needs no entry.
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<String>,
+    /// Why the change needs no entry, when that is what was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_entry_reason: Option<String>,
     pub actor: String,
     pub on_behalf_of: Option<String>,
     pub harness: Option<String>,
@@ -148,6 +155,12 @@ pub struct ChangelogEntry {
 impl ChangelogEntry {
     pub fn effective_author(&self) -> &str {
         self.on_behalf_of.as_deref().unwrap_or(&self.actor)
+    }
+
+    /// Whether the record is release copy the projection emits, rather than
+    /// the record that the change needs none.
+    pub fn is_entry(&self) -> bool {
+        self.no_entry_reason.is_none()
     }
 }
 
@@ -936,6 +949,8 @@ pub struct ChangeState {
     pub opened_at: chrono::DateTime<chrono::Utc>,
     pub patchsets: Vec<Patchset>,
     pub briefs: Vec<Brief>,
+    /// The latest changelog record, release copy or the record that the
+    /// change needs none; [`ChangeState::changelog_entry`] yields only copy.
     pub changelog: Option<ChangelogEntry>,
     pub messages: Vec<MessageEntry>,
     pub comments: Vec<CommentEntry>,
@@ -1178,6 +1193,12 @@ impl ChangeState {
 
     pub fn latest_brief(&self) -> Option<&Brief> {
         self.briefs.last()
+    }
+
+    /// The release copy the projection emits for this change: the latest
+    /// changelog record, unless that record says the change needs none.
+    pub fn changelog_entry(&self) -> Option<&ChangelogEntry> {
+        self.changelog.as_ref().filter(|entry| entry.is_entry())
     }
 
     /// Who wrote the brief a patchset was built from, read the same way a
@@ -1566,12 +1587,14 @@ pub fn reduce(events: &[Event]) -> Result<ChangeState> {
                 category,
                 body,
                 supersedes,
+                no_entry_reason,
             } => {
                 state.changelog = Some(ChangelogEntry {
                     event_id: ev.event_id.clone(),
                     category: category.clone(),
                     body: body.clone(),
                     supersedes: supersedes.clone(),
+                    no_entry_reason: no_entry_reason.clone(),
                     actor: ev.actor.clone(),
                     on_behalf_of: ev.on_behalf_of.clone(),
                     harness: ev.harness.clone(),
@@ -3143,6 +3166,7 @@ mod tests {
                 category: "added".into(),
                 body: "first".into(),
                 supersedes: None,
+                no_entry_reason: None,
             },
         );
         let first_id = first.event_id.clone();
@@ -3152,6 +3176,7 @@ mod tests {
                 category: "added".into(),
                 body: "second".into(),
                 supersedes: Some(first_id.clone()),
+                no_entry_reason: None,
             },
         );
         let state = reduce(&[opened("fix"), first, second]).unwrap();
