@@ -927,7 +927,10 @@ pub enum JournalCmd {
     /// retained observation; changing harness or session clears that
     /// observation because it belongs to the replaced session.
     Reattribute {
-        /// Artifact filename inside the journal dir (a name, not a path)
+        /// Artifact filename this project's journal or its cold archive holds
+        /// (a name, not a path). A file only another known journal holds, or
+        /// its `<journal-dir>::<file>` reference, is refused naming that
+        /// journal and its project, where the repair runs
         filename: String,
         /// The event kind to repair; only the creation event (`note`) is
         /// supported and anything else is refused by name
@@ -9887,12 +9890,7 @@ fn reattribute(
     replacement: Reattribution<'_>,
     dry_run: bool,
 ) -> Result<i32> {
-    if filename.contains(['/', '\\']) {
-        bail!("artifact reference must be a filename inside the journal dir, not a path");
-    }
-    if parse_artifact_name(filename).is_none() {
-        bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
-    }
+    check_artifact_name(ctx, filename)?;
     if event_kind != "note" {
         bail!(
             "provenance repair covers the artifact creation event (`note`); {event_kind} \
@@ -9910,6 +9908,9 @@ fn reattribute(
     }
 
     let dir = resolve_dir(&ctx.cwd)?;
+    if artifact_body_path(&dir, filename).is_none() {
+        return Err(missing_write_target(&dir, filename));
+    }
     let _lock = lock_journal_transition(&dir)?;
     let _events = lock_journal_events(&dir)?;
     let path = dir.join("events.jsonl");
@@ -9962,9 +9963,6 @@ fn reattribute(
     }
 
     let index = match matches.as_slice() {
-        [] if artifact_body_path(&dir, filename).is_none() => {
-            return Err(missing_write_target(&dir, filename));
-        }
         [] => bail!(
             "no {event_kind} creation event names {filename} in {}",
             path.display()
