@@ -2542,7 +2542,21 @@ fn a_provisional_approval_stops_being_owed_once_a_new_patchset_strands_it() {
         "{status}"
     );
     assert!(!stdout(repo.arc(&repo.root).args(["query", "--provisional"])).contains(&change_id));
-    let check = stdout_any_status(repo.arc(&worktree).args(["check", "stranded"]));
+    // The stranded approval no longer approves anything, so check blocks on
+    // that, and only a report that rendered its advisories can say the
+    // provisional one is absent.
+    let check = repo
+        .arc(&worktree)
+        .args(["check", "stranded"])
+        .output()
+        .unwrap();
+    assert_eq!(check.status.code(), Some(3), "{check:?}");
+    let check = String::from_utf8_lossy(&check.stdout);
+    assert!(
+        check.contains("Blocker 1: missing or stale approval"),
+        "{check}"
+    );
+    assert!(check.contains("Advisories (never blocking):"), "{check}");
     assert!(!check.contains("provisional-approval"), "{check}");
 }
 

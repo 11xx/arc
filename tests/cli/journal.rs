@@ -13635,6 +13635,79 @@ fn consume_from_a_non_owning_project_is_refused() {
     assert!(owner_journal.join(&todo).is_file());
 }
 
+/// A journal write naming a bare filename only another project's journal
+/// holds is still refused, and the refusal names that journal and its project
+/// as where the write runs from.
+#[test]
+fn a_write_naming_another_journals_filename_names_the_owning_journal() {
+    let owner = Repo::new();
+    let todo = filed_artifact(&owner, "todo", "owned-todo", "owned\n");
+    let discussion = discussion_fixture(&owner, "owned-talk");
+    let owner_journal = fs::canonicalize(journal_dir(&owner)).unwrap();
+    let owner_root = fs::canonicalize(&owner.root).unwrap();
+    let promoter = sibling_project(&owner, "promoter");
+    let before = fs::read_to_string(owner_journal.join("events.jsonl")).unwrap_or_default();
+    let cases: [(&str, Vec<&str>); 5] = [
+        (&todo, vec!["journal", "verified", &todo]),
+        (
+            &todo,
+            vec![
+                "journal", "correct", &todo, "--target", "artifact", "--field", "title", "--value",
+                "renamed",
+            ],
+        ),
+        (
+            &todo,
+            vec!["journal", "consume", &todo, "--outcome", "done"],
+        ),
+        (&todo, vec!["journal", "transition", &todo, "--to", "later"]),
+        (
+            &discussion,
+            vec![
+                "journal",
+                "delivered",
+                &discussion,
+                "--question",
+                "q1",
+                "--to",
+                "person",
+            ],
+        ),
+    ];
+    for (file, args) in cases {
+        let refusal = owner.arc(&promoter).args(&args).assert().failure();
+        let stderr = String::from_utf8_lossy(&refusal.get_output().stderr).to_string();
+        assert!(
+            stderr.contains(&format!("no such artifact {file} in ")),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!(
+                "another project's journal holds it: {} (project {}); a journal write runs from the project that owns it, with the bare filename",
+                owner_journal.display(),
+                owner_root.display()
+            )),
+            "{args:?}: {stderr}"
+        );
+    }
+    let after = fs::read_to_string(owner_journal.join("events.jsonl")).unwrap_or_default();
+    assert_eq!(before, after);
+
+    // A filename no journal holds keeps the plain local refusal.
+    let nowhere = "20990101T000000Z-nowhere-todo.md";
+    let refusal = owner
+        .arc(&promoter)
+        .args(["journal", "verified", nowhere])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&refusal.get_output().stderr).to_string();
+    assert!(
+        stderr.contains(&format!("no such artifact {nowhere} in ")),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("another project's journal"), "{stderr}");
+}
+
 #[test]
 fn cross_project_reference_to_a_missing_artifact_is_refused() {
     let owner = Repo::new();

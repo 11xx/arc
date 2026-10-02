@@ -132,6 +132,7 @@ pub fn begin(
     let change_id = ids::new_change_id(slug);
     let title = title.unwrap_or_else(|| slug.replace('-', " "));
     let base_from_target = base.is_none();
+    let adopting = adopt.is_some();
     let mut no_worktree_advice: Option<(String, String)> = None;
 
     let (branch_name, base_rev, worktree_path) = if let Some(adopted) = adopt {
@@ -183,14 +184,21 @@ pub fn begin(
                     gitio::checkout(&ctx.cwd, &branch_name)?;
                     Some(path.display().to_string())
                 }
+                // Every worktree shares `refs/stash`, so the advice never
+                // parks the dirty work there: another writer's pop would
+                // apply it in the wrong checkout.
                 (_, false) => {
+                    let branch = shell_quote(&branch_name);
+                    let own = default_worktree_path(&ctx.cwd, slug).map_or_else(
+                        |_| "<path>".to_string(),
+                        |path| shell_quote(&path.display().to_string()),
+                    );
+                    let checkout = format!("`git checkout {branch}`");
+                    let worktree = format!("`git worktree add {own} {branch}`");
                     no_worktree_advice = Some((
                         "in-place checkout declined: the invoking working tree is dirty"
                             .to_string(),
-                        format!(
-                            "git stash push --include-untracked && git checkout {}",
-                            shell_quote(&branch_name)
-                        ),
+                        format!("commit the work in progress or copy it aside, then {checkout}; or check the branch out in its own worktree: {worktree}"),
                     ));
                     None
                 }
@@ -201,7 +209,7 @@ pub fn begin(
                             "in-place checkout declined: the invoking checkout is on branch \
                              {current:?}, not requested target {target_branch:?}"
                         ),
-                        format!("git checkout {}", shell_quote(&branch_name)),
+                        format!("`git checkout {}`", shell_quote(&branch_name)),
                     ));
                     None
                 }
@@ -230,7 +238,17 @@ pub fn begin(
         (branch_name, base_rev, wt)
     };
     let stale_target = base_from_target
-        .then(|| stale_target_warning(&ctx.cwd, &change_id, &target_branch, &target_head))
+        .then(|| {
+            let basis = if adopting {
+                format!(
+                    "change {change_id} is based on {}, the merge base of {branch_name} with the local target",
+                    render::short_sha(&base_rev)
+                )
+            } else {
+                format!("change {change_id} is based on the local target")
+            };
+            stale_target_warning(&ctx.cwd, &change_id, &basis, &target_branch, &target_head)
+        })
         .flatten();
 
     /// Warn that creating this worktree adds to a filesystem running out of
@@ -417,9 +435,9 @@ pub fn begin(
     if let Some(wt) = worktree_path {
         println!("worktree: {wt}");
     }
-    if let Some((reason, command)) = no_worktree_advice {
+    if let Some((reason, next)) = no_worktree_advice {
         println!("{reason}");
-        println!("next: `{command}`");
+        println!("next: {next}");
     }
     if let Some(warning) = stale_target {
         eprint!("{warning}");
@@ -428,7 +446,8 @@ pub fn begin(
 }
 
 /// The warning for a change based on a target that lacks commits its
-/// configured upstream holds. arc makes no network call: the upstream is the
+/// configured upstream holds, with `basis` saying which revision the change
+/// took from that target. arc makes no network call: the upstream is the
 /// ref the last fetch left, so this compares local refs only. A target level
 /// with or ahead of its upstream, or tracking none, gets no warning, and a
 /// failed read is a silent omission, since the warning is advice and never
@@ -441,6 +460,7 @@ pub fn begin(
 fn stale_target_warning(
     cwd: &Path,
     change_id: &str,
+    basis: &str,
     target: &str,
     target_head: &str,
 ) -> Option<String> {
@@ -456,7 +476,6 @@ fn stale_target_warning(
     };
     let target_at = format!("{target} at {}", render::short_sha(target_head));
     let upstream_at = format!("{upstream} at {}", render::short_sha(&upstream_head));
-    let based = format!("change {change_id} is based on the local target");
     let (standing, fix) = if target_only > 0 {
         (
             format!(
@@ -487,7 +506,7 @@ fn stale_target_warning(
         )
     };
     Some(format!(
-        "warning: target {target_at} {standing}; {based}\n  {fix}\n  then replay the change onto it: `arc rebase {change_id}`\n"
+        "warning: target {target_at} {standing}; {basis}\n  {fix}\n  then replay the change onto it: `arc rebase {change_id}`\n"
     ))
 }
 
