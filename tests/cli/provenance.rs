@@ -1120,27 +1120,18 @@ fn squash_over_a_foreign_claim_refuses_before_the_branch_moves() {
     );
 }
 
-/// The single commit can stay open for as long as a signing prompt or a hook
-/// takes. A claim attempted in that window cannot land between the squash's
-/// claim check and the patchset it records, so a squash either records the
-/// commit it made or leaves the branch where it was.
-#[test]
-fn a_claim_attempted_while_squash_commits_cannot_strand_the_rewritten_branch() {
+/// Install `hook` to claim `slug` as `codex-luna`, and return the file it
+/// writes `taken` or `refused` to.
+fn claim_from_hook(repo: &Repo, hook: &str, slug: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
-    let repo = Repo::new();
-    stdout(repo.arc(&repo.root).args(["begin", "raced-squash"]));
-    let worktree = repo.home.join(".worktrees").join("repo-raced-squash");
-    repo.commit(&worktree, "one.txt", "one\n", "feat: one");
-    repo.commit(&worktree, "two.txt", "two\n", "feat: two");
-    let head = repo.head(&worktree);
-    let outcome = repo.home.join("hook-claim");
-    let hook = repo.root.join(".git/hooks/pre-commit");
+    let outcome = repo.home.join(format!("{hook}-claim"));
+    let path = repo.root.join(".git/hooks").join(hook);
     fs::write(
-        &hook,
+        &path,
         format!(
             "#!/bin/sh\n\
              if env -u GIT_INDEX_FILE ARC_ACTOR=codex-luna ARC_HARNESS=codex ARC_SESSION=codex-session \
-             '{arc}' claim raced-squash >/dev/null 2>&1\n\
+             '{arc}' claim {slug} >/dev/null 2>&1\n\
              then echo taken > '{outcome}'\n\
              else echo refused > '{outcome}'\n\
              fi\n\
@@ -1150,33 +1141,82 @@ fn a_claim_attempted_while_squash_commits_cannot_strand_the_rewritten_branch() {
         ),
     )
     .unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    outcome
+}
+
+/// A command that moves the branch and then records it either records the
+/// head it made or leaves the branch at `head`, and a claim attempted while
+/// it ran was refused rather than left to refuse the recording.
+fn assert_branch_recorded_or_untouched(
+    repo: &Repo,
+    worktree: &Path,
+    slug: &str,
+    head: &str,
+    out: &std::process::Output,
+    outcome: &Path,
+) {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        assert_eq!(
+            repo.head(worktree),
+            head,
+            "a refusal moved the branch: {stderr}"
+        );
+    }
+    assert!(out.status.success(), "{stderr}");
+    assert_eq!(fs::read_to_string(outcome).unwrap().trim(), "refused");
+    let status = json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]));
+    assert_eq!(
+        status["latest_patchset"]["head"],
+        repo.head(worktree).as_str(),
+        "{status}"
+    );
+    assert!(status["claim"].is_null(), "{status}");
+}
+
+/// The single commit can stay open for as long as a signing prompt or a hook
+/// takes. A claim attempted in that window cannot land between the squash's
+/// claim check and the patchset it records, so a squash either records the
+/// commit it made or leaves the branch where it was.
+#[test]
+fn a_claim_attempted_while_squash_commits_cannot_strand_the_rewritten_branch() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "raced-squash"]));
+    let worktree = repo.home.join(".worktrees").join("repo-raced-squash");
+    repo.commit(&worktree, "one.txt", "one\n", "feat: one");
+    repo.commit(&worktree, "two.txt", "two\n", "feat: two");
+    let head = repo.head(&worktree);
+    let outcome = claim_from_hook(&repo, "pre-commit", "raced-squash");
 
     let out = repo
         .arc(&worktree)
         .args(["squash", "raced-squash", "-m", "feat: one and two"])
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() {
-        assert_eq!(
-            repo.head(&worktree),
-            head,
-            "a refused squash moved the branch: {stderr}"
-        );
-    }
-    assert!(out.status.success(), "{stderr}");
-    assert_eq!(fs::read_to_string(&outcome).unwrap().trim(), "refused");
-    let status = json_stdout(
-        repo.arc(&repo.root)
-            .args(["status", "raced-squash", "--json"]),
-    );
-    assert_eq!(
-        status["latest_patchset"]["head"],
-        repo.head(&worktree).as_str(),
-        "{status}"
-    );
-    assert!(status["claim"].is_null(), "{status}");
+    assert_branch_recorded_or_untouched(&repo, &worktree, "raced-squash", &head, &out, &outcome);
+}
+
+/// The replay runs hooks and can sign every commit it makes, so a claim
+/// attempted while it runs cannot land between the rebase's claim check and
+/// the patchset it records either.
+#[test]
+fn a_claim_attempted_while_rebase_replays_cannot_strand_the_replayed_branch() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "raced-rebase"]));
+    let worktree = repo.home.join(".worktrees").join("repo-raced-rebase");
+    repo.commit(&worktree, "work.txt", "work\n", "feat: work");
+    repo.commit(&repo.root, "README.md", "target\n", "feat: move target");
+    let head = repo.head(&worktree);
+    let outcome = claim_from_hook(&repo, "post-rewrite", "raced-rebase");
+
+    let out = repo
+        .arc(&worktree)
+        .args(["rebase", "raced-rebase"])
+        .output()
+        .unwrap();
+    assert_branch_recorded_or_untouched(&repo, &worktree, "raced-rebase", &head, &out, &outcome);
+    assert_ne!(repo.head(&worktree), head, "the replay never ran");
 }
 
 #[test]

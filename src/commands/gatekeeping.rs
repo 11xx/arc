@@ -1087,6 +1087,18 @@ pub fn snapshot_with_verify(
         journal_refs,
         thread,
     )?;
+    verify_recorded(ctx, reference, verify_requested, gates, all)
+}
+
+/// The verification `snapshot --verify` runs once the patchset is recorded:
+/// every required gate, or the named ones.
+fn verify_recorded(
+    ctx: &Ctx,
+    reference: &str,
+    verify_requested: bool,
+    gates: Vec<String>,
+    all: bool,
+) -> Result<i32> {
     if !verify_requested {
         return Ok(0);
     }
@@ -1300,10 +1312,14 @@ pub fn rebase(
     contributors: Option<Vec<String>>,
     solo: bool,
 ) -> Result<i32> {
-    let declared =
-        super::review::contributor_declaration(ctx, contributors.clone(), solo)?.is_some();
+    let requested_contributors = super::review::contributor_declaration(ctx, contributors, solo)?;
     let store = ctx.store()?;
-    let (change_id, st) = ctx.load_state(&store, reference)?;
+    let change_id = store.resolve_change(reference)?;
+    // Held from the claim check until the replayed head is recorded: a claim
+    // taken while the replay runs would otherwise refuse the patchset after
+    // the branch has moved.
+    let transition = store.lock_transition(&change_id)?;
+    let st = store.state(&change_id)?;
     if st.is_closed() {
         eprintln!("{change_id} is closed; its branch has nothing left to replay");
         return Ok(status::Blocker::Closed.exit_code());
@@ -1347,7 +1363,12 @@ pub fn rebase(
     }
     // The replayed head is recorded as a patchset, so a claim that would
     // refuse that recording refuses the rebase while the branch is untouched.
-    super::review::ensure_attribution_over_claim(ctx, &st, declared, chrono::Utc::now())?;
+    super::review::ensure_attribution_over_claim(
+        ctx,
+        &st,
+        requested_contributors.is_some(),
+        chrono::Utc::now(),
+    )?;
 
     match gitio::rebase(&wt, &st.target_branch)? {
         gitio::RebaseOutcome::Stopped => {
@@ -1381,19 +1402,20 @@ pub fn rebase(
                     st.target_branch
                 ),
             );
-            let code = snapshot_with_verify(
+            super::review::snapshot_holding(
                 ctx,
-                reference,
+                &store,
+                &change_id,
+                &transition,
                 None,
                 None,
-                verify_requested,
-                Vec::new(),
-                false,
-                contributors,
-                solo,
+                requested_contributors,
                 Vec::new(),
                 None,
             )?;
+            // Verification takes the lock for each run it records.
+            drop(transition);
+            let code = verify_recorded(ctx, reference, verify_requested, Vec::new(), false)?;
             let (_, replayed_state) = ctx.load_state(&store, reference)?;
             let report = ctx.report(&store, &replayed_state)?;
             print!("{}", render::gates_owed(&report));
