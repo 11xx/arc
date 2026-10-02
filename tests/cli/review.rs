@@ -322,6 +322,7 @@ fn review_help_states_the_findings_shape_and_the_cause_rule_its_refusals_enforce
         "a required `severity` (critical, major, minor, or note) and `summary` (string)",
         "optional `blocking` (bool, default false), `body` (string), and `anchor`",
         "a required `path` and optional `side` (base or head, default head), `line_start`, `line_end`, and `context`",
+        "`line` for `line_start`, `lines` for `line_start` and `line_end`",
     ] {
         assert!(help.contains(rule), "missing {rule:?} in: {help}");
     }
@@ -594,5 +595,62 @@ fn findings_json_refuses_a_misspelled_field_and_warns_on_other_unknown_fields() 
     .assert()
     .success()
     .stderr(predicates::str::contains("warning").not());
+    assert_eq!(event_count(&repo, &change_id), before + 2);
+}
+
+/// An anchor is read for named fields too, so `line` for `line_start` would
+/// record an anchor with no line. A field that looks like a misspelling of one
+/// the anchor omits refuses the batch; any other unknown anchor field is
+/// ignored with a warning naming the finding.
+#[test]
+fn findings_json_refuses_a_misspelled_anchor_field_and_warns_on_other_unknown_ones() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "anchor-fields");
+    let review = |anchor: &str| {
+        let mut command = repo.arc(&worktree);
+        command
+            .args(["review", "anchor-fields", "--verdict", "comment-only"])
+            .args(["--findings-json", "-"])
+            .write_stdin(format!(
+                r#"[{{"severity": "note", "summary": "anchored", "anchor": {anchor}}}]"#
+            ));
+        command
+    };
+
+    let before = event_count(&repo, &change_id);
+    review(r#"{"path": "anchor-fields.txt", "line": 1}"#)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "the anchor of finding 1 has unknown field `line`, which looks like a misspelling of `line_start`; rename or remove it (an anchor reads path, side, line_start, line_end, context)",
+        ));
+    review(r#"{"path": "anchor-fields.txt", "lines": "1-2"}"#)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "which looks like a misspelling of `line_start` and `line_end`",
+        ));
+    assert_eq!(event_count(&repo, &change_id), before);
+
+    review(r#"{"path": "anchor-fields.txt", "line_start": 1, "note": "first line"}"#)
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "warning: the anchor of finding 1 has unknown field `note`, which arc ignores (an anchor reads path, side, line_start, line_end, context)",
+        ));
+    assert_eq!(event_count(&repo, &change_id), before + 1);
+    let findings =
+        json_stdout(
+            repo.arc(&worktree)
+                .args(["findings", "anchor-fields", "--format", "json"]),
+        );
+    let anchor = &findings["findings"][0]["anchor"];
+    assert_eq!(anchor["path"], "anchor-fields.txt", "{findings}");
+    assert_eq!(anchor["line_start"], 1, "{findings}");
+
+    review(r#"{"path": "anchor-fields.txt", "side": "head", "line_start": 1, "line_end": 1, "context": "anchor-fields"}"#)
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("warning").not());
     assert_eq!(event_count(&repo, &change_id), before + 2);
 }
