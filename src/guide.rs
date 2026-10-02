@@ -871,7 +871,8 @@ REVIEW COVERAGE AND DEBT
   than one commit; `arc squash <change> -m <message>` makes that one commit as
   a new patchset with its own gates and verdict, attributed by `--contributors`
   or `--solo` as on `arc snapshot`. Over another actor's live claim an
-  unattributed squash refuses before the branch moves. A failed squash commit, a
+  unattributed squash refuses before the branch moves, and the change stays
+  locked from that check until the patchset is recorded. A failed squash commit, a
   changed commit tree, or tracked edits left by a hook restore the original
   head, index, and tracked files. Untracked files created by hooks are retained
   for inspection. Paths obstructing restoration are moved under

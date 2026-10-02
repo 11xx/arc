@@ -367,8 +367,36 @@ pub fn snapshot(
     let requested_contributors = contributor_declaration(ctx, contributors, solo)?;
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
-    let _transition = store.lock_transition(&change_id)?;
-    let events = store.load_events(&change_id)?;
+    let transition = store.lock_transition(&change_id)?;
+    snapshot_holding(
+        ctx,
+        &store,
+        &change_id,
+        &transition,
+        base,
+        brief_version,
+        requested_contributors,
+        journal_refs,
+        thread,
+    )
+}
+
+/// Record the change branch's head as a patchset under the change transition
+/// lock the caller holds. `requested_contributors` is a normalized
+/// declaration, as `contributor_declaration` returns it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn snapshot_holding(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    _transition: &crate::store::TransitionLock,
+    base: Option<String>,
+    brief_version: Option<usize>,
+    requested_contributors: Option<Vec<String>>,
+    journal_refs: Vec<String>,
+    thread: Option<String>,
+) -> Result<()> {
+    let events = store.load_events(change_id)?;
     let mut st = state::reduce_following(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
     // Snapshotting is the lead's first read of the change's worktree, and an
@@ -469,7 +497,7 @@ pub fn snapshot(
     for skipped in &skipped_defaults {
         eprintln!("{skipped}");
     }
-    let mut ev = ctx.event_at(&store, &change_id, now, payload);
+    let mut ev = ctx.event_at(store, change_id, now, payload);
     ev.event_id = event_id_after(
         &events
             .last()
@@ -481,7 +509,7 @@ pub fn snapshot(
     // individually, even if the branch is rewound or deleted later.
     gitio::update_ref(
         &ctx.cwd,
-        &gitio::retention_ref(&change_id, &patchset_id),
+        &gitio::retention_ref(change_id, &patchset_id),
         &head,
     )?;
     println!("patchset: {patchset_id}");
