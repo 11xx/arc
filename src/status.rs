@@ -491,6 +491,40 @@ pub(crate) fn review_subject_for_patchset(patchset: &state::Patchset) -> ReviewS
     }
 }
 
+/// A change's blockers, highest precedence first. Readiness is their absence
+/// and the `arc check` code is the first one's, so neither can be stated
+/// apart from the list.
+#[derive(Debug)]
+pub struct Readiness {
+    blockers: Vec<Blocker>,
+}
+
+impl Readiness {
+    pub fn new(blockers: Vec<Blocker>) -> Self {
+        Self { blockers }
+    }
+
+    pub fn ready(&self) -> bool {
+        self.blockers.is_empty()
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        blockers::exit_code(&self.blockers)
+    }
+}
+
+impl Serialize for Readiness {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut fields = serializer.serialize_struct("Readiness", 3)?;
+        fields.serialize_field("ready_to_integrate", &self.ready())?;
+        // The arc-status/1 spelling, kept for consumers that read it.
+        fields.serialize_field("integrate_ready", &self.ready())?;
+        fields.serialize_field("blockers", &self.blockers)?;
+        fields.end()
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct StatusReport {
     pub schema: &'static str,
@@ -609,11 +643,8 @@ pub struct StatusReport {
     /// which declaration put it there.
     pub danger: DangerScope,
     pub ready_reason: String,
-    /// True exactly when `blockers` is empty.
-    pub ready_to_integrate: bool,
-    /// Backward-compatible spelling retained from arc-status/1.
-    pub integrate_ready: bool,
-    pub blockers: Vec<Blocker>,
+    #[serde(flatten)]
+    readiness: Readiness,
     pub closure: Option<crate::state::ClosureState>,
     /// The head a contribution was last found ready to send at. Additive in
     /// `arc-status/25`.
@@ -1565,8 +1596,8 @@ fn build_report(
         !state.holds.is_empty(),
     );
 
-    let ready = blockers.is_empty();
-    let ready_reason = if ready {
+    let readiness = Readiness::new(blockers);
+    let ready_reason = if readiness.ready() {
         // Ready with no declared gate is not a gate that passed.
         if gate_statuses.is_empty() {
             format!("no gates declared for profile {}", state.profile)
@@ -1574,7 +1605,8 @@ fn build_report(
             "all integration gates pass".into()
         }
     } else {
-        blockers
+        readiness
+            .blockers
             .iter()
             .map(|blocker| blocker.as_str())
             .collect::<Vec<_>>()
@@ -1648,9 +1680,7 @@ fn build_report(
         kept: state.kept.clone(),
         danger,
         ready_reason,
-        ready_to_integrate: ready,
-        integrate_ready: ready,
-        blockers,
+        readiness,
         closure: state.closure.clone(),
         ready_to_send: state.ready_to_send.clone(),
         debt_outstanding: state.debt_outstanding(),
@@ -1715,10 +1745,22 @@ pub fn claim_status_at(
     })
 }
 
+impl StatusReport {
+    /// Every blocker on the change, highest precedence first.
+    pub fn blockers(&self) -> &[Blocker] {
+        &self.readiness.blockers
+    }
+
+    /// True exactly when the change carries no blocker.
+    pub fn integrate_ready(&self) -> bool {
+        self.readiness.ready()
+    }
+}
+
 /// Exit code for `arc check`: the code of the highest-precedence blocker, or
 /// 0 when there is none, which is what makes the change integrate-ready.
 pub fn check_exit_code(report: &StatusReport) -> i32 {
-    blockers::exit_code(&report.blockers)
+    report.readiness.exit_code()
 }
 
 fn verification_result_label(result: Option<VerifyResult>) -> String {
@@ -1993,6 +2035,34 @@ mod tests {
             Blocker::AcceptanceProbesNotGreen.exit_code(),
             12,
             "the probe blocker must keep its own code"
+        );
+    }
+
+    #[test]
+    fn readiness_with_any_blocker_is_not_ready_and_exits_non_zero() {
+        let clear = Readiness::new(Vec::new());
+        assert!(clear.ready());
+        assert_eq!(clear.exit_code(), 0);
+        for blocker in blockers::PRIORITY {
+            let readiness = Readiness::new(vec![blocker]);
+            assert!(!readiness.ready(), "{}", blocker.as_str());
+            assert_eq!(readiness.exit_code(), blocker.exit_code());
+            assert_ne!(readiness.exit_code(), 0, "{}", blocker.as_str());
+        }
+        let every = Readiness::new(blockers::PRIORITY.to_vec());
+        assert!(!every.ready());
+        assert_eq!(every.exit_code(), blockers::PRIORITY[0].exit_code());
+    }
+
+    #[test]
+    fn readiness_serializes_both_spellings_from_the_list() {
+        assert_eq!(
+            serde_json::to_string(&Readiness::new(Vec::new())).unwrap(),
+            r#"{"ready_to_integrate":true,"integrate_ready":true,"blockers":[]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Readiness::new(vec![Blocker::HoldActive])).unwrap(),
+            r#"{"ready_to_integrate":false,"integrate_ready":false,"blockers":["hold-active"]}"#
         );
     }
 }
