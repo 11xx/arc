@@ -23,10 +23,13 @@ pub fn squash(
     if message.is_empty() {
         bail!("--message must name the single commit");
     }
-    let declared =
-        super::review::contributor_declaration(ctx, contributors.clone(), solo)?.is_some();
+    let requested_contributors = super::review::contributor_declaration(ctx, contributors, solo)?;
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
+    // Held from the claim check until the patchset is recorded: a claim taken
+    // while the commit is made would otherwise refuse the patchset after the
+    // branch has moved.
+    let transition = store.lock_transition(&change_id)?;
     let st = store.state(&change_id)?;
     // A squash ends in a patchset, so the phase authority is asked about that
     // patchset before the branch moves rather than after.
@@ -80,7 +83,12 @@ pub fn squash(
     }
     // The single commit is recorded as a patchset, so a claim that would
     // refuse that recording refuses the squash while the branch is untouched.
-    super::review::ensure_attribution_over_claim(ctx, &st, declared, chrono::Utc::now())?;
+    super::review::ensure_attribution_over_claim(
+        ctx,
+        &st,
+        requested_contributors.is_some(),
+        chrono::Utc::now(),
+    )?;
     let tree = tree_of(&ctx.cwd, &head)?;
 
     // The checkout moves with the branch, so the commit is made there, with
@@ -106,13 +114,14 @@ pub fn squash(
         "squashed: {count} commits since {} into {squashed} (the tree of {head})",
         st.target_branch
     );
-    super::review::snapshot(
+    super::review::snapshot_holding(
         ctx,
+        &store,
         &change_id,
+        &transition,
         None,
         None,
-        contributors,
-        solo,
+        requested_contributors,
         Vec::new(),
         None,
     )
