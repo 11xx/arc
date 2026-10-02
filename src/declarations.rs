@@ -2,9 +2,11 @@
 //!
 //! Integration answers to the branch it merges into. A change that edits
 //! `.arc/gates.toml` or `.arc/policy.toml` is therefore judged by the target's
-//! declarations, read at the target's current head, wherever the command is
-//! typed. The gates the change's own tree adds are owed on top; the operator's
-//! policy file lives outside every tree and applies in both readings.
+//! declarations, read at the target's current head while the change is open
+//! and at the target revision its closure recorded once it is closed,
+//! wherever the command is typed. The gates the change's own tree adds are
+//! owed on top; the operator's files live outside every tree and apply in
+//! every reading.
 
 use crate::gates::{self, GatesFile};
 use crate::gitio;
@@ -30,15 +32,31 @@ pub struct Declarations {
 
 /// The declarations `state` is judged by, from any checkout of its repository.
 ///
-/// Required gates are the target's plus those the change's branch head adds;
-/// policy is the target's. When the target branch cannot be resolved the
-/// result says so and carries only what the change's own branch declares, for
+/// Required gates are the target's plus those the change's head adds; policy
+/// is the target's. An open change's heads are its branch and target where
+/// they stand. A closed change's are the head it is judged at and the target
+/// revision its closure recorded, else the target's current head; neither its
+/// branch nor this checkout is read, so declarations edited after closure do
+/// not change what it answered to. When the target cannot be resolved the
+/// result says so and carries only what the change's own head declares, for
 /// display: a change is never judged by declarations it could have written.
 pub fn for_change(cwd: &Path, state: &ChangeState) -> Result<Declarations> {
     let toplevel = gitio::toplevel(cwd)?;
-    let Ok(target_head) = gitio::branch_head(cwd, &state.target_branch) else {
-        let own = gitio::branch_head(cwd, &state.branch)
-            .ok()
+    let change_head = if state.is_closed() {
+        state.closed_head().map(str::to_string)
+    } else {
+        gitio::branch_head(cwd, &state.branch).ok()
+    };
+    let target_head = match state
+        .closure
+        .as_ref()
+        .and_then(|closure| closure.target_before.clone())
+    {
+        Some(recorded) => Ok(recorded),
+        None => gitio::branch_head(cwd, &state.target_branch),
+    };
+    let Ok(target_head) = target_head else {
+        let own = change_head
             .and_then(|head| gates::inspect_at(cwd, &head).ok())
             .unwrap_or_default();
         return Ok(Declarations {
@@ -51,7 +69,7 @@ pub fn for_change(cwd: &Path, state: &ChangeState) -> Result<Declarations> {
     let target = &state.target_branch;
     let mut required = gates::load_at(cwd, &target_head)?;
     let mut notes = Vec::new();
-    if let Ok(change_head) = gitio::branch_head(cwd, &state.branch) {
+    if let Some(change_head) = change_head {
         let own = gates::inspect_at(cwd, &change_head)?;
         let divergences = required.owe_also(
             own,
@@ -60,7 +78,9 @@ pub fn for_change(cwd: &Path, state: &ChangeState) -> Result<Declarations> {
         );
         notes.extend(divergences.iter().map(gates::GateDivergence::describe));
     }
-    notes.extend(checkout_notes(cwd, &toplevel, target, &target_head)?);
+    if !state.is_closed() {
+        notes.extend(checkout_notes(cwd, &toplevel, target, &target_head)?);
+    }
     Ok(Declarations {
         gates: required,
         policy: policy::load_at(cwd, &target_head)?,
