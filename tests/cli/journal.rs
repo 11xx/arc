@@ -8715,23 +8715,19 @@ fn journal_transition_refusals_leave_the_journal_untouched() {
         .failure()
         .stderr(predicates::str::contains("already a feature-request"));
 
-    // A repeated transition reports the existing relation instead of
-    // duplicating artifacts.
+    // A transition retires its source, so a repeat to any kind, its
+    // successor's included, is refused rather than duplicating artifacts.
     repo.arc(&repo.root)
         .args(["journal", "transition", &source, "--to", "plan"])
         .assert()
         .success();
-    let after_out =
-        stdout(
-            repo.arc(&repo.root)
-                .args(["journal", "transition", &source, "--to", "todo"]),
-        );
-    let _ = after_out;
-    repo.arc(&repo.root)
-        .args(["journal", "transition", &source, "--to", "todo"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("already consumed"));
+    for kind in ["plan", "todo"] {
+        repo.arc(&repo.root)
+            .args(["journal", "transition", &source, "--to", kind])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("already consumed"));
+    }
     let after = {
         let names: Vec<String> = fs::read_dir(Path::new(&dir))
             .unwrap()

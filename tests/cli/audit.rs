@@ -3801,7 +3801,10 @@ fn review_options_route_the_lead_without_writing() {
             .assert()
             .failure()
             .code(3);
-        let _ = stdout(repo.arc(&repo.root).args(["check", "readonly", "--json"]));
+        repo.arc(&repo.root)
+            .args(["check", "readonly", "--json"])
+            .assert()
+            .code(3);
     }
     let journal_after = fs::read_to_string(journal_dir.join("events.jsonl"))
         .unwrap_or_default()
