@@ -165,6 +165,28 @@ pub fn exit_code(blockers: &[Blocker]) -> Option<i32> {
         .map(Blocker::exit_code)
 }
 
+/// The exit status `arc check --help` states, rendered from [`PRIORITY`] so
+/// the table a caller reads is the one the command exits by, in the order
+/// that picks the code when several blockers are present.
+pub fn exit_status_help() -> String {
+    let mut rows: Vec<(i32, Vec<&str>)> = Vec::new();
+    for blocker in PRIORITY {
+        match rows.last_mut() {
+            Some((code, names)) if *code == blocker.exit_code() => names.push(blocker.as_str()),
+            _ => rows.push((blocker.exit_code(), vec![blocker.as_str()])),
+        }
+    }
+    let mut help =
+        String::from("Exit status, with blockers in precedence order:\n  0   ready to integrate\n");
+    for (code, names) in rows {
+        help.push_str(&format!("  {code:<3} {}\n", names.join(", ")));
+    }
+    help.push_str("  1   an error, named on stderr\n");
+    help.push_str("  2   also a usage error, refused before any change is read\n");
+    help.push_str("A change with several blockers exits with the first one's code. With --tag, the command exits with the code of the first blocked change it lists, or 0 when every match is ready or closed.");
+    help
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

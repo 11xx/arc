@@ -1492,6 +1492,8 @@ EXIT CODES
     `arc check` exits 15 when the change's branch is a fork's: fork work is
       unintegrated by intent, and the boundary binds to the change rather
       than to the directory the command runs in.
+    `arc check --tag` exits with the code of the first blocked change it
+      lists, and 0 when every match is ready or closed.
     Arc exits 17 when a paired replica does not hold integration authority;
       the refusal names the holder or an offer in flight.
 
