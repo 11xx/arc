@@ -444,6 +444,9 @@ RUN A CHANGE
                                      Without it, a target behind its upstream
                                      (as the last fetch left it) is a warning
                                      naming both revisions and the fix.
+  arc brief --body-file <f>          Record the next contract version.
+    --caused-by <kind:ref>           Why it changed. v1 refuses a cause; every
+    --cause-note <text>              later version requires one of these.
   arc claim / stage / release-claim  Advisory liveness while implementing.
     --takeover                       Displace a claim that may be taken over:
                                      a stale one on a change, an expired one
