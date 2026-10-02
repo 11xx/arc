@@ -1401,13 +1401,7 @@ pub fn next_step(report: &StatusReport) -> String {
         ),
         ("verify_against", target) => format!("arc verify {change} --against {target}"),
         ("run_probe", name) => match report.probes.iter().find(|probe| probe.name == name) {
-            Some(probe) if probe.undischargeable => {
-                let version = probe.brief_version;
-                format!(
-                    "as lead, record a brief based on the revision the work started from, redeclaring v{version}'s probes, and snapshot to bind the patchset to it: arc brief {change} --body-file <file> --base <revision the work started from> --cause-note \"<why v{version} could not discharge its probes>\" --probes-json {} && arc snapshot {change}",
-                    redeclared_probes(report)
-                )
-            }
+            Some(probe) if probe.undischargeable => undischargeable_probe_step(report, probe),
             Some(probe) if probe.baseline_result != "fail" => format!(
                 "with {} checked out in the change's worktree: arc verify {change} --probe {name} --probe-phase baseline",
                 probe.baseline_revision
@@ -1440,6 +1434,62 @@ pub fn next_step(report: &StatusReport) -> String {
         _ => return code.to_string(),
     };
     format!("{step} ({code})")
+}
+
+/// The recovery for a probe its patchset's brief cannot discharge. A patchset
+/// binds the brief that is latest when it is recorded, so the brief version a
+/// probe can fail at comes first and the snapshot that binds it second. Once
+/// a later version exists, that snapshot is all that remains, so a recovery
+/// stopped between the two resumes rather than recording another version.
+fn undischargeable_probe_step(report: &StatusReport, probe: &crate::status::ProbeStatus) -> String {
+    let change = report.change_id.as_str();
+    let bound = probe.brief_version;
+    let snapshot = format!(
+        "arc snapshot {change} --contributors {}",
+        patchset_contributors(report)
+    );
+    let later = report
+        .brief
+        .as_ref()
+        .map(|brief| brief.version)
+        .filter(|latest| *latest > bound);
+    if let Some(latest) = later {
+        return format!("snapshot to bind the patchset to brief v{latest}: {snapshot}");
+    }
+    format!(
+        "as lead, record a brief based on the revision the work started from, redeclaring v{bound}'s probes, and snapshot to bind the patchset to it: arc brief {change} --body-file <file> --base <revision the work started from> --cause-note \"<why v{bound} could not discharge its probes>\" --probes-json {} && {snapshot}",
+        redeclared_probes(report)
+    )
+}
+
+/// The latest patchset's effective contributors as a `--contributors` value:
+/// its recorded set when nonempty, otherwise its effective author. A snapshot
+/// that rebinds the same head to a later brief records the same work, so it
+/// declares the same hands, which is also what a live claim held by another
+/// actor requires of it.
+fn patchset_contributors(report: &StatusReport) -> String {
+    let Some(patchset) = &report.latest_patchset else {
+        return "<contributors>".to_string();
+    };
+    let contributors = if patchset.contributors.is_empty() {
+        vec![patchset.effective_author()]
+    } else {
+        patchset.contributors.iter().map(String::as_str).collect()
+    };
+    shell_word(&contributors.join(","))
+}
+
+/// `value` as one shell word: bare when it holds nothing a shell interprets.
+fn shell_word(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.:@/+=,%".contains(c));
+    if plain {
+        value.to_string()
+    } else {
+        crate::context::shell_quote(value)
+    }
 }
 
 /// The patchset's brief's probes as a shell-quoted `--probes-json` argument.
