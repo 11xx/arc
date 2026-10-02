@@ -495,7 +495,28 @@ pub fn select(ctx: &Ctx, args: SelectArgs) -> Result<i32> {
         }
         event.event_id
     };
+    paused_before_promotion()?;
     promote_selection(ctx, &store, &selection_id, false)
+}
+
+/// A pause the test suite injects between recording a selection and
+/// promoting it, so a basis that moves in between is exercised on purpose.
+/// `ARC_SELECT_PAUSE` names a file; the selection, holding no lock, waits for
+/// it to exist. Unset, which is every run that is not a test, this does
+/// nothing.
+fn paused_before_promotion() -> Result<()> {
+    let Some(release) = std::env::var_os("ARC_SELECT_PAUSE") else {
+        return Ok(());
+    };
+    let release = Path::new(&release);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !release.exists() {
+        if std::time::Instant::now() >= deadline {
+            bail!("ARC_SELECT_PAUSE: {} never appeared", release.display());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Ok(())
 }
 
 pub fn promote(ctx: &Ctx, selection_id: &str) -> Result<i32> {
