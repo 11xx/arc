@@ -895,6 +895,136 @@ fn a_closed_change_reports_the_head_it_shipped_after_its_branch_is_deleted() {
     );
 }
 
+/// A closed change answers to the declarations it closed under. A gate the
+/// target declares afterwards is not owed by work that already shipped, and
+/// declarations the target breaks afterwards cannot make its report fail.
+#[test]
+fn a_closed_change_reports_the_declarations_it_closed_under() {
+    let repo = repo_with_gates();
+    let (change_id, worktree) = approved_change(&repo, "shipped-gates", "gated.txt", "gated\n");
+    repo.arc(&repo.root)
+        .args(["integrate", "shipped-gates"])
+        .assert()
+        .success();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.smoke]\ncommand = \"test -f README.md\"\n\n[gates.later]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["commit", "-am", "test: require a later gate"]);
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", &change_id, "--json"]));
+    let recorded: Vec<&String> = status["closure"]["authorization"]["gates"]
+        .as_object()
+        .expect("a guarded closure records the gates it consumed")
+        .keys()
+        .collect();
+    let reported: Vec<&str> = status["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|gate| gate["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(recorded, ["smoke"], "{status}");
+    assert_eq!(reported, ["smoke"], "{status}");
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
+    assert_eq!(
+        status["blockers"],
+        serde_json::json!(["closed"]),
+        "{status}"
+    );
+    let show = stdout(repo.arc(&repo.root).args(["show", "shipped-gates"]));
+    assert!(!show.contains("later"), "{show}");
+
+    fs::write(repo.root.join(".arc/gates.toml"), "[gates.smoke\n").unwrap();
+    fs::write(repo.root.join(".arc/policy.toml"), "[policy\n").unwrap();
+    git(&repo.root, &["add", ".arc"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: break the declarations"],
+    );
+    let status = json_stdout(repo.arc(&worktree).args(["status", &change_id, "--json"]));
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
+    repo.arc(&worktree)
+        .args(["show", "shipped-gates"])
+        .assert()
+        .success();
+}
+
+/// Replaying a closed change answers for the head its closure recorded, as
+/// the live report does: an asserted integration that shipped an earlier
+/// patchset is judged at that patchset's head, not at a later one.
+#[test]
+fn a_replayed_closure_reports_the_head_it_recorded() {
+    let repo = repo_with_gates();
+    stdout(repo.arc(&repo.root).args(["begin", "earlier-shipped"]));
+    let worktree = repo.home.join(".worktrees").join("repo-earlier-shipped");
+    repo.commit(&worktree, "first.txt", "first\n", "feat: first");
+    stdout(repo.arc(&worktree).args(["snapshot", "earlier-shipped"]));
+    let shipped = repo.head(&worktree);
+    repo.commit(&worktree, "second.txt", "second\n", "feat: second");
+    stdout(repo.arc(&worktree).args(["snapshot", "earlier-shipped"]));
+    git(
+        &repo.root,
+        &[
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            "-m",
+            "external merge",
+            &shipped,
+        ],
+    );
+    let merge = repo.head(&repo.root);
+    repo.arc(&repo.root)
+        .args([
+            "close",
+            "earlier-shipped",
+            "--assert-integrated",
+            &merge,
+            "--patchset",
+            "ps-01",
+        ])
+        .assert()
+        .success();
+
+    let live = json_stdout(
+        repo.arc(&repo.root)
+            .args(["status", "earlier-shipped", "--json"]),
+    );
+    assert_eq!(live["current_head"], shipped.as_str(), "{live}");
+    let closure = live["closure"]["event_id"].as_str().unwrap().to_string();
+    let replayed = json_stdout(repo.arc(&repo.root).args([
+        "status",
+        "earlier-shipped",
+        "--at",
+        &closure,
+        "--json",
+    ]));
+    assert_eq!(replayed["current_head"], shipped.as_str(), "{replayed}");
+    assert_eq!(
+        replayed["head_matches_latest_patchset"], live["head_matches_latest_patchset"],
+        "{replayed}"
+    );
+
+    let worktree_state = |show: &str| {
+        show.lines()
+            .find(|line| line.starts_with("- Worktree state:"))
+            .map(str::to_owned)
+    };
+    let live_show = stdout(repo.arc(&repo.root).args(["show", "earlier-shipped"]));
+    let replayed_show =
+        stdout(
+            repo.arc(&repo.root)
+                .args(["show", "earlier-shipped", "--at", &closure]),
+        );
+    assert_eq!(
+        worktree_state(&replayed_show),
+        worktree_state(&live_show),
+        "{replayed_show}"
+    );
+}
+
 /// The plan the dry run prints is the one the merge carries out: the basis
 /// the integration event records, at the target revision the plan names.
 #[test]

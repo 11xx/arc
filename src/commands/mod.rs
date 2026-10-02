@@ -550,8 +550,9 @@ impl Ctx {
         )
     }
 
-    /// Build a report for a state replayed to a past event: the derived
-    /// latest-patchset head stands in for the live branch head, so approval
+    /// Build a report for a state replayed to a past event: the latest
+    /// patchset's head stands in for the live branch head, or the head the
+    /// closure recorded once the replayed state is closed, so approval
     /// validity reflects what the actor saw at that point rather than the
     /// current worktree. Cross-change dependency state is still evaluated
     /// against the present ledger.
