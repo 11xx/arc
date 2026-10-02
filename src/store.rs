@@ -41,6 +41,9 @@ pub struct Store {
     pub require_declared_actor: bool,
     /// Files that enabled the declared-actor requirement.
     pub require_declared_actor_sources: Vec<String>,
+    /// Opened for reading only: the append policy was never parsed, so this
+    /// handle refuses every append.
+    pub read_only: bool,
 }
 
 /// A process-scoped transition guard. The lock file is intentionally
@@ -60,12 +63,29 @@ impl Store {
     /// exactly one repository) > configured `data_root` (per-repo slug
     /// subdirectory, sandbox-friendly) > the repository's Git common dir.
     pub fn discover(cwd: &Path) -> Result<Store> {
+        Self::discover_with(cwd, false)
+    }
+
+    /// Locate the store as `discover` does, for a command that records
+    /// nothing. The invoking checkout's policy governs only appends, so it is
+    /// never parsed here: a checkout whose policy is unreadable can still be
+    /// reported on, and every append through this handle is refused.
+    pub fn discover_for_reading(cwd: &Path) -> Result<Store> {
+        Self::discover_with(cwd, true)
+    }
+
+    fn discover_with(cwd: &Path, read_only: bool) -> Result<Store> {
         let root = Self::resolve_root(cwd)?;
         // Read the invoking checkout's policy before creating anything. An
         // unreadable local policy fails with the filesystem untouched, and
         // repository-wide appends have no change target to read instead.
-        let (require_declared_actor, require_declared_actor_sources) = match gitio::toplevel(cwd) {
-            Ok(top) => {
+        let checkout = if read_only {
+            None
+        } else {
+            gitio::toplevel(cwd).ok()
+        };
+        let (require_declared_actor, require_declared_actor_sources) = match checkout {
+            Some(top) => {
                 let policy = crate::policy::load(&top)?;
                 let required = policy.policy.require_declared_actor;
                 let sources = if required {
@@ -77,8 +97,9 @@ impl Store {
                 };
                 (required, sources)
             }
-            // A store opened outside a repository has no policy to honour.
-            Err(_) => (false, Vec::new()),
+            // A store opened outside a repository, or for reading, has no
+            // policy to honour.
+            None => (false, Vec::new()),
         };
         create_private_dir(&root)?;
         let config_path = root.join("config.json");
@@ -113,6 +134,7 @@ impl Store {
             repository_id,
             require_declared_actor,
             require_declared_actor_sources,
+            read_only,
         };
         store.repair_missing_format_three_stamp()?;
         Ok(store)
@@ -129,6 +151,7 @@ impl Store {
                 repository_id,
                 require_declared_actor: false,
                 require_declared_actor_sources: Vec::new(),
+                read_only: false,
             })),
             None => Ok(None),
         }
@@ -174,6 +197,7 @@ impl Store {
     pub const REPOSITORY_SCOPE: &'static str = "repository";
 
     pub fn append_repository_event(&self, event: &Event) -> Result<()> {
+        self.refuse_read_only()?;
         self.refuse_undeclared_author(event)?;
         self.stamp_session_resolution(event.session_resolution)?;
         self.stamp_format_for(&event.payload)?;
@@ -535,6 +559,7 @@ impl Store {
     /// Append one event. The file is created exclusively; a collision on
     /// a ULID event ID indicates a real bug and fails loudly.
     pub fn append_event(&self, event: &Event) -> Result<()> {
+        self.refuse_read_only()?;
         self.refuse_undeclared_author(event)?;
         self.stamp_session_resolution(event.session_resolution)?;
         self.stamp_format_for(&event.payload)?;
@@ -754,6 +779,13 @@ impl Store {
             }
         }
         Ok(false)
+    }
+
+    pub(crate) fn refuse_read_only(&self) -> Result<()> {
+        if self.read_only {
+            bail!("this ledger handle was opened for reading and records nothing");
+        }
+        Ok(())
     }
 
     /// Under `require_declared_actor`, refuse to record an event whose author
@@ -1043,6 +1075,7 @@ impl Store {
     /// Write a repository-scoped event verbatim, as import does for a change.
     /// Idempotent: a rewrite already recorded here is the same fact.
     pub fn append_raw_repository_event(&self, event_id: &str, bytes: &[u8]) -> Result<bool> {
+        self.refuse_read_only()?;
         ids::validate_id_component(event_id)?;
         let value = serde_json::from_slice::<serde_json::Value>(bytes).ok();
         self.stamp_format_for_value(value.as_ref())?;
@@ -1070,6 +1103,7 @@ impl Store {
     }
 
     pub fn append_raw_event(&self, change_id: &str, event_id: &str, bytes: &[u8]) -> Result<()> {
+        self.refuse_read_only()?;
         ids::validate_id_component(change_id)?;
         ids::validate_id_component(event_id)?;
         // Import writes bytes rather than a typed payload, but the store it
@@ -1207,7 +1241,23 @@ mod tests {
             repository_id: "repo".into(),
             require_declared_actor: false,
             require_declared_actor_sources: Vec::new(),
+            read_only: false,
         }
+    }
+
+    #[test]
+    fn a_read_only_handle_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store {
+            read_only: true,
+            ..test_store(dir.path())
+        };
+        let event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let bytes = br#"{"event_type":"note-added"}"#;
+        assert!(store.append_raw_event("change", event_id, bytes).is_err());
+        assert!(store.append_raw_repository_event(event_id, bytes).is_err());
+        assert!(!dir.path().join("changes").exists());
+        assert!(!dir.path().join("repository").exists());
     }
 
     #[test]

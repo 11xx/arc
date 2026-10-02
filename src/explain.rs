@@ -462,7 +462,7 @@ pub fn explain(ctx: &Ctx, reference: &str, at: Option<&str>, json: bool) -> Resu
 }
 
 fn build(ctx: &Ctx, reference: &str, at: Option<&str>) -> Result<Explanation> {
-    let store = ctx.store()?;
+    let store = ctx.store_for_reading()?;
     let change_id = store.resolve_change(reference)?;
     let events = store.load_events(&change_id)?;
     let at_position = match at {

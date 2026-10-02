@@ -3170,11 +3170,16 @@ fn run(cli: Cli) -> Result<i32> {
     // spellings naming different changes is a mistake, not a precedence
     // question — but a slug, an ID, and a unique prefix of one change are one
     // reference, so they are compared after resolution.
-    let select = |positional: Option<String>| -> Result<Option<String>> {
+    //
+    // A command that can record resolves through the store it would append
+    // to, so its own policy refuses it before it starts; a report resolves
+    // through a handle that never parses that policy.
+    type Open = fn(&Path) -> Result<store::Store>;
+    let select_with = |positional: Option<String>, open: Open| -> Result<Option<String>> {
         let (Some(positional), Some(flag)) = (&positional, &flag_change) else {
             return Ok(positional.or_else(|| flag_change.clone()));
         };
-        let store = store::Store::discover(&ctx.cwd)?;
+        let store = open(&ctx.cwd)?;
         let (left, right) = (
             store.resolve_change(positional)?,
             store.resolve_change(flag)?,
@@ -3184,11 +3189,15 @@ fn run(cli: Cli) -> Result<i32> {
         }
         Ok(Some(left))
     };
-    let infer = |change: Option<&str>| -> Result<String> {
-        let selected = select(change.map(str::to_string))?;
-        let store = store::Store::discover(&ctx.cwd)?;
+    let infer_with = |change: Option<&str>, open: Open| -> Result<String> {
+        let selected = select_with(change.map(str::to_string), open)?;
+        let store = open(&ctx.cwd)?;
         context::resolve_change_or_infer(&store, &ctx.cwd, selected.as_deref())
     };
+    let select = |positional| select_with(positional, store::Store::discover);
+    let infer = |change| infer_with(change, store::Store::discover);
+    let select_report = |positional| select_with(positional, store::Store::discover_for_reading);
+    let infer_report = |change| infer_with(change, store::Store::discover_for_reading);
     // Which store a subject positional addresses. Only an explicit name can
     // be an artifact: an omitted subject is inferred from the branch, and a
     // branch names a change.
@@ -3277,17 +3286,17 @@ fn run(cli: Cli) -> Result<i32> {
             at,
         } => {
             let change = if tag.is_empty() {
-                Some(infer(change.as_deref())?)
+                Some(infer_report(change.as_deref())?)
             } else {
                 // With --tag the command refuses a change; the flag has to
                 // reach it to be refused.
-                select(change)?
+                select_report(change)?
             };
             commands::show_selection(&ctx, role, change.as_deref(), tag, json, at.as_deref())?;
             Ok(0)
         }
         Cmd::Explain { change, at, json } => {
-            let change = infer(change.as_deref())?;
+            let change = infer_report(change.as_deref())?;
             explain::explain(&ctx, &change, at.as_deref(), json)?;
             Ok(0)
         }
@@ -3302,7 +3311,7 @@ fn run(cli: Cli) -> Result<i32> {
                      for commits, use git log --oneline"
                 );
             }
-            let change = infer(change.as_deref())?;
+            let change = infer_report(change.as_deref())?;
             commands::log(&ctx, &change, reverse)?;
             Ok(0)
         }
@@ -3368,7 +3377,7 @@ fn run(cli: Cli) -> Result<i32> {
             format,
             audit,
         } => {
-            let change = infer(change.as_deref())?;
+            let change = infer_report(change.as_deref())?;
             commands::findings(&ctx, &change, format, audit)?;
             Ok(0)
         }
@@ -3506,7 +3515,7 @@ fn run(cli: Cli) -> Result<i32> {
             fields,
             at,
         } => {
-            let change = infer(change.as_deref())?;
+            let change = infer_report(change.as_deref())?;
             commands::status_cmd(
                 &ctx,
                 &change,
@@ -3639,11 +3648,11 @@ fn run(cli: Cli) -> Result<i32> {
             json,
         } => {
             let change = if tag.is_empty() {
-                Some(infer(change.as_deref())?)
+                Some(infer_report(change.as_deref())?)
             } else {
                 // With --tag the command refuses a change; the flag has to
                 // reach it to be refused.
-                select(change)?
+                select_report(change)?
             };
             commands::check_selection(&ctx, change.as_deref(), tag, explain, json)
         }

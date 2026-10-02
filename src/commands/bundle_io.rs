@@ -42,6 +42,7 @@ pub fn import_bundle(ctx: &Ctx, input: &str, dry_run: bool) -> Result<i32> {
         repository_id: repository_id.clone(),
         require_declared_actor: false,
         require_declared_actor_sources: Vec::new(),
+        read_only: true,
     });
     // A suffix is only meaningful against the prefix it extends, and the
     // checksum of the whole history is what ties the two together.
