@@ -284,6 +284,22 @@ pub(crate) fn spawn_arc_with_session(
     args: &[&str],
     session: &str,
 ) -> Child {
+    arc_child(repo, cwd, args, session, Stdio::null())
+}
+
+/// `spawn_arc_with_session` with stderr kept for `child_stderr`, for a child
+/// whose failure the test reports. The stderr pipe is read only after exit,
+/// so the child must write less than a pipe buffer to it.
+pub(crate) fn spawn_arc_keeping_stderr(
+    repo: &Repo,
+    cwd: &Path,
+    args: &[&str],
+    session: &str,
+) -> Child {
+    arc_child(repo, cwd, args, session, Stdio::piped())
+}
+
+fn arc_child(repo: &Repo, cwd: &Path, args: &[&str], session: &str, stderr: Stdio) -> Child {
     let binary = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo should provide arc binary");
     Command::new(binary)
         .args(args)
@@ -300,7 +316,7 @@ pub(crate) fn spawn_arc_with_session(
         .env_remove("ARC_WORKTREES_DIR")
         .env_remove("AI_HOME")
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(stderr)
         .spawn()
         .unwrap()
 }
@@ -403,15 +419,20 @@ pub(crate) fn assert_waiting_on_transition_lock(children: &mut [&mut Child]) {
     }
 }
 
+/// How long a test waits on an arc subprocess before calling it hung. Only a
+/// process that never finishes reaches it, however loaded the machine is.
+pub(crate) const HANG_BOUND: Duration = Duration::from_secs(120);
+
+/// The child's exit status, killing it as hung after `HANG_BOUND`.
 pub(crate) fn wait_for_exit(child: &mut Child) -> ExitStatus {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + HANG_BOUND;
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             return status;
         }
         if Instant::now() >= deadline {
             child.kill().unwrap();
-            panic!("arc subprocess did not exit within five seconds");
+            panic!("arc subprocess did not exit within {HANG_BOUND:?}");
         }
         thread::sleep(Duration::from_millis(10));
     }
@@ -423,6 +444,17 @@ pub(crate) fn child_stdout(child: &mut Child) -> String {
         .stdout
         .take()
         .unwrap()
+        .read_to_string(&mut output)
+        .unwrap();
+    output
+}
+
+pub(crate) fn child_stderr(child: &mut Child) -> String {
+    let mut output = String::new();
+    child
+        .stderr
+        .take()
+        .expect("child spawned with spawn_arc_keeping_stderr")
         .read_to_string(&mut output)
         .unwrap();
     output
