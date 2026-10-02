@@ -57,4 +57,8 @@
   resolved by an agent that did not author the winning position, or by the
   user.
 
+## The question
+
+{{body}}
+
 ## Positions

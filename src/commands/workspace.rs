@@ -2490,6 +2490,7 @@ mod report {
         "Positions",
         "How it resolves",
         "Questions only a person settles",
+        "The question",
     ];
 
     /// Where an artifact that left the backlog went, as the journal records it.
