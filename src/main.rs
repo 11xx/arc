@@ -1669,6 +1669,10 @@ enum Cmd {
         cmd: SandboxCmd,
     },
     /// Check the append-only ledger for malformed or stale state (read-only)
+    ///
+    /// Exits 0 when the ledger is clean or carries only advice, and 1 when it
+    /// reports a problem. A ledger that cannot be read at all also exits 1,
+    /// with the error on stderr and no report; a usage error exits 2.
     Doctor {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]

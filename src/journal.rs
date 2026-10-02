@@ -517,6 +517,10 @@ pub enum JournalCmd {
         explain: bool,
     },
     /// Check the journal for malformed or stale state (read-only)
+    ///
+    /// Exits 0 when the journal is clean or carries only advice, and 1 when it
+    /// reports a problem. A journal that cannot be read at all also exits 1,
+    /// with the error on stderr and no report; a usage error exits 2.
     Doctor {
         /// Emit structured JSON instead of text
         #[arg(long)]
