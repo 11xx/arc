@@ -1285,12 +1285,23 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         println!("finding: {id}");
     }
     println!("event: {}", ev.event_id);
+    // Everything below is advice about a verdict that already stands, so a
+    // failure to evaluate it is a warning and never the review's result.
+    //
     // The inert-approval note already names the reviewer's relation to the
     // work when the gate rejects it. Where the gate lets the approval stand —
     // a repository that permits self-approval, or a change outside the
-    // dangerous surfaces — the same relation is still what a reader needs to
-    // judge the verdict, so it is said rather than left to be inferred.
-    if !report_inert_approval(ctx, &store, &change_id)? {
+    // dangerous surfaces — or where the gate could not be evaluated, the same
+    // relation is still what a reader needs to judge the verdict, so it is
+    // said rather than left to be inferred.
+    let rejection_named = report_inert_approval(ctx, &store, &change_id).unwrap_or_else(|error| {
+        eprintln!(
+            "warning: verdict {} is recorded; whether it gates could not be evaluated: {error:#}",
+            ev.event_id
+        );
+        false
+    });
+    if !rejection_named {
         if let Some(patchset) = st.patchsets.iter().find(|p| p.id == patchset_id) {
             ctx.warn_verdict_not_independent(patchset, verdict);
         }
