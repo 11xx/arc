@@ -927,9 +927,11 @@ enum Cmd {
         cmd: ReplicaCmd,
     },
     /// Integration preflight; exit code identifies the first blocker
+    ///
     /// Unreadable neighboring changes are named with their errors on stderr;
     /// an unreadable selected change fails and an unreadable prerequisite
     /// cannot authorize integration
+    #[command(after_help = blockers::exit_status_help())]
     Check {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1670,6 +1672,10 @@ enum Cmd {
         cmd: SandboxCmd,
     },
     /// Check the append-only ledger for malformed or stale state (read-only)
+    ///
+    /// Exits 0 when the ledger is clean or carries only advice, and 1 when it
+    /// reports a problem. A ledger that cannot be read at all also exits 1,
+    /// with the error on stderr and no report; a usage error exits 2.
     Doctor {
         /// Emit the machine-readable JSON view instead of text
         #[arg(long)]
