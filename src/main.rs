@@ -618,13 +618,20 @@ enum Cmd {
     },
     /// Record, read, or project changelog entries
     ///
+    /// While an open change has no changelog record, `arc status`, `arc
+    /// check`, and `arc integrate` advise one under the code
+    /// `no-changelog-entry`; the advice never blocks. Recording an entry, or
+    /// recording with --none that the change needs none, answers it. The
+    /// latest record wins, and a --none record projects nothing.
+    ///
     /// The projection is rendered by the renderer `.arc/changelog.toml`
     /// selects: the built-in `keep-a-changelog`, or `command`, whose
     /// `renderer_command` argv runs from the repository root without a shell,
     /// with the authority of whoever runs arc changelog. It reads an
     /// arc-changelog-render-request/1 document on stdin and answers on stdout;
     /// `renderer_timeout` bounds it (default 60s), and its process group is
-    /// killed at the deadline. `--json` never runs it
+    /// killed at the deadline. `--json` never runs it.
+    ///
     /// Read-only projections name unreadable changes with their errors on
     /// stderr and retain readable entries. --write requires every change to
     /// be readable; an unreadable selected change fails
@@ -638,6 +645,13 @@ enum Cmd {
         /// Read a new entry body from a file ('-' for stdin)
         #[arg(long)]
         body_file: Option<String>,
+        /// Record that the change needs no changelog entry, replacing any
+        /// entry recorded before. Requires --reason
+        #[arg(long, requires = "reason", conflicts_with_all = ["category", "body_file"])]
+        none: bool,
+        /// Why the change needs no changelog entry; only with --none
+        #[arg(long, requires = "none")]
+        reason: Option<String>,
         /// Emit a read result as JSON
         #[arg(long)]
         json: bool,
@@ -3303,6 +3317,8 @@ fn run(cli: Cli) -> Result<i32> {
             change,
             category,
             body_file,
+            none: _,
+            reason,
             json,
             provenance,
             since,
@@ -3314,6 +3330,7 @@ fn run(cli: Cli) -> Result<i32> {
             select(change)?.as_deref(),
             category,
             body_file,
+            reason,
             json,
             provenance,
             since,

@@ -1658,17 +1658,20 @@ pub(crate) fn event_kind_summary(payload: &Payload) -> (&'static str, String) {
             category,
             body,
             supersedes,
-        } => (
-            "changelog-recorded",
-            match supersedes {
-                Some(superseded) => format!(
-                    "{}: {} (supersedes {superseded})",
-                    category,
-                    first_line(body)
-                ),
+            no_entry_reason,
+        } => {
+            let recorded = match no_entry_reason {
+                Some(reason) => format!("no entry: {}", first_line(reason)),
                 None => format!("{}: {}", category, first_line(body)),
-            },
-        ),
+            };
+            (
+                "changelog-recorded",
+                match supersedes {
+                    Some(superseded) => format!("{recorded} (supersedes {superseded})"),
+                    None => recorded,
+                },
+            )
+        }
         Payload::PatchsetAdded {
             patchset_id,
             head,
