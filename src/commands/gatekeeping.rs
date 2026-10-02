@@ -3637,7 +3637,7 @@ fn check(ctx: &Ctx, reference: &str, explain: bool, json: bool) -> Result<i32> {
 }
 
 fn check_tagged(ctx: &Ctx, tags: Vec<String>) -> Result<i32> {
-    let store = ctx.store()?;
+    let store = ctx.store_for_reading()?;
     let states = store.readable_states()?;
     let selected = states
         .values()

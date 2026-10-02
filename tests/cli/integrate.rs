@@ -1007,6 +1007,41 @@ fn a_closed_change_reports_from_a_target_whose_policy_is_broken() {
     assert!(!listed.contains("after-broken-policy"), "{listed}");
 }
 
+/// Every command that records nothing reads the ledger without the append
+/// policy, so the target checkout's broken policy fails none of them: the
+/// tagged and aggregate views as much as a single change's report.
+#[test]
+fn reports_over_many_changes_read_past_a_broken_policy() {
+    let repo = repo_with_gates();
+    let (change_id, _worktree) = approved_change(&repo, "tagged-shipped", "tagged.txt", "t\n");
+    repo.arc(&repo.root)
+        .args(["integrate", "tagged-shipped"])
+        .assert()
+        .success();
+    fs::write(repo.root.join(".arc/policy.toml"), "[policy\n").unwrap();
+    git(&repo.root, &["add", ".arc/policy.toml"]);
+    git(&repo.root, &["commit", "-m", "test: break the policy"]);
+
+    let shown = stdout(repo.arc(&repo.root).args(["show", "--tag", "series"]));
+    assert!(shown.contains(&change_id), "{shown}");
+    let checked = stdout(repo.arc(&repo.root).args(["check", "--tag", "series"]));
+    assert!(
+        checked.contains(&format!("{change_id}: integrated")),
+        "{checked}"
+    );
+    let listed = stdout(repo.arc(&repo.root).args(["list"]));
+    assert!(listed.contains(&change_id), "{listed}");
+    let queried = stdout(repo.arc(&repo.root).args(["query", "--tag", "series"]));
+    assert!(queried.contains(&change_id), "{queried}");
+    let blockers = json_stdout(repo.arc(&repo.root).args(["blocker-status", &change_id]));
+    assert_eq!(blockers["blocked"], false, "{blockers}");
+    repo.arc(&repo.root)
+        .args(["is-blocked", &change_id])
+        .assert()
+        .success();
+    repo.arc(&repo.root).args(["inbox"]).assert().success();
+}
+
 /// Replaying a closed change answers for the head its closure recorded, as
 /// the live report does: an asserted integration that shipped an earlier
 /// patchset is judged at that patchset's head, not at a later one.

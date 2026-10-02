@@ -555,7 +555,7 @@ pub fn iterating(ctx: &Ctx, reference: &str, off: bool) -> Result<()> {
 }
 
 pub fn list(ctx: &Ctx, open_only: bool, json: bool, format: ListFormat) -> Result<()> {
-    let store = ctx.store()?;
+    let store = ctx.store_for_reading()?;
     let states = store.readable_states()?;
     let selected = states
         .values()
@@ -621,7 +621,7 @@ pub fn query(ctx: &Ctx, args: QueryArgs) -> Result<()> {
             );
         }
     }
-    let store = ctx.store()?;
+    let store = ctx.store_for_reading()?;
     let states = store.readable_states()?;
     let tags = normalize_tags(args.tags)?;
     let selected = states
@@ -1239,7 +1239,7 @@ fn status_output_with(
 }
 
 pub fn blocker_status_cmd(ctx: &Ctx, reference: &str) -> Result<()> {
-    let store = ctx.store()?;
+    let store = ctx.store_for_reading()?;
     let (_, state) = ctx.load_state(&store, reference)?;
     let states = store.readable_states()?;
     println!(
@@ -1250,7 +1250,7 @@ pub fn blocker_status_cmd(ctx: &Ctx, reference: &str) -> Result<()> {
 }
 
 pub fn is_blocked(ctx: &Ctx, reference: &str) -> Result<i32> {
-    let store = ctx.store()?;
+    let store = ctx.store_for_reading()?;
     let (_, state) = ctx.load_state(&store, reference)?;
     let states = store.readable_states()?;
     let blocker_status = dependency_status(&state, &states);
@@ -1409,7 +1409,7 @@ fn show(
 }
 
 fn show_tagged(ctx: &Ctx, tags: Vec<String>, json: bool) -> Result<()> {
-    let store = ctx.store()?;
+    let store = ctx.store_for_reading()?;
     let states = store.readable_states()?;
     let selected = states
         .values()
