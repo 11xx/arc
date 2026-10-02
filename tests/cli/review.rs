@@ -654,3 +654,107 @@ fn findings_json_refuses_a_misspelled_anchor_field_and_warns_on_other_unknown_on
         .stderr(predicates::str::contains("warning").not());
     assert_eq!(event_count(&repo, &change_id), before + 2);
 }
+
+/// What a refused review must leave as it was: the change's events, its latest
+/// patchset with its contributors, whether an approval stands, and the
+/// retention refs.
+fn recorded(
+    repo: &Repo,
+    change_id: &str,
+    slug: &str,
+) -> (usize, serde_json::Value, serde_json::Value, String) {
+    let status = json_stdout(repo.arc(&repo.root).args(["status", slug, "--json"]));
+    (
+        event_count(repo, change_id),
+        status["latest_patchset"].clone(),
+        status["has_valid_approval"].clone(),
+        git_out(
+            &repo.root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/arc/",
+            ],
+        ),
+    )
+}
+
+/// `review --snapshot` validates the findings batch and the verdict before it
+/// records anything: a refused review leaves the patchsets, their
+/// contributors, the standing approval, and the retention refs as they were,
+/// even when its attribution would have recorded a new patchset.
+#[test]
+fn a_refused_review_snapshot_records_no_patchset() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "refused-snapshot");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args(["review", "refused-snapshot", "--verdict", "approved"])
+        .assert()
+        .success();
+    let observed = || recorded(&repo, &change_id, "refused-snapshot");
+    let before = observed();
+    assert_eq!(before.1["id"], "ps-01", "{}", before.1);
+    assert_eq!(before.2, true, "the fixture's approval must stand");
+
+    for (batch, refusal) in [
+        (
+            r#"[{"severity": "major", "summary": "a defect", "blocker": true}]"#,
+            "which looks like a misspelling of `blocking`",
+        ),
+        (
+            r#"[{"severity": "major", "summary": "a defect", "blocking": true}]"#,
+            "cannot approve while recording blocking findings",
+        ),
+    ] {
+        repo.arc(&worktree)
+            .env("ARC_ACTOR", "reviewer")
+            .args([
+                "review",
+                "refused-snapshot",
+                "--snapshot",
+                "--contributors",
+                "codex-luna",
+                "--verdict",
+                "approved",
+                "--findings-json",
+                "-",
+            ])
+            .write_stdin(batch.to_string())
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(refusal));
+        assert_eq!(observed(), before, "{batch}");
+    }
+}
+
+/// A misspelled anchor field refuses the batch before `--snapshot` records the
+/// head that moved, whatever the verdict.
+#[test]
+fn a_misspelled_anchor_field_refuses_review_snapshot_before_it_records() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "anchor-snapshot");
+    repo.commit(&worktree, "more.txt", "more\n", "test: move the head");
+    let before = recorded(&repo, &change_id, "anchor-snapshot");
+    assert_eq!(before.1["id"], "ps-01", "{}", before.1);
+
+    repo.arc(&worktree)
+        .args([
+            "review",
+            "anchor-snapshot",
+            "--snapshot",
+            "--verdict",
+            "comment-only",
+            "--findings-json",
+            "-",
+        ])
+        .write_stdin(
+            r#"[{"severity": "minor", "summary": "a note", "anchor": {"path": "more.txt", "line": 1}}]"#,
+        )
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "the anchor of finding 1 has unknown field `line`, which looks like a misspelling of `line_start`",
+        ));
+    assert_eq!(recorded(&repo, &change_id, "anchor-snapshot"), before);
+}

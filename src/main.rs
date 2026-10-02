@@ -1049,7 +1049,9 @@ enum Cmd {
     /// Obstructing paths are moved to a reported recovery directory under
     /// <git-common-dir>/arc/squash-recovery/. Over another actor's live
     /// claim, a squash without --contributors or --solo refuses before the
-    /// branch moves
+    /// branch moves. The change stays locked from that check until the
+    /// patchset is recorded, so a command acting on the change while the
+    /// commit is made reports the lock busy
     Squash {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1220,7 +1222,9 @@ enum Cmd {
         #[command(flatten)]
         body: BodyOpts,
         /// Snapshot the clean change worktree before recording the verdict;
-        /// --contributors or --solo attribute that patchset
+        /// --contributors or --solo attribute that patchset. The findings
+        /// batch and the verdict are validated first, so a refused review
+        /// records no patchset
         #[arg(long)]
         snapshot: bool,
         #[command(flatten)]
@@ -1412,7 +1416,9 @@ enum Cmd {
     },
     /// Replay a change's branch onto its target, then snapshot the new head.
     /// Over another actor's live claim, a rebase without --contributors or
-    /// --solo refuses before the branch moves
+    /// --solo refuses before the branch moves. The change stays locked from
+    /// that check until the replayed head is recorded, so a command acting on
+    /// the change during the replay reports the lock busy
     Rebase {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in

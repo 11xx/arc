@@ -370,8 +370,36 @@ pub fn snapshot(
     let requested_contributors = contributor_declaration(ctx, contributors, solo)?;
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
-    let _transition = store.lock_transition(&change_id)?;
-    let events = store.load_events(&change_id)?;
+    let transition = store.lock_transition(&change_id)?;
+    snapshot_holding(
+        ctx,
+        &store,
+        &change_id,
+        &transition,
+        base,
+        brief_version,
+        requested_contributors,
+        journal_refs,
+        thread,
+    )
+}
+
+/// Record the change branch's head as a patchset under the change transition
+/// lock the caller holds. `requested_contributors` is a normalized
+/// declaration, as `contributor_declaration` returns it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn snapshot_holding(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    _transition: &crate::store::TransitionLock,
+    base: Option<String>,
+    brief_version: Option<usize>,
+    requested_contributors: Option<Vec<String>>,
+    journal_refs: Vec<String>,
+    thread: Option<String>,
+) -> Result<()> {
+    let events = store.load_events(change_id)?;
     let mut st = state::reduce_following(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
     // Snapshotting is the lead's first read of the change's worktree, and an
@@ -472,7 +500,7 @@ pub fn snapshot(
     for skipped in &skipped_defaults {
         eprintln!("{skipped}");
     }
-    let mut ev = ctx.event_at(&store, &change_id, now, payload);
+    let mut ev = ctx.event_at(store, change_id, now, payload);
     ev.event_id = event_id_after(
         &events
             .last()
@@ -484,7 +512,7 @@ pub fn snapshot(
     // individually, even if the branch is rewound or deleted later.
     gitio::update_ref(
         &ctx.cwd,
-        &gitio::retention_ref(&change_id, &patchset_id),
+        &gitio::retention_ref(change_id, &patchset_id),
         &head,
     )?;
     println!("patchset: {patchset_id}");
@@ -1048,6 +1076,15 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         }
         _ => {}
     }
+    // The batch and the verdict it rides on are settled before `--snapshot`
+    // records a patchset, so a review that refuses has written nothing.
+    let finding_inputs = match findings_json {
+        None => Vec::new(),
+        Some(src) => read_finding_inputs(&src)?,
+    };
+    if verdict == Verdict::Approved && finding_inputs.iter().any(|f| f.blocking) {
+        bail!("cannot approve while recording blocking findings in the same review");
+    }
     if snapshot_first {
         if patchset.is_some() {
             bail!("--snapshot cannot be combined with --patchset");
@@ -1085,38 +1122,31 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
         .collect();
     let relation = (!observed.is_empty()).then(|| relation.with_observed(observed));
 
-    let inline: Vec<InlineFinding> = match findings_json {
-        None => Vec::new(),
-        Some(src) => read_finding_inputs(&src)?
-            .into_iter()
-            .map(|f| {
-                let anchor = f.anchor.map(|a| {
-                    let anchor_args = AnchorArgs {
-                        path: Some(a.path),
-                        side: a.side,
-                        line_start: a.line_start,
-                        line_end: a.line_end,
-                        context: a.context,
-                    };
-                    build_anchor(ctx, &st, Some(&patchset_id), &anchor_args)
-                        .ok()
-                        .flatten()
-                });
-                InlineFinding {
-                    finding_id: ids::new_finding_id(),
-                    blocking: f.blocking,
-                    severity: f.severity,
-                    summary: f.summary,
-                    body: f.body,
-                    anchor: anchor.flatten(),
-                }
-            })
-            .collect(),
-    };
-
-    if verdict == Verdict::Approved && inline.iter().any(|f| f.blocking) {
-        bail!("cannot approve while recording blocking findings in the same review");
-    }
+    let inline: Vec<InlineFinding> = finding_inputs
+        .into_iter()
+        .map(|f| {
+            let anchor = f.anchor.map(|a| {
+                let anchor_args = AnchorArgs {
+                    path: Some(a.path),
+                    side: a.side,
+                    line_start: a.line_start,
+                    line_end: a.line_end,
+                    context: a.context,
+                };
+                build_anchor(ctx, &st, Some(&patchset_id), &anchor_args)
+                    .ok()
+                    .flatten()
+            });
+            InlineFinding {
+                finding_id: ids::new_finding_id(),
+                blocking: f.blocking,
+                severity: f.severity,
+                summary: f.summary,
+                body: f.body,
+                anchor: anchor.flatten(),
+            }
+        })
+        .collect();
 
     let finding_ids: Vec<String> = inline.iter().map(|f| f.finding_id.clone()).collect();
     if let Some(relation) = relation.as_ref() {
