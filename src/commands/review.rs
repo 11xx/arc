@@ -403,7 +403,7 @@ pub fn snapshot(
     if let Some(claim) = snapshot_claim.filter(|claim| claim.owner.actor != ctx.actor.trim()) {
         if requested_contributors.is_none() {
             bail!(
-                "active claim {} is owned by {}; snapshot requires --contributors or --solo",
+                "active claim {} is owned by {}; recording a patchset over it requires --contributors or --solo, which `arc snapshot` and `arc done` accept",
                 claim.claim_id,
                 claim.owner.actor
             );
