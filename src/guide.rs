@@ -1529,7 +1529,11 @@ EXIT CODES
     `arc workspace backlog` exits 16 when any selected project's observation
       failed; the rows that were read still print.
     `arc doctor` exits 1 when problems are present and 0 for a clean or
-      advice-only ledger.
+      advice-only ledger; a ledger it cannot read also exits 1, with the
+      error on stderr and no report.
+    `arc journal doctor` exits 1 when problems are present and 0 for a clean
+      or advice-only journal; a journal it cannot read also exits 1, with the
+      error on stderr and no report.
     A rejected self-approval follows the no-valid-approval path and exits 3.
     An arc-managed Git hook always exits 0, so it can never block a commit.
     A repeat of a recorded source item writes nothing, prints the existing
