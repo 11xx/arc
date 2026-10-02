@@ -573,14 +573,14 @@ fn review_map_names_the_reviewer_that_never_saw_the_final_patchset() {
     );
 
     // Advisory only: thin coverage never becomes a blocker.
-    let check = json_stdout(repo.arc(&repo.root).args(["check", "drifted", "--json"]));
+    let check = json_stdout_any_status(repo.arc(&repo.root).args(["check", "drifted", "--json"]));
     assert_eq!(check["schema"], "arc-check/3", "{check}");
     assert!(check["advisories"]
         .as_array()
         .unwrap()
         .iter()
         .any(|advisory| advisory["detail"].as_str().unwrap().contains("ps-01")));
-    let text = stdout(repo.arc(&repo.root).args(["check", "drifted"]));
+    let text = stdout_any_status(repo.arc(&repo.root).args(["check", "drifted"]));
     assert!(text.contains("Advisories (never blocking):"), "{text}");
 }
 
@@ -1029,7 +1029,8 @@ fn touched_debt_is_named_on_check_and_catchup_only_for_intersecting_diffs() {
         repo.arc(&touched_worktree)
             .args(["snapshot", "touches-debt"]),
     );
-    let touched_check = stdout(repo.arc(&touched_worktree).args(["check", "touches-debt"]));
+    let touched_check =
+        stdout_any_status(repo.arc(&touched_worktree).args(["check", "touches-debt"]));
     assert!(touched_check.contains(&touched), "{touched_check}");
     assert!(
         touched_check.contains("deferred shared invariant"),
@@ -1049,7 +1050,8 @@ fn touched_debt_is_named_on_check_and_catchup_only_for_intersecting_diffs() {
         repo.arc(&untouched_worktree)
             .args(["snapshot", "untouched"]),
     );
-    let untouched_check = stdout(repo.arc(&untouched_worktree).args(["check", "untouched"]));
+    let untouched_check =
+        stdout_any_status(repo.arc(&untouched_worktree).args(["check", "untouched"]));
     assert!(
         untouched_check.contains("1 outstanding"),
         "{untouched_check}"
@@ -1751,7 +1753,7 @@ fn doctor_checks_uncommitted_local_danger_declarations() {
         "[danger]\npaths = [\"missing.rs\"]\n",
     )
     .unwrap();
-    let report = json_stdout(repo.arc(&repo.root).args(["doctor", "--json"]));
+    let report = json_stdout_any_status(repo.arc(&repo.root).args(["doctor", "--json"]));
     assert!(
         report["problems"]
             .as_array()
@@ -2434,7 +2436,7 @@ fn a_provisional_approval_stops_being_owed_once_a_new_patchset_strands_it() {
         "{status}"
     );
     assert!(!stdout(repo.arc(&repo.root).args(["query", "--provisional"])).contains(&change_id));
-    let check = stdout(repo.arc(&worktree).args(["check", "stranded"]));
+    let check = stdout_any_status(repo.arc(&worktree).args(["check", "stranded"]));
     assert!(!check.contains("provisional-approval"), "{check}");
 }
 
@@ -3853,7 +3855,10 @@ fn review_options_route_the_lead_without_writing() {
             .assert()
             .failure()
             .code(3);
-        let _ = stdout(repo.arc(&repo.root).args(["check", "readonly", "--json"]));
+        repo.arc(&repo.root)
+            .args(["check", "readonly", "--json"])
+            .assert()
+            .code(3);
     }
     let journal_after = fs::read_to_string(journal_dir.join("events.jsonl"))
         .unwrap_or_default()

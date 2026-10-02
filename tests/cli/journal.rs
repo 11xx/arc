@@ -6238,7 +6238,7 @@ fn journal_doctor_reports_an_orphaned_binding() {
     )
     .unwrap();
 
-    let report = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    let report = json_stdout_any_status(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
     assert!(
         report["problems"]
             .as_array()
@@ -6603,7 +6603,7 @@ fn journal_doctor_reports_a_malformed_binding() {
     bindings.push_str("not json at all\n");
     fs::write(dir.join("bindings.jsonl"), bindings).unwrap();
 
-    let report = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    let report = json_stdout_any_status(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
     assert!(
         report["problems"]
             .as_array()
@@ -7228,7 +7228,7 @@ fn semantically_invalid_answer_events_are_reported_and_ignored() {
     lines.push('\n');
     fs::write(path, lines).unwrap();
 
-    let doctor = stdout(repo.arc(&repo.root).args(["journal", "doctor"]));
+    let doctor = stdout_any_status(repo.arc(&repo.root).args(["journal", "doctor"]));
     assert!(doctor.contains("invalid-question-state"), "{doctor}");
     let emitted = stdout(repo.arc(&repo.root).args(["journal", "events"]));
     assert!(!emitted.contains("sideways"), "{emitted}");
@@ -8783,23 +8783,19 @@ fn journal_transition_refusals_leave_the_journal_untouched() {
         .failure()
         .stderr(predicates::str::contains("already a feature-request"));
 
-    // A repeated transition reports the existing relation instead of
-    // duplicating artifacts.
+    // A transition retires its source, so a repeat to any kind, its
+    // successor's included, is refused rather than duplicating artifacts.
     repo.arc(&repo.root)
         .args(["journal", "transition", &source, "--to", "plan"])
         .assert()
         .success();
-    let after_out =
-        stdout(
-            repo.arc(&repo.root)
-                .args(["journal", "transition", &source, "--to", "todo"]),
-        );
-    let _ = after_out;
-    repo.arc(&repo.root)
-        .args(["journal", "transition", &source, "--to", "todo"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("already consumed"));
+    for kind in ["plan", "todo"] {
+        repo.arc(&repo.root)
+            .args(["journal", "transition", &source, "--to", kind])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("already consumed"));
+    }
     let after = {
         let names: Vec<String> = fs::read_dir(Path::new(&dir))
             .unwrap()
@@ -9520,7 +9516,7 @@ fn amendment_event(
 }
 
 fn doctor_findings(repo: &Repo, bucket: &str) -> Vec<String> {
-    let report = json_stdout(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
+    let report = json_stdout_any_status(repo.arc(&repo.root).args(["journal", "doctor", "--json"]));
     report[bucket]
         .as_array()
         .unwrap()
@@ -10862,7 +10858,7 @@ fn journal_doctor_reports_an_unusable_source_reference() {
         ),
     )
     .unwrap();
-    let text = stdout(repo.arc(&repo.root).args(["journal", "doctor"]));
+    let text = stdout_any_status(repo.arc(&repo.root).args(["journal", "doctor"]));
     assert_eq!(text.matches("unknown-jsonl-event").count(), 2, "{text}");
 }
 
