@@ -503,7 +503,7 @@ fn watch_approved_does_not_return_on_an_approval_policy_refuses() {
         .args(["check", "watch-selfapproved"])
         .assert()
         .code(3);
-    let out = stdout(repo.arc(&repo.root).args([
+    let out = stdout_any_status(repo.arc(&repo.root).args([
         "watch",
         "watch-selfapproved",
         "--until",

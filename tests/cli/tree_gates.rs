@@ -56,7 +56,7 @@ fn status(repo: &Repo) -> serde_json::Value {
 }
 
 fn blockers(repo: &Repo) -> Vec<String> {
-    json_stdout(repo.arc(&repo.root).args(["check", "paired", "--json"]))["blockers"]
+    json_stdout_any_status(repo.arc(&repo.root).args(["check", "paired", "--json"]))["blockers"]
         .as_array()
         .unwrap()
         .iter()

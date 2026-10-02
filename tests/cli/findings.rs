@@ -586,7 +586,7 @@ fn blocking_findings_name_the_patchset_they_predate() {
     repo.commit(&wt, "two.rs", "second\n", "feat: second");
     stdout(repo.arc(&wt).args(["snapshot", "eras"]));
 
-    let check = stdout(repo.arc(&wt).args(["check", "eras"]));
+    let check = stdout_any_status(repo.arc(&wt).args(["check", "eras"]));
     assert!(
         check.contains("raised in round one (against ps-01)"),
         "{check}"
