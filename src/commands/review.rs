@@ -15,7 +15,7 @@ struct ReviewView<'a> {
     verdicts: Vec<ReviewVerdict<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     external_verdicts: Vec<&'a crate::status::ExternalVerdictStatus>,
-    open_findings: Vec<&'a FindingSummary>,
+    open_findings: Vec<ReviewOpenFinding<'a>>,
     has_valid_approval: bool,
     /// The current status guidance, carried here so a review reader sees the
     /// same available actions as `status` and `inbox`.
@@ -28,6 +28,16 @@ struct ReviewView<'a> {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// An open finding as the review view reports it: its status summary, and
+/// the dispositions recorded after the change shipped with it open.
+#[derive(Serialize)]
+struct ReviewOpenFinding<'a> {
+    #[serde(flatten)]
+    summary: &'a FindingSummary,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    after_integration: Vec<&'a crate::state::DispositionEntry>,
 }
 
 #[derive(Serialize)]
@@ -81,6 +91,14 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
             .findings
             .iter()
             .filter(|finding| finding.status == "open")
+            .map(|summary| ReviewOpenFinding {
+                summary,
+                after_integration: state
+                    .findings
+                    .get(&summary.id)
+                    .map(|finding| finding.after_integration.iter().collect())
+                    .unwrap_or_default(),
+            })
             .collect(),
         has_valid_approval: report.has_valid_approval,
         review_options: report.review_options.clone(),
@@ -191,7 +209,8 @@ pub fn read_review(ctx: &Ctx, reference: &str, json: bool) -> Result<()> {
     if view.open_findings.is_empty() {
         println!("No open findings.");
     } else {
-        for finding in &view.open_findings {
+        for open in &view.open_findings {
+            let finding = open.summary;
             let after = state
                 .findings
                 .get(&finding.id)
