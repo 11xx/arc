@@ -895,6 +895,62 @@ fn a_closed_change_reports_the_head_it_shipped_after_its_branch_is_deleted() {
     );
 }
 
+/// A closed change answers to the declarations it closed under. A gate the
+/// target declares afterwards is not owed by work that already shipped, and
+/// declarations the target breaks afterwards cannot make its report fail.
+#[test]
+fn a_closed_change_reports_the_declarations_it_closed_under() {
+    let repo = repo_with_gates();
+    let (change_id, worktree) = approved_change(&repo, "shipped-gates", "gated.txt", "gated\n");
+    repo.arc(&repo.root)
+        .args(["integrate", "shipped-gates"])
+        .assert()
+        .success();
+    fs::write(
+        repo.root.join(".arc/gates.toml"),
+        "[gates.smoke]\ncommand = \"test -f README.md\"\n\n[gates.later]\ncommand = \"true\"\n",
+    )
+    .unwrap();
+    git(&repo.root, &["commit", "-am", "test: require a later gate"]);
+
+    let status = json_stdout(repo.arc(&repo.root).args(["status", &change_id, "--json"]));
+    let recorded: Vec<&String> = status["closure"]["authorization"]["gates"]
+        .as_object()
+        .expect("a guarded closure records the gates it consumed")
+        .keys()
+        .collect();
+    let reported: Vec<&str> = status["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|gate| gate["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(recorded, ["smoke"], "{status}");
+    assert_eq!(reported, ["smoke"], "{status}");
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
+    assert_eq!(
+        status["blockers"],
+        serde_json::json!(["closed"]),
+        "{status}"
+    );
+    let show = stdout(repo.arc(&repo.root).args(["show", "shipped-gates"]));
+    assert!(!show.contains("later"), "{show}");
+
+    fs::write(repo.root.join(".arc/gates.toml"), "[gates.smoke\n").unwrap();
+    fs::write(repo.root.join(".arc/policy.toml"), "[policy\n").unwrap();
+    git(&repo.root, &["add", ".arc"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "test: break the declarations"],
+    );
+    let status = json_stdout(repo.arc(&worktree).args(["status", &change_id, "--json"]));
+    assert_eq!(status["gates"][0]["green_at_head"], true, "{status}");
+    repo.arc(&worktree)
+        .args(["show", "shipped-gates"])
+        .assert()
+        .success();
+}
+
 /// Replaying a closed change answers for the head its closure recorded, as
 /// the live report does: an asserted integration that shipped an earlier
 /// patchset is judged at that patchset's head, not at a later one.
