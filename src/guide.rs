@@ -560,11 +560,12 @@ RUN A CHANGE
 
   A findings batch (`--findings-json` on `review`, `audit`, and `external
   verdict`) is read for `blocking`, `severity`, `summary`, `body`, and
-  `anchor`. A field that looks like a misspelling of one its finding omits,
-  such as `blocker`, refuses the batch: the finding would record the omitted
-  field's default, and a non-blocking finding lets an approval through. Any
-  other unknown field is ignored with a warning naming it; `id` is ignored
-  silently, since arc assigns finding IDs.
+  `anchor`, and an anchor for `path`, `side`, `line_start`, `line_end`, and
+  `context`. A field that looks like a misspelling of one its finding or
+  anchor omits, such as `blocker` or `line`, refuses the batch: the omitted
+  field would be recorded at its default, and a non-blocking finding lets an
+  approval through. Any other unknown field is ignored with a warning naming
+  it; a finding's `id` is ignored silently, since arc assigns finding IDs.
 
   Each acceptance probe declared on the patchset's brief blocks readiness
   until baseline evidence fails at that brief's base and final evidence passes
