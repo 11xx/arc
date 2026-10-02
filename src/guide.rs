@@ -1497,6 +1497,8 @@ EXIT CODES
     `arc check` exits 15 when the change's branch is a fork's: fork work is
       unintegrated by intent, and the boundary binds to the change rather
       than to the directory the command runs in.
+    `arc check --tag` exits with the code of the first blocked change it
+      lists, and 0 when every match is ready or closed.
     Arc exits 17 when a paired replica does not hold integration authority;
       the refusal names the holder or an offer in flight.
 
@@ -1534,7 +1536,11 @@ EXIT CODES
     `arc workspace backlog` exits 16 when any selected project's observation
       failed; the rows that were read still print.
     `arc doctor` exits 1 when problems are present and 0 for a clean or
-      advice-only ledger.
+      advice-only ledger; a ledger it cannot read also exits 1, with the
+      error on stderr and no report.
+    `arc journal doctor` exits 1 when problems are present and 0 for a clean
+      or advice-only journal; a journal it cannot read also exits 1, with the
+      error on stderr and no report.
     A rejected self-approval follows the no-valid-approval path and exits 3.
     An arc-managed Git hook always exits 0, so it can never block a commit.
     A repeat of a recorded source item writes nothing, prints the existing
