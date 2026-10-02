@@ -600,7 +600,11 @@ RUN A CHANGE
   still opens, and arc prints the Git command that finishes the switch.
 
   Release copy is recorded per change and rendered at release; arc imposes
-  no file convention. The built-in renderer replaces the `## [Unreleased]`
+  no file convention. While an open change has no changelog record, `arc
+  status`, `arc check`, and `arc integrate` advise one under the code
+  `no-changelog-entry`, never as a blocker. Recording `--none --reason` that
+  the change needs no entry answers the advice and projects nothing; the
+  latest record wins. The built-in renderer replaces the `## [Unreleased]`
   block of the target `.arc/changelog.toml` names, `CHANGELOG.md` by default.
   A project whose file follows another convention selects `renderer =
   "command"` with a `renderer_command` argv. That command runs from the

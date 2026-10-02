@@ -576,6 +576,12 @@ enum Cmd {
     },
     /// Record, read, or project changelog entries
     ///
+    /// While an open change has no changelog record, `arc status`, `arc
+    /// check`, and `arc integrate` advise one under the code
+    /// `no-changelog-entry`; the advice never blocks. Recording an entry, or
+    /// recording with --none that the change needs none, answers it. The
+    /// latest record wins, and a --none record projects nothing.
+    ///
     /// The projection is rendered by the renderer `.arc/changelog.toml`
     /// selects: the built-in `keep-a-changelog`, or `command`, whose
     /// `renderer_command` argv runs from the repository root without a shell,

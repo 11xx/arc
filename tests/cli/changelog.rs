@@ -809,6 +809,59 @@ fn has_code(advisories: &[serde_json::Value], code: &str) -> bool {
 }
 
 #[test]
+fn an_open_change_without_an_entry_is_advised_in_check_and_status() {
+    let repo = Repo::new();
+    begin(&repo, "advised");
+    let worktree = repo.home.join(".worktrees/repo-advised");
+
+    let advisories = check_advisories(&repo, &worktree, "advised");
+    let advisory = advisories
+        .iter()
+        .find(|advisory| advisory["code"] == "no-changelog-entry")
+        .unwrap_or_else(|| panic!("{advisories:?}"));
+    let detail = advisory["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("arc changelog advised --category CATEGORY --body-file FILE")
+            && detail.contains("arc changelog advised --none --reason TEXT"),
+        "{detail}"
+    );
+
+    let out = repo
+        .arc(&worktree)
+        .args(["check", "advised"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("Advisories (never blocking):") && text.contains("no-changelog-entry: "),
+        "{text}"
+    );
+
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&worktree).args(["status", "advised"]))).unwrap();
+    assert!(
+        has_code(
+            status["advisories"].as_array().unwrap(),
+            "no-changelog-entry"
+        ),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_change_with_an_entry_is_not_advised() {
+    let repo = Repo::new();
+    begin(&repo, "entered");
+    let worktree = repo.home.join(".worktrees/repo-entered");
+    record(&repo, &worktree, "entered", "added", "- entered\n");
+    let advisories = check_advisories(&repo, &worktree, "entered");
+    assert!(
+        !has_code(&advisories, "no-changelog-entry"),
+        "{advisories:?}"
+    );
+}
+
+#[test]
 fn recording_no_entry_silences_the_advice_and_projects_nothing() {
     let repo = Repo::new();
     begin(&repo, "internal");
