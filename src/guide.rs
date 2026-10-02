@@ -648,7 +648,10 @@ RUN A CHANGE
   target is checked out onto the new branch and recorded as the change's
   worktree, so the next command infers the change without being told. A dirty
   checkout, or one standing elsewhere, is left exactly as it was — the change
-  still opens, and arc prints the Git command that finishes the switch.
+  still opens, and arc prints how to finish the switch. For a dirty one that is
+  committing the work in progress or copying it aside before `git checkout`,
+  or `git worktree add` for the branch; never `git stash`, which every
+  worktree of the repository shares.
 
   Release copy is recorded per change and rendered at release; arc imposes
   no file convention. While an open change has no changelog record, `arc
@@ -1343,9 +1346,10 @@ RULES THAT CHANGE WHAT YOU DO
     of that file. Both render on a row and neither becomes the other: work with
     no artifact still takes a lane.
   - An artifact claim expires by its lease alone. A change's stages are
-    budgeted and a stage over budget reads `stale`; an artifact has no stages
-    to budget, so `expired` is when it becomes reclaimable, and `--takeover`
-    is what displaces it.
+    budgeted and a stage over budget reads `stale`; an artifact's claim takes
+    `arc stage <file>` progress in the same vocabulary but no stage carries a
+    budget, so `expired` is when it becomes reclaimable, and `--takeover` is
+    what displaces it.
   - A claim that is not yet reclaimable is displaced only by `--takeover
     --because <reason>`, and the reason is recorded on the displaced claim,
     printed wherever it is rendered, and verified by nobody. The evidence a
@@ -1387,9 +1391,9 @@ RULES THAT CHANGE WHAT YOU DO
     4 MiB of a recording file as its window. It names the reader and the read
     bound, or the cause and reason when lookup or reading cannot finish.
   - `arc watch <file.md> --until stalled` arms the wait over an artifact
-    claim, which has no stages and stalls when its lease runs out, and
-    `arc rescue <file.md> [--take]` reports where the work stopped and takes
-    it over. An artifact answers only `stalled`; the rest of the
+    claim, whose stages carry no budget, so it stalls when its lease runs out,
+    and `arc rescue <file.md> [--take]` reports where the work stopped and
+    takes it over. An artifact answers only `stalled`; the rest of the
     vocabulary asks about patchsets and verdicts.
   - `arc watch <change> --until` accepts `snapshot`, `stalled`, `reviewed`,
     `approved`, `gates-green`, `ready`, `blocked`, `brief-recorded`,
@@ -1450,8 +1454,11 @@ RULES THAT CHANGE WHAT YOU DO
     `open`, and workspace views list the promotion with its `repository_id`,
     its status read from the promoting ledger: `unknown` when that ledger
     cannot be read, which never counts as closed. Only the owning project
-    consumes, archives, unarchives, or transitions an artifact; a qualified
-    reference to one is refused naming the owning journal.
+    consumes, archives, unarchives, transitions, appends to, or amends an
+    artifact. A qualified reference to one is refused naming the owning
+    journal, and so is a bare filename this project's journal does not hold
+    but another known journal does: the refusal names each such journal and
+    its project, where the write runs with the bare filename.
   - A gate may declare an environment probe: a command whose output
     identifies the environment the gate's evidence applies to. `verify` runs
     the probe beside the gate and records its identity on the evidence. The

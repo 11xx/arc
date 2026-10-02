@@ -299,9 +299,29 @@ pub(crate) fn spawn_arc_keeping_stderr(
     arc_child(repo, cwd, args, session, Stdio::piped())
 }
 
+/// `spawn_arc` with extra environment, for a test-only hook the child reads.
+pub(crate) fn spawn_arc_with_env(
+    repo: &Repo,
+    cwd: &Path,
+    args: &[&str],
+    envs: &[(&str, &Path)],
+) -> Child {
+    arc_command(repo, cwd, args, "session-a", Stdio::null())
+        .envs(envs.iter().copied())
+        .spawn()
+        .unwrap()
+}
+
 fn arc_child(repo: &Repo, cwd: &Path, args: &[&str], session: &str, stderr: Stdio) -> Child {
+    arc_command(repo, cwd, args, session, stderr)
+        .spawn()
+        .unwrap()
+}
+
+fn arc_command(repo: &Repo, cwd: &Path, args: &[&str], session: &str, stderr: Stdio) -> Command {
     let binary = std::env::var_os("CARGO_BIN_EXE_arc").expect("cargo should provide arc binary");
-    Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(args)
         .current_dir(cwd)
         .env("HOME", &repo.home)
@@ -316,9 +336,8 @@ fn arc_child(repo: &Repo, cwd: &Path, args: &[&str], session: &str, stderr: Stdi
         .env_remove("ARC_WORKTREES_DIR")
         .env_remove("AI_HOME")
         .stdout(Stdio::piped())
-        .stderr(stderr)
-        .spawn()
-        .unwrap()
+        .stderr(stderr);
+    command
 }
 
 pub(crate) fn refresh_bundle_checksum(bundle: &mut serde_json::Value) {

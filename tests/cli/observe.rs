@@ -1014,12 +1014,26 @@ fn watch_integrated_returns_after_real_integration() {
         .success();
     // No `--timeout`: the watcher waits as long as integration takes, and
     // only a watcher that never sees it reaches the harness's hang bound.
-    let mut child = spawn_arc(
+    let evaluated = repo.home.join("watch-evaluated");
+    let mut child = spawn_arc_with_env(
         &repo,
         &repo.root,
         &["watch", "watch-integrated", "--until", "integrated"],
+        &[("ARC_WATCH_EVALUATED", &evaluated)],
     );
-    thread::sleep(Duration::from_millis(50));
+    // Integrate only once the watcher has seen the change unintegrated, so a
+    // watcher that returns without waiting cannot pass by starting late.
+    let deadline = Instant::now() + HANG_BOUND;
+    while !evaluated.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("watch exited {status} before it evaluated the unintegrated change");
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            panic!("watch never evaluated the unintegrated change within {HANG_BOUND:?}");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
     assert!(
         child.try_wait().unwrap().is_none(),
         "watch returned before the change was integrated"

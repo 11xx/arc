@@ -520,6 +520,7 @@ fn watch_until_reached(
         WatchSelection::Tagged(_, quorum) => *quorum,
     };
     let mut poll_interval = POLL_MIN;
+    let mut evaluated = false;
     loop {
         let mut hits = Vec::new();
         for change_id in change_ids {
@@ -544,6 +545,10 @@ fn watch_until_reached(
         if quorum == WatchQuorum::All && hits.len() == change_ids.len() {
             return Ok(Some(hits));
         }
+        if !evaluated {
+            mark_evaluated_unreached();
+            evaluated = true;
+        }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Ok(None);
         }
@@ -555,6 +560,18 @@ fn watch_until_reached(
             .map_or(poll_interval, |remaining| poll_interval.min(remaining));
         thread::sleep(sleep_for);
         poll_interval = (poll_interval * 2).min(POLL_MAX);
+    }
+}
+
+/// A signal the test suite reads to know a watcher has evaluated its
+/// conditions and found them unreached, so a state change made afterwards is
+/// one the running watch observes rather than one raced against its start.
+/// `ARC_WATCH_EVALUATED` names a file the watch creates after its first
+/// unreached pass. Unset, which is every run that is not a test, this does
+/// nothing.
+fn mark_evaluated_unreached() {
+    if let Some(marker) = std::env::var_os("ARC_WATCH_EVALUATED") {
+        let _ = std::fs::write(marker, b"");
     }
 }
 
