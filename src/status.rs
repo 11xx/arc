@@ -1085,8 +1085,11 @@ fn build_report(
         approval_waived_by_debt,
         approval_rejection_reason,
         verdict_contested,
-        advisories,
+        mut advisories,
     } = approval;
+    if !state.is_closed() {
+        advisories.extend(missing_changelog_advisory(state));
+    }
     // Computed before the report takes ownership of the head it is compared
     // against. A waiver covers exactly the revision it names.
     let dirty_tree_waiver_in_force = state
@@ -1889,6 +1892,27 @@ pub struct Advisory {
     /// without parsing prose.
     pub code: &'static str,
     pub detail: String,
+}
+
+/// Advice that the change has no changelog record: neither release copy nor
+/// the record that it needs none.
+///
+/// Advice, not policy: arc holds no opinion about which changes deserve a
+/// release line. A change that closes with nothing recorded is where the file
+/// and the ledger start disagreeing about what shipped, and recording that it
+/// needs no entry answers the advice without inventing copy.
+pub fn missing_changelog_advisory(state: &ChangeState) -> Option<Advisory> {
+    if state.changelog.is_some() {
+        return None;
+    }
+    Some(Advisory {
+        code: "no-changelog-entry",
+        detail: format!(
+            "no changelog entry on {id}; record one with `arc changelog {slug} --category CATEGORY --body-file FILE`, or that it needs none with `arc changelog {slug} --none --reason TEXT`",
+            id = state.change_id,
+            slug = state.slug
+        ),
+    })
 }
 
 /// The brief's author, when every verdict on `final_patchset` came from it.

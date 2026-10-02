@@ -70,6 +70,41 @@ fn importing_an_integration_stamps_the_destination_store_format() {
     assert_eq!(config["schema_version"], 2, "{config}");
 }
 
+/// A record that a change needs no changelog entry reads to an older build
+/// as an entry with an empty category and body, so importing one stamps the
+/// format recording it locally does.
+#[test]
+fn importing_a_no_entry_changelog_record_stamps_store_format_seven() {
+    let repo = Repo::new();
+    stdout(repo.arc(&repo.root).args(["begin", "internal"]));
+    let worktree = repo.home.join(".worktrees/repo-internal");
+    stdout(
+        repo.arc(&worktree)
+            .args(["changelog", "internal", "--none", "--reason", "test-only"]),
+    );
+    let bundle = repo.home.join("internal.json");
+    repo.arc(&repo.root)
+        .args(["export", "internal", "--output", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let other = Repo::new();
+    stdout(
+        other
+            .arc(&other.root)
+            .args(["begin", "seed", "--no-worktree"]),
+    );
+    let config_path = other.root.join(".git/arc/config.json");
+    other
+        .arc(&other.root)
+        .args(["import", bundle.to_str().unwrap()])
+        .assert()
+        .success();
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    assert_eq!(config["schema_version"], 7, "{config}");
+}
+
 #[test]
 fn importing_a_waiver_only_integration_stamps_store_format_three() {
     let source = Repo::new();

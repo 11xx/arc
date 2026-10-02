@@ -603,6 +603,12 @@ impl Store {
             | Payload::ContextDeclared { .. }
             | Payload::ContextCaptureReported { .. } => Some(7),
             Payload::HistoryRewriteWithdrawn { .. } => Some(7),
+            // An older reader projects a record that a change needs no entry
+            // as an entry with an empty category and body.
+            Payload::ChangelogRecorded {
+                no_entry_reason: Some(_),
+                ..
+            } => Some(7),
             Payload::ChangeIntegrated { .. } | Payload::IntegrationAsserted { .. } => Some(2),
             _ => None,
         };
@@ -632,6 +638,13 @@ impl Store {
             | Some("context-declared")
             | Some("context-capture-reported") => Some(7),
             Some("history-rewrite-withdrawn") => Some(7),
+            Some("changelog-recorded")
+                if value
+                    .and_then(|value| value.get("no_entry_reason"))
+                    .is_some_and(|reason| !reason.is_null()) =>
+            {
+                Some(7)
+            }
             Some("integration-asserted")
                 if value
                     .and_then(|value| value.get("external_reference"))

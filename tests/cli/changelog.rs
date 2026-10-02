@@ -792,6 +792,175 @@ fn integration_advises_when_the_change_recorded_no_entry() {
     assert!(!quiet.contains("advice: no changelog entry"), "{quiet}");
 }
 
+/// The advisory codes `arc check --json` reports; the check itself may exit
+/// non-zero on an unreviewed change, which is not what these tests read.
+fn check_advisories(repo: &Repo, cwd: &Path, slug: &str) -> Vec<serde_json::Value> {
+    let out = repo
+        .arc(cwd)
+        .args(["check", slug, "--json"])
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    value["advisories"].as_array().cloned().unwrap_or_default()
+}
+
+fn has_code(advisories: &[serde_json::Value], code: &str) -> bool {
+    advisories.iter().any(|advisory| advisory["code"] == code)
+}
+
+#[test]
+fn an_open_change_without_an_entry_is_advised_in_check_and_status() {
+    let repo = Repo::new();
+    begin(&repo, "advised");
+    let worktree = repo.home.join(".worktrees/repo-advised");
+
+    let advisories = check_advisories(&repo, &worktree, "advised");
+    let advisory = advisories
+        .iter()
+        .find(|advisory| advisory["code"] == "no-changelog-entry")
+        .unwrap_or_else(|| panic!("{advisories:?}"));
+    let detail = advisory["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("arc changelog advised --category CATEGORY --body-file FILE")
+            && detail.contains("arc changelog advised --none --reason TEXT"),
+        "{detail}"
+    );
+
+    let out = repo
+        .arc(&worktree)
+        .args(["check", "advised"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("Advisories (never blocking):") && text.contains("no-changelog-entry: "),
+        "{text}"
+    );
+
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&worktree).args(["status", "advised"]))).unwrap();
+    assert!(
+        has_code(
+            status["advisories"].as_array().unwrap(),
+            "no-changelog-entry"
+        ),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_change_with_an_entry_is_not_advised() {
+    let repo = Repo::new();
+    begin(&repo, "entered");
+    let worktree = repo.home.join(".worktrees/repo-entered");
+    record(&repo, &worktree, "entered", "added", "- entered\n");
+    let advisories = check_advisories(&repo, &worktree, "entered");
+    assert!(
+        !has_code(&advisories, "no-changelog-entry"),
+        "{advisories:?}"
+    );
+}
+
+#[test]
+fn recording_no_entry_silences_the_advice_and_projects_nothing() {
+    let repo = Repo::new();
+    begin(&repo, "internal");
+    let worktree = repo.home.join(".worktrees/repo-internal");
+    let recorded = stdout(repo.arc(&worktree).args([
+        "changelog",
+        "internal",
+        "--none",
+        "--reason",
+        "test-only refactor",
+    ]));
+    assert!(recorded.starts_with("changelog: no entry\n"), "{recorded}");
+
+    let advisories = check_advisories(&repo, &worktree, "internal");
+    assert!(
+        !has_code(&advisories, "no-changelog-entry"),
+        "{advisories:?}"
+    );
+
+    let read = stdout(repo.arc(&worktree).args(["changelog", "internal"]));
+    assert_eq!(read, "no entry: test-only refactor\n");
+    let one: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&worktree).args([
+        "changelog",
+        "internal",
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(one["entries"], serde_json::json!([]), "{one}");
+
+    // An older reader would project the record as an empty entry.
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.root.join(".git/arc/config.json")).unwrap()).unwrap();
+    assert_eq!(config["schema_version"], 7, "{config}");
+
+    let advice = integrate(&repo, "internal");
+    assert!(!advice.contains("no changelog entry"), "{advice}");
+    let projection: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(["changelog", "--json"]))).unwrap();
+    assert_eq!(projection["entries"], serde_json::json!([]), "{projection}");
+}
+
+#[test]
+fn an_entry_recorded_after_no_entry_replaces_it() {
+    let repo = Repo::new();
+    begin(&repo, "reconsidered");
+    let worktree = repo.home.join(".worktrees/repo-reconsidered");
+    repo.arc(&worktree)
+        .args([
+            "changelog",
+            "reconsidered",
+            "--none",
+            "--reason",
+            "internal",
+        ])
+        .assert()
+        .success();
+    record(
+        &repo,
+        &worktree,
+        "reconsidered",
+        "fixed",
+        "- user-visible\n",
+    );
+    let value: serde_json::Value = serde_json::from_str(&stdout(repo.arc(&worktree).args([
+        "changelog",
+        "reconsidered",
+        "--json",
+    ])))
+    .unwrap();
+    assert_eq!(value["entries"][0]["category"], "fixed", "{value}");
+}
+
+#[test]
+fn no_entry_takes_a_reason_and_no_entry_copy() {
+    let repo = Repo::new();
+    begin(&repo, "misused");
+    let worktree = repo.home.join(".worktrees/repo-misused");
+    for args in [
+        vec!["changelog", "misused", "--none"],
+        vec!["changelog", "misused", "--reason", "why"],
+        vec![
+            "changelog",
+            "misused",
+            "--none",
+            "--reason",
+            "why",
+            "--category",
+            "added",
+        ],
+    ] {
+        repo.arc(&worktree).args(&args).assert().failure();
+    }
+    repo.arc(&worktree)
+        .args(["changelog", "misused", "--none", "--reason", "  "])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--reason must say why"));
+}
+
 #[test]
 fn reviewer_role_is_refused_when_recording() {
     let repo = Repo::new();

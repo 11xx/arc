@@ -107,6 +107,7 @@ pub fn changelog(
     reference: Option<&str>,
     category: Option<String>,
     body_file: Option<String>,
+    no_entry_reason: Option<String>,
     json: bool,
     provenance: bool,
     since: Option<String>,
@@ -116,21 +117,38 @@ pub fn changelog(
     if keep_unrecorded && !write {
         bail!("--keep-unrecorded applies only to --write");
     }
-    if category.is_some() || body_file.is_some() {
+    if category.is_some() || body_file.is_some() || no_entry_reason.is_some() {
         let reference = reference.context("recording a changelog entry requires CHANGE")?;
-        let category = category.context("--body-file requires --category")?;
-        let body_file = body_file.context("--category requires --body-file")?;
         if json || provenance || since.is_some() || write {
             bail!(
                 "--json, --provenance, --since, and --write cannot be used when recording an entry"
             );
         }
+        let no_entry_reason = no_entry_reason
+            .as_deref()
+            .map(validate_reason)
+            .transpose()?;
+        let entry = match no_entry_reason {
+            Some(_) if category.is_some() || body_file.is_some() => {
+                bail!("--none records no entry; it cannot be given --category or --body-file")
+            }
+            Some(_) => None,
+            None => Some((
+                category.context("--body-file requires --category")?,
+                body_file.context("--category requires --body-file")?,
+            )),
+        };
         if role == ExecutionRole::Reviewer {
             eprintln!("role refusal: reviewer may not changelog (requires implementer or lead)");
             return Ok(9);
         }
-        let body = super::read_body_file_verbatim(&body_file)?;
-        let category = validate_category(&category)?;
+        let (category, body) = match entry {
+            Some((category, body_file)) => (
+                validate_category(&category)?,
+                super::read_body_file_verbatim(&body_file)?,
+            ),
+            None => (String::new(), String::new()),
+        };
         let store = ctx.store()?;
         let (change_id, _transition, state) = locked_state(&store, reference)?;
         // Recording a second entry replaced the first with no event saying
@@ -139,17 +157,23 @@ pub fn changelog(
         // the projection still emits one entry, which is a granularity
         // question this deliberately leaves where it is.
         let superseded = state.changelog.as_ref().map(|entry| entry.event_id.clone());
+        let recorded = if no_entry_reason.is_some() {
+            "no entry".to_owned()
+        } else {
+            category.clone()
+        };
         let payload = Payload::ChangelogRecorded {
-            category: category.clone(),
+            category,
             body,
             supersedes: superseded.clone(),
+            no_entry_reason,
         };
         ensure_append_allowed(&state, &payload)?;
         let event = ctx.event(&store, &change_id, payload);
         store.append_event(&event)?;
         match superseded {
-            Some(superseded) => println!("changelog: {category} (supersedes {superseded})"),
-            None => println!("changelog: {category}"),
+            Some(superseded) => println!("changelog: {recorded} (supersedes {superseded})"),
+            None => println!("changelog: {recorded}"),
         }
         println!("event: {}", event.event_id);
         return Ok(0);
@@ -165,8 +189,7 @@ pub fn changelog(
         let (_, state) = ctx.load_state(&store, reference)?;
         if json {
             let entries = state
-                .changelog
-                .as_ref()
+                .changelog_entry()
                 .map(|entry| projected_state_entry(&state, entry))
                 .into_iter()
                 .collect();
@@ -289,7 +312,7 @@ fn projected_entry<'a>(
             Err(error) => return Some(Err(error)),
         }
     }
-    state.changelog.as_ref().map(|entry| {
+    state.changelog_entry().map(|entry| {
         Ok((
             closure.event_id.clone(),
             projected_state_entry(state, entry),
@@ -555,10 +578,15 @@ fn render_category<'a>(
 }
 
 fn print_entry(change: &str, entry: &ChangelogEntry, provenance: bool) {
-    println!("### {}\n", entry.category);
-    print!("{}", entry.body);
+    match &entry.no_entry_reason {
+        Some(reason) => println!("no entry: {reason}"),
+        None => {
+            println!("### {}\n", entry.category);
+            print!("{}", entry.body);
+        }
+    }
     if provenance {
-        if !entry.body.ends_with('\n') {
+        if !entry.body.ends_with('\n') && entry.is_entry() {
             println!();
         }
         println!(
@@ -572,6 +600,14 @@ fn print_entry(change: &str, entry: &ChangelogEntry, provenance: bool) {
             entry.created_at,
         );
     }
+}
+
+fn validate_reason(reason: &str) -> Result<String> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        bail!("--reason must say why the change needs no changelog entry");
+    }
+    Ok(reason.to_owned())
 }
 
 fn validate_category(category: &str) -> Result<String> {

@@ -654,14 +654,22 @@ pub enum Payload {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         must_read: Vec<ReadRequirement>,
     },
+    /// The change's release copy, or the record that it needs none.
     ChangelogRecorded {
+        /// Empty on a record that the change needs no entry.
         #[serde(alias = "section")]
         category: String,
+        /// Empty on a record that the change needs no entry.
         body: String,
         /// The changelog entry this one replaces, when it supersedes an
         /// earlier projection.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supersedes: Option<String>,
+        /// Why the change needs no entry. Present only on a record saying
+        /// so, which projects nothing; a reader of an older store format
+        /// would project it as an entry, so recording it stamps format 7.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        no_entry_reason: Option<String>,
     },
     PatchsetAdded {
         patchset_id: String,
