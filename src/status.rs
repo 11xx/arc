@@ -609,6 +609,7 @@ pub struct StatusReport {
     /// which declaration put it there.
     pub danger: DangerScope,
     pub ready_reason: String,
+    /// True exactly when `blockers` is empty.
     pub ready_to_integrate: bool,
     /// Backward-compatible spelling retained from arc-status/1.
     pub integrate_ready: bool,
@@ -1714,13 +1715,10 @@ pub fn claim_status_at(
     })
 }
 
-/// Exit code for `arc check`: 0 when integrate-ready, else the code of
-/// the highest-precedence blocker.
+/// Exit code for `arc check`: the code of the highest-precedence blocker, or
+/// 0 when there is none, which is what makes the change integrate-ready.
 pub fn check_exit_code(report: &StatusReport) -> i32 {
-    if report.integrate_ready {
-        return 0;
-    }
-    blockers::exit_code(&report.blockers).unwrap_or(6)
+    blockers::exit_code(&report.blockers)
 }
 
 fn verification_result_label(result: Option<VerifyResult>) -> String {
