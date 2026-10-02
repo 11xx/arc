@@ -676,9 +676,10 @@ enum Cmd {
         /// Write the configured target. The built-in renderer replaces the
         /// generated [Unreleased] block in CHANGELOG.md; each paragraph and
         /// list item, bulleted or numbered, of an entry is refilled to 75
-        /// columns, continuations indented under their marker, and a fenced
-        /// block keeps its lines. The
-        /// block is judged paragraph by paragraph, on words rather than the
+        /// columns, continuations indented under their marker and never
+        /// begun with a word Markdown would read as opening a block, and a
+        /// fenced block keeps its lines. The block is judged paragraph by
+        /// paragraph, on words rather than the
         /// column they are wrapped at, and refused, naming each paragraph,
         /// while it holds prose no recorded entry produced. The block runs to
         /// the next release heading or the end of the file; a missing target,

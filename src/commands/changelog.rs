@@ -393,25 +393,51 @@ fn canonical_category(category: &str) -> Option<&'static str> {
         })
 }
 
+/// Fill `line`'s words into lines of at most `width` columns; a word wider
+/// than that sits alone. No line after the first begins with a word that
+/// would open a block there: the words before it move down with it, and a
+/// word with only one word above it stays on that word's line.
 fn wrap_words(line: &str, width: usize) -> Vec<String> {
-    let mut wrapped = Vec::new();
-    let mut current = String::new();
+    let mut lines = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
     for word in line.split_whitespace() {
-        let word_width = word.chars().count();
-        let candidate_width =
-            current.chars().count() + usize::from(!current.is_empty()) + word_width;
-        if !current.is_empty() && candidate_width > width {
-            wrapped.push(std::mem::take(&mut current));
+        let candidate_width = current
+            .iter()
+            .map(|placed| placed.chars().count() + 1)
+            .sum::<usize>()
+            + word.chars().count();
+        if current.is_empty() || candidate_width <= width {
+            current.push(word);
+            continue;
         }
-        if !current.is_empty() {
-            current.push(' ');
+        // The next line starts at `start`: the words from there on move down.
+        let leading = |start: usize| current.get(start).copied().unwrap_or(word);
+        let mut start = current.len();
+        while start > 1 && opens_block(leading(start)) {
+            start -= 1;
         }
-        current.push_str(word);
+        if !opens_block(leading(start)) {
+            let next = current.split_off(start);
+            lines.push(std::mem::replace(&mut current, next).join(" "));
+        }
+        current.push(word);
     }
     if !current.is_empty() {
-        wrapped.push(current);
+        lines.push(current.join(" "));
     }
-    wrapped
+    lines
+}
+
+/// Whether `word`, first on a line, could open a block Markdown reads in
+/// place of the paragraph that line continues: a list marker, a heading, a
+/// block quote, a code fence, an HTML block, or a rule or setext underline.
+fn opens_block(word: &str) -> bool {
+    line_marker(&format!("{word} ")).is_some()
+        || (word.len() <= 6 && word.chars().all(|c| c == '#'))
+        || word.starts_with(['>', '<'])
+        || word.starts_with("```")
+        || word.starts_with("~~~")
+        || word.chars().all(|c| matches!(c, '-' | '=' | '*' | '_'))
 }
 
 /// The marker a line begins with: its indent, then a `-`, `*`, or `+`
@@ -1266,6 +1292,30 @@ mod tests {
         );
         // Four columns into its container, a run opens nothing.
         assert_eq!(as_list_item("Text\n    ```\nmore"), "- Text ``` more");
+    }
+
+    #[test]
+    fn a_wrapped_line_never_begins_with_a_block_marker() {
+        // 72 columns: a further word of any width passes the 73 a bare
+        // body's item leaves for its text.
+        let lead = format!("{}ab", "word ".repeat(14));
+        for token in [
+            "-", "*", "+", "1.", "2)", "#", ">", ">=", "```", "~~~", "---", "===",
+        ] {
+            let rendered = as_list_item(&format!("{lead} {token} after"));
+            assert_eq!(
+                rendered,
+                format!("- {}\n  ab {token} after", "word ".repeat(14).trim_end()),
+                "{token}"
+            );
+            assert!(rendered.lines().all(|line| line.chars().count() <= 75));
+        }
+        // With one word above it, the marker stays on that word's line.
+        let token = "x".repeat(73);
+        assert_eq!(
+            as_list_item(&format!("{token} - after")),
+            format!("- {token} -\n  after")
+        );
     }
 
     #[test]
