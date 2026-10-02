@@ -55,6 +55,122 @@ fn skip_green_skips_only_at_matching_head_and_reruns_after_a_commit() {
     assert!(third.contains("gates: 2/2 pass"), "{third}");
 }
 
+/// The `verification-reused` events of one change, as `(revision, tree,
+/// evidence_event_id)`, beside the revision each reused evidence names.
+fn reuses(repo: &Repo, wt: &Path, change: &str) -> Vec<(String, String, String)> {
+    let events: Vec<serde_json::Value> = stdout(repo.arc(wt).args(["events", "--change", change]))
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    events
+        .iter()
+        .filter(|event| event["event_type"] == "verification-reused")
+        .map(|reuse| {
+            let evidence = events
+                .iter()
+                .find(|event| event["event_id"] == reuse["evidence_event_id"])
+                .unwrap();
+            (
+                reuse["revision"].as_str().unwrap().to_string(),
+                reuse["tree"].as_str().unwrap().to_string(),
+                evidence["revision"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn skip_green_reuses_evidence_from_another_commit_holding_the_head_tree() {
+    let repo = repo_with_trivial_gates();
+    let (id, wt, verified) = change_with_patchset(&repo, "reworded");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+
+    // Rewording the commit, as re-signing it does, makes a new commit around
+    // the tree the gates already answered for.
+    git(&wt, &["commit", "--amend", "-m", "test: reworded"]);
+    let head = repo.head(&wt);
+    assert_ne!(head, verified);
+    repo.arc(&wt).args(["snapshot"]).assert().success();
+    let status = json_stdout(repo.arc(&wt).args(["status"]));
+    assert!(
+        status["gates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|gate| gate["green_at_head"] == true && gate["inherited_from"] == verified),
+        "{status}"
+    );
+
+    let rerun = stdout(repo.arc(&wt).args(["verify", "--all", "--skip-green"]));
+    assert!(
+        rerun.contains("build: skipped (green at head; declared by .arc/gates.toml)"),
+        "{rerun}"
+    );
+    assert!(
+        rerun.contains("test: skipped (green at head; declared by .arc/gates.toml)"),
+        "{rerun}"
+    );
+    assert!(rerun.contains("gates: 2/2 pass"), "{rerun}");
+    let tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+    assert_eq!(
+        reuses(&repo, &wt, &id),
+        vec![(head.clone(), tree.clone(), verified.clone()); 2]
+    );
+    repo.arc(&wt).args(["show", "--json"]).assert().success();
+    let check = json_stdout(repo.arc(&wt).args(["check", "--json"]));
+    assert!(
+        !check["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["blocker"] == "gates-not-green"),
+        "{check}"
+    );
+}
+
+#[test]
+fn skip_green_after_a_rebase_reuses_the_evidence_for_the_merged_tree() {
+    let repo = repo_with_trivial_gates();
+    let (id, wt, _) = change_with_patchset(&repo, "restacked");
+    repo.commit(&repo.root, "sibling.txt", "sibling\n", "test: sibling");
+    repo.arc(&wt)
+        .args(["verify", "--against", "master"])
+        .assert()
+        .success();
+    let merged_tree = json_stdout(repo.arc(&wt).args(["status"]))["merged_tree"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Moving the base and nothing else lands the head on the merged tree the
+    // gates ran against.
+    git(&wt, &["rebase", "master"]);
+    let head = repo.head(&wt);
+    assert_eq!(git_out(&wt, &["rev-parse", "HEAD^{tree}"]), merged_tree);
+    repo.arc(&wt).args(["snapshot"]).assert().success();
+
+    let rerun = stdout(repo.arc(&wt).args(["verify", "--all", "--skip-green"]));
+    assert!(
+        rerun.contains("build: skipped (green at head; declared by .arc/gates.toml)"),
+        "{rerun}"
+    );
+    assert!(
+        rerun.contains("test: skipped (green at head; declared by .arc/gates.toml)"),
+        "{rerun}"
+    );
+    let reused = reuses(&repo, &wt, &id);
+    assert_eq!(reused.len(), 2, "{reused:?}");
+    assert!(
+        reused
+            .iter()
+            .all(|(revision, tree, evidence)| *revision == head
+                && *tree == merged_tree
+                && *evidence != head),
+        "{reused:?}"
+    );
+    repo.arc(&wt).args(["show", "--json"]).assert().success();
+}
+
 #[test]
 fn verification_run_records_manifest_results_and_reused_evidence() {
     let repo = repo_with_trivial_gates();

@@ -467,7 +467,8 @@ RUN A CHANGE
                                      gate runs or evidence is recorded;
                                      rebase first.
     --skip-green                    Reuse passing evidence with --all at the
-                                     head, or --against at the merged tree.
+                                     head's tree, or --against at the merged
+                                     tree, whichever commit it ran on.
                                      The reuse records its tree; evidence
                                      with neither tree nor tested_tree is
                                      rerun. Replays of reuse events without
@@ -1354,7 +1355,8 @@ RULES THAT CHANGE WHAT YOU DO
     nothing new: a rebase that moves the base without touching the diff lands
     on the tree that was evaluated, and the evidence carries over to it. The
     gate line reads `inherited from <revision>` wherever the run that answered
-    was against another commit holding that tree. A single `integrate` runs no
+    was against another commit holding that tree, and `verify --all
+    --skip-green` reuses that run. A single `integrate` runs no
     gate; it checks that the merge it made carries the tree that was
     evaluated, and undoes it otherwise. A queue runs the ones with no answer
     at that tree, because it moves the target itself and every member behind
