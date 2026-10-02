@@ -75,9 +75,9 @@ arc integrate radio-refill-fix --cleanup
 makes the approval stale, unless a recorded rewrite changed nothing but
 signatures. It also requires every gate the profile names to be green for the
 tree the merge would ship, no open blocking finding, no active hold, and every
-prerequisite integrated. With no independent reviewer available,
-`--debt <reason>` integrates without a verdict and records the review still
-owed.
+prerequisite integrated. `--debt <reason>` integrates without a verdict and
+records the review still owed; policy decides where an independent verdict is
+required instead.
 
 [arc-model](https://github.com/11xx/arc-model) models these authorization
 rules independently and checks the `arc` binary against them on generated

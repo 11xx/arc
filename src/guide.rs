@@ -699,8 +699,8 @@ PROFILES (--profile, default local)
            a clean target checkout in place; otherwise it remains untouched.
            Implement, verify, review the diff, commit. No journal topic.
   local    Spans sessions or roles, or needs host-local evidence CI cannot
-           reproduce. Dedicated branch/worktree, fresh review where possible,
-           --no-ff merge.
+           reproduce. Dedicated branch/worktree, verdict or debt per REVIEW
+           COVERAGE AND DEBT, --no-ff merge.
   forge    A hosted PR adds a remote record, inline discussion, clean runner
            evidence, or branch protection. local underneath; project only public
            integration facts into the PR.
@@ -710,7 +710,15 @@ PROFILES (--profile, default local)
   Promote when the work reveals more scope, risk, or concurrency; record why.
   Never keep an undersized profile just because the change started there.
 
-WHEN NO INDEPENDENT REVIEWER IS REACHABLE
+REVIEW COVERAGE AND DEBT
+  For ordinary work the review of record is the lead's own read of the diff,
+  recorded as the verdict — or, where the lead contributed to the patchset or
+  policy refuses its approval, a declared debt naming what was read and what
+  is still owed. Neither waits on a reviewer: record it, then integrate. An
+  independent reviewer is asked for only where policy requires one, or when
+  someone asks for one. A deeper pass is bought later, over a batch, on the
+  operator's call; the inbox and catchup hold what it covers.
+
   Review coverage is measured against the final patchset, not participation:
   `arc check` warns when a reviewer's last look predates what is about to ship,
   or when nobody distinguishable from the author covers it. Warnings, never
@@ -728,17 +736,14 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   otherwise its actor. A patchset's effective contributors are its recorded
   set when nonempty, otherwise its effective author alone.
 
-  For ordinary work outside the independent-review scope, status offers the
-  lead a choice: review_options carries declare_debt first, then
-  request_review. The list is guidance — reading it writes nothing, and the
-  user or lead runs arc debt themselves. A required-review or unknown-danger
-  change offers review alone. A current `changes-requested` or `comment-only`
-  verdict is its own next action and offers no debt route: a waiver records a
-  missing review, not a way past a refusal.
-
-  `arc review <change>` prints the same current `review_options` alongside the
-  verdict history, so a reader does not have to switch views to find the
-  available guidance.
+  `arc status` and `arc review <change>` print the rule as `review_options`:
+  for ordinary scope, `declare_debt` then `request_review`, with
+  `next_action` `declare_debt`; a required-review or undetermined-danger
+  change lists `request_review` alone. Reading the list writes nothing — the
+  lead runs `arc debt` or `arc integrate --debt` itself. A current
+  `changes-requested` or `comment-only` verdict is its own next action and
+  offers no debt route: a waiver records a missing review, not a way past a
+  refusal.
 
   Repairing a patchset's attribution happens only before any verdict:
   `snapshot --amend <ps> --contributors ...` replaces the whole set, and the
@@ -811,8 +816,8 @@ WHEN NO INDEPENDENT REVIEWER IS REACHABLE
   `<git-common-dir>/arc/squash-recovery/`; the command prints the recovery
   directory before moving them.
 
-  If no independent verdict is available, integrate with
-  `arc integrate <change> --debt "<why>"`. A debt already in force routes to
+  A debt is declared with `arc debt <change> --reason <why>`, or at the merge
+  with `arc integrate <change> --debt "<why>"`. A debt already in force routes to
   integration: status says integrate beside the flagged waiver, check drops
   the review-queue advisory, and the inbox keeps one lead row — until the
   head moves past the covered patchset, which restores request_review. The debt can stand in for an
@@ -1090,7 +1095,7 @@ THE HISTORY MODEL
   coverage the work did have, its coordinates, and who produced it. A later
   independent verdict on the shipped revision discharges it; a discharge is
   fulfilment, never approval, and never rewrites the basis the integration
-  was accepted on. See WHEN NO INDEPENDENT REVIEWER IS REACHABLE.
+  was accepted on. See REVIEW COVERAGE AND DEBT.
 
   `arc explain <change>` reads a change's history through these, `arc
   candidate` and `arc context` write them, and `arc stats --provenance`
