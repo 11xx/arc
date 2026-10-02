@@ -183,14 +183,21 @@ pub fn begin(
                     gitio::checkout(&ctx.cwd, &branch_name)?;
                     Some(path.display().to_string())
                 }
+                // Every worktree shares `refs/stash`, so the advice never
+                // parks the dirty work there: another writer's pop would
+                // apply it in the wrong checkout.
                 (_, false) => {
+                    let branch = shell_quote(&branch_name);
+                    let own = default_worktree_path(&ctx.cwd, slug).map_or_else(
+                        |_| "<path>".to_string(),
+                        |path| shell_quote(&path.display().to_string()),
+                    );
+                    let checkout = format!("`git checkout {branch}`");
+                    let worktree = format!("`git worktree add {own} {branch}`");
                     no_worktree_advice = Some((
                         "in-place checkout declined: the invoking working tree is dirty"
                             .to_string(),
-                        format!(
-                            "git stash push --include-untracked && git checkout {}",
-                            shell_quote(&branch_name)
-                        ),
+                        format!("commit the work in progress or copy it aside, then {checkout}; or check the branch out in its own worktree: {worktree}"),
                     ));
                     None
                 }
@@ -201,7 +208,7 @@ pub fn begin(
                             "in-place checkout declined: the invoking checkout is on branch \
                              {current:?}, not requested target {target_branch:?}"
                         ),
-                        format!("git checkout {}", shell_quote(&branch_name)),
+                        format!("`git checkout {}`", shell_quote(&branch_name)),
                     ));
                     None
                 }
@@ -417,9 +424,9 @@ pub fn begin(
     if let Some(wt) = worktree_path {
         println!("worktree: {wt}");
     }
-    if let Some((reason, command)) = no_worktree_advice {
+    if let Some((reason, next)) = no_worktree_advice {
         println!("{reason}");
-        println!("next: `{command}`");
+        println!("next: {next}");
     }
     if let Some(warning) = stale_target {
         eprint!("{warning}");

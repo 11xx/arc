@@ -517,8 +517,21 @@ fn no_worktree_leaves_dirty_target_checkout_and_preserves_the_next_command() {
         output.contains("invoking working tree is dirty"),
         "{output}"
     );
+    // Every worktree shares the stash, so the advice keeps the dirty work out
+    // of it: commit or copy it aside, or check the branch out elsewhere.
+    assert!(!output.contains("git stash"), "{output}");
     assert!(
-        output.contains("git stash push --include-untracked && git checkout 'arc/dirty-in-place'"),
+        output.contains(
+            "next: commit the work in progress or copy it aside, then `git checkout 'arc/dirty-in-place'`"
+        ),
+        "{output}"
+    );
+    let own = repo.home.join(".worktrees").join("repo-dirty-in-place");
+    assert!(
+        output.contains(&format!(
+            "or check the branch out in its own worktree: `git worktree add '{}' 'arc/dirty-in-place'`",
+            own.display()
+        )),
         "{output}"
     );
 }

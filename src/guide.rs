@@ -644,7 +644,10 @@ RUN A CHANGE
   target is checked out onto the new branch and recorded as the change's
   worktree, so the next command infers the change without being told. A dirty
   checkout, or one standing elsewhere, is left exactly as it was — the change
-  still opens, and arc prints the Git command that finishes the switch.
+  still opens, and arc prints how to finish the switch. For a dirty one that is
+  committing the work in progress or copying it aside before `git checkout`,
+  or `git worktree add` for the branch; never `git stash`, which every
+  worktree of the repository shares.
 
   Release copy is recorded per change and rendered at release; arc imposes
   no file convention. While an open change has no changelog record, `arc
