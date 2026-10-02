@@ -848,7 +848,10 @@ REVIEW COVERAGE AND DEBT
   head moves past the covered patchset, which restores request_review. The debt can stand in for an
   absent verdict or rescue a self-approval rejected by repository policy. It
   binds to the exact patchset head declared, so new work needs a new
-  declaration — it does not excuse the rest of the change's life.
+  declaration — it does not excuse the rest of the change's life. A refused
+  `arc integrate --debt` keeps the debt it declared; declaring it again with
+  the same reason, kind, and declarer against the same patchset and coverage
+  records nothing and prints the debt already in force.
 
   A debt is a record, not a count. It carries what kind of deficit it is,
   what review the work did have and at what coordinates, and who planned and

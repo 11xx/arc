@@ -489,6 +489,31 @@ pub struct Debt {
     pub discharged_by: Option<DebtCoverage>,
 }
 
+impl Debt {
+    /// Whether `event` declares this undischarged obligation again: the same
+    /// patchset, reason, kind, coverage, and production, by the same declarer.
+    pub fn restated_by(&self, event: &Event) -> bool {
+        let Payload::DebtDeclared {
+            reason,
+            patchset_id,
+            missing,
+            coverage,
+            production,
+        } = &event.payload
+        else {
+            return false;
+        };
+        self.discharged_by.is_none()
+            && self.reason == *reason
+            && self.patchset_id == *patchset_id
+            && self.missing == Some(*missing)
+            && self.coverage.as_ref() == Some(coverage)
+            && self.production == *production
+            && self.actor == event.actor
+            && self.on_behalf_of == event.on_behalf_of
+    }
+}
+
 /// Permission for dirty evidence to count, at one revision.
 ///
 /// Bound the way the thing it excuses is bound: gate evidence counts only at
