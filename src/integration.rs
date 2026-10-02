@@ -150,8 +150,7 @@ impl fmt::Display for Refusal {
             Refusal::ConfigurationMoved => f.write_str(CONFIGURATION_MOVED),
             Refusal::TrackedDirt { checkout } => write!(
                 f,
-                "worktree {} carries tracked modifications, staged or unstaged; commit or stash \
-                 them first",
+                "worktree {} carries tracked modifications, staged or unstaged; commit the work in progress or copy it aside first",
                 checkout.display()
             ),
             Refusal::WriteCollision { checkout, paths } => write!(
@@ -744,8 +743,7 @@ mod tests {
         assert!(guard_tracked_dirt(checkout, false).is_ok());
         assert_eq!(
             guard_tracked_dirt(checkout, true).unwrap_err().to_string(),
-            "worktree /repo carries tracked modifications, staged or unstaged; commit or stash \
-             them first"
+            "worktree /repo carries tracked modifications, staged or unstaged; commit the work in progress or copy it aside first"
         );
         assert!(guard_writes(checkout, Vec::new()).is_ok());
         let collisions = vec!["notes.txt".to_string(), "out/".to_string()];

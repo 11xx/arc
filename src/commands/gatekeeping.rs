@@ -1235,30 +1235,30 @@ pub fn done(
     journal_refs: Vec<String>,
     thread: Option<String>,
 ) -> Result<i32> {
-    // Attribution the snapshot would refuse refuses before the claim's stage
+    // An input the snapshot would refuse refuses before the claim's stage
     // moves.
-    super::review::contributor_declaration(ctx, contributors.clone(), solo)?;
+    let store = ctx.store()?;
+    let change_id = store.resolve_change(reference)?;
+    let request = super::review::SnapshotRequest::validate(
+        ctx,
+        &store,
+        &change_id,
+        contributors,
+        solo,
+        &journal_refs,
+        thread,
+    )?;
     if super::claims::owns_live_claim(ctx, reference)? {
         let code = super::claims::stage(ctx, reference, StageArg::Verifying, None, None, false)?;
         if code != 0 {
             return Ok(code);
         }
     }
-    super::review::snapshot(
-        ctx,
-        reference,
-        None,
-        None,
-        contributors,
-        solo,
-        journal_refs,
-        thread,
-    )?;
+    super::review::record_snapshot(ctx, &store, &change_id, None, None, request)?;
     // A profile with no declared gate has nothing to run. Reporting the check
     // state is still the whole point of `done`, and the state says plainly
     // that nothing was evaluated, so a green never stands in for a gate
     // nobody declared.
-    let store = ctx.store()?;
     let (_, st) = ctx.load_state(&store, reference)?;
     let declarations = ctx.declarations(&st)?.gates;
     let required = declarations.required_for(&st.profile);
@@ -1336,8 +1336,7 @@ pub fn rebase(
     if !gitio::is_clean(&wt)? {
         let dirt = gitio::dirt(&wt)?;
         eprintln!(
-            "worktree {} carries {}; commit or stash it before rebasing, or the \
-             replay has uncommitted work to reconcile",
+            "worktree {} carries {}; commit the work in progress or copy it aside before rebasing, or the replay has uncommitted work to reconcile",
             wt.display(),
             describe_dirt(dirt)
         );
@@ -1407,9 +1406,7 @@ pub fn rebase(
                 &transition,
                 None,
                 None,
-                requested_contributors,
-                Vec::new(),
-                None,
+                super::review::SnapshotRequest::attributed(requested_contributors),
             )?;
             // Verification takes the lock for each run it records.
             drop(transition);

@@ -559,6 +559,11 @@ RUN A CHANGE
   A change whose worktree is gone has nowhere to gate: give it one with `git
   worktree add`, or record evidence arc did not run with `verify --attest`.
 
+  `done` moves its caller's live claim to `verifying` before it snapshots,
+  and only after every snapshot input is accepted — the attribution,
+  `--thread`, and each `--journal-ref` — so an input it refuses leaves the
+  claim's stage and its clock as they were.
+
   A profile with no declared gate runs none: `done` still snapshots and
   prints the check state, saying plainly that no gate is declared rather
   than reporting a pass, and `verify --all` and `verify --against` still
@@ -576,6 +581,11 @@ RUN A CHANGE
   field would be recorded at its default, and a non-blocking finding lets an
   approval through. Any other unknown field is ignored with a warning naming
   it; a finding's `id` is ignored silently, since arc assigns finding IDs.
+
+  `review --snapshot` validates the batch and the verdict before it records
+  the patchset, and keeps the change locked from that patchset until the
+  verdict on it is recorded: a refused review records no patchset, and a
+  command acting on the change in between reports the lock busy.
 
   Each acceptance probe declared on the patchset's brief blocks readiness
   until baseline evidence fails at that brief's base and final evidence passes

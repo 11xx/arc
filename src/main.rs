@@ -1233,7 +1233,9 @@ enum Cmd {
         /// Snapshot the clean change worktree before recording the verdict;
         /// --contributors or --solo attribute that patchset. The findings
         /// batch and the verdict are validated first, so a refused review
-        /// records no patchset
+        /// records no patchset. The change stays locked from the snapshot
+        /// until the verdict on that patchset is recorded, so a command
+        /// acting on the change in between reports the lock busy
         #[arg(long)]
         snapshot: bool,
         #[command(flatten)]
@@ -1414,6 +1416,11 @@ enum Cmd {
     /// Finish implementation: snapshot, verify all gates, then print check
     /// state. A profile with no declared gate records no evidence and prints
     /// that no gate is declared instead of a pass.
+    ///
+    /// The caller's live claim moves to `verifying` before the snapshot, and
+    /// only after every snapshot input is accepted: the attribution,
+    /// --thread, and each --journal-ref. An input it refuses leaves the
+    /// claim's stage and its clock as they were.
     Done {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in

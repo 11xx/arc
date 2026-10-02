@@ -975,10 +975,11 @@ fn done_over_a_foreign_claim_accepts_the_attribution_its_refusal_names() {
     );
 }
 
-/// `done` moves its caller's claim to `verifying` only after the attribution
-/// it was given is accepted, so a declaration it refuses changes nothing.
+/// `done` moves its caller's claim to `verifying` only after every input its
+/// snapshot records is accepted: the attribution, the thread, and the journal
+/// links. An input it refuses changes nothing.
 #[test]
-fn done_refuses_blank_contributors_before_moving_the_claim_stage() {
+fn done_refuses_snapshot_inputs_before_moving_the_claim_stage() {
     let repo = Repo::new();
     let change_id = opened_change_id(&stdout(repo.arc(&repo.root).args(["begin", "blank-done"])));
     let worktree = repo.home.join(".worktrees").join("repo-blank-done");
@@ -1002,14 +1003,25 @@ fn done_refuses_blank_contributors_before_moving_the_claim_stage() {
     let before = observed();
     assert_eq!(before.1, "launch", "{before:?}");
 
-    repo.arc(&worktree)
-        .args(["done", "blank-done", "--contributors", " "])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains(
+    for (input, refusal) in [
+        (
+            ["--contributors", " "],
             "--contributors must name nonempty actors",
-        ));
-    assert_eq!(observed(), before);
+        ),
+        (["--thread", "malformed"], "--thread must be SCHEME:ID"),
+        (
+            ["--journal-ref", "20260101T000000Z-absent-plan.md"],
+            "20260101T000000Z-absent-plan.md",
+        ),
+    ] {
+        repo.arc(&worktree)
+            .args(["done", "blank-done"])
+            .args(input)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(refusal));
+        assert_eq!(observed(), before, "{input:?}");
+    }
 }
 
 #[test]
