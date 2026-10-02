@@ -154,6 +154,42 @@ fn a_conflicting_rebase_stops_in_progress_and_names_the_conflicting_files() {
     );
 }
 
+/// Naming the gates a replayed head owes is advice about a rebase that already
+/// stands. A target policy that does not parse leaves that advice unknown,
+/// not the rebase failed: the replayed head stays recorded, the command says
+/// so, and it succeeds.
+#[test]
+fn an_unreadable_target_policy_warns_after_rebase_records() {
+    let repo = Repo::new();
+    let (change_id, wt) = diverged(&repo, "advisory-replay", "branch.txt", "target\n");
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    repo.commit(
+        &repo.root,
+        ".arc/policy.toml",
+        "[policy\n",
+        "test: break the target policy",
+    );
+
+    let out = repo
+        .arc(&wt)
+        .args(["rebase", "advisory-replay"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    let replayed = repo.head(&wt);
+    assert!(stdout.contains("patchset: ps-02"), "{stdout}");
+    assert!(stderr.contains("warning: "), "{stderr}");
+    assert!(stderr.contains(".arc/policy.toml"), "{stderr}");
+    let recorded = fs::read_dir(event_dir(&repo, &change_id))
+        .unwrap()
+        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+        .filter(|event| event.contains("\"patchset-added\""))
+        .any(|event| event.contains(&replayed));
+    assert!(recorded, "the replayed head {replayed} is not recorded");
+}
+
 #[test]
 fn a_dirty_worktree_is_refused_by_name() {
     let repo = Repo::new();
