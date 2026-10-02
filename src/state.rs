@@ -342,6 +342,15 @@ impl FindingState {
         observed_tips(&self.after_integration)
     }
 
+    /// Whether the dispositions recorded after integration release the
+    /// finding: a single tip that is resolved, accepted-risk, or obsolete.
+    pub fn released_after_integration(&self) -> bool {
+        matches!(
+            self.after_integration_tips().as_slice(),
+            [tip] if tip.status.releases_block()
+        )
+    }
+
     /// How the finding stands after integration, as readers print it: the
     /// single tip's status, `contested` for several, `None` for none.
     pub fn after_integration_status(&self) -> Option<String> {
@@ -3101,6 +3110,40 @@ impl ChangeState {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn competing_later_dispositions_release_nothing() {
+        let later = |event_id: &str, status| DispositionEntry {
+            event_id: event_id.into(),
+            status,
+            commit: None,
+            evidence: None,
+            evidence_event_id: None,
+            actor: "tester".into(),
+            supersedes: Vec::new(),
+        };
+        let mut finding = FindingState {
+            id: "f1".into(),
+            blocking: false,
+            severity: Severity::Minor,
+            summary: "left open at ship".into(),
+            body: None,
+            patchset_id: None,
+            anchor: None,
+            origin_event: "e0".into(),
+            reported_by: "tester".into(),
+            on_behalf_of: None,
+            actor_source: None,
+            dispositions: Vec::new(),
+            after_integration: vec![later("e1", DispositionStatus::Resolved)],
+            replies: Vec::new(),
+        };
+        assert!(finding.released_after_integration());
+        finding
+            .after_integration
+            .push(later("e2", DispositionStatus::Obsolete));
+        assert!(!finding.released_after_integration());
+    }
 
     fn ev(change: &str, payload: Payload) -> Event {
         Event {
