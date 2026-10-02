@@ -1225,6 +1225,9 @@ pub fn done(
     journal_refs: Vec<String>,
     thread: Option<String>,
 ) -> Result<i32> {
+    // Attribution the snapshot would refuse refuses before the claim's stage
+    // moves.
+    super::review::contributor_declaration(ctx, contributors.clone(), solo)?;
     if super::claims::owns_live_claim(ctx, reference)? {
         let code = super::claims::stage(ctx, reference, StageArg::Verifying, None, None, false)?;
         if code != 0 {
