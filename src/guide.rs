@@ -1318,7 +1318,10 @@ RULES THAT CHANGE WHAT YOU DO
     --from-journal` closes the invoker's own claim as `promoted` citing the
     change it opened.
   - Give every concurrent writer its own branch and worktree. Integration and
-    shared refs belong to the lead alone.
+    shared refs belong to the lead alone. The stash is one of those refs:
+    every worktree of a repository shares `refs/stash`, so a concurrent
+    writer never runs `git stash` — another worktree's pop applies it there.
+    It commits work in progress and amends it, or copies files aside.
   - An executor's first act is `arc config --check-writable`; a nonzero exit
     means stop, not work around. Only writability decides that exit: the
     `commit` line says whether a commit can be made at all, while the
