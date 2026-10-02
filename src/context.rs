@@ -745,7 +745,7 @@ pub fn resume(
             println!("- {}: {}", gate.name, crate::render::gate_line(gate));
         }
     }
-    println!("\nNext action: {}", status.report.next_action);
+    println!("\nNext step: {}", crate::render::next_step(&status.report));
     journal.render_markdown();
     Ok(())
 }
