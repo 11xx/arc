@@ -156,13 +156,13 @@ pub fn derive(facts: &BlockerFacts) -> Vec<Blocker> {
         .collect()
 }
 
-/// The exit code of the highest-precedence blocker present, or `None` when
-/// there is none.
-pub fn exit_code(blockers: &[Blocker]) -> Option<i32> {
+/// The code `arc check` exits with: the highest-precedence blocker's, or 0
+/// when there is none.
+pub fn exit_code(blockers: &[Blocker]) -> i32 {
     PRIORITY
         .into_iter()
         .find(|blocker| blockers.contains(blocker))
-        .map(Blocker::exit_code)
+        .map_or(0, Blocker::exit_code)
 }
 
 /// The exit status `arc check --help` states, rendered from [`PRIORITY`] so
@@ -410,8 +410,16 @@ mod tests {
                 Blocker::HoldActive,
             ]
         );
-        assert_eq!(exit_code(&blockers), Some(Blocker::NeedsRebase.exit_code()));
-        assert_eq!(exit_code(&[Blocker::HoldActive, Blocker::Closed]), Some(6));
-        assert_eq!(exit_code(&[]), None);
+        assert_eq!(exit_code(&blockers), Blocker::NeedsRebase.exit_code());
+        assert_eq!(exit_code(&[Blocker::HoldActive, Blocker::Closed]), 6);
+    }
+
+    #[test]
+    fn exit_code_is_zero_exactly_when_no_blocker_is_present() {
+        assert_eq!(exit_code(&[]), 0);
+        for blocker in PRIORITY {
+            assert_eq!(exit_code(&[blocker]), blocker.exit_code());
+            assert_ne!(exit_code(&[blocker]), 0, "{}", blocker.as_str());
+        }
     }
 }
