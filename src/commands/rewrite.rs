@@ -254,7 +254,9 @@ fn open(ctx: &Ctx, store: &Store) -> Result<Opened> {
     // leave the operator holding a diff against a commit that no longer
     // exists.
     if !gitio::is_clean(&ctx.cwd)? {
-        bail!("the worktree has uncommitted changes; commit or stash them first");
+        bail!(
+            "the worktree has uncommitted changes; commit the work in progress or copy it aside first"
+        );
     }
     Ok(Opened::Branch(branch))
 }
