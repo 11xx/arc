@@ -13822,6 +13822,83 @@ fn storage_writes_naming_another_journals_filename_name_the_owning_journal() {
     }
 }
 
+/// Provenance repair from a project whose journal has recorded nothing names
+/// the journal owning the artifact, for a bare filename and for a qualified
+/// reference alike, before the local event log is read.
+#[test]
+fn reattribute_naming_another_journals_artifact_names_the_owning_journal() {
+    let owner = Repo::new();
+    let note = filed_artifact(&owner, "note", "owned-note", "owned\n");
+    let owner_journal = fs::canonicalize(journal_dir(&owner)).unwrap();
+    let owner_root = fs::canonicalize(&owner.root).unwrap();
+    let promoter = sibling_project(&owner, "promoter");
+    let promoter_journal = PathBuf::from(
+        stdout(owner.arc(&promoter).args(["journal", "dir"]))
+            .trim()
+            .to_string(),
+    );
+    assert!(!promoter_journal.join("events.jsonl").exists());
+    let before = fs::read_to_string(owner_journal.join("events.jsonl")).unwrap();
+
+    let refusal = owner
+        .arc(&promoter)
+        .args(["journal", "reattribute", &note, "--set-actor", "someone"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&refusal.get_output().stderr).to_string();
+    assert!(
+        stderr.contains(&format!(
+            "no such artifact {note} in {}; another project's journal holds it: {} (project {}); a journal write runs from the project that owns it, with the bare filename",
+            promoter_journal.display(),
+            owner_journal.display(),
+            owner_root.display()
+        )),
+        "{stderr}"
+    );
+
+    let reference = format!("{}::{note}", owner_journal.display());
+    let refusal = owner
+        .arc(&promoter)
+        .args([
+            "journal",
+            "reattribute",
+            &reference,
+            "--set-actor",
+            "someone",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&refusal.get_output().stderr).to_string();
+    assert!(
+        stderr.contains(&format!(
+            "{note} belongs to the journal at {} (project {})",
+            owner_journal.display(),
+            owner_root.display()
+        )),
+        "{stderr}"
+    );
+
+    let nowhere = "20990101T000000Z-nowhere-note.md";
+    let refusal = owner
+        .arc(&promoter)
+        .args(["journal", "reattribute", nowhere, "--set-actor", "someone"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&refusal.get_output().stderr).to_string();
+    assert!(
+        stderr.contains(&format!(
+            "no such artifact {nowhere} in {}",
+            promoter_journal.display()
+        )),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("another project's journal"), "{stderr}");
+
+    let after = fs::read_to_string(owner_journal.join("events.jsonl")).unwrap();
+    assert_eq!(before, after);
+    assert!(!promoter_journal.join("events.jsonl").exists());
+}
+
 #[test]
 fn cross_project_reference_to_a_missing_artifact_is_refused() {
     let owner = Repo::new();
