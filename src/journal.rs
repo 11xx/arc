@@ -2289,7 +2289,7 @@ fn promote_one(
     // never who moved it. The promoting caller is named beside it.
     let mut event = spooled.event.clone();
     if let (Some(filename), Some(body)) = (&spooled.filename, &spooled.body) {
-        let (_, _) = check_artifact_name(filename)?;
+        let (_, _) = check_artifact_name(ctx, filename)?;
         // The name is allocated where the journal is reachable, which is here
         // rather than where the write was parked: what a spooled artifact
         // collides with is whatever was filed while it waited.
@@ -4645,7 +4645,7 @@ fn position(
     // Refuse a malformed name or a branch on a non-discussion before the body
     // is read: with `--body-file -` the read waits on stdin, and a caller who
     // mistyped the filename would wait with it rather than being told.
-    let (_, kind) = check_artifact_name(filename)?;
+    let (_, kind) = check_artifact_name(ctx, filename)?;
     if branch.is_some() && kind != JournalKind::Discussion.as_str() {
         bail!("{filename} is a {kind}, not a discussion");
     }
@@ -4778,13 +4778,18 @@ fn position(
     Ok(0)
 }
 
-/// The syntactic half of the artifact preflight, separable because it costs
-/// nothing and touches nothing: a caller who mistyped a name learns so before
-/// a body is read from stdin.
-fn check_artifact_name(filename: &str) -> Result<(String, String)> {
+/// The syntactic half of the artifact preflight, separable because it writes
+/// nothing: a caller who mistyped a name learns so before a body is read from
+/// stdin. A path to a journal artifact's file is refused naming the reference
+/// that resolves it.
+fn check_artifact_name(ctx: &Ctx, filename: &str) -> Result<(String, String)> {
     refuse_foreign_write(filename)?;
     if filename.contains(['/', '\\']) {
-        bail!("journal takes an artifact filename inside the journal dir, not a path");
+        let spelled = reference_for_path(&ctx.cwd, filename);
+        if let Some(spelled) = &spelled {
+            refuse_foreign_write(spelled)?;
+        }
+        return Err(path_refusal(filename, spelled.as_deref()));
     }
     let Some((_, topic, kind)) = parse_artifact_name(filename) else {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
@@ -4796,7 +4801,7 @@ fn check_artifact_name(filename: &str) -> Result<(String, String)> {
 /// name, the artifact exists, and it has not been consumed. A consumed
 /// artifact is a closed record, so a later operation must not edit its history.
 fn open_artifact(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String, String)> {
-    let (topic, kind) = check_artifact_name(filename)?;
+    let (topic, kind) = check_artifact_name(ctx, filename)?;
     let dir = resolve_dir(&ctx.cwd)?;
     ensure_storage_settled(&dir, &read_events(&dir)?, filename)?;
     let path = dir.join(filename);
@@ -4816,7 +4821,7 @@ fn open_artifact(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String,
 /// keeps unresolved discussions appendable, but the caller must name the cold
 /// store so an accidental write cannot silently resurrect ordinary history.
 fn open_archived_discussion(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String)> {
-    let (topic, kind) = check_artifact_name(filename)?;
+    let (topic, kind) = check_artifact_name(ctx, filename)?;
     if kind != JournalKind::Discussion.as_str() {
         bail!("{filename} is a {kind}, not a discussion");
     }
@@ -4856,7 +4861,7 @@ fn open_discussion(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, Strin
 /// what makes an artifact archivable: an open question outlives its source,
 /// and the source it outlives is exactly the kind that has already moved.
 fn open_discussion_for_answer(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String)> {
-    let (topic, kind) = check_artifact_name(filename)?;
+    let (topic, kind) = check_artifact_name(ctx, filename)?;
     if kind != JournalKind::Discussion.as_str() {
         bail!("{filename} is a {kind}, not a discussion");
     }
@@ -5522,7 +5527,7 @@ fn delivered(
 /// consumption is what makes an artifact archivable and its events remain in
 /// the hot journal whichever directory holds the body.
 fn open_artifact_for_amendment(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String)> {
-    let (topic, _kind) = check_artifact_name(filename)?;
+    let (topic, _kind) = check_artifact_name(ctx, filename)?;
     let hot = resolve_dir(&ctx.cwd)?;
     ensure_storage_settled(&hot, &read_events(&hot)?, filename)?;
     let Some(path) = artifact_body_path(&hot, filename) else {
@@ -5616,7 +5621,7 @@ fn correct(
         bail!("--field stance takes for, against, or amend, not {value:?}");
     }
     if field == "planners" {
-        if check_artifact_name(filename)?.1 != "plan" {
+        if check_artifact_name(ctx, filename)?.1 != "plan" {
             bail!("planner corrections apply only to plans");
         }
         if note.is_none_or(|note| note.trim().is_empty()) {
@@ -11420,7 +11425,7 @@ pub(crate) const REFERENCE_SEPARATOR: &str = "::";
 pub(crate) struct ArtifactLocation {
     /// The hot directory of the journal the reference names.
     pub(crate) hot: PathBuf,
-    /// The artifact's filename inside that journal.
+    /// The artifact's filename inside that journal, never a path.
     pub(crate) file: String,
     /// Whether `hot` is another project's journal. A foreign journal is read
     /// and recorded against, never bound to this project.
@@ -11435,12 +11440,17 @@ pub(crate) fn split_qualified(reference: &str) -> Option<(&str, &str)> {
     Path::new(dir).is_absolute().then_some((dir, file))
 }
 
-/// Resolve a reference to the journal that holds it. A qualified reference
-/// must name a directory that is a journal and a filename that is an artifact
-/// name; whether the file exists is each caller's question, since some accept
-/// the cold archive and some do not.
+/// Resolve a reference to the journal that holds it. A bare reference must
+/// be a filename, not a path; a qualified one must name a directory that is a
+/// journal and a filename that is an artifact name. Whether the file exists
+/// is each caller's question, since some accept the cold archive and some do
+/// not; [`missing_artifact`] is the refusal when it does not.
 pub(crate) fn locate_artifact(ctx: &Ctx, reference: &str) -> Result<ArtifactLocation> {
     let Some((dir, file)) = split_qualified(reference) else {
+        if reference.contains(['/', '\\']) {
+            let spelled = reference_for_path(&ctx.cwd, reference);
+            return Err(path_refusal(reference, spelled.as_deref()));
+        }
         return Ok(ArtifactLocation {
             hot: resolve_dir(&ctx.cwd)?,
             file: reference.to_string(),
@@ -11469,6 +11479,99 @@ pub(crate) fn locate_artifact(ctx: &Ctx, reference: &str) -> Result<ArtifactLoca
         file: file.to_string(),
         foreign,
     })
+}
+
+/// The reference a path to a journal artifact's file spells: the filename in
+/// this project's journal, `<journal-dir>::<file>` in another project's, the
+/// hot directory as it resolves on disk. A path into a cold archive names the
+/// hot journal it belongs to. `None` when the path is no artifact file of a
+/// journal.
+pub(crate) fn reference_for_path(cwd: &Path, raw: &str) -> Option<String> {
+    let path = Path::new(raw);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let name = absolute.file_name()?.to_str()?.to_string();
+    parse_artifact_name(&name)?;
+    let parent = canonical_dir(absolute.parent()?);
+    let own = resolve_dir(cwd).ok().map(|hot| canonical_dir(&hot));
+    if let Some(own) = own {
+        if own == parent || canonical_dir(&archive_dir(&own)) == parent {
+            return Some(name);
+        }
+    }
+    let hot = archived_from(&parent).unwrap_or(parent);
+    if !hot.is_dir() || !looks_like_a_journal(&hot).unwrap_or(false) {
+        return None;
+    }
+    Some(format!("{}{REFERENCE_SEPARATOR}{name}", hot.to_str()?))
+}
+
+fn canonical_dir(dir: &Path) -> PathBuf {
+    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// The hot journal a cold archive directory belongs to, when `dir` is one.
+fn archived_from(dir: &Path) -> Option<PathBuf> {
+    let hot = PathBuf::from(dir.to_str()?.strip_suffix("-archive")?);
+    (archive_dir(&hot) == dir && hot.is_dir()).then_some(hot)
+}
+
+/// The refusal for a path given where a journal reference belongs, naming the
+/// reference that resolves when the path is a journal artifact's file.
+fn path_refusal(path: &str, spelled: Option<&str>) -> anyhow::Error {
+    match spelled {
+        Some(spelled) => anyhow::anyhow!(
+            "a journal reference names an artifact, not a path; name {path} as {spelled}"
+        ),
+        None => anyhow::anyhow!(
+            "a journal reference is an artifact filename in this project's journal, or \
+             <journal-dir>::<file> in another project's, not a path: {path}"
+        ),
+    }
+}
+
+/// The refusal for a reference that resolves to no artifact in `searched`. A
+/// filename this project's journal does not hold is named in the
+/// `<journal-dir>::<file>` form of each other known journal that holds it, or,
+/// when none does, the qualified form is named.
+pub(crate) fn missing_artifact(location: &ArtifactLocation, searched: &str) -> anyhow::Error {
+    let file = &location.file;
+    let refusal = format!("no such artifact {file} in {searched}");
+    if location.foreign {
+        return anyhow::anyhow!(refusal);
+    }
+    let holders = journals_holding(&location.hot, file);
+    if holders.is_empty() {
+        anyhow::anyhow!(
+            "{refusal}; an artifact in another project's journal is named \
+             <journal-dir>::{file}"
+        )
+    } else {
+        anyhow::anyhow!(
+            "{refusal}; another project's journal holds it: {}",
+            holders.join(", ")
+        )
+    }
+}
+
+/// `<journal-dir>::<file>` for each known journal other than `own` whose hot
+/// directory or cold archive holds `file`.
+fn journals_holding(own: &Path, file: &str) -> Vec<String> {
+    let Ok(journals) = config::load().and_then(|cfg| crate::registry::known_journals(&cfg)) else {
+        return Vec::new();
+    };
+    let own = canonical_dir(own);
+    journals
+        .into_iter()
+        .map(|(_, dir)| canonical_dir(&dir))
+        .filter(|dir| *dir != own && artifact_body_path(dir, file).is_some())
+        .map(|dir| format!("{}{REFERENCE_SEPARATOR}{file}", dir.display()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Refuse a journal write that would change the disposition of an artifact
@@ -11500,9 +11603,6 @@ pub fn read_artifact_body(ctx: &Ctx, reference: &str) -> Result<String> {
 
 fn read_located_body(location: &ArtifactLocation) -> Result<String> {
     let (hot, filename) = (&location.hot, location.file.as_str());
-    if filename.contains(['/', '\\']) {
-        bail!("artifact reference must be a filename inside the journal dir, not a path");
-    }
     ensure_storage_settled(hot, &read_events(hot)?, filename)?;
     for dir in [hot.clone(), archive_dir(hot)] {
         let path = dir.join(filename);
@@ -11511,10 +11611,10 @@ fn read_located_body(location: &ArtifactLocation) -> Result<String> {
                 .with_context(|| format!("cannot read {}", path.display()));
         }
     }
-    bail!(
-        "no such artifact {filename} in {} or its cold archive",
-        hot.display()
-    )
+    Err(missing_artifact(
+        location,
+        &format!("{} or its cold archive", hot.display()),
+    ))
 }
 
 /// Resolve a journal artifact reference into the reference a patchset
@@ -11559,9 +11659,6 @@ pub fn artifact_digest(ctx: &Ctx, reference: &str) -> Result<String> {
 pub fn validate_plan_artifact(ctx: &Ctx, reference: &str) -> Result<()> {
     let location = locate_artifact(ctx, reference)?;
     let filename = location.file.as_str();
-    if filename.contains(['/', '\\']) {
-        bail!("plan reference must be a journal artifact filename, not a path");
-    }
     let Some((_, _, kind)) = parse_artifact_name(filename) else {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     };
@@ -11580,9 +11677,6 @@ pub fn validate_plan_artifact(ctx: &Ctx, reference: &str) -> Result<()> {
 pub fn plan_source(ctx: &Ctx, reference: &str, slice: &str) -> Result<PlanSource> {
     let location = locate_artifact(ctx, reference)?;
     let filename = location.file.as_str();
-    if filename.contains(['/', '\\']) {
-        bail!("plan reference must be a journal artifact filename, not a path");
-    }
     crate::ids::validate_slug(slice)?;
     let Some((_, _, kind)) = parse_artifact_name(filename) else {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
@@ -11592,7 +11686,7 @@ pub fn plan_source(ctx: &Ctx, reference: &str, slice: &str) -> Result<PlanSource
     }
     let (hot, anchor) = if location.foreign {
         let anchor = recorded_anchor(&location.hot)?;
-        (location.hot, anchor)
+        (location.hot.clone(), anchor)
     } else {
         let resolution = resolve(&ctx.cwd)?;
         let anchor = resolution.anchor.map(|path| path.display().to_string());
@@ -11603,10 +11697,10 @@ pub fn plan_source(ctx: &Ctx, reference: &str, slice: &str) -> Result<PlanSource
     } else if archive_dir(&hot).join(filename).is_file() {
         (archive_dir(&hot).join(filename), "archived")
     } else {
-        bail!(
-            "no such artifact {filename} (plan) in {} or its cold archive",
-            hot.display()
-        );
+        return Err(missing_artifact(
+            &location,
+            &format!("{} or its cold archive", hot.display()),
+        ));
     };
     let bytes = std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
     let body = String::from_utf8(bytes.clone()).context("plan body is not valid UTF-8")?;
@@ -12567,7 +12661,7 @@ pub(crate) fn consume(
 ) -> Result<i32> {
     let dir = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&dir)?;
-    check_artifact_name(filename)?;
+    check_artifact_name(ctx, filename)?;
     ensure_storage_settled(&dir, &read_events(&dir)?, filename)?;
     let target_kind = parse_artifact_name(filename).map(|(_, _, kind)| kind);
     let mut decision_filename = None;
@@ -12757,7 +12851,7 @@ fn archive(
 }
 
 fn unarchive(ctx: &Ctx, filename: &str) -> Result<i32> {
-    let (topic, _) = check_artifact_name(filename)?;
+    let (topic, _) = check_artifact_name(ctx, filename)?;
     let hot = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&hot)?;
     let events = read_events(&hot)?;
@@ -12887,7 +12981,7 @@ fn move_artifact(
     outcome: Option<&str>,
     note: Option<&str>,
 ) -> Result<()> {
-    let (topic, _) = check_artifact_name(filename)?;
+    let (topic, _) = check_artifact_name(ctx, filename)?;
     let cold = archive_dir(hot);
     let (source, destination) = if operation == "archive" {
         (hot.join(filename), cold.join(filename))
@@ -12981,7 +13075,7 @@ fn archive_one(
     acknowledge_claim: &[String],
     unresolved: bool,
 ) -> Result<()> {
-    let (topic, kind) = check_artifact_name(filename)?;
+    let (topic, kind) = check_artifact_name(ctx, filename)?;
     let events = read_events(hot)?;
     let consumed = is_consumed(&events, filename);
     if unresolved {
@@ -13043,12 +13137,6 @@ fn journal_tail(dir: &Path, limit: usize) -> Result<Vec<String>> {
 pub fn require_open_actionable(ctx: &Ctx, reference: &str) -> Result<String> {
     let location = locate_artifact(ctx, reference)?;
     let filename = location.file.as_str();
-    if filename.contains(['/', '\\']) {
-        bail!(
-            "--from-journal takes an artifact filename inside the journal dir, or \
-             <journal-dir>::<file>, not a path"
-        );
-    }
     let Some((_, _, kind)) = parse_artifact_name(filename) else {
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     };
@@ -13059,12 +13147,12 @@ pub fn require_open_actionable(ctx: &Ctx, reference: &str) -> Result<String> {
             LATER_KIND
         );
     }
-    let dir = location.hot;
-    ensure_storage_settled(&dir, &read_events(&dir)?, filename)?;
+    let dir = &location.hot;
+    ensure_storage_settled(dir, &read_events(dir)?, filename)?;
     if !dir.join(filename).is_file() {
-        bail!("no such artifact {} in {}", filename, dir.display());
+        return Err(missing_artifact(&location, &dir.display().to_string()));
     }
-    let events = read_events(&dir)?;
+    let events = read_events(dir)?;
     if is_consumed(&events, filename) {
         bail!("{filename} is already consumed (see the journal)");
     }

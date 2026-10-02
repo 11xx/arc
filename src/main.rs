@@ -196,8 +196,10 @@ struct LinkOpts {
     /// journal at the absolute `<journal-dir>` another project's `arc journal
     /// dir` prints. The link records the reference as given. Its body digest
     /// is read from the owning journal when the patchset is recorded, and a
-    /// name that resolves to no artifact is refused. Given
-    /// once or more, only the flagged artifacts are linked, `via: flag`.
+    /// name that resolves to no artifact is refused naming each other known
+    /// journal that holds it; a path is refused naming the reference that
+    /// resolves it. Given once or more, only the flagged artifacts are
+    /// linked, `via: flag`.
     /// Omitted, the patchset links the artifact the change was opened from
     /// (`via: begin`) and the plan its brief names (`via: brief`), one link
     /// per file, a file named by both linked once as `begin`; a default that
@@ -285,8 +287,10 @@ enum Cmd {
         /// resolves `<file>` in the journal at the absolute `<journal-dir>`
         /// that project's `arc journal dir` prints, and records the promotion
         /// in that journal, naming this repository and change. A journal that
-        /// is not one, or a file it does not hold, is refused naming both. The
-        /// change records the reference as given and the digest of its body
+        /// is not one, or a file it does not hold, is refused naming both; a
+        /// filename this project's journal does not hold, naming each other
+        /// known journal that holds it; a path, naming the reference that
+        /// resolves it. The change records the reference as given and the digest of its body
         /// read now, and each later snapshot links it `via: begin` unless
         /// given --journal-ref
         #[arg(long = "from-journal")]
@@ -573,7 +577,10 @@ enum Cmd {
         /// journal at the absolute `<journal-dir>` another project's `arc
         /// journal dir` prints. The brief records the reference as given;
         /// a plan in another journal is read there, and that journal records
-        /// the brief as a promotion naming this repository and change
+        /// the brief as a promotion naming this repository and change. A
+        /// filename this project's journal does not hold is refused naming
+        /// each other known journal that holds it; a path, naming the
+        /// reference that resolves it
         #[arg(long)]
         plan_ref: Option<String>,
         /// Opaque plan slice slug implemented by this brief
@@ -595,7 +602,10 @@ enum Cmd {
         /// `@sha256:<hex>` or at the body digest read now; or a file at a
         /// revision, `<revision>:<path>[:<from>-<to>]`, recorded as its blob
         /// and the one-based inclusive line range, whole when none is given.
-        /// A locator that resolves to nothing is refused. `arc candidate
+        /// A locator that resolves to nothing is refused, an artifact filename
+        /// this project's journal does not hold naming each other known
+        /// journal that holds it, and a path to an artifact naming the
+        /// reference that resolves it. `arc candidate
         /// select` meets a requirement only with a tool read at that version
         /// covering that extent. An artifact requirement is met by digest
         /// equality with the text a tool returned, so a tool that decorates
