@@ -1548,6 +1548,14 @@ EXIT CODES
     Arc exits 17 when a paired replica does not hold integration authority;
       the refusal names the holder or an offer in flight.
 
+  A refusal lists its blockers, then `Next step:`: the command that does
+  what comes next, with the change filled in and the `next_action` code in
+  parentheses, as in `arc verify <change> --gate test (run_gate:test)`.
+  Where no single command does it, the line says what to do and names the
+  command that records it; an approval rejection prints the policy's reason
+  in place of a code. `status`, `show`, `review`, `resume`, and `rescue`
+  print the same line, and `--json` carries the code alone.
+
   Codes 1 and 2 are also reachable without a blocker at all: `arc` exits 1 on
   an internal error and 2 on a usage error, which argument parsing decides
   before any command runs.
