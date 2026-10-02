@@ -436,7 +436,8 @@ fn line_marker(line: &str) -> Option<&str> {
 ///
 /// Each paragraph and list item is refilled to the width as one unit, so an
 /// entry renders the same whatever column its author wrapped it at. A fenced
-/// block keeps its lines exactly.
+/// block keeps its lines exactly, trailing whitespace included; the only
+/// change is the item's indentation in front of each non-empty line.
 fn as_list_item(body: &str) -> String {
     let blocks = body_blocks(body.trim_end());
     let Some(first) = blocks.first() else {
@@ -457,11 +458,13 @@ fn as_list_item(body: &str) -> String {
     for block in &blocks {
         match block {
             Block::Blank => lines.push(String::new()),
-            Block::Fenced(fenced) => lines.extend(
-                fenced
-                    .iter()
-                    .map(|line| format!("{base}{}", line.trim_end())),
-            ),
+            Block::Fenced(fenced) => lines.extend(fenced.iter().map(|line| {
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("{base}{line}")
+                }
+            })),
             Block::Prose {
                 marker,
                 indent,
@@ -503,19 +506,66 @@ enum Block<'a> {
     },
 }
 
+/// An open code fence, as CommonMark delimits one: the character its run is
+/// drawn with, the run's length, and the run's indentation.
+struct Fence {
+    mark: char,
+    run: usize,
+    indent: usize,
+}
+
+impl Fence {
+    /// The fence `line` opens: a run of three or more backticks or tildes
+    /// after its indentation. A backtick run followed by another backtick on
+    /// the line is inline code and opens nothing.
+    fn opened_by(line: &str) -> Option<Self> {
+        let (indent, mark, run, after) = fence_run(line)?;
+        (run >= 3 && !(mark == '`' && after.contains('`'))).then_some(Self { mark, run, indent })
+    }
+
+    /// Whether `line` closes this fence: a run of the same character at
+    /// least as long, nothing after it but whitespace, and indented less than
+    /// four columns past the opener; deeper, the line is content.
+    fn closed_by(&self, line: &str) -> bool {
+        fence_run(line).is_some_and(|(indent, mark, run, after)| {
+            mark == self.mark
+                && run >= self.run
+                && after.trim().is_empty()
+                && indent < self.indent + 4
+        })
+    }
+}
+
+/// A line's indentation, the backtick or tilde that begins its text, the
+/// length of that character's run, and the text after the run.
+fn fence_run(line: &str) -> Option<(usize, char, usize, &str)> {
+    let text = line.trim_start();
+    let mark = text
+        .chars()
+        .next()
+        .filter(|mark| matches!(mark, '`' | '~'))?;
+    let after = text.trim_start_matches(mark);
+    Some((
+        line.len() - text.len(),
+        mark,
+        text.len() - after.len(),
+        after,
+    ))
+}
+
 /// Split a body into paragraphs, list items, and fenced blocks. A line joins
 /// the paragraph or item above it unless a blank line, a fence, or a list
 /// marker of its own separates them.
 fn body_blocks(body: &str) -> Vec<Block<'_>> {
     let mut blocks: Vec<Block<'_>> = Vec::new();
-    let mut fence: Option<&str> = None;
+    let mut fence: Option<Fence> = None;
     for line in body.lines() {
         let trimmed = line.trim();
-        if let Some(open) = fence {
+        if let Some(open) = &fence {
             if let Some(Block::Fenced(fenced)) = blocks.last_mut() {
                 fenced.push(line);
             }
-            if trimmed.starts_with(open) {
+            if open.closed_by(line) {
                 fence = None;
             }
             continue;
@@ -526,10 +576,7 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
             }
             continue;
         }
-        if let Some(open) = ["```", "~~~"]
-            .into_iter()
-            .find(|open| trimmed.starts_with(open))
-        {
+        if let Some(open) = Fence::opened_by(line) {
             fence = Some(open);
             blocks.push(Block::Fenced(vec![line]));
             continue;
@@ -1080,6 +1127,37 @@ mod tests {
         assert_eq!(
             as_list_item("Run it:\n```\narc changelog --write\n  indented\n```\nthen look."),
             "- Run it:\n  ```\n  arc changelog --write\n    indented\n  ```\n  then look."
+        );
+    }
+
+    #[test]
+    fn a_fence_closes_only_on_its_own_character_and_length() {
+        assert_eq!(
+            as_list_item("Example:\n````md\n```\nline one\n  indented\n```\n````\nAfter."),
+            "- Example:\n  ````md\n  ```\n  line one\n    indented\n  ```\n  ````\n  After."
+        );
+        assert_eq!(
+            as_list_item("~~~\n```\n~~\n~~~~ \nthen prose"),
+            "- ~~~\n  ```\n  ~~\n  ~~~~ \n  then prose"
+        );
+        // Text after the run, or an indent four columns past the opener,
+        // makes the line content rather than a closing fence.
+        assert_eq!(
+            as_list_item("```\n``` not a close\n    ```\n```\nthen prose"),
+            "- ```\n  ``` not a close\n      ```\n  ```\n  then prose"
+        );
+        // A backtick run followed by another backtick is inline code.
+        assert_eq!(
+            as_list_item("``` x ``` opens nothing\nso this joins it"),
+            "- ``` x ``` opens nothing so this joins it"
+        );
+    }
+
+    #[test]
+    fn fenced_lines_keep_their_trailing_whitespace() {
+        assert_eq!(
+            as_list_item("Diff:\n```\nkeep  \n\n   \nthis\t\n```"),
+            "- Diff:\n  ```\n  keep  \n\n     \n  this\t\n  ```"
         );
     }
 
