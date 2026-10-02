@@ -126,7 +126,8 @@ fn recorded_map(repo: &Repo, revisions: &[String]) -> BTreeMap<String, String> {
     revisions
         .iter()
         .filter_map(|revision| {
-            let out = stdout(repo.arc(&repo.root).args(["history", "resolve", revision]));
+            let out =
+                stdout_any_status(repo.arc(&repo.root).args(["history", "resolve", revision]));
             let successor = out.split('→').nth(1)?.trim().to_string();
             (successor.len() == 40).then(|| (revision.clone(), successor))
         })
@@ -560,7 +561,7 @@ fn a_rewrite_leading_to_a_missing_commit_is_a_problem() {
     // The successor goes the same way as the revision it replaced.
     amend_and_prune("test: add stranded, rewritten again");
 
-    let doctor = stdout(repo.arc(&repo.root).args(["doctor"]));
+    let doctor = stdout_any_status(repo.arc(&repo.root).args(["doctor"]));
     assert!(doctor.contains("unresolved-revision"), "{doctor}");
     repo.arc(&repo.root).args(["doctor"]).assert().failure();
 }
@@ -1040,7 +1041,7 @@ fn a_contradictory_rewrite_record_refuses_a_projection_rather_than_reverting_it(
         "a refused projection reports no revision at all, least of all the pre-rewrite one"
     );
 
-    let doctor = stdout(repo.arc(&repo.root).args(["doctor"]));
+    let doctor = stdout_any_status(repo.arc(&repo.root).args(["doctor"]));
     assert!(doctor.contains("invalid-rewrite-mapping"), "{doctor}");
 }
 

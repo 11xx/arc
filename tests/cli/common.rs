@@ -207,7 +207,25 @@ pub(crate) fn git_out(cwd: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// Stdout of a command that must exit zero. Any other exit fails the test at
+/// the caller, with the command, its status, and its stderr.
+#[track_caller]
 pub(crate) fn stdout(cmd: &mut AssertCommand) -> String {
+    let out = cmd.output().unwrap();
+    let program = Path::new(cmd.get_program()).file_name().unwrap();
+    let args: Vec<_> = cmd.get_args().collect();
+    assert!(
+        out.status.success(),
+        "{program:?} {args:?} exited {}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Stdout of a command whatever its exit status, for a call whose non-zero
+/// exit is part of what the test observes.
+pub(crate) fn stdout_any_status(cmd: &mut AssertCommand) -> String {
     let out = cmd.output().unwrap();
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
@@ -446,8 +464,15 @@ pub(crate) fn begin_change(repo: &Repo, slug: &str, blocked_by: Option<&str>) ->
     begin_no_worktree(repo, slug, &extra)
 }
 
+#[track_caller]
 pub(crate) fn json_stdout(cmd: &mut AssertCommand) -> serde_json::Value {
     serde_json::from_str(&stdout(cmd)).unwrap()
+}
+
+/// `json_stdout` for a call whose non-zero exit is part of what the test
+/// observes.
+pub(crate) fn json_stdout_any_status(cmd: &mut AssertCommand) -> serde_json::Value {
+    serde_json::from_str(&stdout_any_status(cmd)).unwrap()
 }
 
 /// Write one journal artifact and return the directory holding it and its

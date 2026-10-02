@@ -391,7 +391,7 @@ fn workspace_backlog_names_an_unreachable_project() {
 
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
-    let value = json_stdout(&mut report);
+    let value = json_stdout_any_status(&mut report);
     assert_backlog_summary_matches_rows(&value);
     let stranded = value["unreachable"]
         .as_array()
@@ -717,7 +717,7 @@ fn workspace_backlog_compacts_temporary_unreachable_journals() {
     )
     .unwrap();
 
-    let text = stdout(repo.arc(&repo.root).args(["workspace", "backlog"]));
+    let text = stdout_any_status(repo.arc(&repo.root).args(["workspace", "backlog"]));
     assert!(
         text.contains("maintenance: 6 unreachable journals (5 temporary/scratch, 1 other)"),
         "{text}"
@@ -729,16 +729,17 @@ fn workspace_backlog_compacts_temporary_unreachable_journals() {
         "{text}"
     );
 
-    let expanded = stdout(
-        repo.arc(&repo.root)
-            .args(["workspace", "backlog", "--unreachable"]),
-    );
+    let expanded =
+        stdout_any_status(
+            repo.arc(&repo.root)
+                .args(["workspace", "backlog", "--unreachable"]),
+        );
     assert!(expanded.contains("-tmp-noise-0"), "{expanded}");
     assert!(expanded.contains("-durable-project"), "{expanded}");
 
     let mut json = repo.arc(&repo.root);
     json.args(["workspace", "backlog", "--json"]);
-    let value = json_stdout(&mut json);
+    let value = json_stdout_any_status(&mut json);
     assert_backlog_summary_matches_rows(&value);
     assert_eq!(value["summary"]["unreachable"], 6);
 }
@@ -790,7 +791,7 @@ fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
 
     let mut scoped = repo.arc(&workspace);
     scoped.args(["workspace", "backlog", "--here", "--json"]);
-    let value = json_stdout(&mut scoped);
+    let value = json_stdout_any_status(&mut scoped);
     assert_eq!(value["schema"], "arc-workspace-backlog/19");
     assert_eq!(value["scope"]["mode"], "under");
     assert_eq!(
@@ -821,7 +822,7 @@ fn workspace_backlog_scopes_reachable_and_missing_anchors_by_path() {
 
     let mut global = repo.arc(&workspace);
     global.args(["workspace", "backlog", "--global", "--json"]);
-    let global = json_stdout(&mut global);
+    let global = json_stdout_any_status(&mut global);
     assert_eq!(global["scope"]["mode"], "global");
     assert_eq!(global["projects"].as_array().unwrap().len(), 3, "{global}");
     assert_eq!(global["unreachable"].as_array().unwrap().len(), 2);
@@ -949,7 +950,7 @@ fn workspace_backlog_names_a_binding_only_orphan() {
 
     let mut report = repo.arc(&repo.root);
     report.args(["workspace", "backlog", "--json"]);
-    let value = json_stdout(&mut report);
+    let value = json_stdout_any_status(&mut report);
     let named = value["unreachable"]
         .as_array()
         .unwrap()
@@ -1639,8 +1640,11 @@ fn workspace_backlog_detail_hint_preserves_selection() {
     // single-quoted POSIX shell argument.
     let quoted_scope = format!("'{}'", scope.display().to_string().replace('\'', "'\\''"));
 
-    let command_line = |args: &[&str], cwd: &Path| {
-        let text = stdout(repo.arc(cwd).args(args));
+    // A global scope still reaches the path the project was registered at,
+    // which the rename above left empty: a partial collection, exit 16.
+    let command_line = |args: &[&str], cwd: &Path, exit: i32| {
+        let assert = repo.arc(cwd).args(args).assert().code(exit);
+        let text = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
         text.lines()
             .rev()
             .find(|line| line.trim_start().starts_with("detail:"))
@@ -1657,6 +1661,7 @@ fn workspace_backlog_detail_hint_preserves_selection() {
     let under_hint = command_line(
         &["workspace", "backlog", "--under", scope.to_str().unwrap()],
         &repo_root,
+        0,
     );
 
     // --here resolves to the caller's directory; --since survives.
@@ -1669,6 +1674,7 @@ fn workspace_backlog_detail_hint_preserves_selection() {
             "20990101T000000Z",
         ],
         &repo_root,
+        0,
     );
     let quoted_cwd = format!(
         "'{}'",
@@ -1686,6 +1692,7 @@ fn workspace_backlog_detail_hint_preserves_selection() {
             "2026-01-01T00:00:00Z",
         ],
         &repo_root,
+        16,
     );
 
     // Chrono accepts the RFC 3339 form with a space between date and time.
@@ -1699,6 +1706,7 @@ fn workspace_backlog_detail_hint_preserves_selection() {
             "2026-01-01 00:00:00Z",
         ],
         &repo_root,
+        16,
     );
     let mut spaced_shell = Command::new("sh");
     spaced_shell
@@ -1768,6 +1776,7 @@ fn workspace_backlog_detail_hint_preserves_selection() {
     let hint = command_line(
         &["workspace", "backlog", "--under", scope.to_str().unwrap()],
         &repo_root,
+        0,
     );
     // The hint is a POSIX shell command line, so it is followed the way a
     // shell would read it — quoting included — rather than re-split by hand.
@@ -1827,15 +1836,12 @@ fn workspace_backlog_detail_hint_preserves_selection() {
     // JSON stays one parseable value: no footer may ride along. The project
     // anchor moved with the fixture, so the collection is partial and exits
     // 16; the value must still parse.
-    repo.arc(&repo_root)
+    let partial = repo
+        .arc(&repo_root)
         .args(["workspace", "backlog", "--items", "--json"])
         .assert()
         .code(16);
-    let text = stdout(
-        repo.arc(&repo_root)
-            .args(["workspace", "backlog", "--items", "--json"]),
-    );
-    serde_json::from_str::<serde_json::Value>(&text).unwrap();
+    serde_json::from_slice::<serde_json::Value>(&partial.get_output().stdout).unwrap();
 }
 
 /// One timestamp interpretation across the queue: a legacy stamp (no `Z`)

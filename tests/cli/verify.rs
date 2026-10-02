@@ -1248,10 +1248,11 @@ fn check_names_a_probe_that_cannot_discharge() {
             .args(["status", "base-is-head", "--json"]),
     );
     assert_eq!(status["probes"][0]["undischargeable"], true, "{status}");
-    let check = json_stdout(
-        repo.arc(&worktree)
-            .args(["check", "base-is-head", "--json"]),
-    );
+    let check =
+        json_stdout_any_status(
+            repo.arc(&worktree)
+                .args(["check", "base-is-head", "--json"]),
+        );
     assert!(
         check["blockers"]
             .as_array()
@@ -1261,12 +1262,13 @@ fn check_names_a_probe_that_cannot_discharge() {
         "{check}"
     );
 
-    let text = stdout(repo.arc(&worktree).args(["check", "base-is-head"]));
+    let text = stdout_any_status(repo.arc(&worktree).args(["check", "base-is-head"]));
     assert!(text.contains("cannot discharge"), "{text}");
-    let explained = stdout(
-        repo.arc(&worktree)
-            .args(["check", "base-is-head", "--explain"]),
-    );
+    let explained =
+        stdout_any_status(
+            repo.arc(&worktree)
+                .args(["check", "base-is-head", "--explain"]),
+        );
     assert!(explained.contains("cannot discharge"), "{explained}");
 
     // Evidence claiming both a Fail and a Pass at one revision is
@@ -2617,10 +2619,11 @@ fn discrimination_renders_in_both_states_in_json_and_text() {
     assert!(shown.contains(": marker absent)"));
     assert!(shown.contains("(undiscriminated)"));
 
-    let explained = stdout(
-        repo.arc(&repo.root)
-            .args(["check", "both-states", "--explain"]),
-    );
+    let explained =
+        stdout_any_status(
+            repo.arc(&repo.root)
+                .args(["check", "both-states", "--explain"]),
+        );
     assert!(explained.contains("gate `fixable`: (discriminating: failed at "));
     assert!(explained.contains("gate `plain`: (undiscriminated)"));
 }

@@ -634,7 +634,7 @@ fn review_queue_groups_uncovered_changes_and_names_an_open_pass() {
     assert!(grouped.contains(&changes[2].0), "{grouped}");
     assert!(grouped.contains(&changes[3].0), "{grouped}");
 
-    let check = stdout(repo.arc(&changes[0].1).args(["check", "queue-pass-1"]));
+    let check = stdout_any_status(repo.arc(&changes[0].1).args(["check", "queue-pass-1"]));
     assert!(
         check.contains(&format!("pass {pass} (2 changes):")),
         "{check}"
