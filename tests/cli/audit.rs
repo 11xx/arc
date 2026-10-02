@@ -1204,6 +1204,186 @@ fn a_finding_left_open_at_ship_takes_a_disposition_after_integration() {
         log.contains("post-integration-disposition-recorded"),
         "{log}"
     );
+    // A finding filed on its own belongs to no verdict, so the review view's
+    // open findings are where its later disposition has to show.
+    let review_json =
+        json_stdout(
+            repo.arc(&repo.root)
+                .args(["review", "shipped-finding", "--json"]),
+        );
+    assert_eq!(review_json["schema"], "arc-review/5");
+    let open = &review_json["open_findings"][0];
+    assert_eq!(open["id"], finding_id.as_str());
+    assert_eq!(open["after_integration"][0]["status"], "resolved");
+}
+
+#[test]
+fn sarif_hides_a_shipped_finding_only_once_a_later_disposition_releases_it() {
+    let repo = repo_forbidding_self_approval();
+    let finding_id = finding_left_open_at_ship(&repo, "sarif-later");
+    let reported = |repo: &Repo| -> bool {
+        let sarif = json_stdout(repo.arc(&repo.root).args([
+            "findings",
+            "sarif-later",
+            "--format",
+            "sarif",
+        ]));
+        sarif["runs"][0]["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|result| result["ruleId"] == finding_id.as_str())
+    };
+    assert!(reported(&repo));
+
+    for status in ["still-open", "disputed"] {
+        repo.arc(&repo.root)
+            .args(["resolve", "sarif-later", &finding_id, "--status", status])
+            .assert()
+            .success();
+        assert!(reported(&repo), "a later {status} still leaves it open");
+    }
+    repo.arc(&repo.root)
+        .args([
+            "resolve",
+            "sarif-later",
+            &finding_id,
+            "--status",
+            "resolved",
+        ])
+        .assert()
+        .success();
+    assert!(!reported(&repo));
+}
+
+#[test]
+fn import_refuses_a_post_integration_disposition_its_change_could_not_take() {
+    let source = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&source, "crafted");
+    let file = |summary: &str| -> String {
+        stdout(source.arc(&worktree).args([
+            "finding",
+            "crafted",
+            "--summary",
+            summary,
+            "--severity",
+            "minor",
+        ]))
+        .lines()
+        .find_map(|line| line.strip_prefix("finding: "))
+        .unwrap()
+        .to_string()
+    };
+    let open_id = file("left open at ship");
+    let released_id = file("accepted at ship");
+    source
+        .arc(&source.root)
+        .args([
+            "resolve",
+            "crafted",
+            &released_id,
+            "--status",
+            "accepted-risk",
+        ])
+        .assert()
+        .success();
+    source
+        .arc(&source.root)
+        .args(["integrate", "crafted", "--debt", "quota"])
+        .assert()
+        .success();
+    source
+        .arc(&source.root)
+        .args(["resolve", "crafted", &open_id, "--status", "resolved"])
+        .assert()
+        .success();
+    source
+        .arc(&source.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args(["audit", "crafted", "--verdict", "comment-only"])
+        .assert()
+        .success();
+    let bundle_path = source.home.join("crafted.json");
+    source
+        .arc(&source.root)
+        .args([
+            "export",
+            "crafted",
+            "--output",
+            bundle_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let bundle: serde_json::Value =
+        serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
+    let change_id = bundle["change_id"].as_str().unwrap().to_string();
+    let import = |name: &str, bundle: &serde_json::Value| {
+        let path = source.home.join(name);
+        fs::write(&path, json_file_bytes(bundle)).unwrap();
+        let destination = Repo::new();
+        let assert = destination
+            .arc(&destination.root)
+            .args(["import", path.to_str().unwrap()])
+            .assert();
+        (destination, assert)
+    };
+
+    // Untampered, the history imports: each refusal below is the tampering.
+    let (_, assert) = import("untampered.json", &bundle);
+    assert.success();
+
+    let mut released = bundle.clone();
+    released["events"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|event| event["event_type"] == "post-integration-disposition-recorded")
+        .unwrap()["finding_id"] = serde_json::json!(released_id);
+    refresh_bundle_checksum(&mut released);
+    let (destination, assert) = import("released.json", &released);
+    assert
+        .failure()
+        .stderr(predicates::str::contains("was accepted-risk when"));
+    assert!(!destination
+        .root
+        .join(".git/arc/changes")
+        .join(&change_id)
+        .exists());
+
+    let unintegrated = |also_dropped: &[&str]| {
+        let mut open = bundle.clone();
+        open["events"].as_array_mut().unwrap().retain(|event| {
+            let event_type = event["event_type"].as_str().unwrap();
+            !["change-integrated", "change-closed", "integration-asserted"].contains(&event_type)
+                && !also_dropped.contains(&event_type)
+        });
+        open["event_count"] = serde_json::json!(open["events"].as_array().unwrap().len());
+        refresh_bundle_checksum(&mut open);
+        open
+    };
+    let (destination, assert) = import("open.json", &unintegrated(&[]));
+    assert
+        .failure()
+        .stderr(predicates::str::contains("before change"));
+    assert!(!destination
+        .root
+        .join(".git/arc/changes")
+        .join(&change_id)
+        .exists());
+
+    // Every integrated-only event is held to the same phase, an audit too.
+    let (destination, assert) = import(
+        "open-audit.json",
+        &unintegrated(&["post-integration-disposition-recorded"]),
+    );
+    assert.failure().stderr(predicates::str::contains(
+        "records post-integration work before",
+    ));
+    assert!(!destination
+        .root
+        .join(".git/arc/changes")
+        .join(&change_id)
+        .exists());
 }
 
 #[test]

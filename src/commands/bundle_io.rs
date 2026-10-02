@@ -437,8 +437,9 @@ fn validate_import_candidate(
     // Replayability is not admissibility. A bundle legitimately carries the
     // lifecycle events a command would not append by hand, so the CLI's own
     // permission table is the wrong question here; what an import must still
-    // refuse is a history that contradicts itself — a change closed twice, or
-    // work recorded after it closed.
+    // refuse is a history that contradicts itself — a change closed twice,
+    // work recorded after it closed, or post-integration work recorded before
+    // it integrated.
     let mut closed_at: Option<&str> = None;
     let mut integrated = false;
     for event in &candidate {
@@ -474,6 +475,12 @@ fn validate_import_candidate(
                     validated.bundle.change_id
                 );
             }
+        } else if append_permission(&event.payload) == AppendPermission::IntegratedOnlyFact {
+            bail!(
+                "bundled event {} records post-integration work before {} integrated",
+                event.event_id,
+                validated.bundle.change_id
+            );
         }
         if terminal {
             closed_at = Some(&event.event_id);
