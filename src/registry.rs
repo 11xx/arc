@@ -121,13 +121,9 @@ pub(crate) fn journal_directories(cfg: &Config) -> Result<Vec<(String, PathBuf)>
     Ok(dirs)
 }
 
-/// Every project arc knows about, sorted by journal directory.
-///
-/// The default root holds one directory per project; `[journals] dirs` may
-/// route a project's journal elsewhere, and those are registered too — that
-/// config is the documented way to give a non-repository project a journal, so
-/// a registry that ignored it would miss exactly the projects that need it.
-pub fn projects(cfg: &Config) -> Result<Vec<Project>> {
+/// Every hot journal directory arc knows about, with its slug, sorted: those
+/// under the default root and those `[journals] dirs` routes elsewhere.
+pub(crate) fn known_journals(cfg: &Config) -> Result<Vec<(String, PathBuf)>> {
     let mut dirs = journal_directories(cfg)?;
     for directory in cfg.journal_dirs.values() {
         let path = crate::config::expand_tilde(directory)?;
@@ -141,9 +137,18 @@ pub fn projects(cfg: &Config) -> Result<Vec<Project>> {
         dirs.push((slug, path));
     }
     dirs.sort();
+    Ok(dirs)
+}
 
+/// Every project arc knows about, sorted by journal directory.
+///
+/// The default root holds one directory per project; `[journals] dirs` may
+/// route a project's journal elsewhere, and those are registered too — that
+/// config is the documented way to give a non-repository project a journal, so
+/// a registry that ignored it would miss exactly the projects that need it.
+pub fn projects(cfg: &Config) -> Result<Vec<Project>> {
     let mut projects = Vec::new();
-    for (slug, journal_dir) in dirs {
+    for (slug, journal_dir) in known_journals(cfg)? {
         let configured = configured_anchor(cfg, &journal_dir)?;
         let (anchor, anchor_source) = match crate::journal::recorded_anchor(&journal_dir)? {
             Some(recorded) => (Some(PathBuf::from(recorded)), AnchorSource::Binding),
