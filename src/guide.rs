@@ -582,7 +582,9 @@ RUN A CHANGE
   changes. A conflict stops it and leaves the rebase in progress — the partial
   resolution is yours, and aborting would throw it away — with the conflicting
   files and the commands that finish the replay. Resolve, `git rebase
-  --continue`, then `arc snapshot --verify`.
+  --continue`, then `arc snapshot --verify`. Over another actor's live claim
+  an unattributed rebase refuses before the branch moves, and the change stays
+  locked from that check until the replayed head is recorded.
 
   Several changes, or `--tag`, make `integrate` a queue: dependency order, and
   per member the two repairs that need no judgement — replaying a branch its
