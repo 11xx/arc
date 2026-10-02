@@ -556,6 +556,11 @@ RUN A CHANGE
   A change whose worktree is gone has nowhere to gate: give it one with `git
   worktree add`, or record evidence arc did not run with `verify --attest`.
 
+  `done` moves its caller's live claim to `verifying` before it snapshots,
+  and only after every snapshot input is accepted — the attribution,
+  `--thread`, and each `--journal-ref` — so an input it refuses leaves the
+  claim's stage and its clock as they were.
+
   A profile with no declared gate runs none: `done` still snapshots and
   prints the check state, saying plainly that no gate is declared rather
   than reporting a pass, and `verify --all` and `verify --against` still
