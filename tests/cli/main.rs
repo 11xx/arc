@@ -55,7 +55,7 @@ mod tree_gates;
 mod verify;
 mod workspace;
 
-use common::Repo;
+use common::{PredicateBooleanExt, Repo};
 
 #[test]
 fn doctor_groups_advice_and_ignores_closed_claims() {
@@ -80,6 +80,46 @@ fn nested_leaf_at_top_level_suggests_its_command_path() {
         .assert()
         .code(2)
         .stderr(predicates::str::contains("journal note"));
+}
+
+/// A value that starts with `-` reads as the next option. The refusal names
+/// it and the attached form that passes it, not a similarly spelled option or
+/// a trailing positional.
+#[test]
+fn a_hyphenated_option_value_names_the_attached_form() {
+    let repo = Repo::new();
+    for (args, typed) in [
+        (
+            ["keep", "x", "--kind", "verified", "--evidence", "--at 2026"],
+            "--at 2026",
+        ),
+        (
+            ["keep", "x", "--kind", "verified", "--evidence", "--at"],
+            "--at",
+        ),
+    ] {
+        repo.arc(&repo.root)
+            .args(args)
+            .assert()
+            .code(2)
+            .stderr(predicates::str::contains(format!(
+                "unexpected argument '{typed}' found"
+            )))
+            .stderr(predicates::str::contains(format!(
+                "attach it: '--evidence={typed}'"
+            )))
+            .stderr(predicates::str::contains("--actor").not())
+            .stderr(predicates::str::contains(format!("'-- {typed}'")).not());
+    }
+    // An option that takes no value leaves clap's own reading of the token.
+    repo.arc(&repo.root)
+        .args(["integrate", "x", "--dry-run", "--nope"])
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains(
+            "unexpected argument '--nope' found",
+        ))
+        .stderr(predicates::str::contains("attach it").not());
 }
 
 #[test]

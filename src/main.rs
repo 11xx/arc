@@ -2764,6 +2764,66 @@ fn parse_cli() -> Result<Cli, clap::Error> {
     Ok(cli)
 }
 
+/// Name the attached form when the unknown argument was meant as the value of
+/// the long option typed before it.
+///
+/// A value that starts with `-` reads as the next option, so `--evidence
+/// "--at …"` leaves `--at …` unknown, and clap's tips — a similarly spelled
+/// option, or `-- --at …` — pass it as something else. Attached with `=`, it
+/// is the option's value.
+fn attach_hyphenated_value_tip(error: &mut clap::Error) {
+    use clap::error::{ContextKind, ContextValue};
+    let Some(ContextValue::String(invalid)) = error.get(ContextKind::InvalidArg) else {
+        return;
+    };
+    let invalid = invalid.clone();
+    let args = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let Some(position) = args.iter().position(|arg| *arg == invalid) else {
+        return;
+    };
+    let Some((option, before)) = args[..position].split_last() else {
+        return;
+    };
+    let Some(long) = option
+        .strip_prefix("--")
+        .filter(|name| !name.is_empty() && !name.contains('='))
+    else {
+        return;
+    };
+    let mut command = Cli::command();
+    command.build();
+    for arg in before {
+        if let Some(subcommand) = command.find_subcommand(arg).cloned() {
+            command = subcommand;
+        }
+    }
+    let takes_value = command
+        .get_arguments()
+        .any(|arg| arg.get_long() == Some(long) && arg.get_action().takes_values());
+    if !takes_value {
+        return;
+    }
+    error.remove(ContextKind::SuggestedArg);
+    error.insert(
+        ContextKind::Suggested,
+        ContextValue::StyledStrs(vec![format!(
+            concat!(
+                "'{0}' takes a value; to pass one that starts with '-', ",
+                "attach it: '{0}={1}'"
+            ),
+            option, invalid
+        )
+        .into()]),
+    );
+    error.insert(
+        ContextKind::Usage,
+        ContextValue::StyledStr(command.render_usage()),
+    );
+}
+
 fn typed_on_command_line(matches: Option<&ArgMatches>, id: &str) -> bool {
     matches.and_then(|matches| matches.value_source(id)) == Some(ValueSource::CommandLine)
 }
@@ -2785,8 +2845,11 @@ fn main() {
 
     let cli = match parse_cli() {
         Ok(cli) => cli,
-        Err(error) => {
+        Err(mut error) => {
             let kind = error.kind();
+            if kind == clap::error::ErrorKind::UnknownArgument {
+                attach_hyphenated_value_tip(&mut error);
+            }
             let typed = std::env::args().nth(1);
             // An exact redirect replaces clap's guess rather than printing
             // beside it. Its similarity search reaches for whatever is
