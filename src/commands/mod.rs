@@ -875,6 +875,28 @@ pub fn parse_duration(raw: &str) -> Result<u64> {
         .context("duration is too large")
 }
 
+/// A duration in the units `parse_duration` reads: hours and minutes, with
+/// seconds kept below an hour where they still matter to a reader.
+pub(crate) fn format_duration(seconds: u64) -> String {
+    if seconds == 0 {
+        return "0s".into();
+    }
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+    let mut out = String::new();
+    if hours > 0 {
+        out.push_str(&format!("{hours}h"));
+    }
+    if minutes > 0 {
+        out.push_str(&format!("{minutes}m"));
+    }
+    if secs > 0 && hours == 0 {
+        out.push_str(&format!("{secs}s"));
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 pub enum ListFormat {
     #[default]

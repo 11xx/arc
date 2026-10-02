@@ -269,7 +269,79 @@ fn watch_multiple_conditions_reports_the_winner() {
         ])
         .assert()
         .success()
-        .stdout("reached: stalled\n");
+        .stdout(predicates::str::starts_with(
+            "reached: stalled (stage launch for ",
+        ));
+}
+
+/// `stalled` is a stage clock, so its answer names the stage, how long the
+/// claim has sat in it, and that stage's budget. A renewal keeps the clock
+/// running; re-reporting the stage restarts it. Above an hour the rendered
+/// age drops its seconds, so an aged stage reads exactly without waiting.
+#[test]
+fn watch_stalled_names_the_stage_its_age_and_its_budget() {
+    let repo = Repo::new();
+    let opened = stdout(repo.arc(&repo.root).args(["begin", "stage-clock"]));
+    let change_id = opened_change_id(&opened);
+    let claim = [
+        "claim",
+        "stage-clock",
+        "--ttl",
+        "4h",
+        "--stage-budget",
+        "implementing=1h",
+    ];
+    repo.arc(&repo.root).args(claim).assert().success();
+    repo.arc(&repo.root)
+        .args(["stage", "stage-clock", "implementing"])
+        .assert()
+        .success();
+    age_event(&repo, &change_id, "stage-set", 2 * 3600);
+    let expected = "reached: stalled (stage implementing for 2h, budget 1h; reset by arc stage or arc snapshot)\n";
+    let watch = [
+        "watch",
+        "stage-clock",
+        "--until",
+        "stalled",
+        "--timeout",
+        "5",
+    ];
+    repo.arc(&repo.root)
+        .args(watch)
+        .assert()
+        .success()
+        .stdout(expected);
+
+    repo.arc(&repo.root).args(claim).assert().success();
+    repo.arc(&repo.root)
+        .args(watch)
+        .assert()
+        .success()
+        .stdout(expected);
+    let reached: serde_json::Value =
+        serde_json::from_str(&stdout(repo.arc(&repo.root).args(watch).arg("--json"))).unwrap();
+    assert_eq!(reached["condition"], "stalled");
+    assert_eq!(reached["stage"], "implementing");
+    assert_eq!(reached["budget_seconds"], 3600);
+    let age = reached["age_seconds"].as_u64().unwrap();
+    assert!((2 * 3600..2 * 3600 + 60).contains(&age), "{reached}");
+
+    repo.arc(&repo.root)
+        .args(["stage", "stage-clock", "implementing"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args([
+            "watch",
+            "stage-clock",
+            "--until",
+            "stalled",
+            "--timeout",
+            "1",
+        ])
+        .assert()
+        .code(2)
+        .stdout("timeout: stalled\n");
 }
 
 /// Every tag reader normalises before matching, so a padded tag that selects a
@@ -1083,7 +1155,13 @@ fn watch_tag_all_waits_for_every_member() {
         ])
         .assert()
         .success()
-        .stdout("reached: stalled (2 changes)\n");
+        .stdout(
+            predicates::str::starts_with("reached: stalled (2 changes; first-")
+                .and(predicates::str::contains("; second-"))
+                .and(predicates::str::ends_with(
+                    ", budget 1s; reset by arc stage or arc snapshot)\n",
+                )),
+        );
 }
 
 #[test]

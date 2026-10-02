@@ -143,14 +143,40 @@ struct WatchHit {
     condition: WatchUntil,
     event_id: Option<String>,
     provisional: Option<String>,
+    stall: Option<Stall>,
 }
 
 /// One condition that holds, with the event that made it hold when one can be
-/// named. The provisional reason travels with an approving verdict so the
-/// watch diagnostic does not have to replay the selection a second time.
+/// named. The provisional reason travels with an approving verdict, and the
+/// stall timing with a stalled claim, so the watch diagnostic does not have to
+/// replay the selection a second time.
 struct WatchReached {
     event_id: Option<String>,
     provisional: Option<String>,
+    stall: Option<Stall>,
+}
+
+/// Why a claim reads as stalled: it has sat in one stage longer than that
+/// stage's budget. The clock is the stage, so a reader can tell an executor
+/// that is over budget while busy from one that is hung only by naming it.
+struct Stall {
+    stage: String,
+    age_seconds: u64,
+    budget_seconds: u64,
+}
+
+/// The only events that restart a stage's clock.
+const STALL_RESET: &str = "reset by arc stage or arc snapshot";
+
+impl Stall {
+    fn describe(&self) -> String {
+        format!(
+            "stage {} for {}, budget {}",
+            self.stage,
+            format_duration(self.age_seconds),
+            format_duration(self.budget_seconds)
+        )
+    }
 }
 
 pub struct WatchArgs<'a> {
@@ -352,39 +378,70 @@ fn report_timeout(until: &[WatchUntil], json: bool) -> Result<()> {
 
 fn report_reached(selection: &WatchSelection, hits: &[WatchHit], until: &[WatchUntil]) {
     match selection {
-        WatchSelection::Single(_) => println!(
-            "reached: {}{}",
-            hits[0].condition.label(),
-            provisional_suffix(&hits[0].provisional)
-        ),
-        WatchSelection::Tagged(_, WatchQuorum::Any) => {
+        WatchSelection::Single(_) => {
+            let hit = &hits[0];
+            let mut details = Vec::new();
+            if let Some(stall) = &hit.stall {
+                details.extend([stall.describe(), STALL_RESET.to_string()]);
+            }
             println!(
-                "reached: {} ({}){}",
-                hits[0].condition.label(),
-                hits[0].change_id,
-                provisional_suffix(&hits[0].provisional)
+                "reached: {}{}{}",
+                hit.condition.label(),
+                parenthesized(&details),
+                provisional_suffix(&hit.provisional)
+            )
+        }
+        WatchSelection::Tagged(_, WatchQuorum::Any) => {
+            let hit = &hits[0];
+            let details = match &hit.stall {
+                Some(stall) => vec![
+                    format!("{}: {}", hit.change_id, stall.describe()),
+                    STALL_RESET.to_string(),
+                ],
+                None => vec![hit.change_id.clone()],
+            };
+            println!(
+                "reached: {}{}{}",
+                hit.condition.label(),
+                parenthesized(&details),
+                provisional_suffix(&hit.provisional)
             )
         }
         WatchSelection::Tagged(change_ids, WatchQuorum::All) => {
+            let mut details = vec![format!("{} changes", change_ids.len())];
+            let stalls = hits
+                .iter()
+                .filter_map(|hit| {
+                    hit.stall
+                        .as_ref()
+                        .map(|stall| format!("{}: {}", hit.change_id, stall.describe()))
+                })
+                .collect::<Vec<_>>();
+            if !stalls.is_empty() {
+                details.extend(stalls);
+                details.push(STALL_RESET.to_string());
+            }
             let reasons = hits
                 .iter()
                 .filter_map(|hit| hit.provisional.as_deref().map(render::one_line))
                 .collect::<Vec<_>>();
-            if reasons.is_empty() {
-                println!(
-                    "reached: {} ({} changes)",
-                    until_labels(until),
-                    change_ids.len()
-                );
-            } else {
-                println!(
-                    "reached: {} ({} changes; provisional: {})",
-                    until_labels(until),
-                    change_ids.len(),
-                    reasons.join(", ")
-                );
+            if !reasons.is_empty() {
+                details.push(format!("provisional: {}", reasons.join(", ")));
             }
+            println!(
+                "reached: {}{}",
+                until_labels(until),
+                parenthesized(&details)
+            );
         }
+    }
+}
+
+fn parenthesized(details: &[String]) -> String {
+    if details.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", details.join("; "))
     }
 }
 
@@ -419,7 +476,8 @@ fn watch_hook_payload(
 /// One satisfied member. `event_id` is present only when an event satisfied
 /// the condition: a field that otherwise holds an event ID should not
 /// sometimes hold a placeholder, and a condition derived from elapsed time or
-/// from policy was satisfied by no event at all.
+/// from policy was satisfied by no event at all. A stalled member carries
+/// `stage`, `age_seconds`, and `budget_seconds`, the stage clock it ran past.
 fn watch_hit_object(hit: &WatchHit) -> serde_json::Value {
     let mut value = serde_json::json!({
         "change_id": hit.change_id,
@@ -430,6 +488,11 @@ fn watch_hit_object(hit: &WatchHit) -> serde_json::Value {
     }
     if let Some(reason) = &hit.provisional {
         value["provisional"] = reason.clone().into();
+    }
+    if let Some(stall) = &hit.stall {
+        value["stage"] = stall.stage.clone().into();
+        value["age_seconds"] = stall.age_seconds.into();
+        value["budget_seconds"] = stall.budget_seconds.into();
     }
     value
 }
@@ -457,6 +520,7 @@ fn watch_until_reached(
                         condition: *condition,
                         event_id: reached.event_id,
                         provisional: reached.provisional,
+                        stall: reached.stall,
                     });
                     break;
                 }
@@ -546,15 +610,21 @@ fn watch_reached(
         WatchUntil::Snapshot => state.latest_patchset().is_some().then(|| WatchReached {
             event_id: snapshot_event(),
             provisional: None,
+            stall: None,
         }),
-        WatchUntil::Stalled => state
-            .claim
-            .as_ref()
-            .is_some_and(|claim| state::claim_timing_at(claim, chrono::Utc::now()).stale)
-            .then_some(WatchReached {
+        WatchUntil::Stalled => state.claim.as_ref().and_then(|claim| {
+            let timing = state::claim_timing_at(claim, chrono::Utc::now());
+            let budget_seconds = timing.budget_seconds.filter(|_| timing.stale)?;
+            Some(WatchReached {
                 event_id: None,
                 provisional: None,
-            }),
+                stall: Some(Stall {
+                    stage: timing.stage,
+                    age_seconds: timing.age_seconds,
+                    budget_seconds,
+                }),
+            })
+        }),
         // Any verdict against the patchset under review, whatever it concluded.
         // `ready` cannot express this: a review returning changes-requested or
         // comment-only never satisfies it, so the watch runs to its timeout and
@@ -574,6 +644,7 @@ fn watch_reached(
                 .map(|verdict| WatchReached {
                     event_id: Some(verdict.event_id.clone()),
                     provisional: None,
+                    stall: None,
                 })
         }),
         // The sole authoritative verdict, which is the same question the
@@ -605,6 +676,7 @@ fn watch_reached(
                         .map(|authoritative| WatchReached {
                             event_id: Some(authoritative.event_id.clone()),
                             provisional: authoritative.provisional.clone(),
+                            stall: None,
                         })
                 })
         }
@@ -618,6 +690,7 @@ fn watch_reached(
             .then_some(WatchReached {
                 event_id: None,
                 provisional: None,
+                stall: None,
             }),
         WatchUntil::Ready => ctx
             .report(store, &state)?
@@ -625,6 +698,7 @@ fn watch_reached(
             .then_some(WatchReached {
                 event_id: None,
                 provisional: None,
+                stall: None,
             }),
         WatchUntil::Blocked => {
             state
@@ -634,11 +708,13 @@ fn watch_reached(
                 .map(|event_id| WatchReached {
                     event_id: Some(event_id),
                     provisional: None,
+                    stall: None,
                 })
         }
         WatchUntil::BriefRecorded => state.latest_brief().map(|brief| WatchReached {
             event_id: Some(brief.event_id.clone()),
             provisional: None,
+            stall: None,
         }),
         WatchUntil::Integrated => state
             .closure
@@ -647,10 +723,12 @@ fn watch_reached(
             .map(|closure| WatchReached {
                 event_id: Some(closure.event_id.clone()),
                 provisional: None,
+                stall: None,
             }),
         WatchUntil::Closed => state.closure.as_ref().map(|closure| WatchReached {
             event_id: Some(closure.event_id.clone()),
             provisional: None,
+            stall: None,
         }),
     })
 }

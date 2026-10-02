@@ -871,6 +871,16 @@ enum Cmd {
         /// `stalled`, `reviewed`, `approved`, `gates-green`, `ready`,
         /// `blocked`, `brief-recorded`, `integrated`, or `closed`.
         ///
+        /// `stalled` is a stage clock, not an activity check: it holds once
+        /// the change's live claim has sat in one stage longer than that
+        /// stage's budget (`arc claim --stage-budget`), counted from its last
+        /// `arc stage`, or from the claim while it is still at `launch`. Only
+        /// `arc stage`, re-reporting the current stage included, or a
+        /// snapshot under the claim restarts the clock; output, logs, and
+        /// claim renewals do not. The reached line and the JSON name the
+        /// stage, its age, and its budget. On a journal artifact, `stalled`
+        /// means the claim's lease ran out.
+        ///
         /// `reviewed` returns on any verdict against the patchset under
         /// review, whatever it concluded, and names the verdict event so the
         /// caller can read which. `approved` returns on the latest approving
@@ -893,7 +903,8 @@ enum Cmd {
         #[arg(long = "exec")]
         exec_command: Option<String>,
         /// Emit the outcome as one JSON object, naming the change, the
-        /// condition, and the event that satisfied it
+        /// condition, and the event that satisfied it; `stalled` adds
+        /// `stage`, `age_seconds`, and `budget_seconds`
         #[arg(long)]
         json: bool,
     },
