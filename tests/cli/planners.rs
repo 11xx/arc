@@ -210,3 +210,53 @@ fn represented_human_does_not_inherit_model_and_fenced_examples_are_not_metadata
     );
     assert_ne!(view["planner_status"], "malformed");
 }
+
+/// Effort is a natural thing to name beside a model, and the planner object
+/// refuses it as a field, so `--help` states the accepted fields and where
+/// effort goes, and the refusal names them too.
+#[test]
+fn planned_by_help_and_refusal_name_the_accepted_fields() {
+    let repo = Repo::new();
+    let normalize = |text: String| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let help = normalize(stdout(
+        repo.arc(&repo.root).args(["journal", "plan", "--help"]),
+    ));
+    for rule in [
+        "whose only fields are `actor`, `harness`, `session`, and `model`, each a nonempty string, with at least one present",
+        "Effort is not a field: it rides in `model` as `<model>#<effort>`",
+    ] {
+        assert!(help.contains(rule), "missing {rule:?} in: {help}");
+    }
+
+    repo.arc(&repo.root)
+        .args([
+            "journal",
+            "plan",
+            "effort-field",
+            "--title",
+            "Plan",
+            "--planned-by",
+            r#"{"model":"model-a","effort":"high"}"#,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(concat!(
+            "unknown planner field effort; the fields are actor, harness, session, ",
+            "and model, and effort rides in model as <model>#<effort>"
+        )));
+
+    let path = stdout(repo.arc(&repo.root).args([
+        "journal",
+        "plan",
+        "effort-in-model",
+        "--title",
+        "Plan",
+        "--planned-by",
+        r#"{"harness":"test","model":"model-a#high"}"#,
+    ]));
+    let body = fs::read_to_string(path.trim()).unwrap();
+    assert!(
+        body.contains(r#"planned-by: {"harness":"test","model":"model-a#high"}"#),
+        "{body}"
+    );
+}
