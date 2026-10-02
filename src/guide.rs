@@ -502,7 +502,8 @@ RUN A CHANGE
                                      and a summary. `--help` has the rest.
     --provisional <why>              It gates, and owes a second judgment.
     --relation corroborates          Support the standing verdict, not replace it.
-  arc resolve                        Dispose of a finding.
+  arc resolve                        Dispose of a finding; after integration,
+                                     one left open when the change shipped.
     --evidence-event <id>            Cite the verification run that justifies it.
   arc check                          Integration preflight; exit code names the blocker.
   arc integrate <c>...               Guarded --no-ff merge once the gates are green.
@@ -960,6 +961,14 @@ REVIEW COVERAGE AND DEBT
   from an identity other than the author — otherwise the obligation would
   discharge itself — though anyone may audit into `changes-requested`, since
   raising problems needs no independence.
+
+  A review finding left open when the change shipped stays open in what
+  shipped. `arc resolve` on the integrated change records its later
+  disposition, such as `resolved --commit <fix>`, `obsolete`, or
+  `accepted-risk`, beside that state, and readers show both: open at ship,
+  and how it stood after integration. A finding resolved, accepted-risk, or
+  obsolete at integration takes none. Such a disposition is not a verdict
+  and discharges no debt.
 
   Where `forbid_self_approval` is off, an approving verdict from the identity
   that wrote the work is recorded rather than refused, and `arc review` and
