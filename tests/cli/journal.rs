@@ -13349,6 +13349,125 @@ fn cross_project_begin_consumes_a_foreign_todo_in_its_own_journal() {
     );
 }
 
+/// Every flag that takes a journal reference, given `reference`, against
+/// the change `linked` in `cwd`.
+fn journal_reference_refusal(repo: &Repo, cwd: &Path, reference: &str) -> Vec<String> {
+    let snapshot = repo
+        .arc(cwd)
+        .args(["snapshot", "linked", "--journal-ref", reference])
+        .assert()
+        .failure();
+    let begin = repo
+        .arc(cwd)
+        .args([
+            "begin",
+            "other",
+            "--no-worktree",
+            "--from-journal",
+            reference,
+        ])
+        .assert()
+        .failure();
+    let brief = repo
+        .arc(cwd)
+        .args([
+            "brief",
+            "linked",
+            "--body-file",
+            "-",
+            "--must-read",
+            reference,
+        ])
+        .write_stdin("Read it.\n")
+        .assert()
+        .failure();
+    [snapshot, begin, brief]
+        .iter()
+        .map(|assert| String::from_utf8_lossy(&assert.get_output().stderr).to_string())
+        .collect()
+}
+
+#[test]
+fn a_journal_reference_refusal_names_the_reference_that_resolves() {
+    let owner = Repo::new();
+    let foreign = filed_artifact(&owner, "todo", "elsewhere", "do it\n");
+    let owner_journal = fs::canonicalize(journal_dir(&owner)).unwrap();
+    let qualified = format!("{}::{foreign}", owner_journal.display());
+    let promoter = sibling_project(&owner, "promoter");
+    owner
+        .arc(&promoter)
+        .args(["begin", "linked", "--no-worktree"])
+        .assert()
+        .success();
+    owner.commit(&promoter, "work.txt", "work\n", "test: work");
+    let own = stdout(
+        owner
+            .arc(&promoter)
+            .args(["journal", "todo", "here", "--body-file", "-"])
+            .write_stdin("here\n"),
+    );
+    let own = PathBuf::from(own.trim());
+    let own_name = own.file_name().unwrap().to_string_lossy().to_string();
+
+    // A filename this journal does not hold names each journal that does.
+    for stderr in journal_reference_refusal(&owner, &promoter, &foreign) {
+        assert!(stderr.contains("no such artifact"), "{stderr}");
+        assert!(
+            stderr.contains(&format!("another project's journal holds it: {qualified}")),
+            "{stderr}"
+        );
+    }
+    // A filename no journal holds names the qualified form.
+    let nowhere = "20990101T000000Z-nowhere-todo.md";
+    for stderr in journal_reference_refusal(&owner, &promoter, nowhere) {
+        assert!(stderr.contains("no such artifact"), "{stderr}");
+        assert!(
+            stderr.contains(&format!("<journal-dir>::{nowhere}")),
+            "{stderr}"
+        );
+    }
+    // A path to another project's artifact names its qualified reference.
+    let foreign_path = owner_journal.join(&foreign).display().to_string();
+    for stderr in journal_reference_refusal(&owner, &promoter, &foreign_path) {
+        assert!(
+            stderr.contains(&format!("name {foreign_path} as {qualified}")),
+            "{stderr}"
+        );
+    }
+    // A path to this project's artifact names its filename.
+    let own_path = own.display().to_string();
+    for stderr in journal_reference_refusal(&owner, &promoter, &own_path) {
+        assert!(
+            stderr.contains(&format!("name {own_path} as {own_name}")),
+            "{stderr}"
+        );
+    }
+    // A path that is no journal artifact names both forms.
+    for stderr in journal_reference_refusal(&owner, &promoter, "../plan.md") {
+        assert!(stderr.contains("<journal-dir>::<file>"), "{stderr}");
+        assert!(stderr.contains("not a path: ../plan.md"), "{stderr}");
+    }
+    // A journal write given a path to another project's artifact names the
+    // journal that owns it; given its own artifact's path, the filename.
+    owner
+        .arc(&promoter)
+        .args(["journal", "verified", &foreign_path])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(format!(
+            "{foreign} belongs to the journal at {}",
+            owner_journal.display()
+        )));
+    owner
+        .arc(&promoter)
+        .args(["journal", "verified", &own_path])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(format!(
+            "name {own_path} as {own_name}"
+        )));
+}
+
 #[test]
 fn cross_project_plan_ref_briefs_from_the_owning_journal() {
     let owner = Repo::new();

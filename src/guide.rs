@@ -1350,8 +1350,12 @@ RULES THAT CHANGE WHAT YOU DO
     another project's journal holds, `<journal-dir>` being the absolute path
     that project's `arc journal dir` prints; the file is read hot, then cold.
     A directory that is not a journal, or a file it does not hold, is refused
-    naming both. The change records the reference as given, with digests read
-    from the owning journal. A cross-project `begin --from-journal` or `brief
+    naming both. These references and a `brief --must-read` artifact refuse a
+    path by naming the reference that resolves it, and a filename this
+    project's journal does not hold by naming each other known journal that
+    holds it as `<journal-dir>::<file>`, or that form when none does. The
+    change records the reference as given, with digests read from the owning
+    journal. A cross-project `begin --from-journal` or `brief
     --plan-ref` appends a `promoted` event to the owning journal naming this
     repository id, change, and checkout, and a non-plan source is consumed
     there as superseded by that change. The owning journal's `inventory`,

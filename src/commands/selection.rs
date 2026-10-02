@@ -77,7 +77,9 @@ fn artifact_name(ctx: &Ctx, locator: &str, reference: &str) -> Result<String> {
     }
     let archived = crate::journal::archive_dir(&location.hot).join(&location.file);
     if !location.hot.join(&location.file).is_file() && !archived.is_file() {
-        bail!("unknown-locator: {locator:?} names no artifact the journal holds");
+        let searched = format!("{} or its cold archive", location.hot.display());
+        let missing = crate::journal::missing_artifact(&location, &searched);
+        bail!("unknown-locator: {locator:?}: {missing}");
     }
     if !location.foreign {
         return Ok(location.file);
