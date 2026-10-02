@@ -1364,6 +1364,55 @@ fn sarif_keeps_an_audit_finding_its_dispositions_leave_unresolved() {
     assert!(!reported.contains(&resolved), "{reported:?}");
 }
 
+#[test]
+fn review_lists_every_finding_that_shipped_unresolved_with_its_later_history() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "review-unresolved");
+    let change = "review-unresolved";
+    let still_open = file_minor_finding(&repo, &worktree, change, "marked still-open");
+    let disputed = file_minor_finding(&repo, &worktree, change, "marked disputed");
+    let accepted = file_minor_finding(&repo, &worktree, change, "accepted before integration");
+    for (finding, status) in [
+        (&still_open, "still-open"),
+        (&disputed, "disputed"),
+        (&accepted, "accepted-risk"),
+    ] {
+        repo.arc(&repo.root)
+            .args(["resolve", change, finding, "--status", status])
+            .assert()
+            .success();
+    }
+    repo.arc(&repo.root)
+        .args(["integrate", change, "--debt", "quota"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["resolve", change, &still_open, "--status", "resolved"])
+        .assert()
+        .success();
+
+    let review = json_stdout(repo.arc(&repo.root).args(["review", change, "--json"]));
+    assert_eq!(review["schema"], "arc-review/5");
+    let listed = review["open_findings"].as_array().unwrap();
+    let entry = |id: &str| listed.iter().find(|finding| finding["id"] == id);
+    let still_open_entry = entry(&still_open).expect("a still-open finding shipped unresolved");
+    assert_eq!(still_open_entry["status"], "stillopen");
+    assert_eq!(
+        still_open_entry["after_integration"][0]["status"],
+        "resolved"
+    );
+    let disputed_entry = entry(&disputed).expect("a disputed finding shipped unresolved");
+    assert_eq!(disputed_entry["status"], "disputed");
+    assert!(disputed_entry.get("after_integration").is_none());
+    assert!(entry(&accepted).is_none(), "{listed:?}");
+
+    let text = stdout(repo.arc(&repo.root).args(["review", change]));
+    assert!(
+        text.contains("stillopen at ship; resolved after integration"),
+        "{text}"
+    );
+}
+
 /// The rule IDs `arc findings --format sarif` reports, which are finding IDs.
 fn sarif_rule_ids(repo: &Repo, change: &str, audit: bool) -> Vec<String> {
     let mut args = vec!["findings", change, "--format", "sarif"];
