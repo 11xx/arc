@@ -443,6 +443,8 @@ RUN A CHANGE
                                      and `delegate-exit:<handle>` are the
                                      expected evidence; any text is accepted.
   arc snapshot                       Record the current head as a patchset.
+    --contributors <a,b> | --solo    Declare who wrote it; required while
+                                     another actor holds a live claim.
     --journal-ref <file>             Name a journal artifact that framed the
                                      work; recorded with the digest read now.
     --thread <scheme:id>             Name the external thread it belongs to.
@@ -465,6 +467,7 @@ RUN A CHANGE
     --falsified-by <id> --predicted <why>
                                      Name the failure this pass answers.
   arc done                           Snapshot, run every gate, print check state.
+    --contributors <a,b> | --solo    As on `arc snapshot`.
   arc rebase [--verify]              Replay the branch onto its target, snapshot
                                      the new head, name the gates it owes.
   arc policy show                    Show effective project and operator rules,

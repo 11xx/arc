@@ -942,6 +942,40 @@ fn foreign_claim_requires_contributors_and_then_accepts_an_independent_lead_revi
 }
 
 #[test]
+fn done_over_a_foreign_claim_accepts_the_attribution_its_refusal_names() {
+    let repo = Repo::new();
+    let (change_id, worktree, claim_id) = claimed_work(&repo, "claimed-done", false);
+    let before = event_count(&repo, &change_id);
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .args(["done", "claimed-done"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(&claim_id))
+        .stderr(predicates::str::contains("--contributors or --solo"))
+        .stderr(predicates::str::contains("`arc done`"));
+    assert_eq!(event_count(&repo, &change_id), before);
+
+    let output = repo
+        .arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .args(["done", "claimed-done", "--contributors", "codex-luna"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("patchset: ps-01"), "{stdout}\n{stderr}");
+    assert!(!stderr.contains("active claim"), "{stderr}");
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "claimed-done"]));
+    assert_eq!(
+        status["latest_patchset"]["contributors"],
+        serde_json::json!(["codex-luna"]),
+        "{status}"
+    );
+}
+
+#[test]
 fn a_reviewer_matching_a_declared_contributor_is_reported_by_name() {
     let repo = repo_with_self_approval_policy();
     let (_, worktree, _) = claimed_work(&repo, "claimed-self", true);
