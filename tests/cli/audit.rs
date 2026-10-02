@@ -1412,6 +1412,58 @@ fn a_declared_debt_does_not_overrule_a_reviewer_who_refused() {
     assert_eq!(status["ready_reason"], "no-valid-approval", "{status}");
 }
 
+/// The debt a refused `integrate --debt` recorded is the one its retry
+/// reuses: the same judgment twice is one obligation, while a different
+/// reason is a different judgment and records its own.
+#[test]
+fn a_refused_integration_retried_with_the_same_debt_records_it_once() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = unreviewed_change(&repo, "retried");
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "Reviewer")
+        .args([
+            "review",
+            "retried",
+            "--verdict",
+            "changes-requested",
+            "--cause",
+            "executor",
+        ])
+        .assert()
+        .success();
+    let debts = || {
+        stdout(repo.arc(&repo.root).args([
+            "events",
+            "--change",
+            "retried",
+            "--type",
+            "debt-declared",
+        ]))
+        .lines()
+        .count()
+    };
+
+    for _ in 0..2 {
+        repo.arc(&repo.root)
+            .args(["integrate", "retried", "--debt", "shipping anyway"])
+            .assert()
+            .code(3);
+    }
+    assert_eq!(debts(), 1);
+    repo.arc(&repo.root)
+        .args(["debt", "retried", "--reason", "shipping anyway"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("debt already declared for"));
+    assert_eq!(debts(), 1);
+
+    repo.arc(&repo.root)
+        .args(["integrate", "retried", "--debt", "another reason"])
+        .assert()
+        .code(3);
+    assert_eq!(debts(), 2);
+}
+
 /// A waiver binds to the committed head inside its patchset, not only to the
 /// patchset label. Moving the branch without snapshotting must stale both the
 /// approval and the debt rather than integrating the older revision.
