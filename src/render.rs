@@ -379,6 +379,7 @@ pub fn markdown(
     if let Some(line) = merged_tree_line(report) {
         let _ = writeln!(w, "- {line}");
     }
+    let _ = writeln!(w, "- Next step: {}", next_step(report));
 
     if !report.blocker_status.blockers_ready.is_empty() {
         let _ = writeln!(w, "\n## Blocked by\n");
@@ -1329,8 +1330,124 @@ pub fn blocker_explanation(state: &ChangeState, report: &StatusReport) -> String
     if !notes.is_empty() {
         let _ = writeln!(out, "{notes}");
     }
-    let _ = writeln!(out, "Next step: {}", report.next_action);
+    let _ = writeln!(out, "Next step: {}", next_step(report));
     out
+}
+
+/// `next_action` as its reader acts on it: a command with the change filled
+/// in, or an instruction where no single command does it, followed by the
+/// code in parentheses. Every human `Next step:` line is this; JSON carries
+/// the code alone. A code without a rendering prints as itself.
+pub fn next_step(report: &StatusReport) -> String {
+    let code = report.next_action.as_str();
+    let change = report.change_id.as_str();
+    let review = format!("arc review {change} --verdict <verdict>");
+    // An approval rejection is its own code: the policy's reason, which
+    // already says what is wrong, so only the command follows it.
+    if report.approval_rejection_reason.as_deref() == Some(code) {
+        if report.verdict_contested {
+            return format!("{code}: {review}");
+        }
+        return format!("{code}; ask a reviewer independent of the contributors to run: {review}");
+    }
+    let external = format!(
+        "arc external verdict {change} --verdict <verdict> --decided-by <who> --reference <ref> --revision <revision>"
+    );
+    let step = match code.split_once(':').unwrap_or((code, "")) {
+        ("none", "closed") => "nothing; the change is closed".to_string(),
+        ("restore_branch", _) => match &report.latest_patchset {
+            Some(patchset) => format!(
+                "recreate branch {branch} at its newest patchset: git branch {branch} {}",
+                patchset.head,
+                branch = report.branch
+            ),
+            None => format!("recreate branch {}", report.branch),
+        },
+        ("restore_target", target) => format!(
+            "restore target branch {target}; the change is judged by the declarations on it"
+        ),
+        ("repair_blockers", _) => {
+            let withdrawals: String = dependencies_with_status(report, "wedged")
+                .map(|dependency| format!(" --remove-blocked-by {dependency}"))
+                .collect();
+            format!(
+                "withdraw the prerequisite closed without integrating, or name its replacement with --blocked-by: arc metadata {change}{withdrawals}"
+            )
+        }
+        ("wait_for", _) => {
+            let open = dependencies_with_status(report, "open").collect::<Vec<_>>();
+            let waiting = if open.is_empty() {
+                "the prerequisites".to_string()
+            } else {
+                open.join(", ")
+            };
+            format!("wait for {waiting} to integrate; arc blocker-status {change} reports them")
+        }
+        ("rebase", _) => format!("arc rebase {change}"),
+        ("snapshot", _) => format!("arc snapshot {change}"),
+        ("resolve_findings", _) => {
+            let finding = report
+                .open_blocking_findings
+                .first()
+                .map_or("<finding>", String::as_str);
+            format!(
+                "address blocking finding {finding}, then: arc resolve {change} {finding} --status resolved"
+            )
+        }
+        ("release_hold", hold) => format!("arc release-hold {change} {hold}"),
+        ("run_gate", gate) => format!("arc verify {change} --gate {gate}"),
+        ("clean_worktree", gate) => format!(
+            "commit or discard the worktree's uncommitted edits, then: arc verify {change} --gate {gate}"
+        ),
+        ("verify_against", target) => format!("arc verify {change} --against {target}"),
+        ("run_probe", name) => match report.probes.iter().find(|probe| probe.name == name) {
+            Some(probe) if probe.undischargeable => format!(
+                "record a brief based on the revision the work started from: arc brief {change} --body-file <file>"
+            ),
+            Some(probe) if probe.baseline_result != "fail" => format!(
+                "with {} checked out in the change's worktree: arc verify {change} --probe {name} --probe-phase baseline",
+                probe.baseline_revision
+            ),
+            _ => format!("arc verify {change} --probe {name}"),
+        },
+        ("declare_debt", _) => {
+            format!("arc debt {change} --reason \"<what was read and what review is owed>\"")
+        }
+        ("iterating", "clear") => format!("arc iterating {change} --off"),
+        ("external_changes_requested", _) => format!(
+            "address the external reviewer's requested changes, then record their next decision: {external}"
+        ),
+        ("external_rejected", _) => format!(
+            "revise what the external reviewer rejected, then record their next decision: {external}"
+        ),
+        ("comment-only", _) => format!(
+            "address the comment-only verdict, record any new commits with arc snapshot {change}, then ask for a fresh verdict: {review}"
+        ),
+        ("changes-requested", _) => format!(
+            "address the requested changes, record them with arc snapshot {change}, then ask for a fresh verdict: {review}"
+        ),
+        ("await_receiver", _) => {
+            format!("send the change to its receiver, then record their decision: {external}")
+        }
+        ("integrate", _) => format!("arc integrate {change}"),
+        ("request_review", _) => {
+            format!("ask a reviewer independent of the contributors to run: {review}")
+        }
+        _ => return code.to_string(),
+    };
+    format!("{step} ({code})")
+}
+
+fn dependencies_with_status<'a>(
+    report: &'a StatusReport,
+    status: &'a str,
+) -> impl Iterator<Item = &'a str> {
+    report
+        .blocker_status
+        .blockers_ready
+        .iter()
+        .filter(move |dependency| dependency.status == status)
+        .map(|dependency| dependency.change_id.as_str())
 }
 
 /// The required gates that do not answer for the head, and why each does not.
