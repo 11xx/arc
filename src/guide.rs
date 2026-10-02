@@ -597,8 +597,10 @@ RUN A CHANGE
   An undischargeable probe is recovered by a later brief version with
   `--base` at the revision the work started from, a cause, and the probes
   restated in `--probes-json`, since a version declares only the probes it is
-  given; `arc snapshot` then binds the patchset to that version. `check`
-  prints that command with the change and probes filled in.
+  given; `arc snapshot` then binds the patchset to that version, declaring
+  the patchset's contributors, which a live claim held by another actor
+  requires. `check` prints both with the change, probes, and contributors
+  filled in, and only the snapshot once the later version exists.
 
   `arc rebase` is what `check` names when the target moved with conflicting
   changes. A conflict stops it and leaves the rebase in progress — the partial
