@@ -471,7 +471,7 @@ fn ordinal(marker: &str) -> Option<&str> {
 /// block keeps its lines exactly, trailing whitespace included; the only
 /// change is the item's indentation in front of each non-empty line.
 fn as_list_item(body: &str) -> String {
-    let blocks = body_blocks(body.trim_end());
+    let blocks = body_blocks(body);
     let Some(first) = blocks.first() else {
         return String::new();
     };
@@ -587,7 +587,9 @@ fn fence_run(line: &str) -> Option<(usize, char, usize, &str)> {
 
 /// Split a body into paragraphs, list items, and fenced blocks. A line joins
 /// the paragraph or item above it unless a blank line, a fence, or a list
-/// marker of its own separates them.
+/// marker of its own separates them. A fence left open runs to the end of
+/// the body, every line its content; blank lines after the last block are
+/// dropped.
 fn body_blocks(body: &str) -> Vec<Block<'_>> {
     let mut blocks: Vec<Block<'_>> = Vec::new();
     let mut fence: Option<Fence> = None;
@@ -629,6 +631,9 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
             indent: &line[..line.len() - line.trim_start().len()],
             words: text.split_whitespace().collect(),
         });
+    }
+    if matches!(blocks.last(), Some(Block::Blank)) {
+        blocks.pop();
     }
     blocks
 }
@@ -1199,6 +1204,16 @@ mod tests {
             as_list_item("Diff:\n```\nkeep  \n\n   \nthis\t\n```"),
             "- Diff:\n  ```\n  keep  \n\n     \n  this\t\n  ```"
         );
+    }
+
+    #[test]
+    fn an_unclosed_fence_keeps_its_lines_to_the_end_of_the_body() {
+        assert_eq!(
+            as_list_item("Diff:\n```\nkeep \n   \n"),
+            "- Diff:\n  ```\n  keep \n     "
+        );
+        // Outside a fence, trailing whitespace and blank lines are dropped.
+        assert_eq!(as_list_item("Did a thing.  \n\n   \n"), "- Did a thing.");
     }
 
     #[test]
