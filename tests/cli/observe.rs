@@ -1272,6 +1272,81 @@ fn watch_json_omits_the_event_id_for_a_derived_condition() {
     assert!(value.get("event_id").is_none(), "{value}");
 }
 
+/// Every document a watch emits is one a script parses, so each carries the
+/// schema it can pin: reached for one change, for any member, and for every
+/// member, timed out, and the copy `--exec` reads on stdin. Under `--all` the
+/// document carries it once, not each member it lists.
+#[test]
+fn every_watch_document_carries_its_schema() {
+    let repo = Repo::new();
+    stdout(
+        repo.arc(&repo.root)
+            .args(["begin", "schema-watched", "--tag", "schema-series"]),
+    );
+    let wt = repo.home.join(".worktrees/repo-schema-watched");
+    repo.commit(&wt, "work.rs", "done\n", "feat: work");
+    stdout(repo.arc(&wt).args(["snapshot", "schema-watched"]));
+
+    let observed = repo.root.join("schema-hook");
+    let command = format!("cat > {}", observed.display());
+    let single = json_stdout(repo.arc(&wt).args([
+        "watch",
+        "schema-watched",
+        "--until",
+        "snapshot",
+        "--json",
+        "--exec",
+        &command,
+    ]));
+    assert_eq!(single["schema"], "arc-watch/1", "{single}");
+    let hooked: serde_json::Value =
+        serde_json::from_str(fs::read_to_string(&observed).unwrap().trim()).unwrap();
+    assert_eq!(hooked, single);
+
+    let any = json_stdout(repo.arc(&wt).args([
+        "watch",
+        "--tag",
+        "schema-series",
+        "--any",
+        "--until",
+        "snapshot",
+        "--json",
+    ]));
+    assert_eq!(any["schema"], "arc-watch/1", "{any}");
+
+    let all = json_stdout(repo.arc(&wt).args([
+        "watch",
+        "--tag",
+        "schema-series",
+        "--all",
+        "--until",
+        "snapshot",
+        "--json",
+    ]));
+    assert_eq!(all["schema"], "arc-watch/1", "{all}");
+    let members = all["changes"].as_array().unwrap();
+    assert_eq!(members.len(), 1, "{all}");
+    assert!(members[0].get("schema").is_none(), "{all}");
+
+    let out = repo
+        .arc(&wt)
+        .args([
+            "watch",
+            "schema-watched",
+            "--until",
+            "integrated",
+            "--timeout",
+            "1",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let timeout: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(timeout["schema"], "arc-watch/1", "{timeout}");
+}
+
 /// A tagged program is the unit an orchestrator waits on, and following each
 /// member separately loses the interleaving that makes the stream worth
 /// reading.
