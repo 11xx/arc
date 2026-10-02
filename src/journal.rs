@@ -4822,7 +4822,7 @@ fn open_artifact(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathBuf, String,
     ensure_storage_settled(&dir, &read_events(&dir)?, filename)?;
     let path = dir.join(filename);
     if !path.is_file() {
-        bail!("no such artifact {} in {}", filename, dir.display());
+        return Err(missing_write_target(&dir, filename));
     }
     if is_consumed(&read_events(&dir)?, filename) {
         bail!(
@@ -4886,7 +4886,7 @@ fn open_discussion_for_answer(ctx: &Ctx, filename: &str) -> Result<(PathBuf, Pat
     // The events stay in the hot journal, so the answer is recorded there
     // whichever directory holds the body it is appended to.
     let Some(path) = artifact_body_path(&hot, filename) else {
-        bail!("no such artifact {} in {}", filename, hot.display());
+        return Err(missing_write_target(&hot, filename));
     };
     Ok((hot, path, topic))
 }
@@ -5547,7 +5547,7 @@ fn open_artifact_for_amendment(ctx: &Ctx, filename: &str) -> Result<(PathBuf, Pa
     let hot = resolve_dir(&ctx.cwd)?;
     ensure_storage_settled(&hot, &read_events(&hot)?, filename)?;
     let Some(path) = artifact_body_path(&hot, filename) else {
-        bail!("no such artifact {} in {}", filename, hot.display());
+        return Err(missing_write_target(&hot, filename));
     };
     Ok((hot, path, topic))
 }
@@ -8411,7 +8411,7 @@ fn claim_context(ctx: &Ctx, file: &str) -> Result<ClaimContext> {
         bail!("{file:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     };
     if !dir.join(file).is_file() {
-        bail!("no such artifact {} in {}", file, dir.display());
+        return Err(missing_write_target(&dir, file));
     }
     let events = read_events(&dir)?;
     ensure_storage_settled(&dir, &events, file)?;
@@ -11566,16 +11566,40 @@ pub(crate) fn missing_artifact(location: &ArtifactLocation, searched: &str) -> a
              <journal-dir>::{file}"
         )
     } else {
+        let qualified = holders
+            .iter()
+            .map(|dir| format!("{}{REFERENCE_SEPARATOR}{file}", dir.display()))
+            .collect::<Vec<_>>();
         anyhow::anyhow!(
             "{refusal}; another project's journal holds it: {}",
-            holders.join(", ")
+            qualified.join(", ")
         )
     }
 }
 
-/// `<journal-dir>::<file>` for each known journal other than `own` whose hot
-/// directory or cold archive holds `file`.
-fn journals_holding(own: &Path, file: &str) -> Vec<String> {
+/// The refusal for a journal write naming a bare filename this project's
+/// journal at `own` does not hold. Only the owning project writes to what its
+/// journal holds, so each other known journal holding the filename is named
+/// with its project, as the place the write runs from.
+fn missing_write_target(own: &Path, file: &str) -> anyhow::Error {
+    let refusal = format!("no such artifact {file} in {}", own.display());
+    let holders = journals_holding(own, file);
+    if holders.is_empty() {
+        return anyhow::anyhow!(refusal);
+    }
+    let owners = holders
+        .iter()
+        .map(|dir| format!("{}{}", dir.display(), project_of(dir)))
+        .collect::<Vec<_>>();
+    let owners = owners.join(", ");
+    anyhow::anyhow!(
+        "{refusal}; another project's journal holds it: {owners}; a journal write runs from the project that owns it, with the bare filename"
+    )
+}
+
+/// Each known journal other than `own` whose hot directory or cold archive
+/// holds `file`, canonical and in order.
+fn journals_holding(own: &Path, file: &str) -> Vec<PathBuf> {
     let Ok(journals) = config::load().and_then(|cfg| crate::registry::known_journals(&cfg)) else {
         return Vec::new();
     };
@@ -11584,10 +11608,19 @@ fn journals_holding(own: &Path, file: &str) -> Vec<String> {
         .into_iter()
         .map(|(_, dir)| canonical_dir(&dir))
         .filter(|dir| *dir != own && artifact_body_path(dir, file).is_some())
-        .map(|dir| format!("{}{REFERENCE_SEPARATOR}{file}", dir.display()))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+/// ` (project <anchor>)` for a journal that recorded the project it belongs
+/// to, or nothing when it recorded none.
+fn project_of(dir: &Path) -> String {
+    recorded_anchor(dir)
+        .ok()
+        .flatten()
+        .map(|anchor| format!(" (project {anchor})"))
+        .unwrap_or_default()
 }
 
 /// Refuse a journal write that would change the disposition of an artifact
@@ -11597,11 +11630,7 @@ fn refuse_foreign_write(reference: &str) -> Result<()> {
     let Some((dir, file)) = split_qualified(reference) else {
         return Ok(());
     };
-    let owner = recorded_anchor(Path::new(dir))
-        .ok()
-        .flatten()
-        .map(|anchor| format!(" (project {anchor})"))
-        .unwrap_or_default();
+    let owner = project_of(Path::new(dir));
     bail!(
         "{file} belongs to the journal at {dir}{owner}; a journal write that changes an \
          artifact's disposition runs from the project that owns it, with the bare filename"
@@ -12766,7 +12795,7 @@ pub(crate) fn consume(
         bail!("{filename:?} is not a journal artifact name (<timestamp>-<topic>-<kind>.md)");
     };
     if artifact_body_path(&dir, filename).is_none() {
-        bail!("no such artifact {} in {}", filename, dir.display());
+        return Err(missing_write_target(&dir, filename));
     }
     let events = read_events(&dir)?;
     if is_consumed(&events, filename) {
@@ -13332,7 +13361,7 @@ fn transition(
     };
     let source_path = dir.join(filename);
     if !source_path.is_file() {
-        bail!("no such artifact {} in {}", filename, dir.display());
+        return Err(missing_write_target(&dir, filename));
     }
     let events = read_events(&dir)?;
     if is_consumed(&events, filename) {

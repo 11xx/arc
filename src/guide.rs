@@ -1442,8 +1442,11 @@ RULES THAT CHANGE WHAT YOU DO
     `open`, and workspace views list the promotion with its `repository_id`,
     its status read from the promoting ledger: `unknown` when that ledger
     cannot be read, which never counts as closed. Only the owning project
-    consumes, archives, unarchives, or transitions an artifact; a qualified
-    reference to one is refused naming the owning journal.
+    consumes, archives, unarchives, transitions, appends to, or amends an
+    artifact. A qualified reference to one is refused naming the owning
+    journal, and so is a bare filename this project's journal does not hold
+    but another known journal does: the refusal names each such journal and
+    its project, where the write runs with the bare filename.
   - A gate may declare an environment probe: a command whose output
     identifies the environment the gate's evidence applies to. `verify` runs
     the probe beside the gate and records its identity on the evidence. The
