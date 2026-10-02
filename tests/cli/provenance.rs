@@ -1084,6 +1084,43 @@ fn squash_over_a_foreign_claim_refuses_before_the_branch_moves() {
 }
 
 #[test]
+fn rebase_over_a_foreign_claim_refuses_before_the_branch_moves() {
+    let repo = Repo::new();
+    let (change_id, worktree, claim_id) = claimed_work(&repo, "claimed-rebase", false);
+    repo.commit(&repo.root, "README.md", "target\n", "feat: move target");
+    let target = git_out(&repo.root, &["rev-parse", "HEAD"]);
+    let head = git_out(&worktree, &["rev-parse", "HEAD"]);
+    let before = event_count(&repo, &change_id);
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .args(["rebase", "claimed-rebase"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(&claim_id))
+        .stderr(predicates::str::contains("`arc rebase`"));
+    assert_eq!(git_out(&worktree, &["rev-parse", "HEAD"]), head);
+    assert_eq!(event_count(&repo, &change_id), before);
+
+    repo.arc(&worktree)
+        .env("ARC_ACTOR", "claude-lead")
+        .args(["rebase", "claimed-rebase", "--contributors", "codex-luna"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("patchset: ps-01"));
+    let replayed = git_out(&worktree, &["rev-parse", "HEAD"]);
+    assert_ne!(replayed, head);
+    assert_eq!(git_out(&worktree, &["rev-parse", "HEAD~1"]), target);
+    let status = json_stdout(repo.arc(&repo.root).args(["status", "claimed-rebase"]));
+    assert_eq!(status["latest_patchset"]["head"], replayed, "{status}");
+    assert_eq!(
+        status["latest_patchset"]["contributors"],
+        serde_json::json!(["codex-luna"]),
+        "{status}"
+    );
+}
+
+#[test]
 fn a_reviewer_matching_a_declared_contributor_is_reported_by_name() {
     let repo = repo_with_self_approval_policy();
     let (_, worktree, _) = claimed_work(&repo, "claimed-self", true);
