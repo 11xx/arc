@@ -792,8 +792,9 @@ pub fn brief(
         if plan_source.is_some() {
             crate::ids::validate_slug(plan_slice.as_deref().unwrap_or_default())?;
         }
-        // A scaffold template is prepended to the body being recorded;
-        // --scaffold with no --body-file records the template alone.
+        // The body fills the scaffold template's slot, or follows a template
+        // that has none; --scaffold with no --body-file records the template
+        // alone.
         let template = match &scaffold {
             Some(name) => super::scaffold::resolve(ctx, name)?,
             None => String::new(),
@@ -802,7 +803,7 @@ pub fn brief(
             Some(path) => read_body_file_verbatim(path)?,
             None => String::new(),
         };
-        let body = super::scaffold::prepended(&template, &content);
+        let body = super::scaffold::filled(&template, &content);
         let acceptance_probes = probes_json
             .as_deref()
             .map(read_acceptance_probes)

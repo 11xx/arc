@@ -470,8 +470,9 @@ pub struct KindWrite {
     /// otherwise headed from the topic slug
     #[arg(long)]
     pub title: Option<String>,
-    /// Scaffold template prepended to the body (.arc/templates/<name>.md or a
-    /// built-in: sol-low, sol-high, reviewer, discussion)
+    /// Scaffold template around the body (.arc/templates/<name>.md or a
+    /// built-in: sol-low, sol-high, reviewer, discussion). The body takes the
+    /// place of the template's `{{body}}` line, or follows a template without one
     #[arg(long, conflicts_with = "no_scaffold")]
     pub scaffold: Option<String>,
     /// Record the body alone, without the kind's default scaffold
@@ -540,7 +541,9 @@ pub enum JournalCmd {
         /// is argued and read far more often than created, so its verbs are
         /// `position`, `question`, `answer` and the `discussion` summary, and
         /// `--kind discussion` stays the way to open one. It also brings the
-        /// `discussion` scaffold unless told otherwise
+        /// `discussion` scaffold unless told otherwise, which puts the body
+        /// under `## The question` and ends on `## Positions`, so every
+        /// position appended follows that heading
         #[arg(long, value_enum, default_value = "note")]
         kind: JournalKind,
     },
@@ -764,8 +767,8 @@ pub enum JournalCmd {
         #[arg(long)]
         supersedes: Vec<String>,
     },
-    /// List the scaffolds a write can prepend, and print one before using
-    /// it. A journal artifact is append-only, so choosing between
+    /// List the scaffolds a write can add to its body, and print one before
+    /// using it. A journal artifact is append-only, so choosing between
     /// `--scaffold`, a kind's default, and `--no-scaffold` blind makes a
     /// wrong guess permanent
     Scaffolds {
@@ -4254,8 +4257,9 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
         return Ok(0);
     }
     // Read the body before touching the filesystem so a bad source path or
-    // scaffold name leaves nothing written. A scaffold template is prepended
-    // to the body; a scaffold with no --body-file records the template alone.
+    // scaffold name leaves nothing written. The body fills the scaffold
+    // template's slot, or follows a template that has none; a scaffold with no
+    // --body-file records the template alone.
     let template = match scaffold {
         Some(name) => crate::commands::scaffold::resolve(ctx, name)?,
         None => String::new(),
@@ -4264,7 +4268,7 @@ fn note(ctx: &Ctx, kind: JournalKind, write: &KindWrite, prelude: Option<&str>) 
         Some(source) => read_body_verbatim(source)?,
         None => String::new(),
     };
-    let body = crate::commands::scaffold::prepended(&template, &content);
+    let body = crate::commands::scaffold::filled(&template, &content);
     // An artifact with nothing in it is a queue entry that says nothing. A
     // repo-local template may be empty, so the check is on what would be
     // written rather than on which options were passed.
@@ -5974,7 +5978,7 @@ fn question_text(path: &Path, question_id: &str) -> Option<String> {
         .map(|line| line.trim().to_string())
 }
 
-/// List the scaffolds a write can prepend, or print one.
+/// List the scaffolds a write can add to its body, or print one.
 ///
 /// `--no-scaffold` implies kinds carry defaults and `--scaffold` names
 /// built-ins, but neither said which exist or what any contains. A journal
@@ -6048,9 +6052,9 @@ fn scaffolds(ctx: &Ctx, show: Option<&str>, json: bool) -> Result<i32> {
     }
     println!();
     if defaults.is_empty() {
-        println!("no kind prepends one unless asked.");
+        println!("no kind adds one unless asked.");
     } else {
-        println!("prepended unless `--no-scaffold`:");
+        println!("added unless `--no-scaffold`:");
         for (kind, name) in &defaults {
             println!("  --kind {kind}  {name}");
         }

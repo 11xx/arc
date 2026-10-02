@@ -562,8 +562,10 @@ enum Cmd {
         /// Read one derived brief version instead of the latest
         #[arg(long)]
         version: Option<usize>,
-        /// Prepend a scaffold template: .arc/templates/<name>.md, or a built-in
-        /// (sol-low, sol-high, reviewer, discussion)
+        /// Scaffold template around the body: .arc/templates/<name>.md, or a
+        /// built-in (sol-low, sol-high, reviewer, discussion). The body takes
+        /// the place of the template's `{{body}}` line, or follows a template
+        /// without one
         #[arg(long)]
         scaffold: Option<String>,
         /// Journal plan artifact implemented by this brief: a filename in
