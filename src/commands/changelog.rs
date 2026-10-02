@@ -410,67 +410,122 @@ fn line_marker(line: &str) -> Option<&str> {
 /// what its author recorded, and the projection decides how a release reads.
 /// A body that already leads with a marker keeps the markers and nesting its
 /// author chose; only the bullet arc would otherwise have added is withheld.
+///
+/// Each paragraph and list item is refilled to the width as one unit, so an
+/// entry renders the same whatever column its author wrapped it at. A fenced
+/// block keeps its lines exactly.
 fn as_list_item(body: &str) -> String {
-    let body = body.trim_end();
-    let Some(first) = body.lines().next() else {
+    let blocks = body_blocks(body.trim_end());
+    let Some(first) = blocks.first() else {
         return String::new();
     };
-    if line_marker(first).is_some() {
-        return wrap_authored_list(body);
-    }
+    let authored = matches!(
+        first,
+        Block::Prose {
+            marker: Some(_),
+            ..
+        }
+    );
+    // A bare body becomes one item: everything sits under the text of the
+    // bullet that opens it.
+    let base = if authored { "" } else { "  " };
 
-    let content_width = CHANGELOG_LINE_WIDTH - 2;
-    let mut out = String::new();
-    let mut first_line = true;
-    for line in body.lines() {
-        if line.trim().is_empty() {
-            out.push('\n');
-            continue;
-        }
-        for wrapped in wrap_words(line.trim(), content_width) {
-            if !out.is_empty() {
-                out.push('\n');
+    let mut lines = Vec::new();
+    for block in &blocks {
+        match block {
+            Block::Blank => lines.push(String::new()),
+            Block::Fenced(fenced) => lines.extend(
+                fenced
+                    .iter()
+                    .map(|line| format!("{base}{}", line.trim_end())),
+            ),
+            Block::Prose {
+                marker,
+                indent,
+                words,
+            } => {
+                let opener = match marker {
+                    Some(marker) => format!("{base}{marker}"),
+                    None if authored => (*indent).to_string(),
+                    None => base.to_string(),
+                };
+                let continuation = " ".repeat(opener.chars().count());
+                let width = CHANGELOG_LINE_WIDTH.saturating_sub(opener.chars().count());
+                for (index, wrapped) in wrap_words(&words.join(" "), width).into_iter().enumerate()
+                {
+                    let prefix = if index == 0 { &opener } else { &continuation };
+                    lines.push(format!("{prefix}{wrapped}"));
+                }
             }
-            out.push_str(if first_line { "- " } else { "  " });
-            out.push_str(&wrapped);
-            first_line = false;
         }
     }
-    out
+    if !authored {
+        lines[0].replace_range(..base.len(), "- ");
+    }
+    lines.join("\n")
 }
 
-/// Wrap a body whose author already formatted it as a list, keeping each
-/// line's own marker and indent and aligning continuations under the text
-/// the marker introduces.
-fn wrap_authored_list(body: &str) -> String {
-    let mut out = String::new();
+/// One unit of a recorded body as the changelog renders it.
+enum Block<'a> {
+    /// A paragraph break; runs of blank lines collapse to one.
+    Blank,
+    /// A fenced code block, fences included, kept line for line.
+    Fenced(Vec<&'a str>),
+    /// A paragraph or list item: the marker that opens it, if any, the
+    /// indentation of its first line, and every word of its lines in order.
+    Prose {
+        marker: Option<&'a str>,
+        indent: &'a str,
+        words: Vec<&'a str>,
+    },
+}
+
+/// Split a body into paragraphs, list items, and fenced blocks. A line joins
+/// the paragraph or item above it unless a blank line, a fence, or a list
+/// marker of its own separates them.
+fn body_blocks(body: &str) -> Vec<Block<'_>> {
+    let mut blocks: Vec<Block<'_>> = Vec::new();
+    let mut fence: Option<&str> = None;
     for line in body.lines() {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        if line.trim().is_empty() {
+        let trimmed = line.trim();
+        if let Some(open) = fence {
+            if let Some(Block::Fenced(fenced)) = blocks.last_mut() {
+                fenced.push(line);
+            }
+            if trimmed.starts_with(open) {
+                fence = None;
+            }
             continue;
         }
-        let (prefix, text) = match line_marker(line) {
-            Some(marker) => (marker.to_string(), line[marker.len()..].trim()),
-            None => {
-                let indent = line.len() - line.trim_start().len();
-                (" ".repeat(indent), line.trim())
+        if trimmed.is_empty() {
+            if !matches!(blocks.last(), None | Some(Block::Blank)) {
+                blocks.push(Block::Blank);
             }
-        };
-        let continuation = " ".repeat(prefix.chars().count());
-        let width = CHANGELOG_LINE_WIDTH.saturating_sub(prefix.chars().count());
-        for (index, wrapped) in wrap_words(text, width).into_iter().enumerate() {
-            if index > 0 {
-                out.push('\n');
-                out.push_str(&continuation);
-            } else {
-                out.push_str(&prefix);
-            }
-            out.push_str(&wrapped);
+            continue;
         }
+        if let Some(open) = ["```", "~~~"]
+            .into_iter()
+            .find(|open| trimmed.starts_with(open))
+        {
+            fence = Some(open);
+            blocks.push(Block::Fenced(vec![line]));
+            continue;
+        }
+        let marker = line_marker(line);
+        if marker.is_none() {
+            if let Some(Block::Prose { words, .. }) = blocks.last_mut() {
+                words.extend(trimmed.split_whitespace());
+                continue;
+            }
+        }
+        let text = marker.map_or(trimmed, |marker| &line[marker.len()..]);
+        blocks.push(Block::Prose {
+            marker,
+            indent: &line[..line.len() - line.trim_start().len()],
+            words: text.split_whitespace().collect(),
+        });
     }
-    out
+    blocks
 }
 
 fn render_category<'a>(
@@ -915,12 +970,81 @@ mod tests {
         // An author who already formatted a list keeps their exact markers.
         assert_eq!(as_list_item("- Did a thing.\n"), "- Did a thing.");
         assert_eq!(as_list_item("* Did a thing."), "* Did a thing.");
-        // An explicitly multi-line body stays one item with indented continuations.
+        // A body its author wrapped is one item, refilled as one paragraph.
         assert_eq!(
             as_list_item("Did a thing,\nacross lines.\n"),
-            "- Did a thing,\n  across lines."
+            "- Did a thing, across lines."
         );
         assert_eq!(as_list_item("   "), "");
+    }
+
+    #[test]
+    fn a_body_renders_the_same_whatever_column_its_author_wrapped_it_at() {
+        let words = concat!(
+            "A change keeps its own branch from the integration target with the ",
+            "fork's commits replayed onto it, and a recorded link naming the fork ",
+            "and the source base, head, and tree. The link grants no review credit.",
+        );
+        let wrapped_at = |width: usize| {
+            words
+                .split_whitespace()
+                .fold(vec![String::new()], |mut lines, word| {
+                    let line = lines.last_mut().unwrap();
+                    if !line.is_empty() && line.len() + 1 + word.len() > width {
+                        lines.push(word.to_string());
+                    } else {
+                        if !line.is_empty() {
+                            line.push(' ');
+                        }
+                        line.push_str(word);
+                    }
+                    lines
+                })
+                .join("\n")
+        };
+        let unwrapped = as_list_item(words);
+        for width in [60, 78] {
+            let body = format!("{}\n\nA second paragraph.\n", wrapped_at(width));
+            assert_eq!(
+                as_list_item(&body),
+                format!("{unwrapped}\n\n  A second paragraph."),
+                "wrapped at {width}"
+            );
+        }
+        let lines = unwrapped.lines().collect::<Vec<_>>();
+        for pair in lines.windows(2) {
+            let next_word = pair[1].split_whitespace().next().unwrap();
+            assert!(
+                pair[0].chars().count() + 1 + next_word.chars().count() > 75,
+                "{unwrapped}"
+            );
+        }
+    }
+
+    #[test]
+    fn authored_items_refill_their_continuations_and_keep_their_nesting() {
+        assert_eq!(
+            as_list_item(concat!(
+                "- a top-level item\n  continued on a second line\n",
+                "  - a nested item\n    continued too\n- a second item",
+            )),
+            concat!(
+                "- a top-level item continued on a second line\n",
+                "  - a nested item continued too\n- a second item",
+            )
+        );
+        assert_eq!(
+            as_list_item("Did a thing:\n- first\n- second\n\n\n\nAfter the list."),
+            "- Did a thing:\n  - first\n  - second\n\n  After the list."
+        );
+    }
+
+    #[test]
+    fn fenced_blocks_keep_their_lines() {
+        assert_eq!(
+            as_list_item("Run it:\n```\narc changelog --write\n  indented\n```\nthen look."),
+            "- Run it:\n  ```\n  arc changelog --write\n    indented\n  ```\n  then look."
+        );
     }
 
     #[test]
