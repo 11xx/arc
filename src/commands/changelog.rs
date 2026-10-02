@@ -414,17 +414,49 @@ fn wrap_words(line: &str, width: usize) -> Vec<String> {
     wrapped
 }
 
-/// The marker a line already carries: its indent plus a `-`, `*`, or `+`
-/// bullet. An author who wrote their own list chose the markers and the
-/// nesting; they did not choose the column the file wraps at, so the prefix
-/// survives and the text after it is still wrapped.
+/// The marker a line begins with: its indent, then a `-`, `*`, or `+`
+/// bullet, or a number of one to nine digits closed by `.` or `)`, then a
+/// space. An author who wrote their own list chose the markers, the numbers,
+/// and the nesting; they did not choose the column the file wraps at, so the
+/// prefix survives and the text after it is still wrapped.
 fn line_marker(line: &str) -> Option<&str> {
     let indent = line.len() - line.trim_start().len();
     let rest = &line[indent..];
-    ["- ", "* ", "+ "]
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let token = if ["- ", "* ", "+ "]
         .iter()
-        .any(|marker| rest.starts_with(marker))
-        .then(|| &line[..indent + 2])
+        .any(|bullet| rest.starts_with(bullet))
+    {
+        1
+    } else if (1..=9).contains(&digits)
+        && [". ", ") "]
+            .iter()
+            .any(|close| rest[digits..].starts_with(close))
+    {
+        digits + 1
+    } else {
+        return None;
+    };
+    Some(&line[..indent + token + 1])
+}
+
+/// Whether a line beginning with `marker` opens an item instead of joining
+/// the paragraph or item above it, whose own marker is `above`. A bullet
+/// always opens one. A number opens one only when it is 1 or the unit above
+/// is a numbered item; elsewhere, as CommonMark reads it, the line is a
+/// wrapped sentence that happens to begin with a number.
+fn interrupts(marker: &str, above: Option<&str>) -> bool {
+    match ordinal(marker) {
+        None => true,
+        Some(number) => number.trim_start_matches('0') == "1" || above.and_then(ordinal).is_some(),
+    }
+}
+
+/// The number of a numbered marker; a bullet has none.
+fn ordinal(marker: &str) -> Option<&str> {
+    let token = marker.trim();
+    let number = &token[..token.len() - 1];
+    (!number.is_empty()).then_some(number)
 }
 
 /// Recorded bodies are free text and predate any convention about list
@@ -436,7 +468,8 @@ fn line_marker(line: &str) -> Option<&str> {
 ///
 /// Each paragraph and list item is refilled to the width as one unit, so an
 /// entry renders the same whatever column its author wrapped it at. A fenced
-/// block keeps its lines exactly.
+/// block keeps its lines exactly, trailing whitespace included; the only
+/// change is the item's indentation in front of each non-empty line.
 fn as_list_item(body: &str) -> String {
     let blocks = body_blocks(body.trim_end());
     let Some(first) = blocks.first() else {
@@ -457,11 +490,13 @@ fn as_list_item(body: &str) -> String {
     for block in &blocks {
         match block {
             Block::Blank => lines.push(String::new()),
-            Block::Fenced(fenced) => lines.extend(
-                fenced
-                    .iter()
-                    .map(|line| format!("{base}{}", line.trim_end())),
-            ),
+            Block::Fenced(fenced) => lines.extend(fenced.iter().map(|line| {
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("{base}{line}")
+                }
+            })),
             Block::Prose {
                 marker,
                 indent,
@@ -503,19 +538,66 @@ enum Block<'a> {
     },
 }
 
+/// An open code fence, as CommonMark delimits one: the character its run is
+/// drawn with, the run's length, and the run's indentation.
+struct Fence {
+    mark: char,
+    run: usize,
+    indent: usize,
+}
+
+impl Fence {
+    /// The fence `line` opens: a run of three or more backticks or tildes
+    /// after its indentation. A backtick run followed by another backtick on
+    /// the line is inline code and opens nothing.
+    fn opened_by(line: &str) -> Option<Self> {
+        let (indent, mark, run, after) = fence_run(line)?;
+        (run >= 3 && !(mark == '`' && after.contains('`'))).then_some(Self { mark, run, indent })
+    }
+
+    /// Whether `line` closes this fence: a run of the same character at
+    /// least as long, nothing after it but whitespace, and indented less than
+    /// four columns past the opener; deeper, the line is content.
+    fn closed_by(&self, line: &str) -> bool {
+        fence_run(line).is_some_and(|(indent, mark, run, after)| {
+            mark == self.mark
+                && run >= self.run
+                && after.trim().is_empty()
+                && indent < self.indent + 4
+        })
+    }
+}
+
+/// A line's indentation, the backtick or tilde that begins its text, the
+/// length of that character's run, and the text after the run.
+fn fence_run(line: &str) -> Option<(usize, char, usize, &str)> {
+    let text = line.trim_start();
+    let mark = text
+        .chars()
+        .next()
+        .filter(|mark| matches!(mark, '`' | '~'))?;
+    let after = text.trim_start_matches(mark);
+    Some((
+        line.len() - text.len(),
+        mark,
+        text.len() - after.len(),
+        after,
+    ))
+}
+
 /// Split a body into paragraphs, list items, and fenced blocks. A line joins
 /// the paragraph or item above it unless a blank line, a fence, or a list
 /// marker of its own separates them.
 fn body_blocks(body: &str) -> Vec<Block<'_>> {
     let mut blocks: Vec<Block<'_>> = Vec::new();
-    let mut fence: Option<&str> = None;
+    let mut fence: Option<Fence> = None;
     for line in body.lines() {
         let trimmed = line.trim();
-        if let Some(open) = fence {
+        if let Some(open) = &fence {
             if let Some(Block::Fenced(fenced)) = blocks.last_mut() {
                 fenced.push(line);
             }
-            if trimmed.starts_with(open) {
+            if open.closed_by(line) {
                 fence = None;
             }
             continue;
@@ -526,15 +608,15 @@ fn body_blocks(body: &str) -> Vec<Block<'_>> {
             }
             continue;
         }
-        if let Some(open) = ["```", "~~~"]
-            .into_iter()
-            .find(|open| trimmed.starts_with(open))
-        {
+        if let Some(open) = Fence::opened_by(line) {
             fence = Some(open);
             blocks.push(Block::Fenced(vec![line]));
             continue;
         }
-        let marker = line_marker(line);
+        let marker = line_marker(line).filter(|marker| match blocks.last() {
+            Some(Block::Prose { marker: above, .. }) => interrupts(marker, *above),
+            _ => true,
+        });
         if marker.is_none() {
             if let Some(Block::Prose { words, .. }) = blocks.last_mut() {
                 words.extend(trimmed.split_whitespace());
@@ -845,10 +927,10 @@ impl Paragraph {
     }
 }
 
-/// Split prose into paragraphs. A blank line ends one; a heading or a bullet
-/// marker starts one, so an author's own list stays as many units as it has
-/// items. The unrecorded marker carries no prose and delimits rather than
-/// joins.
+/// Split prose into paragraphs. A blank line ends one; a heading, or a list
+/// marker that opens an item where the renderer would open one, starts one,
+/// so an author's own list stays as many units as it has items. The
+/// unrecorded marker carries no prose and delimits rather than joins.
 fn paragraphs(text: &str) -> Vec<Paragraph> {
     let mut paragraphs = Vec::new();
     let mut lines: Vec<String> = Vec::new();
@@ -868,7 +950,12 @@ fn paragraphs(text: &str) -> Vec<Paragraph> {
             flush(&mut lines);
             continue;
         }
-        if trimmed.starts_with('#') || line_marker(line).is_some() {
+        let opens_item = line_marker(line).is_some_and(|marker| {
+            lines
+                .first()
+                .is_none_or(|first| interrupts(marker, line_marker(first)))
+        });
+        if trimmed.starts_with('#') || opens_item {
             flush(&mut lines);
         }
         lines.push(line.to_owned());
@@ -998,7 +1085,7 @@ fn write_changelog(
 
 #[cfg(test)]
 mod tests {
-    use super::{as_list_item, render_category, ProjectedEntry, RecordedProvenance};
+    use super::{as_list_item, paragraphs, render_category, ProjectedEntry, RecordedProvenance};
 
     #[test]
     fn bare_bodies_become_list_items_and_authored_markers_survive() {
@@ -1080,6 +1167,93 @@ mod tests {
         assert_eq!(
             as_list_item("Run it:\n```\narc changelog --write\n  indented\n```\nthen look."),
             "- Run it:\n  ```\n  arc changelog --write\n    indented\n  ```\n  then look."
+        );
+    }
+
+    #[test]
+    fn a_fence_closes_only_on_its_own_character_and_length() {
+        assert_eq!(
+            as_list_item("Example:\n````md\n```\nline one\n  indented\n```\n````\nAfter."),
+            "- Example:\n  ````md\n  ```\n  line one\n    indented\n  ```\n  ````\n  After."
+        );
+        assert_eq!(
+            as_list_item("~~~\n```\n~~\n~~~~ \nthen prose"),
+            "- ~~~\n  ```\n  ~~\n  ~~~~ \n  then prose"
+        );
+        // Text after the run, or an indent four columns past the opener,
+        // makes the line content rather than a closing fence.
+        assert_eq!(
+            as_list_item("```\n``` not a close\n    ```\n```\nthen prose"),
+            "- ```\n  ``` not a close\n      ```\n  ```\n  then prose"
+        );
+        // A backtick run followed by another backtick is inline code.
+        assert_eq!(
+            as_list_item("``` x ``` opens nothing\nso this joins it"),
+            "- ``` x ``` opens nothing so this joins it"
+        );
+    }
+
+    #[test]
+    fn fenced_lines_keep_their_trailing_whitespace() {
+        assert_eq!(
+            as_list_item("Diff:\n```\nkeep  \n\n   \nthis\t\n```"),
+            "- Diff:\n  ```\n  keep  \n\n     \n  this\t\n  ```"
+        );
+    }
+
+    #[test]
+    fn ordered_items_refill_one_per_number() {
+        assert_eq!(
+            as_list_item("Steps:\n1. First\n   continued\n2. Second"),
+            "- Steps:\n  1. First continued\n  2. Second"
+        );
+        // An authored ordered list keeps its numbers and gains no bullet.
+        assert_eq!(
+            as_list_item("1. First\n2. Second\n\n3) Third\n10) Tenth"),
+            "1. First\n2. Second\n\n3) Third\n10) Tenth"
+        );
+        let rendered = as_list_item(concat!(
+            "10. An ordered item whose text is long enough that the renderer ",
+            "has to wrap it somewhere."
+        ));
+        assert_eq!(
+            rendered,
+            concat!(
+                "10. An ordered item whose text is long enough that the renderer has to wrap\n",
+                "    it somewhere."
+            )
+        );
+        assert!(rendered.lines().all(|line| line.chars().count() <= 75));
+    }
+
+    #[test]
+    fn a_wrapped_line_that_begins_with_a_number_stays_in_its_paragraph() {
+        assert_eq!(
+            as_list_item("Shipped in\n2024. Then more.\nAnd 1.5 too."),
+            "- Shipped in 2024. Then more. And 1.5 too."
+        );
+        assert_eq!(
+            as_list_item("- an item\n  14. still the item"),
+            "- an item 14. still the item"
+        );
+    }
+
+    #[test]
+    fn paragraphs_split_where_the_renderer_opens_items() {
+        let prose = |text: &str| {
+            paragraphs(text)
+                .into_iter()
+                .map(|paragraph| paragraph.prose)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(prose("1. First\n2. Second"), ["First", "Second"]);
+        assert_eq!(
+            prose("- Steps:\n  1. First\n  2. Second"),
+            ["Steps:", "First", "Second"]
+        );
+        assert_eq!(
+            prose("- Shipped in\n  2024. Then more."),
+            ["Shipped in 2024. Then more."]
         );
     }
 

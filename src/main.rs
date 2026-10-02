@@ -628,11 +628,12 @@ enum Cmd {
     },
     /// Record, read, or project changelog entries
     ///
-    /// While an open change has no changelog record, `arc status`, `arc
-    /// check`, and `arc integrate` advise one under the code
-    /// `no-changelog-entry`; the advice never blocks. Recording an entry, or
-    /// recording with --none that the change needs none, answers it. The
-    /// latest record wins, and a --none record projects nothing.
+    /// While an open change has no changelog record, `arc status` and `arc
+    /// check` advise one under the code `no-changelog-entry`, and `arc
+    /// integrate` prints that advice once it has merged such a change; the
+    /// advice never blocks. Recording an entry, or recording with --none that
+    /// the change needs none, answers it. The latest record wins, and a
+    /// --none record projects nothing.
     ///
     /// The projection is rendered by the renderer `.arc/changelog.toml`
     /// selects: the built-in `keep-a-changelog`, or `command`, whose
@@ -674,8 +675,9 @@ enum Cmd {
         since: Option<String>,
         /// Write the configured target. The built-in renderer replaces the
         /// generated [Unreleased] block in CHANGELOG.md; each paragraph and
-        /// list item of an entry is refilled to 75 columns, continuations
-        /// indented under their marker, and a fenced block keeps its lines. The
+        /// list item, bulleted or numbered, of an entry is refilled to 75
+        /// columns, continuations indented under their marker, and a fenced
+        /// block keeps its lines. The
         /// block is judged paragraph by paragraph, on words rather than the
         /// column they are wrapped at, and refused, naming each paragraph,
         /// while it holds prose no recorded entry produced. The block runs to
