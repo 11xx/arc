@@ -3387,6 +3387,37 @@ fn begin_warns_when_the_target_has_diverged_from_its_upstream() {
     assert!(!err.contains("--ff-only"), "{err}");
 }
 
+/// An adopted branch starts from its merge base with the local target, not
+/// from the target's head, and the warning names that base.
+#[test]
+fn begin_adopt_names_the_merge_base_it_took_from_a_stale_target() {
+    let (repo, local, _) = repo_behind_its_upstream();
+    git(&repo.root, &["switch", "-q", "-c", "adopted-work"]);
+    repo.commit(&repo.root, "adopted.txt", "adopted\n", "feat: adopted work");
+    git(&repo.root, &["switch", "-q", "master"]);
+    repo.commit(&repo.root, "local.txt", "local\n", "feat: local work");
+    let target = repo.head(&repo.root);
+    let (out, err) = begin_output(&repo, &["adopted-stale", "--adopt", "adopted-work"]);
+    let change_id = opened_change_id(&out);
+    assert!(
+        err.contains(&format!(
+            "warning: target master at {} has diverged",
+            &target[..12]
+        )),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!(
+            "; change {change_id} is based on {}, the merge base of adopted-work with the local target\n",
+            &local[..12]
+        )),
+        "{err}"
+    );
+    assert!(!err.contains("is based on the local target"), "{err}");
+    let state = json_stdout(repo.arc(&repo.root).args(["show", &change_id, "--json"]));
+    assert_eq!(state["base"], local, "{state}");
+}
+
 /// A target level with its upstream, or one that tracks none, gets no
 /// warning.
 #[test]
