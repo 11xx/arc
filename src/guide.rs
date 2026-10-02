@@ -585,7 +585,9 @@ RUN A CHANGE
   `review --snapshot` validates the batch and the verdict before it records
   the patchset, and keeps the change locked from that patchset until the
   verdict on it is recorded: a refused review records no patchset, and a
-  command acting on the change in between reports the lock busy.
+  command acting on the change in between reports the lock busy. Whether an
+  approval gates is said once the verdict is recorded; a failure to evaluate
+  it is a warning naming the recorded verdict, and the review still succeeds.
 
   Each acceptance probe declared on the patchset's brief blocks readiness
   until baseline evidence fails at that brief's base and final evidence passes

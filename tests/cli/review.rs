@@ -802,6 +802,73 @@ fn a_close_attempted_while_review_snapshots_cannot_strand_a_patchset() {
     }
 }
 
+/// The type of every event recorded on `change_id`, oldest first. Read from
+/// the ledger files, so it holds when the target's declarations do not parse.
+fn event_types(repo: &Repo, change_id: &str) -> Vec<String> {
+    let mut paths: Vec<_> = fs::read_dir(event_dir(repo, change_id))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let event: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            event["event_type"].as_str().unwrap().to_string()
+        })
+        .collect()
+}
+
+/// What a review prints after it records is advice about a verdict that
+/// already stands. A target policy that does not parse leaves that advice
+/// unknown, not the review refused: the patchset, its retention ref, and the
+/// verdict stay recorded, the command says so, and it succeeds.
+#[test]
+fn an_unreadable_target_policy_warns_after_review_records() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "advisory-policy");
+    repo.commit(&worktree, "more.txt", "more\n", "test: move the head");
+    fs::create_dir_all(repo.root.join(".arc")).unwrap();
+    repo.commit(
+        &repo.root,
+        ".arc/policy.toml",
+        "[policy\n",
+        "test: break the target policy",
+    );
+    let before = event_types(&repo, &change_id);
+
+    let out = repo
+        .arc(&worktree)
+        .env("ARC_ACTOR", "reviewer")
+        .args([
+            "review",
+            "advisory-policy",
+            "--snapshot",
+            "--verdict",
+            "comment-only",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("patchset: ps-02"), "{stdout}");
+    assert!(stdout.contains("verdict: CommentOnly on ps-02"), "{stdout}");
+    assert!(stderr.contains("warning: "), "{stderr}");
+    assert!(stderr.contains(".arc/policy.toml"), "{stderr}");
+    let after = event_types(&repo, &change_id);
+    assert_eq!(
+        after[before.len()..],
+        ["patchset-added".to_string(), "verdict-recorded".to_string()],
+        "{after:?}"
+    );
+    assert!(
+        git_out(&repo.root, &["for-each-ref", "refs/arc/"]).contains("ps-02"),
+        "the recorded patchset lost its retention ref"
+    );
+}
+
 /// A misspelled anchor field refuses the batch before `--snapshot` records the
 /// head that moved, whatever the verdict.
 #[test]
