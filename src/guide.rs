@@ -486,6 +486,9 @@ RUN A CHANGE
   arc policy path                    Print the operator policy path for this repo.
   arc policy write --body-file FILE  Replace that local policy from TOML.
   arc review --verdict <v>           Record a verdict (+ --findings-json -).
+    --snapshot                       Snapshot the clean worktree first;
+      --contributors <a,b> | --solo  attribute that patchset, as on
+                                     `arc snapshot`.
     --provisional <why>              It gates, and owes a second judgment.
     --relation corroborates          Support the standing verdict, not replace it.
   arc resolve                        Dispose of a finding.
@@ -841,7 +844,9 @@ REVIEW COVERAGE AND DEBT
   "squash"|"preserve"` declaration makes `integrate` record the change ready to
   send instead of merging it, refusing merge commits and, under squash, more
   than one commit; `arc squash <change> -m <message>` makes that one commit as
-  a new patchset with its own gates and verdict. A failed squash commit, a
+  a new patchset with its own gates and verdict, attributed by `--contributors`
+  or `--solo` as on `arc snapshot`. Over another actor's live claim an
+  unattributed squash refuses before the branch moves. A failed squash commit, a
   changed commit tree, or tracked edits left by a hook restore the original
   head, index, and tracked files. Untracked files created by hooks are retained
   for inspection. Paths obstructing restoration are moved under

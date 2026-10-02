@@ -12,11 +12,19 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-pub fn squash(ctx: &Ctx, reference: &str, message: &str) -> Result<()> {
+pub fn squash(
+    ctx: &Ctx,
+    reference: &str,
+    message: &str,
+    contributors: Option<Vec<String>>,
+    solo: bool,
+) -> Result<()> {
     let message = message.trim();
     if message.is_empty() {
         bail!("--message must name the single commit");
     }
+    let declared =
+        super::review::contributor_declaration(ctx, contributors.clone(), solo)?.is_some();
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
     let st = store.state(&change_id)?;
@@ -70,6 +78,9 @@ pub fn squash(ctx: &Ctx, reference: &str, message: &str) -> Result<()> {
         }
         _ => {}
     }
+    // The single commit is recorded as a patchset, so a claim that would
+    // refuse that recording refuses the squash while the branch is untouched.
+    super::review::ensure_attribution_over_claim(ctx, &st, declared, chrono::Utc::now())?;
     let tree = tree_of(&ctx.cwd, &head)?;
 
     // The checkout moves with the branch, so the commit is made there, with
@@ -95,7 +106,16 @@ pub fn squash(ctx: &Ctx, reference: &str, message: &str) -> Result<()> {
         "squashed: {count} commits since {} into {squashed} (the tree of {head})",
         st.target_branch
     );
-    super::review::snapshot(ctx, &change_id, None, None, None, false, Vec::new(), None)
+    super::review::snapshot(
+        ctx,
+        &change_id,
+        None,
+        None,
+        contributors,
+        solo,
+        Vec::new(),
+        None,
+    )
 }
 
 fn restore_tracked_state(worktree: &std::path::Path, head: &str) -> Result<()> {
