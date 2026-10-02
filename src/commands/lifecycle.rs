@@ -840,7 +840,10 @@ pub fn brief(
             bail!("brief v{next_version} requires at least one cause: pass --caused-by or --cause-note");
         }
         if next_version == 1 && has_causes {
-            bail!("brief v1 cannot have a cause");
+            bail!(concat!(
+                "brief v1 cannot have a cause: the first brief on a change ",
+                "renegotiates nothing; drop --caused-by and --cause-note"
+            ));
         }
         let event = ctx.event(&store, &change_id, payload);
         let event_id = event.event_id.clone();
