@@ -606,15 +606,16 @@ enum Cmd {
         #[arg(long)]
         since: Option<String>,
         /// Write the configured target. The built-in renderer replaces the
-        /// generated [Unreleased] block in CHANGELOG.md; entries wrap at 75
-        /// columns, continuations indented under their marker. The block is
-        /// judged paragraph by paragraph, on words rather than the column they
-        /// are wrapped at, and refused, naming each paragraph, while it holds
-        /// prose no recorded entry produced. The block runs to the next release
-        /// heading or the end of the file; a missing target, or one with no
-        /// [Unreleased] heading, is refused with exit 1 and nothing written. A
-        /// command renderer's stdout replaces the whole target, atomically,
-        /// only after it exits 0 with a non-empty answer
+        /// generated [Unreleased] block in CHANGELOG.md; each paragraph and
+        /// list item of an entry is refilled to 75 columns, continuations
+        /// indented under their marker, and a fenced block keeps its lines. The
+        /// block is judged paragraph by paragraph, on words rather than the
+        /// column they are wrapped at, and refused, naming each paragraph,
+        /// while it holds prose no recorded entry produced. The block runs to
+        /// the next release heading or the end of the file; a missing target,
+        /// or one with no [Unreleased] heading, is refused with exit 1 and
+        /// nothing written. A command renderer's stdout replaces the whole
+        /// target, atomically, only after it exits 0 with a non-empty answer
         #[arg(long)]
         write: bool,
         /// Keep the block's unrecorded paragraphs whole above the projected
