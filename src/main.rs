@@ -1201,7 +1201,18 @@ enum Cmd {
         /// Root cause of requested rework; repeat for a mixed round
         #[arg(long, value_enum)]
         cause: Vec<ReviewCause>,
-        /// JSON array of findings ('-' for stdin); IDs are assigned by arc
+        /// Findings batch: a path to a JSON array, or '-' for stdin. Each
+        /// element is an object with a required `severity` (critical, major,
+        /// minor, or note) and `summary` (string), and optional `blocking`
+        /// (bool, default false), `body` (string), and `anchor`. An anchor is
+        /// an object with a required `path` and optional `side` (base or head,
+        /// default head), `line_start`, `line_end`, and `context`; its other
+        /// fields are ignored. An unknown finding field that looks like a
+        /// misspelling of one the finding omits (`blocker` for `blocking`,
+        /// `title` for `summary`, `path` for `anchor`, or one edit away)
+        /// refuses the batch; any other is ignored with a warning, except
+        /// `id`, ignored silently because IDs are assigned by arc. An approval
+        /// cannot carry a blocking finding
         #[arg(long)]
         findings_json: Option<String>,
         /// What this verdict does to the verdicts already standing on the
@@ -1594,7 +1605,9 @@ enum Cmd {
         /// Read body from file ('-' for stdin)
         #[arg(long, conflicts_with = "body")]
         body_file: Option<String>,
-        /// Findings batch as JSON ('-' for stdin)
+        /// Findings batch: a path to a JSON array, or '-' for stdin, in the
+        /// shape `arc review --help` states for `--findings-json`, without an
+        /// `anchor`: an audited revision has no patchset diff to anchor to
         #[arg(long = "findings-json")]
         findings_json: Option<String>,
         /// The routing version that selected this auditor. Recorded as a
@@ -1938,7 +1951,10 @@ enum ExternalCmd {
         /// Commit revision the external decision covered
         #[arg(long, required = true)]
         revision: String,
-        /// Findings JSON for a changes-requested verdict
+        /// Findings batch for a changes-requested verdict: a path to a JSON
+        /// array, or '-' for stdin, in the shape `arc review --help` states
+        /// for `--findings-json`. A non-empty batch is refused with any other
+        /// verdict
         #[arg(long = "findings-json")]
         findings_json: Option<String>,
     },
