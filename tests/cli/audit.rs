@@ -1257,6 +1257,213 @@ fn sarif_hides_a_shipped_finding_only_once_a_later_disposition_releases_it() {
 }
 
 #[test]
+fn sarif_keeps_a_finding_its_own_history_leaves_unresolved() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "sarif-own");
+    let still_open = file_minor_finding(&repo, &worktree, "sarif-own", "marked still-open");
+    let disputed = file_minor_finding(&repo, &worktree, "sarif-own", "marked disputed");
+    let resolved = file_minor_finding(&repo, &worktree, "sarif-own", "resolved before integration");
+    for (finding, status) in [
+        (&still_open, "still-open"),
+        (&disputed, "disputed"),
+        (&resolved, "resolved"),
+    ] {
+        repo.arc(&repo.root)
+            .args(["resolve", "sarif-own", finding, "--status", status])
+            .assert()
+            .success();
+    }
+    let assert_reported = |when: &str| {
+        let reported = sarif_rule_ids(&repo, "sarif-own", false);
+        assert!(
+            reported.contains(&still_open),
+            "still-open {when}: {reported:?}"
+        );
+        assert!(
+            reported.contains(&disputed),
+            "disputed {when}: {reported:?}"
+        );
+        assert!(
+            !reported.contains(&resolved),
+            "resolved {when}: {reported:?}"
+        );
+    };
+    assert_reported("on the open change");
+    repo.arc(&repo.root)
+        .args(["integrate", "sarif-own", "--debt", "quota"])
+        .assert()
+        .success();
+    assert_reported("after it shipped");
+}
+
+#[test]
+fn sarif_keeps_an_audit_finding_its_dispositions_leave_unresolved() {
+    let repo = repo_forbidding_self_approval();
+    self_approved_change(&repo, "sarif-audit");
+    repo.arc(&repo.root)
+        .args(["integrate", "sarif-audit", "--debt", "quota"])
+        .assert()
+        .success();
+    let path = repo.home.join("audit-findings.json");
+    fs::write(
+        &path,
+        json_file_bytes(&serde_json::json!([
+            { "severity": "minor", "summary": "marked still-open" },
+            { "severity": "minor", "summary": "marked disputed" },
+            { "severity": "minor", "summary": "resolved" },
+        ])),
+    )
+    .unwrap();
+    repo.arc(&repo.root)
+        .env("ARC_ACTOR", "Reviewer")
+        .args([
+            "audit",
+            "sarif-audit",
+            "--verdict",
+            "changes-requested",
+            "--findings-json",
+            path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let listed = json_stdout(repo.arc(&repo.root).args([
+        "findings",
+        "sarif-audit",
+        "--audit",
+        "--format",
+        "json",
+    ]));
+    let id_of = |summary: &str| -> String {
+        listed["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| finding["summary"] == summary)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let still_open = id_of("marked still-open");
+    let disputed = id_of("marked disputed");
+    let resolved = id_of("resolved");
+    for (finding, status) in [
+        (&still_open, "still-open"),
+        (&disputed, "disputed"),
+        (&resolved, "resolved"),
+    ] {
+        repo.arc(&repo.root)
+            .args(["resolve", "sarif-audit", finding, "--status", status])
+            .assert()
+            .success();
+    }
+
+    let reported = sarif_rule_ids(&repo, "sarif-audit", true);
+    assert!(reported.contains(&still_open), "{reported:?}");
+    assert!(reported.contains(&disputed), "{reported:?}");
+    assert!(!reported.contains(&resolved), "{reported:?}");
+}
+
+#[test]
+fn review_lists_every_finding_that_shipped_unresolved_with_its_later_history() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "review-unresolved");
+    let change = "review-unresolved";
+    let still_open = file_minor_finding(&repo, &worktree, change, "marked still-open");
+    let disputed = file_minor_finding(&repo, &worktree, change, "marked disputed");
+    let accepted = file_minor_finding(&repo, &worktree, change, "accepted before integration");
+    for (finding, status) in [
+        (&still_open, "still-open"),
+        (&disputed, "disputed"),
+        (&accepted, "accepted-risk"),
+    ] {
+        repo.arc(&repo.root)
+            .args(["resolve", change, finding, "--status", status])
+            .assert()
+            .success();
+    }
+    repo.arc(&repo.root)
+        .args(["integrate", change, "--debt", "quota"])
+        .assert()
+        .success();
+    repo.arc(&repo.root)
+        .args(["resolve", change, &still_open, "--status", "resolved"])
+        .assert()
+        .success();
+
+    let review = json_stdout(repo.arc(&repo.root).args(["review", change, "--json"]));
+    assert_eq!(review["schema"], "arc-review/5");
+    let listed = review["open_findings"].as_array().unwrap();
+    let entry = |id: &str| listed.iter().find(|finding| finding["id"] == id);
+    let still_open_entry = entry(&still_open).expect("a still-open finding shipped unresolved");
+    assert_eq!(still_open_entry["status"], "stillopen");
+    assert_eq!(
+        still_open_entry["after_integration"][0]["status"],
+        "resolved"
+    );
+    let disputed_entry = entry(&disputed).expect("a disputed finding shipped unresolved");
+    assert_eq!(disputed_entry["status"], "disputed");
+    assert!(disputed_entry.get("after_integration").is_none());
+    assert!(entry(&accepted).is_none(), "{listed:?}");
+
+    let text = stdout(repo.arc(&repo.root).args(["review", change]));
+    assert!(
+        text.contains("stillopen at ship; resolved after integration"),
+        "{text}"
+    );
+}
+
+#[test]
+fn diff_findings_keep_a_finding_its_dispositions_leave_unresolved() {
+    let repo = repo_forbidding_self_approval();
+    let worktree = self_approved_change(&repo, "diff-unresolved");
+    let change = "diff-unresolved";
+    let still_open = file_minor_finding(&repo, &worktree, change, "marked still-open");
+    let resolved = file_minor_finding(&repo, &worktree, change, "resolved before integration");
+    for (finding, status) in [(&still_open, "still-open"), (&resolved, "resolved")] {
+        repo.arc(&repo.root)
+            .args(["resolve", change, finding, "--status", status])
+            .assert()
+            .success();
+    }
+
+    let diff = stdout(repo.arc(&repo.root).args(["diff", change, "--findings"]));
+    assert!(diff.contains("marked still-open"), "{diff}");
+    assert!(!diff.contains("resolved before integration"), "{diff}");
+}
+
+/// The rule IDs `arc findings --format sarif` reports, which are finding IDs.
+fn sarif_rule_ids(repo: &Repo, change: &str, audit: bool) -> Vec<String> {
+    let mut args = vec!["findings", change, "--format", "sarif"];
+    if audit {
+        args.push("--audit");
+    }
+    let sarif = json_stdout(repo.arc(&repo.root).args(args));
+    sarif["runs"][0]["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["ruleId"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// File a minor standalone finding and return its ID.
+fn file_minor_finding(repo: &Repo, worktree: &Path, change: &str, summary: &str) -> String {
+    stdout(repo.arc(worktree).args([
+        "finding",
+        change,
+        "--summary",
+        summary,
+        "--severity",
+        "minor",
+    ]))
+    .lines()
+    .find_map(|line| line.strip_prefix("finding: "))
+    .unwrap()
+    .to_string()
+}
+
+#[test]
 fn import_refuses_a_post_integration_disposition_its_change_could_not_take() {
     let source = repo_forbidding_self_approval();
     let worktree = self_approved_change(&source, "crafted");

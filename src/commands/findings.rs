@@ -119,15 +119,7 @@ pub fn findings(ctx: &Ctx, reference: &str, format: FindingsFormat, audit: bool)
         FindingsFormat::Sarif => {
             let mut results = selected
                 .values()
-                // After integration, only a later disposition that releases
-                // the finding takes it out of the results.
-                .filter(|finding| {
-                    if finding.after_integration.is_empty() {
-                        finding.effective_status().is_none()
-                    } else {
-                        !finding.released_after_integration()
-                    }
-                })
+                .filter(|finding| !finding.currently_released())
                 .map(|finding| {
                     // SARIF exists to carry file, line, and message. The
                     // summary is a label; the body is the message.
