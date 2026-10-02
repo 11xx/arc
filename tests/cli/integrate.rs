@@ -431,7 +431,8 @@ fn tracked_modifications_refuse_by_their_own_reason() {
         .args(["integrate", "dirty-target"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("tracked modifications"));
+        .stderr(predicates::str::contains("tracked modifications"))
+        .stderr(predicates::str::contains("stash").not());
     git(&repo.root, &["checkout", "--", "README.md"]);
     // A staged addition is tracked dirt too.
     fs::write(repo.root.join("staged.txt"), "staged\n").unwrap();

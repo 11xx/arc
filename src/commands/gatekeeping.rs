@@ -1336,8 +1336,7 @@ pub fn rebase(
     if !gitio::is_clean(&wt)? {
         let dirt = gitio::dirt(&wt)?;
         eprintln!(
-            "worktree {} carries {}; commit or stash it before rebasing, or the \
-             replay has uncommitted work to reconcile",
+            "worktree {} carries {}; commit the work in progress or copy it aside before rebasing, or the replay has uncommitted work to reconcile",
             wt.display(),
             describe_dirt(dirt)
         );

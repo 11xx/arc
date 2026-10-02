@@ -168,6 +168,9 @@ fn a_dirty_worktree_is_refused_by_name() {
         .code(11);
     let err = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
     assert!(err.contains("uncommitted changes"), "{err}");
+    // Every worktree shares the stash, so the advice keeps the dirty work
+    // out of it.
+    assert!(!err.contains("stash"), "{err}");
     assert_eq!(repo.head(&wt), before, "nothing may be replayed");
 }
 
