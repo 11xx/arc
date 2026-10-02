@@ -1289,9 +1289,11 @@ enum Cmd {
         /// Record reuse of passing evidence instead of rerunning the gate that
         /// produced it: with --all, evidence green at the current head's tree;
         /// with --against, evidence green at the merged tree. Evidence counts
-        /// for its tree whichever commit it ran on, as it does for readiness.
-        /// Reuse records that tree and requires evidence carrying the same
-        /// content key; evidence with neither tree nor tested_tree is rerun
+        /// for its tree whichever commit it ran on, as it does for readiness,
+        /// and only the newest evidence readiness counts there is a candidate.
+        /// Reuse records that tree and requires that evidence to carry the same
+        /// content key; a gate whose newest evidence failed or has neither
+        /// tree nor tested_tree is rerun
         #[arg(long = "skip-green")]
         skip_green: bool,
         /// Gate name from .arc/gates.toml
