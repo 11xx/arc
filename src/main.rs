@@ -1383,7 +1383,9 @@ enum Cmd {
         #[command(flatten)]
         links: LinkOpts,
     },
-    /// Replay a change's branch onto its target, then snapshot the new head
+    /// Replay a change's branch onto its target, then snapshot the new head.
+    /// Over another actor's live claim, a rebase without --contributors or
+    /// --solo refuses before the branch moves
     Rebase {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
@@ -1391,6 +1393,8 @@ enum Cmd {
         /// Run every required gate at the replayed head
         #[arg(long)]
         verify: bool,
+        #[command(flatten)]
+        attribution: AttributionOpts,
     },
     /// Print shell exports for a detected harness session, for `eval`:
     /// `eval "$(arc env)"`.
@@ -3941,9 +3945,19 @@ fn run(cli: Cli) -> Result<i32> {
                 links.thread,
             )
         }
-        Cmd::Rebase { change, verify } => {
+        Cmd::Rebase {
+            change,
+            verify,
+            attribution,
+        } => {
             let change = infer(change.as_deref())?;
-            commands::rebase(&ctx, &change, verify)
+            commands::rebase(
+                &ctx,
+                &change,
+                verify,
+                attribution.contributors,
+                attribution.solo,
+            )
         }
         Cmd::Env => Ok(context::print_env()),
         Cmd::Completions { shell } => {

@@ -486,6 +486,9 @@ RUN A CHANGE
     --contributors <a,b> | --solo    As on `arc snapshot`.
   arc rebase [--verify]              Replay the branch onto its target, snapshot
                                      the new head, name the gates it owes.
+    --contributors <a,b> | --solo    As on `arc snapshot`; while another actor
+                                     holds a live claim, refused without one
+                                     before the branch moves.
   arc policy show                    Show effective project and operator rules,
                                      with the file that declared each rule.
   arc policy path                    Print the operator policy path for this repo.
