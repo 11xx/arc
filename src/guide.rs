@@ -527,9 +527,10 @@ RUN A CHANGE
                                      File a journal bundle into this journal.
   arc audit <change> --verdict <v>   Review an already-integrated revision.
   arc close                          Terminal outcome arc did not merge itself.
-  arc changelog <c> --category <k> --body-file <f>
-                                     Record the change's release copy.
-  arc changelog <c> --none --reason <why>
+  arc changelog [<c>] --category <k> --body-file <f>
+                                     Record the change's release copy; <c> is
+                                     inferred from the branch or worktree.
+  arc changelog [<c>] --none --reason <why>
                                      Record that the change needs no entry.
   arc changelog [--json | --write]   Render unreleased copy, or write the target.
 

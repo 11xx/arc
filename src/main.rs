@@ -643,8 +643,9 @@ enum Cmd {
     /// stderr and retain readable entries. --write requires every change to
     /// be readable; an unreadable selected change fails
     Changelog {
-        /// Change to act on. Omitted, it is inferred from the current branch,
-        /// then from the worktree the command runs in
+        /// Change whose entry is recorded or read. Omitted, recording infers
+        /// it from the current branch, then from the worktree the command
+        /// runs in, while a read projects every change's entry instead
         change: Option<String>,
         /// Free-form category for a newly recorded changelog entry
         #[arg(long)]
