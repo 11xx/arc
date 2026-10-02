@@ -985,13 +985,18 @@ REVIEW COVERAGE AND DEBT
   discharge itself — though anyone may audit into `changes-requested`, since
   raising problems needs no independence.
 
-  A review finding left open when the change shipped stays open in what
-  shipped. `arc resolve` on the integrated change records its later
-  disposition, such as `resolved --commit <fix>`, `obsolete`, or
-  `accepted-risk`, beside that state, and readers show both: open at ship,
-  and how it stood after integration. A finding resolved, accepted-risk, or
-  obsolete at integration takes none. Such a disposition is not a verdict
-  and discharges no debt.
+  A review finding the change shipped unresolved, whether open, still-open,
+  disputed, or contested, stays that way in what shipped. `arc resolve` on
+  the integrated change records its later disposition, such as `resolved
+  --commit <fix>`, `obsolete`, or `accepted-risk`, beside that state, and
+  readers show both: how it shipped, and how it stood after integration. A
+  finding resolved, accepted-risk, or obsolete at integration takes none.
+  Such a disposition is not a verdict and discharges no debt.
+
+  `arc findings --format sarif` reports every unresolved finding, review or
+  audit. A finding leaves it only when its applicable history has a single
+  resolved, accepted-risk, or obsolete tip; that history is the later
+  dispositions when there are any, otherwise the finding's own.
 
   Where `forbid_self_approval` is off, an approving verdict from the identity
   that wrote the work is recorded rather than refused, and `arc review` and
