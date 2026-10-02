@@ -465,3 +465,85 @@ fn skip_green_reruns_evidence_without_a_replayable_tree_key() {
         .stdout(predicates::str::contains("build: skipped").not());
     repo.arc(&wt).args(["show", "--json"]).assert().success();
 }
+
+/// Attest a failing `build` at `revision`, then strip the tree fields from
+/// it, the shape evidence had before arc recorded the tree it describes.
+fn record_revision_keyed_build_failure(repo: &Repo, wt: &Path, change: &str, revision: &str) {
+    repo.arc(wt)
+        .args([
+            "verify",
+            change,
+            "--gate",
+            "build",
+            "--attest",
+            "--result",
+            "fail",
+            "--tested-revision",
+            revision,
+            "--execution-host",
+            "fixture",
+            "--runner",
+            "fixture",
+        ])
+        .assert()
+        .code(1);
+    rewrite_event(repo, change, "verification-recorded", |event| {
+        let object = event.as_object_mut().unwrap();
+        object.remove("tree");
+        object.remove("tested_tree");
+    });
+}
+
+#[test]
+fn skip_green_reruns_when_newer_revision_keyed_evidence_failed_at_the_tree() {
+    let repo = repo_with_trivial_gates();
+    let (id, wt, passed) = change_with_patchset(&repo, "newer-failure");
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    git(&wt, &["commit", "--amend", "-m", "test: reworded"]);
+    let head = repo.head(&wt);
+    assert_ne!(head, passed);
+    repo.arc(&wt).args(["snapshot"]).assert().success();
+    record_revision_keyed_build_failure(&repo, &wt, &id, &head);
+
+    let status = json_stdout_any_status(repo.arc(&wt).args(["status", "--json"]));
+    let build = status["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|gate| gate["name"] == "build")
+        .unwrap();
+    assert_eq!(build["result"], "fail", "{status}");
+
+    let rerun = stdout(repo.arc(&wt).args(["verify", "--all", "--skip-green"]));
+    assert!(!rerun.contains("build: skipped"), "{rerun}");
+    assert!(
+        rerun.contains("test: skipped (green at head; declared by .arc/gates.toml)"),
+        "{rerun}"
+    );
+    assert!(rerun.contains("gates: 2/2 pass"), "{rerun}");
+    let tree = git_out(&wt, &["rev-parse", "HEAD^{tree}"]);
+    assert_eq!(reuses(&repo, &wt, &id), vec![(head, tree, passed)]);
+}
+
+#[test]
+fn skip_green_against_reruns_when_newer_revision_keyed_evidence_failed_at_the_tree() {
+    let repo = repo_with_trivial_gates();
+    let begun = stdout(repo.arc(&repo.root).args(["begin", "tip-failure"]));
+    let id = opened_change_id(&begun);
+    let wt = repo.home.join(".worktrees/repo-tip-failure");
+    let head = repo.head(&wt);
+    repo.arc(&wt).args(["snapshot"]).assert().success();
+    repo.arc(&wt).args(["verify", "--all"]).assert().success();
+    record_revision_keyed_build_failure(&repo, &wt, &id, &head);
+
+    let rerun = stdout(
+        repo.arc(&wt)
+            .args(["verify", "--against", "master", "--skip-green"]),
+    );
+    assert!(!rerun.contains("build: skipped"), "{rerun}");
+    assert!(
+        rerun.contains("test: skipped (green at the merged tree"),
+        "{rerun}"
+    );
+    assert!(rerun.contains("gates: 2/2 pass"), "{rerun}");
+}
