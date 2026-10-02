@@ -121,9 +121,7 @@ pub fn squash(
         &transition,
         None,
         None,
-        requested_contributors,
-        Vec::new(),
-        None,
+        super::review::SnapshotRequest::attributed(requested_contributors),
     )
     .map(drop)
 }

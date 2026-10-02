@@ -386,29 +386,109 @@ pub fn snapshot(
     journal_refs: Vec<String>,
     thread: Option<String>,
 ) -> Result<()> {
-    let requested_contributors = contributor_declaration(ctx, contributors, solo)?;
     let store = ctx.store()?;
     let change_id = store.resolve_change(reference)?;
-    let transition = store.lock_transition(&change_id)?;
-    snapshot_holding(
+    let request = SnapshotRequest::validate(
         ctx,
         &store,
         &change_id,
+        contributors,
+        solo,
+        &journal_refs,
+        thread,
+    )?;
+    record_snapshot(ctx, &store, &change_id, base, brief_version, request).map(drop)
+}
+
+/// What a snapshot records beside the head: its attribution, the journal
+/// links it was asked for, and an external thread. Every part is checked
+/// when the request is built, so a command can refuse a bad input before it
+/// writes anything of its own.
+pub(super) struct SnapshotRequest {
+    /// A normalized declaration, as `contributor_declaration` returns it.
+    contributors: Option<Vec<String>>,
+    journal_refs: Vec<JournalArtifactRef>,
+    thread: Option<ExternalThreadRef>,
+}
+
+impl SnapshotRequest {
+    /// A request for a normalized attribution and no links, so the snapshot
+    /// records its default links or keeps an unchanged patchset's.
+    pub(super) fn attributed(contributors: Option<Vec<String>>) -> Self {
+        Self {
+            contributors,
+            journal_refs: Vec::new(),
+            thread: None,
+        }
+    }
+
+    /// Check a snapshot's inputs for `change_id`: the attribution, `--thread`
+    /// as `SCHEME:ID`, and each `--journal-ref` resolved to an artifact with
+    /// the digest read now. The change worktree's spool is filed before the
+    /// links resolve, so a link may name an artifact its executor spooled.
+    pub(super) fn validate(
+        ctx: &Ctx,
+        store: &Store,
+        change_id: &str,
+        contributors: Option<Vec<String>>,
+        solo: bool,
+        journal_refs: &[String],
+        thread: Option<String>,
+    ) -> Result<Self> {
+        let contributors = contributor_declaration(ctx, contributors, solo)?;
+        let thread = thread
+            .map(|thread| parse_thread_reference(&thread))
+            .transpose()?;
+        if !journal_refs.is_empty() {
+            promote_change_spool(ctx, &store.state(change_id)?);
+        }
+        Ok(Self {
+            contributors,
+            journal_refs: resolve_journal_refs(ctx, journal_refs)?,
+            thread,
+        })
+    }
+
+    fn links_supplied(&self) -> bool {
+        !self.journal_refs.is_empty() || self.thread.is_some()
+    }
+}
+
+/// Snapshotting is the lead's first read of the change's worktree, and an
+/// executor confined to that worktree spools its journal writes there.
+/// Filing them here puts them in the journal while the worktree still exists
+/// to hold them.
+fn promote_change_spool(ctx: &Ctx, st: &ChangeState) {
+    if let Some(worktree) = st.worktree.as_deref() {
+        crate::journal::promote_worktree_spool(ctx, std::path::Path::new(worktree));
+    }
+}
+
+/// Take the change transition lock and record the snapshot `request`
+/// describes, returning its patchset as `snapshot_holding` does.
+pub(super) fn record_snapshot(
+    ctx: &Ctx,
+    store: &Store,
+    change_id: &str,
+    base: Option<String>,
+    brief_version: Option<usize>,
+    request: SnapshotRequest,
+) -> Result<String> {
+    let transition = store.lock_transition(change_id)?;
+    snapshot_holding(
+        ctx,
+        store,
+        change_id,
         &transition,
         base,
         brief_version,
-        requested_contributors,
-        journal_refs,
-        thread,
+        request,
     )
-    .map(drop)
 }
 
 /// Record the change branch's head as a patchset under the change transition
 /// lock the caller holds, and return the patchset that holds it: the one
-/// recorded, or the unchanged one already there. `requested_contributors` is
-/// a normalized declaration, as `contributor_declaration` returns it.
-#[allow(clippy::too_many_arguments)]
+/// recorded, or the unchanged one already there.
 pub(super) fn snapshot_holding(
     ctx: &Ctx,
     store: &Store,
@@ -416,27 +496,18 @@ pub(super) fn snapshot_holding(
     _transition: &crate::store::TransitionLock,
     base: Option<String>,
     brief_version: Option<usize>,
-    requested_contributors: Option<Vec<String>>,
-    journal_refs: Vec<String>,
-    thread: Option<String>,
+    request: SnapshotRequest,
 ) -> Result<String> {
     let events = store.load_events(change_id)?;
     let mut st = state::reduce_following(&events, &store.rewrites()?)?;
     crate::replica::localize_change(&store.repository_id, &events, &mut st);
-    // Snapshotting is the lead's first read of the change's worktree, and an
-    // executor confined to that worktree spools its journal writes there.
-    // Filing them here puts them in the journal while the worktree still
-    // exists to hold them.
-    if let Some(worktree) = st.worktree.as_deref() {
-        crate::journal::promote_worktree_spool(ctx, std::path::Path::new(worktree));
-    }
-    // Links are resolved before anything is written, so a name that does not
-    // resolve refuses the snapshot instead of recording a dead reference.
-    let links_supplied = !journal_refs.is_empty() || thread.is_some();
-    let flagged_refs = resolve_journal_refs(ctx, &journal_refs)?;
-    let thread = thread
-        .map(|thread| parse_thread_reference(&thread))
-        .transpose()?;
+    promote_change_spool(ctx, &st);
+    let links_supplied = request.links_supplied();
+    let SnapshotRequest {
+        contributors: requested_contributors,
+        journal_refs: flagged_refs,
+        thread,
+    } = request;
     let head = gitio::branch_head(&ctx.cwd, &st.branch)?;
     let (default_base, merge_base) = patchset_base(ctx, &st, &head)?;
     let base_rev = match base {
@@ -1131,9 +1202,7 @@ pub fn review(ctx: &Ctx, reference: &str, args: ReviewArgs) -> Result<()> {
             &transition,
             None,
             None,
-            requested_contributors,
-            Vec::new(),
-            None,
+            SnapshotRequest::attributed(requested_contributors),
         )?)
     } else {
         None

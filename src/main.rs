@@ -1411,6 +1411,11 @@ enum Cmd {
     /// Finish implementation: snapshot, verify all gates, then print check
     /// state. A profile with no declared gate records no evidence and prints
     /// that no gate is declared instead of a pass.
+    ///
+    /// The caller's live claim moves to `verifying` before the snapshot, and
+    /// only after every snapshot input is accepted: the attribution,
+    /// --thread, and each --journal-ref. An input it refuses leaves the
+    /// claim's stage and its clock as they were.
     Done {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
