@@ -1043,7 +1043,9 @@ enum Cmd {
     /// Obstructing paths are moved to a reported recovery directory under
     /// <git-common-dir>/arc/squash-recovery/. Over another actor's live
     /// claim, a squash without --contributors or --solo refuses before the
-    /// branch moves
+    /// branch moves. The change stays locked from that check until the
+    /// patchset is recorded, so a command acting on the change while the
+    /// commit is made reports the lock busy
     Squash {
         /// Change to act on. Omitted, it is inferred from the current branch,
         /// then from the worktree the command runs in
