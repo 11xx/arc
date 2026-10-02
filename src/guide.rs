@@ -576,6 +576,12 @@ RUN A CHANGE
   the basis it would record. Before merging, readiness is recomputed and the
   basis rebuilt; if readiness fails or the basis differs, nothing is written.
 
+  A closed change is judged at the head its closure recorded, or at its
+  newest patchset's when the closure recorded none. `status`, `show`, and
+  `check` read neither its branch nor its target, so deleting the branch or
+  moving the target after closure leaves the head its verdict and gate
+  evidence are read against where it was.
+
   The decision is one function of facts observed under the target and change
   locks: a plan naming the target revision, the approved head, the tree the
   merge must ship, and the basis to record, or a refusal. The merge runs from
