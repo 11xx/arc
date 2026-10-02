@@ -1400,8 +1400,8 @@ fn artifact_claim_releases_with_each_owner_outcome() {
 fn an_artifact_lease_expires_on_its_own_with_no_stage_budget_to_set() {
     let repo = Repo::new();
     let (dir, file) = journal_artifact(&repo, "artifact-lease", "todo", "# X\n");
-    // A change's stages are budgeted; an artifact has no stages to budget, so
-    // the lease is the whole of what expires.
+    // A change's stages are budgeted; an artifact's stages carry no budget,
+    // so the lease is the whole of what expires.
     repo.arc(&repo.root)
         .args(["claim", &file, "--stage-budget", "launch=1s"])
         .assert()

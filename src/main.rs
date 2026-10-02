@@ -889,8 +889,9 @@ enum Cmd {
         /// `arc stage`, re-reporting the current stage included, or a
         /// snapshot under the claim restarts the clock; output, logs, and
         /// claim renewals do not. The reached line and the JSON name the
-        /// stage, its age, and its budget. On a journal artifact, `stalled`
-        /// means the claim's lease ran out.
+        /// stage, its age, and its budget. On a journal artifact, whose
+        /// claim takes stages but no stage budgets, `stalled` means the
+        /// claim's lease ran out.
         ///
         /// `reviewed` returns on any verdict against the patchset under
         /// review, whatever it concluded, and names the verdict event so the
