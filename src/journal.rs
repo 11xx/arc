@@ -4846,6 +4846,9 @@ fn open_archived_discussion(ctx: &Ctx, filename: &str) -> Result<(PathBuf, PathB
     let cold = archive_dir(&hot);
     let path = cold.join(filename);
     if !path.is_file() {
+        if artifact_body_path(&hot, filename).is_none() {
+            return Err(missing_write_target(&hot, filename));
+        }
         bail!("no archived artifact {filename} in {}", cold.display());
     }
     let events = read_events(&hot)?;
@@ -9959,6 +9962,9 @@ fn reattribute(
     }
 
     let index = match matches.as_slice() {
+        [] if artifact_body_path(&dir, filename).is_none() => {
+            return Err(missing_write_target(&dir, filename));
+        }
         [] => bail!(
             "no {event_kind} creation event names {filename} in {}",
             path.display()
@@ -12901,6 +12907,7 @@ fn unarchive(ctx: &Ctx, filename: &str) -> Result<i32> {
     let hot = resolve_dir(&ctx.cwd)?;
     let _transition = lock_journal_transition(&hot)?;
     let events = read_events(&hot)?;
+    require_stored(&hot, &events, filename)?;
     move_artifact(ctx, &hot, &events, filename, "unarchive", None, None)?;
     let mut event = JournalEvent::base(ctx, Utc::now(), &topic, "unarchived");
     event.file = Some(filename.to_string());
@@ -13016,6 +13023,16 @@ fn same_storage_body(source: &Path, destination: &Path) -> Result<bool> {
     }
 }
 
+/// Refuse a storage move of a file that neither store of the journal at `hot`
+/// holds and no pending move names, naming each other known journal that
+/// holds it.
+fn require_stored(hot: &Path, events: &[JournalEvent], filename: &str) -> Result<()> {
+    if artifact_body_path(hot, filename).is_none() && pending_storage(events, filename).is_none() {
+        return Err(missing_write_target(hot, filename));
+    }
+    Ok(())
+}
+
 /// A hard link claims the destination exclusively before unlinking the source.
 /// An interrupted link/unlink pair retains the same inode at both paths.
 fn move_artifact(
@@ -13123,6 +13140,7 @@ fn archive_one(
 ) -> Result<()> {
     let (topic, kind) = check_artifact_name(ctx, filename)?;
     let events = read_events(hot)?;
+    require_stored(hot, &events, filename)?;
     let consumed = is_consumed(&events, filename);
     if unresolved {
         if kind != "discussion" {
