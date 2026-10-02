@@ -709,14 +709,8 @@ fn verify_against(
     // leaves nothing to run.
     let cheap_reusable = |name: &String, gate: &gates::Gate| {
         skip_green
-            .then(|| {
-                st.gate_evidence_at_tree_matching(name, &merged_tree, &resolve_tree, |evidence| {
-                    evidence.recorded_tree() == Some(merged_tree.as_str())
-                        && status::matches_declaration(evidence, gate)
-                })
-            })
+            .then(|| reusable_evidence(st, name, gate, &merged_tree, &resolve_tree, None))
             .flatten()
-            .filter(|evidence| evidence.green_at_head(st.dirty_tree_waiver.as_ref()))
     };
     let any_probe = required.iter().any(|(_, gate)| gate.environment.is_some());
     let answered_already = required
@@ -999,8 +993,10 @@ fn start_verification_run(
 /// gate status already counts as green, whichever commit the run that answered
 /// was against. Reuse is reuse of a *run*: the recorded command must be the
 /// one declared now, and evidence from another environment ran, but not here.
-/// The reuse event names the tree, and replay checks it against the content
-/// key the evidence itself carries, so evidence keyed only by a revision is
+/// Only the newest evidence that applies is a candidate, because it is the
+/// one readiness counts; an older pass never stands in for it. The reuse
+/// event names the tree, and replay checks it against the content key the
+/// evidence itself carries, so newest evidence keyed only by a revision is
 /// rerun.
 fn reusable_evidence<'a>(
     st: &'a ChangeState,
@@ -1011,11 +1007,13 @@ fn reusable_evidence<'a>(
     environment: Option<&str>,
 ) -> Option<&'a state::VerificationEntry> {
     st.gate_evidence_at_tree_matching(name, tree, resolve_tree, |evidence| {
-        evidence.recorded_tree() == Some(tree)
-            && status::matches_declaration(evidence, gate)
+        status::matches_declaration(evidence, gate)
             && status::matches_environment(evidence, gate, environment)
     })
-    .filter(|evidence| evidence.green_at_head(st.dirty_tree_waiver.as_ref()))
+    .filter(|evidence| {
+        evidence.recorded_tree() == Some(tree)
+            && evidence.green_at_head(st.dirty_tree_waiver.as_ref())
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

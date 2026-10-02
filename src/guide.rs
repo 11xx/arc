@@ -474,10 +474,13 @@ RUN A CHANGE
     --skip-green                    Reuse passing evidence with --all at the
                                      head's tree, or --against at the merged
                                      tree, whichever commit it ran on.
-                                     The reuse records its tree; evidence
-                                     with neither tree nor tested_tree is
-                                     rerun. Replays of reuse events without
-                                     a tree require matching revisions.
+                                     Only the newest evidence readiness
+                                     counts there is a candidate: a gate
+                                     reruns when it failed or carries
+                                     neither tree nor tested_tree. The
+                                     reuse records its tree. Replays of
+                                     reuse events without a tree require
+                                     matching revisions.
     --attest --environment <id>      Record a run arc did not perform, naming
                                      the environment it applies to.
     --falsified-by <id> --predicted <why>
