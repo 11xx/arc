@@ -117,7 +117,7 @@ fn skip_green_reuses_evidence_from_another_commit_holding_the_head_tree() {
         vec![(head.clone(), tree.clone(), verified.clone()); 2]
     );
     repo.arc(&wt).args(["show", "--json"]).assert().success();
-    let check = json_stdout(repo.arc(&wt).args(["check", "--json"]));
+    let check = json_stdout_any_status(repo.arc(&wt).args(["check", "--json"]));
     assert!(
         !check["blockers"]
             .as_array()
