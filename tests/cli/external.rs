@@ -300,3 +300,25 @@ fn an_external_rejection_of_the_head_closes_the_change() {
         "{status}"
     );
 }
+
+/// An external change request's findings are read like a review's, so a
+/// misspelled `blocking` is refused rather than recorded as non-blocking.
+#[test]
+fn an_external_verdict_refuses_a_finding_with_a_misspelled_blocking_field() {
+    let repo = Repo::new();
+    let (change_id, worktree, head) = change_with_patchset(&repo, "ext-misspelled");
+    let before = event_count(&repo, &change_id);
+    repo.arc(&worktree)
+        .args(["external", "verdict", "ext-misspelled"])
+        .args(["--verdict", "changes-requested"])
+        .args(["--decided-by", "Upstream Maintainer"])
+        .args(["--reference", "https://example.invalid/pull/9"])
+        .args(["--revision", &head, "--findings-json", "-"])
+        .write_stdin(r#"[{"severity": "major", "summary": "missed", "blocked": true}]"#)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "unknown field `blocked`, which looks like a misspelling of `blocking`",
+        ));
+    assert_eq!(event_count(&repo, &change_id), before);
+}

@@ -482,3 +482,63 @@ fn a_verdict_from_a_declared_reviewer_of_someone_elses_work_is_not_warned_about(
     let warning = String::from_utf8_lossy(&reviewed.get_output().stderr).into_owned();
     assert!(!warning.contains("recorded as"), "{warning}");
 }
+
+/// A findings batch is read for named fields, so a misspelled `blocking`
+/// would record a non-blocking finding that an approval could carry. A field
+/// that looks like a misspelling of one the finding omits refuses the batch;
+/// any other unknown field is ignored with a warning; a supplied `id` is
+/// ignored silently because arc assigns finding IDs.
+#[test]
+fn findings_json_refuses_a_misspelled_field_and_warns_on_other_unknown_fields() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "findings-fields");
+    let review = |verdict: &str, batch: &str| {
+        let mut command = repo.arc(&worktree);
+        command.args(["review", "findings-fields", "--verdict", verdict]);
+        if verdict == "changes-requested" {
+            command.args(["--cause", "executor"]);
+        }
+        command
+            .args(["--findings-json", "-"])
+            .write_stdin(batch.to_string());
+        command
+    };
+
+    let before = event_count(&repo, &change_id);
+    review(
+        "approved",
+        r#"[{"severity": "major", "summary": "a defect", "blocker": true}]"#,
+    )
+    .assert()
+    .failure()
+    .stderr(predicates::str::contains(
+        "finding 1 has unknown field `blocker`, which looks like a misspelling of `blocking`",
+    ));
+    assert_eq!(event_count(&repo, &change_id), before);
+
+    review(
+        "changes-requested",
+        r#"[{"severity": "minor", "summary": "noted", "tool": "lint"}]"#,
+    )
+    .assert()
+    .success()
+    .stderr(predicates::str::contains(
+        "warning: finding 1 has unknown field `tool`, which arc ignores (a finding reads blocking, severity, summary, body, anchor)",
+    ));
+    assert_eq!(event_count(&repo, &change_id), before + 1);
+    let findings =
+        json_stdout(
+            repo.arc(&worktree)
+                .args(["findings", "findings-fields", "--format", "json"]),
+        );
+    assert_eq!(findings["findings"][0]["summary"], "noted", "{findings}");
+
+    review(
+        "comment-only",
+        r#"[{"id": "F-1", "blocking": false, "severity": "note", "summary": "plain"}]"#,
+    )
+    .assert()
+    .success()
+    .stderr(predicates::str::contains("warning").not());
+    assert_eq!(event_count(&repo, &change_id), before + 2);
+}
