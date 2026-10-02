@@ -485,8 +485,12 @@ pub struct KindWrite {
     /// --promote` files it later, keeping this write's identity
     #[arg(long)]
     pub spool: bool,
-    /// Portable planner identity metadata for plan artifacts. Repeat for
-    /// multiple planners; values are one-line JSON objects.
+    /// Planner identity for a plan artifact; repeat once per planner. Each
+    /// value is a one-line JSON object whose only fields are `actor`,
+    /// `harness`, `session`, and `model`, each a nonempty string, with at
+    /// least one present. Effort is not a field: it rides in `model` as
+    /// `<model>#<effort>`. Values join the body's `planned-by:` headers;
+    /// omitted, a plan records those headers, or else the invoking identity
     #[arg(
         long = "planned-by",
         value_name = "JSON",
@@ -1113,7 +1117,9 @@ pub enum JournalCmd {
         /// progress on it
         #[arg(long = "acknowledge-claim")]
         acknowledge_claim: Vec<String>,
-        /// Assert additional material planners on a plan successor.
+        /// Assert an additional material planner on a plan successor
+        /// (repeatable): a one-line JSON object in the shape `arc journal
+        /// plan --help` states for --planned-by
         #[arg(long = "planned-by", conflicts_with = "no_planner")]
         planned_by: Vec<String>,
         /// Preserve unknown authorship on a plan successor.
@@ -3988,7 +3994,13 @@ fn planner_from_value(value: &serde_json::Value) -> Result<PlannerIdentity> {
         .context("planner metadata must be a JSON object")?;
     for key in object.keys() {
         if !matches!(key.as_str(), "actor" | "harness" | "session" | "model") {
-            bail!("unknown planner field {key}");
+            bail!(
+                concat!(
+                    "unknown planner field {}; the fields are actor, harness, session, ",
+                    "and model, and effort rides in model as <model>#<effort>"
+                ),
+                key
+            );
         }
     }
     let field = |name: &str| -> Result<Option<String>> {
@@ -13376,7 +13388,10 @@ fn transition(
             metadata.planners
         };
         for raw in planned_by {
-            planners.push(planner_from_value(&serde_json::from_str(raw)?)?);
+            planners.push(planner_from_value(
+                &serde_json::from_str(raw)
+                    .with_context(|| format!("invalid --planned-by JSON: {raw}"))?,
+            )?);
         }
         planners.sort_by(|a, b| a.key().cmp(&b.key()));
         planners.dedup();

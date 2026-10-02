@@ -118,7 +118,6 @@ pub fn changelog(
         bail!("--keep-unrecorded applies only to --write");
     }
     if category.is_some() || body_file.is_some() || no_entry_reason.is_some() {
-        let reference = reference.context("recording a changelog entry requires CHANGE")?;
         if json || provenance || since.is_some() || write {
             bail!(
                 "--json, --provenance, --since, and --write cannot be used when recording an entry"
@@ -150,7 +149,8 @@ pub fn changelog(
             None => (String::new(), String::new()),
         };
         let store = ctx.store()?;
-        let (change_id, _transition, state) = locked_state(&store, reference)?;
+        let change = crate::context::resolve_change_or_infer(&store, &ctx.cwd, reference)?;
+        let (change_id, _transition, state) = locked_state(&store, &change)?;
         // Recording a second entry replaced the first with no event saying
         // it did, an identical success message both times, and no way to see
         // what was lost. The edge is what makes the replacement inspectable;

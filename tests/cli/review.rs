@@ -308,6 +308,60 @@ fn changes_requested_requires_typed_causes_and_stats_tallies_them() {
     assert_eq!(event_count(&repo, &change_id), before + 1);
 }
 
+/// A findings batch and a requested-rework round refuse on rules a reviewer
+/// writing them has to know in advance, so `--help` states each rule the
+/// refusal enforces and the refusal points back at it.
+#[test]
+fn review_help_states_the_findings_shape_and_the_cause_rule_its_refusals_enforce() {
+    let repo = Repo::new();
+    let (change_id, worktree, _) = change_with_patchset(&repo, "review-contract");
+    let normalize = |text: String| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let help = normalize(stdout(repo.arc(&worktree).args(["review", "--help"])));
+    for rule in [
+        "Required with `--verdict changes-requested` and refused with any other verdict",
+        "a required `severity` (critical, major, minor, or note) and `summary` (string)",
+        "optional `blocking` (bool, default false), `body` (string), and `anchor`",
+        "a required `path` and optional `side` (base or head, default head), `line_start`, `line_end`, and `context`",
+    ] {
+        assert!(help.contains(rule), "missing {rule:?} in: {help}");
+    }
+
+    let before = event_count(&repo, &change_id);
+    repo.arc(&worktree)
+        .args([
+            "review",
+            "review-contract",
+            "--verdict",
+            "comment-only",
+            "--findings-json",
+            "-",
+        ])
+        .write_stdin(r#"[{"severity": "blocking", "summary": "a defect"}]"#)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "malformed findings JSON; `arc review --help` states the shape",
+        ))
+        .stderr(predicates::str::contains(
+            "expected one of `critical`, `major`, `minor`, `note`",
+        ));
+    assert_eq!(event_count(&repo, &change_id), before);
+
+    repo.arc(&worktree)
+        .args([
+            "review",
+            "review-contract",
+            "--verdict",
+            "comment-only",
+            "--findings-json",
+            "-",
+        ])
+        .write_stdin(r#"[{"severity": "major", "summary": "a defect", "blocking": true}]"#)
+        .assert()
+        .success();
+    assert_eq!(event_count(&repo, &change_id), before + 1);
+}
+
 /// A reviewer reports on a revision, not on arc's patchset numbering. Making
 /// the lead translate by hand is where a verdict gets bound to work nobody
 /// reviewed, so a revision names its patchset directly.

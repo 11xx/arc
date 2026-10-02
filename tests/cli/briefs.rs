@@ -372,6 +372,43 @@ fn brief_cause_is_canonical_validated_and_required_after_v1() {
     );
 }
 
+/// Whether a brief write needs a cause depends on the version it records,
+/// which a lead re-briefing in a loop cannot see from the refusal alone, so
+/// `--help` states the version a write produces and the rule for each, and
+/// the v1 refusal says what to drop.
+#[test]
+fn brief_help_states_which_versions_require_or_refuse_a_cause() {
+    let repo = Repo::new();
+    let change_id = begin(&repo, "brief-cause-contract");
+    let normalize = |text: String| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let help = normalize(stdout(repo.arc(&repo.root).args(["brief", "--help"])));
+    for rule in [
+        "A write records the next version: v1 on a change with no brief, otherwise one past the latest",
+        "v1 refuses a cause; every later version requires at least one, from this flag or --cause-note",
+        "refused on v1, and enough alone for any later version",
+    ] {
+        assert!(help.contains(rule), "missing {rule:?} in: {help}");
+    }
+
+    let before = event_count(&repo, &change_id);
+    repo.arc(&repo.root)
+        .args([
+            "brief",
+            "brief-cause-contract",
+            "--body-file",
+            "-",
+            "--cause-note",
+            "nothing to renegotiate yet",
+        ])
+        .write_stdin("first contract\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "brief v1 cannot have a cause: the first brief on a change renegotiates nothing; drop --caused-by and --cause-note",
+        ));
+    assert_eq!(event_count(&repo, &change_id), before);
+}
+
 /// A cause is resolved once and stored canonically in an append-only event, so
 /// an ambiguous prefix has to refuse. Picking the first candidate would record
 /// the wrong relationship permanently, and nothing downstream could tell.

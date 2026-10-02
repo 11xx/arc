@@ -145,7 +145,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          `integrate`/`close` name the `journal consume` that
                          makes closing the loop a decision.
 
-  Plans carry portable planned-by metadata. A brief selecting --plan-ref and
+  Plans carry portable planned-by metadata: `--planned-by` takes a JSON
+  object of `actor`, `harness`, `session`, and `model`, with effort riding in
+  the model as `<model>#<effort>`. A brief selecting --plan-ref and
   --plan-slice captures the body digest and declared planners; reading the
   brief prints available credit suggestions. Conflicting or malformed
   metadata grants no credit, and corrections leave existing briefs unchanged.
@@ -444,6 +446,9 @@ RUN A CHANGE
                                      Without it, a target behind its upstream
                                      (as the last fetch left it) is a warning
                                      naming both revisions and the fix.
+  arc brief --body-file <f>          Record the next contract version.
+    --caused-by <kind:ref>           Why it changed. v1 refuses a cause; every
+    --cause-note <text>              later version requires one of these.
   arc claim / stage / release-claim  Advisory liveness while implementing.
     --takeover                       Displace a claim that may be taken over:
                                      a stale one on a change, an expired one
@@ -489,6 +494,12 @@ RUN A CHANGE
     --snapshot                       Snapshot the clean worktree first;
       --contributors <a,b> | --solo  attribute that patchset, as on
                                      `arc snapshot`.
+    --cause <c>                      Required with changes-requested, refused
+                                     otherwise: brief, executor, or
+                                     integration-staleness.
+    --findings-json <file|->         A JSON array; each finding needs a
+                                     severity (critical, major, minor, note)
+                                     and a summary. `--help` has the rest.
     --provisional <why>              It gates, and owes a second judgment.
     --relation corroborates          Support the standing verdict, not replace it.
   arc resolve                        Dispose of a finding.
@@ -516,9 +527,10 @@ RUN A CHANGE
                                      File a journal bundle into this journal.
   arc audit <change> --verdict <v>   Review an already-integrated revision.
   arc close                          Terminal outcome arc did not merge itself.
-  arc changelog <c> --category <k> --body-file <f>
-                                     Record the change's release copy.
-  arc changelog <c> --none --reason <why>
+  arc changelog [<c>] --category <k> --body-file <f>
+                                     Record the change's release copy; <c> is
+                                     inferred from the branch or worktree.
+  arc changelog [<c>] --none --reason <why>
                                      Record that the change needs no entry.
   arc changelog [--json | --write]   Render unreleased copy, or write the target.
 
