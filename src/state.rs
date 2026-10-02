@@ -2840,6 +2840,17 @@ impl ChangeState {
             .find(|patchset| patchset.id == shipped)
     }
 
+    /// The head a closed change is judged at, read from the ledger alone: the
+    /// one its closure recorded, else its newest patchset's. `None` while the
+    /// change is open, whose head is its branch.
+    pub fn closed_head(&self) -> Option<&str> {
+        let closure = self.closure.as_ref()?;
+        closure.source_head.as_deref().or_else(|| {
+            self.latest_patchset()
+                .map(|patchset| patchset.head.as_str())
+        })
+    }
+
     /// What kind of deficit a debt declared now would carry, read off the
     /// ledger.
     ///

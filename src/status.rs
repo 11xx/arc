@@ -896,8 +896,16 @@ pub fn build_at(
     now: DateTime<Utc>,
     fork: Option<String>,
 ) -> Result<StatusReport> {
-    let current_head = gitio::branch_head(cwd, &state.branch).ok();
-    let target_head = gitio::branch_head(cwd, &state.target_branch).ok();
+    // A closed change is judged at the head its ledger recorded: its branch
+    // may be deleted or reused, and its target is never merged into again.
+    let (current_head, target_head) = if state.is_closed() {
+        (state.closed_head().map(str::to_string), None)
+    } else {
+        (
+            gitio::branch_head(cwd, &state.branch).ok(),
+            gitio::branch_head(cwd, &state.target_branch).ok(),
+        )
+    };
     // One merge-tree run answers both questions it can answer: whether the
     // text conflicts, and what a clean merge would ship.
     let merge = match (&current_head, &target_head) {
