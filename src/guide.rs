@@ -625,7 +625,15 @@ RUN A CHANGE
   `check` read neither its branch nor its target, so deleting the branch or
   moving the target after closure leaves the head its verdict and gate
   evidence are read against where it was. A replay with `--at` to the
-  closure or any later event judges the same head.
+  closure or any later event judges the same head. Its gate and policy
+  declarations are the target's at the revision the closure recorded as
+  where the target stood, plus the gates its judged head adds, so a gate
+  the target declares later is not owed and declarations the target breaks
+  later do not fail its report. A closure that recorded no target revision
+  (an abandoned or superseded change, a legacy closure, or an asserted
+  fast-forward given no `--target-before`) reads the target's current
+  declarations instead. The operator's own gate and policy files are read as
+  they stand now.
 
   The decision is one function of facts observed under the target and change
   locks: a plan naming the target revision, the approved head, the tree the
