@@ -145,7 +145,9 @@ ORIENT INSIDE A PROJECT (start here, in this order)
                          `integrate`/`close` name the `journal consume` that
                          makes closing the loop a decision.
 
-  Plans carry portable planned-by metadata. A brief selecting --plan-ref and
+  Plans carry portable planned-by metadata: `--planned-by` takes a JSON
+  object of `actor`, `harness`, `session`, and `model`, with effort riding in
+  the model as `<model>#<effort>`. A brief selecting --plan-ref and
   --plan-slice captures the body digest and declared planners; reading the
   brief prints available credit suggestions. Conflicting or malformed
   metadata grants no credit, and corrections leave existing briefs unchanged.
