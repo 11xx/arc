@@ -1639,8 +1639,11 @@ fn workspace_backlog_detail_hint_preserves_selection() {
     // single-quoted POSIX shell argument.
     let quoted_scope = format!("'{}'", scope.display().to_string().replace('\'', "'\\''"));
 
-    let command_line = |args: &[&str], cwd: &Path| {
-        let text = stdout(repo.arc(cwd).args(args));
+    // A global scope still reaches the path the project was registered at,
+    // which the rename above left empty: a partial collection, exit 16.
+    let command_line = |args: &[&str], cwd: &Path, exit: i32| {
+        let assert = repo.arc(cwd).args(args).assert().code(exit);
+        let text = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
         text.lines()
             .rev()
             .find(|line| line.trim_start().starts_with("detail:"))
@@ -1657,6 +1660,7 @@ fn workspace_backlog_detail_hint_preserves_selection() {
     let under_hint = command_line(
         &["workspace", "backlog", "--under", scope.to_str().unwrap()],
         &repo_root,
+        0,
     );
 
     // --here resolves to the caller's directory; --since survives.
@@ -1669,6 +1673,7 @@ fn workspace_backlog_detail_hint_preserves_selection() {
             "20990101T000000Z",
         ],
         &repo_root,
+        0,
     );
     let quoted_cwd = format!(
         "'{}'",
@@ -1686,6 +1691,7 @@ fn workspace_backlog_detail_hint_preserves_selection() {
             "2026-01-01T00:00:00Z",
         ],
         &repo_root,
+        16,
     );
 
     // Chrono accepts the RFC 3339 form with a space between date and time.
@@ -1699,6 +1705,7 @@ fn workspace_backlog_detail_hint_preserves_selection() {
             "2026-01-01 00:00:00Z",
         ],
         &repo_root,
+        16,
     );
     let mut spaced_shell = Command::new("sh");
     spaced_shell
@@ -1768,6 +1775,7 @@ fn workspace_backlog_detail_hint_preserves_selection() {
     let hint = command_line(
         &["workspace", "backlog", "--under", scope.to_str().unwrap()],
         &repo_root,
+        0,
     );
     // The hint is a POSIX shell command line, so it is followed the way a
     // shell would read it — quoting included — rather than re-split by hand.
@@ -1827,15 +1835,12 @@ fn workspace_backlog_detail_hint_preserves_selection() {
     // JSON stays one parseable value: no footer may ride along. The project
     // anchor moved with the fixture, so the collection is partial and exits
     // 16; the value must still parse.
-    repo.arc(&repo_root)
+    let partial = repo
+        .arc(&repo_root)
         .args(["workspace", "backlog", "--items", "--json"])
         .assert()
         .code(16);
-    let text = stdout(
-        repo.arc(&repo_root)
-            .args(["workspace", "backlog", "--items", "--json"]),
-    );
-    serde_json::from_str::<serde_json::Value>(&text).unwrap();
+    serde_json::from_slice::<serde_json::Value>(&partial.get_output().stdout).unwrap();
 }
 
 /// One timestamp interpretation across the queue: a legacy stamp (no `Z`)
